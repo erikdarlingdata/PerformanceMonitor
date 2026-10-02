@@ -37,10 +37,17 @@ namespace PerformanceMonitor.Collectors;
 public static class LongQueryTraceDatabases
 {
     /// <summary>
-    /// Failed cleanup passes in a row, for one registration, before it stops retrying. Without a cap, a database
-    /// that refuses the drop forever would repeat a warning every cycle forever.
+    /// Failed cleanup passes in a row, for one registration, before it stops retrying every cycle. Without a cap, a
+    /// database that refuses the drop forever would repeat a warning every cycle forever. After the cap, the
+    /// registration tries again once every <see cref="RetryInterval"/>.
     /// </summary>
     public const int DropAttemptCap = 5;
+
+    /// <summary>
+    /// The wait between the attempts that follow the cap (<see cref="LongQueryTraceDropRetry"/>). Darling also re-runs
+    /// the create side this often while the trace is on, so a session dropped from outside comes back.
+    /// </summary>
+    public static readonly TimeSpan RetryInterval = TimeSpan.FromHours(1);
 
     /* Characters no database name can contain, one for each level of a state key, so a key cannot read two ways:
        names within one list, the lists inside one co-owner, the co-owners, and the key's parts. */
@@ -214,13 +221,14 @@ public static class LongQueryTraceDatabases
     }
 
     /// <summary>
-    /// The one warning a registration logs when it stops retrying (<see cref="DropAttemptCap"/>). It names each
-    /// database where the session may remain. When the last pass could not list the databases there are no
-    /// names to give, and the warning says so.
+    /// The one warning a registration logs when it stops retrying every cycle (<see cref="DropAttemptCap"/>). It names
+    /// each database where the session may remain. When the last pass could not list the databases there are no
+    /// names to give, and the warning says so. <paramref name="retryNote"/> adds what else makes this app try again.
     /// </summary>
-    public static string GiveUpWarning(IReadOnlyList<string> databases) => databases.Count == 0
-        ? $"Stopped retrying the long-query trace cleanup after {DropAttemptCap} failed attempts in a row. The databases could not be listed, so the session may remain in any of them. The next attempt comes after a restart or a change to the trace's settings."
-        : $"Stopped retrying the long-query trace cleanup after {DropAttemptCap} failed attempts in a row. The session may remain in: {string.Join(", ", databases)}. The next attempt comes after a restart or a change to the trace's settings.";
+    public static string GiveUpWarning(IReadOnlyList<string> databases, string? retryNote = null) => (databases.Count == 0
+        ? $"Stopped retrying the long-query trace cleanup after {DropAttemptCap} failed attempts in a row. The databases could not be listed, so the session may remain in any of them."
+        : $"Stopped retrying the long-query trace cleanup after {DropAttemptCap} failed attempts in a row. The session may remain in: {string.Join(", ", databases)}.")
+        + " The next attempt comes after a restart or a change to the trace's settings.";
 
     private static IEnumerable<LongQueryTraceRegistration> OtherOwners(
         string selfId, string host, IEnumerable<LongQueryTraceRegistration> registrations)
@@ -304,17 +312,37 @@ public sealed record LongQueryTraceRegistration(
     IReadOnlyCollection<string>? DatabaseScope);
 
 /// <summary>
-/// Counts one registration's failed cleanup passes in a row, for <see cref="LongQueryTraceDatabases.DropAttemptCap"/>.
+/// What a failed cleanup pass leads to (<see cref="LongQueryTraceDropRetry.RecordFailure"/>).
+/// </summary>
+public enum LongQueryTraceDropOutcome
+{
+    /// <summary>Under the cap: the next cycle tries again, and the caller logs the failure as a warning.</summary>
+    TryAgainNextCycle,
+
+    /// <summary>
+    /// The last pass the cap allows: the caller marks the reconcile done and logs
+    /// <see cref="LongQueryTraceDatabases.GiveUpWarning"/> once. The next attempt comes an hour later.
+    /// </summary>
+    GaveUp,
+
+    /// <summary>An attempt after the cap failed: the caller logs it at Debug, and the next attempt comes an hour later.</summary>
+    TryAgainInAnHour,
+}
+
+/// <summary>
+/// Counts one registration's failed cleanup passes in a row, for <see cref="LongQueryTraceDatabases.DropAttemptCap"/>,
+/// and keeps the clock for the attempts after the cap, one every <see cref="LongQueryTraceDatabases.RetryInterval"/>.
 /// The count belongs to one state key (<see cref="LongQueryTraceDatabases.StateKey"/>): a pass that succeeds starts
-/// it again, and so does any change to the key, such as turning the trace on or off.
+/// it again, and so does any change to the key, such as turning the trace on or off. The caller passes the time.
 /// </summary>
 public sealed class LongQueryTraceDropRetry
 {
     private readonly object _gate = new();
     private string? _stateKey;
     private int _failures;
+    private DateTime? _nextAttemptUtc;
 
-    /// <summary>Failed passes in a row under the current state key.</summary>
+    /// <summary>Failed passes in a row under the current state key, before the cap.</summary>
     public int ConsecutiveFailures
     {
         get
@@ -326,11 +354,20 @@ public sealed class LongQueryTraceDropRetry
         }
     }
 
-    /// <summary>
-    /// Records a failed pass. True when it is the last one the cap allows: the caller then marks the reconcile done
-    /// and logs <see cref="LongQueryTraceDatabases.GiveUpWarning"/> once.
-    /// </summary>
-    public bool RecordFailure(string stateKey)
+    /// <summary>When the next attempt after the cap is due. Null until the cap gives up under the current key.</summary>
+    public DateTime? NextAttemptUtc
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _nextAttemptUtc;
+            }
+        }
+    }
+
+    /// <summary>Records a failed pass under this state key, and says what the caller does next.</summary>
+    public LongQueryTraceDropOutcome RecordFailure(string stateKey, DateTime utcNow)
     {
         lock (_gate)
         {
@@ -338,27 +375,52 @@ public sealed class LongQueryTraceDropRetry
             {
                 _stateKey = stateKey;
                 _failures = 0;
+                _nextAttemptUtc = null;
+            }
+
+            if (_nextAttemptUtc is not null)
+            {
+                _nextAttemptUtc = utcNow + LongQueryTraceDatabases.RetryInterval;
+                return LongQueryTraceDropOutcome.TryAgainInAnHour;
             }
 
             _failures++;
             if (_failures < LongQueryTraceDatabases.DropAttemptCap)
             {
-                return false;
+                return LongQueryTraceDropOutcome.TryAgainNextCycle;
             }
 
-            _stateKey = null;
             _failures = 0;
-            return true;
+            _stateKey = null;
+            return LongQueryTraceDropOutcome.GaveUp;
         }
     }
 
-    /// <summary>Starts the count again: after a pass that succeeds, and in Darling after every reconnect.</summary>
+    /// <summary>
+    /// True when the cap gave up under this state key and the next attempt is due. The caller then runs the cleanup
+    /// pass again, although the reconcile is marked done.
+    /// </summary>
+    public bool RetryDue(string stateKey, DateTime utcNow)
+    {
+        lock (_gate)
+        {
+            return _nextAttemptUtc is { } next
+                && utcNow >= next
+                && string.Equals(_stateKey, stateKey, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// Starts the count again and stops the attempts after the cap: after a cleanup pass that succeeds, and in Darling
+    /// after every reconnect.
+    /// </summary>
     public void Reset()
     {
         lock (_gate)
         {
             _stateKey = null;
             _failures = 0;
+            _nextAttemptUtc = null;
         }
     }
 }
@@ -367,7 +429,7 @@ public sealed class LongQueryTraceDropRetry
 /// A long-query trace reconcile that could not finish its drops on Azure SQL Database: the database list could not
 /// be read, or the drop failed in some databases (the others were still dropped). The caller does not mark the
 /// reconcile done, so the next cycle tries again, up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/> passes
-/// in a row.
+/// in a row, and then once an hour (<see cref="LongQueryTraceDropRetry"/>).
 /// </summary>
 public sealed class LongQueryTraceDropException : Exception
 {

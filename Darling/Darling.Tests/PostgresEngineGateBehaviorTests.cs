@@ -237,7 +237,7 @@ public sealed class PostgresEngineGateBehaviorTests
     {
         /* runner is null on purpose: reaching it would mean the gate did not fire. */
         await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
-            PostgresRuntime(), runner: null!, enabled, Array.Empty<LongQueryTraceRegistration>(), Array.Empty<string>(),
+            PostgresRuntime(), runner: null!, enabled, LongQueryTracePass.Full, Array.Empty<LongQueryTraceRegistration>(), Array.Empty<string>(),
             NullLogger<DarlingWorker>.Instance, CancellationToken.None);
     }
 
@@ -255,7 +255,7 @@ public sealed class PostgresEngineGateBehaviorTests
 
         var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
             DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
-                ungated, runner: null!, enabled: true, Array.Empty<LongQueryTraceRegistration>(), Array.Empty<string>(),
+                ungated, runner: null!, enabled: true, LongQueryTracePass.Full, Array.Empty<LongQueryTraceRegistration>(), Array.Empty<string>(),
                 NullLogger<DarlingWorker>.Instance, CancellationToken.None));
 
         /* The words from the sweep log, so a future reader can match this pin to that incident. */

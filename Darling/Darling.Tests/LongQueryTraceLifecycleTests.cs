@@ -55,8 +55,12 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         public List<LongQueryTraceRegistration> Others { get; } = new();
         public List<string> ServerOwned { get; set; } = new();
 
+        /* The time each reconcile runs at, and the databases that hold the session. */
+        public DateTime Clock { get; set; } = new(2026, 10, 2, 12, 0, 0, DateTimeKind.Utc);
+        public HashSet<string> Sessions { get; } = new(StringComparer.OrdinalIgnoreCase);
+
         public Task ReconcileAsync(bool enabled) =>
-            DarlingWorker.ReconcileLongQueryTraceAsync(State, Runner, enabled, Others, ServerOwned, Logger, CancellationToken.None);
+            DarlingWorker.ReconcileLongQueryTraceAsync(State, Runner, enabled, Others, ServerOwned, Clock, Logger, CancellationToken.None);
 
         public IEnumerable<string> Dropped => Calls.Where(c => !c.Create).Select(c => c.Database);
 
@@ -130,9 +134,21 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         runner.LongQueryTraceDatabaseOverrideForTests = (_, database, create, _) =>
         {
             rig.Calls.Add((database, create));
-            return rig.Refuse.Contains(database)
-                ? Task.FromException(new InvalidOperationException($"The drop was refused in {database}."))
-                : Task.CompletedTask;
+            if (rig.Refuse.Contains(database))
+            {
+                return Task.FromException(new InvalidOperationException($"The drop was refused in {database}."));
+            }
+
+            if (create)
+            {
+                rig.Sessions.Add(database);
+            }
+            else
+            {
+                rig.Sessions.Remove(database);
+            }
+
+            return Task.CompletedTask;
         };
 
         return rig;
@@ -211,6 +227,125 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Warning, giveUp.Level);
         Assert.Contains("beta", giveUp.Message, StringComparison.Ordinal);
     }
+
+    /* ── After the cap: one attempt an hour ── */
+
+    [Fact]
+    public async Task Off_AfterTheCap_TriesAgainOnceAnHour_AtDebug_WithNoSecondWarning()
+    {
+        var rig = BuildRig();
+        rig.Refuse.Add("beta");
+
+        for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync(enabled: false);
+        }
+
+        Assert.False(rig.State.LongQueryTraceApplied);
+        var giveUp = Assert.Single(rig.Logger.Entries, e => e.Message.Contains("Stopped retrying", StringComparison.Ordinal));
+        Assert.EndsWith(
+            "It tries again once an hour, and right away after a restart, a change to the trace's settings, or a change to"
+            + " another registration of these databases. It also tries again after it reconnects.",
+            giveUp.Message,
+            StringComparison.Ordinal);
+        var warnings = Warnings(rig);
+
+        /* Within the hour: nothing. */
+        rig.Calls.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval - TimeSpan.FromMinutes(1);
+        await rig.ReconcileAsync(enabled: false);
+        Assert.Empty(rig.Calls);
+
+        /* An hour after the cap: one attempt, and the sweep after it runs nothing. */
+        rig.Clock += TimeSpan.FromMinutes(1);
+        await rig.ReconcileAsync(enabled: false);
+        await rig.ReconcileAsync(enabled: false);
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, rig.Dropped);
+
+        /* It fails again an hour later. Both failures log at Debug, and the cap's warning stays the only one. */
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: false);
+        Assert.Equal(new[] { "alpha", "beta", "gamma", "alpha", "beta", "gamma" }, rig.Dropped);
+
+        Assert.Equal(warnings, Warnings(rig));
+        Assert.Equal(2, rig.Logger.Entries.Count(e =>
+            e.Level == Microsoft.Extensions.Logging.LogLevel.Debug
+            && e.Message.Contains("The next attempt is in an hour.", StringComparison.Ordinal)));
+        Assert.Equal(2, rig.Logger.Entries.Count(e =>
+            e.Level == Microsoft.Extensions.Logging.LogLevel.Debug
+            && e.Message.Contains("[beta]", StringComparison.Ordinal)));
+        Assert.False(rig.State.LongQueryTraceApplied);
+    }
+
+    [Fact]
+    public async Task AfterTheCap_AnAttemptThatSucceeds_StartsTheCountAgain_AndEndsTheHourlyAttempts()
+    {
+        var rig = BuildRig();
+        rig.Refuse.Add("beta");
+
+        for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync(enabled: false);
+        }
+
+        rig.Refuse.Clear();
+        rig.Calls.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, rig.Dropped);
+        Assert.Equal(0, rig.State.LongQueryTraceDropRetry.ConsecutiveFailures);
+        Assert.Null(rig.State.LongQueryTraceDropRetry.NextAttemptUtc);
+
+        /* Done, with nothing left to retry: an hour later nothing runs. */
+        rig.Calls.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: false);
+        Assert.Empty(rig.Calls);
+    }
+
+    /* ── While the trace is on: the create side again once an hour ── */
+
+    [Fact]
+    public async Task On_ASessionDroppedFromOutside_IsCreatedAgainAnHourLater_AndNothingIsDropped()
+    {
+        /* gamma is excluded, so a pass that ran the drop side would drop it again. */
+        var rig = BuildRig("gamma");
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.True(rig.State.LongQueryTraceApplied);
+        Assert.Equal(new[] { "gamma" }, rig.Dropped);
+        Assert.Contains("beta", rig.Sessions);
+
+        /* The session is dropped outside the app. The read returns no rows for it, the same as for a quiet trace. */
+        rig.Sessions.Remove("beta");
+        rig.Calls.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Contains("beta", rig.Sessions);
+        Assert.Equal(new[] { "alpha", "beta" }, rig.Created);
+        Assert.Empty(rig.Dropped);
+        Assert.True(rig.State.LongQueryTraceApplied);
+    }
+
+    [Fact]
+    public async Task On_WithinTheHour_TheLatchedReconcileRunsNothing()
+    {
+        var rig = BuildRig();
+        await rig.ReconcileAsync(enabled: true);
+
+        rig.Calls.Clear();
+        var listCalls = rig.ListCalls;
+        rig.Clock += LongQueryTraceDatabases.RetryInterval - TimeSpan.FromSeconds(1);
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Empty(rig.Calls);
+        Assert.Equal(listCalls, rig.ListCalls);
+    }
+
+    private static int Warnings(Rig rig) =>
+        rig.Logger.Entries.Count(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
 
     /* ── M2: the trace follows the monitored set ── */
 
@@ -475,7 +610,7 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     {
         var worker = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
         var sweep = worker.IndexOf("private async Task ReconcileLongQueryTraceAsync(ServerLoopState server, DarlingCollectorRunner runner, CancellationToken cancellationToken)", StringComparison.Ordinal);
-        var end = worker.IndexOf("await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, _logger,", sweep, StringComparison.Ordinal);
+        var end = worker.IndexOf("await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger,", sweep, StringComparison.Ordinal);
         Assert.True(sweep > 0 && end > sweep, "the sweep's reconcile passes the registrations and the server's list");
 
         var body = worker[sweep..end];

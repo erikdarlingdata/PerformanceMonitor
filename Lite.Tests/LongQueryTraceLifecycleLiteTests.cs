@@ -74,6 +74,9 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         public Exception? ListFailure { get; set; }
         public int ListCalls { get; set; }
 
+        /* The time each reconcile runs at. */
+        public DateTime Clock { get; set; } = new(2026, 10, 2, 12, 0, 0, DateTimeKind.Utc);
+
         public Task ReconcileAsync() => Service.ReconcileLongQueryCompletionsXeSessionAsync(Server, CancellationToken.None);
 
         public bool? Applied => Service.LongQueryTraceAppliedState(Server.Id);
@@ -130,6 +133,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
             Server = server,
         };
 
+        rig.Service.LongQueryTraceUtcNowForTests = () => rig.Clock;
         rig.Service.LongQueryTraceListOverrideForTests = (registration, allDatabases, _) =>
         {
             rig.ListCalls++;
@@ -272,6 +276,129 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
             AppLogger.SetMinimumLevel(level);
         }
     }
+
+    /* ── After the cap: one attempt an hour ── */
+
+    [Fact]
+    public async Task Off_AfterTheCap_TriesAgainOnceAnHour_AtDebug_WithNoSecondWarning()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildRigAsync(traceOn: false);
+            rig.Refuse.Add("beta");
+
+            for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+            {
+                await rig.ReconcileAsync();
+            }
+
+            Assert.False(rig.Applied);
+            var giveUp = Assert.Single(Lines(rig), line => line.Contains("Stopped retrying", StringComparison.Ordinal));
+            Assert.Contains(
+                "It tries again once an hour, and right away after a restart, a change to the trace's settings, or a change to"
+                + " another registration of these databases.",
+                giveUp,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("reconnects", giveUp, StringComparison.Ordinal);
+
+            /* Within the hour: nothing. */
+            rig.Calls.Clear();
+            rig.Clock += LongQueryTraceDatabases.RetryInterval - TimeSpan.FromMinutes(1);
+            await rig.ReconcileAsync();
+            Assert.Empty(rig.Calls);
+
+            /* An hour after the cap: one attempt, and the cycle after it runs nothing. */
+            rig.Clock += TimeSpan.FromMinutes(1);
+            await rig.ReconcileAsync();
+            await rig.ReconcileAsync();
+            Assert.Equal(new[] { "alpha", "beta", "gamma" }, rig.Dropped);
+
+            /* It fails again an hour later. Both failures log at Debug, and the cap's warning stays the only one. */
+            rig.Clock += LongQueryTraceDatabases.RetryInterval;
+            await rig.ReconcileAsync();
+            Assert.Equal(new[] { "alpha", "beta", "gamma", "alpha", "beta", "gamma" }, rig.Dropped);
+
+            var afterTheCap = Lines(rig);
+            Assert.DoesNotContain(afterTheCap, line => line.Contains("WARN", StringComparison.Ordinal));
+            Assert.Equal(2, afterTheCap.Count(line =>
+                line.Contains("DEBUG", StringComparison.Ordinal)
+                && line.Contains("The next attempt is in an hour.", StringComparison.Ordinal)));
+            Assert.Equal(2, afterTheCap.Count(line =>
+                line.Contains("DEBUG", StringComparison.Ordinal)
+                && line.Contains("[beta]", StringComparison.Ordinal)));
+            Assert.False(rig.Applied);
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    [Fact]
+    public async Task AfterTheCap_AnAttemptThatSucceeds_EndsTheHourlyAttempts()
+    {
+        var rig = await BuildRigAsync(traceOn: false);
+        rig.Refuse.Add("beta");
+
+        for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync();
+        }
+
+        rig.Refuse.Clear();
+        rig.Calls.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, rig.Dropped);
+
+        /* Done, with nothing left to retry: an hour later nothing runs. */
+        rig.Calls.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync();
+        Assert.Empty(rig.Calls);
+    }
+
+    [Fact]
+    public async Task On_AfterTheCap_TheCyclesInBetween_KeepTheHourlyAttempt()
+    {
+        /* gamma is excluded, so the drop outside the set tries it, and gamma refuses. */
+        var rig = await BuildRigAsync(traceOn: true, "gamma");
+        rig.Refuse.Add("gamma");
+
+        for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync();
+        }
+
+        Assert.True(rig.Applied);
+
+        /* Each cycle in the hour creates the session where it is missing and leaves the drop alone. A cycle that
+           skips the drop must not end the hourly attempt. */
+        rig.Calls.Clear();
+        for (var cycle = 1; cycle <= 3; cycle++)
+        {
+            rig.Clock += TimeSpan.FromMinutes(15);
+            await rig.ReconcileAsync();
+        }
+
+        Assert.Empty(rig.Dropped);
+        Assert.Equal(new[] { "alpha", "beta", "alpha", "beta", "alpha", "beta" }, rig.Created);
+
+        rig.Clock += TimeSpan.FromMinutes(15);
+        await rig.ReconcileAsync();
+        Assert.Equal(new[] { "gamma" }, rig.Dropped);
+    }
+
+    /// <summary>This rig's lines in the log buffer since the last drain.</summary>
+    private static List<string> Lines(Rig rig) =>
+        AppLogger.DrainBufferedLines()
+            .Where(line => line.Contains(rig.Server.DisplayName, StringComparison.Ordinal))
+            .ToList();
 
     /* ── M2: the trace follows the monitored set ── */
 

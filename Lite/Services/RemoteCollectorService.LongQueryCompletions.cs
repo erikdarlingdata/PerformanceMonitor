@@ -101,6 +101,12 @@ public partial class RemoteCollectorService
                 LongQueryTraceDatabases.CoOwners(server.Id, server.ServerName, registrations, serverSeparatelyMonitored))
             : string.Empty;
 
+        /* After the cap, the cleanup runs once an hour, on this clock. That attempt logs its failures at Debug, so
+           the one warning is not repeated. */
+        var utcNow = LongQueryTraceUtcNowForTests?.Invoke() ?? DateTime.UtcNow;
+        var retry = _longQueryTraceDropRetry.GetOrAdd(server.Id, _ => new LongQueryTraceDropRetry());
+        var afterTheCap = retry.RetryDue(stateKey, utcNow);
+
         try
         {
             if (enabled)
@@ -111,19 +117,22 @@ public partial class RemoteCollectorService
                 _longQueryTraceFault.TryRemove(server.Id, out _);
 
                 /* Azure SQL Database: drop the session from listed databases outside the monitored set, when
-                   the plan's settings changed since the last pass that finished (and once after each start). */
-                if (monitored is not null && !IsLongQueryTraceApplied(server.Id, enabled: true, stateKey))
+                   the plan's settings changed since the last pass that finished (and once after each start), or
+                   when the hourly attempt after the cap is due. */
+                if (monitored is not null && (afterTheCap || !IsLongQueryTraceApplied(server.Id, enabled: true, stateKey)))
                 {
-                    await DropLongQueryTraceOutsideTheSetAsync(server, monitored, separatelyMonitored, KeptElsewhere, cancellationToken);
+                    await DropLongQueryTraceOutsideTheSetAsync(server, monitored, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
+                    retry.Reset();
                 }
 
                 MarkLongQueryTraceApplied(server.Id, enabled: true, stateKey);
             }
-            else if (!IsLongQueryTraceApplied(server.Id, enabled: false, stateKey))
+            else if (afterTheCap || !IsLongQueryTraceApplied(server.Id, enabled: false, stateKey))
             {
                 /* Disabled and either never reconciled, previously enabled, or reconciled under different
                    settings: drop, then remember it is gone so the next cycles skip the connection entirely. */
-                await DropLongQueryCompletionsXeSessionAsync(server, separatelyMonitored, KeptElsewhere, cancellationToken);
+                await DropLongQueryCompletionsXeSessionAsync(server, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
+                retry.Reset();
                 MarkLongQueryTraceApplied(server.Id, enabled: false, stateKey);
 
                 /* #3754: nothing to be honest about while disabled - the collector is not dispatched - and a
@@ -139,15 +148,20 @@ public partial class RemoteCollectorService
         {
             /* Azure SQL Database: a drop failed, or the databases could not be listed for it. The state stays
                unapplied so the next cycle tries again, until the cap: then it counts as done, and one warning
-               names where the session may remain. While enabled, the create side had already finished. */
-            if (_longQueryTraceDropRetry.GetOrAdd(server.Id, _ => new LongQueryTraceDropRetry()).RecordFailure(stateKey))
+               names where the session may remain. After that, one attempt an hour, logged at Debug, so the
+               warning is not repeated. While enabled, the create side had already finished. */
+            switch (retry.RecordFailure(stateKey, utcNow))
             {
-                _longQueryTraceApplied[server.Id] = (enabled, stateKey);
-                AppLogger.Warn("XeSession", $"[{server.DisplayName}] {LongQueryTraceDatabases.GiveUpWarning(ex.Databases)}");
-            }
-            else
-            {
-                AppLogger.Warn("XeSession", $"[{server.DisplayName}] {ex.Message} The next cycle tries again.");
+                case LongQueryTraceDropOutcome.GaveUp:
+                    _longQueryTraceApplied[server.Id] = (enabled, stateKey);
+                    AppLogger.Warn("XeSession", $"[{server.DisplayName}] {LongQueryTraceDatabases.GiveUpWarning(ex.Databases)}");
+                    break;
+                case LongQueryTraceDropOutcome.TryAgainInAnHour:
+                    AppLogger.Debug("XeSession", $"[{server.DisplayName}] {ex.Message} The next attempt is in an hour.");
+                    break;
+                default:
+                    AppLogger.Warn("XeSession", $"[{server.DisplayName}] {ex.Message} The next cycle tries again.");
+                    break;
             }
         }
         catch (Exception ex)
@@ -309,6 +323,7 @@ END;", connection);
         ServerConnection server,
         IReadOnlyList<string> separatelyMonitored,
         Func<IEnumerable<string>, IReadOnlyList<string>> keptElsewhere,
+        bool afterTheCap,
         CancellationToken cancellationToken)
     {
         var engineEdition = _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition;
@@ -317,7 +332,7 @@ END;", connection);
         {
             var listed = await ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken);
             var plan = LongQueryTraceDatabases.Plan(enabled: false, listed, Array.Empty<string>(), separatelyMonitored, keptElsewhere(listed));
-            await DropLongQueryTraceInEachAsync(server, plan.Drop, cancellationToken);
+            await DropLongQueryTraceInEachAsync(server, plan.Drop, afterTheCap, cancellationToken);
             return;
         }
 
@@ -347,22 +362,24 @@ END;", connection);
     internal bool? LongQueryTraceAppliedState(string serverId) =>
         _longQueryTraceApplied.TryGetValue(serverId, out var applied) ? applied.Enabled : null;
 
+    /// <summary>
+    /// Replaces the clock the long-query trace's hourly attempts after the cap read (<see cref="LongQueryTraceDropRetry"/>).
+    /// Null in production.
+    /// </summary>
+    internal Func<DateTime>? LongQueryTraceUtcNowForTests { get; set; }
+
     /// <summary>True when the last reconcile that finished applied this enabled state under this state key.</summary>
     private bool IsLongQueryTraceApplied(string serverId, bool enabled, string stateKey) =>
         _longQueryTraceApplied.TryGetValue(serverId, out var applied)
         && applied.Enabled == enabled
         && string.Equals(applied.StateKey, stateKey, StringComparison.Ordinal);
 
-    /// <summary>Records a reconcile that finished, and starts the failed-pass count again.</summary>
-    private void MarkLongQueryTraceApplied(string serverId, bool enabled, string stateKey)
-    {
+    /// <summary>
+    /// Records a reconcile that finished. The failed-pass count starts again only where a cleanup pass ran and
+    /// succeeded, so a cycle that skips the cleanup keeps the hourly attempt after the cap.
+    /// </summary>
+    private void MarkLongQueryTraceApplied(string serverId, bool enabled, string stateKey) =>
         _longQueryTraceApplied[serverId] = (enabled, stateKey);
-
-        if (_longQueryTraceDropRetry.TryGetValue(serverId, out var retry))
-        {
-            retry.Reset();
-        }
-    }
 
     /// <summary>
     /// The databases monitored as their own servers, for this Azure SQL Database registration: the same list the
@@ -426,22 +443,35 @@ END;", connection);
         IReadOnlyList<string> monitored,
         IReadOnlyList<string> separatelyMonitored,
         Func<IEnumerable<string>, IReadOnlyList<string>> keptElsewhere,
+        bool afterTheCap,
         CancellationToken cancellationToken)
     {
         var listed = await ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken);
         var plan = LongQueryTraceDatabases.Plan(enabled: true, listed, monitored, separatelyMonitored, keptElsewhere(listed));
-        await DropLongQueryTraceInEachAsync(server, plan.Drop, cancellationToken);
+        await DropLongQueryTraceInEachAsync(server, plan.Drop, afterTheCap, cancellationToken);
     }
 
     /// <summary>
     /// Drops the session in each database, tries every one, and logs a warning that names each database where the
-    /// drop failed (<see cref="LongQueryTraceDatabases.DropEachAsync"/>).
+    /// drop failed (<see cref="LongQueryTraceDatabases.DropEachAsync"/>). The hourly attempt after the cap logs it at
+    /// Debug instead, so the cap's one warning is not repeated.
     /// </summary>
-    private Task DropLongQueryTraceInEachAsync(ServerConnection server, IReadOnlyList<string> databases, CancellationToken cancellationToken) =>
+    private Task DropLongQueryTraceInEachAsync(ServerConnection server, IReadOnlyList<string> databases, bool afterTheCap, CancellationToken cancellationToken) =>
         LongQueryTraceDatabases.DropEachAsync(
             databases,
             (databaseName, token) => DropLongQueryTraceInDatabaseAsync(server, databaseName, token),
-            (databaseName, ex) => AppLogger.Warn("XeSession", $"[{server.DisplayName}] [{databaseName}] Could not drop the long-query completion XE session: {ex.Message}"),
+            (databaseName, ex) =>
+            {
+                var line = $"[{server.DisplayName}] [{databaseName}] Could not drop the long-query completion XE session: {ex.Message}";
+                if (afterTheCap)
+                {
+                    AppLogger.Debug("XeSession", line);
+                }
+                else
+                {
+                    AppLogger.Warn("XeSession", line);
+                }
+            },
             createNote: null,
             cancellationToken);
 

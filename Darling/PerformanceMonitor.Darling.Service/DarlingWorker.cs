@@ -1444,8 +1444,9 @@ LIMIT 1";
            refused in others: the run's read of the survivors is real and stays SUCCESS, and this - the
            #2623 partial note naming the refused databases - is merged onto its row so the row cannot pass
            for a server that is quiet. It persists while LongQueryTraceApplied is latched true, because the
-           refused databases are not retried until the next (re)connect resets the latch; the note is a
-           standing claim about the sessions as they were last reconciled, which is also what it says.
+           refused databases are retried only by the hourly create pass (LongQueryTraceAppliedAtUtc) or the
+           next (re)connect; the note is a standing claim about the sessions as they were last reconciled,
+           which is also what it says.
 
            Both reset with the latch on every (re)connect, and both written only by the per-server body on
            the pool thread (INV-2), like the latch itself. */
@@ -1459,7 +1460,14 @@ LIMIT 1";
            Reset with the latch on every (re)connect. */
         public string? LongQueryTraceAppliedKey { get; set; }
 
-        /* Failed cleanup passes in a row, for LongQueryTraceDatabases.DropAttemptCap. Reset on every (re)connect. */
+        /* When the last reconcile that created the session ran. While the trace is on and latched, the create side
+           runs again once this is LongQueryTraceDatabases.RetryInterval old, so a session dropped from outside
+           comes back: the read returns no rows for an absent session, the same as for a quiet one. Reset with the
+           latch on every (re)connect. */
+        public DateTime? LongQueryTraceAppliedAtUtc { get; set; }
+
+        /* Failed cleanup passes in a row, for LongQueryTraceDatabases.DropAttemptCap, and the clock for the hourly
+           attempts after the cap. Reset on every (re)connect. */
         public LongQueryTraceDropRetry LongQueryTraceDropRetry { get; } = new();
     }
 
@@ -4014,10 +4022,11 @@ LIMIT 1";
     /// the desired state differs from what was last applied to this server (tracked in
     /// <see cref="ServerLoopState.LongQueryTraceApplied"/>, and on Azure SQL Database in
     /// <see cref="ServerLoopState.LongQueryTraceAppliedKey"/> too, so steady state — a default-off
-    /// collector — opens no connection at all). Enabling creates the session; disabling drops it. A
-    /// failure leaves the applied state unchanged so the next sweep retries (a failed drop on Azure SQL
-    /// Database up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/> times in a row), and never
-    /// breaks the sweep.
+    /// collector — opens no connection at all). Enabling creates the session; disabling drops it. While
+    /// the trace is on, the create side runs again once an hour, so a session dropped from outside comes
+    /// back. A failure leaves the applied state unchanged so the next sweep retries (a failed drop on Azure
+    /// SQL Database up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/> times in a row, then once
+    /// an hour), and never breaks the sweep.
     /// </summary>
     private async Task ReconcileLongQueryTraceAsync(ServerLoopState server, DarlingCollectorRunner runner, CancellationToken cancellationToken)
     {
@@ -4055,7 +4064,7 @@ LIMIT 1";
             serverSeparatelyMonitored = LongQueryTraceServerSeparatelyMonitored(server.Runtime.Config.Host, live);
         }
 
-        await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, _logger, cancellationToken);
+        await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger, cancellationToken);
     }
 
     /// <summary>
@@ -4107,7 +4116,7 @@ LIMIT 1";
     /// <summary>
     /// The half of <see cref="ReconcileLongQueryTraceAsync(ServerLoopState, DarlingCollectorRunner, CancellationToken)"/> that
     /// runs after the engine gate and the schedule: it decides whether the trace needs reconciling, runs it, and records
-    /// the outcome on the loop state. Static, with the enabled flag passed in, so a test can drive it.
+    /// the outcome on the loop state. Static, with the enabled flag and the time passed in, so a test can drive it.
     /// </summary>
     internal static async Task ReconcileLongQueryTraceAsync(
         ServerLoopState server,
@@ -4115,6 +4124,7 @@ LIMIT 1";
         bool enabled,
         IReadOnlyList<LongQueryTraceRegistration> registrations,
         IReadOnlyList<string> serverSeparatelyMonitored,
+        DateTime utcNow,
         ILogger logger,
         CancellationToken cancellationToken)
     {
@@ -4141,7 +4151,27 @@ LIMIT 1";
                     serverSeparatelyMonitored))
             : null;
 
-        if (server.LongQueryTraceApplied == enabled && string.Equals(server.LongQueryTraceAppliedKey, stateKey, StringComparison.Ordinal))
+        /* Latched, the reconcile runs again only on the hour. The whole pass runs when the cleanup's attempt after the
+           cap is due. Otherwise, while the trace is on, the create side runs alone, so a session dropped from outside
+           comes back: the read returns no rows for an absent session, the same as for a quiet one. The drop side
+           runs once per connect, per change of the state key, or per attempt after the cap. */
+        LongQueryTracePass pass;
+        if (server.LongQueryTraceApplied != enabled
+            || !string.Equals(server.LongQueryTraceAppliedKey, stateKey, StringComparison.Ordinal))
+        {
+            pass = LongQueryTracePass.Full;
+        }
+        else if (server.LongQueryTraceDropRetry.RetryDue(stateKey ?? string.Empty, utcNow))
+        {
+            pass = LongQueryTracePass.RetryAfterCap;
+        }
+        else if (enabled
+                 && server.LongQueryTraceAppliedAtUtc is { } appliedAt
+                 && utcNow - appliedAt >= TimeSpan.MaxValue)
+        {
+            pass = LongQueryTracePass.CreateOnly;
+        }
+        else
         {
             return;
         }
@@ -4149,10 +4179,16 @@ LIMIT 1";
         try
         {
             var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
-                server.Runtime, runner, enabled, registrations, serverSeparatelyMonitored, logger, cancellationToken);
+                server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, logger, cancellationToken);
             server.LongQueryTraceApplied = enabled;
             server.LongQueryTraceAppliedKey = stateKey;
-            server.LongQueryTraceDropRetry.Reset();
+            server.LongQueryTraceAppliedAtUtc = utcNow;
+
+            /* Only a pass that ran the cleanup ends its retries: the create side alone leaves the hourly attempt. */
+            if (pass != LongQueryTracePass.CreateOnly)
+            {
+                server.LongQueryTraceDropRetry.Reset();
+            }
 
             /* #3754: a reconcile that returned is one the session exists after - everywhere, or (Azure)
                everywhere it could. Clear the fault, and carry the partial note if there was one. Nulled
@@ -4167,22 +4203,29 @@ LIMIT 1";
             /* Azure SQL Database: a drop failed, or the databases could not be listed for it. While enabling, the
                create side had finished, so the fault clears and its partial note stands. The latch stays unset so
                the next sweep tries again, until the cap: then the reconcile counts as applied, and one warning
-               names the databases where the session may remain. */
+               names the databases where the session may remain. After that, one attempt an hour, logged at Debug,
+               so the warning is not repeated. */
             if (enabled)
             {
                 server.LongQueryTraceFault = null;
                 server.LongQueryTracePartialNote = ex.CreateNote;
+                server.LongQueryTraceAppliedAtUtc = utcNow;
             }
 
-            if (server.LongQueryTraceDropRetry.RecordFailure(stateKey ?? string.Empty))
+            switch (server.LongQueryTraceDropRetry.RecordFailure(stateKey ?? string.Empty, utcNow))
             {
-                server.LongQueryTraceApplied = enabled;
-                server.LongQueryTraceAppliedKey = stateKey;
-                logger.LogWarning("[{Server}] {Message}", server.Config.DisplayName, LongQueryTraceDatabases.GiveUpWarning(ex.Databases));
-            }
-            else
-            {
-                logger.LogWarning("[{Server}] {Message} The next sweep tries again.", server.Config.DisplayName, ex.Message);
+                case LongQueryTraceDropOutcome.GaveUp:
+                    server.LongQueryTraceApplied = enabled;
+                    server.LongQueryTraceAppliedKey = stateKey;
+                    logger.LogWarning("[{Server}] {Message}", server.Config.DisplayName,
+                        LongQueryTraceDatabases.GiveUpWarning(ex.Databases, " It also tries again after it reconnects."));
+                    break;
+                case LongQueryTraceDropOutcome.TryAgainInAnHour:
+                    logger.LogDebug("[{Server}] {Message} The next attempt is in an hour.", server.Config.DisplayName, ex.Message);
+                    break;
+                default:
+                    logger.LogWarning("[{Server}] {Message} The next sweep tries again.", server.Config.DisplayName, ex.Message);
+                    break;
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -10461,6 +10504,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             server.LongQueryTraceFault = null;
             server.LongQueryTracePartialNote = null;
             server.LongQueryTraceAppliedKey = null;
+            server.LongQueryTraceAppliedAtUtc = null;
             server.LongQueryTraceDropRetry.Reset();
             /* Capture the id once, while the connection is freshly established and non-null: an on-load
                RunOneAsync below can drop server.Runtime on a mid-collection connection-level failure, so any
