@@ -1100,7 +1100,8 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         Assert.True(ensure > 0, "the always-on database-scoped ensure is gone");
         var body = source[ensure..source.IndexOf("\n    }\n", ensure, StringComparison.Ordinal)];
 
-        Assert.Contains("databases = await runner.GetAzureDatabaseListAsync(server, databaseScope: null, cancellationToken);", body, StringComparison.Ordinal);
+        /* #4961: a test replaces the listing, so the read of the server is the second arm of a conditional. */
+        Assert.Contains(": await runner.GetAzureDatabaseListAsync(server, databaseScope: null, cancellationToken);", body, StringComparison.Ordinal);
         Assert.DoesNotContain("SeparatelyMonitored", body, StringComparison.Ordinal);
     }
 
@@ -1204,8 +1205,13 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     {
         var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingXeSessions.cs");
 
-        /* The four always-on session statements (deadlock and blocked process, on-prem and Azure) are unchanged. */
-        Assert.Equal(4, source.Split("STARTUP_STATE = ON", StringSplitOptions.None).Length - 1);
+        /* The two server-scoped always-on session statements (deadlock and blocked process) are unchanged. The two Azure ones are
+           made by the shared builder since #4961, which keeps the shared sessions on and starts only an own fallback off. */
+        Assert.Equal(2, source.Split("STARTUP_STATE = ON", StringSplitOptions.None).Length - 1);
+        foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess })
+        {
+            Assert.Contains("STARTUP_STATE = ON", AlwaysOnXeSessions.BuildAzureCreateSql(kind, AlwaysOnXeSessions.SharedNameFor(kind)), StringComparison.Ordinal);
+        }
         Assert.DoesNotContain("STARTUP_STATE = OFF", source, StringComparison.Ordinal);
 
         var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(OwnSession, databaseScoped: false, 2_000_000);

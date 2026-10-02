@@ -51,6 +51,13 @@ public static class DarlingXeSessions
             return;
         }
 
+        /* A test replaces the whole ensure of one server. Null in production. */
+        if (runner.XeEnsureOverrideForTests is { } ensureOverride)
+        {
+            await ensureOverride(server, cancellationToken);
+            return;
+        }
+
         if (server.Target.IsAzureSqlDb)
         {
             await EnsureDatabaseScopedAsync(server, runner, logger, cancellationToken);
@@ -119,7 +126,9 @@ public static class DarlingXeSessions
                server-side; a session dropped because ONE collector was scoped would blind the other.
                The opt-in long-query trace is the other rule: it follows its own collector's scope
                (ReconcileLongQueryCompletionsAzureAsync). */
-            databases = await runner.GetAzureDatabaseListAsync(server, databaseScope: null, cancellationToken);
+            databases = runner.AzureDatabaseListOverrideForTests is { } listOverride
+                ? await listOverride(server, cancellationToken)
+                : await runner.GetAzureDatabaseListAsync(server, databaseScope: null, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -138,116 +147,36 @@ public static class DarlingXeSessions
                 continue;
             }
 
+            SqlConnection? connection = null;
             try
             {
-                using var connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
+                IAlwaysOnXeDatabase database;
+                if (runner.AlwaysOnXeDatabaseForTests is { } open)
+                {
+                    database = await open(server, databaseName, cancellationToken);
+                }
+                else
+                {
+                    connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
+                    database = new DarlingAlwaysOnXeSessions.Database(connection);
+                }
 
-                await EnsureOneDatabaseScopedAsync(
-                    connection, server, databaseName, "deadlock", DeadlocksCollector.XeSessionName,
-                    c => EnsureDeadlockAzureAsync(c, server, logger, cancellationToken), logger, cancellationToken);
-
-                await EnsureOneDatabaseScopedAsync(
-                    connection, server, databaseName, "blocked process", BlockedProcessReportCollector.XeSessionName,
-                    c => EnsureBlockedProcessAzureAsync(c, server, logger, cancellationToken), logger, cancellationToken);
+                /* #4961: the shared session when it is usable, this install's own when it is not, and back again. */
+                await DarlingAlwaysOnXeSessions.EnsureAsync(
+                    database, runner, server, databaseName, AlwaysOnXeSessionKind.Deadlock, "deadlock", logger, cancellationToken);
+                await DarlingAlwaysOnXeSessions.EnsureAsync(
+                    database, runner, server, databaseName, AlwaysOnXeSessionKind.BlockedProcess, "blocked process", logger, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger?.LogWarning("[{Server}] [{Database}] Failed to open a connection for XE session ensure: {Message}",
                     server.Config.DisplayName, databaseName, ex.Message);
             }
-        }
-    }
-
-    /// <summary>
-    /// One capture's database-scoped ensure, with the #1251 benign path grown a read-back check
-    /// (#1535, verbatim semantics from Lite): a benign "already exists"/"already started" proves
-    /// the session is there, but NOT that this principal can see it — the ring-buffer reader joins
-    /// <c>sys.dm_xe_database_sessions</c>, and a session invisible there (created by another
-    /// principal, or present-but-stopped) reads zero rows forever while collection reports
-    /// SUCCESS. So after a benign error the session is probed in the reader's own DMV, and an
-    /// invisible one is dropped and recreated under this principal. Hard failures are warn-logged
-    /// by the caller's per-capture catch here.
-    /// </summary>
-    private static async Task EnsureOneDatabaseScopedAsync(
-        SqlConnection connection,
-        ServerRuntime server,
-        string databaseName,
-        string captureName,
-        string sessionName,
-        Func<SqlConnection, Task> ensureAsync,
-        ILogger? logger,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            try
+            finally
             {
-                await ensureAsync(connection);
-            }
-            catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
-            {
-                if (!await IsDatabaseScopedSessionVisibleAsync(connection, sessionName, cancellationToken))
-                {
-                    using (var dropCmd = new SqlCommand($"DROP EVENT SESSION [{sessionName}] ON DATABASE;", connection))
-                    {
-                        dropCmd.CommandTimeout = 60;
-                        await dropCmd.ExecuteNonQueryAsync(cancellationToken);
-                    }
-
-                    await ensureAsync(connection);
-
-                    /* Read back once: recreated under THIS principal and still invisible means the
-                       reader cannot see this database's capture at all — say so at Error rather than
-                       announcing a recreate that didn't help. Ensure runs once per connect, so there
-                       is no per-cycle churn to bound here (Lite's per-cycle driver keeps a give-up
-                       set for the same case). */
-                    if (await IsDatabaseScopedSessionVisibleAsync(connection, sessionName, cancellationToken))
-                    {
-                        logger?.LogInformation("[{Server}] [{Database}] {Capture} XE session existed but was not visible to the ring-buffer reader — dropped and recreated (#1535)",
-                            server.Config.DisplayName, databaseName, captureName);
-                    }
-                    else
-                    {
-                        logger?.LogError("[{Server}] [{Database}] {Capture} XE session is still not visible in sys.dm_xe_database_sessions after recreating it — the ring-buffer reader cannot see this database's capture",
-                            server.Config.DisplayName, databaseName, captureName);
-                    }
-                }
+                connection?.Dispose();
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger?.LogWarning("[{Server}] [{Database}] Failed to ensure {Capture} XE session: {Message}",
-                server.Config.DisplayName, databaseName, captureName, ex.Message);
-        }
-    }
-
-    /// <summary>
-    /// Whether the database-scoped session is visible to THIS principal in
-    /// <c>sys.dm_xe_database_sessions</c> — the reader's-eye view (false: the reader would see zero
-    /// rows regardless of captured events).
-    /// </summary>
-    private static async Task<bool> IsDatabaseScopedSessionVisibleAsync(SqlConnection connection, string sessionName, CancellationToken cancellationToken)
-    {
-        using var cmd = new SqlCommand(@"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT /* PerformanceMonitorDarling */
-    is_visible =
-        CASE
-            WHEN EXISTS
-            (
-                SELECT
-                    1/0
-                FROM sys.dm_xe_database_sessions AS xes
-                WHERE xes.name = @session_name
-            )
-            THEN 1
-            ELSE 0
-        END;", connection);
-        cmd.CommandTimeout = 60;
-        cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
-        var result = await cmd.ExecuteScalarAsync(cancellationToken);
-        return result is int isVisible && isVisible == 1;
     }
 
     private static async Task EnsureDeadlockOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
@@ -301,98 +230,6 @@ ALTER EVENT SESSION [{DeadlocksCollector.XeSessionName}] ON SERVER STATE = START
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         logger?.LogInformation("[{Server}] Created and started deadlock XE session", server.Config.DisplayName);
-    }
-
-    private static async Task EnsureDeadlockAzureAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
-    {
-        using (var cmd = new SqlCommand(@"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT /* PerformanceMonitorDarling */
-    has_correct_event = CASE
-        WHEN EXISTS
-        (
-            SELECT 1/0
-            FROM sys.database_event_session_events AS dese
-            JOIN sys.database_event_sessions AS des
-              ON des.event_session_id = dese.event_session_id
-            WHERE des.name = @session_name
-            AND   dese.name = N'database_xml_deadlock_report'
-        )
-        THEN 1
-        WHEN EXISTS
-        (
-            SELECT 1/0
-            FROM sys.database_event_sessions AS des
-            WHERE des.name = @session_name
-        )
-        THEN 0
-        ELSE NULL
-    END;", connection))
-        {
-            cmd.CommandTimeout = 60;
-            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = DeadlocksCollector.XeSessionName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-
-            if (result is int hasCorrectEvent)
-            {
-                if (hasCorrectEvent == 0)
-                {
-                    /* Wrong event — drop and recreate (mirrors Lite). */
-                    try
-                    {
-                        using var dropCmd = new SqlCommand(
-                            $"DROP EVENT SESSION [{DeadlocksCollector.XeSessionName}] ON DATABASE;", connection);
-                        dropCmd.CommandTimeout = 60;
-                        await dropCmd.ExecuteNonQueryAsync(cancellationToken);
-                    }
-                    catch (SqlException ex)
-                    {
-                        logger?.LogError("[{Server}] Failed to drop old deadlock XE session: {Message}", server.Config.DisplayName, ex.Message);
-                    }
-                }
-                else
-                {
-                    using var startCmd = new SqlCommand($@"
-IF NOT EXISTS
-(
-    SELECT
-        1/0
-    FROM sys.dm_xe_database_sessions AS xes
-    WHERE xes.name = N'{DeadlocksCollector.XeSessionName}'
-)
-BEGIN
-    ALTER EVENT SESSION [{DeadlocksCollector.XeSessionName}] ON DATABASE STATE = START;
-END;", connection);
-                    startCmd.CommandTimeout = 60;
-                    await startCmd.ExecuteNonQueryAsync(cancellationToken);
-                    return;
-                }
-            }
-        }
-
-        using (var cmd = new SqlCommand($@"
-CREATE EVENT SESSION [{DeadlocksCollector.XeSessionName}]
-ON DATABASE
-ADD EVENT sqlserver.database_xml_deadlock_report
-ADD TARGET package0.ring_buffer
-(
-    SET max_memory = 4096
-)
-WITH
-(
-    MAX_DISPATCH_LATENCY = 5 SECONDS,
-    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
-    STARTUP_STATE = ON
-);
-
-ALTER EVENT SESSION [{DeadlocksCollector.XeSessionName}] ON DATABASE STATE = START;", connection))
-        {
-            cmd.CommandTimeout = 60;
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        logger?.LogInformation("[{Server}] Created and started deadlock XE session (database-scoped)", server.Config.DisplayName);
     }
 
     private static async Task EnsureBlockedProcessOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
@@ -487,62 +324,6 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         logger?.LogInformation("[{Server}] Created and started blocked process XE session", server.Config.DisplayName);
-    }
-
-    private static async Task EnsureBlockedProcessAzureAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
-    {
-        using (var cmd = new SqlCommand(@"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT /* PerformanceMonitorDarling */
-    session_state = des.name
-FROM sys.database_event_sessions AS des
-WHERE des.name = @session_name;", connection))
-        {
-            cmd.CommandTimeout = 60;
-            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = BlockedProcessReportCollector.XeSessionName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-
-            if (result != null)
-            {
-                using var startCmd = new SqlCommand($@"
-IF NOT EXISTS
-(
-    SELECT
-        1/0
-    FROM sys.dm_xe_database_sessions AS xes
-    WHERE xes.name = N'{BlockedProcessReportCollector.XeSessionName}'
-)
-BEGIN
-    ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE STATE = START;
-END;", connection);
-                startCmd.CommandTimeout = 60;
-                await startCmd.ExecuteNonQueryAsync(cancellationToken);
-                return;
-            }
-        }
-
-        using (var cmd = new SqlCommand($@"
-CREATE EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}]
-ON DATABASE
-ADD EVENT sqlserver.blocked_process_report
-ADD TARGET package0.ring_buffer
-(
-    SET max_memory = 4096
-)
-WITH
-(
-    MAX_DISPATCH_LATENCY = 5 SECONDS,
-    STARTUP_STATE = ON
-);
-
-ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON DATABASE STATE = START;", connection))
-        {
-            cmd.CommandTimeout = 60;
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        logger?.LogInformation("[{Server}] Created and started blocked process XE session (database-scoped)", server.Config.DisplayName);
     }
 
     /// <summary>

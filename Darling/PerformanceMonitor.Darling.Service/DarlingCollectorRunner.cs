@@ -2337,6 +2337,15 @@ public sealed class DarlingCollectorRunner
                        CollectorContext.CurrentDatabaseName. */
                     context.CurrentDatabaseName = databaseName;
 
+                    /* #4961: the deadlock and blocked-process reads name the session the ensure chose for THIS database, so
+                       the name is set per database, beside the database name. Every other definition leaves it null. */
+                    context.AlwaysOnSessionName = definition switch
+                    {
+                        DeadlocksCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.Deadlock),
+                        BlockedProcessReportCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.BlockedProcess),
+                        _ => null,
+                    };
+
                     /* #2855: cleared once per iteration, because this loop reuses ONE context across every
                        database and without the reset a database whose read faults would print the PREVIOUS
                        database's split as its own — a stale timing that looks precise is worse than no
@@ -6574,6 +6583,36 @@ RETURNING s.state_key";
            session is logged again, once per connect. */
         _legacyLongQuery?.OnServerReconnected(serverId);
     }
+
+    /// <summary>
+    /// The choice this install has made for each deadlock and blocked-process session in each Azure SQL Database it monitors
+    /// (#4961): the shared session, or its own. The ensure sets it and the per-database read takes its name from it. In
+    /// memory only: a restart starts every database at the shared session, and the first ensure sets it again.
+    /// </summary>
+    internal AlwaysOnXeChoices AlwaysOnChoices { get; } = new();
+
+    /// <summary>This install's own session of the capture, or null when the runner has no install id to make it from.</summary>
+    internal string? AlwaysOnOwnSessionName(AlwaysOnXeSessionKind kind) =>
+        AlwaysOnXeSessions.TryOwnNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallId, kind);
+
+    /// <summary>
+    /// The session a read of the capture names in one Azure SQL Database: this install's own when the ensure fell back to it
+    /// there, else the shared name.
+    /// </summary>
+    internal string AlwaysOnReadSessionName(ServerRuntime server, string databaseName, AlwaysOnXeSessionKind kind) =>
+        AlwaysOnChoices.NameFor(DarlingAlwaysOnXeSessions.ServerKey(server), databaseName, kind, AlwaysOnOwnSessionName(kind));
+
+    /// <summary>
+    /// Replaces the connection to one Azure SQL Database for the always-on sessions' ensure: the server and the database. The
+    /// ensure's decisions then run against what it returns, in place of a server. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeDatabaseForTests { get; set; }
+
+    /// <summary>
+    /// Replaces the whole always-on ensure of one server, which otherwise opens a connection to it: a test counts the calls.
+    /// Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, CancellationToken, Task>? XeEnsureOverrideForTests { get; set; }
 
     /// <summary>Replaces the engine target provider resolved for a run. Null in production.</summary>
     internal Func<CollectorTargetInfo, ITargetProvider>? TargetProviderOverrideForTests { get; set; }

@@ -1127,7 +1127,8 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
             Assert.True(call > 0, $"{file} lost its database-scoped ensure");
             var args = source[call..source.IndexOf(';', call)];
             Assert.Contains(capture, args, StringComparison.Ordinal);
-            Assert.EndsWith("cancellationToken)", args, StringComparison.Ordinal);
+            /* #4961: the arms also hand the shared driver their per-database routine, which is no list of databases. */
+            Assert.EndsWith("databaseName, token))", args, StringComparison.Ordinal);
             Assert.DoesNotContain("SeparatelyMonitored", args, StringComparison.Ordinal);
         }
     }
