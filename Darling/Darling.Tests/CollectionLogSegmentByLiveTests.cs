@@ -58,18 +58,21 @@ public sealed class CollectionLogSegmentByLiveTests
 
     private static readonly string[] Collectors = { "blocked_process_report", "wait_stats", "cpu_utilization" };
 
-    /// <summary>The plan test's analysis hour, in the past, so every seeded chunk is old enough to compress.</summary>
-    private static readonly DateTime AnalysisTime = new(2026, 3, 4, 14, 0, 0, DateTimeKind.Unspecified);
+    /// <summary>The plan test's analysis hour, in the past, so every seeded chunk is old enough to compress. It is the
+    /// coverage-read plan class's own hour, because that class's EXPLAIN helper reads the window at it.</summary>
+    private static readonly DateTime AnalysisTime = DarlingEventBaselineCoverageReadPlanShapeLiveTests.AnalysisTime;
 
     /// <summary>Inside the plan test's baseline window.</summary>
-    private static readonly DateTime EventTime = new(2026, 2, 8, 9, 10, 0, DateTimeKind.Unspecified);
+    private static readonly DateTime EventTime = DarlingEventBaselineCoverageReadPlanShapeLiveTests.EventTime;
 
     /* ---------------- fresh stores (condition 1) ---------------- */
 
     /// <summary>
     /// The usual fresh store: the migrations run before CREATE EXTENSION, so V23's guard skips and the runtime ensure
-    /// both converts collection_log and sets its compression. Its first ALTER must already be the new setting, so the
-    /// store never compresses a chunk under <c>server_id</c> alone.
+    /// both converts collection_log and sets its compression. This one collected on plain PostgreSQL for days before
+    /// the extension arrived, so the conversion moves rows old enough to compress at once. The ensure's first ALTER
+    /// must already be the new setting, so the policy's first run compresses every one of those chunks with it, and
+    /// the store never compresses a chunk under <c>server_id</c> alone.
     /// </summary>
     [Fact]
     public async Task AFreshStore_WhoseExtensionComesAfterTheMigrations_GetsTheNewSegmentBy_OnItsFirstConversion()
@@ -88,6 +91,11 @@ public sealed class CollectionLogSegmentByLiveTests
         Assert.False((await ReadHypertableAsync(connection, ct)).IsHypertable,
             "V23 converted collection_log on a store without the extension; this test needs the usual order");
 
+        /* Six days of runs, written while collection_log is still a plain table. */
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        await SeedAsync(connection, "collector_name", new[] { ServerA, ServerB }, now.Date.AddDays(-6), now.AddMinutes(-15), ct);
+        var dataBefore = await DataHashAsync(connection, "collector_name", ct);
+
         Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct),
             "TimescaleDB is not available on this cluster.");
         await StopBackgroundWorkersAsync(connection, ct);
@@ -100,21 +108,22 @@ public sealed class CollectionLogSegmentByLiveTests
         Assert.Equal(WantedSegmentBy, state.SegmentBy);
         Assert.Contains(TimescaleSupport.CollectionLogTable, await ConvergedTablesAsync(connection, ct));
 
-        /* The store's first compressed chunks all use the new value. */
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-        await SeedAsync(connection, "collector_name", new[] { ServerA, ServerB }, now.Date.AddDays(-6), now.AddMinutes(-15), ct);
-        await CompressChunksAsync(connection, olderThanDays: 3, ct);
+        /* The policy's first run compresses the converted rows' older chunks, every one with the new value, and
+           changes no row. */
+        await RunCompressionPolicyAsync(connection, ct);
         var chunks = await ReadChunkSettingsAsync(connection, ct);
         Assert.NotEmpty(chunks);
         Assert.All(chunks, chunk => Assert.Equal(WantedChunkSegmentBy, chunk.SegmentBy));
+        Assert.Equal(dataBefore, await DataHashAsync(connection, "collector_name", ct));
     }
 
     /// <summary>
     /// The other fresh-store order: TimescaleDB is installed before the migrations run (a bring-your-own store whose
     /// administrator created it first), so V23 does the first conversion, with the <c>server_id</c> its text has always
-    /// had (a migration is never edited). The first start's ensure moves the hypertable to the new value while the
-    /// table has no compressed chunk, so the first chunks it compresses use the new value and none uses
-    /// <c>server_id</c> alone.
+    /// had (a migration is never edited). V23's policy has no start time, so the scheduler runs it as soon as it is
+    /// added; on a new store that run finds an empty table. The first start's ensure then moves the hypertable to the
+    /// new value before any row is old enough to compress, so every chunk the policy compresses later uses the new
+    /// value and none uses <c>server_id</c> alone.
     /// </summary>
     [Fact]
     public async Task AFreshStore_WhoseExtensionPredatesTheMigrations_HasTheNewSegmentBy_AfterItsFirstStart_AndNoServerIdOnlyChunk()
@@ -131,11 +140,15 @@ public sealed class CollectionLogSegmentByLiveTests
         await StopBackgroundWorkersAsync(connection, ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        /* V23's own work: converted, compression on, its text's server_id, and nothing compressed yet. */
+        /* V23's own work: converted, compression on, with its text's server_id. */
         var afterMigrations = await ReadHypertableAsync(connection, ct);
         Assert.True(afterMigrations.IsHypertable, "V23 did not convert collection_log although the extension existed when it ran");
         Assert.True(afterMigrations.CompressionEnabled);
         Assert.Equal(OldSegmentBy, afterMigrations.SegmentBy);
+
+        /* V23's policy's immediate first run (the background workers are stopped, so it runs here). A new store's
+           table is empty, so it compresses nothing under server_id. */
+        await RunCompressionPolicyAsync(connection, ct);
         Assert.Empty(await ReadChunkSettingsAsync(connection, ct));
 
         /* The first start. */
@@ -143,10 +156,10 @@ public sealed class CollectionLogSegmentByLiveTests
         Assert.Equal(WantedSegmentBy, (await ReadHypertableAsync(connection, ct)).SegmentBy);
         Assert.Contains(TimescaleSupport.CollectionLogTable, await ConvergedTablesAsync(connection, ct));
 
-        /* The store's first compressed chunks all use the new value. */
+        /* Days of runs later, the policy compresses the older chunks, every one with the new value. */
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
         await SeedAsync(connection, "collector_name", new[] { ServerA, ServerB }, now.Date.AddDays(-6), now.AddMinutes(-15), ct);
-        await CompressChunksAsync(connection, olderThanDays: 3, ct);
+        await RunCompressionPolicyAsync(connection, ct);
         var chunks = await ReadChunkSettingsAsync(connection, ct);
         Assert.NotEmpty(chunks);
         Assert.All(chunks, chunk => Assert.Equal(WantedChunkSegmentBy, chunk.SegmentBy));
@@ -492,6 +505,22 @@ public sealed class CollectionLogSegmentByLiveTests
     private static Task StopBackgroundWorkersAsync(NpgsqlConnection connection, CancellationToken ct) =>
         ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
 
+    /// <summary>One run of collection_log's compression policy in this session, as the scheduler runs it: it compresses
+    /// every chunk older than the policy's compress-after with the settings the hypertable has at that moment.</summary>
+    private static async Task RunCompressionPolicyAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        int? jobId;
+        using (var find = new NpgsqlCommand(
+            "SELECT job_id FROM timescaledb_information.jobs WHERE proc_name = 'policy_compression' "
+            + "AND hypertable_schema = 'collect' AND hypertable_name = 'collection_log'", connection))
+        {
+            jobId = await find.ExecuteScalarAsync(ct) as int?;
+        }
+
+        Assert.True(jobId.HasValue, "collection_log has no compression policy to run");
+        await ExecAsync(connection, $"CALL run_job({jobId.Value})", ct);
+    }
+
     /* ---------------- reads of the store ---------------- */
 
     private sealed record HypertableState(bool IsHypertable, bool CompressionEnabled, string? SegmentBy);
@@ -605,42 +634,23 @@ public sealed class CollectionLogSegmentByLiveTests
         return results;
     }
 
-    /// <summary>The blocking baseline as the provider runs it: the six bound parameters of an unkeyed arm, over the
-    /// day-grain window ending at the analysis hour.</summary>
-    private static async Task<JsonElement> ExplainBlockingBaselineAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
-    {
-        var windowEnd = PgBaselineProvider.RoundedDay(AnalysisTime);
-        var windowStart = windowEnd.AddDays(-BaselineMath.BaselineWindowDays);
-        var clock = LocalClockWindow.Utc(windowEnd);
+    /// <summary>The blocking baseline as the provider runs it, through the coverage-read plan class's own EXPLAIN helper
+    /// (one copy of the six bound parameters, not two).</summary>
+    private static Task<JsonElement> ExplainBlockingBaselineAsync(NpgsqlConnection connection, int serverId, CancellationToken ct) =>
+        DarlingEventBaselineCoverageReadPlanShapeLiveTests.ExplainAsync(
+            connection, PgBaselineProvider.GetBaselineQuery(MetricNames.Blocking)!, serverId, ct);
 
-        using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + PgBaselineProvider.GetBaselineQuery(MetricNames.Blocking)!, connection);
-        command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(clock.TransitionAtUtc, DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(clock.OffsetBeforeMinutes);
-        command.Parameters.AddWithValue(clock.OffsetAfterMinutes);
-
-        var json = (string)(await command.ExecuteScalarAsync(ct))!;
-        using var document = JsonDocument.Parse(json);
-        return document.RootElement[0].GetProperty("Plan").Clone();
-    }
-
-    /// <summary>Every scan of a chunk's compressed relation: <c>_hyper_N_M_chunk_compressed</c> on a fresh 2.30.1 store,
-    /// <c>compress_hyper_N_M_chunk</c> on an older one.</summary>
+    /// <summary>Every scan of a chunk's compressed relation, by the coverage-read plan class's own relation test.</summary>
     private static List<JsonElement> CompressedScans(JsonElement plan)
     {
         var found = new List<JsonElement>();
 
         void Visit(JsonElement node)
         {
-            if (node.TryGetProperty("Relation Name", out var relation))
+            if (node.TryGetProperty("Relation Name", out var relation)
+                && DarlingEventBaselineCoverageReadPlanShapeLiveTests.IsCompressedRelation(relation.GetString()!))
             {
-                var name = relation.GetString()!;
-                if (name.StartsWith("compress_hyper_", StringComparison.Ordinal) || name.EndsWith("_chunk_compressed", StringComparison.Ordinal))
-                {
-                    found.Add(node);
-                }
+                found.Add(node);
             }
 
             if (node.TryGetProperty("Plans", out var children))
@@ -656,35 +666,10 @@ public sealed class CollectionLogSegmentByLiveTests
         return found;
     }
 
-    /// <summary>A scan's own conditions and its descendants' (a bitmap scan carries its index condition one node down).
-    /// On the old layout the compressed scan's only collector condition is a bloom filter on a metadata column, which
-    /// never contains "(collector_name = ".</summary>
-    private static string Conditions(JsonElement node)
-    {
-        var text = new List<string>();
-
-        void Collect(JsonElement current)
-        {
-            foreach (var property in new[] { "Index Cond", "Filter", "Recheck Cond" })
-            {
-                if (current.TryGetProperty(property, out var value))
-                {
-                    text.Add(value.GetString() ?? string.Empty);
-                }
-            }
-
-            if (current.TryGetProperty("Plans", out var children))
-            {
-                foreach (var child in children.EnumerateArray())
-                {
-                    Collect(child);
-                }
-            }
-        }
-
-        Collect(node);
-        return string.Join(" | ", text);
-    }
+    /// <summary>A scan's own conditions and its descendants', by the coverage-read plan class's helper. On the old layout
+    /// the compressed scan's only collector condition is a bloom filter on a metadata column, which never contains
+    /// "(collector_name = ".</summary>
+    private static string Conditions(JsonElement node) => DarlingEventBaselineCoverageReadPlanShapeLiveTests.Conditions(node);
 
     /// <summary>Warning lines saying the settings change failed and the table kept its settings.</summary>
     private static int CountSettingsFailures(CapturingTestLogger logger) =>

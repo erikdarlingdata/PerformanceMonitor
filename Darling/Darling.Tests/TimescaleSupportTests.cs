@@ -163,6 +163,15 @@ public sealed class TimescaleSupportTests
         Assert.Equal("server_id, collector_name", TimescaleSupport.CollectionLogSegmentBy);
         Assert.Equal(TimescaleSupport.CollectionLogSegmentBy, TimescaleSupport.CompressionSegmentByFor(TimescaleSupport.CollectionLogTable));
         Assert.All(CollectorCatalog.All, schema => Assert.Equal("server_id", TimescaleSupport.CompressionSegmentByFor(schema.TargetTable)));
+
+        /* Callers spell tables both ways ("collect.x" and bare "x"). A schema-qualified collection_log must get the
+           same value as the bare name the convergence read compares against, or the read never sees the table as
+           converged and every hourly pass issues the ALTER (#3817's divergence, reached through a spelling). */
+        Assert.Equal(TimescaleSupport.CollectionLogSegmentBy, TimescaleSupport.CompressionSegmentByFor("collect." + TimescaleSupport.CollectionLogTable));
+        Assert.Equal(
+            "ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id, collector_name')",
+            TimescaleSupport.EnableCompressionSql("collect." + TimescaleSupport.CollectionLogTable));
+        Assert.All(CollectorCatalog.All, schema => Assert.Equal("server_id", TimescaleSupport.CompressionSegmentByFor("collect." + schema.TargetTable)));
         Assert.Equal("3s", TimescaleSupport.CollectionLogSettingsLockTimeout);
         Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(TimescaleSupport.CollectionLogTable, out var logPhase));
         Assert.Equal(
