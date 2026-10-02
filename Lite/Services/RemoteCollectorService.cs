@@ -1388,7 +1388,7 @@ public partial class RemoteCollectorService
     /// </summary>
     protected string AzureDatabaseConnectionString(ServerConnection server, string databaseName, bool withoutReadOnlyIntent = false)
     {
-        var builder = new SqlConnectionStringBuilder(_serverManager.CredentialResolver.GetConnectionString(server))
+        var builder = new SqlConnectionStringBuilder(RegistrationConnectionString(server))
         {
             ConnectTimeout = ConnectionTimeoutSeconds,
             InitialCatalog = databaseName
@@ -1415,19 +1415,72 @@ public partial class RemoteCollectorService
     protected async Task<SqlConnection> OpenAzureDatabaseConnectionAsync(ServerConnection server, string databaseName, CancellationToken cancellationToken, bool withoutReadOnlyIntent = false)
     {
         var connStr = AzureDatabaseConnectionString(server, databaseName, withoutReadOnlyIntent);
+        var builder = new SqlConnectionStringBuilder(connStr);
 
-        var conn = new SqlConnection(connStr);
+        /* A device-code registration signs in over this connection as it does over CreateConnectionAsync's (#4961). The
+           long-query trace creates its session's definition over a connection with the read-only intent forced off, and any
+           open here can be the first of a run to raise the prompt. Begin hands the prompt window its attempt and returns null
+           for every other mode, which opens exactly as it did. Begin also refuses a second sign-in while one is in flight, so
+           the database opens of a device-code registration take the lock CreateConnectionAsync takes and never overlap one. */
+        var signsInByDeviceCode = builder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow;
+        var signInLockHeld = false;
+
         try
         {
-            await conn.OpenAsync(cancellationToken);
-            return conn;
+            if (signsInByDeviceCode)
+            {
+                await s_mfaAuthLock.WaitAsync(cancellationToken);
+                signInLockHeld = true;
+
+                if (_serverManager.GetConnectionStatus(server.Id).UserCancelledMfa)
+                {
+                    throw new InvalidOperationException("Interactive authentication cancelled by user. Please connect to the server explicitly to retry.");
+                }
+            }
+
+            using var deviceCode = EntraDeviceCodeAuth.Begin(builder);
+            using var openCancellation = deviceCode is null
+                ? null
+                : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deviceCode.Token);
+
+            var conn = new SqlConnection(connStr);
+            try
+            {
+                await conn.OpenAsync(openCancellation?.Token ?? cancellationToken);
+                return conn;
+            }
+            catch
+            {
+                conn.Dispose();
+
+                /* The prompt's Cancel ends the open through the linked token; the caller's own token ending it is a shutdown,
+                   which is no decline. A decline is flagged so the opens queued behind this one stop instead of each raising a
+                   prompt of its own, as CreateConnectionAsync does. */
+                if (deviceCode is not null && deviceCode.Token.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    _serverManager.GetConnectionStatus(server.Id).UserCancelledMfa = true;
+                    AppLogger.Info("Collector", $"  [{server.DisplayName}] interactive authentication cancelled by user - flagging to abort other pending connections");
+                }
+
+                throw;
+            }
         }
-        catch
+        finally
         {
-            conn.Dispose();
-            throw;
+            if (signInLockHeld)
+            {
+                s_mfaAuthLock.Release();
+            }
         }
     }
+
+    /// <summary>
+    /// The registration's own connection string. It is resolved here, in the file whose opens handle a device-code sign-in, so a
+    /// partial that needs the string beside a connection it does not open reads it through here instead of resolving it again
+    /// (#4961). The long-query trace's test seam is one.
+    /// </summary>
+    protected string RegistrationConnectionString(ServerConnection server) =>
+        _serverManager.CredentialResolver.GetConnectionString(server);
 
     /// <summary>
     /// Creates a SQL connection to a remote server.

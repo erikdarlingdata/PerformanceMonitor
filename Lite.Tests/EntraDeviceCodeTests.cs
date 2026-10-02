@@ -18,6 +18,7 @@ using Darling.Tests;
 using Lite.Tests;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -1947,6 +1948,118 @@ public class EntraDeviceCodeTests
             Assert.Contains("EntraDeviceCodeAuth." + "Begin(", code, StringComparison.Ordinal);
             Assert.Contains("OpenAsync(", code, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>Exposes the protected database open, so a test can drive the connection the long-query trace creates its definition over.</summary>
+    private sealed class DatabaseOpenProbe : RemoteCollectorService
+    {
+        public DatabaseOpenProbe(DuckDbInitializer duckDb, ServerManager servers, ScheduleManager schedules)
+            : base(duckDb, servers, schedules)
+        {
+        }
+
+        public Task<SqlConnection> OpenAsync(ServerConnection server, string database, bool withoutReadOnlyIntent, CancellationToken cancellationToken) =>
+            OpenAzureDatabaseConnectionAsync(server, database, cancellationToken, withoutReadOnlyIntent);
+    }
+
+    [Fact]
+    public async Task ADatabaseOpenForADeviceCodeRegistration_ClaimsTheSignInSlot_WithOrWithoutReadOnlyIntent()
+    {
+        /* #4961: the long-query trace creates its session's definition on Azure SQL Database over a second connection of the
+           registration, with the read-only intent forced off, and every database open can be the first connection of a run to
+           raise the device-code prompt. Opens that did not claim the sign-in slot gave the prompt window no attempt to
+           publish onto, and no early return to hand a waiting UI thread back.
+
+           Observed without a tenant: while another sign-in holds the one slot, an open that claims it is refused with the
+           concurrent-sign-in message at once, and one that does not would start a real connect to a host this test never
+           reaches, which the bound below turns into a failure of the assertion. Both intents are driven in turn, and the
+           second one is also the proof that the first refusal gave back the lock the opens share. */
+        var tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
+        var configDir = Path.Combine(tempDir, "config");
+        Directory.CreateDirectory(configDir);
+
+        EntraDeviceCodeAuth.ResetForTests();
+        try
+        {
+            var servers = new ServerManager(configDir);
+            var server = new ServerConnection
+            {
+                ServerName = "example.database.windows.net",
+                DisplayName = "device-code-" + Guid.NewGuid().ToString("N")[..8],
+                DatabaseName = "alpha",
+                AuthenticationType = AuthenticationTypes.EntraDeviceCode,
+                ReadOnlyIntent = true,
+            };
+            servers.AddServer(server);
+            var probe = new DatabaseOpenProbe(
+                new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb")), servers, new ScheduleManager(configDir));
+
+            var builder = new SqlConnectionStringBuilder();
+            ServerConnection.ApplyAuthentication(builder, AuthenticationTypes.EntraDeviceCode, null, null, null, null);
+
+            using var holder = EntraDeviceCodeAuth.Begin(builder);
+            Assert.NotNull(holder);
+
+            foreach (var withoutReadOnlyIntent in new[] { true, false })
+            {
+                using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                var refused = await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => probe.OpenAsync(server, "alpha", withoutReadOnlyIntent, bound.Token));
+
+                Assert.Equal(EntraDeviceCodeAuth.ConcurrentSignInMessage, refused.Message);
+            }
+
+            /* A refusal must not have taken the slot from the attempt that holds it. */
+            Assert.True(EntraDeviceCodeAuth.SignInInFlight);
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+
+            try
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+            catch (IOException)
+            {
+                /* Best-effort cleanup */
+            }
+        }
+    }
+
+    [Fact]
+    public void TheDatabaseOpen_TakesTheSignInLockBeforeItClaimsTheSlot_AndOwnsTheOneResolutionOfTheString()
+    {
+        /* The behaviour above shows the claim; this pins the order the claim depends on. Begin refuses an overlapping
+           sign-in, so the claim has to sit behind the lock CreateConnectionAsync takes, and the attempt has to exist before the
+           connection is built so a failed Begin leaves nothing open. And the registration's string is resolved in the wrapped
+           file: the long-query trace's seam reads it through there, which is why that partial is in neither bucket of the census. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Services/RemoteCollectorService.cs"));
+        var at = code.IndexOf("Task<SqlConnection> OpenAzureDatabaseConnectionAsync(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the per-database open must still exist");
+        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
+
+        var signInLock = body.IndexOf("s_mfaAuthLock.WaitAsync(", StringComparison.Ordinal);
+        var claim = body.IndexOf("EntraDeviceCodeAuth.Begin(", StringComparison.Ordinal);
+        var connection = body.IndexOf("new SqlConnection(", StringComparison.Ordinal);
+
+        Assert.True(signInLock >= 0 && claim >= 0 && connection >= 0, "the per-database open must lock, claim and open");
+        Assert.True(signInLock < claim, "the sign-in lock must be taken before the slot is claimed");
+        Assert.True(claim < connection, "the slot must be claimed before the connection is built");
+        Assert.Contains("deviceCode.Token", body, StringComparison.Ordinal);
+        Assert.Contains("s_mfaAuthLock.Release()", body, StringComparison.Ordinal);
+
+        var resolution = code.IndexOf("string RegistrationConnectionString(", StringComparison.Ordinal);
+        Assert.True(resolution >= 0, "the registration's string must be resolved in this file");
+        Assert.Contains(
+            "CredentialResolver.GetConnectionString",
+            code[resolution..Math.Min(code.Length, resolution + 200)],
+            StringComparison.Ordinal);
+
+        var trace = CSharpSourceWalker.StripCommentsAndStrings(
+            ParitySource.ReadFile("Lite/Services/RemoteCollectorService.LongQueryCompletions.cs"));
+        Assert.DoesNotContain("CredentialResolver.GetConnectionString", trace, StringComparison.Ordinal);
+        Assert.Contains("RegistrationConnectionString(server)", trace, StringComparison.Ordinal);
     }
 
     // ---- Cancelling is recognised as a decision, not a fault -----------------------------

@@ -6217,7 +6217,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         await using var command = new NpgsqlCommand(@"
 SELECT cs.server_id, cs.collector_name, cs.frequency_minutes, cs.retention_days, cs.enabled, cs.databases
 FROM config.config_collector_schedules AS cs
-WHERE cs.collector_name = 'long_query_completions'", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+WHERE cs.collector_name = 'long_query_completions'", connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -6240,7 +6240,7 @@ WHERE cs.collector_name = 'long_query_completions'", connection) { CommandTimeou
 SELECT cst.server_id, cst.collector_name, cst.state_value
 FROM collect.collector_state AS cst
 WHERE cst.state_key = $1
-AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
         command.Parameters.Add(new NpgsqlParameter { Value = ServerEpoch.IdentityStateKey });
         command.Parameters.Add(new NpgsqlParameter { Value = ServerEpoch.IdentityCarrierCollectors.ToArray() });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

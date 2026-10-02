@@ -437,7 +437,7 @@ public partial class RemoteCollectorService
         /* Below it, a test replaces the open and the work, and sees the registration's own connection string (#4961). */
         if (LongQueryTraceStepOverrideForTests is { } stepOnServer)
         {
-            await stepOnServer(server, string.Empty, _serverManager.CredentialResolver.GetConnectionString(server), LongQueryTraceStep.CreateAndStart, sessionName, cancellationToken);
+            await stepOnServer(server, string.Empty, RegistrationConnectionString(server), LongQueryTraceStep.CreateAndStart, sessionName, cancellationToken);
             return null;
         }
 

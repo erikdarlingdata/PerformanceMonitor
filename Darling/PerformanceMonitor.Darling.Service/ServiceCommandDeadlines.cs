@@ -159,7 +159,9 @@ public static class ServiceCommandDeadlines
     /// <summary>
     /// The store reads and writes the CLI verbs perform — <c>--enable-mcp</c>/<c>--disable-mcp</c>/
     /// <c>--enable-web</c>/<c>--disable-web</c>'s <c>config_service</c> update, <c>--configure-firewall</c>'s
-    /// endpoint-toggle read, and <c>--recompress-plan-dim</c>'s plan-codec preflight.
+    /// endpoint-toggle read, <c>--recompress-plan-dim</c>'s plan-codec preflight, and the two reads
+    /// <c>--drop-xe-sessions</c> makes before it connects to a server (#4961): the long-query schedule rows and each
+    /// registration's last-known instance name.
     ///
     /// <para><b>This number is not new: the product already derived it, and two of the three sites did not
     /// get it.</b> <c>DarlingCliCommands.TryReadEndpointTogglesAsync</c> wraps its read in a linked
