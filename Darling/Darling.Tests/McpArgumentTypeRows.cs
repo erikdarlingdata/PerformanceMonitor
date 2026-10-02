@@ -159,7 +159,9 @@ internal static class McpArgumentTypeRows
                 }
 
                 var clr = Nullable.GetUnderlyingType(parameter.Type) ?? parameter.Type;
-                var integral = Type.GetTypeCode(clr) is TypeCode.SByte or TypeCode.Byte or TypeCode.Int16 or TypeCode.UInt16
+                /* An enum is not a whole number here, as in McpArgumentValueCheck.Bounds: Type.GetTypeCode answers an
+                   enum's underlying integer type. */
+                var integral = !clr.IsEnum && Type.GetTypeCode(clr) is TypeCode.SByte or TypeCode.Byte or TypeCode.Int16 or TypeCode.UInt16
                     or TypeCode.Int32 or TypeCode.UInt32 or TypeCode.Int64 or TypeCode.UInt64;
                 var schemaType = property.Value.TryGetProperty("type", out var type)
                     ? type.ValueKind == JsonValueKind.String
@@ -365,12 +367,14 @@ internal static class McpArgumentTypeRows
 
     /// <summary>The first tool with a parameter of the CLR type that the host advertises and that needs no other
     /// argument, so a call sending only that one argument reaches the binder for it alone. The walk takes the tool types
-    /// in the order the caller gives them (the host's registration order) and each type's methods by method name, not
-    /// by tool name. A tool that changes data is passed over, by its name (<c>delete_</c>, <c>create_</c> or
-    /// <c>update_</c>): a row that sends a value the binder reads runs the tool, and a row should not run a write. The
-    /// name check covers those three prefixes only, so a write tool named otherwise (<c>add_servers</c>,
-    /// <c>remove_server</c>, <c>set_mute_rule_enabled</c>) is not passed over. What keeps any tool body from reaching
-    /// a real store is the test host's stand-in services: Darling's data source points at a closed port.</summary>
+    /// in the order the caller gives them (both products' test lists sort them by full type name) and each type's
+    /// methods by method name, not by tool name. A tool that changes data is passed over, by its name (<c>delete_</c>,
+    /// <c>create_</c> or <c>update_</c>): a row that sends a value the binder reads runs the tool, and a row should not
+    /// run a write. The name check covers those three prefixes only, so a write tool named otherwise
+    /// (<c>add_servers</c>, <c>remove_server</c>, <c>set_mute_rule_enabled</c>, <c>mute_analysis_finding</c>) is not
+    /// passed over. What keeps any tool body from reaching a real store is the test host's stand-in services, not the
+    /// name check: Darling's data source points at a closed port, and Lite's services are uninitialized instances with
+    /// every field null.</summary>
     private static (string Tool, string Parameter) Resolve(McpInProcessHost host, IEnumerable<Type> toolTypes, Type clr)
     {
         var served = host.RegisteredTools.ToDictionary(tool => tool.ProtocolTool.Name, StringComparer.Ordinal);
