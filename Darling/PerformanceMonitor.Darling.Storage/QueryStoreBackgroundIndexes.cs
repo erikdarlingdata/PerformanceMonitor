@@ -144,6 +144,9 @@ SELECT EXISTS
     WHERE h.hypertable_schema || '.' || h.hypertable_name = $1
 );";
 
+    /// <summary>Signature only: a table name's schema and name, split at its last dot.</summary>
+    internal static (string Schema, string Name) SplitTableName(string tableName) => throw new NotImplementedException();
+
     /// <summary>
     /// The pure build-or-skip decision. The version check comes first: below the floor a build is wrong whatever the
     /// table is. A hypertable is then skipped, because TimescaleDB refuses <c>CONCURRENTLY</c> on one.

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -54,8 +55,9 @@ public sealed class QueryStoreBackgroundIndexesLiveTests
     private static Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct) =>
         QueryStoreIntervalWideBrinIndexLiveTests.ScalarAsync(connection, sql, ct);
 
-    /* Both background indexes, in the order the worker's delayed task ensures them: the BRIN, then the btree. */
-    private static async Task EnsureAllAsync(NpgsqlConnection connection, CancellationToken ct)
+    /* Both background indexes, in the order the worker's delayed task ensures them: the BRIN, then the btree. Shared with
+       the HOT census in QueryStoreIntervalWideBrinIndexLiveTests, which must see every spec in All. */
+    internal static async Task EnsureAllAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         foreach (var spec in QueryStoreBackgroundIndexes.All)
         {
@@ -247,6 +249,90 @@ ANALYZE collect.query_store_interval_wide;", ct);
         {
             Assert.Equal(oids[i], await ScalarAsync(connection, $"SELECT '{names[i]}'::regclass::oid", ct));
         }
+    }
+
+    /* The Custom Views fleet loop resolves each server's read source in turn, and for a window of 12 hours or more on this
+       plain table each resolve runs PlainTableFloorSql: MIN(first_execution_time) for one server. With the wide btree the
+       planner answers it through its min/max path, a Limit over an ordered scan of that btree under an index condition on
+       server_id, instead of a pass over the table. The older single-column first_execution_time index also supports a
+       min/max path (it walks entries of every server until one matches), so a plan that merely shows a Limit over an
+       index scan would pass without the wide btree: the pin names the index. */
+    [Fact]
+    public async Task ThePerServerTableFloorRead_IsAnsweredByTheWideBtree_NotByAScan()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4952 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await SeedAsync(connection, ct);
+        await EnsureAllAsync(connection, ct);
+        await ExecAsync(connection, "ANALYZE collect.query_store_interval_wide", ct);
+
+        /* The premise: two servers, and a table of many pages, so a pass over the table is a real alternative. */
+        Assert.Equal(2L, await ScalarAsync(connection, "SELECT count(DISTINCT server_id) FROM collect.query_store_interval_wide", ct));
+        var pages = (int)(await ScalarAsync(connection, "SELECT relpages FROM pg_class WHERE oid = 'collect.query_store_interval_wide'::regclass", ct))!;
+        Assert.True(pages >= 20, $"the table spans {pages} pages; the pin needs a table whose pass would cost more than an index probe");
+
+        var plan = await ExplainPlainTableFloorAsync(connection, 1, ct);
+
+        var wideName = QueryStoreBackgroundIndexes.WideServerFirstExecIndexName[(QueryStoreBackgroundIndexes.WideServerFirstExecIndexName.IndexOf('.', StringComparison.Ordinal) + 1)..];
+        Assert.DoesNotContain("Seq Scan", plan.NodeTypes);
+        Assert.Contains("Limit", plan.NodeTypes);
+        Assert.Equal(new[] { wideName }, plan.IndexScansUnderLimit.Select(scan => scan.Index).Distinct().ToArray());
+        Assert.All(plan.IndexScansUnderLimit, scan => Assert.Contains("server_id", scan.Cond, StringComparison.Ordinal));
+    }
+
+    /* EXPLAIN of the product's own statement, its server bound as the product binds it: an integer parameter. */
+    private static async Task<(HashSet<string> NodeTypes, List<(string Index, string Cond)> IndexScansUnderLimit)> ExplainPlainTableFloorAsync(
+        NpgsqlConnection connection, int serverId, CancellationToken ct)
+    {
+        await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + QueryStoreIntervalWide.PlainTableFloorSql, connection);
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        var json = (string)(await explain.ExecuteScalarAsync(ct))!;
+
+        var nodeTypes = new HashSet<string>(StringComparer.Ordinal);
+        var underLimit = new List<(string Index, string Cond)>();
+
+        void Walk(JsonElement element, bool limited)
+        {
+            if (element.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in element.EnumerateArray())
+                {
+                    Walk(item, limited);
+                }
+
+                return;
+            }
+
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                return;
+            }
+
+            var isLimit = false;
+            if (element.TryGetProperty("Node Type", out var type))
+            {
+                nodeTypes.Add(type.GetString()!);
+                isLimit = type.GetString() == "Limit";
+            }
+
+            if (limited && element.TryGetProperty("Index Name", out var index))
+            {
+                underLimit.Add((index.GetString()!, element.TryGetProperty("Index Cond", out var cond) ? cond.GetString()! : string.Empty));
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                Walk(property.Value, limited || isLimit);
+            }
+        }
+
+        using var document = JsonDocument.Parse(json);
+        Walk(document.RootElement, false);
+        return (nodeTypes, underLimit);
     }
 
     [Fact]

@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -55,13 +56,68 @@ public sealed class QueryStoreBackgroundIndexesTests
     [Fact]
     public void TheWideBtree_LeadsWithTheServerAndCarriesTheFirstExecutionBoundTheTableReadsFilterOn()
     {
-        foreach (var sql in new[] { DarlingDataReader.QueryStoreTopTableSql })
+        /* Every per-server read of the table, the duration trend once per arm (its two arms are joined by UNION ALL and
+           each carries its own server filter and floor). QueryStoreIntervalWideFirstExecFloorTests pins the rest of each
+           read's floor: its margin, its position after the time bounds, and that the raw reads carry none. */
+        var trendArms = ViewerDataService.QueryStoreDurationTrendTableSql.Split("UNION ALL", StringSplitOptions.None);
+        Assert.Equal(2, trendArms.Length);
+
+        var reads = new (string Name, string Sql)[]
         {
-            Assert.Contains("WHERE server_id = $1", sql);
-            Assert.Contains("first_execution_time >= $2 - ", sql);
+            ("DarlingDataReader.QueryStoreTopTableSql", DarlingDataReader.QueryStoreTopTableSql),
+            ("ViewerDataService.QueryStoreTopTableSql", ViewerDataService.QueryStoreTopTableSql),
+            ("ViewerDataService.QueryStoreDurationTrendTableSql, interval arm", trendArms[0]),
+            ("ViewerDataService.QueryStoreDurationTrendTableSql, legacy arm", trendArms[1]),
+        };
+
+        foreach (var (name, sql) in reads)
+        {
+            Assert.True(sql.Contains("WHERE server_id = $1", StringComparison.Ordinal), name + " must filter on the server first");
+            Assert.True(sql.Contains("first_execution_time >= $2 - ", StringComparison.Ordinal), name + " must bound first_execution_time on the window start");
         }
 
         Assert.Contains("(server_id, first_execution_time)", Wide.PlainCreateSql);
+    }
+
+    /* The hypertable probe compares the schema and the name as two bound values, so the spelling of a spec's TableName
+       is not matched through a concatenation. */
+    [Theory]
+    [InlineData("collect.query_store_interval_wide", "collect", "query_store_interval_wide")]
+    [InlineData("collect.query_store_stats", "collect", "query_store_stats")]
+    [InlineData("a.b.c", "a.b", "c")]
+    public void ATableName_SplitsAtItsLastDot_IntoItsSchemaAndItsName(string tableName, string schema, string name)
+    {
+        Assert.Equal((schema, name), QueryStoreBackgroundIndexes.SplitTableName(tableName));
+    }
+
+    [Theory]
+    [InlineData("query_store_interval_wide")]
+    [InlineData(".query_store_interval_wide")]
+    [InlineData("collect.")]
+    public void ATableNameWithoutBothAParts_IsRejected(string tableName)
+    {
+        Assert.Throws<ArgumentException>(() => QueryStoreBackgroundIndexes.SplitTableName(tableName));
+    }
+
+    [Fact]
+    public void EveryBackgroundIndexsTableName_SplitsIntoItsRealSchemaAndName()
+    {
+        foreach (var spec in QueryStoreBackgroundIndexes.All)
+        {
+            var (schema, name) = QueryStoreBackgroundIndexes.SplitTableName(spec.TableName);
+            Assert.Equal("collect", schema);
+            Assert.Equal(spec.TableName, schema + "." + name);
+        }
+    }
+
+    [Fact]
+    public void TheHypertableProbe_ComparesTheSchemaAndTheNameAsTwoParameters_NotAConcatenation()
+    {
+        var sql = QueryStoreBackgroundIndexes.HypertableSql;
+        Assert.Contains("h.hypertable_schema = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("h.hypertable_name = $2", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("||", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'.'", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -161,6 +217,106 @@ public sealed class QueryStoreBackgroundIndexesTests
         Assert.Equal(new[] { Wide.IndexName, Brin.IndexName }, calls);
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
         Assert.Contains("retried at the next start", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains(Wide.IndexName, logger.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("(shutdown)", logger.Joined, StringComparison.Ordinal);
+    }
+
+    /* The delayed run's three shutdown lines each name the index they are about: the one in progress, or, before the
+       delay is over, every index the run would have built. None puts a reason where the index name goes. */
+    [Fact]
+    public async Task CancelledBeforeItStarted_NamesEveryIndexTheRunWouldHaveBuilt_AndAttemptsNone()
+    {
+        using var shutdown = new CancellationTokenSource();
+        shutdown.Cancel();
+        var calls = new List<string>();
+        var logger = new CapturingTestLogger();
+
+        await QueryStoreBackgroundIndexes.RunDelayedAsync(
+            logger,
+            QueryStoreBackgroundIndexes.StartDelay,
+            QueryStoreBackgroundIndexes.All,
+            (spec, _) =>
+            {
+                calls.Add(spec.IndexName);
+                return Task.CompletedTask;
+            },
+            shutdown.Token);
+
+        Assert.Empty(calls);
+        var line = Assert.Single(logger.Lines);
+        Assert.StartsWith("Debug:", line, StringComparison.Ordinal);
+        Assert.Contains("cancelled before it started", line, StringComparison.Ordinal);
+        foreach (var spec in QueryStoreBackgroundIndexes.All)
+        {
+            Assert.Contains(spec.IndexName, line, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("(shutdown)", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ShutdownDuringABuild_NamesTheIndexInProgress_AndOnlyThatOne()
+    {
+        using var shutdown = new CancellationTokenSource();
+        var logger = new CapturingTestLogger();
+
+        await QueryStoreBackgroundIndexes.RunDelayedAsync(
+            logger,
+            TimeSpan.Zero,
+            new[] { Brin, Wide },
+            (spec, token) =>
+            {
+                if (spec == Wide)
+                {
+                    shutdown.Cancel();
+                    token.ThrowIfCancellationRequested();
+                }
+
+                return Task.CompletedTask;
+            },
+            shutdown.Token);
+
+        var line = Assert.Single(logger.Lines);
+        Assert.StartsWith("Information:", line, StringComparison.Ordinal);
+        Assert.Contains("cancelled at shutdown", line, StringComparison.Ordinal);
+        Assert.Contains("next start retries", line, StringComparison.Ordinal);
+        Assert.Contains(Wide.IndexName, line, StringComparison.Ordinal);
+        Assert.DoesNotContain(Brin.IndexName, line, StringComparison.Ordinal);
+        Assert.DoesNotContain("(shutdown)", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnErrorRaisedWhileShuttingDown_IsInformation_NamingTheIndexInProgressTheErrorAndTheRetry()
+    {
+        using var shutdown = new CancellationTokenSource();
+        var logger = new CapturingTestLogger();
+
+        await QueryStoreBackgroundIndexes.RunDelayedAsync(
+            logger,
+            TimeSpan.Zero,
+            new[] { Brin, Wide },
+            (spec, _) =>
+            {
+                if (spec == Wide)
+                {
+                    shutdown.Cancel();
+                    throw new InvalidOperationException("the connection closed under the build");
+                }
+
+                return Task.CompletedTask;
+            },
+            shutdown.Token);
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        var line = Assert.Single(logger.Lines);
+        Assert.StartsWith("Information:", line, StringComparison.Ordinal);
+        Assert.Contains(Wide.IndexName, line, StringComparison.Ordinal);
+        Assert.DoesNotContain(Brin.IndexName, line, StringComparison.Ordinal);
+        Assert.Contains("stopped at shutdown", line, StringComparison.Ordinal);
+        Assert.Contains(nameof(InvalidOperationException), line, StringComparison.Ordinal);
+        Assert.Contains("the connection closed under the build", line, StringComparison.Ordinal);
+        Assert.Contains("next start retries", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("(shutdown)", line, StringComparison.Ordinal);
     }
 
     [Fact]

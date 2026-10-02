@@ -230,7 +230,16 @@ WHERE i.indrelid = 'collect.query_store_interval_wide'::regclass
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
-        await EnsureAsync(connection, ct);
+
+        /* Every background index the service builds, not the BRIN alone: the census reads the catalog after the product's
+           own list has been ensured, so the next member of QueryStoreBackgroundIndexes.All is scanned without an edit here. */
+        await QueryStoreBackgroundIndexesLiveTests.EnsureAllAsync(connection, ct);
+        foreach (var spec in QueryStoreBackgroundIndexes.All)
+        {
+            Assert.True(
+                (bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{spec.IndexName}'::regclass", ct))!,
+                $"{spec.IndexName} must be built and valid before the census reads the catalog");
+        }
 
         /* Data-independent: the catalog, not a seeded update. The scan must see the identity index and the
            first_execution_time index, or it reads nothing. */
