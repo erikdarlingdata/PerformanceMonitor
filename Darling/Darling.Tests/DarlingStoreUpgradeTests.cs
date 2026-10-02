@@ -2491,7 +2491,7 @@ public sealed class DarlingStoreUpgradeTests
         var call = source.IndexOf("IsDowngradeAgainstStore(dataDirectory, runtimeZipPath)", StringComparison.Ordinal);
         Assert.True(call >= 0, "nothing calls IsDowngradeAgainstStore — a correct downgrade check that is never invoked is what #1738 already was");
 
-        var rescue = source.IndexOf("Directory.Move(pgsqlDirectory, previousPgsql)", StringComparison.Ordinal);
+        var rescue = source.IndexOf("MoveRuntimeDirectory(pgsqlDirectory, previousPgsql)", StringComparison.Ordinal);
         Assert.True(rescue > call, "the downgrade guard must run BEFORE the runtime is rescued and replaced");
 
         var noStampBranch = source.IndexOf("if (stamp is null)", StringComparison.Ordinal);
@@ -2678,7 +2678,8 @@ public sealed class DarlingStoreUpgradeTests
             using var hold = new FileStream(heldFile, FileMode.Open, FileAccess.Read, FileShare.None);
 
             var log = new CapturingLogger();
-            var advance = await new DarlingStoreUpgrade(log).TryAdvanceRuntimeAsync(
+            /* The lock is held throughout, so the whole retry budget is spent; do not sleep through it. */
+            var advance = await new DarlingStoreUpgrade(log) { RetryDelay = (_, _) => Task.CompletedTask }.TryAdvanceRuntimeAsync(
                 host.RuntimeRoot, host.Package, host.DataDirectory,
                 /* nothing is running in this fixture */ (_, _) => Task.FromResult(false),
                 TestContext.Current.CancellationToken);
@@ -2713,13 +2714,15 @@ public sealed class DarlingStoreUpgradeTests
             File.WriteAllText(previousRoot, "a file where the folder should be");
 
             var log = new CapturingLogger();
-            var advance = await new DarlingStoreUpgrade(log).TryAdvanceRuntimeAsync(
+            /* The folder never becomes creatable, so the whole retry budget is spent; do not sleep through it. */
+            var advance = await new DarlingStoreUpgrade(log) { RetryDelay = (_, _) => Task.CompletedTask }.TryAdvanceRuntimeAsync(
                 host.RuntimeRoot, host.Package, host.DataDirectory,
                 (_, _) => Task.FromResult(false),
                 TestContext.Current.CancellationToken);
 
             var warning = AssertSwapDeferred(advance, host, log);
             Assert.Contains(previousRoot, warning, StringComparison.Ordinal);
+            Assert.Equal(4, CountRetryLines(log));
 
             /* Nothing is deleted to make room: the file is not the service's to remove. */
             Assert.Equal("a file where the folder should be", File.ReadAllText(previousRoot));
@@ -2769,6 +2772,1003 @@ public sealed class DarlingStoreUpgradeTests
         }
         finally
         {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /* ==================================================================================
+       The runtime rescue's bounded retry. Just after the store stops, an antivirus scan or the exiting
+       server can hold the runtime folder for a moment, and the first lock used to defer the whole update
+       to the next service start. The portable pins stand in for the lock through the seams, because a
+       file lock blocks rename and delete on Windows only; the real-lock pins skip elsewhere.
+       ================================================================================== */
+
+    private static readonly TimeSpan[] s_expectedRetryDelays =
+    [
+        TimeSpan.FromSeconds(0.5), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2),
+    ];
+
+    private static int CountRetryLines(CapturingLogger log)
+        => log.ToString().Split(Environment.NewLine)
+            .Count(line => line.StartsWith("[Information]", StringComparison.Ordinal)
+                && line.Contains("Retrying", StringComparison.Ordinal));
+
+    private static bool HasWarning(CapturingLogger log)
+        => log.ToString().Split(Environment.NewLine)
+            .Any(line => line.StartsWith("[Warning]", StringComparison.Ordinal)
+                && (line.Contains("Could not rescue the current runtime", StringComparison.Ordinal)
+                    || line.Contains("Could not clear the previous runtime", StringComparison.Ordinal)));
+
+    [Fact]
+    public async Task RuntimeAdvance_AMoveThatIsLockedTwice_RetriesAndThenSwaps()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-move-retry-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var log = new CapturingLogger();
+            var delays = new List<TimeSpan>();
+            var attempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
+                MoveRuntimeDirectory = (from, to) =>
+                {
+                    if (++attempts <= 2)
+                    {
+                        throw new IOException("The process cannot access the file because it is being used by another process.");
+                    }
+
+                    Directory.Move(from, to);
+                },
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.Equal(3, attempts);
+            Assert.Equal(2, CountRetryLines(log));
+            Assert.False(HasWarning(log));
+            Assert.Equal(HostAwaitingARuntimeSwap.PackageRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(DarlingStoreUpgrade.ComputeFileHash(host.Package), File.ReadAllText(host.StampPath).Trim());
+            Assert.Equal(s_expectedRetryDelays.Take(2), delays);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeAdvance_AMoveThatStaysLocked_RetriesFourTimesThenDefers()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-move-stuck-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var log = new CapturingLogger();
+            var delays = new List<TimeSpan>();
+            var attempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
+                MoveRuntimeDirectory = (_, _) =>
+                {
+                    attempts++;
+                    throw new UnauthorizedAccessException("Access to the path is denied.");
+                },
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.False(advance.Swapped);
+            Assert.Null(advance.PreviousBinDirectory);
+            Assert.Equal(5, attempts);
+            Assert.Equal(4, CountRetryLines(log));
+            Assert.Equal(s_expectedRetryDelays, delays);
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(HostAwaitingARuntimeSwap.PriorStamp, File.ReadAllText(host.StampPath).Trim());
+            var warning = Assert.Single(
+                log.ToString().Split(Environment.NewLine),
+                line => line.Contains("Could not rescue the current runtime", StringComparison.Ordinal));
+            Assert.StartsWith("[Warning]", warning, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeAdvance_AClearThatIsLockedTwice_RetriesAndThenSwaps()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-clear-retry-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var log = new CapturingLogger();
+            var delays = new List<TimeSpan>();
+            var attempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
+                ClearPreviousRuntime = path =>
+                {
+                    if (++attempts <= 2)
+                    {
+                        throw new IOException("The process cannot access the file because it is being used by another process.");
+                    }
+
+                    DarlingStoreUpgrade.EmptyDirectory(path);
+                },
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.Equal(3, attempts);
+            Assert.Equal(2, CountRetryLines(log));
+            Assert.False(HasWarning(log));
+            Assert.Equal(HostAwaitingARuntimeSwap.PackageRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(DarlingStoreUpgrade.ComputeFileHash(host.Package), File.ReadAllText(host.StampPath).Trim());
+            Assert.Equal(s_expectedRetryDelays.Take(2), delays);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeAdvance_AClearThatStaysLocked_RetriesFourTimesThenDefers()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-clear-stuck-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var log = new CapturingLogger();
+            var delays = new List<TimeSpan>();
+            var attempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
+                ClearPreviousRuntime = _ =>
+                {
+                    attempts++;
+                    throw new IOException("The process cannot access the file because it is being used by another process.");
+                },
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            AssertSwapDeferred(advance, host, log);
+            Assert.Equal(5, attempts);
+            Assert.Equal(4, CountRetryLines(log));
+            Assert.Equal(s_expectedRetryDelays, delays);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeAdvance_ACancellationDuringARetryDelay_Propagates_NotADeferral()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-retry-cancel-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var log = new CapturingLogger();
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                /* The caller's token must reach the delay: cancelling it there ends the wait. */
+                RetryDelay = (delay, token) =>
+                {
+                    cts.Cancel();
+                    return Task.Delay(delay, token);
+                },
+                MoveRuntimeDirectory = (_, _) => throw new IOException("held"),
+            };
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                cts.Token));
+
+            Assert.False(HasWarning(log));
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(HostAwaitingARuntimeSwap.PriorStamp, File.ReadAllText(host.StampPath).Trim());
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// A package whose runtime fails to extract (no <c>pgsql\bin\pg_ctl.exe</c> in it) sends the update to
+    /// its revert. The restore of the previous runtime hits a briefly locked folder twice, and the revert
+    /// retries it: the original extract failure is what surfaces, with the live runtime back at <c>pgsql</c>.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_AFailedExtractWhoseRestoreIsLockedTwice_RetriesAndRestoresTheRuntime()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-revert-retry-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+
+            var brokenSource = Path.Combine(root.FullName, "broken", "pgsql");
+            Directory.CreateDirectory(Path.Combine(brokenSource, "bin"));
+            File.WriteAllText(Path.Combine(brokenSource, "bin", "postgres.exe"), "a package with no pg_ctl");
+            File.Delete(host.Package);
+            ZipFile.CreateFromDirectory(brokenSource, host.Package, CompressionLevel.NoCompression, includeBaseDirectory: true);
+
+            var previousPgsql = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot), "pgsql");
+            var log = new CapturingLogger();
+            var restoreAttempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                MoveRuntimeDirectory = (from, to) =>
+                {
+                    if (string.Equals(from, previousPgsql, StringComparison.OrdinalIgnoreCase) && ++restoreAttempts <= 2)
+                    {
+                        throw new IOException("The process cannot access the file because it is being used by another process.");
+                    }
+
+                    Directory.Move(from, to);
+                },
+            };
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken));
+
+            Assert.Equal(3, restoreAttempts);
+            Assert.Equal(2, CountRetryLines(log));
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(HostAwaitingARuntimeSwap.PriorStamp, File.ReadAllText(host.StampPath).Trim());
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The same failed extract, with the MOVE ASIDE of the partial runtime locked twice instead: the revert
+    /// retries it, and the previous runtime is back at <c>pgsql</c> afterwards.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_AFailedExtractWhoseMoveAsideIsLockedTwice_RetriesAndRestoresTheRuntime()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-revert-aside-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+
+            var brokenSource = Path.Combine(root.FullName, "broken", "pgsql");
+            Directory.CreateDirectory(Path.Combine(brokenSource, "bin"));
+            File.WriteAllText(Path.Combine(brokenSource, "bin", "postgres.exe"), "a package with no pg_ctl");
+            File.Delete(host.Package);
+            ZipFile.CreateFromDirectory(brokenSource, host.Package, CompressionLevel.NoCompression, includeBaseDirectory: true);
+
+            var pgsqlDirectory = Path.Combine(host.RuntimeRoot, "pgsql");
+            var log = new CapturingLogger();
+            var moveAsideAttempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                MoveRuntimeDirectory = (from, to) =>
+                {
+                    if (string.Equals(from, pgsqlDirectory, StringComparison.OrdinalIgnoreCase)
+                        && to.EndsWith(".failed", StringComparison.OrdinalIgnoreCase)
+                        && ++moveAsideAttempts <= 2)
+                    {
+                        throw new IOException("The process cannot access the file because it is being used by another process.");
+                    }
+
+                    Directory.Move(from, to);
+                },
+            };
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => upgrade.TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken));
+
+            Assert.Equal(3, moveAsideAttempts);
+            Assert.Equal(2, CountRetryLines(log));
+            Assert.Contains("could not be extracted", log.ToString());
+            Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(HostAwaitingARuntimeSwap.PriorStamp, File.ReadAllText(host.StampPath).Trim());
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /* ==================================================================================
+       #4934: a start that finds no runtime at pgsql, but the store's own runtime rescued, puts it back.
+       ================================================================================== */
+
+    private sealed record RestoreHost(
+        string Root, string RuntimeRoot, string Pgsql, string PreviousPgsql, string PreviousBin, string DataDirectory,
+        string Zip, string StampPath)
+    {
+        /// <summary>The stamp an interrupted update leaves behind: the package that was live before it, not the shipped one.</summary>
+        public const string InterruptedStamp = "0000000000000000000000000000000000000000000000000000000000000000";
+    }
+
+    /// <summary>
+    /// A deploy folder with a store on <paramref name="storeMajor"/> (null: no store), a shipped package, and
+    /// the stamp of an interrupted update (it differs from the package's hash).
+    /// </summary>
+    private static RestoreHost PlantRestoreHost(string root, string? storeMajor)
+    {
+        var runtimeRoot = Path.Combine(root, "deploy", "pg-runtime");
+        var previousPgsql = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+        var dataDirectory = Path.Combine(root, "pg");
+        Directory.CreateDirectory(runtimeRoot);
+        Directory.CreateDirectory(dataDirectory);
+        if (storeMajor is not null)
+        {
+            File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), storeMajor + "\n");
+        }
+
+        var zip = Path.Combine(root, "deploy", "pg-runtime.zip");
+        File.WriteAllText(zip, "the shipped package");
+        var stampPath = Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName);
+        File.WriteAllText(stampPath, RestoreHost.InterruptedStamp);
+
+        return new RestoreHost(
+            root, runtimeRoot, Path.Combine(runtimeRoot, "pgsql"), previousPgsql,
+            Path.Combine(previousPgsql, "bin"), dataDirectory, zip, stampPath);
+    }
+
+    private static int CountWarnings(CapturingLogger log)
+        => log.ToString().Split(Environment.NewLine).Count(line => line.StartsWith("[Warning]", StringComparison.Ordinal));
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AnEmptyPgsqlAndTheStoresRescuedRuntime_PutsTheRuntimeBack()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-empty-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            Directory.CreateDirectory(host.Pgsql);
+            PlantRuntime(host.PreviousPgsql, "the-stores-own");
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
+            };
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("the-stores-own", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.True(File.Exists(Path.Combine(host.Pgsql, "bin", "pg_ctl.exe")));
+            Assert.False(Directory.Exists(host.PreviousPgsql));
+            Assert.Equal(1, CountWarnings(log));
+            Assert.Contains("The incomplete runtime was moved aside and deleted", log.ToString());
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_APartialPgsql_IsMovedAsideAndDeleted_AndTheRuntimeComesBack()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-partial-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            Directory.CreateDirectory(Path.Combine(host.Pgsql, "lib"));
+            File.WriteAllText(Path.Combine(host.Pgsql, "lib", "half-extracted.dll"), "partial");
+            PlantRuntime(host.PreviousPgsql, "the-stores-own");
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
+            };
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Contains("The incomplete runtime was moved aside and deleted", log.ToString());
+            Assert.Equal("the-stores-own", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.False(File.Exists(Path.Combine(host.Pgsql, "lib", "half-extracted.dll")));
+            Assert.False(Directory.Exists(host.Pgsql + ".failed"));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_NoRuntimeFolderAtAll_PutsTheRescuedOneBack_AndSaysOnlyThat()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-absent-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            PlantRuntime(host.PreviousPgsql, "the-stores-own");
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
+            };
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("the-stores-own", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.Contains("The rescued runtime was put back", log.ToString());
+            Assert.DoesNotContain("moved aside", log.ToString());
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_NoStore_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-nostore-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, null);
+            PlantRuntime(host.PreviousPgsql, "rescued");
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
+            };
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.False(Directory.Exists(host.Pgsql));
+            Assert.True(File.Exists(Path.Combine(host.PreviousBin, "pg_ctl.exe")));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AStoreWithNoRescuedRuntime_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-noprev-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
+            };
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.False(Directory.Exists(host.Pgsql));
+            Assert.False(Directory.Exists(host.PreviousPgsql));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_ARescuedRuntimeOfAnotherMajor_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-major-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            PlantRuntime(host.PreviousPgsql, "an-eighteen");
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 18.4")),
+            };
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.False(Directory.Exists(host.Pgsql));
+            Assert.True(File.Exists(Path.Combine(host.PreviousBin, "pg_ctl.exe")));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_ALiveRuntimeInPlace_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-live-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            PlantRuntime(host.Pgsql, "live");
+            PlantRuntime(host.PreviousPgsql, "rescued");
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
+            };
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("live", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.PreviousBin, "runtime.txt")));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>Plants the shape of a restore that WOULD fire (no pg_ctl, a same-major rescued copy), for a gate to refuse.</summary>
+    private static DarlingStoreUpgrade PlantRestorableHost(RestoreHost host, CapturingLogger log)
+    {
+        Directory.CreateDirectory(host.Pgsql);
+        PlantRuntime(host.PreviousPgsql, "rescued");
+        return new DarlingStoreUpgrade(log)
+        {
+            ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
+        };
+    }
+
+    private static void AssertNothingMoved(RestoreHost host)
+    {
+        Assert.False(File.Exists(Path.Combine(host.Pgsql, "bin", "pg_ctl.exe")));
+        Assert.False(Directory.Exists(host.Pgsql + ".failed"));
+        Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.PreviousBin, "runtime.txt")));
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AStampThatMatchesThePackage_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-finished-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.WriteAllText(host.StampPath, DarlingStoreUpgrade.ComputeFileHash(host.Zip).ToUpperInvariant());
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_NoStampAtAll_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-nostamp-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.Delete(host.StampPath);
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_ARescuedRuntimeThatCannotLoadTheStoresTimescale_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-timescale-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.WriteAllText(Path.Combine(host.DataDirectory, DarlingStoreUpgrade.TimescaleRecordFileName), "2.28.1");
+            var lib = Path.Combine(host.PreviousPgsql, "lib");
+            Directory.CreateDirectory(lib);
+            File.WriteAllText(Path.Combine(lib, "timescaledb-2.24.0.dll"), "x");
+            File.WriteAllText(Path.Combine(lib, "timescaledb-tsl-2.24.0.dll"), "x");
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_ARescuedRuntimeThatCarriesTheStoresTimescale_PutsTheRuntimeBack()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-timescale-ok-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.WriteAllText(Path.Combine(host.DataDirectory, DarlingStoreUpgrade.TimescaleRecordFileName), "2.24.0");
+            var lib = Path.Combine(host.PreviousPgsql, "lib");
+            Directory.CreateDirectory(lib);
+            File.WriteAllText(Path.Combine(lib, "timescaledb-2.24.0.dll"), "x");
+            File.WriteAllText(Path.Combine(lib, "timescaledb-tsl-2.24.0.dll"), "x");
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.True(File.Exists(Path.Combine(host.Pgsql, "bin", "pg_ctl.exe")));
+            Assert.False(Directory.Exists(host.PreviousPgsql));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_BothStampsPresent_TheMainStampDecides_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-bothstamps-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.WriteAllText(host.StampPath, DarlingStoreUpgrade.ComputeFileHash(host.Zip));
+            File.WriteAllText(
+                Path.Combine(host.RuntimeRoot, DarlingStoreUpgrade.LegacyRuntimeStampFileName),
+                DarlingStoreUpgrade.LegacyRuntimePackageHash);
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_OnlyTheLegacyStamp_AnInterruptedFirstUpdate_PutsTheRuntimeBack()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-legacystamp-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.Delete(host.StampPath);
+            File.WriteAllText(
+                Path.Combine(host.RuntimeRoot, DarlingStoreUpgrade.LegacyRuntimeStampFileName),
+                DarlingStoreUpgrade.LegacyRuntimePackageHash);
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.False(Directory.Exists(host.PreviousPgsql));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AMainStampThatExistsButIsEmpty_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-emptystamp-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.WriteAllText(host.StampPath, string.Empty);
+            File.WriteAllText(
+                Path.Combine(host.RuntimeRoot, DarlingStoreUpgrade.LegacyRuntimeStampFileName),
+                DarlingStoreUpgrade.LegacyRuntimePackageHash);
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_APackageThatCannotBeRead_MovesNothing_AndDoesNotThrow()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-lockedzip-");
+        FileStream? hold = null;
+        UnixFileMode? original = null;
+        var host = PlantRestoreHost(root.FullName, "17");
+        try
+        {
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            if (OperatingSystem.IsWindows())
+            {
+                hold = new FileStream(host.Zip, FileMode.Open, FileAccess.Read, FileShare.None);
+            }
+            else
+            {
+                original = File.GetUnixFileMode(host.Zip);
+                File.SetUnixFileMode(host.Zip, UnixFileMode.None);
+            }
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            hold?.Dispose();
+            if (!OperatingSystem.IsWindows() && original is { } mode)
+            {
+                File.SetUnixFileMode(host.Zip, mode);
+            }
+
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AMissingPackage_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-nozip-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.Delete(host.Zip);
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AServerRunningOnTheStore_MovesNothing_AndNamesThePid()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-live-pm-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var log = new CapturingLogger();
+            var upgrade = PlantRestorableHost(host, log);
+            using var postmaster = StartProcessNamedPostgres(Path.Combine(root.FullName, "fake"));
+            File.WriteAllText(
+                Path.Combine(host.DataDirectory, "postmaster.pid"),
+                postmaster.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n" + host.DataDirectory + "\n");
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+            Assert.Contains("PID " + postmaster.Id.ToString(System.Globalization.CultureInfo.InvariantCulture), log.ToString(), StringComparison.Ordinal);
+            Assert.Equal(1, CountWarnings(log));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// A live process whose image is named postgres (a copy of a harmless system tool that idles for a
+    /// minute), which is all the liveness check can see of a real postmaster. Killed on dispose.
+    /// </summary>
+    private static ProcessHandle StartProcessNamedPostgres(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var windows = OperatingSystem.IsWindows();
+        var source = windows ? Path.Combine(Environment.SystemDirectory, "PING.EXE") : "/bin/sleep";
+        var image = Path.Combine(directory, windows ? "postgres.exe" : "postgres");
+        File.Copy(source, image, overwrite: true);
+        if (OperatingSystem.IsMacOS())
+        {
+            using var sign = System.Diagnostics.Process.Start("codesign", ["-f", "-s", "-", image]);
+            sign!.WaitForExit();
+        }
+
+        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(image, windows ? "-n 60 127.0.0.1" : "60")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        }) ?? throw new InvalidOperationException("Could not start " + image);
+        return new ProcessHandle(process);
+    }
+
+    private sealed class ProcessHandle(System.Diagnostics.Process process) : IDisposable
+    {
+        public int Id => process.Id;
+
+        public void Dispose()
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                    process.WaitForExit(10_000);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            process.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AMoveThatKeepsFailing_LogsAndReturnsFalse()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-stuck-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var log = new CapturingLogger();
+            var upgrade = PlantRestorableHost(host, log);
+            upgrade.RetryDelay = (_, _) => Task.CompletedTask;
+            upgrade.MoveRuntimeDirectory = (_, _) => throw new IOException("The process cannot access the file because it is being used by another process.");
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.True(File.Exists(Path.Combine(host.PreviousBin, "pg_ctl.exe")));
+            Assert.Contains("could not be put back", log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AMoveLockedTwice_RetriesAndRestores()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-retry-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            PlantRuntime(host.PreviousPgsql, "the-stores-own");
+            var log = new CapturingLogger();
+            var attempts = 0;
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                RetryDelay = (_, _) => Task.CompletedTask,
+                ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
+                MoveRuntimeDirectory = (from, to) =>
+                {
+                    if (string.Equals(from, host.PreviousPgsql, StringComparison.OrdinalIgnoreCase) && ++attempts <= 2)
+                    {
+                        throw new IOException("The process cannot access the file because it is being used by another process.");
+                    }
+
+                    Directory.Move(from, to);
+                },
+            };
+
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal(3, attempts);
+            Assert.Equal(2, CountRetryLines(log));
+            Assert.Equal("the-stores-own", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public void EnsureRuntime_RestoresTheRescuedRuntime_BeforeItLooksForPgCtl()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedPostgres.cs");
+        var start = source.IndexOf("private async Task<string> EnsureRuntimeAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "EnsureRuntimeAsync must exist");
+        var body = source[start..];
+        var restore = body.IndexOf("_storeUpgrade.TryRestoreRescuedRuntimeAsync(_runtimeRoot, _runtimeZipPath, _dataDirectory, cancellationToken)", StringComparison.Ordinal);
+        var existsCheck = body.IndexOf("if (File.Exists(pgCtl))", StringComparison.Ordinal);
+        Assert.True(restore >= 0, "EnsureRuntimeAsync must try to restore the rescued runtime");
+        Assert.True(existsCheck >= 0, "EnsureRuntimeAsync must test for pg_ctl.exe");
+        Assert.True(restore < existsCheck, "the restore must run BEFORE the pg_ctl.exe test, so a restored runtime takes the normal path and not the first-run extract");
+    }
+
+    /// <summary>
+    /// The real lock, on the platform where one blocks a rename: a file under the live runtime is held for
+    /// about a second, which is longer than the first attempt and shorter than the retry budget.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_ALiveRuntimeHeldForAMoment_IsRescuedOnceTheLockClears()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "File locks block rename and delete on Windows only.");
+        var root = Directory.CreateTempSubdirectory("darling-move-held-");
+        FileStream? hold = null;
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var held = hold = new FileStream(host.PgCtl, FileMode.Open, FileAccess.Read, FileShare.None);
+            using var release = new Timer(_ => held.Dispose(), null, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan);
+
+            var advance = await new DarlingStoreUpgrade(new CapturingLogger()).TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.Equal(HostAwaitingARuntimeSwap.PackageRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(DarlingStoreUpgrade.ComputeFileHash(host.Package), File.ReadAllText(host.StampPath).Trim());
+        }
+        finally
+        {
+            hold?.Dispose();
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>The same real lock, on a file under the last update's rescued runtime.</summary>
+    [Fact]
+    public async Task RuntimeAdvance_APreviousRuntimeHeldForAMoment_IsClearedOnceTheLockClears()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "File locks block rename and delete on Windows only.");
+        var root = Directory.CreateTempSubdirectory("darling-prev-held-");
+        FileStream? hold = null;
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var previousRoot = DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot);
+            var heldFile = Path.Combine(previousRoot, "pgsql", "bin", "postgres.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(heldFile)!);
+            File.WriteAllText(heldFile, "previous runtime");
+            var held = hold = new FileStream(heldFile, FileMode.Open, FileAccess.Read, FileShare.None);
+            using var release = new Timer(_ => held.Dispose(), null, TimeSpan.FromSeconds(1), Timeout.InfiniteTimeSpan);
+
+            var advance = await new DarlingStoreUpgrade(new CapturingLogger()).TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.False(File.Exists(heldFile));
+            Assert.Equal(HostAwaitingARuntimeSwap.PackageRuntime, File.ReadAllText(host.PgCtl));
+        }
+        finally
+        {
+            hold?.Dispose();
             TryDeleteTree(root.FullName);
         }
     }

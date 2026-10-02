@@ -183,6 +183,48 @@ internal sealed class DarlingStoreUpgrade
     public DarlingStoreUpgrade(ILogger logger)
         => _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
+    /// <summary>The wait between attempts of a runtime-rescue step. Tests replace it so a retry does not sleep.</summary>
+    internal Func<TimeSpan, CancellationToken, Task> RetryDelay { get; set; } = Task.Delay;
+
+    /// <summary>The rename that rescues the live runtime. Tests replace it to stand in for a file lock.</summary>
+    internal Action<string, string> MoveRuntimeDirectory { get; set; } = Directory.Move;
+
+    /// <summary>The step that clears the last update's rescued runtime. Tests replace it to stand in for a file lock.</summary>
+    internal Action<string> ClearPreviousRuntime { get; set; } = EmptyDirectory;
+
+    /// <summary>
+    /// Just after the store stops, an antivirus scan or the exiting server can hold the runtime folder for a
+    /// moment. Runs <paramref name="operation"/> up to <see cref="s_runtimeRescueRetryDelays"/>.Length + 1
+    /// times, waiting between attempts, and retries only <see cref="IOException"/> and
+    /// <see cref="UnauthorizedAccessException"/>. The last failure is rethrown for the caller's existing
+    /// "defer the update" handling; a cancelled wait propagates as the cancellation.
+    /// </summary>
+    private async Task RetryTransientIoAsync(Action operation, string what, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                operation();
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                && attempt <= s_runtimeRescueRetryDelays.Length)
+            {
+                var delay = s_runtimeRescueRetryDelays[attempt - 1];
+                _logger.LogInformation(
+                    "Retrying {What} in {DelaySeconds} s after attempt {Attempt} failed ({Message}).",
+                    what, delay.TotalSeconds, attempt, ex.Message);
+                await RetryDelay(delay, cancellationToken);
+            }
+        }
+    }
+
+    private static readonly TimeSpan[] s_runtimeRescueRetryDelays =
+    [
+        TimeSpan.FromSeconds(0.5), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2),
+    ];
+
     /// <summary>
     /// The <c>pg_ctl --version</c> probe behind every runtime-major read that decides whether a runtime
     /// directory is kept, swapped or used for an upgrade. An instance member so a test with no binaries to
@@ -1027,6 +1069,157 @@ internal sealed class DarlingStoreUpgrade
     }
 
     /// <summary>
+    /// Puts the store's own rescued runtime back at <c>pgsql</c> when an INTERRUPTED runtime update left no
+    /// <c>bin\pg_ctl.exe</c> there and the rescued copy under <see cref="PreviousRuntimeRootFor"/> is the one
+    /// that last opened the store. Returns true when it moved the runtime back; false, having changed
+    /// nothing, in every other case: a live runtime is there, there is no store or no rescued copy of the
+    /// store's major (which <see cref="FindRescuedRuntimeBinAsync"/> already refuses), no stamp exists, a
+    /// server is running on the data directory, the shipped package is missing, the stamp already names the
+    /// shipped package, or a restore move still fails after its retries (logged; the first-run branch then
+    /// runs as it did before this restore existed).
+    ///
+    /// <para>The shape: a runtime update moved the live runtime aside and its extract never finished (the
+    /// process died, or an antivirus scan held the folder), leaving an empty or partial <c>pgsql</c> with the
+    /// good runtime in <c>pg-runtime-prev</c>. Without this, the next start saw no <c>pg_ctl.exe</c>, took the
+    /// first-run branch and extracted the package as if there were no store.</para>
+    ///
+    /// <para>The stamp is what separates an interrupted update from a finished one. The advance writes the
+    /// stamp only after a good extract, so an interrupted update leaves the OLD stamp, which differs from the
+    /// shipped package. <c>pg-runtime-prev</c> is never emptied after a successful update, so a finished host
+    /// that later loses <c>pgsql</c> still has an older same-major runtime there; putting that back would
+    /// leave it in front of the store with a stamp that never triggers a retry. That host re-extracts the
+    /// shipped package instead. A host with no stamp at all cannot be proven interrupted, so it takes the
+    /// same path. A finished host that later receives a newer package can also pass the stamp test, so the
+    /// store's recorded TimescaleDB versions must all be carried by the rescued runtime: a rescued runtime
+    /// that could not open the store stays where it is.</para>
+    ///
+    /// <para>The checks run cheapest first. The same-major test runs the rescued binary's version probe,
+    /// which can take up to the tool timeout (about five minutes) on a hung binary. The package is hashed
+    /// last, only when everything else says the restore is due.</para>
+    /// </summary>
+    internal async Task<bool> TryRestoreRescuedRuntimeAsync(
+        string runtimeRoot, string runtimeZipPath, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var pgsqlDirectory = Path.Combine(runtimeRoot, "pgsql");
+        if (File.Exists(Path.Combine(pgsqlDirectory, "bin", "pg_ctl.exe")))
+        {
+            return false;
+        }
+
+        if (await FindRescuedRuntimeBinAsync(runtimeRoot, dataDirectory, cancellationToken) is null)
+        {
+            return false;
+        }
+
+        /* Only a MISSING main stamp falls back to the legacy one. A main stamp file that exists but cannot be
+           read is no proof of an interrupted update, so nothing is restored. */
+        var mainStampPath = Path.Combine(runtimeRoot, RuntimeStampFileName);
+        var stamp = ReadTrimmedOrNull(mainStampPath);
+        if (stamp is null && !File.Exists(mainStampPath))
+        {
+            stamp = ReadTrimmedOrNull(Path.Combine(runtimeRoot, LegacyRuntimeStampFileName));
+        }
+
+        if (string.IsNullOrEmpty(stamp))
+        {
+            return false;
+        }
+
+        /* Windows lets a folder be moved while an exe inside it runs, so a server started by hand from the
+           rescued runtime would lose its binaries. The same guard RevertRuntime uses. */
+        var livePostmaster = FindLivePostmaster(dataDirectory);
+        if (livePostmaster is not null)
+        {
+            _logger.LogWarning(
+                "The Postgres runtime at {Runtime} had no pg_ctl.exe, but a PostgreSQL server (PID {Pid}) is running on {DataDirectory}, so the rescued runtime was not moved.",
+                pgsqlDirectory, livePostmaster, dataDirectory);
+            return false;
+        }
+
+        /* In an interrupted update the store is still on the rescued runtime's extension, because the extension
+           moves only after a good swap, so the rescued runtime carries every version the store records. A
+           finished host that later receives a newer package also passes the stamp test below; its rescued
+           runtime predates the store's extension, and putting it back would leave a runtime that cannot load
+           TimescaleDB in front of the store. With no record this abstains. */
+        var previousPgsql = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+        if (ReadTimescaleRecord(dataDirectory) is { StoreVersions.Count: > 0 } record
+            && record.StoreVersions.Except(TryReadTimescaleLibraryVersions(previousPgsql), StringComparer.Ordinal).Any())
+        {
+            return false;
+        }
+
+        if (!File.Exists(runtimeZipPath))
+        {
+            return false;
+        }
+
+        string zipHash;
+        try
+        {
+            zipHash = await Task.Run(() => ComputeFileHash(runtimeZipPath), cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+
+        if (string.Equals(stamp, zipHash, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        /* A partial pgsql goes aside before the restore, exactly as the extract-failure revert does it: a
+           move is one operation, a recursive delete is not, and a half-deleted folder is no runtime. */
+        var failedExtract = pgsqlDirectory + ".failed";
+        var movedAside = false;
+        try
+        {
+            TryDeleteDirectory(failedExtract);
+            if (Directory.Exists(pgsqlDirectory))
+            {
+                movedAside = true;
+                await RetryTransientIoAsync(
+                    () => MoveRuntimeDirectory(pgsqlDirectory, failedExtract),
+                    $"the move aside of the incomplete runtime at {pgsqlDirectory}",
+                    cancellationToken);
+            }
+
+            await RetryTransientIoAsync(
+                () => MoveRuntimeDirectory(previousPgsql, pgsqlDirectory),
+                $"the restore of the rescued runtime to {pgsqlDirectory}",
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "The rescued Postgres runtime at {Previous} could not be put back at {Runtime}: {Reason}. The runtime is extracted from the package instead.",
+                previousPgsql, pgsqlDirectory, ex.Message);
+            return false;
+        }
+
+        TryDeleteDirectory(failedExtract);
+
+        /* The stamp still names the runtime that was live before the interrupted update: the advance writes it
+           only after a good extract (File.WriteAllText(stampPath, zipHash) in TryAdvanceRuntimeAsync). So the
+           normal path that follows compares the package against that stamp, sees the difference, and retries
+           the update. */
+        if (movedAside)
+        {
+            _logger.LogWarning(
+                "The Postgres runtime at {Runtime} had no pg_ctl.exe, and the runtime that last opened the store at {DataDirectory} was found at {Previous}. The incomplete runtime was moved aside and deleted, the rescued runtime was put back, and the runtime update is retried on this start.",
+                pgsqlDirectory, dataDirectory, previousPgsql);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "The Postgres runtime at {Runtime} had no pg_ctl.exe, and the runtime that last opened the store at {DataDirectory} was found at {Previous}. The rescued runtime was put back, and the runtime update is retried on this start.",
+                pgsqlDirectory, dataDirectory, previousPgsql);
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Whether an unidentifiable runtime must STOP the service rather than be waved through, PURE so the
     /// decision is pinned without needing a broken runtime to reproduce (deleting the guard inline left the
     /// whole suite green).
@@ -1268,7 +1461,12 @@ internal sealed class DarlingStoreUpgrade
 
         try
         {
-            EmptyDirectory(previousRoot);
+            /* EmptyDirectory only runs here once the rescued-runtime guard above has decided the folder may be
+               cleared, and clearing is idempotent, so running it again after a partial pass is safe. */
+            await RetryTransientIoAsync(
+                () => ClearPreviousRuntime(previousRoot),
+                $"the clear of the previous runtime at {previousRoot}",
+                cancellationToken);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1287,7 +1485,12 @@ internal sealed class DarlingStoreUpgrade
 
         try
         {
-            Directory.Move(pgsqlDirectory, previousPgsql);
+            /* A failed Directory.Move leaves the source intact (a same-volume rename is one operation), so
+               trying it again after a lock clears is safe. */
+            await RetryTransientIoAsync(
+                () => MoveRuntimeDirectory(pgsqlDirectory, previousPgsql),
+                $"the rescue of the current runtime to {previousPgsql}",
+                cancellationToken);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1315,20 +1518,36 @@ internal sealed class DarlingStoreUpgrade
                     $"Extracted {runtimeZipPath} but {binDirectory}\\pg_ctl.exe is missing — the archive does not contain pgsql\\bin.");
             }
         }
-        catch (Exception)
+        catch (Exception extractFailure)
         {
             /* The new runtime is not usable; put the old one back so the store still boots, and let the
                caller's existing error path report. Nothing has touched the data directory yet. Move-aside
                rather than delete-first, for the reason spelled out in RevertRuntime: a partial delete
-               would leave an unbootable runtime behind. */
+               would leave an unbootable runtime behind. The cause is logged first: a revert move that
+               still fails after its retries throws in its place, and would hide why the extract failed. */
+            _logger.LogWarning(
+                "The new Postgres runtime from {Package} could not be extracted to {Runtime}: {Reason}. The previous runtime is being put back.",
+                runtimeZipPath, pgsqlDirectory, extractFailure.Message);
             var failedExtract = pgsqlDirectory + ".failed";
             TryDeleteDirectory(failedExtract);
+
+            /* Both moves retry a briefly locked folder like the rescue does: a same-volume rename is atomic,
+               so trying again is safe, and a lock here would otherwise leave no runtime at pgsql. The waits
+               use CancellationToken.None: if the extract failed because the update was cancelled, the revert
+               still has to finish to leave a bootable runtime, and a cancelled wait would throw a new
+               OperationCanceledException in place of the original failure. */
             if (Directory.Exists(pgsqlDirectory))
             {
-                Directory.Move(pgsqlDirectory, failedExtract);
+                await RetryTransientIoAsync(
+                    () => MoveRuntimeDirectory(pgsqlDirectory, failedExtract),
+                    $"the move aside of the failed extract at {pgsqlDirectory}",
+                    CancellationToken.None);
             }
 
-            Directory.Move(previousPgsql, pgsqlDirectory);
+            await RetryTransientIoAsync(
+                () => MoveRuntimeDirectory(previousPgsql, pgsqlDirectory),
+                $"the restore of the previous runtime to {pgsqlDirectory}",
+                CancellationToken.None);
             TryDeleteDirectory(failedExtract);
             TryEmptyDirectory(previousRoot);
             throw;
