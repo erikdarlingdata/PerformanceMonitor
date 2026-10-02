@@ -24,8 +24,8 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4732: removing a server leaves its Extended Events sessions on it, and <c>--drop-xe-sessions</c> is the operator's
-/// explicit way to remove them. The pure halves (the grammar, the statements, the plan) pin as text; the executor runs over a
+/// #4732, #4961: removing a server drops this install's own Extended Events sessions on it, and <c>--drop-xe-sessions</c> is
+/// the operator's explicit way to drop the shared ones and what a removal could not drop. The pure halves (the grammar, the statements, the plan) pin as text; the executor runs over a
 /// fake target so the find-print-drop path needs no SQL Server.
 /// </summary>
 public sealed class DropXeSessionsVerbTests
@@ -1200,6 +1200,11 @@ public sealed class DropXeSessionsVerbTests
         Assert.Contains("--print-sql", note, StringComparison.Ordinal);
         Assert.Contains("history are kept", note, StringComparison.Ordinal);
 
+        /* #4961: the removal drops this install's own sessions, so the note no longer says every session stays. */
+        Assert.Contains("also drops this install's own Extended Events sessions on the server", note, StringComparison.Ordinal);
+        Assert.Contains("The shared sessions (", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("are not dropped and stay on the server", note, StringComparison.Ordinal);
+
         /* The server is gone by the time the answer is read, so the named form cannot find it: the first form the note points at is
            --print-sql, and the named form is mentioned only to say it had to run before the removal. */
         Assert.Equal(
@@ -1225,7 +1230,7 @@ public sealed class DropXeSessionsVerbTests
         Assert.True(end > start, "the --drop-xe-sessions section no longer ends at a horizontal rule");
         var section = readme[start..end];
 
-        var bulletAt = readme.IndexOf("`remove_server` (which leaves the server's Extended Events sessions on it", StringComparison.Ordinal);
+        var bulletAt = readme.IndexOf("`remove_server` (which drops this install's own Extended Events sessions on the server", StringComparison.Ordinal);
         Assert.True(bulletAt >= 0, "the remove_server bullet no longer says what it leaves on the server (#4732)");
         var bullet = readme[bulletAt..Math.Min(readme.Length, bulletAt + 500)];
 
@@ -1268,17 +1273,19 @@ public sealed class DropXeSessionsVerbTests
         Assert.DoesNotContain("monitored server: the Extended Events sessions", section, StringComparison.Ordinal);
 
         // The other places that point at the verb say the same: after the removal it is --print-sql.
-        var bulletAt = readme.IndexOf("`remove_server` (which leaves the server's Extended Events sessions on it", StringComparison.Ordinal);
+        var bulletAt = readme.IndexOf("`remove_server` (which drops this install's own Extended Events sessions on the server", StringComparison.Ordinal);
         Assert.True(bulletAt >= 0, "the remove_server bullet no longer says what it leaves on the server (#4732)");
         var bullet = readme[bulletAt..Math.Min(readme.Length, bulletAt + 1000)];
         Assert.Contains("`--drop-xe-sessions --print-sql`", bullet, StringComparison.Ordinal);
         Assert.Contains("works only before the removal", bullet, StringComparison.Ordinal);
 
-        var collectorAt = readme.IndexOf("a server removed while the collector was on keeps the session.", StringComparison.Ordinal);
-        Assert.True(collectorAt >= 0, "the long_query_completions paragraph no longer says a removed server keeps its session (#4732)");
+        /* #4961: removing the server drops this install's long-query session; the verb's script is for an attempt that failed. */
+        Assert.DoesNotContain("a server removed while the collector was on keeps the session", readme, StringComparison.Ordinal);
+        var collectorAt = readme.IndexOf("Removing the server also drops this install's session on it", StringComparison.Ordinal);
+        Assert.True(collectorAt >= 0, "the long_query_completions paragraph no longer says removing a server drops this install's session (#4961)");
         var collector = readme[collectorAt..Math.Min(readme.Length, collectorAt + 500)];
-        Assert.Contains("just before you remove the server", collector, StringComparison.Ordinal);
-        Assert.Contains("`--drop-xe-sessions --print-sql` afterwards", collector, StringComparison.Ordinal);
+        Assert.Contains("If that attempt failed or ran out of time", collector, StringComparison.Ordinal);
+        Assert.Contains("`--drop-xe-sessions --print-sql`", collector, StringComparison.Ordinal);
 
         // The list of verbs that survive an unusable store connection names this one.
         var listAt = readme.IndexOf("Every other verb that opens the store (", StringComparison.Ordinal);

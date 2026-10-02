@@ -103,25 +103,29 @@ public interface IXeSessionCleanupTarget
 }
 
 /// <summary>
-/// The <c>--drop-xe-sessions</c> verb's plan and executor (#4732): removes the Extended Events sessions Darling leaves on a
-/// server after the server stops being monitored.
+/// The <c>--drop-xe-sessions</c> verb's plan and executor (#4732, #4961): drops the Extended Events sessions Darling can
+/// leave on a server, and lists the sessions of other installs for the operator to drop.
 ///
-/// <para><b>Why an explicit verb and not part of removing a server.</b> The service never drops these sessions when a
-/// server is removed, for two reasons that do not go away: the names are shared with Lite and with any other Darling
-/// service that monitors the same server (dropping them under a monitor that is still running blinds it until its next
-/// connect or cycle), and a server that is unreachable from the service cannot be cleaned at all. The deadlock and
-/// blocked-process sessions cost a 4 MB ring buffer each; the long-query completion session has a 4 MB ring buffer too
-/// and also tests every completed statement and batch against its duration filter, which is why it is opt-in. An
-/// operator who wants them gone runs this deliberately.</para>
+/// <para><b>What removal drops, and what is left for this verb.</b> Removing a server drops this install's own sessions on it
+/// (<see cref="DarlingRemovedServerSessions"/>): one attempt within 15 seconds, except a session another registration of this
+/// install keeps. This verb is for what removal could not drop, such as a server that was unreachable at removal or a drop
+/// that timed out. It also drops the old shared long-query session, which the service tries to drop only once, and the shared
+/// deadlock and blocked-process sessions. Those names are shared with Lite and with any other Darling service that monitors
+/// the same server, so the service never drops them (dropping them under a monitor that is still running blinds it until its
+/// next connect or cycle). And it lists the sessions of other installs, each with a guarded DROP the operator runs when that
+/// install no longer monitors the server. The named form finds a server only while it is still registered, so after a
+/// removal the <c>--print-sql</c> script is the way. The deadlock and blocked-process sessions cost a 4 MB ring buffer each;
+/// the long-query completion session has a 4 MB ring buffer too and also tests every completed statement and batch against
+/// its duration filter, which is why it is opt-in.</para>
 ///
 /// <para><b>Only Darling's own names, never one from input.</b> <see cref="SessionNames"/> is the deadlock and
-/// blocked-process sessions the ensure lifecycle in <see cref="DarlingXeSessions"/> creates, and the opt-in long-query
-/// completion session its reconcile creates while that collector is on, all taken from the same constants the collectors
-/// read. <see cref="DropStatement"/> refuses any other name, and <see cref="PlanDrops"/> rewrites a matching name to the
-/// constant before it builds a statement, so what reaches a server is always Darling's own spelling, bracket-quoted.
-/// The long-query completion session is in the list because the service drops it itself only for a server it still
-/// monitors, when that collector is turned off (<see cref="DarlingXeSessions.ReconcileLongQueryCompletionsAsync"/>): a
-/// server removed while the collector was on keeps the session, and this verb is the only thing that can drop it.</para>
+/// blocked-process sessions the ensure lifecycle in <see cref="DarlingXeSessions"/> creates, and the old shared long-query
+/// completion session that older versions made; <see cref="InstallSessionNames"/> adds this install's own, named from its id.
+/// All of them are taken from the same constants and builders the collectors use. <see cref="DropStatement"/> refuses any
+/// other name, and <see cref="PlanDrops"/> rewrites a matching name to the constant before it builds a statement, so what
+/// reaches a server is always Darling's own spelling, bracket-quoted. The old shared long-query session is in the list
+/// because the service drops it only once and then leaves it (<see cref="DarlingLegacyLongQuerySession"/>), and removing a
+/// server does not drop it.</para>
 ///
 /// <para><b>Plan and executor are separate.</b> <see cref="PlanDrops"/> and <see cref="GuardedDropScript"/> are pure and
 /// pin as text. <see cref="RunAsync"/> is the thin executor over <see cref="IXeSessionCleanupTarget"/>, so tests drive the
