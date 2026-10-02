@@ -923,6 +923,52 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     }
 
     /// <summary>
+    /// The read leaves out master too, by the trace's own rule (<see cref="LongQueryTraceDatabases.CanHoldSession"/>), and
+    /// counts the databases it lists without master, so a logical server whose user databases are all monitored
+    /// separately is not left reading master alone, and a list of master alone is not blamed on them (#4961). The
+    /// behaviour is driven in <see cref="EmptyDatabaseListNoteLiveTests"/>; pinned here in the source as well, so the
+    /// rule stays the trace's own and not a second copy in the runner.
+    /// </summary>
+    [Fact]
+    public void TheLongQueryRead_AlsoSkipsMaster_ByTheTracesOwnRule()
+    {
+        var runner = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
+        var skip = runner.IndexOf("if (definition.SkipsSeparatelyMonitoredDatabases)", StringComparison.Ordinal);
+        var note = runner.IndexOf("EmptyDatabaseListNote.For(", skip, StringComparison.Ordinal);
+        Assert.True(skip > 0 && note > skip, "the skip comes before the note's inputs");
+
+        var block = runner[skip..note];
+        var master = block.IndexOf("databases = databases.FindAll(LongQueryTraceDatabases.CanHoldSession);", StringComparison.Ordinal);
+        var counted = block.IndexOf("listedDatabaseCount = databases.Count;", StringComparison.Ordinal);
+        var separately = block.IndexOf("databases = AzureSweepScope.WithoutSeparatelyMonitored(databases, SeparatelyMonitoredDatabasesFor(server));", StringComparison.Ordinal);
+        Assert.True(master > 0 && counted > master && separately > counted,
+            "master leaves the list, then the list is counted, then the separately monitored databases leave");
+        Assert.DoesNotContain("\"master\"", block, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("master", false)]
+    [InlineData("MASTER", false)]
+    [InlineData("alpha", true)]
+    [InlineData("masters", true)]
+    public void TheTrace_CanHoldASessionInEveryDatabaseButMaster(string database, bool expected)
+    {
+        Assert.Equal(expected, LongQueryTraceDatabases.CanHoldSession(database));
+    }
+
+    [Fact]
+    public void ThePlan_CreatesTheSessionWhereTheReadReads_NeverInMaster()
+    {
+        var listed = new[] { "master", "alpha", "zeta" };
+
+        var plan = LongQueryTraceDatabases.Plan(
+            enabled: true, listed, listed, Array.Empty<string>(), Array.Empty<string>());
+
+        Assert.Equal(listed.Where(LongQueryTraceDatabases.CanHoldSession), plan.Create);
+        Assert.DoesNotContain("master", plan.Create, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// The sweep hands the reconcile the other registrations and the server's own list of separately monitored
     /// databases from the live registry, through the two adapters the tests above drive. The server's list is the
     /// logical server's view for every registration, so it is not the runner's per-registration list, which is empty

@@ -50,36 +50,10 @@ public partial class RemoteCollectorService
             return;
         }
 
-        try
-        {
-            using var connection = await CreateConnectionAsync(server, cancellationToken);
-
-            /* On-prem, Azure MI, and AWS RDS: create server-scoped session with ring_buffer */
-            await EnsureDeadlockXeSessionOnPremAsync(connection, server, cancellationToken);
-        }
-        catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
-        {
-            /* Session already present + running -- see IsBenignXeSessionAlreadyPresent (#1251). */
-            AppLogger.Info("XeSession", $"[{server.DisplayName}] Deadlock XE session already present (benign, #1251)");
-        }
-        catch (SqlException ex)
-        {
-            /* Warn rather than Error when the server simply said no: a denied XE session is a least-privilege
-               posture (#1823), classified as PERMISSIONS upstream and retried no further this session.
-               Genuine failures still log at Error. */
-            if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
-            {
-                AppLogger.Warn("XeSession", $"[{server.DisplayName}] Failed to ensure deadlock XE session: {ex.Message}");
-            }
-            else
-            {
-                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to ensure deadlock XE session: {ex.Message}");
-            }
-
-            /* Propagate so RunCollectorAsync marks the collector unhealthy instead
-               of letting a zero-row ring-buffer read record SUCCESS (#1086) */
-            throw new XeSessionEnsureException("deadlock", ex);
-        }
+        /* On-prem, Azure MI, and AWS RDS: create server-scoped session with ring_buffer */
+        await EnsureServerScopedXeSessionAsync(
+            server, "deadlock", DeadlockXeSessionName,
+            (connection, token) => EnsureDeadlockXeSessionOnPremAsync(connection, server, token), cancellationToken);
     }
 
     /// <summary>

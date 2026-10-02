@@ -40,7 +40,7 @@ public static class EmptyDatabaseListNote
     /// cannot name: no exclusions are configured, or a database scope narrowed the list (the scope may be what
     /// emptied it, and a note that blames the exclusions would then be wrong).</para>
     /// </summary>
-    /// <param name="listed">The databases the server listed, after its exclusions and any scope, before the separately monitored ones were left out.</param>
+    /// <param name="listed">The databases the server listed, after its exclusions and any scope, before the separately monitored ones were left out. A read that never opens <c>master</c> leaves it out of this count too, so a list of <c>master</c> alone is empty.</param>
     /// <param name="read">The databases the run reads: <paramref name="listed"/> less the separately monitored ones.</param>
     /// <param name="skipsSeparatelyMonitored">Whether this collector leaves out the databases monitored as their own servers.</param>
     /// <param name="exclusionsConfigured">Whether the server has any excluded database.</param>

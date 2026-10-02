@@ -57,6 +57,16 @@ public static class LongQueryTraceDatabases
     private const char PartSeparator = '\u001E';
 
     /// <summary>
+    /// Whether a database can hold the trace's database-scoped session at all: every database but <c>master</c>. The
+    /// plan, the check for where another registration keeps the session, and the long-query read of a logical server
+    /// all ask this one rule, so the read never opens a database the trace cannot create its session in (#4961).
+    /// Whether another registration owns the database is a separate question, which the plan answers from the
+    /// separately monitored databases.
+    /// </summary>
+    public static bool CanHoldSession(string database) =>
+        !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// The databases one reconcile creates the session in and drops it from.
     /// </summary>
     /// <param name="enabled">Whether the trace is on for this registration.</param>
@@ -76,9 +86,7 @@ public static class LongQueryTraceDatabases
     {
         var ownedElsewhere = new HashSet<string>(separatelyMonitoredDatabases, StringComparer.OrdinalIgnoreCase);
         var kept = new HashSet<string>(keptElsewhere, StringComparer.OrdinalIgnoreCase);
-        bool CanTouch(string database) =>
-            !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase)
-            && !ownedElsewhere.Contains(database);
+        bool CanTouch(string database) => CanHoldSession(database) && !ownedElsewhere.Contains(database);
 
         if (!enabled)
         {
@@ -260,7 +268,7 @@ public static class LongQueryTraceDatabases
             return string.Equals(owner.Database!.Trim(), database, StringComparison.OrdinalIgnoreCase);
         }
 
-        return !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase)
+        return CanHoldSession(database)
             && !separatelyMonitored.Contains(database)
             && !owner.ExcludedDatabases.Any(excluded => string.Equals(excluded.Trim(), database, StringComparison.OrdinalIgnoreCase))
             && (owner.DatabaseScope is null

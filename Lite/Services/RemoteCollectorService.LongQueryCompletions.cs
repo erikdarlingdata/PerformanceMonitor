@@ -66,12 +66,14 @@ public partial class RemoteCollectorService
        creates on every cycle: a reconnect is the first create that succeeds. In memory, so a restart warns again. */
     private readonly ConcurrentDictionary<string, bool> _longQueryTraceCreateWarned = new();
 
-    /* #4964: the same rule for the always-on deadlock and blocked-process sessions' Azure ensure, kept per server and per
+    /* #4964: the same rule for the always-on deadlock and blocked-process sessions' ensure, kept per server and per
        session (the key is the server id, then the session name): the ensures whose last cycle failed, until a cycle of that
-       session on that server succeeds. Their ensure runs on every collector cycle in every monitored database, so a server
-       that refuses the create refuses it on every cycle. The first failing cycle logs its refusals at Warning and the all-refused
-       line at Error; the cycles after it log the same lines at Debug. The retry on every cycle, and the exception each
-       failing cycle throws for the collector to record, do not change. In memory, so a restart warns again. */
+       session on that server succeeds. Their ensure runs on every collector cycle: in every monitored database on Azure SQL
+       Database, so a server that refuses the create refuses it on every cycle, and once on the server everywhere else. The
+       first failing cycle logs its refusals at Warning and the all-refused line at Error (the server-scoped arm's one failure
+       at Warning or Error); the cycles after it log the same lines at Debug, and so does the collector's own line for the
+       failure. The retry on every cycle, and the exception each failing cycle throws for the collector to record, do not
+       change. In memory, so a restart warns again. */
     private readonly ConcurrentDictionary<string, bool> _databaseScopedXeSessionEnsureWarned = new();
 
     /* The engine edition the reconcile judges a server by. Its own instance, because the app's other one lives in the main

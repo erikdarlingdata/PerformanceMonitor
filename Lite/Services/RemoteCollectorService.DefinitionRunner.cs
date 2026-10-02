@@ -282,11 +282,16 @@ public partial class RemoteCollectorService
                 ? await databaseListOverride(server, cancellationToken)
                 : await GetAzureDatabaseListAsync(server, cancellationToken);
 
-            /* The long-query trace leaves a database monitored as its own server to that registration, so its
-               read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases). */
+            /* The long-query trace leaves a database monitored as its own server to that registration, and never
+               keeps a session in master, so its read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases).
+               A logical server lists master beside its user databases. master goes first and is not counted as
+               listed: the note below speaks of user databases, and a list of master alone has none to blame it on
+               (#4961). Other collectors read the list as it came. */
             var listedDatabaseCount = databases.Count;
             if (definition.SkipsSeparatelyMonitoredDatabases)
             {
+                databases = databases.FindAll(LongQueryTraceDatabases.CanHoldSession);
+                listedDatabaseCount = databases.Count;
                 databases = WithoutSeparatelyMonitoredDatabases(server, databases);
             }
 
