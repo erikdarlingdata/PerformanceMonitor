@@ -51,6 +51,11 @@ public partial class RemoteCollectorService
        SqlException's number (PERMISSIONS for a denied ALTER ANY EVENT SESSION, ERROR otherwise). */
     private readonly ConcurrentDictionary<string, Exception> _longQueryTraceFault = new();
 
+    /* The engine edition the reconcile judges a server by. Its own instance, because the app's other one lives in the main
+       window. A known live edition wins and is remembered, so a blank status that a failed connection check wrote leaves the
+       server judged by the edition it had. Its dictionary is concurrent: the per-server tasks run in parallel. */
+    private readonly KnownEngineEditions _engineEditions = new();
+
     /// <summary>
     /// Reconciles the long-query completion XE session to the collector's enabled flag — Erik's
     /// dedicated switch (#1496), default OFF. ENABLED: ensure the session exists + running (re-ensured
@@ -79,7 +84,10 @@ public partial class RemoteCollectorService
         var schedule = _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions");
         var enabled = schedule?.Enabled ?? false;
 
-        var isAzureSqlDatabase = _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5;
+        /* Read once. The ensure and the drop below get this answer: a status that changes during the reconcile (a blank one
+           from a failed connection check, then 5 again) must not send the drop down the Azure branch with none of the
+           registrations this reconcile worked from. */
+        var isAzureSqlDatabase = _engineEditions.IsAzureSqlDatabase(server, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition);
         var separatelyMonitored = isAzureSqlDatabase ? SeparatelyMonitoredDatabasesFor(server) : Array.Empty<string>();
 
         /* Azure SQL Database: the other registrations of this logical server, so a drop leaves a database where one
@@ -113,7 +121,7 @@ public partial class RemoteCollectorService
         {
             if (enabled)
             {
-                var monitored = await EnsureLongQueryCompletionsXeSessionAsync(server, separatelyMonitored, cancellationToken);
+                var monitored = await EnsureLongQueryCompletionsXeSessionAsync(server, isAzureSqlDatabase, separatelyMonitored, cancellationToken);
 
                 /* #3754: the session exists (everywhere it could) - a fault from an earlier cycle is over. */
                 _longQueryTraceFault.TryRemove(server.Id, out _);
@@ -133,7 +141,7 @@ public partial class RemoteCollectorService
             {
                 /* Disabled and either never reconciled, previously enabled, or reconciled under different
                    settings: drop, then remember it is gone so the next cycles skip the connection entirely. */
-                await DropLongQueryCompletionsXeSessionAsync(server, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
+                await DropLongQueryCompletionsXeSessionAsync(server, isAzureSqlDatabase, separatelyMonitored, KeptElsewhere, afterTheCap, cancellationToken);
                 retry.Reset();
                 MarkLongQueryTraceApplied(server.Id, enabled: false, stateKey);
 
@@ -192,11 +200,9 @@ public partial class RemoteCollectorService
     /// databases on Azure SQL DB, for the drop outside that set; null on every other engine.
     /// </summary>
     private async Task<List<string>?> EnsureLongQueryCompletionsXeSessionAsync(
-        ServerConnection server, IReadOnlyList<string> separatelyMonitored, CancellationToken cancellationToken)
+        ServerConnection server, bool isAzureSqlDatabase, IReadOnlyList<string> separatelyMonitored, CancellationToken cancellationToken)
     {
-        var engineEdition = _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition;
-
-        if (engineEdition == 5)
+        if (isAzureSqlDatabase)
         {
             List<string> monitored;
             try
@@ -323,14 +329,13 @@ END;", connection);
     /// </summary>
     private async Task DropLongQueryCompletionsXeSessionAsync(
         ServerConnection server,
+        bool isAzureSqlDatabase,
         IReadOnlyList<string> separatelyMonitored,
         Func<IEnumerable<string>, IReadOnlyList<string>> keptElsewhere,
         bool afterTheCap,
         CancellationToken cancellationToken)
     {
-        var engineEdition = _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition;
-
-        if (engineEdition == 5)
+        if (isAzureSqlDatabase)
         {
             var listed = await ListEveryLongQueryTraceDatabaseAsync(server, cancellationToken);
             var plan = LongQueryTraceDatabases.Plan(enabled: false, listed, Array.Empty<string>(), separatelyMonitored, keptElsewhere(listed));

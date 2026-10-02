@@ -8,11 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service.Targets;
 
@@ -433,9 +435,12 @@ WHERE {alias}.name IN ({literals});";
 
 /// <summary>
 /// <see cref="IXeSessionCleanupTarget"/> over a connected SQL Server target: the ServerRuntime the shared connector produced
-/// (#4732). On Azure SQL Database it visits the same databases <see cref="DarlingXeSessions.EnsureAllAsync"/> would, by the
-/// same rule (a registration that names a database is that database alone; one that names none enumerates master through the
-/// provider's own plan, honoring the server's excluded databases), and skips master, which cannot host a session.
+/// (#4732). On Azure SQL Database it visits two sets, and skips master, which cannot host a session. For the deadlock and
+/// blocked-process sessions it visits the same databases <see cref="DarlingXeSessions.EnsureAllAsync"/> would, by the same rule
+/// (a registration that names a database is that database alone; one that names none enumerates master through the provider's
+/// own plan, honoring the server's excluded databases). For the long-query completion session it visits every online database,
+/// the exclusions not applied, as the trace's off-side reconcile does, except a database monitored as its own server and a
+/// database where another registration of the logical server keeps the session (<see cref="PlanAzureSearch"/>).
 /// </summary>
 internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 {
@@ -519,7 +524,27 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
     internal AzureSearchPlan PlanAzureSearch(IReadOnlyList<string> monitored, IReadOnlyList<string> every)
     {
         var alwaysOn = monitored.Where(database => !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase)).ToList();
-        return new AzureSearchPlan(alwaysOn, alwaysOn);
+        if (!_sessionNames.Contains(LongQueryCompletionsCollector.XeSessionName, StringComparer.OrdinalIgnoreCase))
+        {
+            return new AzureSearchPlan(alwaysOn, Array.Empty<string>());
+        }
+
+        /* The long-query session follows the worker's rule for a trace that is off (LongQueryTraceDatabases.Plan), the one
+           the off-side reconcile applies: every listed database, the registration's exclusions not applied, because a session
+           created before a database was excluded stays there. Never master, never a database monitored as its own server, and
+           never a database where another registration of the logical server keeps the session. The verb cannot read another
+           registration's long-query schedule, so it counts every other registration as keeping it. */
+        var host = _server.Config.Host;
+        var selfId = _server.ServerId.ToString(CultureInfo.InvariantCulture);
+        var registrations = DarlingWorker.LongQueryTraceRegistrations(
+            host, _registry, traceOn: _ => true, databaseScope: _ => Array.Empty<string>());
+        var separatelyMonitored = AzureMasterScope.SeparatelyMonitoredDatabases(
+            isAzureSqlDb: true, selfId, host, _server.Config.Database, DarlingWorker.LiveAlertTargets(_registry));
+        var keptElsewhere = LongQueryTraceDatabases.KeptElsewhere(
+            selfId, host, every, registrations, DarlingWorker.LongQueryTraceServerSeparatelyMonitored(host, _registry));
+
+        var off = LongQueryTraceDatabases.Plan(enabled: false, every, Array.Empty<string>(), separatelyMonitored, keptElsewhere);
+        return new AzureSearchPlan(alwaysOn, off.Drop);
     }
 
     public async Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken)
@@ -539,13 +564,19 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
             return new XeSessionSearch(found, problems);
         }
 
-        foreach (var database in await ListAzureDatabasesAsync(cancellationToken))
+        var monitored = await ListAzureDatabasesAsync(applyExclusions: true, cancellationToken);
+
+        /* The second listing only where exclusions could make it differ, and only for a search that includes the long-query
+           session. */
+        var every = _server.Config.ExcludedDatabases.Count > 0
+            && _sessionNames.Contains(LongQueryCompletionsCollector.XeSessionName, StringComparer.OrdinalIgnoreCase)
+                ? await ListAzureDatabasesAsync(applyExclusions: false, cancellationToken)
+                : monitored;
+        var plan = PlanAzureSearch(monitored, every);
+
+        foreach (var database in plan.Visited)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (string.Equals(database, "master", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
 
             try
             {
@@ -553,7 +584,10 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
                 await connection.OpenAsync(cancellationToken);
                 foreach (var name in await ReadNamesAsync(connection, FindDatabaseSql, cancellationToken))
                 {
-                    found.Add(new ExistingXeSession(name, XeSessionScope.Database, database));
+                    if (plan.Reports(database, name))
+                    {
+                        found.Add(new ExistingXeSession(name, XeSessionScope.Database, database));
+                    }
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -595,13 +629,15 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
     }
 
     /// <summary>
-    /// The databases <see cref="DarlingXeSessions.EnsureAllAsync"/> visits on Azure SQL Database, by the collector runner's
-    /// rule (see its <c>GetAzureDatabaseListAsync</c>): a registration that names a database sweeps that database alone
-    /// (#2220), and one that names none enumerates master through the provider's own plan. Unlike the runner there is no
-    /// fallback when master cannot be read (a registration that names no database has nothing to fall back to), so the
-    /// failure propagates and the verb reports the server as unavailable.
+    /// The databases the search lists on Azure SQL Database, by the collector runner's rule (see its
+    /// <c>GetAzureDatabaseListAsync</c>): a registration that names a database sweeps that database alone (#2220), and one
+    /// that names none enumerates master through the provider's own plan. With <paramref name="applyExclusions"/> the list is
+    /// the one <see cref="DarlingXeSessions.EnsureAllAsync"/> visits, minus the registration's excluded databases; without it,
+    /// every online database, as the long-query trace's off-side reconcile lists them. Unlike the runner there is no fallback
+    /// when master cannot be read (a registration that names no database has nothing to fall back to), so the failure
+    /// propagates and the verb reports the server as unavailable.
     /// </summary>
-    private async Task<IReadOnlyList<string>> ListAzureDatabasesAsync(CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<string>> ListAzureDatabasesAsync(bool applyExclusions, CancellationToken cancellationToken)
     {
         var own = AzureSweepScope.OwnDatabaseOrEmpty(new SqlConnectionStringBuilder(_server.ConnectionString).InitialCatalog);
         if (own.Count > 0)
@@ -609,8 +645,7 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
             return own;
         }
 
-        var (masterConnectionString, query) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
-            _server.ConnectionString, _server.Config.ExcludedDatabases, databaseScope: null);
+        var (masterConnectionString, query) = DarlingCollectorRunner.AzureDatabaseListPlan(_server, databaseScope: null, applyExclusions);
 
         var databases = new List<string>();
         using var connection = new SqlConnection(masterConnectionString);

@@ -343,18 +343,6 @@ public sealed class LongQueryTraceDropRetry
     private int _failures;
     private DateTime? _nextAttemptUtc;
 
-    /// <summary>Failed passes in a row under the current state key, before the cap.</summary>
-    public int ConsecutiveFailures
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _failures;
-            }
-        }
-    }
-
     /// <summary>When the next attempt after the cap is due. Null until the cap gives up under the current key.</summary>
     public DateTime? NextAttemptUtc
     {

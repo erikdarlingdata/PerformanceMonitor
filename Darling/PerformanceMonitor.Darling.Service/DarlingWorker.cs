@@ -4233,6 +4233,24 @@ LIMIT 1";
             logger.LogWarning("[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
                 server.Config.DisplayName, ex.Message);
 
+            /* A pass that ran and threw must move its hourly clock, or every later sweep is another pass and another
+               warning, with no cap. The full pass keeps its retry on each sweep: the latch is still unset. The hourly
+               create pass waits an hour. The attempt after the cap waits an hour too, and the create side it ran
+               counts as the hourly create pass, as in the drop-failure arm above. The fault below stays set until a
+               pass succeeds. */
+            if (pass == LongQueryTracePass.CreateOnly)
+            {
+                server.LongQueryTraceAppliedAtUtc = utcNow;
+            }
+            else if (pass == LongQueryTracePass.RetryAfterCap)
+            {
+                server.LongQueryTraceDropRetry.RecordFailure(stateKey ?? string.Empty, utcNow);
+                if (enabled)
+                {
+                    server.LongQueryTraceAppliedAtUtc = utcNow;
+                }
+            }
+
             /* #3754: while ENABLING, a throw means the session could not be created where the collector
                will read - the one CREATE on-prem, or every database on Azure SQL DB (the Azure arm throws
                only for all-refused). Record it so this sweep's run of the collector is classified

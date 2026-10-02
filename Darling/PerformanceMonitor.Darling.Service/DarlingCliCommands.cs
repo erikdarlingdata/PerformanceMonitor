@@ -5903,7 +5903,8 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         "  --drop-xe-sessions <server-name> [--dry-run] [--config <path>]" + Environment.NewLine +
         "      Connect to the named server (resolved from the configuration exactly as --validate-config resolves it) and drop the" + Environment.NewLine +
         $"      Darling Extended Events sessions on it: {DarlingXeSessionCleanup.SessionNamesPhrase()}, server scope, and on" + Environment.NewLine +
-        "      Azure SQL Database the database-scoped copies in each monitored database. --dry-run lists them and drops nothing." + Environment.NewLine +
+        "      Azure SQL Database the database-scoped copies in each monitored database, and for the long query completions session in the" + Environment.NewLine +
+        "      databases the server excludes too (not in a database another registration of the server keeps it in). --dry-run lists them and drops nothing." + Environment.NewLine +
         "      Run it just before you remove the server (it finds only a server this service still monitors, and stops that server's deadlock and blocked-process capture until this service reconnects); after the removal, use --print-sql." + Environment.NewLine +
         "  --drop-xe-sessions --print-sql" + Environment.NewLine +
         "      Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
@@ -6050,19 +6051,20 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
         DropXeSessionsAsync(rest, ConnectXeSessionCleanupTargetAsync, output, error, cancellationToken);
 
-    /// <summary>The connector the public verb uses: the shared server connector, wrapped as the cleanup target. Throws when the
-    /// server cannot be reached.</summary>
+    /// <summary>The connector the public verb uses: the shared server connector, wrapped as the cleanup target, with the servers
+    /// the verb resolved the target in so the target knows the other registrations of an Azure SQL Database server. Throws when
+    /// the server cannot be reached.</summary>
     private static async Task<IXeSessionCleanupTarget> ConnectXeSessionCleanupTargetAsync(
-        MonitoredServer server, CancellationToken cancellationToken)
+        MonitoredServer server, IReadOnlyList<MonitoredServer> registry, CancellationToken cancellationToken)
     {
         var runtime = await DarlingServerConnector.ConnectAsync(server, logger: null, cancellationToken);
-        return new SqlServerXeSessionCleanupTarget(runtime);
+        return new SqlServerXeSessionCleanupTarget(runtime, sessionNames: null, registry);
     }
 
     /// <summary>The verb with the connection injected, so a test drives the connect-and-drop path without a SQL Server.</summary>
     internal static async Task<int> DropXeSessionsAsync(
         string[] rest,
-        Func<MonitoredServer, CancellationToken, Task<IXeSessionCleanupTarget>> connect,
+        Func<MonitoredServer, IReadOnlyList<MonitoredServer>, CancellationToken, Task<IXeSessionCleanupTarget>> connect,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
@@ -6149,7 +6151,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         IXeSessionCleanupTarget target;
         try
         {
-            target = await connect(server, cancellationToken);
+            target = await connect(server, targets, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

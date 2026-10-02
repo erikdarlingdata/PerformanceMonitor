@@ -294,7 +294,6 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         await rig.ReconcileAsync(enabled: false);
 
         Assert.Equal(new[] { "alpha", "beta", "gamma" }, rig.Dropped);
-        Assert.Equal(0, rig.State.LongQueryTraceDropRetry.ConsecutiveFailures);
         Assert.Null(rig.State.LongQueryTraceDropRetry.NextAttemptUtc);
 
         /* Done, with nothing left to retry: an hour later nothing runs. */
