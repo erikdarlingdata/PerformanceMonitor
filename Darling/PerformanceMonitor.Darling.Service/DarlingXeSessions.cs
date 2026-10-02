@@ -991,8 +991,9 @@ SELECT /* PerformanceMonitorDarling */
         /* Some refused: the session exists where it could, and the run that reads those databases is a real
            read - SUCCESS is right for it - but its row must say that the others are not in it. The shared
            #2623 composer, so this loss is worded exactly as the runners word theirs; null when nothing
-           failed, which is the ordinary sweep. */
-        var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure?.Message);
+           failed, which is the ordinary sweep. The first failure is worded as the per-database line above words it, so a
+           create or start refused on Azure SQL Database carries the caps sentence in the note too (#4961). */
+        var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure is null ? null : AlwaysOnXeSessions.DescribeFailure(firstFailure));
 
         /* The worker's hourly pass while the trace is on stops here: it brings back a session dropped from outside,
            and leaves the drop side to a connect, a change of the state key, or an attempt after the cap. */
