@@ -63,7 +63,7 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         public DateTime Clock { get; set; } = new(2026, 10, 2, 12, 0, 0, DateTimeKind.Utc);
         public HashSet<string> Sessions { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-        /* #4961: the guard an on-premises server's reconcile resolves, and how many times it did. A rig that sets none passes none,
+        /* #4961: the guard an on-premises server's reconcile resolves, and how many times it did. A test that sets none passes none,
            as the sweep does for an Azure SQL Database target. */
         public Func<Task<LongQueryTraceInstanceGuard>>? InstanceGuard { get; set; }
         public int GuardResolutions { get; set; }
@@ -1681,7 +1681,7 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     private const string InstanceName = "SQL01";
 
     /// <summary>
-    /// Gives the rig the guard the sweep hands an on-premises reconcile: the worker's own builder, over a registry of this
+    /// Gives the test's registration the guard the sweep hands an on-premises reconcile: the worker's own builder, over a registry of this
     /// install's other registrations, each one's effective trace setting, and the name each instance last reported. Every
     /// resolution is counted. A null name is an instance that has reported none.
     /// </summary>
