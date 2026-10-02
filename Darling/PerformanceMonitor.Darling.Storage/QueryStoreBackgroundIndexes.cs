@@ -76,7 +76,8 @@ public static class QueryStoreBackgroundIndexes
     /// the cycle's rows for that database are not stored until then. The seeded store scanned about 1 GB/s warm and a
     /// volume capped at 250 MB/s reads 256 MB in about a second, so this limit keeps the lock far below the 10 s
     /// deadline, where a 5-9 GB chunk would hold it for tens of seconds. The newest chunk is the one the collector
-    /// writes; older chunks take the same lock but only the backfill and a late write touch them.</para>
+    /// writes: the live cycle and the backfill both stamp the current time, so older chunks, which take the same lock
+    /// for their own longer scans, are not written to.</para>
     /// </summary>
     public const long NewestChunkMaxBytes = 256L * 1024 * 1024;
 
