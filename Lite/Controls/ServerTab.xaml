@@ -1722,10 +1722,13 @@
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="BlockingSlicer" Grid.Row="0"/>
-                            <DataGrid x:Name="BlockedProcessReportGrid" Grid.Row="1"
+                                <TextBlock x:Name="BlockedProcessReportNoteText" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid x:Name="BlockedProcessReportGrid" Grid.Row="2"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource BlockingRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
@@ -1833,10 +1836,13 @@
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="DeadlockSlicer" Grid.Row="0"/>
-                            <DataGrid x:Name="DeadlockGrid" Grid.Row="1"
+                                <TextBlock x:Name="DeadlockNoteText" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid x:Name="DeadlockGrid" Grid.Row="2"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource DeadlockRowStyle}"
                                       MouseDoubleClick="DeadlockGrid_MouseDoubleClick"

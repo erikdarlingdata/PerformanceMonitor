@@ -96,6 +96,9 @@ public partial class FinOpsTab : UserControl
                 AppLogger.Error("FinOps", $"Failed to load optimized locking note: {noteEx.Message}");
             }
             if (_loads.Superseded(nameof(LoadIndexLockingGridAsync), gen)) return;
+            var separatelyMonitoredNote = PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.ListNote(serverId);
+            LockingSeparatelyMonitoredNoteText.Text = separatelyMonitoredNote ?? "";
+            LockingSeparatelyMonitoredNoteText.Visibility = separatelyMonitoredNote is null ? Visibility.Collapsed : Visibility.Visible;
             OptimizedLockingNoteText.Text = optimizedLockingNote ?? "";
             OptimizedLockingNoteText.Visibility = optimizedLockingNote is null ? Visibility.Collapsed : Visibility.Visible;
         }

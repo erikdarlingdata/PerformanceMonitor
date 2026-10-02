@@ -16,6 +16,7 @@ namespace PerformanceMonitorLite.Tests;
 /// Pins the BLOCKING_EVENTS and DEADLOCKS facts and both anomaly spike detectors, on the blocked-process arm
 /// and the DMV-snapshot arm, and the every-process rule for deadlock graphs. A null or empty list changes nothing.
 /// </summary>
+[Collection(SeparatelyMonitoredProviderCollection.Name)]
 public class AzureMasterAnalysisScopeTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = -4894_07;
