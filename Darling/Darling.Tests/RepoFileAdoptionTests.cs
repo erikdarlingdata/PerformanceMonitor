@@ -203,6 +203,8 @@ public sealed class RepoFileAdoptionTests
            on its own line, and asserts the display-name assignment sits inside it and ahead of the dot update. */
         "ServerPageTitlePinTests.cs",
         "ServerPageTabsTests.cs",
+        // #4218: reads build.yml to pin the SignPath action version.
+        "SignPathActionVersionTests.cs",
         "StartupFailureTriageTests.cs",
         "StoreCopyPhaseTests.cs",
         /* #3754: its reconcile and worker pins anchor multi-statement arms across their line breaks - the
