@@ -16,6 +16,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 using static Darling.Tests.RepoFile;
+using LogLevel = Microsoft.Extensions.Logging.LogLevel;
 
 namespace Darling.Tests;
 
@@ -68,6 +69,73 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         public IEnumerable<string> Dropped => Calls.Where(c => !c.Create).Select(c => c.Database);
 
         public IEnumerable<string> Created => Calls.Where(c => c.Create).Select(c => c.Database);
+
+        /* #4961: the legacy session's drops, kept apart from the per-install work above. Each entry is the database the
+           drop ran in; the server's own session is the empty name. */
+        public List<string> LegacyCalls { get; } = new();
+        public List<string> LegacyNames { get; } = new();
+        public HashSet<string> RefuseLegacy { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /* The databases that hold a legacy session right now. An older install creates it again by adding one here, and
+           two installs that monitor the same server share one set. */
+        public HashSet<string> LegacySessions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /* Every call in the order it ran: "legacy:alpha", "create:alpha", "drop:gamma". */
+        public List<string> Events { get; } = new();
+
+        /* Where this install keeps the record of the legacy drop, in memory because the store is never opened. */
+        public InMemoryLegacyRecords Records { get; init; } = new();
+
+        /* What a reconnect does to the loop state (DarlingWorker's connect block), and to the runner. */
+        public void Reconnect()
+        {
+            Runner.OnServerReconnected(State.Runtime!.ServerId);
+            State.LongQueryTraceApplied = null;
+            State.LongQueryTraceAppliedKey = null;
+            State.LongQueryTraceAppliedAtUtc = null;
+            State.LongQueryTraceFault = null;
+            State.LongQueryTracePartialNote = null;
+            State.LongQueryTraceDropRetry.Reset();
+            State.LongQueryTraceCreateWarned = false;
+        }
+    }
+
+    /// <summary>The record the legacy drop leaves, in memory. A read or a write fails on demand, as the store's would.</summary>
+    internal sealed class InMemoryLegacyRecords : ILegacyLongQueryRecords
+    {
+        public Dictionary<(int ServerId, string StateKey), string> Rows { get; } = new();
+        public Exception? ReadFailure { get; set; }
+        public Exception? WriteFailure { get; set; }
+        public int Reads { get; private set; }
+        public int Writes { get; private set; }
+
+        public Task<IReadOnlyCollection<string>> ReadAsync(int serverId, CancellationToken cancellationToken)
+        {
+            Reads++;
+            if (ReadFailure is { } failure)
+            {
+                return Task.FromException<IReadOnlyCollection<string>>(failure);
+            }
+
+            return Task.FromResult<IReadOnlyCollection<string>>(Rows.Keys
+                .Where(k => k.ServerId == serverId && k.StateKey.StartsWith(LegacyLongQuerySession.StateKeyPrefix, StringComparison.Ordinal))
+                .Select(k => k.StateKey)
+                .ToList());
+        }
+
+        public Task WriteAsync(int serverId, string stateKey, DateTime droppedUtc, CancellationToken cancellationToken)
+        {
+            if (WriteFailure is { } failure)
+            {
+                return Task.FromException(failure);
+            }
+
+            Writes++;
+            Rows[(serverId, stateKey)] = droppedUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+            return Task.CompletedTask;
+        }
+
+        public bool Has(int serverId, string database) => Rows.ContainsKey((serverId, LegacyLongQuerySession.StateKey(database)));
     }
 
     /// <summary>A logical-server registration (no database named) on an Azure SQL Database server.</summary>
@@ -101,7 +169,7 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     private const string InstallIdValue = "0a1b2c3d";
     private static readonly string OwnSession = LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallIdValue);
 
-    private Rig BuildRig(MonitoredServer config, int serverId, bool azureSqlDatabase = true, string? installId = InstallIdValue)
+    private Rig BuildRig(MonitoredServer config, int serverId, bool azureSqlDatabase = true, string? installId = InstallIdValue, InMemoryLegacyRecords? records = null)
     {
         var runtime = new ServerRuntime
         {
@@ -125,7 +193,11 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
             Runner = runner,
             State = new DarlingWorker.ServerLoopState { Config = config, Runtime = runtime },
             Config = config,
+            Records = records ?? new InMemoryLegacyRecords(),
         };
+
+        runner.LegacyLongQueryRecordsForTests = rig.Records;
+        runner.LegacyLongQueryPresentForTests = (_, database, _) => Task.FromResult(rig.LegacySessions.Contains(database));
 
         runner.LongQueryTraceListOverrideForTests = (_, allDatabases, scope, _) =>
         {
@@ -145,6 +217,21 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
 
         runner.LongQueryTraceDatabaseOverrideForTests = (_, database, create, sessionName, _) =>
         {
+            if (sessionName == LongQueryCompletionsCollector.LegacyXeSessionName)
+            {
+                rig.LegacyCalls.Add(database);
+                rig.LegacyNames.Add(sessionName);
+                rig.Events.Add("legacy:" + database);
+                if (rig.RefuseLegacy.Contains(database))
+                {
+                    return Task.FromException(new InvalidOperationException($"The legacy drop was refused in {database}."));
+                }
+
+                rig.LegacySessions.Remove(database);
+                return Task.CompletedTask;
+            }
+
+            rig.Events.Add((create ? "create:" : "drop:") + database);
             rig.Calls.Add((database, create));
             rig.Names.Add(sessionName);
             if (rig.Refuse.Contains(database))
@@ -165,6 +252,17 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         };
 
         return rig;
+    }
+
+    /// <summary>A service restart: a new runner and a new loop state over the same record, on the same server.</summary>
+    private Rig Restart(Rig before)
+    {
+        var after = BuildRig(
+            before.Config, before.State.Runtime!.ServerId, before.State.Runtime.Target.IsAzureSqlDb, before.Runner.InstallId, before.Records);
+        after.Listed = before.Listed;
+        after.LegacySessions = before.LegacySessions;
+        after.Clock = before.Clock;
+        return after;
     }
 
     /* ── M1: a failed listing or drop is retried, with a cap ── */
@@ -1033,6 +1131,10 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         Assert.Equal(rig.Calls.Count, rig.Names.Count);
         Assert.All(rig.Names, name => Assert.Equal(OwnSession, name));
         Assert.DoesNotContain(rig.Names, name => name == LongQueryCompletionsCollector.LegacyXeSessionName);
+
+        /* The legacy session is dropped once in each listed database but master, by its own name, and never again. */
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, rig.LegacyCalls);
+        Assert.All(rig.LegacyNames, name => Assert.Equal(LongQueryCompletionsCollector.LegacyXeSessionName, name));
     }
 
     [Fact]
@@ -1050,6 +1152,10 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         Assert.Single(rig.Calls, c => !c.Create);
         Assert.Equal(3, rig.Names.Count);
         Assert.All(rig.Names, name => Assert.Equal(OwnSession, name));
+
+        /* The legacy session is dropped once on the server, by its own name, and the hourly pass does not touch it. */
+        Assert.Equal(new[] { TheServer }, rig.LegacyCalls);
+        Assert.All(rig.LegacyNames, name => Assert.Equal(LongQueryCompletionsCollector.LegacyXeSessionName, name));
     }
 
     [Theory]
@@ -1111,5 +1217,457 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(OwnSession, databaseScoped: false, 2_000_000);
         Assert.Contains("STARTUP_STATE = OFF", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("STARTUP_STATE = ON", sql, StringComparison.Ordinal);
+    }
+
+    /* ── #4961: the legacy session is dropped once per registration and database, then recorded ── */
+
+    private static readonly string LegacyName = LongQueryCompletionsCollector.LegacyXeSessionName;
+
+    private static readonly string[] ThreeDatabases = { "alpha", "beta", "gamma" };
+
+    /* The one Information line that names a legacy session an older install created again. */
+    private static int Notices(Rig rig) =>
+        rig.Logger.Entries.Count(e => e.Level == LogLevel.Information && e.Message.Contains(LegacyName, StringComparison.Ordinal));
+
+    [Fact]
+    public async Task Legacy_Azure_IsDroppedOncePerDatabase_RecordedAfterTheDrop_AndNeverDroppedAgain()
+    {
+        var rig = BuildRig();
+        rig.LegacySessions.UnionWith(ThreeDatabases);
+
+        await rig.ReconcileAsync(enabled: true);
+
+        /* Each listed database but master, once, and the session is gone. */
+        Assert.Equal(ThreeDatabases, rig.LegacyCalls);
+        Assert.Empty(rig.LegacySessions);
+        foreach (var database in ThreeDatabases)
+        {
+            Assert.True(rig.Records.Has(ServerId, database), database);
+            var value = rig.Records.Rows[(ServerId, LegacyLongQuerySession.StateKey(database))];
+            Assert.True(DateTime.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out _), value);
+        }
+
+        Assert.False(rig.Records.Has(ServerId, "master"));
+        Assert.Equal(ThreeDatabases.Length, rig.Records.Rows.Count);
+
+        /* A reconnect, the trace turned off and on again: each is a full pass, and none drops it again. */
+        rig.Reconnect();
+        await rig.ReconcileAsync(enabled: true);
+        await rig.ReconcileAsync(enabled: false);
+        rig.Clock += TimeSpan.FromMinutes(1);
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Equal(ThreeDatabases, rig.LegacyCalls);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Legacy_OnPrem_IsDroppedOnceOnTheServer_WhetherTheTraceIsOnOrOff_BeforeThePerInstallWork(bool enabled)
+    {
+        var rig = BuildOnPremRig();
+        rig.LegacySessions.Add(TheServer);
+
+        await rig.ReconcileAsync(enabled);
+
+        Assert.Equal(new[] { TheServer }, rig.LegacyCalls);
+        Assert.Equal(new[] { "legacy:", enabled ? "create:" : "drop:" }, rig.Events);
+
+        /* The server scope's database part is empty, and the value is the time of the drop. */
+        var key = Assert.Single(rig.Records.Rows.Keys);
+        Assert.Equal((ServerId, "legacy_session_dropped:"), key);
+
+        rig.Reconnect();
+        await rig.ReconcileAsync(!enabled);
+        await rig.ReconcileAsync(enabled);
+
+        Assert.Single(rig.LegacyCalls);
+    }
+
+    [Fact]
+    public async Task Legacy_ACrashBetweenTheDropAndTheRecord_CostsOneMoreDrop_ThenIsRecorded()
+    {
+        var rig = BuildRig();
+        rig.LegacySessions.UnionWith(ThreeDatabases);
+        rig.Records.WriteFailure = new InvalidOperationException("The store went away.");
+
+        await rig.ReconcileAsync(enabled: true);
+
+        /* The drops ran and the record did not, so the pass is not done and nothing is remembered. */
+        Assert.Equal(ThreeDatabases, rig.LegacyCalls);
+        Assert.Empty(rig.Records.Rows);
+        Assert.Null(rig.State.LongQueryTraceApplied);
+
+        /* The next sweep drops each one more time and records it. After that nothing drops it again. */
+        rig.Records.WriteFailure = null;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(ThreeDatabases.Length * 2, rig.LegacyCalls.Count);
+        Assert.True(rig.State.LongQueryTraceApplied);
+
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        rig.Reconnect();
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(ThreeDatabases.Length * 2, rig.LegacyCalls.Count);
+    }
+
+    [Fact]
+    public async Task Legacy_TheRecordSurvivesAServiceRestart_AndAReconnect()
+    {
+        var rig = BuildRig();
+        rig.LegacySessions.UnionWith(ThreeDatabases);
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(ThreeDatabases, rig.LegacyCalls);
+
+        /* A service restart: a new runner that has only the record to go on. */
+        var restarted = Restart(rig);
+        restarted.LegacySessions.UnionWith(ThreeDatabases);
+        await restarted.ReconcileAsync(enabled: true);
+        Assert.Empty(restarted.LegacyCalls);
+
+        restarted.Reconnect();
+        await restarted.ReconcileAsync(enabled: true);
+        Assert.Empty(restarted.LegacyCalls);
+        Assert.Equal(ThreeDatabases.Length, restarted.LegacySessions.Count);
+    }
+
+    [Fact]
+    public async Task Legacy_ASessionAnOlderInstallCreatesAgain_IsNotDropped_AndOneInformationLineNamesItPerConnect()
+    {
+        var rig = BuildRig();
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(ThreeDatabases, rig.LegacyCalls);
+        Assert.Equal(0, Notices(rig));
+
+        /* An older install creates it again. The hourly create pass finds it, says so once, and leaves it alone. */
+        rig.LegacySessions.Add("alpha");
+        rig.LegacyCalls.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Empty(rig.LegacyCalls);
+        Assert.Contains("alpha", rig.LegacySessions);
+        var notice = Assert.Single(rig.Logger.Entries, e => e.Level == LogLevel.Information && e.Message.Contains(LegacyName, StringComparison.Ordinal));
+        Assert.Contains("older Lite or Darling created it", notice.Message, StringComparison.Ordinal);
+        Assert.Contains("--drop-xe-sessions", notice.Message, StringComparison.Ordinal);
+
+        /* A reconnect is a new connect: the full pass leaves it alone and says so again. */
+        rig.Reconnect();
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Empty(rig.LegacyCalls);
+        Assert.Equal(2, Notices(rig));
+        Assert.Contains("alpha", rig.LegacySessions);
+    }
+
+    [Fact]
+    public async Task Legacy_TheAttemptAfterTheCap_LeavesASessionAnOlderInstallCreatedAgainAlone()
+    {
+        /* gamma is excluded and refuses the drop outside the monitored set, until the cap gives up on it. */
+        var rig = BuildRig("gamma");
+        rig.Refuse.Add("gamma");
+        for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync(enabled: true);
+        }
+
+        Assert.Equal(ThreeDatabases, rig.LegacyCalls);
+        Assert.True(rig.State.LongQueryTraceDropRetry.NextAttemptUtc is not null);
+
+        rig.LegacySessions.Add("beta");
+        rig.LegacyCalls.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Empty(rig.LegacyCalls);
+        Assert.Contains("beta", rig.LegacySessions);
+        Assert.Equal(1, Notices(rig));
+    }
+
+    [Fact]
+    public async Task Legacy_TheDrop_NamesOnlyTheLegacySession_NeverAnotherInstallsNorTheDeadlockOrBlockedProcessSessions()
+    {
+        var azure = BuildRig("gamma");
+        azure.LegacySessions.UnionWith(ThreeDatabases);
+        await azure.ReconcileAsync(enabled: true);
+        azure.Clock += LongQueryTraceDatabases.RetryInterval;
+        await azure.ReconcileAsync(enabled: true);
+        await azure.ReconcileAsync(enabled: false);
+
+        var onPrem = BuildOnPremRig();
+        onPrem.LegacySessions.Add(TheServer);
+        await onPrem.ReconcileAsync(enabled: false);
+
+        foreach (var rig in new[] { azure, onPrem })
+        {
+            Assert.NotEmpty(rig.LegacyNames);
+            Assert.All(rig.LegacyNames, name => Assert.Equal(LegacyName, name));
+            Assert.NotEmpty(rig.Names);
+            Assert.All(rig.Names, name => Assert.Equal(OwnSession, name));
+        }
+
+        /* The statement builder takes the legacy name and a per-install one, and nothing else. */
+        foreach (var other in new[] { DeadlocksCollector.XeSessionName, BlockedProcessReportCollector.XeSessionName })
+        {
+            Assert.NotEqual(LegacyName, other);
+            Assert.Throws<ArgumentException>(() => LongQueryCompletionsCollector.BuildDropSessionSql(other, databaseScoped: false));
+            Assert.Throws<ArgumentException>(() => LongQueryCompletionsCollector.BuildDropSessionSql(other, databaseScoped: true));
+        }
+    }
+
+    [Fact]
+    public async Task Legacy_AFailedDrop_IsNotRecorded_AndRetriesOnTheCap_ThenOnceAnHourAtDebug()
+    {
+        var rig = BuildRig();
+        rig.LegacySessions.UnionWith(ThreeDatabases);
+        rig.RefuseLegacy.Add("beta");
+
+        for (var pass = 1; pass < LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync(enabled: true);
+            Assert.Null(rig.State.LongQueryTraceApplied);
+        }
+
+        /* The first pass tried every database. The passes after it retried beta alone, which is the one not recorded. */
+        Assert.Equal(new[] { "alpha", "beta", "gamma", "beta", "beta", "beta" }, rig.LegacyCalls);
+        Assert.True(rig.Records.Has(ServerId, "alpha"));
+        Assert.True(rig.Records.Has(ServerId, "gamma"));
+        Assert.False(rig.Records.Has(ServerId, "beta"));
+
+        /* The failed legacy drop did not stop the per-install session from being created there. */
+        Assert.Contains("beta", rig.Sessions);
+
+        await rig.ReconcileAsync(enabled: true);
+        Assert.True(rig.State.LongQueryTraceApplied);
+        var giveUp = Assert.Single(rig.Logger.Entries, e => e.Message.Contains("Stopped retrying", StringComparison.Ordinal));
+        Assert.Equal(LogLevel.Warning, giveUp.Level);
+        Assert.Contains("beta", giveUp.Message, StringComparison.Ordinal);
+
+        /* Done for now: the sweeps within the hour try nothing. An hour later, one attempt, logged at Debug. */
+        rig.LegacyCalls.Clear();
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Empty(rig.LegacyCalls);
+        var warnings = Warnings(rig);
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(new[] { "beta" }, rig.LegacyCalls);
+        Assert.Equal(warnings, Warnings(rig));
+
+        /* The refusal ends: the next attempt records it, and the attempts end. */
+        rig.RefuseLegacy.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.True(rig.Records.Has(ServerId, "beta"));
+        Assert.Null(rig.State.LongQueryTraceDropRetry.NextAttemptUtc);
+    }
+
+    [Fact]
+    public async Task Legacy_OnPrem_AFailedDrop_IsNotRecorded_AndRetriesOnTheCap_WhileThePerInstallSessionIsStillCreated()
+    {
+        var rig = BuildOnPremRig();
+        rig.LegacySessions.Add(TheServer);
+        rig.RefuseLegacy.Add(TheServer);
+
+        for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync(enabled: true);
+        }
+
+        Assert.Equal(LongQueryTraceDatabases.DropAttemptCap, rig.LegacyCalls.Count);
+        Assert.Equal(LongQueryTraceDatabases.DropAttemptCap, rig.Created.Count());
+        Assert.Empty(rig.Records.Rows);
+        var giveUp = Assert.Single(rig.Logger.Entries, e => e.Message.Contains("Stopped retrying", StringComparison.Ordinal));
+        Assert.Contains("may remain on the server", giveUp.Message, StringComparison.Ordinal);
+
+        rig.RefuseLegacy.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.True(rig.Records.Has(ServerId, TheServer));
+        Assert.Null(rig.State.LongQueryTraceDropRetry.NextAttemptUtc);
+    }
+
+    [Fact]
+    public async Task Azure_InEachDatabase_TheLegacyDropRunsBeforeThePerInstallCreate()
+    {
+        /* gamma is excluded: its legacy drop still runs, and its per-install drop follows it. */
+        var rig = BuildRig("gamma");
+        rig.LegacySessions.UnionWith(ThreeDatabases);
+
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Equal(
+            new[] { "legacy:alpha", "create:alpha", "legacy:beta", "create:beta", "legacy:gamma", "drop:gamma" },
+            rig.Events);
+        Assert.Equal(2, rig.ListCalls);
+    }
+
+    [Fact]
+    public async Task Azure_AFailedLegacyDrop_DoesNotStopThePerInstallCreateInThatDatabase()
+    {
+        var rig = BuildRig();
+        rig.RefuseLegacy.Add("beta");
+
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Equal(
+            new[] { "legacy:alpha", "create:alpha", "legacy:beta", "create:beta", "legacy:gamma", "create:gamma" },
+            rig.Events);
+        Assert.Contains("beta", rig.Sessions);
+        Assert.Null(rig.State.LongQueryTraceApplied);
+    }
+
+    [Fact]
+    public async Task Azure_TheTraceOff_DropsTheLegacySessionOnceInEachListedDatabase_WithOneListing()
+    {
+        var rig = BuildRig();
+        rig.LegacySessions.UnionWith(ThreeDatabases);
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Equal(
+            new[] { "legacy:alpha", "legacy:beta", "legacy:gamma", "drop:alpha", "drop:beta", "drop:gamma" },
+            rig.Events);
+        Assert.Equal(1, rig.ListCalls);
+        Assert.Equal(ThreeDatabases.Length, rig.Records.Rows.Count);
+    }
+
+    [Fact]
+    public async Task Legacy_ARecordThatCannotBeRead_SkipsTheLegacyStep_NeverDropsTwice_AndTriesAgainOnTheNextPass()
+    {
+        /* A store that has the record, read by a restarted service while the store is not answering. */
+        var rig = BuildRig();
+        await rig.ReconcileAsync(enabled: true);
+        var restarted = Restart(rig);
+        restarted.LegacySessions.Add("alpha");
+        restarted.Records.ReadFailure = new InvalidOperationException("The store is not answering.");
+
+        await restarted.ReconcileAsync(enabled: true);
+
+        Assert.Empty(restarted.LegacyCalls);
+        Assert.Equal(ThreeDatabases, restarted.Created);
+        Assert.Null(restarted.State.LongQueryTraceApplied);
+        Assert.Contains(restarted.Logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("The store is not answering.", StringComparison.Ordinal));
+
+        restarted.Records.ReadFailure = null;
+        await restarted.ReconcileAsync(enabled: true);
+
+        Assert.Empty(restarted.LegacyCalls);
+        Assert.True(restarted.State.LongQueryTraceApplied);
+        Assert.Contains("alpha", restarted.LegacySessions);
+
+        /* A store with no record yet: the unreadable pass drops nothing, and the next one drops each session once. */
+        var fresh = BuildRig();
+        fresh.LegacySessions.UnionWith(ThreeDatabases);
+        fresh.Records.ReadFailure = new InvalidOperationException("The store is not answering.");
+        await fresh.ReconcileAsync(enabled: true);
+        Assert.Empty(fresh.LegacyCalls);
+        Assert.Equal(ThreeDatabases, fresh.Created);
+
+        fresh.Records.ReadFailure = null;
+        await fresh.ReconcileAsync(enabled: true);
+        Assert.Equal(ThreeDatabases, fresh.LegacyCalls);
+        Assert.Equal(ThreeDatabases.Length, fresh.Records.Rows.Count);
+    }
+
+    [Fact]
+    public async Task Legacy_OnPrem_ARecordThatCannotBeRead_DropsNothing_AndTheNextPassTriesAgain()
+    {
+        var rig = BuildOnPremRig();
+        rig.LegacySessions.Add(TheServer);
+        rig.Records.ReadFailure = new InvalidOperationException("The store is not answering.");
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Empty(rig.LegacyCalls);
+        Assert.Null(rig.State.LongQueryTraceApplied);
+
+        rig.Records.ReadFailure = null;
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Equal(new[] { TheServer }, rig.LegacyCalls);
+        Assert.False(rig.State.LongQueryTraceApplied);
+    }
+
+    [Fact]
+    public async Task Legacy_AKeyKnownToBeRecorded_IsKeptInMemory_SoLaterPassesDoNotReadTheStoreAgain()
+    {
+        var rig = BuildRig();
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(1, rig.Records.Reads);
+
+        /* Turning the trace off and on again makes full passes, and the hourly pass is the create side alone. */
+        await rig.ReconcileAsync(enabled: false);
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(1, rig.Records.Reads);
+
+        /* A connect reads it again, once. */
+        rig.Reconnect();
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(2, rig.Records.Reads);
+    }
+
+    [Fact]
+    public async Task Legacy_AnOlderDarlingWithTheTraceOn_LosesItsSessionOncePerUpgradedInstall_ThenNeverAgain()
+    {
+        var first = BuildRig(new MonitoredServer { Name = "lqtrace", Host = Host }, ServerId, installId: "0a1b2c3d");
+        var second = BuildRig(new MonitoredServer { Name = "lqtrace", Host = Host }, ServerId, installId: "4e5f6a7b");
+
+        /* One older install's session, in one server, that both upgraded installs see. */
+        second.LegacySessions = first.LegacySessions;
+        first.LegacySessions.UnionWith(ThreeDatabases);
+
+        await first.ReconcileAsync(enabled: true);
+        Assert.Empty(first.LegacySessions);
+
+        /* The older install creates it again at its next connect, and the second upgraded install drops it once. */
+        first.LegacySessions.UnionWith(ThreeDatabases);
+        await second.ReconcileAsync(enabled: true);
+        Assert.Empty(second.LegacySessions);
+
+        /* The older install creates it once more. Neither upgraded install drops it again, at a connect or an hour later. */
+        first.LegacySessions.UnionWith(ThreeDatabases);
+        foreach (var rig in new[] { first, second })
+        {
+            rig.Reconnect();
+            await rig.ReconcileAsync(enabled: true);
+            rig.Clock += LongQueryTraceDatabases.RetryInterval;
+            await rig.ReconcileAsync(enabled: true);
+        }
+
+        Assert.Equal(ThreeDatabases, first.LegacyCalls);
+        Assert.Equal(ThreeDatabases, second.LegacyCalls);
+        Assert.Equal(ThreeDatabases.Length, first.LegacySessions.Count);
+
+        /* Each install made and kept only the session that carries its own id. */
+        Assert.All(first.Names, name => Assert.Equal(LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, "0a1b2c3d"), name));
+        Assert.All(second.Names, name => Assert.Equal(LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, "4e5f6a7b"), name));
+    }
+
+    [Fact]
+    public void TheEnsures_AskForTheLegacySessionInTheirOwnBatch_AndTheLegacyLogicLivesInItsOwnFile()
+    {
+        var xe = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingXeSessions.cs");
+
+        /* The on-premises batch and the Azure SQL Database batch each carry a second SELECT for the legacy name, so finding
+           a session an older install created again costs no round trip of its own. */
+        Assert.Equal(2, xe.Split("legacy_present = ", StringSplitOptions.None).Length - 1);
+        Assert.Contains("FROM sys.server_event_sessions AS ses", xe, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.database_event_sessions AS des", xe, StringComparison.Ordinal);
+
+        /* DarlingXeSessions.cs never spells the legacy constant: the one-time drop and its record live in their own file. */
+        Assert.DoesNotContain("LegacyXeSessionName", xe, StringComparison.Ordinal);
+        var legacy = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingLegacyLongQuerySession.cs");
+        Assert.Contains("LongQueryCompletionsCollector.LegacyXeSessionName", legacy, StringComparison.Ordinal);
+        Assert.Contains("LegacyLongQuerySession.StateKey(database)", legacy, StringComparison.Ordinal);
+        Assert.Contains("LegacyLongQuerySession.StateCollector", legacy, StringComparison.Ordinal);
+
+        /* The store-backed record reads and writes through its own throwing statements, not the runner's swallowing helpers. */
+        Assert.DoesNotContain("GetCollectorStateAsync", legacy, StringComparison.Ordinal);
+        Assert.DoesNotContain("SaveCollectorStateAsync", legacy, StringComparison.Ordinal);
     }
 }

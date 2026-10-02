@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -396,25 +397,50 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
             return await ReconcileLongQueryCompletionsAzureAsync(server, runner, sessionName, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken);
         }
 
+        /* #4961: the session older versions shared between installs is dropped once, whether the trace is on or off, and the
+           drop is recorded. Its failure waits until the per-install work has run, then takes the retry cap. */
+        var legacy = runner.LegacyLongQuery;
+        var legacyPass = await legacy.BeginPassAsync(server, pass, logger, cancellationToken);
+        Task DropLegacyOnServer(string legacyName, CancellationToken token) => DropSessionOnServerAsync(server, runner, legacyName, token);
+
         if (!enabled)
         {
+            await legacyPass.DropAsync(string.Empty, DropLegacyOnServer, cancellationToken);
             await DropLongQueryCompletionsOnServerAsync(server, runner, sessionName, cancellationToken);
+            if (legacyPass.ToException(Array.Empty<string>(), createNote: null, onServer: true) is { } legacyDropFailure)
+            {
+                throw legacyDropFailure;
+            }
+
             logger?.LogInformation("[{Server}] Long-query completion XE session reconciled OFF (collector disabled)", server.Config.DisplayName);
             return null;
         }
+
+        await legacyPass.DropAsync(string.Empty, DropLegacyOnServer, cancellationToken);
 
         /* A test replaces the server-scoped create, called with no database name. Null in production. */
         if (runner.LongQueryTraceDatabaseOverrideForTests is { } createOnServer)
         {
             await createOnServer(server, string.Empty, true, sessionName, cancellationToken);
-            return null;
+            if (runner.LegacyLongQueryPresentForTests is { } presentOnServer && await presentOnServer(server, string.Empty, cancellationToken))
+            {
+                legacy.NoteFound(server, string.Empty, logger);
+            }
+        }
+        else
+        {
+            using var connection = new SqlConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            await EnsureLongQueryCompletionsOnPremAsync(connection, server, sessionName, legacy, logger, cancellationToken);
         }
 
-        using var connection = new SqlConnection(server.ConnectionString);
-        await connection.OpenAsync(cancellationToken);
-        await EnsureLongQueryCompletionsOnPremAsync(connection, server, sessionName, logger, cancellationToken);
+        /* One server-scoped session: it either exists now or the CREATE above threw. There is no partial. A failed legacy
+           drop is the one thing left to report, after the create it did not stop. */
+        if (legacyPass.ToException(Array.Empty<string>(), createNote: null, onServer: true) is { } legacyCreateFailure)
+        {
+            throw legacyCreateFailure;
+        }
 
-        /* One server-scoped session: it either exists now or the CREATE above threw. There is no partial. */
         return null;
     }
 
@@ -428,16 +454,7 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
     {
         try
         {
-            /* A test replaces the server-scoped drop, called with no database name. Null in production. */
-            if (runner.LongQueryTraceDatabaseOverrideForTests is { } dropOnServer)
-            {
-                await dropOnServer(server, string.Empty, false, sessionName, cancellationToken);
-                return;
-            }
-
-            using var connection = new SqlConnection(server.ConnectionString);
-            await connection.OpenAsync(cancellationToken);
-            await DropLongQueryCompletionsAsync(connection, sessionName, databaseScoped: false, cancellationToken);
+            await DropSessionOnServerAsync(server, runner, sessionName, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -445,8 +462,27 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
         }
     }
 
-    private static async Task EnsureLongQueryCompletionsOnPremAsync(SqlConnection connection, ServerRuntime server, string sessionName, ILogger? logger, CancellationToken cancellationToken)
+    /// <summary>Drops one session on the server, and lets the failure through as it is.</summary>
+    private static async Task DropSessionOnServerAsync(ServerRuntime server, DarlingCollectorRunner runner, string sessionName, CancellationToken cancellationToken)
     {
+        /* A test replaces the server-scoped drop, called with no database name. Null in production. */
+        if (runner.LongQueryTraceDatabaseOverrideForTests is { } dropOnServer)
+        {
+            await dropOnServer(server, string.Empty, false, sessionName, cancellationToken);
+            return;
+        }
+
+        using var connection = new SqlConnection(server.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await DropLongQueryCompletionsAsync(connection, sessionName, databaseScoped: false, cancellationToken);
+    }
+
+    private static async Task EnsureLongQueryCompletionsOnPremAsync(SqlConnection connection, ServerRuntime server, string sessionName, DarlingLegacyLongQuerySession legacy, ILogger? logger, CancellationToken cancellationToken)
+    {
+        int? isRunning = null;
+        var legacyPresent = false;
+
+        /* The second SELECT asks whether an older install created the legacy session again, in the same batch (#4961). */
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -455,23 +491,42 @@ SELECT /* PerformanceMonitorDarling */
 FROM sys.server_event_sessions AS ses
 LEFT JOIN sys.dm_xe_sessions AS dxs
   ON dxs.name = ses.name
-WHERE ses.name = @session_name;", connection))
+WHERE ses.name = @session_name;
+
+SELECT /* PerformanceMonitorDarling */
+    legacy_present = CASE WHEN EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS les WHERE les.name = @legacy_name) THEN 1 ELSE 0 END;", connection))
         {
             cmd.CommandTimeout = 60;
             cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-
-            if (result != null)
+            cmd.Parameters.Add(new SqlParameter("@legacy_name", SqlDbType.NVarChar, 128) { Value = DarlingLegacyLongQuerySession.SessionName });
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
             {
-                if (result is int isRunning && isRunning == 0)
-                {
-                    using var startCmd = new SqlCommand(LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: false), connection);
-                    startCmd.CommandTimeout = 60;
-                    await startCmd.ExecuteNonQueryAsync(cancellationToken);
-                    logger?.LogInformation("[{Server}] Started long-query completion XE session", server.Config.DisplayName);
-                }
-                return;
+                isRunning = reader.GetInt32(0);
             }
+
+            if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
+            {
+                legacyPresent = reader.GetInt32(0) == 1;
+            }
+        }
+
+        if (legacyPresent)
+        {
+            legacy.NoteFound(server, string.Empty, logger);
+        }
+
+        if (isRunning is not null)
+        {
+            if (isRunning == 0)
+            {
+                using var startCmd = new SqlCommand(LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: false), connection);
+                startCmd.CommandTimeout = 60;
+                await startCmd.ExecuteNonQueryAsync(cancellationToken);
+                logger?.LogInformation("[{Server}] Started long-query completion XE session", server.Config.DisplayName);
+            }
+
+            return;
         }
 
         using var createCmd = new SqlCommand(
@@ -537,6 +592,13 @@ WHERE ses.name = @session_name;", connection))
             LongQueryTraceDatabases.KeptElsewhere(
                 server.ServerId.ToString(CultureInfo.InvariantCulture), server.Config.Host, candidates, registrations, serverSeparatelyMonitored);
 
+        /* #4961: the legacy session is dropped once in each database, then recorded (DarlingLegacyLongQuerySession). */
+        var legacyPass = await runner.LegacyLongQuery.BeginPassAsync(server, pass, logger, cancellationToken);
+
+        /* Every listed database but master and the databases monitored as their own servers, which own their own drops. */
+        IReadOnlyList<string> LegacyDatabases(IEnumerable<string> listed) =>
+            LongQueryTraceDatabases.Plan(enabled: false, listed, Array.Empty<string>(), separatelyMonitored, keptElsewhere: Array.Empty<string>()).Drop;
+
         if (!enabled)
         {
             var listed = await ListEveryDatabaseForTheTraceAsync(server, runner, createNote: null, cancellationToken);
@@ -546,7 +608,30 @@ WHERE ses.name = @session_name;", connection))
                 Array.Empty<string>(),
                 separatelyMonitored,
                 KeptElsewhere(listed));
-            await DropLongQueryTraceInEachAsync(server, runner, sessionName, off.Drop, createNote: null, afterTheCap, logger, cancellationToken);
+
+            /* #4961: the legacy session goes from every listed database but master, whoever else keeps a session there: it
+               is not the per-install session. The same one listing serves both drops. */
+            var legacyOff = LegacyDatabases(listed);
+            foreach (var legacyDatabase in legacyOff)
+            {
+                await legacyPass.DropAsync(legacyDatabase, (legacyName, token) => DropSessionInDatabaseAsync(server, runner, legacyName, legacyDatabase, token), cancellationToken);
+            }
+
+            LongQueryTraceDropException? offFailure = null;
+            try
+            {
+                await DropLongQueryTraceInEachAsync(server, runner, sessionName, off.Drop, createNote: null, afterTheCap, logger, cancellationToken);
+            }
+            catch (LongQueryTraceDropException ex)
+            {
+                offFailure = ex;
+            }
+
+            if (LegacyLongQueryDropPass.Merge(offFailure, legacyPass.ToException(legacyOff, createNote: null, onServer: false)) is { } offFailed)
+            {
+                throw offFailed;
+            }
+
             return null;
         }
 
@@ -576,16 +661,49 @@ WHERE ses.name = @session_name;", connection))
         var failedDatabases = new List<string>();
         Exception? firstFailure = null;
 
+        /* Every database the server lists, read once for both drops of this pass: the legacy session's, in each database before
+           that database's create, and the per-install session's outside the monitored set after the creates. A listing that
+           fails does not stop the creates. It fails the pass after them, as it always has. */
+        List<string>? listedForTheDrop = null;
+        Exception? listFailure = null;
+        if (pass != LongQueryTracePass.CreateOnly)
+        {
+            try
+            {
+                listedForTheDrop = await runner.ListLongQueryTraceDatabasesAsync(server, allDatabases: true, databaseScope: null, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                listFailure = ex;
+            }
+        }
+
+        var legacyDatabases = listedForTheDrop is null ? Array.Empty<string>() : LegacyDatabases(listedForTheDrop);
+        var legacyBeforeCreate = new HashSet<string>(legacyDatabases, StringComparer.OrdinalIgnoreCase);
+        var created = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var databaseName in LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create)
         {
             cancellationToken.ThrowIfCancellationRequested();
             attempted++;
+            created.Add(databaseName);
+
+            /* The legacy drop comes first, so it frees the slot the create needs. Its failure does not stop the create. */
+            if (legacyBeforeCreate.Contains(databaseName))
+            {
+                await legacyPass.DropAsync(databaseName, (legacyName, token) => DropSessionInDatabaseAsync(server, runner, legacyName, databaseName, token), cancellationToken);
+            }
 
             try
             {
                 if (runner.LongQueryTraceDatabaseOverrideForTests is { } inDatabase)
                 {
                     await inDatabase(server, databaseName, true, sessionName, cancellationToken);
+                    if (runner.LegacyLongQueryPresentForTests is { } presentInDatabase && await presentInDatabase(server, databaseName, cancellationToken))
+                    {
+                        runner.LegacyLongQuery.NoteFound(server, databaseName, logger);
+                    }
+
                     continue;
                 }
 
@@ -593,7 +711,7 @@ WHERE ses.name = @session_name;", connection))
 
                 try
                 {
-                    await EnsureLongQueryCompletionsAzureAsync(connection, server, databaseName, sessionName, logger, cancellationToken);
+                    await EnsureLongQueryCompletionsAzureAsync(connection, server, databaseName, sessionName, runner.LegacyLongQuery, logger, cancellationToken);
                 }
                 catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
                 {
@@ -646,14 +764,38 @@ WHERE ses.name = @session_name;", connection))
 
         /* Then drop the session from each listed database outside the monitored set: a database excluded, or
            taken out of the scope, since the session was created there. */
-        var listedForTheDrop = await ListEveryDatabaseForTheTraceAsync(server, runner, partialNote, cancellationToken);
+        if (listedForTheDrop is null)
+        {
+            throw new LongQueryTraceDropException(Array.Empty<string>(), listFailure!, partialNote);
+        }
+
         var outside = LongQueryTraceDatabases.Plan(
             enabled: true,
             listedForTheDrop,
             monitored,
             separatelyMonitored,
             KeptElsewhere(listedForTheDrop));
-        await DropLongQueryTraceInEachAsync(server, runner, sessionName, outside.Drop, partialNote, afterTheCap, logger, cancellationToken);
+
+        /* The legacy drops the creates did not reach: the databases outside the monitored set. */
+        foreach (var legacyDatabase in legacyDatabases.Where(database => !created.Contains(database)))
+        {
+            await legacyPass.DropAsync(legacyDatabase, (legacyName, token) => DropSessionInDatabaseAsync(server, runner, legacyName, legacyDatabase, token), cancellationToken);
+        }
+
+        LongQueryTraceDropException? outsideFailure = null;
+        try
+        {
+            await DropLongQueryTraceInEachAsync(server, runner, sessionName, outside.Drop, partialNote, afterTheCap, logger, cancellationToken);
+        }
+        catch (LongQueryTraceDropException ex)
+        {
+            outsideFailure = ex;
+        }
+
+        if (LegacyLongQueryDropPass.Merge(outsideFailure, legacyPass.ToException(legacyDatabases, partialNote, onServer: false)) is { } cleanupFailure)
+        {
+            throw cleanupFailure;
+        }
 
         return partialNote;
     }
@@ -682,17 +824,7 @@ WHERE ses.name = @session_name;", connection))
     private static Task DropLongQueryTraceInEachAsync(ServerRuntime server, DarlingCollectorRunner runner, string sessionName, IReadOnlyList<string> databases, string? createNote, bool afterTheCap, ILogger? logger, CancellationToken cancellationToken) =>
         LongQueryTraceDatabases.DropEachAsync(
             databases,
-            async (databaseName, token) =>
-            {
-                if (runner.LongQueryTraceDatabaseOverrideForTests is { } inDatabase)
-                {
-                    await inDatabase(server, databaseName, false, sessionName, token);
-                    return;
-                }
-
-                using var connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, token);
-                await DropLongQueryCompletionsAsync(connection, sessionName, databaseScoped: true, token);
-            },
+            (databaseName, token) => DropSessionInDatabaseAsync(server, runner, sessionName, databaseName, token),
             (databaseName, ex) => logger?.Log(
                 afterTheCap ? LogLevel.Debug : LogLevel.Warning,
                 "[{Server}] [{Database}] Failed to drop the long-query completion XE session: {Message}",
@@ -700,23 +832,59 @@ WHERE ses.name = @session_name;", connection))
             createNote,
             cancellationToken);
 
-    private static async Task EnsureLongQueryCompletionsAzureAsync(SqlConnection connection, ServerRuntime server, string databaseName, string sessionName, ILogger? logger, CancellationToken cancellationToken)
+    /// <summary>Drops one session in one database, and lets the failure through as it is.</summary>
+    private static async Task DropSessionInDatabaseAsync(ServerRuntime server, DarlingCollectorRunner runner, string sessionName, string databaseName, CancellationToken cancellationToken)
     {
+        if (runner.LongQueryTraceDatabaseOverrideForTests is { } inDatabase)
+        {
+            await inDatabase(server, databaseName, false, sessionName, cancellationToken);
+            return;
+        }
+
+        using var connection = await runner.OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
+        await DropLongQueryCompletionsAsync(connection, sessionName, databaseScoped: true, cancellationToken);
+    }
+
+    private static async Task EnsureLongQueryCompletionsAzureAsync(SqlConnection connection, ServerRuntime server, string databaseName, string sessionName, DarlingLegacyLongQuerySession legacy, ILogger? logger, CancellationToken cancellationToken)
+    {
+        string? existing = null;
+        var legacyPresent = false;
+
+        /* The second SELECT asks whether an older install created the legacy session again, in the same batch (#4961). */
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorDarling */
     session_state = des.name
 FROM sys.database_event_sessions AS des
-WHERE des.name = @session_name;", connection))
+WHERE des.name = @session_name;
+
+SELECT /* PerformanceMonitorDarling */
+    legacy_present = CASE WHEN EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS les WHERE les.name = @legacy_name) THEN 1 ELSE 0 END;", connection))
         {
             cmd.CommandTimeout = 60;
             cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = sessionName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-
-            if (result != null)
+            cmd.Parameters.Add(new SqlParameter("@legacy_name", SqlDbType.NVarChar, 128) { Value = DarlingLegacyLongQuerySession.SessionName });
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
             {
-                using var startCmd = new SqlCommand($@"
+                existing = reader.GetString(0);
+            }
+
+            if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
+            {
+                legacyPresent = reader.GetInt32(0) == 1;
+            }
+        }
+
+        if (legacyPresent)
+        {
+            legacy.NoteFound(server, databaseName, logger);
+        }
+
+        if (existing != null)
+        {
+            using var startCmd = new SqlCommand($@"
 IF NOT EXISTS
 (
     SELECT
@@ -727,10 +895,9 @@ IF NOT EXISTS
 BEGIN
     ALTER EVENT SESSION [{sessionName}] ON DATABASE STATE = START;
 END;", connection);
-                startCmd.CommandTimeout = 60;
-                await startCmd.ExecuteNonQueryAsync(cancellationToken);
-                return;
-            }
+            startCmd.CommandTimeout = 60;
+            await startCmd.ExecuteNonQueryAsync(cancellationToken);
+            return;
         }
 
         using var createCmd = new SqlCommand(

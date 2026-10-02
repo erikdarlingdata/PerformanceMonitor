@@ -6578,6 +6578,10 @@ RETURNING s.state_key";
            reaches this same path — see the remarks on ServerWatermarkCache.InvalidateServer). */
         _watermarkCache.InvalidateServer(serverId);
         _databaseWatermarkCache.InvalidateServer(serverId);
+
+        /* #4961: the legacy session's record is read again at the next full pass, and the line about an older install's
+           session is logged again, once per connect. */
+        _legacyLongQuery?.OnServerReconnected(serverId);
     }
 
     /// <summary>
@@ -6627,6 +6631,27 @@ RETURNING s.state_key";
     /// the session there, false to drop it. Null in production.
     /// </summary>
     internal Func<ServerRuntime, string, bool, string, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces where the one-time legacy drop keeps its record (<see cref="ILegacyLongQueryRecords"/>), so a test that never
+    /// opens the store has one. Set before the first reconcile. Null in production.
+    /// </summary>
+    internal ILegacyLongQueryRecords? LegacyLongQueryRecordsForTests { get; set; }
+
+    private DarlingLegacyLongQuerySession? _legacyLongQuery;
+
+    /// <summary>
+    /// The one-time drop of the long-query session older versions shared between installs, and what it remembers of its
+    /// record for each registration (#4961). Built on first use, over the store.
+    /// </summary>
+    internal DarlingLegacyLongQuerySession LegacyLongQuery =>
+        LazyInitializer.EnsureInitialized(ref _legacyLongQuery, () => new DarlingLegacyLongQuerySession(LegacyLongQueryRecordsForTests ?? new StoreLegacyLongQueryRecords(_postgres)))!;
+
+    /// <summary>
+    /// Replaces the question the create path asks in the same batch as its existence check: whether the legacy session is in
+    /// the database (the empty name is the server). Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, CancellationToken, Task<bool>>? LegacyLongQueryPresentForTests { get; set; }
 
     /// <summary>
     /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every
