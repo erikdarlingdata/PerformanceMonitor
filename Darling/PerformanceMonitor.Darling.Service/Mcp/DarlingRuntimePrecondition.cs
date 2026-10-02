@@ -89,16 +89,18 @@ SELECT (
        ) AS server_first_collected";
 
     /// <summary>
-    /// The most recent run of one collector for one server. Ordered by <c>log_id</c> rather than
-    /// <c>collection_time</c> because the id is monotonic per insert while two runs inside the same cycle can
-    /// share a timestamp — and "the latest run" is the whole claim this makes. $1 server_id, $2 collector.
+    /// The most recent run of one collector for one server. Ordered by <c>collection_time DESC</c>, the
+    /// hypertable's time dimension, so <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>
+    /// serves it from the newest chunk; <c>log_id</c> has no index, so ordering by it first would sort every retained row
+    /// for the pair. <c>log_id DESC</c> breaks the tie between two runs that share a timestamp, since the id is monotonic
+    /// per insert and "the latest run" is the whole claim this makes. $1 server_id, $2 collector.
     /// </summary>
     public const string LatestCollectorOutcomeSql = @"
 SELECT status, error_message, collection_time
 FROM collection_log
 WHERE server_id = $1
 AND   collector_name = $2
-ORDER BY log_id DESC
+ORDER BY collection_time DESC, log_id DESC
 LIMIT 1";
 
     /// <summary>
