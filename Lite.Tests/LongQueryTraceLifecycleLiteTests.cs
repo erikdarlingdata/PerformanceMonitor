@@ -1252,6 +1252,71 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         Assert.Equal(new[] { string.Empty }, rig.LegacyCalls);
     }
 
+    /// <summary>
+    /// The drop before a recreate takes this install's own long-query session and no other name (#4961). The deadlock and
+    /// blocked-process ensures hand their own per-database routine to the shared driver and never reach it, so a shared
+    /// name arriving there is a bug in a caller, and dropping it would take another install's reader down with it.
+    /// </summary>
+    [Fact]
+    public async Task TheRecreateDrop_TakesOnlyThisInstallsOwnLongQuerySession_NeverASharedOneNorAnotherInstalls()
+    {
+        var rig = await BuildRigAsync(traceOn: true);
+        var own = OwnSession(rig.InstallId);
+
+        Assert.Equal("DROP EVENT SESSION [" + own + "] ON DATABASE;", rig.Service.BuildRecreateDropSql(own));
+
+        var refused = new[]
+        {
+            /* The shared deadlock and blocked-process sessions, and the long-query session every install used to share. */
+            DeadlocksCollector.XeSessionName,
+            BlockedProcessReportCollector.XeSessionName,
+            LongQueryCompletionsCollector.LegacyXeSessionName,
+
+            /* Another install's long-query session, a Darling install with this id, and this install's own session of
+               another capture: each is a name this install does not own as its long-query session. */
+            LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, "ffffffff"),
+            LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, rig.InstallId),
+            AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, rig.InstallId, AlwaysOnXeSessionKind.Deadlock),
+            AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, rig.InstallId, AlwaysOnXeSessionKind.BlockedProcess),
+            string.Empty,
+        };
+        foreach (var name in refused)
+        {
+            Assert.Throws<ArgumentException>(() => rig.Service.BuildRecreateDropSql(name));
+        }
+    }
+
+    /// <summary>An install with no id owns no session, so the drop before a recreate refuses even a well-formed per-install name.</summary>
+    [Fact]
+    public async Task TheRecreateDrop_WithNoInstallId_RefusesEveryName()
+    {
+        var rig = await BuildRigAsync(
+            new ServerConnection { ServerName = Host, DisplayName = "lqtrace-recreate-noid" }, traceOn: true, engineEdition: 5, withInstallId: false);
+        Assert.Null(rig.InstallId);
+
+        Assert.Throws<ArgumentException>(() => rig.Service.BuildRecreateDropSql(
+            LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, "0a1b2c3d")));
+        Assert.Throws<ArgumentException>(() => rig.Service.BuildRecreateDropSql(DeadlocksCollector.XeSessionName));
+    }
+
+    /// <summary>The recreate sends its drop through the guarded builder, never through a statement of its own.</summary>
+    [Fact]
+    public void TheRecreate_SendsItsDropThroughTheGuardedBuilder_NotThroughAStatementOfItsOwn()
+    {
+        var source = ReadLf("Lite/Services/RemoteCollectorService.BlockedProcessReport.cs");
+        var recreate = source.IndexOf("private async Task RecreateDatabaseScopedXeSessionAsync(", StringComparison.Ordinal);
+        var builder = source.IndexOf("internal string BuildRecreateDropSql(string sessionName)", StringComparison.Ordinal);
+        Assert.True(recreate >= 0, "the recreate is gone");
+        Assert.True(builder > recreate, "the builder is gone");
+
+        Assert.Contains("new SqlCommand(BuildRecreateDropSql(sessionName), connection)", source[recreate..builder], StringComparison.Ordinal);
+        Assert.DoesNotContain("DROP EVENT SESSION", source[recreate..builder], StringComparison.Ordinal);
+
+        /* The one DROP statement in the file is the builder's. */
+        Assert.Equal(1, source.Split("DROP EVENT SESSION [", StringSplitOptions.None).Length - 1);
+        Assert.True(source.IndexOf("DROP EVENT SESSION [", StringComparison.Ordinal) > builder);
+    }
+
     [Theory]
     [InlineData(5)]
     [InlineData(3)]

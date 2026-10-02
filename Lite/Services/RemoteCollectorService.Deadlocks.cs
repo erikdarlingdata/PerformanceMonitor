@@ -41,9 +41,10 @@ public partial class RemoteCollectorService
         {
             /* Azure SQL DB: one database-scoped session per monitored database, matching the
                per-database ring-buffer read (DeadlocksCollector.RunsPerDatabase). The shared driver
-               skips master, honors ExcludedDatabases via the shared database list, self-heals
-               sessions the reader can't see, and only surfaces unhealthy when NO database could be
-               ensured. */
+               skips master, honors ExcludedDatabases via the shared database list, and only
+               surfaces unhealthy when NO database could be ensured. The per-database routine
+               passed here never drops a shared session (#4961): it starts a stopped one, and
+               falls back to this install's own session when the shared one stays unusable. */
             await EnsureDatabaseScopedXeSessionsAsync(
                 server, "deadlock", DeadlockXeSessionName,
                 AlwaysOnArmEnsureNotUsed, cancellationToken,
