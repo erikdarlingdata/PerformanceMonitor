@@ -51,19 +51,19 @@ internal static class DarlingAlertReader
         string? SendError, bool Muted, string? DetailText, bool Dismissed, string? ContextJson = null);
 
     private const string AlertHistorySelectColumns = @"
-    alert_time,
-    server_id,
-    server_name,
-    metric_name,
-    current_value,
-    threshold_value,
-    alert_sent,
-    notification_type,
-    send_error,
-    muted,
-    detail_text,
-    context_json,
-    dismissed";
+    a.alert_time,
+    a.server_id,
+    COALESCE(s.display_name, a.server_name) AS server_name,
+    a.metric_name,
+    a.current_value,
+    a.threshold_value,
+    a.alert_sent,
+    a.notification_type,
+    a.send_error,
+    a.muted,
+    a.detail_text,
+    a.context_json,
+    a.dismissed";
 
     /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 window
     /// end, $3 server_id, $4 limit, $5 include-dismissed (naive UTC / naive UTC / int / int / bool).
@@ -83,23 +83,25 @@ internal static class DarlingAlertReader
     /// consts so the pinned exclusion literal stays one string in one place.</para></summary>
     public const string AlertHistorySql = @"
 SELECT" + AlertHistorySelectColumns + @"
-FROM config_alert_log
-WHERE alert_time >= $1
-AND   alert_time <= $2
-AND   server_id = $3
-AND   (dismissed = FALSE OR $5)
-ORDER BY alert_time DESC
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time >= $1
+AND   a.alert_time <= $2
+AND   a.server_id = $3
+AND   (a.dismissed = FALSE OR $5)
+ORDER BY a.alert_time DESC
 LIMIT $4";
 
     /// <summary>All-servers alert history (the fleet default) — the viewer's <c>AlertHistoryAllServersSql</c>.
     /// $1 window start, $2 window end, $3 limit, $4 include-dismissed (naive UTC / naive UTC / int / bool).</summary>
     public const string AlertHistoryAllServersSql = @"
 SELECT" + AlertHistorySelectColumns + @"
-FROM config_alert_log
-WHERE alert_time >= $1
-AND   alert_time <= $2
-AND   (dismissed = FALSE OR $4)
-ORDER BY alert_time DESC
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time >= $1
+AND   a.alert_time <= $2
+AND   (a.dismissed = FALSE OR $4)
+ORDER BY a.alert_time DESC
 LIMIT $3";
 
     /// <summary>How many rows in the window the default read's <c>dismissed = FALSE</c> filter removes, per
@@ -194,10 +196,11 @@ AND   dismissed = TRUE";
     /// hid the very row these reads look for.</summary>
     private const string FirstAlertAfterHead = @"
 SELECT" + AlertHistorySelectColumns + @"
-FROM config_alert_log
-WHERE alert_time > $1
-AND   alert_time <= $2
-AND   metric_name = ANY($3)";
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time > $1
+AND   a.alert_time <= $2
+AND   a.metric_name = ANY($3)";
 
     /// <summary>The tail of the "first row after an alert" reads: the EARLIEST match, one row. There is no
     /// window and no shared row cap, so the row is found wherever it sits (a resolution 30 hours later, or
@@ -218,13 +221,13 @@ LIMIT 1";
         var next = 4;
         if (serverScoped)
         {
-            sql += "\nAND   server_id = $" + next.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            sql += "\nAND   a.server_id = $" + next.ToString(System.Globalization.CultureInfo.InvariantCulture);
             next++;
         }
 
         if (excludesAlertTime)
         {
-            sql += "\nAND   alert_time <> $" + next.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            sql += "\nAND   a.alert_time <> $" + next.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
         return sql + FirstAlertAfterTail;

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -372,5 +373,27 @@ public sealed class HoldEarnedByDeliveryTests
 
         Assert.Single(sender.Sent);   /* steady story held past the cooldown, as before #3916 */
         Assert.Equal(1, toasts);
+    }
+
+    /// <summary>
+    /// The alert's bucket key and the server name it is sent with are unchanged by Alert History showing the
+    /// display name: the bucket is keyed on the server id and the story, and the alert still carries the
+    /// storage name, which is what the alert log stores.
+    /// </summary>
+    [Fact]
+    public async Task TheBucketKey_AndTheStoredServerName_AreUnchanged()
+    {
+        var sender = new ScriptedSender { Delivery = WebhookDelivered() };
+        var service = Service(sender);
+
+        await service.NotifyAsync(new[] { Steady("bucketkey0000001") });
+        await service.FlushPendingAsync();
+
+        var field = typeof(AnalysisNotificationService).GetField("_cooldowns",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var keys = System.Linq.Enumerable.Cast<object>(((System.Collections.IDictionary)field.GetValue(service)!).Keys)
+            .Select(k => (string)k).ToList();
+        Assert.Equal(new[] { "1:bucketkey0000001" }, keys);
+        Assert.Equal("PROD01", Assert.Single(sender.Sent).ServerName);
     }
 }

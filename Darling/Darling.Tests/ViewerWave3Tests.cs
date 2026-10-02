@@ -34,11 +34,11 @@ public sealed class ViewerWave3SqlTests
     public void AlertHistorySql_ReadsConfigAlertLog_PerServer_NewestFirst_ExcludesDismissed()
     {
         Assert.Contains("FROM config_alert_log", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
-        Assert.Contains("WHERE alert_time >= $1", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
-        Assert.Contains("server_id = $2", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
+        Assert.Contains("WHERE a.alert_time >= $1", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
+        Assert.Contains("a.server_id = $2", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
         /* Mirrors Lite's GetAlertHistoryAsync — dismissed rows are hidden from the view. */
-        Assert.Contains("dismissed = FALSE", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY alert_time DESC", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
+        Assert.Contains("a.dismissed = FALSE", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY a.alert_time DESC", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $3", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
     }
 
