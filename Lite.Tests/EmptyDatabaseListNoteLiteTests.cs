@@ -300,7 +300,11 @@ public sealed class EmptyDatabaseListNoteLiteTests : IDisposable
 
         serverManager.GetConnectionStatus(server.Id).SqlEngineEdition = 5;
 
-        var service = new RemoteCollectorService(duckDb, serverManager, new ScheduleManager(_configDir));
+        /* The long-query read names this install's session, so a run that reaches a database needs an install id to build
+           its query. The runs that read nothing never get that far. */
+        var service = new RemoteCollectorService(
+            duckDb, serverManager, new ScheduleManager(_configDir),
+            installIdStore: new InstallIdStore(_configDir, "test-machine", null));
         return new Fixture(service, server, RemoteCollectorService.GetServerId(server));
     }
 
