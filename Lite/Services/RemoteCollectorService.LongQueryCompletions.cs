@@ -244,19 +244,13 @@ public partial class RemoteCollectorService
 
             var create = LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create;
 
-            if (LongQueryTraceDatabaseOverrideForTests is { } createInDatabase)
-            {
-                foreach (var databaseName in create)
-                {
-                    await createInDatabase(server, databaseName, true, cancellationToken);
-                }
-            }
-            else
-            {
-                await EnsureDatabaseScopedXeSessionsAsync(
-                    server, "long query completions", LongQueryXeSessionName,
-                    EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync, create, cancellationToken);
-            }
+            /* A test replaces the work in each database (LongQueryTraceDatabaseOverrideForTests), and the shared ensure
+               still drives it: the same per-database isolation, log lines and all-refused throw as in production. */
+            var createInDatabase = LongQueryTraceDatabaseOverrideForTests;
+            await EnsureDatabaseScopedXeSessionsAsync(
+                server, "long query completions", LongQueryXeSessionName,
+                EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync, create, cancellationToken,
+                createInDatabase is null ? null : (databaseName, token) => createInDatabase(server, databaseName, true, token));
 
             return monitored;
         }

@@ -153,7 +153,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         {
             rig.Calls.Add((database, create));
             return rig.Refuse.Contains(database)
-                ? Task.FromException(new InvalidOperationException($"The drop was refused in {database}."))
+                ? Task.FromException(new InvalidOperationException($"The {(create ? "create" : "drop")} was refused in {database}."))
                 : Task.CompletedTask;
         };
 
@@ -521,6 +521,143 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
             await rig.ReconcileAsync();
             lines.AddRange(Lines(rig));
             Assert.Equal(1, Count(lines, "WARN", "Could not list the databases to drop the long-query trace session from"));
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    /* ── #4964: the per-database create lines of the shared Azure ensure ── */
+
+    private const string EnsureLine = "Failed to ensure long query completions XE session";
+
+    /// <summary>
+    /// The create is refused in every database on every cycle. The shared ensure logs a Warning for each refusing database
+    /// and an Error for the all-refused summary on the first cycle; the cycles after it log the same lines at Debug until a
+    /// create succeeds. The retry does not change: every cycle tries every database, and the fault stays set.
+    /// </summary>
+    [Fact]
+    public async Task On_ACreateRefusedInEveryDatabase_LogsOneWarningSetAndOneError_ThenDebug()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildRigAsync(traceOn: true);
+            foreach (var database in new[] { "alpha", "beta", "gamma" })
+            {
+                rig.Refuse.Add(database);
+            }
+
+            const string allRefused = "Failed to ensure the long query completions XE session in all 3 database(s)";
+            var lines = new List<string>();
+
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(3, Count(lines, "WARN", EnsureLine));
+            Assert.Equal(1, Count(lines, "ERROR", allRefused));
+
+            await rig.ReconcileAsync();
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+
+            Assert.Equal(3, Count(lines, "WARN", EnsureLine));
+            Assert.Equal(1, Count(lines, "ERROR", allRefused));
+            Assert.Equal(6, Count(lines, "DEBUG", EnsureLine));
+            Assert.Equal(2, Count(lines, "DEBUG", allRefused));
+
+            /* The retry and the fault did not change: three cycles tried all three databases, and the run is still told. */
+            Assert.Equal(9, rig.Created.Count());
+            Assert.NotNull(KeptFault(rig));
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    /// <summary>
+    /// A create that succeeds ends the run of refusals, so the next refusal warns again: the Warning set and the Error
+    /// come back once, and their repeats are Debug.
+    /// </summary>
+    [Fact]
+    public async Task On_ACreateRefusedAgainAfterItSucceeded_WarnsAgain()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildRigAsync(traceOn: true);
+            foreach (var database in new[] { "alpha", "beta", "gamma" })
+            {
+                rig.Refuse.Add(database);
+            }
+
+            const string allRefused = "Failed to ensure the long query completions XE session in all 3 database(s)";
+            var lines = new List<string>();
+
+            await rig.ReconcileAsync();
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(3, Count(lines, "WARN", EnsureLine));
+            Assert.Equal(3, Count(lines, "DEBUG", EnsureLine));
+
+            rig.Refuse.Clear();
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Null(KeptFault(rig));
+
+            foreach (var database in new[] { "alpha", "beta", "gamma" })
+            {
+                rig.Refuse.Add(database);
+            }
+
+            await rig.ReconcileAsync();
+            await rig.ReconcileAsync();
+            lines.AddRange(Lines(rig));
+            Assert.Equal(6, Count(lines, "WARN", EnsureLine));
+            Assert.Equal(2, Count(lines, "ERROR", allRefused));
+            Assert.Equal(6, Count(lines, "DEBUG", EnsureLine));
+            Assert.Equal(2, Count(lines, "DEBUG", allRefused));
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    /// <summary>
+    /// The create's own listing of the monitored databases fails with a SQL error on every cycle: its Error line is the
+    /// first failure's, and the cycles after it log Debug.
+    /// </summary>
+    [Fact]
+    public async Task On_AListingThatFailsWithASqlError_LogsOneError_ThenDebug()
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+
+            var rig = await BuildRigAsync(traceOn: true);
+            const string listing = "Failed to enumerate databases for long query completions XE sessions";
+            var lines = new List<string>();
+
+            for (var cycle = 0; cycle < 3; cycle++)
+            {
+                rig.ListFailure = SqlExceptionFactory.Create(4060, errorClass: 11, message: "master is not readable.");
+                await rig.ReconcileAsync();
+                lines.AddRange(Lines(rig));
+            }
+
+            Assert.Equal(1, Count(lines, "ERROR", listing));
+            Assert.Equal(2, Count(lines, "DEBUG", listing));
+            Assert.NotNull(KeptFault(rig));
         }
         finally
         {

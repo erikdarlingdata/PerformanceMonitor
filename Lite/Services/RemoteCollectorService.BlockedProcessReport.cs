@@ -350,7 +350,8 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         string sessionName,
         Func<SqlConnection, CancellationToken, Task> ensureAsync,
         IReadOnlyList<string>? plannedDatabases,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task>? ensureInDatabaseOverrideForTests = null)
     {
         IReadOnlyList<string> databases;
         if (plannedDatabases is not null)
@@ -388,6 +389,15 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
 
             try
             {
+                /* A test replaces the open and the ensure in one database. A failure from it reaches the catch below
+                   like a refusal from the server. Null in production. */
+                if (ensureInDatabaseOverrideForTests is not null)
+                {
+                    await ensureInDatabaseOverrideForTests(databaseName, cancellationToken);
+                    healthy++;
+                    continue;
+                }
+
                 using var connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
                 var readable = true;
 
