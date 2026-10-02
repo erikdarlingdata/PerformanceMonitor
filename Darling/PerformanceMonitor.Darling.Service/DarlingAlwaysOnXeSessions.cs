@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Data;
 using System.Globalization;
 using System.Threading;
@@ -170,6 +171,9 @@ internal static class DarlingAlwaysOnXeSessions
 
         public bool IsAlreadyPresent(Exception exception) =>
             exception is SqlException sql && DarlingXeSessions.IsBenignXeSessionAlreadyPresent(sql);
+
+        /* #4961: the shared marking leaves a read-only database's refusal without the caps sentence. */
+        public IEnumerable<int> ErrorNumbers(Exception exception) => DarlingXeSessions.ErrorNumbersOf(exception);
 
         private async Task<object?> ScalarAsync(string statement, string sessionName, CancellationToken cancellationToken)
         {

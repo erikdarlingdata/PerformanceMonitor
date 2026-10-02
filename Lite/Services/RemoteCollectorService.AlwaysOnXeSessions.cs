@@ -198,6 +198,9 @@ public partial class RemoteCollectorService
         public bool IsAlreadyPresent(Exception exception) =>
             exception is SqlException sql && IsBenignXeSessionAlreadyPresent(sql);
 
+        /* #4961: the shared marking leaves a read-only database's refusal without the caps sentence. */
+        public IEnumerable<int> ErrorNumbers(Exception exception) => ErrorNumbersOf(exception);
+
         private async Task<object?> ScalarAsync(string statement, string sessionName, CancellationToken cancellationToken)
         {
             using var command = new SqlCommand(statement, _connection);
