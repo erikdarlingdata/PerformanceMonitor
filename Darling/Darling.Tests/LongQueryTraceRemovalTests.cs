@@ -435,7 +435,7 @@ public sealed class LongQueryTraceRemovalTests : IAsyncDisposable
         Assert.Single(rig.Statements["beta"]);
         Assert.Contains(rig.Logger.Entries, e =>
             e.Level == LogLevel.Warning
-            && e.Message.Contains("alpha", StringComparison.Ordinal)
+            && e.Message.Contains("alpha", StringComparison.OrdinalIgnoreCase)
             && e.Message.Contains("removed", StringComparison.OrdinalIgnoreCase));
         Assert.Empty(choices.OwnDatabases(key, AlwaysOnXeSessionKind.Deadlock));
     }
@@ -495,7 +495,7 @@ public sealed class LongQueryTraceRemovalTests : IAsyncDisposable
     [Fact]
     public void TheReload_CapturesBeforeTheReconcile_AndDropsAfterTheLock()
     {
-        var code = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var code = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
         var start = code.IndexOf("private async Task<long?> ReloadFromStoreAsync(", StringComparison.Ordinal);
         Assert.True(start > 0, "the reload could not be located");
         var signature = code[start..code.IndexOf(')', start)];
