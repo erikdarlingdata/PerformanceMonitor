@@ -30,7 +30,7 @@ public partial class LocalDataService
     /// </summary>
     private static readonly string DailySummaryRangeSql = @"
 WITH wait_per_type AS (
-    SELECT date_trunc('day', collection_time) AS d, wait_type, SUM(delta_wait_time_ms) AS ms
+    SELECT date_trunc('day', collection_time) AS d, rtrim(wait_type) AS wait_type, SUM(delta_wait_time_ms) AS ms
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND delta_wait_time_ms > 0
     GROUP BY 1, 2

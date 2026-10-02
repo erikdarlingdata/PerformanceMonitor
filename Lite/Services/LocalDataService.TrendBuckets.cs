@@ -456,7 +456,7 @@ WITH raw AS
         END AS interval_seconds
     FROM v_wait_stats
     WHERE server_id = $1
-    AND   wait_type = $2
+    AND   rtrim(wait_type) = rtrim($2)
     AND   collection_time >= $3
     AND   collection_time <= $4
 ),

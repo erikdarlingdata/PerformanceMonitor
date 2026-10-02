@@ -334,7 +334,7 @@ WITH categorized AS (
             WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
             ELSE 'Other'
         END AS category,
-        wait_type,
+        rtrim(wait_type) AS wait_type,
         SUM(delta_wait_time_ms) AS wait_time_ms,
         SUM(delta_waiting_tasks) AS waiting_tasks
     FROM v_wait_stats
@@ -352,7 +352,7 @@ WITH categorized AS (
             WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
             ELSE 'Other'
         END,
-        wait_type
+        rtrim(wait_type)
 ),
 ranked AS (
     SELECT
