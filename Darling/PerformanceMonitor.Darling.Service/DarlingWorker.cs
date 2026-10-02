@@ -1504,7 +1504,16 @@ LIMIT 1";
     internal static async Task EnsureAlwaysOnXeSessionsAsync(
         ServerLoopState server, DarlingCollectorRunner runner, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
     {
-        await Task.CompletedTask;
+        if (server.Runtime is null
+            || server.Runtime.Target.Engine != CollectorTargetEngine.SqlServer
+            || !AlwaysOnXeSessions.EnsureIsDue(server.XeSessionsEnsuredAtUtc, utcNow))
+        {
+            return;
+        }
+
+        /* Stamped before the ensure, so a server that refuses it is asked once an hour and not on every sweep. */
+        server.XeSessionsEnsuredAtUtc = utcNow;
+        await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -3985,6 +3994,10 @@ LIMIT 1";
                Runs regardless of whether the collector is due or enabled, because a disabled collector is
                never dispatched by RunDueCollectorsAsync and so the DROP-on-disable has nowhere else to run. */
             await ReconcileLongQueryTraceAsync(server, runner, stoppingToken);
+
+            /* #4961: the always-on deadlock and blocked-process sessions are ensured at connect and then once an hour, so a
+               session dropped from outside comes back within the hour. */
+            await EnsureAlwaysOnXeSessionsAsync(server, runner, DateTime.UtcNow, _logger, stoppingToken);
 
             await RunDueCollectorsAsync(server, runner, stoppingToken);
 
@@ -10587,6 +10600,8 @@ AND   j.hypertable_name = '{relation}'", connection))
             server.LongQueryTraceDropRetry.Reset();
             /* #4964: and the create side's "already warned" state, so a failure after the reconnect is a new one. */
             server.LongQueryTraceCreateWarned = false;
+            /* #4961: and the always-on sessions' clock, so the connect path ensures them and stamps it again. */
+            server.XeSessionsEnsuredAtUtc = null;
             /* Capture the id once, while the connection is freshly established and non-null: an on-load
                RunOneAsync below can drop server.Runtime on a mid-collection connection-level failure, so any
                later read of server.Runtime.ServerId (the schedule resolve, the connection edge) would NRE. */
@@ -10644,6 +10659,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             if (runtime.Target.Engine == CollectorTargetEngine.SqlServer)
             {
                 await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken);
+                server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
             }
 
             /* On-load config snapshots (effective FrequencyMinutes 0) run once per connect, then every

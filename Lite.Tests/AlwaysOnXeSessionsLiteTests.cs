@@ -379,13 +379,14 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     public async Task TheEnsureOfADeadlockSession_ChoosesPerDatabase_AndTheReadTakesItsNameFromTheChoice()
     {
         var rig = await BuildRigAsync();
+        var ownName = AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, rig.Service.GetInstallId(), AlwaysOnXeSessionKind.Deadlock);
         var shared = AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock);
         rig.Alpha.Started[shared] = true;
         rig.Alpha.WrongEvent.Add(shared);
 
         await rig.Service.EnsureDeadlockXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None);
 
-        Assert.Equal(Own(AlwaysOnXeSessionKind.Deadlock),
+        Assert.Equal(ownName,
             rig.Service.AlwaysOnReadSessionName(rig.Server, "alpha", AlwaysOnXeSessionKind.Deadlock));
         Assert.Equal(shared, rig.Service.AlwaysOnReadSessionName(rig.Server, "beta", AlwaysOnXeSessionKind.Deadlock));
         Assert.False(rig.Alpha.Sent("DROP EVENT SESSION", shared));
@@ -396,7 +397,7 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
         await rig.Service.EnsureDeadlockXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None);
 
         Assert.Equal(shared, rig.Service.AlwaysOnReadSessionName(rig.Server, "alpha", AlwaysOnXeSessionKind.Deadlock));
-        Assert.False(rig.Alpha.Started.ContainsKey(Own(AlwaysOnXeSessionKind.Deadlock)));
+        Assert.False(rig.Alpha.Started.ContainsKey(ownName));
     }
 
     [Fact]

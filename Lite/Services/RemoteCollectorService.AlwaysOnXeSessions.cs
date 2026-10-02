@@ -101,6 +101,10 @@ public partial class RemoteCollectorService
         }
     }
 
+    /// <summary>The shared driver's connection-level ensure, for the arms that ensure through <see cref="EnsureAlwaysOnXeSessionInDatabaseAsync"/> instead. Never called.</summary>
+    private static Task AlwaysOnArmEnsureNotUsed(SqlConnection connection, CancellationToken cancellationToken) =>
+        throw new InvalidOperationException("The always-on sessions ensure through the per-database routine.");
+
     private static string DescribeChoice(AlwaysOnXeChoice choice) => choice == AlwaysOnXeChoice.Own ? "own session" : "shared session";
 
     /// <summary>One open connection to one Azure SQL Database, as <see cref="AlwaysOnXeAzureEnsure"/> needs it.</summary>

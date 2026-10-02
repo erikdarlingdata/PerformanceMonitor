@@ -2337,6 +2337,15 @@ public sealed class DarlingCollectorRunner
                        CollectorContext.CurrentDatabaseName. */
                     context.CurrentDatabaseName = databaseName;
 
+                    /* #4961: the deadlock and blocked-process reads name the session the ensure chose for THIS database, so
+                       the name is set per database, beside the database name. Every other definition leaves it null. */
+                    context.AlwaysOnSessionName = definition switch
+                    {
+                        DeadlocksCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.Deadlock),
+                        BlockedProcessReportCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.BlockedProcess),
+                        _ => null,
+                    };
+
                     /* #2855: cleared once per iteration, because this loop reuses ONE context across every
                        database and without the reset a database whose read faults would print the PREVIOUS
                        database's split as its own — a stale timing that looks precise is worse than no

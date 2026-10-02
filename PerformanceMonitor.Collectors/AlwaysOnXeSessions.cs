@@ -124,8 +124,15 @@ public static class AlwaysOnXeSessions
     public static TimeSpan EnsureInterval => LongQueryTraceDatabases.RetryInterval;
 
     /// <summary>True when the ensure has not run yet (null), or last ran at least <see cref="EnsureInterval"/> before <paramref name="utcNow"/>.</summary>
-    public static bool EnsureIsDue(DateTime? lastEnsuredUtc, DateTime utcNow) =>
-        lastEnsuredUtc is not { } last || utcNow - last >= EnsureInterval;
+    public static bool EnsureIsDue(DateTime? lastEnsuredUtc, DateTime utcNow)
+    {
+        if (lastEnsuredUtc is null)
+        {
+            return true;
+        }
+
+        return utcNow - lastEnsuredUtc.Value >= EnsureInterval;
+    }
 
     /// <summary>The name every install shares for this capture.</summary>
     public static string SharedNameFor(AlwaysOnXeSessionKind kind) => kind switch
