@@ -72,8 +72,16 @@ public sealed class LongQueryTraceRestartTests : IAsyncDisposable
             State = new DarlingWorker.ServerLoopState { Config = config, Runtime = runtime },
         };
 
+        /* The store is never opened, so the record of the one-time legacy drop is kept in memory, and the legacy drop is
+           not one of the per-install calls these tests count. */
+        runner.LegacyLongQueryRecordsForTests = new LongQueryTraceLifecycleTests.InMemoryLegacyRecords();
         runner.LongQueryTraceDatabaseOverrideForTests = (_, database, create, sessionName, _) =>
         {
+            if (sessionName == PerformanceMonitor.Collectors.LongQueryCompletionsCollector.LegacyXeSessionName)
+            {
+                return Task.CompletedTask;
+            }
+
             rig.Calls.Add((database, create, sessionName));
             return Task.CompletedTask;
         };
