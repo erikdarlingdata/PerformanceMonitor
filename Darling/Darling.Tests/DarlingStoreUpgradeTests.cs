@@ -3110,9 +3110,17 @@ public sealed class DarlingStoreUpgradeTests
        ================================================================================== */
 
     private sealed record RestoreHost(
-        string Root, string RuntimeRoot, string Pgsql, string PreviousPgsql, string PreviousBin, string DataDirectory);
+        string Root, string RuntimeRoot, string Pgsql, string PreviousPgsql, string PreviousBin, string DataDirectory,
+        string Zip, string StampPath)
+    {
+        /// <summary>The stamp an interrupted update leaves behind: the package that was live before it, not the shipped one.</summary>
+        public const string InterruptedStamp = "0000000000000000000000000000000000000000000000000000000000000000";
+    }
 
-    /// <summary>A deploy folder with a store on <paramref name="storeMajor"/> (null: no store) and nothing else yet.</summary>
+    /// <summary>
+    /// A deploy folder with a store on <paramref name="storeMajor"/> (null: no store), a shipped package, and
+    /// the stamp of an interrupted update (it differs from the package's hash).
+    /// </summary>
     private static RestoreHost PlantRestoreHost(string root, string? storeMajor)
     {
         var runtimeRoot = Path.Combine(root, "deploy", "pg-runtime");
@@ -3125,9 +3133,14 @@ public sealed class DarlingStoreUpgradeTests
             File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), storeMajor + "\n");
         }
 
+        var zip = Path.Combine(root, "deploy", "pg-runtime.zip");
+        File.WriteAllText(zip, "the shipped package");
+        var stampPath = Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName);
+        File.WriteAllText(stampPath, RestoreHost.InterruptedStamp);
+
         return new RestoreHost(
             root, runtimeRoot, Path.Combine(runtimeRoot, "pgsql"), previousPgsql,
-            Path.Combine(previousPgsql, "bin"), dataDirectory);
+            Path.Combine(previousPgsql, "bin"), dataDirectory, zip, stampPath);
     }
 
     private static int CountWarnings(CapturingLogger log)
@@ -3148,7 +3161,7 @@ public sealed class DarlingStoreUpgradeTests
                 ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
             };
 
-            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.DataDirectory, TestContext.Current.CancellationToken));
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
 
             Assert.Equal("the-stores-own", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
             Assert.True(File.Exists(Path.Combine(host.Pgsql, "bin", "pg_ctl.exe")));
@@ -3176,7 +3189,7 @@ public sealed class DarlingStoreUpgradeTests
                 ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
             };
 
-            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.DataDirectory, TestContext.Current.CancellationToken));
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
 
             Assert.Equal("the-stores-own", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
             Assert.False(File.Exists(Path.Combine(host.Pgsql, "lib", "half-extracted.dll")));
@@ -3201,7 +3214,7 @@ public sealed class DarlingStoreUpgradeTests
                 ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
             };
 
-            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.DataDirectory, TestContext.Current.CancellationToken));
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
 
             Assert.False(Directory.Exists(host.Pgsql));
             Assert.True(File.Exists(Path.Combine(host.PreviousBin, "pg_ctl.exe")));
@@ -3224,7 +3237,7 @@ public sealed class DarlingStoreUpgradeTests
                 ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
             };
 
-            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.DataDirectory, TestContext.Current.CancellationToken));
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
 
             Assert.False(Directory.Exists(host.Pgsql));
             Assert.False(Directory.Exists(host.PreviousPgsql));
@@ -3248,7 +3261,7 @@ public sealed class DarlingStoreUpgradeTests
                 ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 18.4")),
             };
 
-            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.DataDirectory, TestContext.Current.CancellationToken));
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
 
             Assert.False(Directory.Exists(host.Pgsql));
             Assert.True(File.Exists(Path.Combine(host.PreviousBin, "pg_ctl.exe")));
@@ -3273,10 +3286,186 @@ public sealed class DarlingStoreUpgradeTests
                 ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
             };
 
-            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.DataDirectory, TestContext.Current.CancellationToken));
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
 
             Assert.Equal("live", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
             Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.PreviousBin, "runtime.txt")));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>Plants the shape of a restore that WOULD fire (no pg_ctl, a same-major rescued copy), for a gate to refuse.</summary>
+    private static DarlingStoreUpgrade PlantRestorableHost(RestoreHost host, CapturingLogger log)
+    {
+        Directory.CreateDirectory(host.Pgsql);
+        PlantRuntime(host.PreviousPgsql, "rescued");
+        return new DarlingStoreUpgrade(log)
+        {
+            ReadRuntimeVersionLine = VersionsByBin((host.PreviousBin, "pg_ctl (PostgreSQL) 17.6")),
+        };
+    }
+
+    private static void AssertNothingMoved(RestoreHost host)
+    {
+        Assert.False(File.Exists(Path.Combine(host.Pgsql, "bin", "pg_ctl.exe")));
+        Assert.False(Directory.Exists(host.Pgsql + ".failed"));
+        Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.PreviousBin, "runtime.txt")));
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AStampThatMatchesThePackage_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-finished-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.WriteAllText(host.StampPath, DarlingStoreUpgrade.ComputeFileHash(host.Zip).ToUpperInvariant());
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_NoStampAtAll_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-nostamp-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.Delete(host.StampPath);
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AMissingPackage_MovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-nozip-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantRestorableHost(host, new CapturingLogger());
+            File.Delete(host.Zip);
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AServerRunningOnTheStore_MovesNothing_AndNamesThePid()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-live-pm-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var log = new CapturingLogger();
+            var upgrade = PlantRestorableHost(host, log);
+            using var postmaster = StartProcessNamedPostgres(Path.Combine(root.FullName, "fake"));
+            File.WriteAllText(
+                Path.Combine(host.DataDirectory, "postmaster.pid"),
+                postmaster.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n" + host.DataDirectory + "\n");
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            AssertNothingMoved(host);
+            Assert.Contains("PID " + postmaster.Id.ToString(System.Globalization.CultureInfo.InvariantCulture), log.ToString(), StringComparison.Ordinal);
+            Assert.Equal(1, CountWarnings(log));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// A live process whose image is named postgres (a copy of a harmless system tool that idles for a
+    /// minute), which is all the liveness check can see of a real postmaster. Killed on dispose.
+    /// </summary>
+    private static ProcessHandle StartProcessNamedPostgres(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var windows = OperatingSystem.IsWindows();
+        var source = windows ? Path.Combine(Environment.SystemDirectory, "PING.EXE") : "/bin/sleep";
+        var image = Path.Combine(directory, windows ? "postgres.exe" : "postgres");
+        File.Copy(source, image, overwrite: true);
+        if (OperatingSystem.IsMacOS())
+        {
+            using var sign = System.Diagnostics.Process.Start("codesign", ["-f", "-s", "-", image]);
+            sign!.WaitForExit();
+        }
+
+        var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(image, windows ? "-n 60 127.0.0.1" : "60")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        }) ?? throw new InvalidOperationException("Could not start " + image);
+        return new ProcessHandle(process);
+    }
+
+    private sealed class ProcessHandle(System.Diagnostics.Process process) : IDisposable
+    {
+        public int Id => process.Id;
+
+        public void Dispose()
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                    process.WaitForExit(10_000);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            process.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task RestoreRescuedRuntime_AMoveThatKeepsFailing_LogsAndReturnsFalse()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-stuck-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var log = new CapturingLogger();
+            var upgrade = PlantRestorableHost(host, log);
+            upgrade.RetryDelay = (_, _) => Task.CompletedTask;
+            upgrade.MoveRuntimeDirectory = (_, _) => throw new IOException("The process cannot access the file because it is being used by another process.");
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.True(File.Exists(Path.Combine(host.PreviousBin, "pg_ctl.exe")));
+            Assert.Contains("could not be put back", log.ToString(), StringComparison.Ordinal);
         }
         finally
         {
@@ -3309,7 +3498,7 @@ public sealed class DarlingStoreUpgradeTests
                 },
             };
 
-            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.DataDirectory, TestContext.Current.CancellationToken));
+            Assert.True(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
 
             Assert.Equal(3, attempts);
             Assert.Equal(2, CountRetryLines(log));
@@ -3328,7 +3517,7 @@ public sealed class DarlingStoreUpgradeTests
         var start = source.IndexOf("private async Task<string> EnsureRuntimeAsync(", StringComparison.Ordinal);
         Assert.True(start >= 0, "EnsureRuntimeAsync must exist");
         var body = source[start..];
-        var restore = body.IndexOf("_storeUpgrade.TryRestoreRescuedRuntimeAsync(_runtimeRoot, _dataDirectory, cancellationToken)", StringComparison.Ordinal);
+        var restore = body.IndexOf("_storeUpgrade.TryRestoreRescuedRuntimeAsync(_runtimeRoot, _runtimeZipPath, _dataDirectory, cancellationToken)", StringComparison.Ordinal);
         var existsCheck = body.IndexOf("if (File.Exists(pgCtl))", StringComparison.Ordinal);
         Assert.True(restore >= 0, "EnsureRuntimeAsync must try to restore the rescued runtime");
         Assert.True(existsCheck >= 0, "EnsureRuntimeAsync must test for pg_ctl.exe");

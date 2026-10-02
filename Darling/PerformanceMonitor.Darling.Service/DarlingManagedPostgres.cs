@@ -3339,7 +3339,7 @@ public sealed class DarlingManagedPostgres
         /* #4934: a runtime update that died between the rescue and a good extract leaves no pg_ctl.exe here
            and the store's own runtime in pg-runtime-prev. Put it back first, so the branch below takes the
            normal path (and retries the update) instead of the first-run extract. */
-        await _storeUpgrade.TryRestoreRescuedRuntimeAsync(_runtimeRoot, _dataDirectory, cancellationToken);
+        await _storeUpgrade.TryRestoreRescuedRuntimeAsync(_runtimeRoot, _runtimeZipPath, _dataDirectory, cancellationToken);
 
         if (File.Exists(pgCtl))
         {
