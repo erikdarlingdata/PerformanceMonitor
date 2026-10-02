@@ -129,6 +129,18 @@ internal sealed class DarlingStoreUpgrade
         return Path.Combine(PreviousRuntimeRootFor(runtimeRoot), RescueMarkerFileName);
     }
 
+    /// <summary>True when the rescue marker's trimmed content and the trimmed main runtime stamp are both non-empty
+    /// and equal. The marker holds the hash of the package whose extract wrote it, and the stamp is written only
+    /// after that extract is good, so equality means the update that wrote the marker finished. An empty, torn or
+    /// unreadable marker or stamp, or any other content, is not a finished update.</summary>
+    private static bool RescueMarkerOutlivedAFinishedUpdate(string runtimeRoot)
+    {
+        var markerContent = ReadTrimmedOrNull(RescueMarkerPath(runtimeRoot));
+        var mainStamp = ReadTrimmedOrNull(Path.Combine(runtimeRoot, RuntimeStampFileName));
+        return !string.IsNullOrEmpty(markerContent) && !string.IsNullOrEmpty(mainStamp) &&
+               string.Equals(markerContent, mainStamp, StringComparison.OrdinalIgnoreCase);
+    }
+
     /* Every directory naming this class can put BESIDE the data directory lives here, because
        ReportUnmanagedStoreCopies decides what is a stranger's by elimination — anything store-shaped that is
        not one of ours. A new sibling naming that forgets to register here does not fail loudly; it gets
@@ -1122,7 +1134,10 @@ internal sealed class DarlingStoreUpgrade
         /* Under the rescue marker the runtime in pg-runtime-prev is the only one known to open the store, so a
            pgsql that already holds pg_ctl.exe is no proof of a finished update: a re-extract that died part
            way can leave one. Without the marker a live pg_ctl.exe ends the restore. */
-        var underMarker = File.Exists(RescueMarkerPath(runtimeRoot));
+        /* A marker whose content equals the main stamp outlived a FINISHED update: it protects nothing, so the
+           restore treats it as no marker (a live pg_ctl.exe refuses, the 2.28.1 default applies) and the swap's
+           own guard removes it. */
+        var underMarker = File.Exists(RescueMarkerPath(runtimeRoot)) && !RescueMarkerOutlivedAFinishedUpdate(runtimeRoot);
         if (!underMarker && File.Exists(Path.Combine(pgsqlDirectory, "bin", "pg_ctl.exe")))
         {
             return false;
@@ -1529,14 +1544,7 @@ internal sealed class DarlingStoreUpgrade
                because the stamp == zip return above fires first, and the live-major check before this block
                returns for a rescued runtime of another major. An empty, torn or unreadable marker or stamp, or
                any other content, keeps the deferral. */
-            var markerFinished = false;
-            if (rescuedBin is not null)
-            {
-                var markerContent = ReadTrimmedOrNull(markerPath);
-                var mainStamp = ReadTrimmedOrNull(stampPath);
-                markerFinished = !string.IsNullOrEmpty(markerContent) && !string.IsNullOrEmpty(mainStamp) &&
-                                 string.Equals(markerContent, mainStamp, StringComparison.OrdinalIgnoreCase);
-            }
+            var markerFinished = rescuedBin is not null && RescueMarkerOutlivedAFinishedUpdate(runtimeRoot);
 
             if (rescuedBin is not null && !markerFinished)
             {

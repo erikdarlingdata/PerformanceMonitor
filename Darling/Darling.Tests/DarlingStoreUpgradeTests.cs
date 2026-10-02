@@ -3777,6 +3777,28 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     [Fact]
+    public async Task RestoreRescuedRuntime_AStaleMarker_IsNotAMarker_AndALivePgCtlMovesNothing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-restore-stale-marker-");
+        try
+        {
+            var host = PlantRestoreHost(root.FullName, "17");
+            var upgrade = PlantInterruptedUpdate(host, new CapturingLogger());
+            File.WriteAllText(DarlingStoreUpgrade.RescueMarkerPath(host.RuntimeRoot), RestoreHost.InterruptedStamp);
+
+            Assert.False(await upgrade.TryRestoreRescuedRuntimeAsync(host.RuntimeRoot, host.Zip, host.DataDirectory, TestContext.Current.CancellationToken));
+
+            Assert.Equal("partial", File.ReadAllText(Path.Combine(host.Pgsql, "bin", "runtime.txt")));
+            Assert.Equal("rescued", File.ReadAllText(Path.Combine(host.PreviousBin, "runtime.txt")));
+            Assert.False(Directory.Exists(host.Pgsql + ".failed"));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    [Fact]
     public async Task RestoreRescuedRuntime_UnderTheMarker_AServerRunningOnTheStore_MovesNothing()
     {
         var root = Directory.CreateTempSubdirectory("darling-restore-marker-live-pm-");
