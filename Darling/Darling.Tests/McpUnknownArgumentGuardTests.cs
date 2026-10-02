@@ -8,6 +8,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -103,7 +104,7 @@ public sealed class McpUnknownArgumentGuardTests
     /// <remarks>#3898: the shared <see cref="McpServedSchema"/> predicate, which also keeps nullable value types
     /// and arrays (get_tool_guide's <c>string[]</c>) model-facing; the old inline one called both services and
     /// dropped them from the schemas this census checks.</remarks>
-    private static bool IsServiceParameter(Type t) => McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog);
+    internal static bool IsServiceParameter(Type t) => McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog);
 
     private static CallToolRequestParams Call(string toolName, Dictionary<string, JsonElement> arguments) =>
         new() { Name = toolName, Arguments = arguments };
@@ -269,13 +270,20 @@ public sealed class McpUnknownArgumentGuardTests
                 continue;
             }
 
-            var declared = properties.EnumerateObject().Select(p => p.Name).ToArray();
+            var declared = properties.EnumerateObject().ToArray();
             if (declared.Length == 0)
             {
                 continue;
             }
 
-            var everything = Args(declared.Select(p => (p, "x")).ToArray());
+            /* A value each parameter can take: 1 for an integer, since the guard refuses a word there just as the
+               binder cannot read one, and a word for the rest. */
+            var everything = declared.ToDictionary(
+                p => p.Name,
+                p => p.Value.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String && type.GetString() == "integer"
+                    ? JsonSerializer.SerializeToElement(1)
+                    : JsonSerializer.SerializeToElement("x"),
+                StringComparer.Ordinal);
 
             if (McpUnknownArgumentGuard.Refuse(Call(name, everything), tool) is { } refused)
             {
@@ -290,18 +298,67 @@ public sealed class McpUnknownArgumentGuardTests
     }
 
     /// <summary>
-    /// Case is the binder's, stated. A key differing from a real parameter only by case is BOUND by the SDK,
-    /// so the guard accepts it: refusing there would break working calls, and the guard's whole license is
-    /// that it can only reject what would have been dropped anyway.
+    /// Argument names match exactly, letter case included, because that is how the SDK's binder matches them: it
+    /// does not bind <c>HOURS_BACK</c> to <c>hours_back</c>, so the tool ran at its default 24 hours. The guard
+    /// refuses such a key like any other unknown one and suggests the parameter it differs from only by case.
     /// </summary>
     [Fact]
-    public void AKeyDifferingOnlyByCase_IsAcceptedBecauseTheBinderBindsIt()
+    public void AKeyDifferingOnlyByCase_IsRefused_AndTheRefusalNamesTheParameter()
     {
         var tool = RegisteredTools().First(t => t.ProtocolTool.Name == "get_collection_log");
 
-        Assert.Null(McpUnknownArgumentGuard.Refuse(
+        var result = McpUnknownArgumentGuard.Refuse(
             Call("get_collection_log", Args(("HOURS_BACK", "1"))),
-            tool));
+            tool);
+
+        var problem = McpInProcessHost.CaseRefusalProblem("get_collection_log", "HOURS_BACK", "hours_back", result);
+        Assert.True(problem is null, problem);
+    }
+
+    /// <summary>
+    /// The same key through a real in-process server, so the SDK's own binder is on the path: <c>get_wait_stats</c>
+    /// with <c>{"HOURS_BACK": 2}</c> is refused before the tool runs. Without the refusal the binder drops the key
+    /// and the tool reads its default window.
+    /// </summary>
+    [Fact]
+    public async Task AKeyDifferingOnlyByCase_IsRefusedBeforeTheBinder_ThroughARealServer()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var host = await McpWholeNumberArgumentTests.StartHostAsync();
+
+        var result = await host.Client.CallToolAsync(
+            "get_wait_stats", new Dictionary<string, object?> { ["HOURS_BACK"] = 2 }, cancellationToken: ct);
+
+        var problem = McpInProcessHost.CaseRefusalProblem("get_wait_stats", "HOURS_BACK", "hours_back", result);
+        Assert.True(problem is null, problem);
+    }
+
+    /// <summary>
+    /// The premise the case refusal rests on, pinned on the SDK's binder alone, with the guard left out of the host:
+    /// a key that differs from a parameter only by letter case is dropped, never bound. <c>HOURS_BACK</c> carrying a
+    /// value no integer parameter can take logs no binding failure, so the binder never read it. The same value
+    /// under <c>hours_back</c> does log one, which shows this test can see a binding failure when there is one. If a
+    /// later SDK matched names ignoring case, the first half would fail here, and the guard would be refusing calls
+    /// that work.
+    /// </summary>
+    [Fact]
+    public async Task WithoutTheGuard_TheBinderDropsAKeyDifferingOnlyByCase()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var host = await McpWholeNumberArgumentTests.StartHostAsync(installGuard: false);
+
+        await host.Client.CallToolAsync(
+            "get_wait_stats", new Dictionary<string, object?> { ["HOURS_BACK"] = "not-a-number" }, cancellationToken: ct);
+        Assert.False(
+            host.ToolExceptions.HasBindingFailure,
+            "The binder read HOURS_BACK as hours_back. Logged: " + host.ToolExceptions.Describe());
+
+        await host.Client.CallToolAsync(
+            "get_wait_stats", new Dictionary<string, object?> { ["hours_back"] = "not-a-number" }, cancellationToken: ct);
+        Assert.True(
+            host.ToolExceptions.HasBindingFailure,
+            "hours_back: \"not-a-number\" logged no binding failure, so this test cannot see one. Logged: "
+            + host.ToolExceptions.Describe());
     }
 
     /// <summary>
@@ -337,7 +394,7 @@ public sealed class McpUnknownArgumentGuardTests
     /// <see cref="McpToolTypeRegistrationTests"/> uses, so this census covers the tools that actually ship
     /// rather than every class in the assembly.
     /// </summary>
-    private static HashSet<string> RegisteredToolTypeNames()
+    internal static HashSet<string> RegisteredToolTypeNames()
     {
         var source = File.ReadAllText(HostSourcePath());
 
