@@ -258,7 +258,7 @@ WHERE c.hypertable_schema = 'collect' AND c.hypertable_name = 'query_store_stats
         {
             oldOids[name] = await ScalarAsync(connection, $"SELECT '{name}'::regclass::oid", ct);
 
-            /* An interrupted build leaves exactly this catalog state; the rig and CI roles are superuser, so flipping
+            /* An interrupted build leaves exactly this catalog state; the test roles are superuser, so flipping
                indisvalid reproduces it deterministically. */
             await ExecAsync(connection, $"UPDATE pg_index SET indisvalid = false WHERE indexrelid = '{name}'::regclass", ct);
             Assert.False((bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{name}'::regclass", ct))!);
