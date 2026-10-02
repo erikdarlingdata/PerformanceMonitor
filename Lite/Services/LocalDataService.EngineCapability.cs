@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
@@ -51,5 +52,39 @@ LIMIT 1";
         return scalar is null or DBNull
             ? CollectorEngineCapability.UnknownEngineEdition
             : Convert.ToInt32(scalar);
+    }
+
+    /// <summary>
+    /// Every server's stored engine edition in one read, keyed by server id: the edition of the newest
+    /// <c>v_server_properties</c> row, the row <see cref="GetSqlEngineEditionAsync"/> reads for one server. A server
+    /// whose newest row has no edition is left out. Lite seeds the Azure master scope from it at startup
+    /// (<see cref="KnownEngineEditions"/>).
+    ///
+    /// <para>One grouped read, not one read per server: the view reads the Parquet archive, and each read scans it
+    /// again. <c>arg_max_null</c>, not <c>arg_max</c>: <c>arg_max</c> skips a NULL edition (a row archived before
+    /// the column existed) and would answer an older row's, where <see cref="GetSqlEngineEditionAsync"/> answers the
+    /// newest row's.</para>
+    /// </summary>
+    public async Task<IReadOnlyDictionary<int, int>> GetStoredEngineEditionsAsync()
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT server_id, arg_max_null(engine_edition, collection_time)
+FROM v_server_properties
+GROUP BY server_id";
+
+        var editions = new Dictionary<int, int>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            if (!reader.IsDBNull(1))
+            {
+                editions[Convert.ToInt32(reader.GetValue(0))] = Convert.ToInt32(reader.GetValue(1));
+            }
+        }
+
+        return editions;
     }
 }
