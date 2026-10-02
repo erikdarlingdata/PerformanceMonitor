@@ -8,11 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service.Targets;
 
@@ -44,9 +46,18 @@ public sealed record XeSessionDrop(ExistingXeSession Session)
     public string Statement => DarlingXeSessionCleanup.DropStatement(Session.Name, Session.Scope);
 }
 
-/// <summary>What a search of one target found: the Darling sessions that exist, and a sentence for every place that could
-/// not be searched (an Azure SQL Database database that refused the connection, say).</summary>
-public sealed record XeSessionSearch(IReadOnlyList<ExistingXeSession> Sessions, IReadOnlyList<string> Problems);
+/// <summary>What a search of one target found: the Darling sessions that exist, and a sentence for every monitored place
+/// that could not be searched (an Azure SQL Database database that refused the connection, say), each of which fails the
+/// run. <see cref="Notes"/> holds the sentences for a place the registration excludes, which the search opened only for the
+/// long-query session and could not search: it says where a session may be left and does not fail the run.</summary>
+public sealed record XeSessionSearch(IReadOnlyList<ExistingXeSession> Sessions, IReadOnlyList<string> Problems)
+{
+    /// <summary>A sentence for each excluded database that could not be searched for the long-query session. The verb prints
+    /// each on stderr and does not change its exit code for it: before the search reached excluded databases, the verb never
+    /// opened one, so an excluded database the login cannot open is not a reason to stop a script that removes the server
+    /// next. A session left in such a database needs a manual drop.</summary>
+    public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
+}
 
 /// <summary>
 /// The seam between the cleanup verb's decisions and the SQL Server it runs against, so the whole verb is testable
@@ -55,7 +66,9 @@ public sealed record XeSessionSearch(IReadOnlyList<ExistingXeSession> Sessions, 
 public interface IXeSessionCleanupTarget
 {
     /// <summary>Which of Darling's sessions exist on the target. Throws when the target itself cannot be searched; a
-    /// place inside it that cannot be searched comes back as a <see cref="XeSessionSearch.Problems"/> entry instead.</summary>
+    /// monitored place inside it that cannot be searched comes back as a <see cref="XeSessionSearch.Problems"/> entry instead,
+    /// and an excluded database that cannot be searched for the long-query session as a <see cref="XeSessionSearch.Notes"/>
+    /// entry.</summary>
     Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken);
 
     /// <summary>Runs one planned drop. Throws when the server refuses it.</summary>
@@ -111,7 +124,9 @@ public static class DarlingXeSessionCleanup
     /// The one warning both modes print, without its prefix. It says only what the code does: Lite ensures a missing
     /// session on every collection cycle, and <see cref="DarlingXeSessions.EnsureAllAsync"/> creates a missing session
     /// (server-scoped, or in each database on Azure SQL Database) when a Darling service next connects to the server.
-    /// Both create the long-query completion session only for a server whose collector is turned on. The deprecated Full
+    /// While its long-query trace is on, a Darling service also creates a missing long-query completion session within an
+    /// hour (<c>DarlingWorker.ReconcileLongQueryTraceAsync</c>). Both apps create the long-query completion session only for
+    /// a server whose collector is turned on. The deprecated Full
     /// Dashboard installer names the same deadlock and blocked-process sessions, and the collection procedures it installs
     /// (<c>install/22_collect_blocked_processes.sql</c>, <c>install/24_collect_deadlock_xml.sql</c>) create a missing one at
     /// the top of every run; it has no long-query completion session (#4732).
@@ -119,8 +134,9 @@ public static class DarlingXeSessionCleanup
     public const string SharedNamesWarning =
         "a Lite app, a deprecated Full Dashboard install or another Darling service that still monitors this server uses "
         + "the same session names and creates a missing session again (Lite on its next collection cycle, the Dashboard on "
-        + "its next collection run, Darling on its next connect to the server; the long query completions session only "
-        + "where that collector is turned on, and never by the Dashboard), "
+        + "its next collection run, Darling on its next connect to the server or, for the long query completions session, "
+        + "within an hour; the long query completions session only where that collector is turned on, and never by the "
+        + "Dashboard), "
         + "so run this only once nothing else monitors it.";
 
     /// <summary>What each session captures, in the words the note after a drop uses. A name with no entry reads as itself, so
@@ -346,8 +362,9 @@ WHERE {alias}.name IN ({literals});";
     /// dropped) and the shared-names warning. Returns
     /// <see cref="DarlingCliCommands.DropXeSessionsExitCode.Success"/> when everything found was dropped (or listed, in a dry
     /// run) or nothing was there, and <see cref="DarlingCliCommands.DropXeSessionsExitCode.TargetUnavailable"/> when the target
-    /// could not be searched, part of it could not be searched, or a drop was refused. A refused drop does not stop the ones
-    /// after it.
+    /// could not be searched, a monitored part of it could not be searched, or a drop was refused. A refused drop does not
+    /// stop the ones after it. An excluded database that could not be searched for the long-query session is printed on
+    /// stderr as a note (<see cref="XeSessionSearch.Notes"/>) and does not change the exit code.
     /// </summary>
     internal static async Task<int> RunAsync(
         string serverLabel,
@@ -376,10 +393,17 @@ WHERE {alias}.name IN ({literals});";
             exitCode = DarlingCliCommands.DropXeSessionsExitCode.TargetUnavailable;
         }
 
+        /* A note is not a failure: it names an excluded database the search opened only for the long-query session and could not
+           open, which the verb never searched before that session was added to the search. Exit code untouched. */
+        foreach (var note in search.Notes)
+        {
+            error.WriteLine(note);
+        }
+
         var drops = PlanDrops(search.Sessions);
         if (drops.Count == 0)
         {
-            /* "In the places searched": a database that could not be searched (a Problems entry, exit 2) may hold a session. */
+            /* "In the places searched": a database that could not be searched (a Problems entry, exit 2, or a note) may hold a session. */
             output.WriteLine($"No Darling Extended Events sessions ({string.Join(", ", SessionNames)}) were found on '{serverLabel}'; nothing to drop in the places searched.");
         }
 
@@ -430,9 +454,14 @@ WHERE {alias}.name IN ({literals});";
 
 /// <summary>
 /// <see cref="IXeSessionCleanupTarget"/> over a connected SQL Server target: the ServerRuntime the shared connector produced
-/// (#4732). On Azure SQL Database it visits the same databases <see cref="DarlingXeSessions.EnsureAllAsync"/> would, by the
-/// same rule (a registration that names a database is that database alone; one that names none enumerates master through the
-/// provider's own plan, honoring the server's excluded databases), and skips master, which cannot host a session.
+/// (#4732). On Azure SQL Database it visits two sets, and skips master, which cannot host a session. For the deadlock and
+/// blocked-process sessions it visits the same databases <see cref="DarlingXeSessions.EnsureAllAsync"/> would, by the same rule
+/// (a registration that names a database is that database alone; one that names none enumerates master through the provider's
+/// own plan, honoring the server's excluded databases). For the long-query completion session it visits every online database,
+/// the exclusions not applied, as the trace's off-side reconcile does, except a database monitored as its own server and a
+/// database where another registration of the logical server keeps the session (<see cref="PlanAzureSearch"/>). A database the
+/// search cannot open is a problem when the registration monitors it and a note when only the long-query search reaches it
+/// (<see cref="AzureSearchPlan.Unsearched"/>), because the verb never opened an excluded database before that search did.
 /// </summary>
 internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 {
@@ -442,15 +471,21 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 
     private readonly string[] _sessionNames;
 
+    private readonly IReadOnlyList<MonitoredServer> _registry;
+
     /// <param name="server">The connected server.</param>
     /// <param name="sessionNames">The names to search for and to drop, copied here. Every product caller leaves this null, which
     /// is <see cref="DarlingXeSessionCleanup.SessionNames"/>. The live test passes a test-only name so the real find and drop
     /// run against a real server without ever naming one of Darling's own sessions. Either way the target composes its find
     /// and drop text through the same methods the plan's constants and statements are built with, so the live test sends the
     /// text the product sends, and a test pins that a copy of Darling's names sends exactly the plan's text (#4732).</param>
-    public SqlServerXeSessionCleanupTarget(ServerRuntime server, IReadOnlyList<string>? sessionNames = null)
+    /// <param name="registry">The servers this service monitors, from the same list the verb resolved the target in. On Azure SQL
+    /// Database it says which databases belong to another registration of the same logical server.</param>
+    public SqlServerXeSessionCleanupTarget(
+        ServerRuntime server, IReadOnlyList<string>? sessionNames = null, IReadOnlyList<MonitoredServer>? registry = null)
     {
         _server = server ?? throw new ArgumentNullException(nameof(server));
+        _registry = registry ?? Array.Empty<MonitoredServer>();
         _sessionNames = (sessionNames ?? DarlingXeSessionCleanup.SessionNames).ToArray();
         if (_sessionNames.Length == 0 || _sessionNames.Any(string.IsNullOrWhiteSpace))
         {
@@ -484,6 +519,68 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         return DarlingXeSessionCleanup.ComposeDropStatement(session.Name, session.Scope);
     }
 
+    /// <summary>
+    /// Where a search of an Azure SQL Database server looks, and which sessions it reports in each database.
+    /// </summary>
+    /// <param name="AlwaysOnDatabases">The databases searched for every session but the long-query one: the registration's
+    /// monitored databases.</param>
+    /// <param name="LongQueryDatabases">The databases searched for the long-query session.</param>
+    internal sealed record AzureSearchPlan(IReadOnlyList<string> AlwaysOnDatabases, IReadOnlyList<string> LongQueryDatabases)
+    {
+        /// <summary>Every database the search opens, once, in order.</summary>
+        public IReadOnlyList<string> Visited { get; } =
+            AlwaysOnDatabases.Concat(LongQueryDatabases).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        /// <summary>Whether a session of this name, found in this database, belongs in the result.</summary>
+        public bool Reports(string database, string sessionName) =>
+            (string.Equals(sessionName, LongQueryCompletionsCollector.XeSessionName, StringComparison.OrdinalIgnoreCase)
+                ? LongQueryDatabases
+                : AlwaysOnDatabases).Contains(database, StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// The sentence for a database the search could not open, and whether it fails the run. A monitored database is
+        /// searched for every session, so one that cannot be opened is a problem (<see cref="XeSessionSearch.Problems"/>, exit
+        /// 2). A database in <see cref="LongQueryDatabases"/> and not in <see cref="AlwaysOnDatabases"/> is one the
+        /// registration excludes, opened only because a long-query session created before the exclusion stays there; the verb
+        /// never opened it before that search, so a login with no user in it, or a paused serverless database, is a note
+        /// (<see cref="XeSessionSearch.Notes"/>) that does not change the exit code.
+        /// </summary>
+        public (string Text, bool IsProblem) Unsearched(string database, string reason) =>
+            AlwaysOnDatabases.Contains(database, StringComparer.OrdinalIgnoreCase)
+                ? ($"Could not search database {database} for Extended Events sessions: {reason}", true)
+                : ($"Database {database} is excluded from monitoring and could not be searched for the long-query completion session ({reason}), so a {LongQueryCompletionsCollector.XeSessionName} session left there needs a manual drop.", false);
+    }
+
+    /// <summary>
+    /// The databases the search visits. <paramref name="monitored"/> is the registration's monitored databases;
+    /// <paramref name="every"/> is every online database, with no exclusions.
+    /// </summary>
+    internal AzureSearchPlan PlanAzureSearch(IReadOnlyList<string> monitored, IReadOnlyList<string> every)
+    {
+        var alwaysOn = monitored.Where(database => !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (!_sessionNames.Contains(LongQueryCompletionsCollector.XeSessionName, StringComparer.OrdinalIgnoreCase))
+        {
+            return new AzureSearchPlan(alwaysOn, Array.Empty<string>());
+        }
+
+        /* The long-query session follows the worker's rule for a trace that is off (LongQueryTraceDatabases.Plan), the one
+           the off-side reconcile applies: every listed database, the registration's exclusions not applied, because a session
+           created before a database was excluded stays there. Never master, never a database monitored as its own server, and
+           never a database where another registration of the logical server keeps the session. The verb cannot read another
+           registration's long-query schedule, so it counts every other registration as keeping it. */
+        var host = _server.Config.Host;
+        var selfId = _server.ServerId.ToString(CultureInfo.InvariantCulture);
+        var registrations = DarlingWorker.LongQueryTraceRegistrations(
+            host, _registry, traceOn: _ => true, databaseScope: _ => Array.Empty<string>());
+        var separatelyMonitored = AzureMasterScope.SeparatelyMonitoredDatabases(
+            isAzureSqlDb: true, selfId, host, _server.Config.Database, DarlingWorker.LiveAlertTargets(_registry));
+        var keptElsewhere = LongQueryTraceDatabases.KeptElsewhere(
+            selfId, host, every, registrations, DarlingWorker.LongQueryTraceServerSeparatelyMonitored(host, _registry));
+
+        var off = LongQueryTraceDatabases.Plan(enabled: false, every, Array.Empty<string>(), separatelyMonitored, keptElsewhere);
+        return new AzureSearchPlan(alwaysOn, off.Drop);
+    }
+
     public async Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken)
     {
         var found = new List<ExistingXeSession>();
@@ -501,30 +598,60 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
             return new XeSessionSearch(found, problems);
         }
 
-        foreach (var database in await ListAzureDatabasesAsync(cancellationToken))
+        var monitored = await ListAzureDatabasesAsync(applyExclusions: true, cancellationToken);
+
+        /* The second listing only where exclusions could make it differ, and only for a search that includes the long-query
+           session. */
+        var every = _server.Config.ExcludedDatabases.Count > 0
+            && _sessionNames.Contains(LongQueryCompletionsCollector.XeSessionName, StringComparer.OrdinalIgnoreCase)
+                ? await ListAzureDatabasesAsync(applyExclusions: false, cancellationToken)
+                : monitored;
+        return await SearchAzureDatabasesAsync(PlanAzureSearch(monitored, every), NamesInDatabaseAsync, cancellationToken);
+    }
+
+    /// <summary>
+    /// The Azure SQL Database search over the plan's databases, with the read of one database passed in so a test can make one
+    /// refuse the connection without a server. A database that cannot be searched is filed by <see cref="AzureSearchPlan.Unsearched"/>:
+    /// a monitored one as a problem, an excluded one as a note.
+    /// </summary>
+    internal static async Task<XeSessionSearch> SearchAzureDatabasesAsync(
+        AzureSearchPlan plan,
+        Func<string, CancellationToken, Task<IReadOnlyList<string>>> namesInDatabase,
+        CancellationToken cancellationToken)
+    {
+        var found = new List<ExistingXeSession>();
+        var problems = new List<string>();
+        var notes = new List<string>();
+
+        foreach (var database in plan.Visited)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (string.Equals(database, "master", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
 
             try
             {
-                using var connection = new SqlConnection(SqlServerTargetProvider.Instance.WithDatabase(_server.ConnectionString, database));
-                await connection.OpenAsync(cancellationToken);
-                foreach (var name in await ReadNamesAsync(connection, FindDatabaseSql, cancellationToken))
+                foreach (var name in await namesInDatabase(database, cancellationToken))
                 {
-                    found.Add(new ExistingXeSession(name, XeSessionScope.Database, database));
+                    if (plan.Reports(database, name))
+                    {
+                        found.Add(new ExistingXeSession(name, XeSessionScope.Database, database));
+                    }
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                problems.Add($"Could not search database {database} for Extended Events sessions: {ex.Message}");
+                var (text, isProblem) = plan.Unsearched(database, ex.Message);
+                (isProblem ? problems : notes).Add(text);
             }
         }
 
-        return new XeSessionSearch(found, problems);
+        return new XeSessionSearch(found, problems) { Notes = notes };
+    }
+
+    private async Task<IReadOnlyList<string>> NamesInDatabaseAsync(string database, CancellationToken cancellationToken)
+    {
+        using var connection = new SqlConnection(SqlServerTargetProvider.Instance.WithDatabase(_server.ConnectionString, database));
+        await connection.OpenAsync(cancellationToken);
+        return await ReadNamesAsync(connection, FindDatabaseSql, cancellationToken);
     }
 
     public async Task DropAsync(XeSessionDrop drop, CancellationToken cancellationToken)
@@ -557,13 +684,15 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
     }
 
     /// <summary>
-    /// The databases <see cref="DarlingXeSessions.EnsureAllAsync"/> visits on Azure SQL Database, by the collector runner's
-    /// rule (see its <c>GetAzureDatabaseListAsync</c>): a registration that names a database sweeps that database alone
-    /// (#2220), and one that names none enumerates master through the provider's own plan. Unlike the runner there is no
-    /// fallback when master cannot be read (a registration that names no database has nothing to fall back to), so the
-    /// failure propagates and the verb reports the server as unavailable.
+    /// The databases the search lists on Azure SQL Database, by the collector runner's rule (see its
+    /// <c>GetAzureDatabaseListAsync</c>): a registration that names a database sweeps that database alone (#2220), and one
+    /// that names none enumerates master through the provider's own plan. With <paramref name="applyExclusions"/> the list is
+    /// the one <see cref="DarlingXeSessions.EnsureAllAsync"/> visits, minus the registration's excluded databases; without it,
+    /// every online database, as the long-query trace's off-side reconcile lists them. Unlike the runner there is no fallback
+    /// when master cannot be read (a registration that names no database has nothing to fall back to), so the failure
+    /// propagates and the verb reports the server as unavailable.
     /// </summary>
-    private async Task<IReadOnlyList<string>> ListAzureDatabasesAsync(CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<string>> ListAzureDatabasesAsync(bool applyExclusions, CancellationToken cancellationToken)
     {
         var own = AzureSweepScope.OwnDatabaseOrEmpty(new SqlConnectionStringBuilder(_server.ConnectionString).InitialCatalog);
         if (own.Count > 0)
@@ -571,8 +700,7 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
             return own;
         }
 
-        var (masterConnectionString, query) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
-            _server.ConnectionString, _server.Config.ExcludedDatabases, databaseScope: null);
+        var (masterConnectionString, query) = DarlingCollectorRunner.AzureDatabaseListPlan(_server, databaseScope: null, applyExclusions);
 
         var databases = new List<string>();
         using var connection = new SqlConnection(masterConnectionString);

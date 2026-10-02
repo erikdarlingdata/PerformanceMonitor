@@ -1,6 +1,7 @@
 /* Runs the web viewer's real read path (wwwroot/js/util.js, panels.js and pages/server-tabs.js, plus editor.js for
-   an editor scenario) against a scripted /api/read answer and prints what the panels fetched and drew as one line of
-   JSON. WebRangeKeptHistoryBehaviourTests starts it as
+   an editor scenario and pages/server.js for the offeredRanges scenario) against a scripted /api/read answer and
+   prints what the panels fetched and drew as one line of JSON. WebRangeKeptHistoryBehaviourTests and
+   WebServerPageRangeTests start it as
        node web-kept-history-harness.mjs <path to wwwroot/js> <scenario>
    The modules are copied into a scratch folder beside a recording stand-in for charts.js (the SVG renderer, which
    needs a real browser), then imported. `fetch` and the DOM are stand-ins: a node tree of plain objects, and a fetch
@@ -10,7 +11,9 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-const [jsDir, scenario] = process.argv.slice(-2);
+const [jsDir, scenarioArg] = process.argv.slice(-2);
+/* A scenario may carry one argument after a colon: "offeredRanges:168" is the offeredRanges scenario at 168 hours. */
+const [scenario, scenarioValue] = scenarioArg.split(":");
 
 class FakeNode {
   constructor(tag, text) {
@@ -73,12 +76,24 @@ process.on("unhandledRejection", (e) => rejections.push(String(e && e.stack ? e.
 /* The field config an editor scenario derived, or null. */
 let vizcfg = null;
 
+/* The offeredRanges scenario's findings: the hours the server page offers, each read it would ask for more, every
+   ranged read it asked for (as "hours engine tool"), and each tab's note as the page renders it. */
+let offered = null;
+let beyond = null;
+let observed = null;
+let notes = null;
+
 /* The modules, unchanged, with charts.js replaced by a stand-in that records the window each chart was given. An
    editor scenario also loads the view editor (editor.js) and the modules it imports, with compose.js (the composed
    panel card, which no editor scenario draws) as a stand-in. editor.js keeps its save-path sample read in a
    module-private function, so the scratch copy appends one line exporting ensureFieldConfigs; nothing else in the
    copy changes. */
 const editorScenario = scenario.startsWith("editor");
+/* The offeredRanges scenario also loads the server page (pages/server.js and the fleet page it imports). The page
+   keeps its Range presets, and the widest of them that it hands tabNote, in module-private constants, so the scratch
+   copy appends one line exporting RANGE_OPTIONS and WIDEST_RANGE_HOURS, the same way the editor copy exports
+   ensureFieldConfigs. */
+const serverPageScenario = scenario === "offeredRanges";
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "kept-history-"));
 let modules;
 try {
@@ -109,6 +124,13 @@ try {
     );
     fs.writeFileSync(path.join(scratch, "compose.js"), "export function renderComposedPanelCard() { throw new Error('not drawn here'); }\n");
   }
+  if (serverPageScenario) {
+    fs.copyFileSync(path.join(jsDir, "pages", "fleet.js"), path.join(scratch, "pages", "fleet.js"));
+    fs.writeFileSync(
+      path.join(scratch, "pages", "server.js"),
+      fs.readFileSync(path.join(jsDir, "pages", "server.js"), "utf8") + "\nexport { RANGE_OPTIONS, WIDEST_RANGE_HOURS };\n"
+    );
+  }
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
   modules = {
     util: await load("util.js"),
@@ -116,6 +138,7 @@ try {
     tabs: await load(path.join("pages", "server-tabs.js")),
     charts: await load("charts.js"),
     editor: editorScenario ? await load("editor.js") : null,
+    server: serverPageScenario ? await load(path.join("pages", "server.js")) : null,
   };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
@@ -150,6 +173,15 @@ const PICKER_ROWS = {
   get_wait_stats: { waits: [{ wait_type: "LCK_M_X" }] },
   get_perfmon_stats: { counters: [{ counter_name: "Batch Requests/sec" }] },
   get_top_queries_by_cpu: { queries: [{ query_hash: "0x1", database_name: "db1", query_text: "select 1" }] },
+};
+
+/* Let every read and every retry settle (each one is a few promise hops). A timer turn lasts about 15 ms on
+   Windows, so a scenario that settles once per tab turns the event loop with setImmediate instead. */
+const settle = async () => {
+  for (let i = 0; i < 200; i++) await new Promise((r) => setTimeout(r, 0));
+};
+const settleFast = async () => {
+  for (let i = 0; i < 200; i++) await new Promise((r) => setImmediate(r));
 };
 
 const scenarios = {
@@ -221,6 +253,47 @@ const scenarios = {
     }
     return nodes;
   },
+  // Every range the server page's Range offers, through every tab of both registries, against reads that refuse
+  // more than the scenario's hours the way the capped reads do. Each read the page would ask for more than that is
+  // listed by range, registry and tab.
+  offeredRanges: async () => {
+    const maxHours = Number(scenarioValue);
+    answer = (url) => {
+      const hours = Number(asked(url));
+      return hours > maxHours ? refusal(hours, maxHours, Math.round(maxHours / 24)) : data(PICKER_ROWS[tool(url)] || {});
+    };
+    offered = modules.server.RANGE_OPTIONS.map((option) => option.hours);
+    beyond = [];
+    observed = [];
+    notes = [];
+    for (const option of modules.server.RANGE_OPTIONS) {
+      for (const [engine, registry] of [["SQL Server", modules.tabs.SERVER_TABS], ["PostgreSQL", modules.tabs.POSTGRES_TABS]]) {
+        for (const tab of registry) {
+          const before = fetches.length;
+          tab.build("SRV1", { hours: option.hours, label: option.label });
+          await settleFast();
+          for (const fetched of fetches.slice(before)) {
+            const url = new URL(fetched, "http://viewer.test");
+            if (asked(url) !== null) {
+              observed.push(option.hours + " " + engine + " " + tool(url));
+            }
+            if (Number(asked(url)) > maxHours) {
+              beyond.push(option.label + ": " + engine + " " + tab.id + " tab, " + tool(url) + " asked for " + asked(url) + " hours");
+            }
+          }
+        }
+      }
+    }
+    for (const [engine, registry] of [["SQL Server", modules.tabs.SERVER_TABS], ["PostgreSQL", modules.tabs.POSTGRES_TABS]]) {
+      for (const tab of registry) {
+        const note = modules.tabs.tabNote(tab, modules.server.WIDEST_RANGE_HOURS);
+        if (note) {
+          notes.push(engine + " " + tab.id + ": " + note.textContent);
+        }
+      }
+    }
+    return [];
+  },
 };
 
 const chosen = scenarios[scenario];
@@ -228,8 +301,7 @@ if (!chosen) throw new Error("unknown scenario " + scenario);
 
 const root = new FakeNode("main");
 modules.util.mount(root, await chosen());
-// Let every read and every retry settle (each one is a few promise hops).
-for (let i = 0; i < 200; i++) await new Promise((r) => setTimeout(r, 0));
+await settle();
 
 const strips = (kind) => {
   const found = [];
@@ -250,5 +322,9 @@ console.log(JSON.stringify({
   loading: strips("loading").length,
   chartHours: modules.charts.chartCalls.map((c) => (c.windowStart == null ? null : Math.round((c.windowEnd - c.windowStart) / 3600000))),
   vizcfg,
+  offered,
+  beyond,
+  observed,
+  notes,
   rejections,
 }));

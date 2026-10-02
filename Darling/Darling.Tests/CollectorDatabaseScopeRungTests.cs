@@ -473,9 +473,11 @@ public sealed class CollectorDatabaseScopeRungTests
     /// <summary>
     /// The runner feeds ONE resolution per run to all three consumers — the dispatch probe, the
     /// per-database loop's list plan, and the enumeration context — and the stated boundaries hold:
-    /// the worker's delegate reads the SAME live overrides the cadence gate reads; the Azure XE
-    /// session provisioner deliberately passes NO scope (session inventory is server-shaped — three
-    /// collectors with three possible scopes share those sessions); and Lite's definition runner
+    /// the worker's delegate reads the SAME live overrides the cadence gate reads; the always-on Azure XE
+    /// session provisioner deliberately passes NO scope (session inventory is server-shaped — one list
+    /// provisions the deadlock and blocked-process sessions, whose collectors may carry different scopes), while the opt-in long-query trace
+    /// follows its own collector's scope through the runner's accessor (its lifecycle covers what its read
+    /// covers); and Lite's definition runner
     /// never names the scope at all, so every Lite query stays byte-identical to the unscoped form.
     /// </summary>
     [Fact]
@@ -494,7 +496,8 @@ public sealed class CollectorDatabaseScopeRungTests
             worker, StringComparison.Ordinal);
 
         var xe = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingXeSessions.cs");
-        Assert.Equal(2, CountOf(xe, "GetAzureDatabaseListAsync(server, databaseScope: null"));
+        Assert.Equal(1, CountOf(xe, "GetAzureDatabaseListAsync(server, databaseScope: null"));
+        Assert.Contains("runner.DatabaseScopeFor(LongQueryCompletionsCollector.Instance.Name, server.ServerId)", xe, StringComparison.Ordinal);
 
         var lite = RepoFile.ReadRepoFile("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs");
         Assert.DoesNotContain("DatabaseScope", lite, StringComparison.Ordinal);

@@ -153,10 +153,33 @@ internal sealed class KnownEngineEditions
     /// </summary>
     public IReadOnlyList<string> SeparatelyMonitoredDatabases(
         ServerConnection self, int liveEdition, IEnumerable<ServerConnection> servers) =>
+        SeparatelyMonitoredDatabases(IsAzureSqlDatabase(self, liveEdition), self, servers);
+
+    /// <summary>
+    /// <see cref="AzureMasterScope.SeparatelyMonitoredDatabases"/> for a configured server whose edition the caller
+    /// already knows. The long-query trace's session lifecycle calls this from its Azure SQL Database branch, so
+    /// the trace and the alerts skip the same databases.
+    /// </summary>
+    public static IReadOnlyList<string> SeparatelyMonitoredDatabases(
+        bool isAzureSqlDatabase, ServerConnection self, IEnumerable<ServerConnection> servers) =>
         AzureMasterScope.SeparatelyMonitoredDatabases(
-            IsAzureSqlDatabase(self, liveEdition),
+            isAzureSqlDatabase,
             self.Id, self.ServerName, self.DatabaseName,
-            servers.Select(t => new AlertTargetIdentity(t.Id, t.ServerName, t.DatabaseName, t.IsEnabled, t.ReadOnlyIntent)));
+            AlertTargets(servers));
+
+    /// <summary>
+    /// The databases monitored as their own servers on an Azure SQL Database logical server, as that server's
+    /// registration sees them: the same list for every registration of the server, including one that names a
+    /// database. The long-query trace uses it to tell which databases a logical server's registration keeps its
+    /// session in (<see cref="LongQueryTraceDatabases.KeptElsewhere"/>). No configuration id is empty, so the empty
+    /// self id leaves none of the registrations out.
+    /// </summary>
+    public static IReadOnlyList<string> SeparatelyMonitoredDatabasesOnServer(string host, IEnumerable<ServerConnection> servers) =>
+        AzureMasterScope.SeparatelyMonitoredDatabases(
+            isAzureSqlDb: true, selfId: string.Empty, host, database: null, AlertTargets(servers));
+
+    private static IEnumerable<AlertTargetIdentity> AlertTargets(IEnumerable<ServerConnection> servers) =>
+        servers.Select(t => new AlertTargetIdentity(t.Id, t.ServerName, t.DatabaseName, t.IsEnabled, t.ReadOnlyIntent));
 
     /// <summary>
     /// The analysis provider's answer for a storage server id: <see cref="SeparatelyMonitoredDatabases"/> for the

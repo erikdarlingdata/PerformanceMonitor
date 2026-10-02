@@ -19,8 +19,8 @@
       },
       "AWSSDK.Core": {
         "type": "Transitive",
-        "resolved": "4.0.102.6",
-        "contentHash": "YwUi9qpz/OHqwEgsf8I5jj1aC/xkkjmF91R8Yx6yD66dhOiORgQJynYQk0fzI4xdhBgUaw8SRGbMkLRrvL+CNA=="
+        "resolved": "4.0.102.8",
+        "contentHash": "90B9Skhl+ORbtWNXrrmGdGhGvAfZiPmZafRYrB/xHelZjePIwPvXioqz9UiiF1vo21eDLzTnXh5EC4RjbNWsFQ=="
       },
       "Azure.Core": {
         "type": "Transitive",
@@ -85,16 +85,16 @@
       },
       "Microsoft.Data.SqlClient.Extensions.Abstractions": {
         "type": "Transitive",
-        "resolved": "7.1.0",
-        "contentHash": "8xqe8rxLEJealAw21Rh/w+Kis4TtgAZQ+e7HrTkG/gOeiy3CbCtcMXJr3P5H9txhUQNNxkoR9qy1FIk5T85FSg==",
+        "resolved": "7.1.1",
+        "contentHash": "qP/zUOCJwfKqWNC9o+TWqltfNbLnZi1APNpJZgj0yeEJhoI+h+eoQLX+331yZHNOlDxdafZLP5arW/yrS1jAAw==",
         "dependencies": {
-          "Microsoft.Data.SqlClient.Internal.Logging": "[7.1.0, 8.0.0)"
+          "Microsoft.Data.SqlClient.Internal.Logging": "[7.1.1, 8.0.0)"
         }
       },
       "Microsoft.Data.SqlClient.Internal.Logging": {
         "type": "Transitive",
-        "resolved": "7.1.0",
-        "contentHash": "z+uzJ+/xqZlYSlv0slMhiHd3TRZr20ijZmjUG2qOaNjKzMMO5cx8itHQ0s/YguqMq/8BMlXZe5n6XSgswe+73g=="
+        "resolved": "7.1.1",
+        "contentHash": "bVqbATLnHQngue7U9K7GRnzvfdDa7IyiBU2vijfU2vBMBSZrAnQp/wXqNSfaVonckSaMXUk07wfujTqy9IVMdw=="
       },
       "Microsoft.Data.SqlClient.SNI.runtime": {
         "type": "Transitive",
@@ -733,8 +733,8 @@
       "performancemonitor.alerting": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.8.0, )",
-          "PerformanceMonitor.Notifications": "[3.8.0, )"
+          "PerformanceMonitor.Common": "[3.9.0, )",
+          "PerformanceMonitor.Notifications": "[3.9.0, )"
         }
       },
       "performancemonitor.analysis": {
@@ -743,7 +743,7 @@
       "performancemonitor.collectors": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.8.0, )"
+          "PerformanceMonitor.Common": "[3.9.0, )"
         }
       },
       "performancemonitor.common": {
@@ -757,36 +757,36 @@
       "performancemonitor.darling.analysis": {
         "type": "Project",
         "dependencies": {
-          "Microsoft.Data.SqlClient": "[7.1.0, )",
-          "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.0, )",
+          "Microsoft.Data.SqlClient": "[7.1.1, )",
+          "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.1, )",
           "ModelContextProtocol": "[2.2.0, )",
-          "PerformanceMonitor.Analysis": "[3.8.0, )",
-          "PerformanceMonitor.Collectors": "[3.8.0, )",
-          "PerformanceMonitor.Common": "[3.8.0, )",
-          "PerformanceMonitor.Darling.Storage": "[3.8.0, )",
-          "PerformanceMonitor.Notifications": "[3.8.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.8.0, )"
+          "PerformanceMonitor.Analysis": "[3.9.0, )",
+          "PerformanceMonitor.Collectors": "[3.9.0, )",
+          "PerformanceMonitor.Common": "[3.9.0, )",
+          "PerformanceMonitor.Darling.Storage": "[3.9.0, )",
+          "PerformanceMonitor.Notifications": "[3.9.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )"
         }
       },
       "performancemonitor.darling.service": {
         "type": "Project",
         "dependencies": {
-          "AWSSDK.PI": "[4.0.100.14, )",
-          "AWSSDK.RDS": "[4.0.105.3, )",
+          "AWSSDK.PI": "[4.0.100.15, )",
+          "AWSSDK.RDS": "[4.0.106.1, )",
           "BlackwellSystems.Gcf": "[1.0.0, )",
-          "Microsoft.Data.SqlClient": "[7.1.0, )",
-          "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.0, )",
+          "Microsoft.Data.SqlClient": "[7.1.1, )",
+          "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.1, )",
           "Microsoft.Extensions.Hosting": "[10.0.12, )",
           "Microsoft.Extensions.Hosting.WindowsServices": "[10.0.12, )",
           "ModelContextProtocol": "[2.2.0, )",
           "ModelContextProtocol.AspNetCore": "[2.2.0, )",
-          "PerformanceMonitor.Alerting": "[3.8.0, )",
-          "PerformanceMonitor.Collectors": "[3.8.0, )",
-          "PerformanceMonitor.Common": "[3.8.0, )",
-          "PerformanceMonitor.Darling.Analysis": "[3.8.0, )",
-          "PerformanceMonitor.Darling.Storage": "[3.8.0, )",
-          "PerformanceMonitor.Notifications": "[3.8.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.8.0, )",
+          "PerformanceMonitor.Alerting": "[3.9.0, )",
+          "PerformanceMonitor.Collectors": "[3.9.0, )",
+          "PerformanceMonitor.Common": "[3.9.0, )",
+          "PerformanceMonitor.Darling.Analysis": "[3.9.0, )",
+          "PerformanceMonitor.Darling.Storage": "[3.9.0, )",
+          "PerformanceMonitor.Notifications": "[3.9.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )",
           "System.IO.FileSystem.AccessControl": "[5.0.0, )"
         }
       },
@@ -794,66 +794,66 @@
         "type": "Project",
         "dependencies": {
           "Npgsql": "[10.0.3, )",
-          "PerformanceMonitor.Collectors": "[3.8.0, )",
-          "PerformanceMonitor.Common": "[3.8.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.8.0, )"
+          "PerformanceMonitor.Collectors": "[3.9.0, )",
+          "PerformanceMonitor.Common": "[3.9.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )"
         }
       },
       "performancemonitor.darling.viewer": {
         "type": "Project",
         "dependencies": {
           "Hardcodet.NotifyIcon.Wpf": "[2.0.1, )",
-          "PerformanceMonitor.Alerting": "[3.8.0, )",
-          "PerformanceMonitor.Analysis": "[3.8.0, )",
-          "PerformanceMonitor.Collectors": "[3.8.0, )",
-          "PerformanceMonitor.Common": "[3.8.0, )",
-          "PerformanceMonitor.Darling.Analysis": "[3.8.0, )",
-          "PerformanceMonitor.Darling.Storage": "[3.8.0, )",
-          "PerformanceMonitor.Notifications": "[3.8.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.8.0, )",
-          "PerformanceMonitor.Ui": "[3.8.0, )",
+          "PerformanceMonitor.Alerting": "[3.9.0, )",
+          "PerformanceMonitor.Analysis": "[3.9.0, )",
+          "PerformanceMonitor.Collectors": "[3.9.0, )",
+          "PerformanceMonitor.Common": "[3.9.0, )",
+          "PerformanceMonitor.Darling.Analysis": "[3.9.0, )",
+          "PerformanceMonitor.Darling.Storage": "[3.9.0, )",
+          "PerformanceMonitor.Notifications": "[3.9.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )",
+          "PerformanceMonitor.Ui": "[3.9.0, )",
           "ScottPlot.WPF": "[5.1.59, )",
-          "Velopack": "[1.2.158, )"
+          "Velopack": "[1.2.161, )"
         }
       },
       "performancemonitor.notifications": {
         "type": "Project",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.12, )",
-          "PerformanceMonitor.Analysis": "[3.8.0, )"
+          "PerformanceMonitor.Analysis": "[3.9.0, )"
         }
       },
       "performancemonitor.plananalysis": {
         "type": "Project",
         "dependencies": {
-          "Microsoft.Data.SqlClient": "[7.1.0, )",
-          "PerformanceMonitor.Common": "[3.8.0, )"
+          "Microsoft.Data.SqlClient": "[7.1.1, )",
+          "PerformanceMonitor.Common": "[3.9.0, )"
         }
       },
       "performancemonitor.ui": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.8.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.8.0, )",
+          "PerformanceMonitor.Common": "[3.9.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )",
           "ScottPlot.WPF": "[5.1.59, )"
         }
       },
       "AWSSDK.PI": {
         "type": "CentralTransitive",
-        "requested": "[4.0.100.14, )",
-        "resolved": "4.0.100.14",
-        "contentHash": "4IWTPrEW9TzuET1B8GEftX2rx+HyJ0hwmS6sRvx7DTpupCbD80QdSqGBlmsH34eUvv/Gvcowp321Dv/SzZP0CQ==",
+        "requested": "[4.0.100.15, )",
+        "resolved": "4.0.100.15",
+        "contentHash": "Pk25EjBAV+yY7r5vP7c7VmqeX922BwCIpNO/ynp5WIEfZbIZD1FSyg/D++W6gqIOq2vWRSvSXygMlCagMHx4xQ==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.6, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.8, 5.0.0)"
         }
       },
       "AWSSDK.RDS": {
         "type": "CentralTransitive",
-        "requested": "[4.0.105.3, )",
-        "resolved": "4.0.105.3",
-        "contentHash": "LF3fUze3mbiOj+EGEPK5mTgd+VYA5X7Xk5wU6ITMFjo11oce0tMfPifdOAGlnWIgad1jV2s1bDaLRiwkE7aHpg==",
+        "requested": "[4.0.106.1, )",
+        "resolved": "4.0.106.1",
+        "contentHash": "ok3d6CrjA4jS6u6gZC46AHPPStSzjfzp2y/TF19GJRrIvK1eRgkay0xVJaXYrqbmn65W0u6ziMSsFhXlwCfWtw==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.6, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.8, 5.0.0)"
         }
       },
       "BlackwellSystems.Gcf": {
@@ -876,13 +876,13 @@
       },
       "Microsoft.Data.SqlClient": {
         "type": "CentralTransitive",
-        "requested": "[7.1.0, )",
-        "resolved": "7.1.0",
-        "contentHash": "yKPkjufNvrX5VDv49XHaGbUNPL4kDx9ALCrqDhYu+ThFQxjM8zGMzYxPv9iiwRU0ZL3vhgq0F2KEeoV3PT2utQ==",
+        "requested": "[7.1.1, )",
+        "resolved": "7.1.1",
+        "contentHash": "Moz4+bba/OdEM9I4jXWggduJ4sqoNcgVAQyXG/dNnGGvnS/YDr2fTjP83fg5YX3drgRki6fRAhR94P8dAZgZtQ==",
         "dependencies": {
           "Microsoft.Bcl.Cryptography": "9.0.18",
-          "Microsoft.Data.SqlClient.Extensions.Abstractions": "[7.1.0, 8.0.0)",
-          "Microsoft.Data.SqlClient.Internal.Logging": "[7.1.0, 8.0.0)",
+          "Microsoft.Data.SqlClient.Extensions.Abstractions": "[7.1.1, 8.0.0)",
+          "Microsoft.Data.SqlClient.Internal.Logging": "[7.1.1, 8.0.0)",
           "Microsoft.Data.SqlClient.SNI.runtime": "[7.1.0, 8.0.0)",
           "Microsoft.Extensions.Caching.Memory": "9.0.18",
           "Microsoft.IdentityModel.JsonWebTokens": "8.16.0",
@@ -893,14 +893,14 @@
       },
       "Microsoft.Data.SqlClient.Extensions.Azure": {
         "type": "CentralTransitive",
-        "requested": "[7.1.0, )",
-        "resolved": "7.1.0",
-        "contentHash": "ZMfBGoTa2D1VugOSh8y6Klv9mh8hefgjygAFiSHAl/1dw+EehRrBl6YFbB8IX27XUHj1tQ0I+bdGMZ5DtwMOlw==",
+        "requested": "[7.1.1, )",
+        "resolved": "7.1.1",
+        "contentHash": "3/Z+6JJKGUw8+shNtftUSGOagt7XCbuhXknZjzXQfDr5aA4lUEMtU/MMNSiwMIrkviYslNKvFh1yWOArudDxQA==",
         "dependencies": {
           "Azure.Core": "1.51.1",
           "Azure.Identity": "1.18.0",
-          "Microsoft.Data.SqlClient.Extensions.Abstractions": "[7.1.0, 8.0.0)",
-          "Microsoft.Data.SqlClient.Internal.Logging": "[7.1.0, 8.0.0)",
+          "Microsoft.Data.SqlClient.Extensions.Abstractions": "[7.1.1, 8.0.0)",
+          "Microsoft.Data.SqlClient.Internal.Logging": "[7.1.1, 8.0.0)",
           "Microsoft.Extensions.Caching.Memory": "8.0.1",
           "Microsoft.Identity.Client": "4.84.2",
           "Microsoft.Identity.Client.Broker": "4.84.2"
@@ -1038,9 +1038,9 @@
       },
       "Velopack": {
         "type": "CentralTransitive",
-        "requested": "[1.2.158, )",
-        "resolved": "1.2.158",
-        "contentHash": "wQN38beVrAf0WzFMnZtl7UmwxqwaJ7xVYypqITdOI4YUTYch2UvE+xAjg9msfaitVDtgfWeIcGsjRNQ65C03ZQ=="
+        "requested": "[1.2.161, )",
+        "resolved": "1.2.161",
+        "contentHash": "OpHNacIumnkhaaX3ZlQ/TCR4YPOJvud2/PAOoWb6o+mIrLwIVA275I5wAgt4q/1O2VrJeDwR1qFQyqzG4lUArg=="
       }
     }
   }

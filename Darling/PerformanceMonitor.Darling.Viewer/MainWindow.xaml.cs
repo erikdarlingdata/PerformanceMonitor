@@ -432,6 +432,11 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* #4957: measure the rollup floors in the background now that the store has answered, so the first tab that
+           routes by them does not wait on the cold sort. Fire and forget: the warm never throws and changes nothing
+           else when it fails. */
+        _ = _dataService.WarmRollupCoverageAsync();
+
         /* A read-only seat cannot command the service, so "Generate now" (analyze_now) is disabled. */
         RecommendationsGenerateButton.IsEnabled = !_dataService.IsReadOnly;
 
@@ -935,6 +940,32 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Puts the sidebar back on <paramref name="row"/> after its list was rebuilt (a reload, the favorites
+    /// re-sort), then loads the visible tab once. A rebuild is not the user choosing a server, so the selection is
+    /// set under <see cref="_suppressSidebarSelection"/>: <see cref="ServerList_SelectionChanged"/> does not run,
+    /// and <see cref="SyncAggregateServerSelectors"/> does not move the Recommendations and FinOps pickers off the
+    /// servers they show. The guard also skips the handler's load of the visible tab, so this starts it, the way
+    /// the handler did. No row (an empty or fully filtered list) selects nothing and loads nothing, as before.
+    /// </summary>
+    private void RestoreSidebarSelection(FleetServerRow? row)
+    {
+        _suppressSidebarSelection = true;
+        try
+        {
+            ServerList.SelectedItem = row;
+        }
+        finally
+        {
+            _suppressSidebarSelection = false;
+        }
+
+        if (row is not null)
+        {
+            _ = RefreshVisibleAsync();
+        }
+    }
+
+    /// <summary>
     /// Lazy per-tab load: switching top-level tabs loads the newly visible one. SelectionChanged is a
     /// bubbling routed event, so selections inside the tab content (a findings grid, an inner server
     /// tab, the server list template) reach here too — only react to the top TabControl's own.
@@ -1026,33 +1057,43 @@ public partial class MainWindow : Window
 
         try
         {
-            var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
-
             /* The DESIRED-state managed set (config_monitored_servers), enriched with the observed
                collect.servers facts by the shared server_id, so a viewer add/remove/enable is reflected at
                once. Stamp the viewer's favorite pins (matched by server id) and sort favorites-first. */
             var servers = ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync());
+
+            /* Read the servers to keep AFTER the await: a sidebar or picker change made while the list loads is
+               the user's latest choice, and the reload keeps it. */
+            var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
+            var previousRecoServer = (RecommendationsServerSelector.SelectedItem as DarlingServer)?.ServerId;
             _fleet.SetAll(servers);
             ServerList.ItemsSource = _fleet.Visible;
             UpdateServerCountText();
 
+            /* The sidebar's server after this load: the prior one after a server add/edit/remove
+               (preserveSelection), so the view doesn't jump back to the first server; the first one on the
+               initial load. Resolved by SERVER, never by index: once tag rows share this list, row 0 is a header
+               rather than a server. The two pickers below fall back to it. */
+            var sidebarRow = _fleet.ResolveSelection(preserveSelection ? previousSelection : null);
+            var sidebarServerId = sidebarRow?.Server.ServerId;
+
             /* The Recommendations tab has its OWN server selector, synced to the sidebar selection on a
                single-click (SyncAggregateServerSelectors) yet independently changeable while the tab is open.
-               Populate it from the same list; the guard suppresses its SelectionChanged during this initial
-               population so the first load comes from the sidebar-driven RefreshVisibleAsync below (which
-               reads the now-populated combo). */
+               Populate it from the same list. A reload keeps the server it shows while that server exists, and
+               the initial load starts it on the sidebar's server (PickerSelectionAfterReload). The guard
+               suppresses its SelectionChanged here, so the load comes from the RefreshVisibleAsync that
+               RestoreSidebarSelection starts below (which reads the now-populated combo). */
             _populatingRecoServers = true;
             RecommendationsServerSelector.ItemsSource = servers;
-            if (servers.Count > 0)
-            {
-                RecommendationsServerSelector.SelectedIndex = 0;
-            }
+            RecommendationsServerSelector.SelectedItem = ViewerServerSetSync.PickerSelectionAfterReload(
+                servers, preserveSelection ? previousRecoServer : null, sidebarServerId);
             _populatingRecoServers = false;
 
-            /* The FinOps aggregate tab has its OWN server selector too; hand it the same list. It suppresses
-               its selector's SelectionChanged during population (like the Recommendations selector above), so
-               the first FinOps load comes from tab activation, not this call. */
-            FinOpsContent.SetServers(servers);
+            /* The FinOps aggregate tab has its OWN server selector too; hand it the same list. It keeps or falls
+               back the same way, and suppresses its selector's SelectionChanged during population (like the
+               Recommendations selector above), so the first FinOps load comes from tab activation, not this
+               call. */
+            FinOpsContent.SetServers(servers, sidebarServerId, keepSelection: preserveSelection);
 
             var hasServers = servers.Count > 0;
             ServersHintText.Visibility = hasServers ? Visibility.Collapsed : Visibility.Visible;
@@ -1061,14 +1102,9 @@ public partial class MainWindow : Window
 
             if (hasServers)
             {
-                /* Triggers SelectionChanged, which loads the active aggregate tab. Restore the prior
-                   selection after a server add/edit/remove (preserveSelection) so the view doesn't jump
-                   back to the first server; the initial load selects the first.
-
-                   Resolved by SERVER, never by index: once tag rows share this list, row 0 is a header
-                   rather than a server, so a SelectedIndex = 0 fallback would select a non-server and the
-                   aggregate-tab sync would silently never run. */
-                ServerList.SelectedItem = _fleet.ResolveSelection(preserveSelection ? previousSelection : null);
+                /* Selects the sidebar's server and loads the visible tab once, under the suppression guard, so
+                   the restore does not move the two pickers populated above to the sidebar's server. */
+                RestoreSidebarSelection(sidebarRow);
 
                 /* Fold the fleet tags into the sidebar (opt-in: no tags => the list stays flat). Done after
                    the selectors are populated and the initial selection is set, so the tag re-projection
@@ -1181,12 +1217,15 @@ public partial class MainWindow : Window
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
                     /* The picker lists the servers known when LoadServersAsync last ran; a server added since
-                       (by another client) is picked up here, keeping the current selection. */
+                       (by another client) is picked up here, keeping the current selection, or taking the
+                       sidebar's server when the selected one is gone. */
                     if (_dataService is not null)
                     {
                         try
                         {
-                            FinOpsContent.SetServers(ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync()));
+                            FinOpsContent.SetServers(
+                                ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync()),
+                                (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId);
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {

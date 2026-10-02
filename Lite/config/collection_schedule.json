@@ -17,7 +17,7 @@
     { "name": "memory_grant_stats", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Memory grant statistics from sys.dm_exec_query_memory_grants" },
     { "name": "waiting_tasks", "enabled": true, "frequency_minutes": 1, "retention_days": 7, "description": "Point-in-time waiting tasks from sys.dm_os_waiting_tasks" },
     { "name": "blocked_process_report", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Blocked process reports from XE ring buffer session (opt-out)" },
-    { "name": "long_query_completions", "enabled": false, "frequency_minutes": 1, "retention_days": 30, "description": "Long-running query completions from a dedicated XE ring buffer session. OPT-IN, default OFF (#1496)" },
+    { "name": "long_query_completions", "enabled": false, "frequency_minutes": 1, "retention_days": 30, "description": "Long-running query completions from a dedicated XE ring buffer session. OPT-IN, default OFF (#1496). On Azure SQL Database the session is created in each monitored database." },
     { "name": "database_scoped_config", "enabled": true, "frequency_minutes": 0, "retention_days": 30, "description": "Database-scoped configurations (on-load only)" },
     { "name": "trace_flags", "enabled": true, "frequency_minutes": 0, "retention_days": 30, "description": "Active trace flags via DBCC TRACESTATUS (on-load only)" },
     { "name": "running_jobs", "enabled": true, "frequency_minutes": 5, "retention_days": 7, "description": "Currently running SQL Agent jobs with duration comparison" },
