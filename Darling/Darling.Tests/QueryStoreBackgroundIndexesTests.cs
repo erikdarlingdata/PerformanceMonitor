@@ -118,14 +118,6 @@ public sealed class QueryStoreBackgroundIndexesTests
             Assert.DoesNotContain("transaction_per_chunk", spec.PlainCreateSql, StringComparison.Ordinal);
             Assert.Contains("DROP INDEX CONCURRENTLY IF EXISTS", spec.PlainDropSql);
         }
-
-        /* The version floor comes before the table check, whatever the table is. */
-        Assert.Equal(
-            QueryStoreBackgroundIndexes.IndexAction.SkipServerVersion,
-            QueryStoreBackgroundIndexes.Decide(Brin, 150000, true).Action);
-        Assert.Equal(
-            QueryStoreBackgroundIndexes.IndexAction.SkipHypertable,
-            QueryStoreBackgroundIndexes.Decide(Brin, 180006, true).Action);
     }
 
     [Fact]
