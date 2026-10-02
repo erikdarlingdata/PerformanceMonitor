@@ -127,6 +127,28 @@ public sealed class McpWholeNumberArgumentTests
         Assert.Null(McpInProcessHost.WholeNumberRefusalProblem("get_wait_stats", "limit", "whole number", result));
     }
 
+    /// <summary>A whole number past <see cref="int"/> sent for <c>hours_back</c>, through a real in-process server with
+    /// the declared parameter types recorded, is refused as too large, and the refusal states no range. The CLR type's
+    /// range is not the range the tool takes: <c>hours_back</c> is an int, but <c>McpHelpers.ValidateHoursBack</c>
+    /// refuses anything outside 1-168. A refusal that quoted "from -2147483648 to 2147483647" gave the caller two
+    /// ranges that disagree, and invited a retry the tool's own validator refuses.</summary>
+    [Fact]
+    public async Task HoursBackPastInt_IsRefusedAsTooLarge_AndStatesNoRange()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var host = await StartHostAsync();
+
+        var result = await host.Client.CallToolAsync(
+            "get_wait_stats", new Dictionary<string, object?> { ["hours_back"] = Json("99999999999") }, cancellationToken: ct);
+
+        var problem = McpInProcessHost.WholeNumberRefusalProblem("get_wait_stats", "hours_back", "whole number of hours", result);
+        Assert.True(problem is null, problem);
+        var message = McpInProcessHost.RefusalMessage(result)!;
+        Assert.Contains("which is too large", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("2147483647", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("-2147483648", message, StringComparison.Ordinal);
+    }
+
     /// <summary>Every integer parameter of every Lite tool refuses 2.5, 1.0, "0.5" and true by name, and passes 1, "1"
     /// and null. Checked against the guard's decision, so no tool body runs, and with no recorded parameter types:
     /// this is the schema-only path that a tool the record does not cover falls back to. The binder reads null only

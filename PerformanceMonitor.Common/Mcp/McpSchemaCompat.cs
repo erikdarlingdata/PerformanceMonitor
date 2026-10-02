@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
 using ModelContextProtocol.Server;
@@ -163,24 +164,28 @@ public static class McpSchemaCompat
                resolved per-request. The additions are SchemaCreateOptions, the served Description, and Meta. */
             builder.Services.AddSingleton((Func<IServiceProvider, McpServerTool>)(services =>
             {
-                var schemaOptions = SchemaOptionsFor(services);
-
-                /* The CLR type and nullability of each parameter the caller supplies, for the call-tool guard
-                   (McpUnknownArgumentGuard), which refuses a value the SDK's binder cannot read into that type. The
-                   served schema cannot say it: "integer" covers int, long, short and byte alike, and nullability is
-                   absent. The parameters the schema leaves out (DI services) are left out here by the same rule. */
-                parameterTypes.Register(toolName, toolMethod, schemaOptions.IncludeParameter);
-
-                return McpServerTool.Create(
+                var tool = McpServerTool.Create(
                     toolMethod,
                     target: null,
                     options: new McpServerToolCreateOptions
                     {
                         Services = services,
-                        SchemaCreateOptions = schemaOptions,
+                        SchemaCreateOptions = SchemaOptionsFor(services),
                         Description = served,
                         Meta = alwaysLoad ? new JsonObject { ["anthropic/alwaysLoad"] = true } : null
                     });
+
+                /* The CLR type and nullability of each parameter the caller supplies, for the call-tool guard
+                   (McpUnknownArgumentGuard), which refuses a value the SDK's binder cannot read into that type. The
+                   served schema cannot say it: "integer" covers int, long, short and byte alike, and nullability is
+                   absent. Which parameters a caller supplies is read back from the schema the created tool serves, so
+                   the record holds exactly what that schema lists: the DI services it leaves out, and a
+                   CancellationToken the SDK binds from the request, are left out here too, and neither rule is
+                   repeated. */
+                var advertised = AdvertisedParameterNames(tool);
+                parameterTypes.Register(toolName, toolMethod, parameter => parameter.Name is { } name && advertised.Contains(name));
+
+                return tool;
             }));
         }
 
@@ -207,6 +212,28 @@ public static class McpSchemaCompat
         var catalog = new McpToolGuideCatalog();
         services.AddSingleton(catalog);
         return catalog;
+    }
+
+    /// <summary>
+    /// The parameter names the created tool's served schema lists, matched exactly, as the SDK's binder matches them.
+    /// Empty for a schema that is not an object, or lists no properties: a tool that takes nothing a caller may send.
+    /// </summary>
+    private static HashSet<string> AdvertisedParameterNames(McpServerTool tool)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        var schema = tool.ProtocolTool.InputSchema;
+
+        if (schema.ValueKind == JsonValueKind.Object
+            && schema.TryGetProperty("properties", out var properties)
+            && properties.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in properties.EnumerateObject())
+            {
+                names.Add(property.Name);
+            }
+        }
+
+        return names;
     }
 
     /// <summary>

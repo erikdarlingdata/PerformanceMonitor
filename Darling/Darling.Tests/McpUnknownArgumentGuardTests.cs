@@ -440,7 +440,8 @@ public sealed class McpUnknownArgumentGuardTests
         var list = ProbeRefusal("colors", "[0.5]");
 
         Assert.NotNull(list);
-        Assert.Contains("a list (a JSON array) of ProbeColor values", list, StringComparison.Ordinal);
+        Assert.Contains("a list (a JSON array) of names from Crimson, Teal, Amber", list, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProbeColor", list, StringComparison.Ordinal);
         Assert.DoesNotContain("whole number", list, StringComparison.Ordinal);
 
         /* The control: a member name, and a number the enum holds, are read by the binder, so they are not refused. */
@@ -465,8 +466,9 @@ public sealed class McpUnknownArgumentGuardTests
 
         Assert.NotNull(message);
         Assert.Contains("'count'", message, StringComparison.Ordinal);
-        Assert.Contains("takes a whole number from -2147483648 to 2147483647, and the call sent", message, StringComparison.Ordinal);
+        Assert.Contains("takes a whole number, and the call sent", message, StringComparison.Ordinal);
         Assert.Contains($"which is {direction}.", message, StringComparison.Ordinal);
+        AssertStatesNoRange(message);
     }
 
     /// <summary>
@@ -487,8 +489,22 @@ public sealed class McpUnknownArgumentGuardTests
         var message = ProbeRefusal("count", "\"" + sign + new string('0', zeros) + digits + "\"");
 
         Assert.NotNull(message);
-        Assert.Contains("takes a whole number from -2147483648 to 2147483647, and the call sent", message, StringComparison.Ordinal);
+        Assert.Contains("takes a whole number, and the call sent", message, StringComparison.Ordinal);
         Assert.Contains($"which is {direction}.", message, StringComparison.Ordinal);
+        AssertStatesNoRange(message);
+    }
+
+    /// <summary>
+    /// A refusal for a whole number past an <see cref="int"/> says the value is too large or too small, and states no
+    /// range. The range of the CLR type is not the range the tool takes (<c>hours_back</c> is an int, and
+    /// <c>McpHelpers.ValidateHoursBack</c> refuses anything outside 1-168), so quoting it gave the caller two ranges that
+    /// disagree, and invited a retry the tool's own validator refuses.
+    /// </summary>
+    private static void AssertStatesNoRange(string message)
+    {
+        Assert.DoesNotContain("2147483647", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("-2147483648", message, StringComparison.Ordinal);
+        Assert.DoesNotContain(" from ", message, StringComparison.Ordinal);
     }
 
     /// <summary>

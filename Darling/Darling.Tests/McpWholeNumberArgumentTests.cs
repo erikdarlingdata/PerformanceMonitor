@@ -46,9 +46,13 @@ public sealed class McpWholeNumberArgumentTests
     }
 
     /// <summary>Inert stand-ins for the two service types that cannot be left uninitialized. The data source points
-    /// at a closed local port. This class's calls are all refused before the tool body, so it is never opened here;
-    /// but two tests in <see cref="McpUnknownArgumentGuardTests"/> share this host and DO reach the tool body, where
-    /// the one-second connect timeout on the closed port is what keeps them fast.</summary>
+    /// at a closed local port. This class's calls are all refused before the tool body, so it is never opened here.
+    /// Two other places share this host and DO reach a tool body. In <see cref="McpUnknownArgumentGuardTests"/> one
+    /// test does: <c>WithoutTheGuard_TheBinderDropsAKeyDifferingOnlyByCase</c>, through its <c>HOURS_BACK</c> call (the
+    /// binder drops that key, so <c>get_wait_stats</c> runs at its default window); the other test there that starts this
+    /// host is refused before the binder. And <see cref="McpArgumentTypeTests"/> runs a real tool body for every row the
+    /// binder reads, on its guard-less host, and on its guarded host too, which passes those rows on. The one-second
+    /// connect timeout on the closed port is what keeps those fast.</summary>
     private static object? InertInstanceFor(Type serviceType) =>
         serviceType == typeof(NpgsqlDataSource) ? NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=none;Database=none;Timeout=1")
         : serviceType == typeof(ILogger) ? NullLogger.Instance
@@ -144,6 +148,30 @@ public sealed class McpWholeNumberArgumentTests
             "get_wait_stats", new Dictionary<string, object?> { ["limit"] = Json("2.5") }, cancellationToken: ct);
 
         Assert.Null(McpInProcessHost.WholeNumberRefusalProblem("get_wait_stats", "limit", "whole number", result));
+    }
+
+    /// <summary>
+    /// A whole number past <see cref="int"/> sent for <c>hours_back</c>, through a real in-process server with the
+    /// declared parameter types recorded, is refused as too large, and the refusal states no range. The CLR type's range
+    /// is not the range the tool takes: <c>hours_back</c> is an int, but <c>McpHelpers.ValidateHoursBack</c> refuses
+    /// anything outside 1-168. A refusal that quoted "from -2147483648 to 2147483647" gave the caller two ranges that
+    /// disagree, and invited a retry the tool's own validator refuses.
+    /// </summary>
+    [Fact]
+    public async Task HoursBackPastInt_IsRefusedAsTooLarge_AndStatesNoRange()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var host = await StartHostAsync();
+
+        var result = await host.Client.CallToolAsync(
+            "get_wait_stats", new Dictionary<string, object?> { ["hours_back"] = Json("99999999999") }, cancellationToken: ct);
+
+        var problem = McpInProcessHost.WholeNumberRefusalProblem("get_wait_stats", "hours_back", "whole number of hours", result);
+        Assert.True(problem is null, problem);
+        var message = McpInProcessHost.RefusalMessage(result)!;
+        Assert.Contains("which is too large", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("2147483647", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("-2147483648", message, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -27,7 +27,10 @@ namespace Darling.Tests;
 /// over the tool types of both products), and <see cref="long"/> and <c>long?</c>, which Darling's tools declare
 /// and Lite's do not. The in-process host registers it through the same
 /// <c>McpSchemaCompat.WithGeminiCompatibleTools</c> path as the shipped tools, so the call-tool guard meets it the same
-/// way. It carries no <c>McpServerToolType</c> attribute, so no census over the product's tool types sees it.
+/// way. It carries no <c>McpServerToolType</c> attribute, so no census over the product's tool types sees it. It also
+/// declares a <see cref="CancellationToken"/>, which the SDK supplies and the schema leaves out, so the check that the
+/// record holds nothing the schema does not advertise always has such a parameter to see, whatever the shipped tools
+/// declare.
 /// </summary>
 internal static class McpArgumentTypeProbeTools
 {
@@ -40,7 +43,8 @@ internal static class McpArgumentTypeProbeTools
         [Description("An integer array.")] int[]? ids = null,
         [Description("A nullable bool.")] bool? maybe = null,
         [Description("A long.")] long big = 0,
-        [Description("A nullable long.")] long? maybeBig = null) => "ok";
+        [Description("A nullable long.")] long? maybeBig = null,
+        CancellationToken cancellationToken = default) => "ok";
 }
 
 /// <summary>
@@ -180,6 +184,37 @@ internal static class McpArgumentTypeRows
                     }
                 }
             }
+        }
+
+        return problems;
+    }
+
+    /// <summary>
+    /// What the host recorded for a tool that the tool's schema does not advertise, or an empty list: the reverse of
+    /// <see cref="RecordedTypeProblems"/>. The record holds only what a caller may send, so a parameter the schema
+    /// leaves out (a cancellation token the SDK supplies, a service resolved from DI) has no place in it, whatever the
+    /// tool method declares.
+    /// </summary>
+    public static List<string> RecordedButNotAdvertisedProblems(McpInProcessHost host)
+    {
+        var types = host.ParameterTypes;
+        var problems = new List<string>();
+
+        foreach (var tool in host.RegisteredTools)
+        {
+            var name = tool.ProtocolTool.Name;
+            if (!types.TryGet(name, out var recorded))
+            {
+                continue;
+            }
+
+            var advertised = tool.ProtocolTool.InputSchema.TryGetProperty("properties", out var properties)
+                ? properties.EnumerateObject().Select(property => property.Name).ToHashSet(StringComparer.Ordinal)
+                : new HashSet<string>(StringComparer.Ordinal);
+
+            problems.AddRange(recorded.Keys
+                .Where(parameter => !advertised.Contains(parameter))
+                .Select(parameter => $"{name}.{parameter}: recorded, but the schema does not advertise it"));
         }
 
         return problems;

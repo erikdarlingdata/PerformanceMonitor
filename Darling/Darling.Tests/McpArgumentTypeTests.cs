@@ -74,6 +74,17 @@ public sealed class McpArgumentTypeTests : IClassFixture<McpArgumentTypeTests.Ho
         Assert.True(problems.Count == 0, $"{problems.Count} problems:\n" + string.Join("\n", problems.Take(40)));
     }
 
+    /// <summary>The reverse of the check above: the record holds only what a caller may send, so every parameter it holds
+    /// is one the tool's schema advertises. A parameter the schema leaves out (a cancellation token the SDK supplies, a
+    /// service resolved from DI) is not recorded, whatever the tool method declares.</summary>
+    [Fact]
+    public void EveryRecordedParameter_IsOneTheSchemaAdvertises()
+    {
+        var problems = McpArgumentTypeRows.RecordedButNotAdvertisedProblems(_hosts.Guarded);
+
+        Assert.True(problems.Count == 0, $"{problems.Count} problems:\n" + string.Join("\n", problems.Take(40)));
+    }
+
     /// <summary>The table is only worth having if it reaches every CLR type the shipped tools declare, so a tool added
     /// with a type the table lacks fails here by name instead of passing through unchecked.</summary>
     [Fact]

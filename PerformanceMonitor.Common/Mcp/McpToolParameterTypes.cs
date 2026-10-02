@@ -31,9 +31,10 @@ public sealed record McpParameterType(Type Type, bool AllowsNull);
 ///
 /// <para>The served schema cannot stand in for this. It says <c>"integer"</c> for an <c>int</c>, a <c>long</c>, a
 /// <c>short</c> and a <c>byte</c> alike, carries no <c>format</c>, and does not say which parameters take a null, while
-/// the SDK's binder reads each value into the real type and throws on a value that type cannot hold. A parameter the
-/// host resolves from DI (a data source, a logger) is left out, by the same rule that leaves it out of the schema
-/// (<c>McpSchemaCompat.SchemaOptionsFor</c>), so only what a caller may send is here.</para>
+/// the SDK's binder reads each value into the real type and throws on a value that type cannot hold. Only what a caller
+/// may send is here: the host records the parameters the created tool's served schema lists, so a parameter it resolves
+/// from DI (a data source, a logger) or the SDK supplies (a cancellation token) is left out of the record as it is out
+/// of the schema.</para>
 /// </summary>
 public sealed class McpToolParameterTypes
 {
@@ -126,9 +127,12 @@ internal static class McpArgumentValueCheck
         if (Bounds(type) is { } bounds)
         {
             /* A whole number outside the type's range is too large or too small, which "no decimal point" would
-               misstate; anything else the type cannot read (0.5, "abc", true) is not a whole number. */
+               misstate; anything else the type cannot read (0.5, "abc", true) is not a whole number. The range itself
+               is not quoted: the CLR type's range is not the range the tool takes (hours_back is an int, and its own
+               validator refuses anything outside 1-168), so quoting it gave the caller two ranges that disagree, and
+               invited a retry the validator refuses. */
             return OutOfRange(value, bounds) is string direction
-                ? $"{prefix}{takes}{RangeOf(type)}, and the call sent {sent}, which is {direction}."
+                ? $"{prefix}{takes}, and the call sent {sent}, which is {direction}."
                 : $"{prefix}{takes} with no decimal point, such as 1, and the call sent {sent}.";
         }
 
@@ -174,18 +178,6 @@ internal static class McpArgumentValueCheck
             TypeCode.UInt64 => (ulong.MinValue, ulong.MaxValue),
             _ => null,
         };
-    }
-
-    /// <summary>" from -2147483648 to 2147483647" for a type narrower than <see cref="long"/>, and nothing for a
-    /// <see cref="long"/>, whose range a caller never runs into by accident.</summary>
-    private static string RangeOf(Type type)
-    {
-        if (type == typeof(long) || Bounds(type) is not { } bounds)
-        {
-            return "";
-        }
-
-        return string.Create(CultureInfo.InvariantCulture, $" from {bounds.Min} to {bounds.Max}");
     }
 
     /// <summary>"too large" or "too small" when <paramref name="value"/> is a whole number (a JSON number with no
@@ -301,6 +293,7 @@ internal static class McpArgumentValueCheck
         : element == typeof(bool) ? "true or false values"
         : element == typeof(string) ? "text values"
         : element == typeof(double) || element == typeof(float) || element == typeof(decimal) ? "numbers"
+        : element.IsEnum ? "names from " + string.Join(", ", Enum.GetNames(element))
         : element.Name + " values";
 
     /// <summary>The element type of an array or of a generic list-like collection, or null for any other type.</summary>
