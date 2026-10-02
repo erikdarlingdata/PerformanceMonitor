@@ -622,8 +622,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var slicersSource = File.ReadAllText(ControlsFile("ServerTab.Slicers.cs"));
         var slicerBannerCallsOnUtc = Regex.Matches(slicersSource,
             @"RefreshWindowTruncatedBannerAsync\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*e\.StartUtc,\s*e\.EndUtc\)").Count;
-        Assert.True(slicerBannerCallsOnUtc == 3,
-            $"expected all 3 OnXSlicerChanged banner calls to pass e.StartUtc, e.EndUtc (found {slicerBannerCallsOnUtc}) " +
+        /* 3 -> 4: Active Queries' slicer handler joined the three Queries grids' (the Lite twin of #4953's data-start notice). */
+        Assert.True(slicerBannerCallsOnUtc == 4,
+            $"expected all 4 OnXSlicerChanged banner calls to pass e.StartUtc, e.EndUtc (found {slicerBannerCallsOnUtc}) " +
             "-- fromServer/toServer are server-local and GetQueryWindowFloorAsync compares them straight against " +
             "UTC collection_time (#4279).");
         Assert.False(Regex.IsMatch(slicersSource, @"RefreshWindowTruncatedBannerAsync\([^)]*fromServer,\s*toServer\)"),
@@ -632,11 +633,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var refreshSource = File.ReadAllText(ControlsFile("ServerTab.Refresh.cs"));
         var refreshBannerCallsOnHelperOutput = Regex.Matches(refreshSource,
             @"RefreshWindowTruncatedBannerAsync\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*windowStart\d?,\s*windowEnd\d?\)").Count;
-        Assert.True(refreshBannerCallsOnHelperOutput == 6,
-            $"expected all 6 ServerTab.Refresh.cs banner calls to pass a GetQueriesTabWindowUtc result " +
+        /* 6 -> 10: Active Queries (sub-tab switch + full refresh) and Current Waits (sub-tab switch + full refresh)
+           each take their banner window from GetQueriesTabWindowUtc too (see DataStartBannerTests). */
+        Assert.True(refreshBannerCallsOnHelperOutput == 10,
+            $"expected all 10 ServerTab.Refresh.cs banner calls to pass a GetQueriesTabWindowUtc result " +
             $"(windowStart/windowEnd) (found {refreshBannerCallsOnHelperOutput}) -- a server-local cStart must " +
             "not feed the banner (#4279/#4284).");
-        Assert.Equal(6, Regex.Matches(refreshSource, @"LocalDataService\.GetQueriesTabWindowUtc\(").Count);
+        Assert.Equal(10, Regex.Matches(refreshSource, @"LocalDataService\.GetQueriesTabWindowUtc\(").Count);
     }
 
     private static string ControlsFile(string name) => Path.Combine(ControlsDir(), name);
