@@ -39,7 +39,7 @@ namespace PerformanceMonitor.Collectors;
 /// enough). Both SKUs drive that reconcile from the shared <see cref="BuildCreateSessionSql"/> /
 /// <see cref="BuildStartSessionSql"/> / <see cref="BuildDropSessionSql"/> here so the two hosts can
 /// never drift on the (complex, 3-event / 9-action on-prem, 8-action Azure) DDL — the same "reader and
-/// lifecycle never disagree" reason <see cref="XeSessionName"/> lives here.</para>
+/// lifecycle never disagree" reason <see cref="XeSessionNameFor"/> lives here.</para>
 ///
 /// <para>Reads the ring buffer exactly like <see cref="BlockedProcessReportCollector"/>: server-scoped
 /// on on-prem/MI/RDS, database-scoped per monitored database on Azure SQL DB (#1535 — a single session
@@ -61,8 +61,94 @@ public sealed class LongQueryCompletionsCollector : CollectorDefinitionBase<Long
     {
     }
 
-    /* We create and manage our own XE session to avoid conflicts with user's existing sessions. */
-    public const string XeSessionName = "PerformanceMonitor_LongQueryCompletions";
+    /* We create and manage our own XE session to avoid conflicts with user's existing sessions. Since #4961 the session
+       is one per install, named from the product and the install's id (XeSessionNameFor): two installs that monitor the
+       same server no longer share one session, so one's drop or restart cannot take the other's trace with it. */
+
+    /// <summary>
+    /// The one name every install used to share. Nothing creates, starts or reads a session of this name any more: each
+    /// install makes and drops only the session that carries its own id (<see cref="XeSessionNameFor"/>). Code that has
+    /// to find a session an older version left behind, such as a clean-up that drops it, names it through this constant.
+    /// </summary>
+    public const string LegacyXeSessionName = "PerformanceMonitor_LongQueryCompletions";
+
+    /// <summary>The product name in a Lite install's session name.</summary>
+    public const string LiteProduct = "Lite";
+
+    /// <summary>The product name in a Darling install's session name.</summary>
+    public const string DarlingProduct = "Darling";
+
+    private const string SessionNamePrefix = "PerformanceMonitor_";
+    private const string SessionNameSuffix = "_LongQueryCompletions";
+
+    /// <summary>
+    /// This install's session name: <c>PerformanceMonitor_{product}_{id}_LongQueryCompletions</c>. Throws for a product
+    /// other than <see cref="LiteProduct"/> or <see cref="DarlingProduct"/>, and for an id that fails
+    /// <see cref="InstallId.IsValid"/>. It never falls back to <see cref="LegacyXeSessionName"/>: a caller with no id
+    /// has no session to make. The check also keeps the name safe to put in a statement, because the id is hex only.
+    /// </summary>
+    public static string XeSessionNameFor(string product, string? installId)
+    {
+        if (!string.Equals(product, LiteProduct, StringComparison.Ordinal)
+            && !string.Equals(product, DarlingProduct, StringComparison.Ordinal))
+        {
+            throw new ArgumentException($"The product must be {LiteProduct} or {DarlingProduct}.", nameof(product));
+        }
+
+        if (!InstallId.IsValid(installId))
+        {
+            throw new ArgumentException("The install id is missing or not eight lowercase hex digits.", nameof(installId));
+        }
+
+        return SessionNamePrefix + product + "_" + installId + SessionNameSuffix;
+    }
+
+    /// <summary>
+    /// <see cref="XeSessionNameFor"/>, or null when <paramref name="installId"/> does not pass
+    /// <see cref="InstallId.IsValid"/>: a host with no id has no long-query trace to make, and says so as a fault.
+    /// </summary>
+    public static string? TryXeSessionNameFor(string product, string? installId) =>
+        InstallId.IsValid(installId) ? XeSessionNameFor(product, installId) : null;
+
+    /// <summary>
+    /// True when <paramref name="name"/> is a name <see cref="XeSessionNameFor"/> makes. The statement builders refuse
+    /// any other name, so a statement can only ever name a per-install session, or (for a drop) the legacy one.
+    /// </summary>
+    public static bool IsInstallSessionName(string? name)
+    {
+        if (name is null
+            || name.Length <= SessionNamePrefix.Length + SessionNameSuffix.Length
+            || !name.StartsWith(SessionNamePrefix, StringComparison.Ordinal)
+            || !name.EndsWith(SessionNameSuffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var middle = name.Substring(SessionNamePrefix.Length, name.Length - SessionNamePrefix.Length - SessionNameSuffix.Length);
+        foreach (var product in new[] { LiteProduct, DarlingProduct })
+        {
+            if (middle.Length == product.Length + 1 + InstallId.Length
+                && middle.StartsWith(product + "_", StringComparison.Ordinal)
+                && InstallId.IsValid(middle.Substring(product.Length + 1)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /* The statement builders interpolate the name, so each takes only a name that is safe to interpolate: one this class
+       made, or (for the drop) the legacy one. A name from anywhere else is a bug in the caller, not a session to touch. */
+    private static string RequireInstallSessionName(string sessionName)
+    {
+        if (!IsInstallSessionName(sessionName))
+        {
+            throw new ArgumentException("Not a per-install long-query session name.", nameof(sessionName));
+        }
+
+        return sessionName;
+    }
 
     /// <summary>
     /// The default duration threshold (MICROSECONDS) for the completed-event predicate — 2 seconds,
@@ -223,6 +309,12 @@ JOIN sys.dm_xe_database_sessions AS xes
 JOIN sys.dm_xe_sessions AS xes
   ON xes.address = xet.event_session_address";
 
+        /* The session this install made (#4961): the host puts its name on the context. A context with none means the host
+           has no install id, and it says so as a fault before it reads. The read never falls back to the legacy session. */
+        var sessionName = context.LongQuerySessionName is { } named
+            ? RequireInstallSessionName(named)
+            : throw new InvalidOperationException("The long-query completions read needs this install's session name, and the host gave none.");
+
         string query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -240,7 +332,7 @@ INSERT
 SELECT /* PerformanceMonitorLite */
     ring_xml = TRY_CAST(xet.target_data AS xml)
 FROM {ringBufferSource}
-WHERE xes.name = N'{XeSessionName}'
+WHERE xes.name = N'{sessionName}'
 AND   xet.target_name = N'ring_buffer'
 OPTION(RECOMPILE);
 {ShredSelect}";
@@ -459,8 +551,10 @@ OPTION(RECOMPILE);
     /// customizable TEXT columns (statement / batch_text) are turned on via SET so they are actually
     /// collected; object_name needs no SET — it is one of rpc_completed's default data fields (#2129).
     /// </summary>
-    public static string BuildCreateSessionSql(bool databaseScoped, long thresholdMicroseconds)
+    public static string BuildCreateSessionSql(string sessionName, bool databaseScoped, long thresholdMicroseconds)
     {
+        /* Nothing creates the legacy name any more (#4961): a name that is not per-install is refused here. */
+        RequireInstallSessionName(sessionName);
         var scope = databaseScoped ? "DATABASE" : "SERVER";
         var actions = ActionList(databaseScoped);
         /* Server-scoped: single, unpartitioned ring buffer (readable target_data on multi-socket boxes,
@@ -473,7 +567,7 @@ OPTION(RECOMPILE);
            note lives in C# on purpose: the DDL string ships to every monitored server, and the
            test pin asserts the bogus attribute appears NOWHERE in it, comment included. */
         return $@"
-CREATE EVENT SESSION [{XeSessionName}]
+CREATE EVENT SESSION [{sessionName}]
 ON {scope}
 ADD EVENT sqlserver.rpc_completed
 (
@@ -507,13 +601,17 @@ WITH
 (
     MAX_DISPATCH_LATENCY = 5 SECONDS,
     EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,{partitionMode}
-    STARTUP_STATE = ON
+    STARTUP_STATE = OFF
 );";
     }
 
-    /// <summary>Starts the session (CREATE does not auto-start it, even with STARTUP_STATE = ON).</summary>
-    public static string BuildStartSessionSql(bool databaseScoped) =>
-        $"ALTER EVENT SESSION [{XeSessionName}] ON {(databaseScoped ? "DATABASE" : "SERVER")} STATE = START;";
+    /// <summary>
+    /// Starts the session. CREATE does not start it, and the DDL says STARTUP_STATE = OFF, so a session that was never
+    /// started, or that a server restart stopped, stays stopped until an ensure starts it (#4961). The name must be a
+    /// per-install one.
+    /// </summary>
+    public static string BuildStartSessionSql(string sessionName, bool databaseScoped) =>
+        $"ALTER EVENT SESSION [{RequireInstallSessionName(sessionName)}] ON {(databaseScoped ? "DATABASE" : "SERVER")} STATE = START;";
 
     /// <summary>
     /// Idempotently drops the session (the opt-out path — disabling the collector removes the
@@ -521,8 +619,15 @@ WITH
     /// drop on a server that never had the session is a clean no-op. Server- vs database-scoped catalog
     /// + scope selected by <paramref name="databaseScoped"/>.
     /// </summary>
-    public static string BuildDropSessionSql(bool databaseScoped)
+    public static string BuildDropSessionSql(string sessionName, bool databaseScoped)
     {
+        /* A per-install name, or the legacy one, so the one-time drop of the session older versions left can use this
+           builder. Nothing else is a session this class may drop. */
+        if (!string.Equals(sessionName, LegacyXeSessionName, StringComparison.Ordinal))
+        {
+            RequireInstallSessionName(sessionName);
+        }
+
         if (databaseScoped)
         {
             return $@"
@@ -531,10 +636,10 @@ IF EXISTS
     SELECT
         1/0
     FROM sys.database_event_sessions
-    WHERE name = N'{XeSessionName}'
+    WHERE name = N'{sessionName}'
 )
 BEGIN
-    DROP EVENT SESSION [{XeSessionName}] ON DATABASE;
+    DROP EVENT SESSION [{sessionName}] ON DATABASE;
 END;";
         }
 
@@ -544,10 +649,10 @@ IF EXISTS
     SELECT
         1/0
     FROM sys.server_event_sessions
-    WHERE name = N'{XeSessionName}'
+    WHERE name = N'{sessionName}'
 )
 BEGIN
-    DROP EVENT SESSION [{XeSessionName}] ON SERVER;
+    DROP EVENT SESSION [{sessionName}] ON SERVER;
 END;";
     }
 }

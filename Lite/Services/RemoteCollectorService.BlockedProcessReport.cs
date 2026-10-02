@@ -50,36 +50,10 @@ public partial class RemoteCollectorService
             return;
         }
 
-        try
-        {
-            using var connection = await CreateConnectionAsync(server, cancellationToken);
-
-            /* On-prem and Azure MI: create server-scoped session with ring_buffer */
-            await EnsureBlockedProcessXeSessionOnPremAsync(connection, server, cancellationToken);
-        }
-        catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
-        {
-            /* The session is already present + running -- see IsBenignXeSessionAlreadyPresent (#1251). */
-            AppLogger.Info("XeSession", $"[{server.DisplayName}] Blocked process XE session already present (benign, #1251)");
-        }
-        catch (SqlException ex)
-        {
-            /* Warn rather than Error when the server simply said no: a denied XE session is a least-privilege
-               posture (#1823), classified as PERMISSIONS upstream and retried no further this session.
-               Genuine failures still log at Error. */
-            if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
-            {
-                AppLogger.Warn("XeSession", $"[{server.DisplayName}] Failed to ensure blocked process XE session: {ex.Message}");
-            }
-            else
-            {
-                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to ensure blocked process XE session: {ex.Message}");
-            }
-
-            /* Propagate so RunCollectorAsync marks the collector unhealthy instead
-               of letting a zero-row ring-buffer read record SUCCESS (#1086) */
-            throw new XeSessionEnsureException("blocked process", ex);
-        }
+        /* On-prem and Azure MI: create server-scoped session with ring_buffer */
+        await EnsureServerScopedXeSessionAsync(
+            server, "blocked process", BlockedProcessXeSessionName,
+            (connection, token) => EnsureBlockedProcessXeSessionOnPremAsync(connection, server, token), cancellationToken);
     }
 
     /// <summary>
@@ -343,7 +317,7 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
            failing cycle logs at Warning and Error; the cycles after it log the same lines at Debug, until a cycle of this
            session on this server succeeds. The retry and the exception are the same on every cycle, so every run still records
            the failure. A cancellation stops the cycle and says nothing about the server, so it changes neither. */
-        var warnedKey = $"{server.Id}:{sessionName}";
+        var warnedKey = XeSessionEnsureWarnedKey(server, sessionName);
         var repeatsAtDebug = _databaseScopedXeSessionEnsureWarned.ContainsKey(warnedKey);
 
         try
@@ -358,6 +332,13 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _databaseScopedXeSessionEnsureWarned[warnedKey] = true;
+
+            /* The raise carries whether this cycle repeated, so the collector's own line follows the ensure's lines. */
+            if (ex is XeSessionEnsureException ensureFailure)
+            {
+                ensureFailure.RepeatsAtDebug = repeatsAtDebug;
+            }
+
             throw;
         }
 
@@ -376,6 +357,86 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /// production.
     /// </summary>
     internal Func<ServerConnection, string, string, CancellationToken, Task>? XeSessionDatabaseEnsureOverrideForTests { get; set; }
+
+    /// <summary>
+    /// A test replaces the open and the ensure on the server-scoped arm of the always-on sessions: the server and the session
+    /// name. A failure from it reaches the arm's catch like a refusal from the server. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, string, CancellationToken, Task>? XeSessionServerEnsureOverrideForTests { get; set; }
+
+    /// <summary>
+    /// The server-scoped arm of the deadlock and blocked-process ensures (on-prem, Azure Managed Instance, AWS RDS): one
+    /// connection, and the session's own ensure on it. A server that refuses raises <see cref="XeSessionEnsureException"/>, so
+    /// the run records the failure (#1086) instead of a zero-row read recording SUCCESS.
+    /// </summary>
+    private async Task EnsureServerScopedXeSessionAsync(
+        ServerConnection server,
+        string captureName,
+        string sessionName,
+        Func<SqlConnection, CancellationToken, Task> ensureAsync,
+        CancellationToken cancellationToken)
+    {
+        /* #4964: the same rule as the Azure ensure, from the same per-server, per-session state. The first failing cycle logs at
+           Warning or Error; the cycles after it log the same line at Debug, until a cycle of this session on this server
+           succeeds. The retry and the exception are the same on every cycle, so every run still records the failure. A
+           cancellation says nothing about the server, so it changes neither. */
+        var warnedKey = XeSessionEnsureWarnedKey(server, sessionName);
+        var repeatsAtDebug = _databaseScopedXeSessionEnsureWarned.ContainsKey(warnedKey);
+
+        try
+        {
+            /* A test replaces the open and the ensure. Null in production. */
+            if (XeSessionServerEnsureOverrideForTests is { } ensureOnServer)
+            {
+                await ensureOnServer(server, sessionName, cancellationToken);
+            }
+            else
+            {
+                using var connection = await CreateConnectionAsync(server, cancellationToken);
+                await ensureAsync(connection, cancellationToken);
+            }
+        }
+        catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
+        {
+            /* The session is already present + running -- see IsBenignXeSessionAlreadyPresent (#1251). */
+            AppLogger.Info("XeSession", $"[{server.DisplayName}] {char.ToUpperInvariant(captureName[0])}{captureName[1..]} XE session already present (benign, #1251)");
+        }
+        catch (SqlException ex)
+        {
+            /* Warn rather than Error when the server simply said no: a denied XE session is a least-privilege
+               posture (#1823), classified as PERMISSIONS upstream and retried no further this session.
+               Genuine failures still log at Error. */
+            var failure = $"[{server.DisplayName}] Failed to ensure {captureName} XE session: {ex.Message}";
+            if (repeatsAtDebug)
+            {
+                AppLogger.Debug("XeSession", failure);
+            }
+            else if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
+            {
+                AppLogger.Warn("XeSession", failure);
+            }
+            else
+            {
+                AppLogger.Error("XeSession", failure);
+            }
+
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                _databaseScopedXeSessionEnsureWarned[warnedKey] = true;
+            }
+
+            /* Propagate so RunCollectorAsync marks the collector unhealthy instead
+               of letting a zero-row ring-buffer read record SUCCESS (#1086). The raise carries whether this cycle
+               repeated, so the collector's own line follows the ensure's. */
+            throw new XeSessionEnsureException(captureName, ex) { RepeatsAtDebug = repeatsAtDebug };
+        }
+
+        /* Succeeded, or the engine said the session is already there: the run of failures is over. */
+        _databaseScopedXeSessionEnsureWarned.TryRemove(warnedKey, out _);
+    }
+
+    /// <summary>The key of the always-on sessions' ensure state (<see cref="_databaseScopedXeSessionEnsureWarned"/>): the server id, then the session name.</summary>
+    private static string XeSessionEnsureWarnedKey(ServerConnection server, string sessionName) => $"{server.Id}:{sessionName}";
 
     /// <summary>
     /// <see cref="EnsureDatabaseScopedXeSessionsAsync(ServerConnection, string, string, Func{SqlConnection, CancellationToken, Task}, CancellationToken)"/>

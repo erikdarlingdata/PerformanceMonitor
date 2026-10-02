@@ -69,6 +69,11 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         public required ScheduleManager Schedules { get; init; }
         public required ServerConnection Server { get; init; }
 
+        /* This install's id (null when the service was built without an id store), and every session name the long-query
+           work named: the name a create or a drop would have put in its statement (#4961). */
+        public string? InstallId { get; set; }
+        public List<string> Names { get; } = new();
+
         /* What the logical server's master lists, before the registration's exclusions. */
         public List<string> Listed { get; set; } = new() { "master", "alpha", "beta", "gamma" };
         public List<(string Database, bool Create)> Calls { get; } = new();
@@ -122,7 +127,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
             traceOn,
             engineEdition: 3);
 
-    private async Task<Rig> BuildRigAsync(ServerConnection server, bool traceOn, int engineEdition = 5)
+    private async Task<Rig> BuildRigAsync(ServerConnection server, bool traceOn, int engineEdition = 5, bool withInstallId = true)
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         await duckDb.InitializeAsync();
@@ -136,11 +141,14 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
 
         var rig = new Rig
         {
-            Service = new RemoteCollectorService(duckDb, servers, schedules),
+            Service = new RemoteCollectorService(
+                duckDb, servers, schedules,
+                installIdStore: withInstallId ? new InstallIdStore(_configDir, "test-machine", null) : null),
             Servers = servers,
             Schedules = schedules,
             Server = server,
         };
+        rig.InstallId = rig.Service.GetInstallId();
 
         rig.Service.LongQueryTraceUtcNowForTests = () => rig.Clock;
         rig.Service.LongQueryTraceListOverrideForTests = (registration, allDatabases, _) =>
@@ -156,9 +164,10 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
                 : rig.Listed.Where(d => !registration.ExcludedDatabases.Contains(d, StringComparer.OrdinalIgnoreCase)).ToList());
         };
 
-        rig.Service.LongQueryTraceDatabaseOverrideForTests = (_, database, create, _) =>
+        rig.Service.LongQueryTraceDatabaseOverrideForTests = (_, database, create, sessionName, _) =>
         {
             rig.Calls.Add((database, create));
+            rig.Names.Add(sessionName);
             return rig.Refuse.Contains(database)
                 ? Task.FromException(new InvalidOperationException($"The {(create ? "create" : "drop")} was refused in {database}."))
                 : Task.CompletedTask;
@@ -1134,5 +1143,99 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
 
         Assert.NotNull(dir);
         return File.ReadAllText(Path.Combine(dir!, relativePath)).Replace("\r\n", "\n");
+    }
+
+    /* ── #4961: the session is this install's own, named from its id ── */
+
+    private static string OwnSession(string? installId) =>
+        LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, installId);
+
+    [Fact]
+    public async Task Azure_EveryPass_NamesOnlyThisInstallsSession()
+    {
+        /* "gamma" is excluded, so the create pass drops the session outside the monitored set, and it refuses that drop until
+           the cap gives up, so the hourly attempt after the cap runs too. */
+        var rig = await BuildRigAsync(traceOn: true, "gamma");
+        rig.Refuse.Add("gamma");
+        for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync();
+        }
+
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync();
+
+        /* Off: the drop in each listed database. */
+        rig.Schedules.UpdateSchedule("long_query_completions", enabled: false);
+        rig.Refuse.Clear();
+        await rig.ReconcileAsync();
+
+        Assert.Contains(rig.Calls, c => c.Create);
+        Assert.Contains(rig.Calls, c => !c.Create);
+        Assert.Equal(rig.Calls.Count, rig.Names.Count);
+        Assert.All(rig.Names, name => Assert.Equal(OwnSession(rig.InstallId), name));
+        Assert.DoesNotContain(rig.Names, name => name == LongQueryCompletionsCollector.LegacyXeSessionName);
+    }
+
+    [Fact]
+    public async Task OnPrem_TheEnsureRunsOnEachCycle_AndTheDrop_NameThisInstallsSession()
+    {
+        var rig = await BuildOnPremRigAsync(traceOn: true);
+
+        /* Lite ensures on every cycle, so a stopped session is started again on the next one (STARTUP_STATE = OFF). */
+        await rig.ReconcileAsync();
+        await rig.ReconcileAsync();
+        Assert.Equal(2, rig.Calls.Count(c => c.Create));
+
+        rig.Schedules.UpdateSchedule("long_query_completions", enabled: false);
+        await rig.ReconcileAsync();
+
+        Assert.Single(rig.Calls, c => !c.Create);
+        Assert.Equal(3, rig.Names.Count);
+        Assert.All(rig.Names, name => Assert.Equal(OwnSession(rig.InstallId), name));
+    }
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(3)]
+    public async Task NoInstallId_NothingIsCreated_AndTheRunRecordsWhy(int engineEdition)
+    {
+        var rig = await BuildRigAsync(
+            new ServerConnection { ServerName = Host, DisplayName = "lqtrace-noid" }, traceOn: true, engineEdition, withInstallId: false);
+        Assert.Null(rig.InstallId);
+
+        await rig.ReconcileAsync();
+
+        Assert.Empty(rig.Calls);
+        Assert.Empty(rig.Names);
+        Assert.Null(rig.Applied);
+        var fault = rig.Service.LongQueryTraceFaultState(rig.Server.Id);
+        Assert.NotNull(fault);
+        Assert.Contains("no id", fault!.Message, StringComparison.Ordinal);
+
+        /* Off: there is no session of this install's to drop, and no fault is left for a run that is not dispatched. */
+        rig.Schedules.UpdateSchedule("long_query_completions", enabled: false);
+        await rig.ReconcileAsync();
+
+        Assert.Empty(rig.Calls);
+        Assert.Null(rig.Service.LongQueryTraceFaultState(rig.Server.Id));
+    }
+
+    [Fact]
+    public void TheEnsures_StartASessionTheyFindStopped_ByThisInstallsName_AndNothingNamesTheLegacySession()
+    {
+        var source = ReadLf("Lite/Services/RemoteCollectorService.LongQueryCompletions.cs");
+
+        /* On-prem: the existence check also reports whether it runs, and a stopped one is started by name. */
+        Assert.Contains("is_running = CASE WHEN dxs.name IS NOT NULL THEN 1 ELSE 0 END", source, StringComparison.Ordinal);
+        Assert.Contains("isRunning == 0", source, StringComparison.Ordinal);
+        Assert.Contains("BuildStartSessionSql(sessionName, databaseScoped: false)", source, StringComparison.Ordinal);
+
+        /* Azure SQL Database: a session that exists and does not run is started by name. */
+        Assert.Contains("FROM sys.dm_xe_database_sessions AS xes", source, StringComparison.Ordinal);
+        Assert.Contains("ALTER EVENT SESSION [{sessionName}] ON DATABASE STATE = START;", source, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("LegacyXeSessionName", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("LongQueryCompletionsCollector.XeSessionName", source, StringComparison.Ordinal);
     }
 }

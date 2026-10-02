@@ -708,7 +708,7 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _queryStoreWriteFence = queryStoreWriteFence;
@@ -730,12 +730,30 @@ public sealed class DarlingCollectorRunner
            what Lite's twin and every pre-#3477 test constructs. */
         _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
         _separatelyMonitoredDatabases = separatelyMonitoredDatabases ?? (_ => Array.Empty<string>());
+        /* #4961: null provider = no install id, so no long-query session can be named (what a test that builds a runner
+           without one gets). The worker passes the id it made at start. */
+        _installId = installId ?? (() => null);
         /* #4004: the store's log-hash key, loaded once by the worker at start and shared by every run that hashes log
            text (pg_log_events on both transports). Null = none could be used: those runs refuse, with the reason. */
         _logHashKey = logHashKey;
     }
 
     private readonly PgLogHashKey? _logHashKey;
+
+    private readonly Func<string?> _installId;
+
+    /// <summary>
+    /// This install's id (#4961), or null when the runner was built without one. The long-query session's name is made
+    /// from it: the lifecycle names the session it creates and drops from it, and the read names the session it reads.
+    /// </summary>
+    internal string? InstallId => _installId();
+
+    /// <summary>
+    /// The name of this install's long-query completions session, or null when there is no install id to make it from
+    /// (#4961). Null means no session exists to create, drop or read, and the caller says why as a fault.
+    /// </summary>
+    internal string? LongQuerySessionName() =>
+        LongQueryCompletionsCollector.TryXeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallId);
 
     /// <summary>The store's log-hash key this runner was given (#4004), null when the service could not load one. The
     /// hourly deadlock re-mask reads it here (#4012's review), the one instance every log-hashing run shares.</summary>
@@ -2129,6 +2147,7 @@ public sealed class DarlingCollectorRunner
             /* #3477: same shared-not-re-derived rule for the scope — one resolution per run, above. */
             DatabaseScope = databaseScope,
             PerfmonCounterOverride = null,
+            LongQuerySessionName = LongQuerySessionName(),
             /* #2862: plan capture is additionally cadence-gated for procedure_stats — see
                ShouldCapturePlanForCollector. Every other collector reads exactly _capturePlans().
                Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
@@ -6568,7 +6587,7 @@ RETURNING s.state_key";
     /// Replaces the long-query trace's work in one Azure SQL Database database: called with <c>create</c> true to create
     /// the session there, false to drop it. Null in production.
     /// </summary>
-    internal Func<ServerRuntime, string, bool, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
+    internal Func<ServerRuntime, string, bool, string, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
 
     /// <summary>
     /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every

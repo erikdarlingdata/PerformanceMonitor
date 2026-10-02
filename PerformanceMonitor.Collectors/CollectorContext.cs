@@ -420,6 +420,14 @@ public sealed class CollectorContext
     public IReadOnlyList<string>? PerfmonCounterOverride { get; init; }
 
     /// <summary>
+    /// The name of this install's long-query completions session (#4961), made by the host from its product and its
+    /// install id (<see cref="LongQueryCompletionsCollector.XeSessionNameFor"/>). Only the long-query definition reads
+    /// it. Null when the host has no install id: the host then has no session to read, and says so as a fault before the
+    /// read, so the definition does not fall back to another install's name.
+    /// </summary>
+    public string? LongQuerySessionName { get; init; }
+
+    /// <summary>
     /// Host override for the per-item text byte budget (#2164), in BYTES. Null keeps the definition's
     /// own <see cref="ICollectorDefinition{TRow}.PerItemTextByteBudget"/> — which is what Lite passes,
     /// so its behavior is unchanged. Darling supplies this from the store's operator knob.

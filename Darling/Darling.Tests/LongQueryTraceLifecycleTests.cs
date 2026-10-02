@@ -38,6 +38,9 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     {
         public required DarlingCollectorRunner Runner { get; init; }
         public required DarlingWorker.ServerLoopState State { get; init; }
+
+        /* Every session name the long-query work named: the name a create or a drop would have put in its statement (#4961). */
+        public List<string> Names { get; } = new();
         public required MonitoredServer Config { get; init; }
         public DarlingSelfAlertTests.CapturingLogger Logger { get; } = new();
 
@@ -94,7 +97,11 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     private Rig BuildOnPremRig() =>
         BuildRig(new MonitoredServer { Name = "lqtrace-sql", Host = "lqtrace-sql" }, ServerId, azureSqlDatabase: false);
 
-    private Rig BuildRig(MonitoredServer config, int serverId, bool azureSqlDatabase = true)
+    /* This install's id (#4961), and the session it makes from it. */
+    private const string InstallIdValue = "0a1b2c3d";
+    private static readonly string OwnSession = LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallIdValue);
+
+    private Rig BuildRig(MonitoredServer config, int serverId, bool azureSqlDatabase = true, string? installId = InstallIdValue)
     {
         var runtime = new ServerRuntime
         {
@@ -110,7 +117,8 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
             _store,
             new CollectorDeltaCalculator(),
             databaseScope: (_, _) => rig!.Scope.ToList(),
-            separatelyMonitoredDatabases: _ => rig!.Owned.ToList());
+            separatelyMonitoredDatabases: _ => rig!.Owned.ToList(),
+            installId: () => installId);
 
         rig = new Rig
         {
@@ -135,9 +143,10 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
                     .ToList());
         };
 
-        runner.LongQueryTraceDatabaseOverrideForTests = (_, database, create, _) =>
+        runner.LongQueryTraceDatabaseOverrideForTests = (_, database, create, sessionName, _) =>
         {
             rig.Calls.Add((database, create));
+            rig.Names.Add(sessionName);
             if (rig.Refuse.Contains(database))
             {
                 return Task.FromException(new InvalidOperationException($"The {(create ? "create" : "drop")} was refused in {database}."));
@@ -995,5 +1004,106 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
 
         Assert.Contains("databases = await runner.GetAzureDatabaseListAsync(server, databaseScope: null, cancellationToken);", body, StringComparison.Ordinal);
         Assert.DoesNotContain("SeparatelyMonitored", body, StringComparison.Ordinal);
+    }
+
+    /* ── #4961: the session is this install's own, named from its id ── */
+
+    [Fact]
+    public async Task Azure_EveryPass_NamesOnlyThisInstallsSession()
+    {
+        /* "gamma" is excluded and refuses the drop outside the monitored set until the cap gives up: the full pass, its
+           retries, the attempt after the cap and the hourly create all run, then the trace goes off. */
+        var rig = BuildRig("gamma");
+        rig.Refuse.Add("gamma");
+        for (var pass = 1; pass <= LongQueryTraceDatabases.DropAttemptCap; pass++)
+        {
+            await rig.ReconcileAsync(enabled: true);
+        }
+
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        rig.Refuse.Clear();
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Contains(rig.Calls, c => c.Create);
+        Assert.Contains(rig.Calls, c => !c.Create);
+        Assert.Equal(rig.Calls.Count, rig.Names.Count);
+        Assert.All(rig.Names, name => Assert.Equal(OwnSession, name));
+        Assert.DoesNotContain(rig.Names, name => name == LongQueryCompletionsCollector.LegacyXeSessionName);
+    }
+
+    [Fact]
+    public async Task OnPrem_TheFullAndTheHourlyPass_AndTheDrop_NameThisInstallsSession()
+    {
+        var rig = BuildOnPremRig();
+
+        await rig.ReconcileAsync(enabled: true);
+        rig.Clock += LongQueryTraceDatabases.RetryInterval;
+        await rig.ReconcileAsync(enabled: true);
+        Assert.Equal(2, rig.Calls.Count(c => c.Create));
+
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Single(rig.Calls, c => !c.Create);
+        Assert.Equal(3, rig.Names.Count);
+        Assert.All(rig.Names, name => Assert.Equal(OwnSession, name));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task NoInstallId_NothingIsCreated_AndTheRunRecordsWhy(bool azureSqlDatabase)
+    {
+        var rig = BuildRig(
+            new MonitoredServer { Name = "lqtrace-noid", Host = azureSqlDatabase ? Host : "lqtrace-sql" },
+            ServerId, azureSqlDatabase, installId: null);
+
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Empty(rig.Calls);
+        Assert.Empty(rig.Names);
+        Assert.Null(rig.State.LongQueryTraceApplied);
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+        Assert.Contains("no id", rig.State.LongQueryTraceFault, StringComparison.Ordinal);
+
+        /* Off: there is no session of this install's to drop, and the fault is cleared. */
+        await rig.ReconcileAsync(enabled: false);
+
+        Assert.Empty(rig.Calls);
+        Assert.Null(rig.State.LongQueryTraceFault);
+    }
+
+    [Fact]
+    public void TheEnsures_StartASessionTheyFindStopped_ByThisInstallsName_AndNothingNamesTheLegacySession()
+    {
+        var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingXeSessions.cs");
+
+        /* On-prem: the existence check also reports whether it runs, and a stopped one is started by name. */
+        Assert.Contains("is_running = CASE WHEN dxs.name IS NOT NULL THEN 1 ELSE 0 END", source, StringComparison.Ordinal);
+        Assert.Contains("isRunning == 0", source, StringComparison.Ordinal);
+        Assert.Contains("BuildStartSessionSql(sessionName, databaseScoped: false)", source, StringComparison.Ordinal);
+
+        /* Azure SQL Database: a session that exists and does not run is started by name. */
+        Assert.Contains("FROM sys.dm_xe_database_sessions AS xes", source, StringComparison.Ordinal);
+        Assert.Contains("ALTER EVENT SESSION [{sessionName}] ON DATABASE STATE = START;", source, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("LegacyXeSessionName", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("LongQueryCompletionsCollector.XeSessionName", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OnlyThePerInstallDdlStartsOff_TheDeadlockAndBlockedProcessDdlStaysOn()
+    {
+        var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingXeSessions.cs");
+
+        /* The four always-on session statements (deadlock and blocked process, on-prem and Azure) are unchanged. */
+        Assert.Equal(4, source.Split("STARTUP_STATE = ON", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("STARTUP_STATE = OFF", source, StringComparison.Ordinal);
+
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(OwnSession, databaseScoped: false, 2_000_000);
+        Assert.Contains("STARTUP_STATE = OFF", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("STARTUP_STATE = ON", sql, StringComparison.Ordinal);
     }
 }

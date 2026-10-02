@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
@@ -29,6 +30,11 @@ namespace Lite.Tests;
 /// same lines at Debug until a cycle succeeds (#4964). The retry and the exception are the same on every cycle, so each run
 /// still records the failure. The kept state is per server and per session. Each test drives the real ensure with the
 /// database list and the per-database work replaced, so no server is needed.
+///
+/// <para>The same rule covers the server-scoped arms (on-premises, Managed Instance, RDS), whose one connection and ensure
+/// are replaced the same way, and the collector's own line for a failed ensure: the first failing cycle logs at today's
+/// level, and the cycles after it log at Debug until a cycle of that session on that server succeeds (#4964). The run row
+/// and its classification are the same on every cycle.</para>
 ///
 /// <para>In <c>app-logger-statics</c> because the tests read <see cref="AppLogger"/>'s process-wide buffer, which another
 /// reader would drain from under them.</para>
@@ -69,12 +75,22 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
     {
         public required RemoteCollectorService Service { get; init; }
         public required ServerConnection Server { get; init; }
+        public required DuckDbInitializer DuckDb { get; init; }
+        public required int ServerId { get; init; }
 
         /* What the logical server lists, before the registration's exclusions. */
         public List<string> Listed { get; set; } = new() { "master", "alpha", "beta", "gamma" };
         public List<(string Session, string Database)> Calls { get; } = new();
         public HashSet<string> Refuse { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Exception? ListFailure { get; set; }
+
+        /* The SQL error number a refusing database says. 262 is a permission refusal, which the collector's run records as
+           PERMISSIONS and then skips for the rest of the session; any other number is recorded as ERROR on every cycle. */
+        public int RefusalNumber { get; set; } = 262;
+
+        /* The server-scoped arm: the error its one connection and ensure fail with, or null when they succeed. */
+        public SqlException? ServerFailure { get; set; }
+        public List<string> ServerCalls { get; } = new();
 
         /* The databases tried for the session, named as the server names it (the ensure's session name, not its log label). */
         public int TriedFor(string session) =>
@@ -101,6 +117,9 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         var servers = new ServerManager(_configDir);
         servers.AddServer(server);
 
+        /* Azure SQL Database, so a collector run takes the per-database ensure. */
+        servers.GetConnectionStatus(server.Id).SqlEngineEdition = 5;
+
         var schedules = new ScheduleManager(_configDir);
         schedules.UpdateSchedule("deadlocks", enabled: true);
         schedules.UpdateSchedule("blocked_process_report", enabled: true);
@@ -109,6 +128,8 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         {
             Service = new RemoteCollectorService(duckDb, servers, schedules),
             Server = server,
+            DuckDb = duckDb,
+            ServerId = RemoteCollectorService.GetServerId(server),
         };
 
         rig.Service.XeSessionDatabaseListOverrideForTests = (_, _) =>
@@ -120,8 +141,14 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         {
             rig.Calls.Add((session, database));
             return rig.Refuse.Contains(database)
-                ? Task.FromException(SqlExceptionFactory.Create(262, errorClass: 14, message: $"The create was refused in {database}."))
+                ? Task.FromException(SqlExceptionFactory.Create(rig.RefusalNumber, errorClass: 14, message: $"The create was refused in {database}."))
                 : Task.CompletedTask;
+        };
+
+        rig.Service.XeSessionServerEnsureOverrideForTests = (_, session, _) =>
+        {
+            rig.ServerCalls.Add(session);
+            return rig.ServerFailure is { } failure ? Task.FromException(failure) : Task.CompletedTask;
         };
 
         return rig;
@@ -362,5 +389,292 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         {
             AppLogger.SetMinimumLevel(level);
         }
+    }
+
+    private static async Task WithDebugLoggingAsync(Func<Task> body)
+    {
+        var level = AppLogger.MinimumLevel;
+        try
+        {
+            AppLogger.SetMinimumLevel(LogLevel.Debug);
+            AppLogger.DrainBufferedLines();
+            await body();
+        }
+        finally
+        {
+            AppLogger.SetMinimumLevel(level);
+        }
+    }
+
+    /// <summary>One cycle of the named session's ensure on a server-scoped server: on-premises, Managed Instance or RDS.</summary>
+    private static Task EnsureOnPremAsync(Rig rig, string session, ServerConnection? server = null) =>
+        session == Deadlock
+            ? rig.Service.EnsureDeadlockXeSessionAsync(server ?? rig.Server, engineEdition: 3, CancellationToken.None)
+            : rig.Service.EnsureBlockedProcessXeSessionAsync(server ?? rig.Server, engineEdition: 3, CancellationToken.None);
+
+    /// <summary>A server-scoped cycle that fails: the collector still gets the exception it records the failure from.</summary>
+    private static async Task FailingOnPremCycleAsync(Rig rig, string session, ServerConnection? server = null)
+    {
+        var raised = await Assert.ThrowsAsync<XeSessionEnsureException>(() => EnsureOnPremAsync(rig, session, server));
+        Assert.Equal(session, raised.SessionKind);
+        Assert.Same(rig.ServerFailure, raised.InnerException);
+    }
+
+    private static string CollectorName(string session) => session == Deadlock ? "deadlocks" : "blocked_process_report";
+
+    /// <summary>The collector's own line for a failed ensure, as <c>RunCollectorAsync</c> writes it.</summary>
+    private static string CollectorLine(string session) => $"{CollectorName(session)} Failed to ensure {session} XE session";
+
+    /// <summary>One run of the session's collector on the Azure SQL Database server. The ensure fails before any read, so no server is needed.</summary>
+    private static Task RunCollectorAsync(Rig rig, string session) =>
+        rig.Service.RunCollectorAsync(rig.Server, CollectorName(session), CancellationToken.None);
+
+    /// <summary>The collection_log rows the test's server has for the session's collector, oldest first.</summary>
+    private static async Task<List<(string Status, string? Error)>> ReadRunsAsync(Rig rig, string session)
+    {
+        using var connection = rig.DuckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT status, error_message FROM collection_log WHERE server_id = {rig.ServerId} AND collector_name = '{CollectorName(session)}' ORDER BY log_id";
+        using var reader = await command.ExecuteReaderAsync();
+        var runs = new List<(string, string?)>();
+        while (await reader.ReadAsync())
+        {
+            runs.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
+
+        return runs;
+    }
+
+    /// <summary>
+    /// The server-scoped ensure fails with a SQL error that is not a permission refusal on every cycle: the first cycle logs
+    /// its Error, and the cycles after it log Debug. The retry does not change: every cycle connects and ensures, and every
+    /// cycle throws the exception the collector records its failure from.
+    /// </summary>
+    [Theory]
+    [InlineData(Deadlock)]
+    [InlineData(BlockedProcess)]
+    public async Task AServerScopedEnsureThatFailsWithASqlError_LogsOneError_ThenDebug(string session)
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync();
+            rig.ServerFailure = SqlExceptionFactory.Create(1105, errorClass: 17, message: "The filegroup is full.");
+            var lines = new List<string>();
+
+            await FailingOnPremCycleAsync(rig, session);
+            lines.AddRange(Lines(rig.Server));
+            Assert.Equal(1, Count(lines, "ERROR", RefusalLine(session)));
+
+            await FailingOnPremCycleAsync(rig, session);
+            await FailingOnPremCycleAsync(rig, session);
+            lines.AddRange(Lines(rig.Server));
+
+            Assert.Equal(1, Count(lines, "ERROR", RefusalLine(session)));
+            Assert.Equal(2, Count(lines, "DEBUG", RefusalLine(session)));
+            Assert.Equal(0, Count(lines, "WARN", RefusalLine(session)));
+            Assert.Equal(3, rig.ServerCalls.Count(call => call == SessionName(session)));
+        });
+    }
+
+    /// <summary>
+    /// A permission refusal is the same rule at its own level: the first cycle logs its Warning and the cycles after it log
+    /// Debug. A collector run records PERMISSIONS and is skipped from then on, so the ensure is called directly here.
+    /// </summary>
+    [Theory]
+    [InlineData(Deadlock)]
+    [InlineData(BlockedProcess)]
+    public async Task AServerScopedEnsureRefusedForPermission_LogsOneWarning_ThenDebug(string session)
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync();
+            rig.ServerFailure = SqlExceptionFactory.Create(262, errorClass: 14, message: "CREATE EVENT SESSION permission was denied.");
+            var lines = new List<string>();
+
+            await FailingOnPremCycleAsync(rig, session);
+            await FailingOnPremCycleAsync(rig, session);
+            await FailingOnPremCycleAsync(rig, session);
+            lines.AddRange(Lines(rig.Server));
+
+            Assert.Equal(1, Count(lines, "WARN", RefusalLine(session)));
+            Assert.Equal(2, Count(lines, "DEBUG", RefusalLine(session)));
+            Assert.Equal(0, Count(lines, "ERROR", RefusalLine(session)));
+        });
+    }
+
+    /// <summary>
+    /// A cycle that succeeds ends the run of failures, so the next failure logs at its level again. An engine's answer that the
+    /// session already exists and is running is a success too.
+    /// </summary>
+    [Theory]
+    [InlineData(Deadlock, false)]
+    [InlineData(Deadlock, true)]
+    [InlineData(BlockedProcess, false)]
+    [InlineData(BlockedProcess, true)]
+    public async Task AServerScopedEnsureThatFailsAgainAfterItSucceeded_LogsItsErrorAgain(string session, bool alreadyPresent)
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync();
+            var failure = SqlExceptionFactory.Create(1105, errorClass: 17, message: "The filegroup is full.");
+            rig.ServerFailure = failure;
+            var lines = new List<string>();
+
+            await FailingOnPremCycleAsync(rig, session);
+            await FailingOnPremCycleAsync(rig, session);
+
+            /* The engine says the session exists and runs (25631), or the ensure simply succeeds. Neither throws. */
+            rig.ServerFailure = alreadyPresent ? SqlExceptionFactory.Create(25631, errorClass: 16, message: "The event session already exists.") : null;
+            await EnsureOnPremAsync(rig, session);
+
+            rig.ServerFailure = failure;
+            await FailingOnPremCycleAsync(rig, session);
+            await FailingOnPremCycleAsync(rig, session);
+            lines.AddRange(Lines(rig.Server));
+
+            Assert.Equal(2, Count(lines, "ERROR", RefusalLine(session)));
+            Assert.Equal(2, Count(lines, "DEBUG", RefusalLine(session)));
+        });
+    }
+
+    /// <summary>
+    /// The kept state is per session for the server-scoped arm too: the deadlock session's run of failures does not turn the
+    /// blocked-process session's first failure into a Debug line, and the reverse.
+    /// </summary>
+    [Fact]
+    public async Task ARunOfServerScopedFailuresOfOneSession_DoesNotQuietTheOthersFirstFailure()
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync();
+            rig.ServerFailure = SqlExceptionFactory.Create(1105, errorClass: 17, message: "The filegroup is full.");
+            var lines = new List<string>();
+
+            await FailingOnPremCycleAsync(rig, Deadlock);
+            await FailingOnPremCycleAsync(rig, Deadlock);
+            await FailingOnPremCycleAsync(rig, BlockedProcess);
+            await FailingOnPremCycleAsync(rig, BlockedProcess);
+            lines.AddRange(Lines(rig.Server));
+
+            foreach (var session in new[] { Deadlock, BlockedProcess })
+            {
+                Assert.Equal(1, Count(lines, "ERROR", RefusalLine(session)));
+                Assert.Equal(1, Count(lines, "DEBUG", RefusalLine(session)));
+            }
+        });
+    }
+
+    private static string SessionName(string session) =>
+        session == Deadlock ? DeadlocksCollector.XeSessionName : BlockedProcessReportCollector.XeSessionName;
+
+    /// <summary>
+    /// The collector's own line for a failed ensure follows the ensure's: the first failing cycle logs it at Error, and the
+    /// cycles after it log it at Debug. Every run still records ERROR with the same message, counts toward the collector's
+    /// consecutive errors, and flags the XE session unavailable.
+    /// </summary>
+    [Theory]
+    [InlineData(Deadlock)]
+    [InlineData(BlockedProcess)]
+    public async Task ACollectorWhoseEnsureFailsOnEveryCycle_LogsItsOwnLineOnce_ThenDebug(string session)
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync();
+            rig.RefuseEveryDatabase();
+            rig.RefusalNumber = 4060;
+            var lines = new List<string>();
+
+            await RunCollectorAsync(rig, session);
+            lines.AddRange(Lines(rig.Server));
+            Assert.Equal(1, Count(lines, "ERROR", CollectorLine(session)));
+
+            await RunCollectorAsync(rig, session);
+            await RunCollectorAsync(rig, session);
+            lines.AddRange(Lines(rig.Server));
+
+            Assert.Equal(1, Count(lines, "ERROR", CollectorLine(session)));
+            Assert.Equal(2, Count(lines, "DEBUG", CollectorLine(session)));
+
+            /* The run row and its classification are the same on every cycle, and so is the retry. */
+            var runs = await ReadRunsAsync(rig, session);
+            Assert.Equal(3, runs.Count);
+            Assert.All(runs, run =>
+            {
+                Assert.Equal("ERROR", run.Status);
+                Assert.Contains($"Failed to ensure {session} XE session", run.Error, StringComparison.Ordinal);
+            });
+            Assert.Equal(9, rig.TriedFor(session));
+
+            var failure = Assert.Single(rig.Service.GetHealthSummary(rig.ServerId).XeSessionFailures);
+            Assert.Equal(3, failure.ConsecutiveErrors);
+        });
+    }
+
+    /// <summary>
+    /// A run whose ensure succeeded ends the run of failures, so the next failing run logs its own line at Error again.
+    /// </summary>
+    [Theory]
+    [InlineData(Deadlock)]
+    [InlineData(BlockedProcess)]
+    public async Task ACollectorWhoseEnsureFailsAgainAfterItSucceeded_LogsItsOwnLineAtErrorAgain(string session)
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync();
+            rig.RefuseEveryDatabase();
+            rig.RefusalNumber = 4060;
+            var lines = new List<string>();
+
+            await RunCollectorAsync(rig, session);
+            await RunCollectorAsync(rig, session);
+
+            /* The ensure succeeds in every database. (A run would go on to read the server, so the ensure is called directly.) */
+            rig.Refuse.Clear();
+            await EnsureAsync(rig, session);
+
+            rig.RefuseEveryDatabase();
+            await RunCollectorAsync(rig, session);
+            await RunCollectorAsync(rig, session);
+            lines.AddRange(Lines(rig.Server));
+
+            Assert.Equal(2, Count(lines, "ERROR", CollectorLine(session)));
+            Assert.Equal(2, Count(lines, "DEBUG", CollectorLine(session)));
+            Assert.Equal(4, (await ReadRunsAsync(rig, session)).Count(run => run.Status == "ERROR"));
+        });
+    }
+
+    /// <summary>
+    /// A permission refusal is classified PERMISSIONS, and its collector line is a Warning the first time and Debug after it.
+    /// The scheduler skips a collector that was refused for permission, so the second run happens only once the server's
+    /// health is cleared, as removing the server does.
+    /// </summary>
+    [Theory]
+    [InlineData(Deadlock)]
+    [InlineData(BlockedProcess)]
+    public async Task ACollectorRefusedForPermission_LogsItsOwnLineAtWarning_ThenDebug(string session)
+    {
+        await WithDebugLoggingAsync(async () =>
+        {
+            var rig = await BuildRigAsync();
+            rig.RefuseEveryDatabase();
+            var lines = new List<string>();
+
+            await RunCollectorAsync(rig, session);
+            lines.AddRange(Lines(rig.Server));
+            Assert.Equal(1, Count(lines, "WARN", CollectorLine(session)));
+
+            rig.Service.ClearHealthForServer(rig.ServerId);
+            await RunCollectorAsync(rig, session);
+            lines.AddRange(Lines(rig.Server));
+
+            Assert.Equal(1, Count(lines, "WARN", CollectorLine(session)));
+            Assert.Equal(1, Count(lines, "DEBUG", CollectorLine(session)));
+            Assert.Equal(0, Count(lines, "ERROR", CollectorLine(session)));
+
+            var runs = await ReadRunsAsync(rig, session);
+            Assert.Equal(2, runs.Count);
+            Assert.All(runs, run => Assert.Equal("PERMISSIONS", run.Status));
+        });
     }
 }
