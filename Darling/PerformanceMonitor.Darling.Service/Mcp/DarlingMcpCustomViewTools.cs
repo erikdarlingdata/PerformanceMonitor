@@ -319,7 +319,7 @@ public sealed class DarlingMcpCustomViewTools
         "measures (every field below, filtered to this source), dimensions (this source's filterable/groupable " +
         "columns), annotationSources, ...the same small vocabularies}. An unmatched source comes back with empty " +
         "measures/dimensions and a note, not an error. " +
-        "FULL_DETAIL=true (or full_detail with source: same, unfiltered): today's original shape, {measures, " +
+        "FULL DETAIL (full_detail=true without source; with a source, the drill-down above already carries every field): today's original shape, {measures, " +
         "dimensions, annotationSources, universalDimensions, unitFamilies, aggregates, timeBuckets, filterOps, " +
         "viz}, every measure/dimension/annotationSource at every field — the same shape web /api/catalog serves " +
         "the Custom Views editor (unrelated to this default; the editor always gets the full catalog). " +

@@ -26,12 +26,7 @@
          neighbour, is a failure with no user behind it; so this host states a budget orders of magnitude
          larger and the acquisition waits the hold out. Short of forever on purpose - a wedged lock still
          fails, with the same message, rather than hanging the suite. The shipped app declares nothing
-         here and keeps LocalDataService.DefaultWriteLockBudget.
-
-         This comment carries no apostrophe, deliberately. CrossAppGuardCiGateTests reads this file with
-         a regex that treats one as an attribute delimiter, so an unbalanced pair swallows the quoted
-         attribute values after it - including the linked cross-app Compile below, whose absence the
-         guard reports as a moved blind spot rather than as a comment. -->
+         here and keeps LocalDataService.DefaultWriteLockBudget. -->
     <RuntimeHostConfigurationOption Include="PerformanceMonitorLite.WriteLockBudgetSeconds" Value="120" />
   </ItemGroup>
 
@@ -45,6 +40,9 @@
          Its own coverage stays in Darling.Tests/CSharpSourceWalkerTests.cs - the implementation Lite compiles
          is byte-identical to the one those tests exercise. -->
     <Compile Include="..\Darling\Darling.Tests\CSharpSourceWalker.cs" Link="CSharpSourceWalker.cs" />
+    <!-- The in-process MCP server and client (a real call through the shared call-tool guard and the SDK's
+         binder), linked for the same reason: one harness, so the two SKUs' whole-number pins run the same path. -->
+    <Compile Include="..\Darling\Darling.Tests\McpInProcessHost.cs" Link="McpInProcessHost.cs" />
   </ItemGroup>
 
   <ItemGroup>

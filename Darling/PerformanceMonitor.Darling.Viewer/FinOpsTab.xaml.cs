@@ -70,25 +70,26 @@ public partial class FinOpsTab : UserControl
 
     /// <summary>
     /// Populates the server selector from the shell's server list (mirrors the Recommendations tab's own
-    /// selector). Suppresses SelectionChanged during population, preserving the current selection when the list
-    /// is re-supplied. The shell drives the first load once the tab becomes visible.
+    /// selector). Suppresses SelectionChanged during population. With <paramref name="keepSelection"/>, the
+    /// selector keeps its server while that server is in the list; otherwise, or once it is gone, it takes
+    /// <paramref name="sidebarServerId"/>, the shell's sidebar server, as the initial load does
+    /// (<see cref="ViewerServerSetSync.PickerSelectionAfterReload"/>). The shell drives the first load once the
+    /// tab becomes visible.
     /// </summary>
-    public void SetServers(IReadOnlyList<DarlingServer> servers)
+    public void SetServers(IReadOnlyList<DarlingServer> servers, int? sidebarServerId, bool keepSelection = true)
     {
         var previousId = (ServerSelector.SelectedItem as DarlingServer)?.ServerId;
 
         _populatingServers = true;
         ServerSelector.ItemsSource = servers;
-        if (servers.Count > 0)
-        {
-            var match = previousId is int pid ? servers.FirstOrDefault(s => s.ServerId == pid) : null;
-            ServerSelector.SelectedItem = match ?? servers[0];
-        }
+        ServerSelector.SelectedItem = ViewerServerSetSync.PickerSelectionAfterReload(
+            servers, keepSelection ? previousId : null, sidebarServerId);
         _populatingServers = false;
 
-        /* The previously selected server is gone (removed elsewhere), so the selection fell back to another
-           one with SelectionChanged suppressed: reset the drills and column filters exactly as a deliberate
-           server switch does, so the old server's filters cannot zero the new server's grids (#2306). */
+        /* The selection changed with SelectionChanged suppressed: the previously selected server is gone
+           (removed elsewhere), or a load that does not keep the selection moved it. Reset the drills and column
+           filters exactly as a deliberate server switch does, so the old server's filters cannot zero the new
+           server's grids (#2306). */
         if (previousId is not null && servers.Count > 0 && ServerSelector.SelectedItem is DarlingServer now && now.ServerId != previousId)
         {
             ShowFinOpsStorageView(FinOpsStorageDrillLevel.Parent);

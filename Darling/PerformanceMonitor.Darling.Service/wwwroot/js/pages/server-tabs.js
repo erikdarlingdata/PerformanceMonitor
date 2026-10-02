@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, windowFromHours } from "../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, windowFromHours, daysText } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
 import { READ_FIELDS } from "../read-fields.js";
@@ -445,8 +445,9 @@ async function drawQueryTrend(slot, server, ctx, query) {
 
   /* #2353: the read routes to the hourly rollup once the window reaches past the raw tier's four-day
      retention, and reports which tier answered and how far it really reached. Those sentences are rendered
-     rather than dropped, because this page's range goes to 30 days: without them the DOP and plan-hash
-     columns simply go blank, and a blank column reads as "nothing to see" rather than "not measured here". */
+     rather than dropped, because this page's range goes to 7 days, past that tier: without them the DOP and
+     plan-hash columns simply go blank, and a blank column reads as "nothing to see" rather than "not measured
+     here". */
   const notes = [];
   if (trend.data.aggregate_note) notes.push(trend.data.aggregate_note);
   /* #3653 item 17: the window floor is `window_truncated` — the page dialect's `truncated` (a limit biting,
@@ -945,9 +946,14 @@ export const SERVER_TABS = [
   {
     id: "blocking",
     label: "Blocking",
-    note:
+    /* get_blocking_stats, which draws Blocking Severity and Deadlock Severity, takes any window, and its tables keep
+       more than this page's widest Range. The note names that Range from the presets (tabNote), so narrowing them
+       cannot leave it wrong. */
+    note: (widestHours) =>
       "Blocked-process reports and deadlock graphs are shown here as their captured XML. The block-chain view " +
-      "and the interactive deadlock graph are desktop-viewer features.",
+      "and the interactive deadlock graph are desktop-viewer features. This page shows at most " +
+      daysText(widestHours) +
+      ". A Custom View can show more blocking and deadlock history.",
     build: (server, ctx) => [
       line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
@@ -2487,9 +2493,12 @@ export function findServerTab(id, tabs) {
   return registry.find((t) => t.id === id) || registry[0];
 }
 
-/** The tab's note as a rendered strip, or null. Kept here so the shell has no opinion about its wording. */
-export function tabNote(tab) {
-  return tab.note ? noticeStrip(tab.note) : null;
+/** The tab's note as a rendered strip, or null. Kept here so the shell has no opinion about its wording. A note can be
+ *  a function of `widestHours`, the widest window the page's Range offers, so a sentence that names it stays true
+ *  when the presets change. */
+export function tabNote(tab, widestHours) {
+  const note = typeof tab.note === "function" ? tab.note(widestHours) : tab.note;
+  return note ? noticeStrip(note) : null;
 }
 
 /* ─────────────────────────── stat descriptors ─────────────────────────── */
