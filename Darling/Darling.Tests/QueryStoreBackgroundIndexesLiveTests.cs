@@ -17,6 +17,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -93,6 +94,12 @@ SELECT LEAST(timezone('UTC', now()), h + interval '1 hour'), s, 'db', q, q, 'Reg
 FROM generate_series(date_trunc('hour', timezone('UTC', now())) - interval '60 hours', date_trunc('hour', timezone('UTC', now())), interval '1 hour') h
 CROSS JOIN generate_series(1, 2) s CROSS JOIN generate_series(1, 60) q;
 
+INSERT INTO collect.query_store_interval_wide
+    (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
+     last_execution_time, query_text, execution_count, avg_duration_us, runtime_stats_interval_id, interval_start_time_utc)
+VALUES (timezone('UTC', now()) - interval '6 hours', 2, 'db', 1, 1, 'Regular', timezone('UTC', now()) - interval '7 hours',
+        timezone('UTC', now()) - interval '6 hours', 'select 1', 5, 1000, -1, NULL);
+
 SELECT count(compress_chunk(c, if_not_compressed => true))
 FROM show_chunks('collect.query_store_stats', older_than => date_trunc('day', timezone('UTC', now())) - interval '1 day') c;
 ANALYZE collect.query_store_stats;
@@ -103,12 +110,38 @@ ANALYZE collect.query_store_interval_wide;", ct);
 
     private static NpgsqlParameter Text() => new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value };
 
-    /* The probe and the MCP table read, as the product binds them, for both servers over a 24 h and a 60 h window. Rows
-       are stringified and sorted so the comparison is exact and order-free. */
-    private static async Task<List<string>> ReadAllAsync(NpgsqlConnection connection, CancellationToken ct)
+    private static NpgsqlParameter NullTs() => new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DBNull.Value };
+
+    /* Every row of a result, stringified (a timestamp round-trips to the tick, a NULL reads as NULL) and sorted, so a
+       comparison between two runs is exact and order-free. */
+    private static async Task<List<string>> RowsAsync(NpgsqlCommand command, CancellationToken ct)
+    {
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var rows = new List<string>();
+        while (await reader.ReadAsync(ct))
+        {
+            var values = new object[reader.FieldCount];
+            reader.GetValues(values);
+            rows.Add(string.Join("|", values.Select(v => v switch
+            {
+                DBNull => "NULL",
+                DateTime stamp => stamp.ToString("O", CultureInfo.InvariantCulture),
+                _ => Convert.ToString(v, CultureInfo.InvariantCulture),
+            })));
+        }
+
+        rows.Sort(StringComparer.Ordinal);
+        return rows;
+    }
+
+    /* Every read the two indexes speed up, as the product binds each one, for both servers over a 24 h and a 60 h
+       window ending at <paramref name="end"/>, which the caller fixes so two runs read the same windows: the
+       legacy-row probe, the MCP table read, the web viewer's table read (once with a closed window end and once with
+       the open end a preset window binds as NULL) and the duration trend's table read. Server 2 holds the NULL-start
+       rows, so the probe answers true for it and the table reads and the trend's second arm return its legacy row. */
+    private static async Task<List<string>> ReadAllAsync(NpgsqlConnection connection, DateTime end, CancellationToken ct)
     {
         var results = new List<string>();
-        var end = DateTime.UtcNow;
         foreach (var serverId in new[] { 1, 2 })
         {
             foreach (var hours in new[] { 24, 60 })
@@ -123,26 +156,44 @@ ANALYZE collect.query_store_interval_wide;", ct);
                     results.Add($"probe|server {serverId}|{hours}h|{await probe.ExecuteScalarAsync(ct)}");
                 }
 
-                await using var top = new NpgsqlCommand(DarlingDataReader.QueryStoreTopTableSql, connection);
-                top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-                top.Parameters.Add(Ts(start));
-                top.Parameters.Add(Ts(end));
-                top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 500 });
-                top.Parameters.Add(Text());
-                top.Parameters.Add(Text());
-                top.Parameters.Add(Text());
-                await using var reader = await top.ExecuteReaderAsync(ct);
-                var rows = new List<string>();
-                while (await reader.ReadAsync(ct))
+                await using (var top = new NpgsqlCommand(DarlingDataReader.QueryStoreTopTableSql, connection))
                 {
-                    var values = new object[reader.FieldCount];
-                    reader.GetValues(values);
-                    rows.Add(string.Join("|", values.Select(v => Convert.ToString(v, CultureInfo.InvariantCulture))));
+                    top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                    top.Parameters.Add(Ts(start));
+                    top.Parameters.Add(Ts(end));
+                    top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 500 });
+                    top.Parameters.Add(Text());
+                    top.Parameters.Add(Text());
+                    top.Parameters.Add(Text());
+                    var rows = await RowsAsync(top, ct);
+                    results.Add($"mcp top|server {serverId}|{hours}h|{rows.Count} rows");
+                    results.AddRange(rows.Select(r => $"  {r}"));
                 }
 
-                rows.Sort(StringComparer.Ordinal);
-                results.Add($"top|server {serverId}|{hours}h|{rows.Count} rows");
-                results.AddRange(rows.Select(r => $"  {r}"));
+                foreach (var openEnd in new[] { false, true })
+                {
+                    await using var viewerTop = new NpgsqlCommand(ViewerDataService.QueryStoreTopTableSql, connection);
+                    viewerTop.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                    viewerTop.Parameters.Add(Ts(start));
+                    viewerTop.Parameters.Add(openEnd ? NullTs() : Ts(end));
+                    viewerTop.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 500 });
+                    viewerTop.Parameters.Add(ViewerDataService.DatabaseFilterParameter(null));
+                    var rows = await RowsAsync(viewerTop, ct);
+                    results.Add($"viewer top|server {serverId}|{hours}h|{(openEnd ? "open end" : "closed end")}|{rows.Count} rows");
+                    results.AddRange(rows.Select(r => $"  {r}"));
+                }
+
+                await using (var trend = new NpgsqlCommand(ViewerDataService.QueryStoreDurationTrendTableSql, connection))
+                {
+                    trend.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                    trend.Parameters.Add(Ts(start));
+                    trend.Parameters.Add(Ts(end));
+                    trend.Parameters.Add(Ts(end));
+                    trend.Parameters.Add(ViewerDataService.DatabaseFilterParameter(null));
+                    var rows = await RowsAsync(trend, ct);
+                    results.Add($"trend|server {serverId}|{hours}h|{rows.Count} rows");
+                    results.AddRange(rows.Select(r => $"  {r}"));
+                }
             }
         }
 
@@ -162,14 +213,23 @@ ANALYZE collect.query_store_interval_wide;", ct);
 
         Assert.Null(await ScalarAsync(connection, $"SELECT to_regclass('{QueryStoreBackgroundIndexes.LegacyProbeIndexName}')::text", ct) is string a ? a : null);
         Assert.Null(await ScalarAsync(connection, $"SELECT to_regclass('{QueryStoreBackgroundIndexes.WideServerFirstExecIndexName}')::text", ct) is string b ? b : null);
-        var absent = await ReadAllAsync(connection, ct);
+        var end = DateTime.UtcNow;
+        var absent = await ReadAllAsync(connection, end, ct);
 
         /* Non-vacuous: the probe is false for server 1 and true for server 2 (its legacy row), and the top read returns rows. */
         Assert.Contains("probe|server 1|24h|False", absent);
         Assert.Contains("probe|server 2|24h|True", absent);
         Assert.Contains("probe|server 2|60h|True", absent);
-        Assert.DoesNotContain("top|server 1|24h|0 rows", absent);
-        Assert.DoesNotContain("top|server 2|60h|0 rows", absent);
+        Assert.DoesNotContain("mcp top|server 1|24h|0 rows", absent);
+        Assert.DoesNotContain("mcp top|server 2|60h|0 rows", absent);
+        Assert.DoesNotContain("viewer top|server 1|24h|closed end|0 rows", absent);
+        Assert.DoesNotContain("viewer top|server 2|60h|open end|0 rows", absent);
+        Assert.DoesNotContain("trend|server 1|24h|0 rows", absent);
+        Assert.DoesNotContain("trend|server 2|60h|0 rows", absent);
+
+        /* The NULL-start row of server 2 is in what the trend read returns (its second arm), so that arm is compared too. */
+        var legacyPoint = ((DateTime)(await ScalarAsync(connection, $"SELECT collection_time FROM {Wide} WHERE interval_start_time_utc IS NULL", ct))!).ToString("O", CultureInfo.InvariantCulture);
+        Assert.Contains(absent, line => line.TrimStart().StartsWith(legacyPoint, StringComparison.Ordinal));
 
         var planBefore = (string)(await ScalarAsync(connection, ProbePlanSql(), ct))!;
         Assert.DoesNotContain("ix_query_store_stats_legacy_server_time", planBefore);
@@ -177,7 +237,7 @@ ANALYZE collect.query_store_interval_wide;", ct);
         await EnsureAllAsync(connection, ct);
         await ExecAsync(connection, $"ANALYZE {Raw}", ct);
         await ExecAsync(connection, $"ANALYZE {Wide}", ct);
-        var present = await ReadAllAsync(connection, ct);
+        var present = await ReadAllAsync(connection, end, ct);
 
         Assert.Equal(absent, present);
 
@@ -336,6 +396,10 @@ LIMIT 1", ct))!;
         await using var connection = await OpenStoreAsync(scratch, ct);
         await SeedAsync(connection, ct);
         await EnsureAllAsync(connection, ct);
+
+        /* The claim is about the wide btree being present, so prove it is: with the ensure taken out the update below
+           stays heap-only trivially, and this test passed without the index until it asserted it. */
+        Assert.True((bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{QueryStoreBackgroundIndexes.WideServerFirstExecIndexName}'::regclass", ct))!);
 
         /* Exactly the columns the writer's ON CONFLICT ... DO UPDATE sets, each given a changed value by its type. */
         var setColumns = QueryStoreIntervalWideBrinIndexLiveTests.UpsertSetColumns();
