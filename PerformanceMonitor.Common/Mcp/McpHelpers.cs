@@ -63,13 +63,83 @@ internal static class McpHelpers
     public static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
     /// <summary>
-    /// Truncates a string to the specified maximum length, adding a truncation suffix.
+    /// Truncates a string to the specified maximum length, adding a truncation suffix. The cut lands on a whole
+    /// text element at or before <paramref name="maxLength"/> (<see cref="TextElementCutLength"/>), so it never
+    /// splits an emoji's surrogate pair or a letter from its accent. A split pair would reach the caller as U+FFFD,
+    /// because System.Text.Json writes that in place of a lone surrogate.
     /// </summary>
     public static string? Truncate(string? value, int maxLength)
     {
         if (value == null || value.Length <= maxLength) return value;
-        return value[..maxLength] + "... (truncated)";
+        return value[..TextElementCutLength(value, maxLength)] + "... (truncated)";
     }
+
+    /// <summary>
+    /// How many UTF-16 units of <paramref name="text"/> to keep so the cut lands on a text-element boundary (an
+    /// extended grapheme cluster: an emoji with its modifiers, a letter with its combining accent, a CR LF pair) at
+    /// or before <paramref name="limit"/>. The rule and the walk are the #3625 cut in
+    /// <c>WebhookAlertService.SlackCutLength</c>, which this matches on every input. That project does not reference
+    /// this one, so it keeps its own copy.
+    ///
+    /// <para>When no whole element fits (one element wider than the whole limit, such as a long run of combining
+    /// marks), the cut falls back to a code-point boundary: one unit before a surrogate pair, else the limit.</para>
+    ///
+    /// <para>The walk starts at the last position at or before the limit whose two neighbours are both ASCII and are
+    /// not CR then LF. No ASCII character extends, joins or prefixes the character next to it, so such a position is a
+    /// text-element boundary however the text before it segments. Most values are ASCII at the cut, so most calls
+    /// return without segmenting anything, and a 512,000-unit limit costs no more than a 40-unit one.</para>
+    /// </summary>
+    internal static int TextElementCutLength(ReadOnlySpan<char> text, int limit)
+    {
+        if (text.Length <= limit)
+        {
+            return text.Length;
+        }
+
+        if (limit <= 0)
+        {
+            return 0;
+        }
+
+        var start = limit;
+        while (start > 0 && !IsAsciiBoundary(text, start))
+        {
+            start--;
+        }
+
+        if (start == limit)
+        {
+            return limit;
+        }
+
+        /* The window handed to the segmenter ends two units past the limit, as in SlackCutLength: two units hold any
+           scalar that straddles the limit whole, and every boundary decision is made from the left, so each one at or
+           before the limit is the one the full text would make. */
+        var cut = start;
+        while (true)
+        {
+            var window = text.Slice(cut, Math.Min(text.Length - cut, limit - cut + 2));
+            var element = StringInfo.GetNextTextElementLength(window);
+            if (cut + element > limit)
+            {
+                break;
+            }
+
+            cut += element;
+        }
+
+        if (cut > 0)
+        {
+            return cut;
+        }
+
+        return char.IsHighSurrogate(text[limit - 1]) && char.IsLowSurrogate(text[limit]) ? limit - 1 : limit;
+    }
+
+    private static bool IsAsciiBoundary(ReadOnlySpan<char> text, int index) =>
+        char.IsAscii(text[index - 1])
+        && char.IsAscii(text[index])
+        && !(text[index - 1] == '\r' && text[index] == '\n');
 
     /// <summary>
     /// Validates hours_back parameter. Returns null if valid, the <see cref="Refusal"/> envelope if invalid.

@@ -200,6 +200,51 @@ public sealed class McpWholeNumberArgumentTests
             $"{failures.Count} problems across {checkedCount} integer parameters:\n" + string.Join("\n", failures.Take(40)));
     }
 
+    /// <summary>
+    /// A whole number past <see cref="long"/> is refused, since no integer parameter can read it, and the refusal says
+    /// why: too large, or too small. It must not ask for "no decimal point", because the caller sent none.
+    /// </summary>
+    [Theory]
+    [InlineData("99999999999999999999", "too large")]
+    [InlineData("\"99999999999999999999\"", "too large")]
+    [InlineData("-99999999999999999999", "too small")]
+    [InlineData("\"-99999999999999999999\"", "too small")]
+    public async Task AWholeNumberPastLong_IsRefusedAsTooLargeOrTooSmall(string rawValue, string reason)
+    {
+        await using var host = await StartHostAsync();
+        var tool = host.RegisteredTools.Single(registered => registered.ProtocolTool.Name == "get_wait_stats");
+
+        var refusal = McpUnknownArgumentGuard.Refuse(Call("get_wait_stats", "hours_back", rawValue), tool);
+
+        Assert.NotNull(refusal);
+        var problem = McpInProcessHost.WholeNumberRefusalProblem("get_wait_stats", "hours_back", reason, refusal);
+        Assert.True(problem is null, problem);
+        var message = McpInProcessHost.RefusalMessage(refusal)!;
+        Assert.False(message.Contains("no decimal point", StringComparison.Ordinal), message);
+    }
+
+    /// <summary>
+    /// The refusal quotes the value back, cut short at 40 UTF-16 units. Twenty-one emoji in a string are 44 units with
+    /// the quotes, and a cut at 40 splits the twentieth emoji, which System.Text.Json writes as U+FFFD. The cut keeps
+    /// whole characters, so the message shows nineteen emoji, then the truncation suffix, and no U+FFFD.
+    /// </summary>
+    [Fact]
+    public async Task AValueCutShortInTheRefusal_KeepsWholeCharacters()
+    {
+        const string Emoji = "\U0001F600";
+        await using var host = await StartHostAsync();
+        var tool = host.RegisteredTools.Single(registered => registered.ProtocolTool.Name == "get_wait_stats");
+        var sent = "\"" + string.Concat(Enumerable.Repeat(Emoji, 21)) + "\"";
+
+        var refusal = McpUnknownArgumentGuard.Refuse(Call("get_wait_stats", "hours_back", sent), tool);
+
+        Assert.NotNull(refusal);
+        var message = McpInProcessHost.RefusalMessage(refusal)!;
+        Assert.False(message.Contains('�'), message);
+        Assert.Contains(
+            "the call sent \"" + string.Concat(Enumerable.Repeat(Emoji, 19)) + "... (truncated).", message, StringComparison.Ordinal);
+    }
+
     private static CallToolRequestParams Call(string toolName, string parameter, string rawValue) =>
         new() { Name = toolName, Arguments = new Dictionary<string, JsonElement> { [parameter] = Json(rawValue) } };
 }

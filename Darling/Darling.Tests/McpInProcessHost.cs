@@ -158,6 +158,20 @@ internal sealed class McpInProcessHost : IAsyncDisposable
         return null;
     }
 
+    /// <summary>The message of the refusal envelope in <paramref name="result"/>, parsed from its JSON so escapes
+    /// such as <c>😀</c> read back as the characters they stand for; null when it is not a refusal.</summary>
+    public static string? RefusalMessage(CallToolResult result)
+    {
+        var text = TextOf(result);
+        if (result.IsError != true || !McpHelpers.IsRefusalEnvelope(text))
+        {
+            return null;
+        }
+
+        using var document = JsonDocument.Parse(text);
+        return document.RootElement.GetProperty("message").GetString();
+    }
+
     /// <summary>
     /// Null when <paramref name="result"/> is the guard's unknown-argument refusal for <paramref name="sentKey"/>, a key
     /// that differs from <paramref name="parameter"/> only by letter case: the shared refusal envelope,

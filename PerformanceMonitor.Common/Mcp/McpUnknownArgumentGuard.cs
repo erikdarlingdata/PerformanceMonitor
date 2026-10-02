@@ -228,22 +228,54 @@ public static class McpUnknownArgumentGuard
     };
 
     /// <summary>
+    /// "too large" or "too small" when <paramref name="value"/> is an integer literal that
+    /// <see cref="BinderReadsAsInteger"/> refused, so it is past <see cref="long"/>; otherwise null. Decided by the
+    /// value's own text: a JSON number with no '.', 'e' or 'E', or a string of digits with an optional sign. Failing
+    /// to read as a long is not enough on its own, because 0.5 fails that too.
+    /// </summary>
+    private static string? OutOfRangeWord(JsonElement value)
+    {
+        var text = value.ValueKind switch
+        {
+            JsonValueKind.Number when value.GetRawText().AsSpan().IndexOfAny('.', 'e', 'E') < 0 => value.GetRawText(),
+            JsonValueKind.String => value.GetString() ?? "",
+            _ => null,
+        };
+
+        if (text is null)
+        {
+            return null;
+        }
+
+        var digits = text.AsSpan(text.StartsWith('-') || text.StartsWith('+') ? 1 : 0);
+        if (digits.IsEmpty || digits.ContainsAnyExceptInRange('0', '9'))
+        {
+            return null;
+        }
+
+        return text.StartsWith('-') ? "too small" : "too large";
+    }
+
+    /// <summary>
     /// Builds the refusal for integer parameters given a value they cannot take. One sentence per argument, naming
     /// the argument, the unit its name gives (hours for <c>hours_back</c>) and the value that was sent, then the
-    /// accepted parameters, as the unknown-argument refusal lists them. <c>hints.parameter</c> is the first
-    /// argument, the knob the caller must change.
+    /// accepted parameters, as the unknown-argument refusal lists them. A whole number past <see cref="long"/> is
+    /// called too large or too small (<see cref="OutOfRangeWord"/>), since asking for "no decimal point" would
+    /// misstate what is wrong with it. <c>hints.parameter</c> is the first argument, the knob the caller must change.
     /// </summary>
     private static CallToolResult WholeNumberEnvelope(
         string toolName, List<KeyValuePair<string, JsonElement>> notWhole, HashSet<string> accepted)
     {
-        var sentences = notWhole.Select(argument =>
-            $"Argument '{argument.Key}' for tool '{toolName}' takes {WholeNumberOf(argument.Key)} with no decimal point,"
-            + $" such as 1, and the call sent {Shorten(argument.Value.GetRawText())}.");
+        var sentences = notWhole.Select(argument => OutOfRangeWord(argument.Value) is string reason
+            ? $"Argument '{argument.Key}' for tool '{toolName}' takes {WholeNumberOf(argument.Key)},"
+              + $" and the call sent {Shorten(argument.Value.GetRawText())}, which is {reason}."
+            : $"Argument '{argument.Key}' for tool '{toolName}' takes {WholeNumberOf(argument.Key)} with no decimal point,"
+              + $" such as 1, and the call sent {Shorten(argument.Value.GetRawText())}.");
 
         var message = string.Join(" ", sentences)
             + $" Accepted parameters: {string.Join(", ", accepted.OrderBy(name => name, StringComparer.Ordinal))}."
-            + " The call was refused before it ran, because the tool reads "
-            + (notWhole.Count == 1 ? "this value only as a whole number." : "these values only as whole numbers.");
+            + " The call was refused before it ran, because the tool cannot read "
+            + (notWhole.Count == 1 ? "this value." : "these values.");
 
         return new CallToolResult
         {
@@ -271,9 +303,9 @@ public static class McpUnknownArgumentGuard
         "hours", "days", "minutes", "seconds"
     };
 
-    /// <summary>The value as it was sent, cut short so a long string cannot flood the message.</summary>
-    private static string Shorten(string rawValue) =>
-        rawValue.Length <= 40 ? rawValue : string.Concat(rawValue.AsSpan(0, 40), "...");
+    /// <summary>The value as it was sent, cut short so a long string cannot flood the message. The shared
+    /// <see cref="McpHelpers.Truncate"/>, so the cut never splits a character.</summary>
+    private static string Shorten(string rawValue) => McpHelpers.Truncate(rawValue, 40)!;
 
     /// <summary>
     /// Builds the refusal. The unknown key goes in <c>hints.parameter</c> — the house convention is that a
