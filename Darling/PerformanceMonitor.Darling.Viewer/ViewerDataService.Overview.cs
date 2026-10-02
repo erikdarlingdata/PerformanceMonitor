@@ -433,7 +433,10 @@ LIMIT 1";
                 {
                     lastBlocking = dmvLast;
                 }
-                lastBlockingMinutesAgo = MinutesAgo(lastBlocking, nowUtc);
+                /* A master with separately monitored databases shows no "Last" for blocking: the card's "Last"
+                   looks back over all history, and the master's own newest would need a cached all-history read.
+                   Its lists keep every row, with the note. */
+                lastBlockingMinutesAgo = separate.Count > 0 ? null : MinutesAgo(lastBlocking, nowUtc);
             }
         }
 
@@ -450,7 +453,7 @@ LIMIT 1";
             if (await reader.ReadAsync(cancellationToken))
             {
                 deadlockCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
-                /* "Last" stays the server's newest deadlock: a hint, not a count. */
+                /* "Last" is the server's newest deadlock; a master with separately monitored databases shows none (below). */
                 lastDeadlock = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
             }
         }
@@ -495,7 +498,8 @@ LIMIT 1";
             }
         }
 
-        lastDeadlockMinutesAgo = MinutesAgo(lastDeadlock, nowUtc);
+        /* No deadlock "Last" for a master with separately monitored databases, for the blocking reason above. */
+        lastDeadlockMinutesAgo = separate.Count > 0 ? null : MinutesAgo(lastDeadlock, nowUtc);
 
         /* Newest collection time across all collectors — drives the freshness status. */
         await using (var command = _dataSource.CreateCommand(ServerSummaryLastCollectionSql))
@@ -760,12 +764,14 @@ public sealed class ServerSummaryItem
     /// <summary>The worst blocking wait (ms) observed in the window — the "max: Ns" detail + Critical band input.</summary>
     public long MaxBlockingWaitMs { get; set; }
 
-    /// <summary>Minutes since the most recent blocking event ever — the "Last: N ago" detail when the window is clear.</summary>
+    /// <summary>Minutes since the most recent blocking event ever — the "Last: N ago" detail when the window is clear;
+    /// null for an Azure master with separately monitored databases.</summary>
     public int? LastBlockingMinutesAgo { get; set; }
 
     public int DeadlockCount { get; set; }
 
-    /// <summary>Minutes since the most recent deadlock ever — the "Last: N ago" deadlock detail.</summary>
+    /// <summary>Minutes since the most recent deadlock ever — the "Last: N ago" deadlock detail;
+    /// null for an Azure master with separately monitored databases.</summary>
     public int? LastDeadlockMinutesAgo { get; set; }
 
     /// <summary>How many <c>pg_stat_database.deadlocks</c> counter differences <see cref="DeadlockCount"/>'s

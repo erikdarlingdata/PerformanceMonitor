@@ -153,6 +153,75 @@ public sealed class ViewerFleetAzureMasterScopeLiveTests
     }
 
     /// <summary>
+    /// The card's "Last: N ago" for a master with separately monitored databases: a sibling's blocking report and
+    /// deadlock are newer than any of the master's own, and the master shows NO "Last" for either, whether the scoped
+    /// reads succeed or fail (its counts stay scoped). A plain server and a master with no sibling show their newest.
+    /// </summary>
+    [Theory]
+    [InlineData("none")]
+    [InlineData("blocking")]
+    [InlineData("deadlocks")]
+    [InlineData("registry")]
+    public async Task TheMastersCard_ShowsNoLastForBlockingOrDeadlocks(string failingStage)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live Viewer scope pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await SeedAsync(connection, DateTime.UtcNow.AddMinutes(-10), ct);
+            await RegisterAsync(connection, LoneMasterId, "host-c.example", "master", 5, ct);
+
+            /* Newer than anything the master recorded in its own databases. */
+            var newer = DateTime.UtcNow.AddMinutes(-5);
+            await BprAsync(connection, MasterId, "GP", newer, ct);
+            await DeadlockAsync(connection, MasterId, "GP", newer, ct);
+            await BprAsync(connection, LoneMasterId, "GP", newer, ct);
+            await DeadlockAsync(connection, LoneMasterId, "GP", newer, ct);
+
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+            viewer.ScopeReadHookForTests = stage =>
+                stage == failingStage ? throw new InvalidOperationException("scope read failed") : Task.CompletedTask;
+
+            var master = await viewer.GetServerSummaryAsync(MasterId, "master", null, ct);
+            if (failingStage == "registry")
+            {
+                /* A failed list lookup means unscoped: the card keeps today's "Last". */
+                Assert.InRange(master.LastBlockingMinutesAgo!.Value, 4, 6);
+                Assert.InRange(master.LastDeadlockMinutesAgo!.Value, 4, 6);
+            }
+            else
+            {
+                Assert.Null(master.LastBlockingMinutesAgo);
+                Assert.Null(master.LastDeadlockMinutesAgo);
+                Assert.DoesNotContain("Last", master.BlockingDetail);
+                Assert.DoesNotContain("Last", master.DeadlockDetail);
+            }
+
+            var plain = await viewer.GetServerSummaryAsync(PlainId, "plain", null, ct);
+            Assert.InRange(plain.LastBlockingMinutesAgo!.Value, 9, 11);
+            Assert.InRange(plain.LastDeadlockMinutesAgo!.Value, 9, 11);
+
+            var lone = await viewer.GetServerSummaryAsync(LoneMasterId, "lone", null, ct);
+            Assert.InRange(lone.LastBlockingMinutesAgo!.Value, 4, 6);
+            Assert.InRange(lone.LastDeadlockMinutesAgo!.Value, 4, 6);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
+    /// <summary>
     /// A failed scope lookup or scoped read means UNSCOPED, never a dropped card or zeroed totals: whichever
     /// read throws, the master's card shows its unscoped counts and the fleet totals the unscoped totals.
     /// </summary>
