@@ -3335,6 +3335,12 @@ public sealed class DarlingManagedPostgres
         var pgsqlDirectory = Path.Combine(_runtimeRoot, "pgsql");
         var binDirectory = Path.Combine(pgsqlDirectory, "bin");
         var pgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
+
+        /* #4934: a runtime update that died between the rescue and a good extract leaves no pg_ctl.exe here
+           and the store's own runtime in pg-runtime-prev. Put it back first, so the branch below takes the
+           normal path (and retries the update) instead of the first-run extract. */
+        await _storeUpgrade.TryRestoreRescuedRuntimeAsync(_runtimeRoot, _dataDirectory, cancellationToken);
+
         if (File.Exists(pgCtl))
         {
             /* #1706: an extracted runtime is NOT refreshed by a deploy — this early return is exactly why a

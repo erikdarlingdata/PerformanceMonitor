@@ -1069,6 +1069,64 @@ internal sealed class DarlingStoreUpgrade
     }
 
     /// <summary>
+    /// Puts the store's own rescued runtime back at <c>pgsql</c> when the live runtime folder holds no
+    /// <c>bin\pg_ctl.exe</c> and the rescued copy under <see cref="PreviousRuntimeRootFor"/> is the one that
+    /// last opened the store. Returns true when it moved the runtime back; false, having changed nothing,
+    /// in every other case (a live runtime is there, there is no store, no rescued copy, or the rescued copy
+    /// is another major than the store's, which <see cref="FindRescuedRuntimeBinAsync"/> already refuses).
+    ///
+    /// <para>The shape: a runtime update moved the live runtime aside and its extract never finished (the
+    /// process died, or an antivirus scan held the folder), leaving an empty or partial <c>pgsql</c> with the
+    /// good runtime in <c>pg-runtime-prev</c>. Without this, the next start saw no <c>pg_ctl.exe</c>, took the
+    /// first-run branch and extracted the package as if there were no store.</para>
+    ///
+    /// <para>A move that still fails after its retries throws, as the first-run branch does: there is no
+    /// runtime to start on, and no fallback state is invented for it.</para>
+    /// </summary>
+    internal async Task<bool> TryRestoreRescuedRuntimeAsync(string runtimeRoot, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var pgsqlDirectory = Path.Combine(runtimeRoot, "pgsql");
+        if (File.Exists(Path.Combine(pgsqlDirectory, "bin", "pg_ctl.exe")))
+        {
+            return false;
+        }
+
+        if (await FindRescuedRuntimeBinAsync(runtimeRoot, dataDirectory, cancellationToken) is null)
+        {
+            return false;
+        }
+
+        var previousPgsql = Path.Combine(PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+
+        /* A partial pgsql goes aside before the restore, exactly as the extract-failure revert does it: a
+           move is one operation, a recursive delete is not, and a half-deleted folder is no runtime. */
+        var failedExtract = pgsqlDirectory + ".failed";
+        TryDeleteDirectory(failedExtract);
+        if (Directory.Exists(pgsqlDirectory))
+        {
+            await RetryTransientIoAsync(
+                () => MoveRuntimeDirectory(pgsqlDirectory, failedExtract),
+                $"the move aside of the incomplete runtime at {pgsqlDirectory}",
+                cancellationToken);
+        }
+
+        await RetryTransientIoAsync(
+            () => MoveRuntimeDirectory(previousPgsql, pgsqlDirectory),
+            $"the restore of the rescued runtime to {pgsqlDirectory}",
+            cancellationToken);
+        TryDeleteDirectory(failedExtract);
+
+        /* The stamp still names the runtime that was live before the interrupted update: the advance writes it
+           only after a good extract (File.WriteAllText(stampPath, zipHash) in TryAdvanceRuntimeAsync). So the
+           normal path that follows compares the package against that stamp, sees the difference, and retries
+           the update. */
+        _logger.LogWarning(
+            "The Postgres runtime at {Runtime} had no pg_ctl.exe, and the runtime that last opened the store at {DataDirectory} was found at {Previous}. It was put back, and the runtime update is retried on this start.",
+            pgsqlDirectory, dataDirectory, previousPgsql);
+        return true;
+    }
+
+    /// <summary>
     /// Whether an unidentifiable runtime must STOP the service rather than be waved through, PURE so the
     /// decision is pinned without needing a broken runtime to reproduce (deleting the guard inline left the
     /// whole suite green).
