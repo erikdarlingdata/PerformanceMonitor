@@ -312,6 +312,47 @@ public sealed class RollupFloorCacheLiveTests
     }
 
     [Fact]
+    public async Task AFloorPastTwiceTheHourWithItsChunkUnchanged_IsMeasuredInline_NotServedFromTheCache()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4957 serve-cap test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        var now = SeedEnd();
+
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await PopulateStoreAsync(store.ConnectionString, SeedStart(), now, deleteRawBefore: null, oneDayChunks: true, ct);
+
+        var factory = new CommandCountingLoggerFactory();
+        await using var dataSource = new NpgsqlDataSourceBuilder(store.ConnectionString).UseLoggerFactory(factory).Build();
+        var availability = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
+
+        var cold = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+        var floorCold = cold.FloorOf(HourlyView);
+        Assert.Equal(await TruthAsync(store.ConnectionString, ct), floorCold);
+        Assert.Equal(1, factory.Provider.CountContaining(MinBucketStatement));
+
+        /* A retention delete inside the oldest chunk: the true floor moves later and the chunk's identity does not,
+           which is the one change the cache cannot see and the cap exists to bound. */
+        var oldestChunk = await OldestChunkAsync(store.ConnectionString, ct);
+        await DeleteMaterializedBucketsBeforeAsync(store.ConnectionString, floorCold!.Value.AddHours(2), ct);
+        var floorAfterDelete = await TruthAsync(store.ConnectionString, ct);
+        Assert.True(floorAfterDelete > floorCold);
+        Assert.Equal(oldestChunk, await OldestChunkAsync(store.ConnectionString, ct));
+
+        /* At the serve cap the entry is no longer served: the first caller measures it inline and gets the true floor
+           in the same call, with the sort already run when it returns (no polling for a background pass). */
+        var pastTheCap = now + TimescaleSupport.RollupFloorMaxServeAge + TimeSpan.FromMinutes(1);
+        var inline = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTheCap, ct);
+        Assert.Equal(floorAfterDelete, inline.FloorOf(HourlyView));
+        Assert.Equal(2, factory.Provider.CountContaining(MinBucketStatement));
+
+        /* It replaced the entry, so the next call is current and measures nothing. */
+        var next = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTheCap, ct);
+        Assert.Equal(floorAfterDelete, next.FloorOf(HourlyView));
+        Assert.Equal(2, factory.Provider.CountContaining(MinBucketStatement));
+    }
+
+    [Fact]
     public async Task AfterTheStartUpWarm_TheFirstCoverageCallOnAnotherDataSource_RunsNoMinBucket()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),

@@ -52,7 +52,8 @@ public sealed class RollupFloorStoreCacheTests
     private static TimescaleSupport.RollupFloorCacheEntry Entry(DateTime measuredAt, long oid = 7)
         => new("chunk_1", "hyper_1", Floor, measuredAt, Ceiling: null, DatabaseOid: oid);
 
-    private static TimescaleSupport.RollupFloorPlan Plan(TimescaleSupport.RollupFloorCacheEntry? entry, long oidNow = 7)
+    private static TimescaleSupport.RollupFloorPlan Plan(
+        TimescaleSupport.RollupFloorCacheEntry? entry, long oidNow = 7, string chunkNow = "chunk_1", string hypertableNow = "hyper_1")
     {
         var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal);
         if (entry is { } e)
@@ -62,7 +63,7 @@ public sealed class RollupFloorStoreCacheTests
 
         var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
         {
-            [View] = new("chunk_1", "hyper_1", oidNow),
+            [View] = new(chunkNow, hypertableNow, oidNow),
         };
 
         return TimescaleSupport.PlanRollupFloorMeasurements(cached, oldestNow, RollupAvailability.All, Now);
@@ -102,6 +103,58 @@ public sealed class RollupFloorStoreCacheTests
 
         Assert.Contains(View, plan.Inline);
         Assert.Empty(plan.Background);
+    }
+
+    /* The second threshold. Between the reuse window and twice the window a floor is served from the cache and
+       re-measured once in the background (the tests above). At twice the window it is measured inline again, so no
+       floor is served older than that, whether or not callers kept arriving. */
+    [Fact]
+    public void ServeCap_IsTwiceTheReuseWindow()
+    {
+        Assert.Equal(TimescaleSupport.RollupFloorMaxReuse * 2, TimescaleSupport.RollupFloorMaxServeAge);
+        Assert.True(TimescaleSupport.RollupFloorMaxServeAge > TimescaleSupport.RollupFloorMaxReuse);
+    }
+
+    [Fact]
+    public void Plan_AFloorJustUnderTheServeCap_WithItsIdentityUnchanged_IsStillServed_AndDueInTheBackground()
+    {
+        var plan = Plan(Entry(Now - TimescaleSupport.RollupFloorMaxServeAge + TimeSpan.FromMinutes(1)));
+
+        Assert.Empty(plan.Inline);
+        Assert.Contains(View, plan.Background);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(60 * 24 * 30)]
+    public void Plan_AFloorAtOrPastTheServeCap_WithItsIdentityUnchanged_IsInline_NotServedFromTheCache(int minutesPast)
+    {
+        var plan = Plan(Entry(Now - TimescaleSupport.RollupFloorMaxServeAge - TimeSpan.FromMinutes(minutesPast)));
+
+        Assert.Contains(View, plan.Inline);
+        Assert.Empty(plan.Background);
+    }
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(61)]
+    [InlineData(121)]
+    [InlineData(60 * 24 * 30)]
+    public void Plan_AChangedChunkHypertableOrDatabase_IsInline_AtAnyAge(int ageMinutes)
+    {
+        var measuredAt = Now - TimeSpan.FromMinutes(ageMinutes);
+
+        foreach (var plan in new[]
+        {
+            Plan(Entry(measuredAt), chunkNow: "chunk_2"),
+            Plan(Entry(measuredAt), hypertableNow: "hyper_2"),
+            Plan(Entry(measuredAt), oidNow: 8),
+        })
+        {
+            Assert.Contains(View, plan.Inline);
+            Assert.Empty(plan.Background);
+        }
     }
 
     [Fact]

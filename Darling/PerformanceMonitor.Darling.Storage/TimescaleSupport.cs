@@ -9393,6 +9393,15 @@ WHERE ca.view_schema = 'collect'
     /// </summary>
     internal static readonly TimeSpan RollupFloorMaxReuse = TimeSpan.FromHours(1);
 
+    /// <summary>
+    /// #4957: the age at which a cached rollup floor is no longer served at all: twice <see cref="RollupFloorMaxReuse"/>.
+    /// An entry between the two is served from the cache while one background pass re-measures it; an entry this old or
+    /// older is measured inline, by the caller, as it was before the background pass existed. Derived from
+    /// <see cref="RollupFloorMaxReuse"/> rather than written as a second number, and declared AFTER it: static fields
+    /// initialize in textual order, so one declared above it would capture a zero.
+    /// </summary>
+    internal static readonly TimeSpan RollupFloorMaxServeAge = RollupFloorMaxReuse * 2;
+
     /// <summary>One store's cached rollup floors, keyed by view name, plus the background re-measure (#4957).</summary>
     private sealed class RollupFloorCache
     {
