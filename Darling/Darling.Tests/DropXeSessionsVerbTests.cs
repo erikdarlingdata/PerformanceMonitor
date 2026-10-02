@@ -395,7 +395,9 @@ public sealed class DropXeSessionsVerbTests
         var script = DarlingXeSessionCleanup.GuardedDropScript();
         var code = string.Join('\n', script.Split('\n').Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal)));
 
-        Assert.Equal(6, Regex.Matches(code, "DROP EVENT SESSION", RegexOptions.CultureInvariant).Count);
+        /* Six guarded drops, and the two per-install queries (one for each scope) that print a DROP statement as a column for
+           the operator to run (#4961). */
+        Assert.Equal(8, Regex.Matches(code, "DROP EVENT SESSION", RegexOptions.CultureInvariant).Count);
         Assert.Equal(6, Regex.Matches(code, @"IF EXISTS", RegexOptions.CultureInvariant).Count);
         Assert.Equal(
             new[] { Blocked, Deadlock, LongQuery },

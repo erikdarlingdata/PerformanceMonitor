@@ -134,17 +134,126 @@ public static class DarlingXeSessionCleanup
         LongQueryCompletionsCollector.LegacyXeSessionName,
     };
 
-    public static IReadOnlyList<string> InstallSessionNames(string? installId) => Array.Empty<string>();
+    /// <summary>
+    /// This install's own sessions (#4961), made by the builders the collectors use, never by hand: its long-query session and,
+    /// on Azure SQL Database, the deadlock and blocked-process fallbacks it makes when a shared session is unusable. Empty when
+    /// <paramref name="installId"/> is not an install id, because an install with no id has made none of them.
+    /// </summary>
+    public static IReadOnlyList<string> InstallSessionNames(string? installId)
+    {
+        if (!InstallId.IsValid(installId))
+        {
+            return Array.Empty<string>();
+        }
 
-    public static IReadOnlyList<string> NamesToDrop(string? installId) => SessionNames;
+        return new[]
+        {
+            LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, installId),
+            AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, installId, AlwaysOnXeSessionKind.Deadlock),
+            AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, installId, AlwaysOnXeSessionKind.BlockedProcess),
+        };
+    }
 
-    public static bool IsOtherInstallSessionName(string? name, string? installId) => false;
+    /// <summary>The sessions the verb may drop for an install: <see cref="SessionNames"/> (the two shared names and the old
+    /// shared long-query name), then <see cref="InstallSessionNames"/>. The one allow-list: <see cref="DropStatement"/>, the
+    /// plan and the find text all read it.</summary>
+    public static IReadOnlyList<string> NamesToDrop(string? installId) => SessionNames.Concat(InstallSessionNames(installId)).ToList();
 
-    internal static string ComposeFindOthersSql(XeSessionScope scope) => string.Empty;
+    /* The per-install shapes, cut from the shared names so no second spelling exists: PerformanceMonitor_{product}_{id}_{suffix}
+       becomes a LIKE pattern with the underscores escaped. The shared names and the old shared long-query name carry no middle
+       segment, so none of them matches. */
+    private const string SharedNamePrefix = "PerformanceMonitor_";
 
-    public const string OtherInstallsHeading = "STUB";
+    private static string PerInstallPattern(string sharedName) =>
+        "PerformanceMonitor[_]%[_]" + sharedName.Substring(SharedNamePrefix.Length);
 
-    public const string NoInstallIdNote = "STUB";
+    /// <summary>
+    /// True when <paramref name="name"/> is the exact shape of another install's session (<c>PerformanceMonitor_{Lite|Darling}_{id}_</c>
+    /// and a long-query, deadlock or blocked-process suffix) and is not one of this install's own. False for every name when
+    /// <paramref name="installId"/> is not an id: with no id the verb cannot tell this install's sessions from another's, so it
+    /// lists none. The exact shape, not the LIKE match, decides, so a name is never printed into a statement unless it is made of
+    /// the product, a hex id and a fixed suffix.
+    /// </summary>
+    public static bool IsOtherInstallSessionName(string? name, string? installId)
+    {
+        if (name is null || !InstallId.IsValid(installId))
+        {
+            return false;
+        }
+
+        var shaped = LongQueryCompletionsCollector.IsInstallSessionName(name)
+            || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.Deadlock)
+            || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.BlockedProcess);
+        return shaped && !InstallSessionNames(installId).Contains(name, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The query that lists the sessions of every install, this one's included, in the catalog of <paramref name="scope"/>: the
+    /// three per-install shapes as LIKE patterns. The caller drops this install's own names from the result and lists the rest
+    /// (<see cref="IsOtherInstallSessionName"/>). The patterns are fixed text, never input.
+    /// </summary>
+    internal static string ComposeFindOthersSql(XeSessionScope scope)
+    {
+        var (catalogView, alias) = scope switch
+        {
+            XeSessionScope.Server => ("sys.server_event_sessions", "ses"),
+            XeSessionScope.Database => ("sys.database_event_sessions", "des"),
+            _ => throw new ArgumentOutOfRangeException(nameof(scope)),
+        };
+
+        var patterns = new[]
+        {
+            LongQueryCompletionsCollector.LegacyXeSessionName,
+            DeadlocksCollector.XeSessionName,
+            BlockedProcessReportCollector.XeSessionName,
+        }.Select(PerInstallPattern).ToList();
+
+        var conditions = string.Join(Environment.NewLine + "OR ", patterns.Select(pattern => $"{alias}.name LIKE N'{pattern}'"));
+        return $@"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT /* PerformanceMonitorDarling */
+    {alias}.name
+FROM {catalogView} AS {alias}
+WHERE {conditions};";
+    }
+
+    /// <summary>The line above the sessions of other installs the verb lists. It says the verb never drops them.</summary>
+    public const string OtherInstallsHeading =
+        "Sessions of other installs on this server. This verb lists them and never drops them. "
+        + "Run a statement below only when that install no longer monitors this server:";
+
+    /// <summary>What the verb says when the store holds no install id: it leaves every session named for an install alone.</summary>
+    public const string NoInstallIdNote =
+        "The store has no install id yet, so this run leaves alone every session named for an install. "
+        + "The service makes the id when it starts.";
+
+    /// <summary>The guarded DROP of one session as lines of text: an <c>IF EXISTS</c> against the catalog of its scope around the
+    /// DROP. The caller has already limited the name to one it may print (<see cref="DropStatement"/>'s list, or
+    /// <see cref="IsOtherInstallSessionName"/>).</summary>
+    internal static IReadOnlyList<string> GuardedDropLines(string name, XeSessionScope scope)
+    {
+        var (catalogView, alias) = scope switch
+        {
+            XeSessionScope.Server => ("sys.server_event_sessions", "ses"),
+            XeSessionScope.Database => ("sys.database_event_sessions", "des"),
+            _ => throw new ArgumentOutOfRangeException(nameof(scope)),
+        };
+
+        return new[]
+        {
+            "IF EXISTS",
+            "(",
+            "    SELECT",
+            "        1/0",
+            $"    FROM {catalogView} AS {alias}",
+            $"    WHERE {alias}.name = N'{name.Replace("'", "''", StringComparison.Ordinal)}'",
+            ")",
+            "BEGIN",
+            "    " + ComposeDropStatement(name, scope),
+            "END;",
+        };
+    }
 
     /// <summary>The names as one phrase for console and help text: <c>A, B and C</c>.</summary>
     public static string SessionNamesPhrase() => JoinAsPhrase(SessionNames);
@@ -176,11 +285,11 @@ public static class DarlingXeSessionCleanup
 
     /// <summary>What each session captures, in the words the note after a drop uses. A name with no entry reads as itself, so
     /// a session added to <see cref="SessionNames"/> is never left out of the note.</summary>
-    private static string CapturePhrase(string canonicalName) =>
-        canonicalName == DeadlocksCollector.XeSessionName ? "deadlocks"
-        : canonicalName == BlockedProcessReportCollector.XeSessionName ? "blocked processes"
-        : canonicalName == LongQueryCompletionsCollector.LegacyXeSessionName ? "long query completions"
-        : canonicalName;
+    private static string? CapturePhrase(string name) =>
+        name == DeadlocksCollector.XeSessionName || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.Deadlock) ? "deadlocks"
+        : name == BlockedProcessReportCollector.XeSessionName || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.BlockedProcess) ? "blocked processes"
+        : name == LongQueryCompletionsCollector.LegacyXeSessionName || LongQueryCompletionsCollector.IsInstallSessionName(name) ? "long query completions"
+        : null;
 
     /// <summary>
     /// The one line a run that dropped at least one session prints after its results, or null when nothing was dropped (a
@@ -194,8 +303,13 @@ public static class DarlingXeSessionCleanup
     {
         ArgumentNullException.ThrowIfNull(dropped);
 
-        var droppedNames = dropped.Select(d => d.Name).ToHashSet(StringComparer.Ordinal);
-        var captures = SessionNames.Where(droppedNames.Contains).Select(CapturePhrase).ToList();
+        var order = new[] { "deadlocks", "blocked processes", "long query completions" };
+        var captures = dropped
+            .Select(d => CapturePhrase(d.Name))
+            .OfType<string>()
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(phrase => Array.IndexOf(order, phrase))
+            .ToList();
         return captures.Count == 0
             ? null
             : "NOTE: capture of " + JoinAsPhrase(captures) + " on that server stops until this service reconnects to it, so remove the server next.";
@@ -251,7 +365,7 @@ WHERE {alias}.name IN ({literals});";
     /// </summary>
     public static string DropStatement(string sessionName, XeSessionScope scope, string? installId = null)
     {
-        var canonical = Canonical(sessionName)
+        var canonical = Canonical(sessionName, installId)
             ?? throw new ArgumentException("Only Darling's own session names can be dropped by this verb.", nameof(sessionName));
         if (!string.Equals(canonical, sessionName, StringComparison.Ordinal))
         {
@@ -274,9 +388,9 @@ WHERE {alias}.name IN ({literals});";
         _ => throw new ArgumentOutOfRangeException(nameof(scope)),
     };
 
-    /// <summary>The constant spelling of <paramref name="name"/> when it is one of <see cref="SessionNames"/>, else null.</summary>
-    private static string? Canonical(string? name) =>
-        SessionNames.FirstOrDefault(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase));
+    /// <summary>The constant spelling of <paramref name="name"/> when it is one of <see cref="NamesToDrop"/>, else null.</summary>
+    private static string? Canonical(string? name, string? installId) =>
+        NamesToDrop(installId).FirstOrDefault(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// The drops for the sessions that were found: pure, so "which statements for these existing sessions" pins without a
@@ -292,7 +406,7 @@ WHERE {alias}.name IN ({literals});";
         var planned = new List<ExistingXeSession>();
         foreach (var session in existing)
         {
-            var canonical = Canonical(session.Name);
+            var canonical = Canonical(session.Name, installId);
             if (canonical is null)
             {
                 continue;
@@ -316,22 +430,23 @@ WHERE {alias}.name IN ({literals});";
         return planned
             .OrderBy(p => p.Scope)
             .ThenBy(p => p.Database, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(p => SessionIndex(p.Name))
-            .Select(p => new XeSessionDrop(p))
+            .ThenBy(p => SessionIndex(p.Name, installId))
+            .Select(p => new XeSessionDrop(p, installId))
             .ToList();
     }
 
-    private static int SessionIndex(string canonicalName)
+    private static int SessionIndex(string canonicalName, string? installId)
     {
-        for (var i = 0; i < SessionNames.Count; i++)
+        var names = NamesToDrop(installId);
+        for (var i = 0; i < names.Count; i++)
         {
-            if (SessionNames[i] == canonicalName)
+            if (names[i] == canonicalName)
             {
                 return i;
             }
         }
 
-        return SessionNames.Count;
+        return names.Count;
     }
 
     /// <summary>How one found or dropped session reads on the console.</summary>
@@ -358,37 +473,66 @@ WHERE {alias}.name IN ({literals});";
 
         foreach (var name in SessionNames)
         {
-            lines.Add("IF EXISTS");
-            lines.Add("(");
-            lines.Add("    SELECT");
-            lines.Add("        1/0");
-            lines.Add("    FROM sys.server_event_sessions AS ses");
-            lines.Add($"    WHERE ses.name = N'{name}'");
-            lines.Add(")");
-            lines.Add("BEGIN");
-            lines.Add("    " + DropStatement(name, XeSessionScope.Server));
-            lines.Add("END;");
+            lines.AddRange(GuardedDropLines(DropStatementName(name, XeSessionScope.Server), XeSessionScope.Server));
             lines.Add(string.Empty);
         }
+
+        lines.AddRange(PerInstallListing(XeSessionScope.Server));
+        lines.Add(string.Empty);
 
         lines.Add("-- Part 2 of 2 - run inside EACH monitored database on Azure SQL Database (a database-scoped session lives in its own database, never in master).");
 
         foreach (var name in SessionNames)
         {
-            lines.Add("IF EXISTS");
-            lines.Add("(");
-            lines.Add("    SELECT");
-            lines.Add("        1/0");
-            lines.Add("    FROM sys.database_event_sessions AS des");
-            lines.Add($"    WHERE des.name = N'{name}'");
-            lines.Add(")");
-            lines.Add("BEGIN");
-            lines.Add("    " + DropStatement(name, XeSessionScope.Database));
-            lines.Add("END;");
+            lines.AddRange(GuardedDropLines(DropStatementName(name, XeSessionScope.Database), XeSessionScope.Database));
             lines.Add(string.Empty);
         }
 
+        lines.AddRange(PerInstallListing(XeSessionScope.Database));
+        lines.Add(string.Empty);
+
         return string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>A name the allow-list accepts, returned as it was given: the script prints a name only after
+    /// <see cref="DropStatement"/> has accepted it.</summary>
+    private static string DropStatementName(string name, XeSessionScope scope)
+    {
+        _ = DropStatement(name, scope);
+        return name;
+    }
+
+    /// <summary>
+    /// The script's part for the sessions named for an install: a query that lists each one in the catalog of
+    /// <paramref name="scope"/> with its DROP statement as a column. The script connects to nothing, so it cannot know this
+    /// install's id; the operator reads it from the store and runs the statements that carry it. A session with another id
+    /// belongs to another install.
+    /// </summary>
+    private static IEnumerable<string> PerInstallListing(XeSessionScope scope)
+    {
+        var (catalogView, alias, on) = scope == XeSessionScope.Server
+            ? ("sys.server_event_sessions", "ses", "SERVER")
+            : ("sys.database_event_sessions", "des", "DATABASE");
+
+        yield return "-- Sessions named for an install (" + (scope == XeSessionScope.Server ? "server scope" : "database scope") + "): the query lists each one with its DROP statement.";
+        yield return "-- This install's sessions carry this install's id (the install_id column of config.config_install_id in the Darling store): run those statements.";
+        yield return "-- A session with another id belongs to another install: run its statement only when that install no longer monitors this server.";
+        yield return "SELECT";
+        yield return $"    {alias}.name,";
+        yield return $"    N'DROP EVENT SESSION ' + QUOTENAME({alias}.name) + N' ON {on};' AS drop_statement";
+        yield return $"FROM {catalogView} AS {alias}";
+        var patterns = new[]
+        {
+            LongQueryCompletionsCollector.LegacyXeSessionName,
+            DeadlocksCollector.XeSessionName,
+            BlockedProcessReportCollector.XeSessionName,
+        }.Select(PerInstallPattern).ToList();
+        for (var i = 0; i < patterns.Count; i++)
+        {
+            yield return (i == 0 ? "WHERE " : "OR ") + $"{alias}.name LIKE N'{patterns[i]}'";
+        }
+
+        yield return $"ORDER BY {alias}.name;";
     }
 
     /// <summary>
@@ -436,11 +580,16 @@ WHERE {alias}.name IN ({literals});";
             error.WriteLine(note);
         }
 
-        var drops = PlanDrops(search.Sessions);
+        if (!InstallId.IsValid(installId))
+        {
+            output.WriteLine(NoInstallIdNote);
+        }
+
+        var drops = PlanDrops(search.Sessions, installId);
         if (drops.Count == 0)
         {
             /* "In the places searched": a database that could not be searched (a Problems entry, exit 2, or a note) may hold a session. */
-            output.WriteLine($"No Darling Extended Events sessions ({string.Join(", ", SessionNames)}) were found on '{serverLabel}'; nothing to drop in the places searched.");
+            output.WriteLine($"No Darling Extended Events sessions ({string.Join(", ", NamesToDrop(installId))}) were found on '{serverLabel}'; nothing to drop in the places searched.");
         }
 
         var dropped = new List<ExistingXeSession>();
@@ -471,6 +620,29 @@ WHERE {alias}.name IN ({literals});";
         if (dryRun && drops.Count > 0)
         {
             output.WriteLine("Dry run: nothing was dropped.");
+        }
+
+        /* Another install's sessions are text for the operator: listed with a guarded statement, never handed to the target. */
+        var others = search.Others
+            .Where(other => IsOtherInstallSessionName(other.Name, installId)
+                && (other.Scope == XeSessionScope.Server || !string.IsNullOrWhiteSpace(other.Database)))
+            .DistinctBy(other => (other.Scope, other.Name, Database: other.Database?.ToUpperInvariant()))
+            .OrderBy(other => other.Scope)
+            .ThenBy(other => other.Database, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(other => other.Name, StringComparer.Ordinal)
+            .ToList();
+        if (others.Count > 0)
+        {
+            output.WriteLine();
+            output.WriteLine(OtherInstallsHeading);
+            foreach (var other in others)
+            {
+                output.WriteLine($"  {Describe(other)}");
+                foreach (var line in GuardedDropLines(other.Name, other.Scope))
+                {
+                    output.WriteLine("    " + line);
+                }
+            }
         }
 
         output.WriteLine();
@@ -509,6 +681,8 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 
     private readonly IReadOnlyList<MonitoredServer> _registry;
 
+    private readonly string? _installId;
+
     /// <param name="server">The connected server.</param>
     /// <param name="sessionNames">The names to search for and to drop, copied here. Every product caller leaves this null, which
     /// is <see cref="DarlingXeSessionCleanup.SessionNames"/>. The live test passes a test-only name so the real find and drop
@@ -517,12 +691,19 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
     /// text the product sends, and a test pins that a copy of Darling's names sends exactly the plan's text (#4732).</param>
     /// <param name="registry">The servers this service monitors, from the same list the verb resolved the target in. On Azure SQL
     /// Database it says which databases belong to another registration of the same logical server.</param>
-    public SqlServerXeSessionCleanupTarget(
-        ServerRuntime server, IReadOnlyList<string>? sessionNames = null, IReadOnlyList<MonitoredServer>? registry = null)
+    /// <param name="facts">What the verb read from the store: this install's id, which adds this install's own session names to the
+    /// names a product target (no <paramref name="sessionNames"/>) searches for and may drop, and makes it list the sessions of other
+    /// installs. A target given names of its own searches for those alone.</param>
+    internal SqlServerXeSessionCleanupTarget(
+        ServerRuntime server,
+        IReadOnlyList<string>? sessionNames = null,
+        IReadOnlyList<MonitoredServer>? registry = null,
+        XeCleanupStoreFacts? facts = null)
     {
         _server = server ?? throw new ArgumentNullException(nameof(server));
         _registry = registry ?? Array.Empty<MonitoredServer>();
-        _sessionNames = (sessionNames ?? DarlingXeSessionCleanup.SessionNames).ToArray();
+        _installId = sessionNames is null && InstallId.IsValid(facts?.InstallId) ? facts!.InstallId : null;
+        _sessionNames = (sessionNames ?? DarlingXeSessionCleanup.NamesToDrop(_installId)).ToArray();
         if (_sessionNames.Length == 0 || _sessionNames.Any(string.IsNullOrWhiteSpace))
         {
             throw new ArgumentException("A cleanup target needs at least one session name, and none of them blank.", nameof(sessionNames));
@@ -530,7 +711,25 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 
         FindServerSql = DarlingXeSessionCleanup.ComposeFindSql(XeSessionScope.Server, _sessionNames);
         FindDatabaseSql = DarlingXeSessionCleanup.ComposeFindSql(XeSessionScope.Database, _sessionNames);
+        if (_installId is not null)
+        {
+            FindOthersServerSql = DarlingXeSessionCleanup.ComposeFindOthersSql(XeSessionScope.Server);
+            FindOthersDatabaseSql = DarlingXeSessionCleanup.ComposeFindOthersSql(XeSessionScope.Database);
+        }
     }
+
+    /// <summary>The query that lists the sessions of every install on a server that has server-scoped sessions. Null when the
+    /// target has no install id: it then lists none.</summary>
+    internal string? FindOthersServerSql { get; }
+
+    /// <summary>The same query in each database on Azure SQL Database. Null when the target has no install id.</summary>
+    internal string? FindOthersDatabaseSql { get; }
+
+    /// <summary>Whether a session of this name is a long-query session: the old shared one or an install's own. Both are searched
+    /// for in the same databases, which are not the deadlock and blocked-process sessions'.</summary>
+    internal static bool IsLongQuerySession(string sessionName) =>
+        string.Equals(sessionName, LongQueryCompletionsCollector.LegacyXeSessionName, StringComparison.OrdinalIgnoreCase)
+        || LongQueryCompletionsCollector.IsInstallSessionName(sessionName);
 
     /// <summary>The query <see cref="FindSessionsAsync"/> runs on a server that has server-scoped sessions.</summary>
     internal string FindServerSql { get; }
@@ -569,7 +768,7 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 
         /// <summary>Whether a session of this name, found in this database, belongs in the result.</summary>
         public bool Reports(string database, string sessionName) =>
-            (string.Equals(sessionName, LongQueryCompletionsCollector.LegacyXeSessionName, StringComparison.OrdinalIgnoreCase)
+            (IsLongQuerySession(sessionName)
                 ? LongQueryDatabases
                 : AlwaysOnDatabases).Contains(database, StringComparer.OrdinalIgnoreCase);
 
@@ -594,7 +793,7 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
     internal AzureSearchPlan PlanAzureSearch(IReadOnlyList<string> monitored, IReadOnlyList<string> every)
     {
         var alwaysOn = monitored.Where(database => !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase)).ToList();
-        if (!_sessionNames.Contains(LongQueryCompletionsCollector.LegacyXeSessionName, StringComparer.OrdinalIgnoreCase))
+        if (!_sessionNames.Any(IsLongQuerySession))
         {
             return new AzureSearchPlan(alwaysOn, Array.Empty<string>());
         }
@@ -631,7 +830,16 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
                 found.Add(new ExistingXeSession(name, XeSessionScope.Server));
             }
 
-            return new XeSessionSearch(found, problems);
+            var others = new List<ExistingXeSession>();
+            if (FindOthersServerSql is not null)
+            {
+                foreach (var name in await ReadNamesAsync(connection, FindOthersServerSql, cancellationToken))
+                {
+                    others.Add(new ExistingXeSession(name, XeSessionScope.Server));
+                }
+            }
+
+            return new XeSessionSearch(found, problems) { Others = others };
         }
 
         var monitored = await ListAzureDatabasesAsync(applyExclusions: true, cancellationToken);
@@ -639,10 +847,11 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         /* The second listing only where exclusions could make it differ, and only for a search that includes the long-query
            session. */
         var every = _server.Config.ExcludedDatabases.Count > 0
-            && _sessionNames.Contains(LongQueryCompletionsCollector.LegacyXeSessionName, StringComparer.OrdinalIgnoreCase)
+            && _sessionNames.Any(IsLongQuerySession)
                 ? await ListAzureDatabasesAsync(applyExclusions: false, cancellationToken)
                 : monitored;
-        return await SearchAzureDatabasesAsync(PlanAzureSearch(monitored, every), NamesInDatabaseAsync, cancellationToken);
+        return await SearchAzureDatabasesAsync(
+            PlanAzureSearch(monitored, every), NamesInDatabaseAsync, cancellationToken, FindOthersDatabaseSql is null ? null : OthersInDatabaseAsync);
     }
 
     /// <summary>
@@ -653,11 +862,13 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
     internal static async Task<XeSessionSearch> SearchAzureDatabasesAsync(
         AzureSearchPlan plan,
         Func<string, CancellationToken, Task<IReadOnlyList<string>>> namesInDatabase,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task<IReadOnlyList<string>>>? othersInDatabase = null)
     {
         var found = new List<ExistingXeSession>();
         var problems = new List<string>();
         var notes = new List<string>();
+        var others = new List<ExistingXeSession>();
 
         foreach (var database in plan.Visited)
         {
@@ -672,6 +883,15 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
                         found.Add(new ExistingXeSession(name, XeSessionScope.Database, database));
                     }
                 }
+
+                /* The sessions of other installs are listed from every database the search opened. */
+                if (othersInDatabase is not null)
+                {
+                    foreach (var name in await othersInDatabase(database, cancellationToken))
+                    {
+                        others.Add(new ExistingXeSession(name, XeSessionScope.Database, database));
+                    }
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -680,7 +900,7 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
             }
         }
 
-        return new XeSessionSearch(found, problems) { Notes = notes };
+        return new XeSessionSearch(found, problems) { Notes = notes, Others = others };
     }
 
     private async Task<IReadOnlyList<string>> NamesInDatabaseAsync(string database, CancellationToken cancellationToken)
@@ -688,6 +908,13 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         using var connection = new SqlConnection(SqlServerTargetProvider.Instance.WithDatabase(_server.ConnectionString, database));
         await connection.OpenAsync(cancellationToken);
         return await ReadNamesAsync(connection, FindDatabaseSql, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<string>> OthersInDatabaseAsync(string database, CancellationToken cancellationToken)
+    {
+        using var connection = new SqlConnection(SqlServerTargetProvider.Instance.WithDatabase(_server.ConnectionString, database));
+        await connection.OpenAsync(cancellationToken);
+        return await ReadNamesAsync(connection, FindOthersDatabaseSql!, cancellationToken);
     }
 
     public async Task DropAsync(XeSessionDrop drop, CancellationToken cancellationToken)
