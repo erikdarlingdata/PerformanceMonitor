@@ -617,6 +617,12 @@ public sealed class CompressionEnableGuardTests
         Assert.Contains("cs.segmentby_column_index IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("hypertable_compression_settings", sql, StringComparison.Ordinal);
 
+        /* The columns are joined with the separator the statement writes them with (#4951: collection_log's
+           segmentby has two columns), so a converged two-column setting reads back exactly as it was written.
+           Any other separator would read every converged pass as "not converged" and re-issue the ALTER, and its
+           ACCESS EXCLUSIVE lock, every hour. */
+        Assert.Contains("string_agg(cs.attname, ', ' ORDER BY cs.segmentby_column_index)", sql, StringComparison.Ordinal);
+
         /* Scoped, for the reason CompressionPolicyStateSql gives: a bring-your-own store may carry its own
            wait_stats hypertable in another schema, and this product must not read — let alone ALTER — it. */
         Assert.Contains("h.hypertable_schema = 'collect'", sql, StringComparison.Ordinal);
@@ -642,6 +648,12 @@ public sealed class CompressionEnableGuardTests
             TimescaleSupport.EnableCompressionSql("query_stats"),
             StringComparison.Ordinal);
 
+        /* #4951: collection_log alone segments by collector as well, and every other table keeps server_id. */
+        Assert.Contains(
+            "timescaledb.compress_segmentby = 'server_id, collector_name'",
+            TimescaleSupport.EnableCompressionSql("collection_log"),
+            StringComparison.Ordinal);
+
         /* The two halves are tied THROUGH the constant, not through a shared spelling: the statement
            interpolates it, and the guard compares against it. Both are asserted on the SOURCE, because a
            rendered statement cannot tell you whether the name came from the constant or from a literal that
@@ -652,11 +664,13 @@ public sealed class CompressionEnableGuardTests
         var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs");
         /* The statement's half is read off the RAW source: the interpolation lives inside a string literal,
            which StripCommentsAndStrings blanks by design. */
-        Assert.Contains("timescaledb.compress_segmentby = '{CompressionSegmentByColumn}'", raw, StringComparison.Ordinal);
+        /* #4951: the value is per table now (collection_log has its own), so both halves go through the one
+           per-table lookup rather than the shared column constant. */
+        Assert.Contains("timescaledb.compress_segmentby = '{CompressionSegmentByFor(table)}'", raw, StringComparison.Ordinal);
         /* The guard's half is code, so it is read off the stripped source — prose about the comparison is not
            the comparison. */
         Assert.Contains(
-            "string.Equals(segmentBy, CompressionSegmentByColumn, StringComparison.Ordinal)",
+            "string.Equals(segmentBy, CompressionSegmentByFor(table), StringComparison.Ordinal)",
             CSharpSourceWalker.StripCommentsAndStrings(raw),
             StringComparison.Ordinal);
     }

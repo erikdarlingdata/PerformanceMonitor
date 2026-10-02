@@ -492,8 +492,10 @@ public sealed class DarlingObservabilityTests
         Assert.Contains("create_hypertable('collect.collection_log', by_range('collection_time', INTERVAL '1 days')", v23, StringComparison.Ordinal);
         Assert.Contains("migrate_data => true", v23, StringComparison.Ordinal);
         Assert.Contains("if_not_exists => true", v23, StringComparison.Ordinal);
-        /* Compression mirrors TimescaleSupport for this one table: segment by server_id, 1-day compress-after. */
-        Assert.Contains("ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", v23, StringComparison.Ordinal);
+        /* Compression mirrors TimescaleSupport for this one table: segment by server_id and collector_name (#4951),
+           1-day compress-after. A store whose extension predates its migrations converts here first, so V23 must
+           set the same value the runtime path does. */
+        Assert.Contains("ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id, collector_name')", v23, StringComparison.Ordinal);
         Assert.Contains("add_compression_policy('collect.collection_log', compress_after => INTERVAL '1 days', if_not_exists => true)", v23, StringComparison.Ordinal);
 
         var v2 = PgMigrations.Scripts[1].Sql;

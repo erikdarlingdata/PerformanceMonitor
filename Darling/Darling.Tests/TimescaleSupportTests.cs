@@ -150,9 +150,11 @@ public sealed class TimescaleSupportTests
                 TimescaleSupport.AddCompressionPolicySql(schema), StringComparison.Ordinal);
         }
 
-        /* collection_log gets the identical compression via the raw-name overloads (the runtime path). */
+        /* collection_log gets its compression via the raw-name overloads (the runtime path), segmented by
+           collector as well as by server (#4951): its reads ask for one collector on one server, so a
+           server_id-only segment made every such read decompress every collector's runs on that server. */
         Assert.Equal(
-            "ALTER TABLE collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')",
+            "ALTER TABLE collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id, collector_name')",
             TimescaleSupport.EnableCompressionSql(TimescaleSupport.CollectionLogTable));
         Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(TimescaleSupport.CollectionLogTable, out var logPhase));
         Assert.Equal(
