@@ -223,6 +223,7 @@ public sealed class RepoFileAdoptionTests
            and the pre-dispatch `if (…LongQueryTraceFault is { } traceFault) { throw … }` in RunOneAsync - so
            the CODE shape is told apart from the same words inside the comments beside it. */
         "SwallowedItemFailureTests.cs",
+        "TuningHourlyCreateLiveTests.cs",
         "ViewTemplatesTests.cs",
         "ViewerFinOpsPickerRefreshPinTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",

@@ -704,8 +704,8 @@ public sealed class CollectionLogSegmentByLiveTests
         logger.Lines.Count(line =>
             line.StartsWith("Warning:", StringComparison.Ordinal)
             && line.Contains("collection_log's compression settings", StringComparison.Ordinal)
-            && line.Contains("keep their current settings", StringComparison.Ordinal)
-            && line.Contains("next hourly pass tries again", StringComparison.Ordinal));
+            && line.Contains("could not be changed, so the change was rolled back", StringComparison.Ordinal)
+            && line.Contains("keeps its current settings", StringComparison.Ordinal));
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct, NpgsqlTransaction? transaction = null)
     {
