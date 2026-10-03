@@ -39,6 +39,11 @@ public sealed class TopQueriesHourlyRoutingLiveTests
     /// once we delete raw's rows for it, which is what actually drives the router, not calendar time.</summary>
     private static readonly DateTime WindowStart = new(2026, 1, 5, 0, 0, 0, DateTimeKind.Unspecified);
 
+    /// <summary>#4966: <c>effective_start</c> prints in UTC with the trailing Z on every path, a floor read off the
+    /// store included. The floors these tests plant are naive store instants, so the text expected names the same
+    /// instant as UTC (written out here, not through the product's formatter).</summary>
+    private static string UtcText(DateTime naive) => DateTime.SpecifyKind(naive, DateTimeKind.Utc).ToString("o");
+
     [Fact]
     public async Task GetTopQueriesByCpuRoutedAsync_RoutesToHourlyOnceRawIsPurged_AndTotalsAgree()
     {
@@ -239,7 +244,7 @@ public sealed class TopQueriesHourlyRoutingLiveTests
                 var root = doc.RootElement;
                 Assert.Equal("raw", root.GetProperty("tier_used").GetString());
                 Assert.True(root.GetProperty("window_truncated").GetBoolean());
-                Assert.Equal(DarlingMcpTestData.TruncateToSeconds(survivor).ToString("o"), root.GetProperty("effective_start").GetString());
+                Assert.Equal(UtcText(DarlingMcpTestData.TruncateToSeconds(survivor)), root.GetProperty("effective_start").GetString());
                 Assert.Contains("stayed on raw", root.GetProperty("precision_note").GetString());
             }
 
@@ -404,7 +409,7 @@ public sealed class TopQueriesHourlyRoutingLiveTests
                 hourlyDataSource, ServerName + "-young", hours_back: hoursBack, top: 10, as_of: asOf));
             Assert.Equal("hourly", young.RootElement.GetProperty("tier_used").GetString());
             Assert.True(young.RootElement.GetProperty("window_truncated").GetBoolean());
-            Assert.Equal(WindowStart.AddHours(10).ToString("o"), young.RootElement.GetProperty("effective_start").GetString());
+            Assert.Equal(UtcText(WindowStart.AddHours(10)), young.RootElement.GetProperty("effective_start").GetString());
             Assert.Contains("hourly rollup", young.RootElement.GetProperty("truncation_note").GetString());
 
             using var covered = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
@@ -494,16 +499,16 @@ public sealed class TopQueriesHourlyRoutingLiveTests
             using var both = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
                 hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, as_of: asOf));
             Assert.Equal("hourly", both.RootElement.GetProperty("tier_used").GetString());
-            Assert.Equal(WindowStart.AddHours(1).ToString("o"), both.RootElement.GetProperty("effective_start").GetString());
+            Assert.Equal(UtcText(WindowStart.AddHours(1)), both.RootElement.GetProperty("effective_start").GetString());
 
             using var successorOnly = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
                 hourlyDataSource, ServerName + "-successor", hours_back: hoursBack, top: 10, as_of: asOf));
             Assert.Equal("hourly", successorOnly.RootElement.GetProperty("tier_used").GetString());
-            Assert.Equal(WindowStart.AddHours(12).ToString("o"), successorOnly.RootElement.GetProperty("effective_start").GetString());
+            Assert.Equal(UtcText(WindowStart.AddHours(12)), successorOnly.RootElement.GetProperty("effective_start").GetString());
 
             using var legacyOnly = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
                 hourlyDataSource, ServerName + "-legacyonly", hours_back: hoursBack, top: 10, as_of: asOf));
-            Assert.Equal(WindowStart.AddHours(13).ToString("o"), legacyOnly.RootElement.GetProperty("effective_start").GetString());
+            Assert.Equal(UtcText(WindowStart.AddHours(13)), legacyOnly.RootElement.GetProperty("effective_start").GetString());
 
             bodySucceeded = true;
         }

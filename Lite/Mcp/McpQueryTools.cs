@@ -149,7 +149,7 @@ public sealed class McpQueryTools
                 /* #4231: what was served, beside what was asked for — query_stats is raw-only (no rollup
                    fallback), so a lowered retention_days or a young install can serve less than hours_back
                    with nothing else on the payload saying so. */
-                effective_start = FormatEffectiveStart(effectiveStart),
+                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                 effective_hours_back = Math.Round((nowUtc - effectiveStart).TotalHours, 1),
                 window_truncated = truncated,
                 truncation_note = truncated
@@ -264,7 +264,7 @@ public sealed class McpQueryTools
                 /* #4231: what was served, beside what was asked for — procedure_stats is raw-only (no rollup
                    fallback), so a lowered retention_days or a young install can serve less than hours_back
                    with nothing else on the payload saying so. */
-                effective_start = FormatEffectiveStart(effectiveStart),
+                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                 effective_hours_back = Math.Round((nowUtc - effectiveStart).TotalHours, 1),
                 window_truncated = truncated,
                 truncation_note = truncated
@@ -360,7 +360,7 @@ public sealed class McpQueryTools
                            window, and the raw tier may not reach the whole of the one asked for. */
                         : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, new
                         {
-                            effective_start = FormatEffectiveStart(effectiveStart),
+                            effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                             effective_hours_back = Math.Round((nowUtc - effectiveStart).TotalHours, 1),
                             window_truncated = truncated
                         });
@@ -405,7 +405,7 @@ public sealed class McpQueryTools
                 hours_back,
                 /* #4231: what was served, beside what was asked for — hours_back alone is a request echoed
                    back as though it described the data. Same keys, same meaning as Darling's get_query_store_top. */
-                effective_start = FormatEffectiveStart(effectiveStart),
+                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                 effective_hours_back = Math.Round((nowUtc - effectiveStart).TotalHours, 1),
                 window_truncated = truncated,
                 truncation_note = truncated
@@ -1023,16 +1023,6 @@ public sealed class McpQueryTools
         floor is DateTime f && f > requestedStart ? f : requestedStart;
 
     /// <summary>
-    /// #4966: <c>effective_start</c> as every window-floor payload prints it, always as UTC with the trailing Z. The
-    /// served start is either the start that was asked for (already UTC, so a plain "o" printed the Z) or the floor
-    /// read off the store (a naive instant, so a plain "o" printed none), and the zone marker used to come and go with
-    /// <c>window_truncated</c>, on the one value a reader most needs to read right. Only the kind is set: the instant
-    /// is the value's own and is never shifted (no <c>ToUniversalTime</c>, which would take a naive floor for local time).
-    /// </summary>
-    internal static string FormatEffectiveStart(DateTime effectiveStart) =>
-        DateTime.SpecifyKind(effectiveStart, DateTimeKind.Utc).ToString("o");
-
-    /// <summary>
     /// #4966: the window floor of a tool whose payload also carries a PAGE cut (<c>truncated</c>), in the three keys
     /// that tool writes after <c>hours_back</c>: <c>effective_start</c>, <c>window_truncated</c> and
     /// <c>truncation_note</c>, with the Queries tools' verdict (<see cref="IsWindowTruncated"/>), clamp
@@ -1050,7 +1040,7 @@ public sealed class McpQueryTools
     {
         var truncated = IsWindowTruncated(floor, requestedStart);
         return new McpWindowNotice(
-            FormatEffectiveStart(EffectiveWindowStart(floor, requestedStart)),
+            McpHelpers.FormatEffectiveStart(EffectiveWindowStart(floor, requestedStart)),
             truncated,
             truncated
                 ? $"The window reaches further back than this server's raw {table} retains (or this server has been monitored for less time than that), so the older part of it was not read."

@@ -92,14 +92,15 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         Assert.Equal("2026-09-01T01:00:00.0000000Z", insideSlack.EffectiveStart);
     }
 
-    /// <summary>The one formatter every window-floor payload writes effective_start through sets the kind and never shifts the instant.</summary>
+    /// <summary>The one formatter every window-floor payload writes effective_start through, in both apps (now in the
+    /// shared McpHelpers), sets the kind and never shifts the instant.</summary>
     [Fact]
     public void FormatEffectiveStart_NamesTheInstantAsUtc_WhicheverKindItCameWith()
     {
         var instant = new DateTime(2026, 9, 3, 4, 5, 6, 789, DateTimeKind.Unspecified);
 
-        Assert.Equal("2026-09-03T04:05:06.7890000Z", McpQueryTools.FormatEffectiveStart(instant));
-        Assert.Equal("2026-09-03T04:05:06.7890000Z", McpQueryTools.FormatEffectiveStart(DateTime.SpecifyKind(instant, DateTimeKind.Utc)));
+        Assert.Equal("2026-09-03T04:05:06.7890000Z", PerformanceMonitor.Common.McpHelpers.FormatEffectiveStart(instant));
+        Assert.Equal("2026-09-03T04:05:06.7890000Z", PerformanceMonitor.Common.McpHelpers.FormatEffectiveStart(DateTime.SpecifyKind(instant, DateTimeKind.Utc)));
     }
 
     [Fact]

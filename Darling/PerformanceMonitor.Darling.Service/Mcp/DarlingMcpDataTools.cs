@@ -680,7 +680,7 @@ public sealed class DarlingMcpDataTools
                         new
                         {
                             filter_applied = filterApplied,
-                            effective_start = effectiveStart.ToString("o"),
+                            effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                             effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                             window_truncated = windowTruncated
                         });
@@ -768,7 +768,7 @@ public sealed class DarlingMcpDataTools
                 hours_back,
                 /* #4231: what was served, beside what was asked for — the same disclosure get_query_store_top
                    makes (#2364), over query_stats instead of query_store_stats. */
-                effective_start = effectiveStart.ToString("o"),
+                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                 effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                 /* #2235: echoed so a stored or pasted payload cannot be misread as the other grouping —
                    the two answer different questions and the rows look alike. */
@@ -911,7 +911,7 @@ public sealed class DarlingMcpDataTools
                 server = resolved.ServerName,
                 hours_back,
                 /* #4231: what was served, beside what was asked for. */
-                effective_start = effectiveStart.ToString("o"),
+                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                 effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                 /* #4231 stage 3b: which tier answered — "raw" or "hourly" (never bare truncated/degraded
                    vocabulary; see McpHelpers.WindowTruncatedDescription's own rule). precision_note explains
@@ -1067,7 +1067,7 @@ public sealed class DarlingMcpDataTools
                            and the raw tier may not reach the whole of the one asked for. */
                         : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, new
                         {
-                            effective_start = effectiveStart.ToString("o"),
+                            effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                             effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                             window_truncated = truncated
                         });
@@ -1122,7 +1122,7 @@ public sealed class DarlingMcpDataTools
                 hours_back,
                 /* #2364: what was served, beside what was asked for. hours_back alone was a request echoed
                    back as though it described the data. */
-                effective_start = effectiveStart.ToString("o"),
+                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                 effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                 /* Which tier answered. */
                 history_source = tablePlan is null ? "raw" : "interval_table",
