@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Collectors;
 
@@ -395,5 +396,32 @@ public static class CollectorScheduleOverlay
         }
 
         return changes;
+    }
+
+    /// <summary>
+    /// The status line after "Apply Default to All Servers" (#4938), with the per-server schedule overrides and the per-server run
+    /// times it removed counted apart and each named, singular or plural: "Reset 2 per-server run times", or "Reset 1 per-server
+    /// schedule override and 2 per-server run times". Two run times are never reported as two schedule overrides. Pure.
+    /// </summary>
+    public static string FormatResetStatus(CollectorScheduleResetCounts removed)
+    {
+        ArgumentNullException.ThrowIfNull(removed);
+
+        var parts = new List<string>();
+        if (removed.ScheduleOverrides > 0)
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"{removed.ScheduleOverrides} per-server schedule {(removed.ScheduleOverrides == 1 ? "override" : "overrides")}"));
+        }
+
+        if (removed.RunTimes > 0)
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"{removed.RunTimes} per-server run {(removed.RunTimes == 1 ? "time" : "times")}"));
+        }
+
+        return parts.Count == 0
+            ? "No per-server overrides to reset — every server already follows the fleet default."
+            : $"Reset {string.Join(" and ", parts)} — every server now follows the fleet default.";
     }
 }

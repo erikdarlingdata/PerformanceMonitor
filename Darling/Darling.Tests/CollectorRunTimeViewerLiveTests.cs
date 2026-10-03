@@ -258,8 +258,14 @@ public sealed class CollectorRunTimeViewerLiveTests
 
             /* "Apply Default to All Servers" is one call: it sends every server back to the fleet, run times included (no server
                schedule rows are left at this point, so the count is the two server run times), and keeps the fleet's. */
-            Assert.Equal(2, await viewer.ResetAllServerSchedulesAsync(ct));
+            var removed = await viewer.ResetAllServerSchedulesAsync(ct);
+            Assert.Equal(new CollectorScheduleResetCounts(ScheduleOverrides: 0, RunTimes: 2), removed);
             Assert.Equal($"fleet/{Daily}=0", await RunTimesAsync(connection, ct));
+
+            /* A reset of run times alone says so (#4938): it is not reported as schedule overrides. */
+            Assert.Equal(
+                "Reset 2 per-server run times — every server now follows the fleet default.",
+                CollectorScheduleOverlay.FormatResetStatus(removed));
 
             bodySucceeded = true;
         }
@@ -304,7 +310,7 @@ public sealed class CollectorRunTimeViewerLiveTests
             await viewer.ReplaceFleetSchedulesAsync(new[] { new CollectorScheduleRow(null, Daily, 1440, 30, true) }, ct);
             await viewer.ReplaceServerSchedulesAsync(3, new[] { new CollectorScheduleRow(3, Daily, 720, 30, true) }, ct);
             Assert.Equal(2L, await ScheduleRowCountAsync(connection, ct));
-            Assert.Equal(1, await viewer.ResetAllServerSchedulesAsync(ct));
+            Assert.Equal(new CollectorScheduleResetCounts(ScheduleOverrides: 1, RunTimes: 0), await viewer.ResetAllServerSchedulesAsync(ct));
             Assert.Equal(1L, await ScheduleRowCountAsync(connection, ct));
 
             /* The window's one-transaction Save on such a store: a Save that changed no run time sends no run-time statement and
@@ -396,7 +402,7 @@ public sealed class CollectorRunTimeViewerLiveTests
 
     /// <summary>"Apply Default to All Servers" is ONE call (#4938): it deletes every server's schedule rows and every server's run
     /// times, and keeps the fleet's schedule rows and run times. A server's run time is part of its override, and Reset means back
-    /// to the shipped defaults, which have no fixed time. The count it returns is the rows removed from both tables.</summary>
+    /// to the shipped defaults, which have no fixed time. It returns the rows removed from each table, counted apart (#4938).</summary>
     [Fact]
     public async Task ApplyDefaultToAllServers_RemovesEveryServersScheduleRowsAndRunTimes_AndKeepsTheFleets()
     {
@@ -416,13 +422,13 @@ public sealed class CollectorRunTimeViewerLiveTests
             await using var viewer = new ViewerDataService(scratch.ConnectionString);
 
             /* Two server schedule rows and three server run times, in one call. */
-            Assert.Equal(5, await viewer.ResetAllServerSchedulesAsync(ct));
+            Assert.Equal(new CollectorScheduleResetCounts(ScheduleOverrides: 2, RunTimes: 3), await viewer.ResetAllServerSchedulesAsync(ct));
             Assert.Equal(1L, await ScheduleRowCountAsync(connection, ct));
             Assert.Equal(1440, await FleetFrequencyAsync(connection, ct));
             Assert.Equal($"fleet/{Daily}=0", await RunTimesAsync(connection, ct));
 
             /* Nothing left that belongs to a server, so a second call removes nothing. */
-            Assert.Equal(0, await viewer.ResetAllServerSchedulesAsync(ct));
+            Assert.Equal(new CollectorScheduleResetCounts(ScheduleOverrides: 0, RunTimes: 0), await viewer.ResetAllServerSchedulesAsync(ct));
             Assert.Equal($"fleet/{Daily}=0", await RunTimesAsync(connection, ct));
 
             bodySucceeded = true;
@@ -469,7 +475,7 @@ public sealed class CollectorRunTimeViewerLiveTests
 
             /* The control: without the trigger the same call removes both. */
             await ExecAsync(connection, "DROP TRIGGER trg_refuse_run_time_delete ON config.config_collector_run_times", ct);
-            Assert.Equal(4, await viewer.ResetAllServerSchedulesAsync(ct));
+            Assert.Equal(new CollectorScheduleResetCounts(ScheduleOverrides: 2, RunTimes: 2), await viewer.ResetAllServerSchedulesAsync(ct));
             Assert.Equal(1L, await ScheduleRowCountAsync(connection, ct));
             Assert.Equal($"fleet/{Daily}=0", await RunTimesAsync(connection, ct));
 

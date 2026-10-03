@@ -516,9 +516,8 @@ public partial class CollectorScheduleEditorWindow : Window
             await ReloadRunTimesAsync();
             LoadScopeSchedule();
 
-            StatusText.Text = removed > 0
-                ? $"Reset {removed} per-server schedule override(s) — every server now follows the fleet default."
-                : "No per-server overrides to reset — every server already follows the fleet default.";
+            /* #4938: the schedule overrides and the run times it removed are counted apart and each named. */
+            StatusText.Text = CollectorScheduleOverlay.FormatResetStatus(removed);
         }
         catch (ViewerReadOnlyException ex)
         {

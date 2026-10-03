@@ -203,7 +203,7 @@ public sealed class CollectorRunTimeRungTests
         var viewer = CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectorSchedules.cs"));
         Assert.DoesNotContain("ResetAllServerRunTimes", viewer, StringComparison.Ordinal);
-        var start = viewer.IndexOf("public async Task<int> ResetAllServerSchedulesAsync(", StringComparison.Ordinal);
+        var start = viewer.IndexOf("public async Task<CollectorScheduleResetCounts> ResetAllServerSchedulesAsync(", StringComparison.Ordinal);
         Assert.True(start >= 0, "the all-servers reset is gone");
         var body = viewer[start..viewer.IndexOf("private static async Task<int> DeleteRunTimesAsync(", start, StringComparison.Ordinal)];
         Assert.Single(Regex.Matches(body, @"BeginTransactionAsync\("));
