@@ -30,13 +30,18 @@ public static class FinOpsInventoryFigures
         return FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);
     }
 
-    /// <summary>The license-limit warning for Standard edition (over 24 CPUs or 128 GB of memory), or null.</summary>
-    public static string? LicenseWarning(string? edition, int cpuCount, long physicalMemoryMb)
+    /// <summary>
+    /// The license-limit warning for Standard edition (over 24 CPUs or 128 GB of memory), or null. The memory is the
+    /// stored figure; where the engine edition's hardware columns are the host's it is blanked first, so no RAM warning
+    /// can come from a host's memory.
+    /// </summary>
+    public static string? LicenseWarning(string? edition, int engineEdition, int cpuCount, long storedPhysicalMemoryMb)
     {
+        var physicalMemoryMb = PhysicalMemoryMb(engineEdition, storedPhysicalMemoryMb);
         if (edition is null || !edition.Contains("Standard", StringComparison.OrdinalIgnoreCase)) return null;
         var warnings = new List<string>();
         if (cpuCount > 24) warnings.Add($"CPU: {cpuCount} cores (Standard limited to 24)");
-        if (physicalMemoryMb > 131072) warnings.Add($"RAM: {physicalMemoryMb / 1024}GB (Standard limited to 128GB)");
+        if (physicalMemoryMb is long ramMb && ramMb > 131072) warnings.Add($"RAM: {ramMb / 1024}GB (Standard limited to 128GB)");
         return warnings.Count > 0 ? string.Join("; ", warnings) : null;
     }
 

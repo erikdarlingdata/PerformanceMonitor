@@ -49,9 +49,18 @@ public sealed class FinOpsInventoryViewerFiguresTests
     [InlineData("Enterprise Edition (64-bit)", 64, 524288L, null)]
     public void LicenseWarning_FiresOnlyOnStandardOverTheCaps(string edition, int cpus, long memoryMb, string? expected)
     {
-        var row = new ServerPropertyRow { Edition = edition, CpuCount = cpus, PhysicalMemoryMb = memoryMb };
+        var row = new ServerPropertyRow { Edition = edition, EngineEdition = 2, CpuCount = cpus, PhysicalMemoryMb = memoryMb };
         Assert.Equal(expected, row.LicenseWarning);
-        Assert.Equal(expected, FinOpsInventoryFigures.LicenseWarning(edition, cpus, memoryMb));
+        Assert.Equal(expected, FinOpsInventoryFigures.LicenseWarning(edition, 2, cpus, memoryMb));
+    }
+
+    [Fact]
+    public void LicenseWarning_NeverWarnsOnAzureSqlDatabaseHostMemory()
+    {
+        const string edition = "Azure SQL Database (Standard)";
+        var row = new ServerPropertyRow { Edition = edition, EngineEdition = 5, CpuCount = 2, PhysicalMemoryMb = 934000 };
+        Assert.Null(row.LicenseWarning);
+        Assert.Null(FinOpsInventoryFigures.LicenseWarning(edition, 5, 2, 934000));
     }
 
     [Fact]

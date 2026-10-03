@@ -580,7 +580,7 @@ public sealed class ServerPropertyRow
     public string ProvisioningDisplay => ProvisioningStatus == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : ProvisioningStatus?.Replace("_", " ") ?? "";
 
     /// <summary>License-limit warning for Standard edition (CPU/RAM caps). Same math as Lite.</summary>
-    public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, _cpuCount, _physicalMemoryMb);
+    public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, EngineEdition, _cpuCount, _physicalMemoryMb);
 
     public int HealthScore { get; set; }
     public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
