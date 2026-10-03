@@ -142,11 +142,11 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         {
             var view = LocalDataService.QueryWindowRelationView(relation);
             var timeColumn = LocalDataService.QueryWindowRelationTimeColumn(relation);
-            Assert.Contains(timeColumn, new[] { "collection_time", "capture_time", "event_time", "sample_time" });
+            Assert.Contains(timeColumn, new[] { "collection_time", "capture_time", "event_time", "deadlock_time", "sample_time" });
             Assert.StartsWith("v_", view, StringComparison.Ordinal);
             var table = view[2..];
             var purgeColumn = relation is QueryWindowRelation.SystemHealthEvents or QueryWindowRelation.DefaultTraceEvents
-                or QueryWindowRelation.MemoryPressureEvents
+                or QueryWindowRelation.MemoryPressureEvents or QueryWindowRelation.BlockedProcessReports or QueryWindowRelation.Deadlocks
                 ? "collection_time"
                 : timeColumn;
             Assert.Contains(table, DuckDbInitializer.ArchivableTables);

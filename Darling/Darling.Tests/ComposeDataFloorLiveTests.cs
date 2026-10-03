@@ -202,7 +202,15 @@ public sealed class ComposeDataFloorLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var store = await SeededStore.CreateAsync(ct);
 
-        var outcome = await RunAsync(store.DataSource, RecentServerName, hours: 720, ct);
+        var mcpOutcome = await RunAsync(store.DataSource, RecentServerName, hours: 720, ct);
+        Assert.True(mcpOutcome.Error is null, $"compose run failed: {mcpOutcome.Error}");
+        Assert.NotNull(mcpOutcome.Payload!["notice"]);
+        Assert.Null(mcpOutcome.Payload["data_start_note"]);
+        Assert.Null(mcpOutcome.Payload["data_start_utc"]);
+        Assert.Null(mcpOutcome.Payload["window_start_utc"]);
+        Assert.Null(mcpOutcome.Payload["window_end_utc"]);
+
+        var outcome = await RunAsync(store.DataSource, RecentServerName, hours: 720, ct, includeDataStartFields: true);
         Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
 
         var scenario = new JsonObject
@@ -212,7 +220,13 @@ public sealed class ComposeDataFloorLiveTests
             ["answer"] = outcome.Payload!.DeepClone(),
         };
 
-        if (!TryRender(scenario, out var drawn))
+        /* #4966: the answer carries the instants the notice names, and the page writes the notice again in the browser's
+           zone, as it does every time it prints. A zone 5.5 hours from UTC with no daylight saving shows a UTC notice
+           from a local one: the sentence the page drew names no UTC. */
+        Assert.True(outcome.Payload!["data_start_utc"] is not null && outcome.Payload["window_start_utc"] is not null && outcome.Payload["window_end_utc"] is not null);
+        Assert.Contains("UTC", outcome.Payload["notice"]!.GetValue<string>(), StringComparison.Ordinal);
+
+        if (!TryRender(scenario, out var drawn, "Asia/Kolkata"))
         {
             Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             return;
@@ -221,7 +235,8 @@ public sealed class ComposeDataFloorLiveTests
         Assert.Empty(drawn.GetProperty("errors").EnumerateArray());
         var shown = Assert.Single(drawn.GetProperty("notices").EnumerateArray()).GetString();
         Assert.StartsWith("partial window:", shown, StringComparison.Ordinal);
-        Assert.Contains(Minute(store.RecentFirstRow) + " UTC", shown, StringComparison.Ordinal);
+        Assert.DoesNotContain("UTC", shown, StringComparison.Ordinal);
+        Assert.DoesNotContain(Minute(store.RecentFirstRow), shown, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -309,11 +324,12 @@ public sealed class ComposeDataFloorLiveTests
         return outcome.Payload!["notice"]?.GetValue<string>();
     }
 
-    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(NpgsqlDataSource dataSource, string? server, int hours, CancellationToken ct) =>
-        RunAsync(dataSource, WaitDurationPanel, server, hours, ct);
+    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(
+        NpgsqlDataSource dataSource, string? server, int hours, CancellationToken ct, bool includeDataStartFields = false) =>
+        RunAsync(dataSource, WaitDurationPanel, server, hours, ct, includeDataStartFields);
 
     private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(
-        NpgsqlDataSource dataSource, string panel, string? server, int hours, CancellationToken ct)
+        NpgsqlDataSource dataSource, string panel, string? server, int hours, CancellationToken ct, bool includeDataStartFields = false)
     {
         var body = new JsonObject
         {
@@ -325,7 +341,7 @@ public sealed class ComposeDataFloorLiveTests
             body["server"] = server;
         }
 
-        return DarlingWebEndpoints.RunComposedPanelAsync(dataSource, body, ct);
+        return DarlingWebEndpoints.RunComposedPanelAsync(dataSource, body, ct, includeDataStartFields: includeDataStartFields);
     }
 
     /* A pinned Custom Views cell's run: the absolute window pair, as ISO-8601 UTC text, in place of the relative hours. */
@@ -343,7 +359,7 @@ public sealed class ComposeDataFloorLiveTests
         return DarlingWebEndpoints.RunComposedPanelAsync(dataSource, body, ct);
     }
 
-    private static bool TryRender(JsonObject scenario, out JsonElement result)
+    internal static bool TryRender(JsonObject scenario, out JsonElement result, string? zone = null)
     {
         result = default;
         var scenarioPath = Path.Combine(Path.GetTempPath(), "compose-notice-" + Guid.NewGuid().ToString("N") + ".json");
@@ -351,6 +367,11 @@ public sealed class ComposeDataFloorLiveTests
         try
         {
             var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            if (zone is not null)
+            {
+                psi.Environment["TZ"] = zone;
+            }
+
             psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-compose-notice-harness.mjs"));
             psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
             psi.ArgumentList.Add(scenarioPath);

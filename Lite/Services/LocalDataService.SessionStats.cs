@@ -53,7 +53,7 @@ public partial class LocalDataService
 
         var rows = new List<(DateTime BucketStart, int Total, int Running, int Sleeping, int Background, int Dormant,
             int Idle, int WaitingForMemory, int DatabasesWithConnections, string? TopAppName, int? TopAppConnections,
-            string? TopHostName, int? TopHostConnections, DateTime FirstCollectionTime, long CollectionCount)>();
+            string? TopHostName, int? TopHostConnections, DateTime FirstCollectionTime, long CollectionCount, DateTime LatestCollectionTime)>();
         var everyBucketSingleton = true;
 
         using var reader = await command.ExecuteReaderAsync();
@@ -80,7 +80,8 @@ public partial class LocalDataService
                 reader.IsDBNull(11) ? null : reader.GetString(11),
                 reader.IsDBNull(12) ? null : reader.GetInt32(12),
                 reader.GetDateTime(13),
-                collectionCount));
+                collectionCount,
+                reader.GetDateTime(15)));
         }
 
         var items = new List<SessionStatsPoint>(rows.Count);
@@ -100,7 +101,8 @@ public partial class LocalDataService
                 TopApplicationName = row.TopAppName,
                 TopApplicationConnections = row.TopAppConnections,
                 TopHostName = row.TopHostName,
-                TopHostConnections = row.TopHostConnections
+                TopHostConnections = row.TopHostConnections,
+                LatestCollectionTime = row.LatestCollectionTime
             });
         }
 
@@ -160,6 +162,7 @@ latest AS
 (
     SELECT
         bucket_start,
+        collection_time AS latest_collection_time,
         top_application_name,
         top_application_connections,
         top_host_name,
@@ -182,7 +185,8 @@ SELECT
     latest.top_host_name,
     latest.top_host_connections,
     agg.first_collection_time,
-    agg.collection_count
+    agg.collection_count,
+    latest.latest_collection_time
 FROM agg
 JOIN latest ON latest.bucket_start = agg.bucket_start
 ORDER BY agg.bucket_start";
@@ -206,4 +210,9 @@ public class SessionStatsPoint : ISessionStatsPoint
     public int? TopApplicationConnections { get; set; }
     public string? TopHostName { get; set; }
     public int? TopHostConnections { get; set; }
+
+    /// <summary>#4966: the time of the NEWEST physical collection inside this point's bucket, the one <see cref="TopApplicationName"/> and
+    /// <see cref="TopHostName"/> come from. <see cref="CollectionTime"/> is the bucket's grid time (or its first collection), so the
+    /// summary strip's Collected figure reads this one.</summary>
+    public DateTime LatestCollectionTime { get; set; }
 }

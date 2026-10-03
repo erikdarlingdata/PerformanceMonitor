@@ -78,6 +78,16 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
         { "Controls/ServerTab.xaml", "BlockedProcessReportGrid", "EventTimeLocal", Name(typeof(BlockedProcessReportRow)), "EventTime" },
         { "Controls/ServerTab.xaml", "DeadlockGrid", "DeadlockTimeLocal", Name(typeof(DeadlockProcessDetail)), "DeadlockTime" },
         { "Controls/ServerTab.xaml", "AutomaticTuningGrid", "CollectionTimeLocal", Name(typeof(AutomaticTuningRow)), "CollectionTime" },
+        /* #4966: the Collected column of every grid that draws the newest snapshot: the snapshot's collection (or capture) time, sorted by the stored instant. */
+        { "Controls/ServerTab.xaml", "CpuSchedulerGrid", "CollectionTimeLocal", Name(typeof(CpuSchedulerGridRow)), "CollectionTime" },
+        { "Controls/ServerTab.xaml", "LatchStatsGrid", "CollectionTimeLocal", Name(typeof(LatchStatsSnapshotRow)), "CollectionTime" },
+        { "Controls/ServerTab.xaml", "SpinlockStatsGrid", "CollectionTimeLocal", Name(typeof(SpinlockStatsSnapshotRow)), "CollectionTime" },
+        { "Controls/ServerTab.xaml", "ServerConfigGrid", "CaptureTimeLocal", Name(typeof(ServerConfigRow)), "CaptureTime" },
+        { "Controls/ServerTab.xaml", "DatabaseConfigGrid", "CaptureTimeLocal", Name(typeof(DatabaseConfigRow)), "CaptureTime" },
+        { "Controls/ServerTab.xaml", "DatabaseScopedConfigGrid", "CaptureTimeLocal", Name(typeof(DatabaseScopedConfigRow)), "CaptureTime" },
+        { "Controls/ServerTab.xaml", "QueryStoreHealthGrid", "CaptureTimeLocal", Name(typeof(QueryStoreHealthRow)), "CaptureTime" },
+        { "Controls/ServerTab.xaml", "TraceFlagsGrid", "CaptureTimeLocal", Name(typeof(TraceFlagRow)), "CaptureTime" },
+        { "Controls/ServerTab.xaml", "RunningJobsGrid", "CollectionTimeLocal", Name(typeof(RunningJobRow)), "CollectionTime" },
         { "Controls/ServerTab.xaml", "SchedulerIssuesGrid", "EventTimeLocal", Name(typeof(SchedulerIssueRow)), "EventTime" },
         { "Controls/ServerTab.xaml", "SevereErrorsGrid", "EventTimeLocal", Name(typeof(SevereErrorRow)), "EventTime" },
         { "Controls/ServerTab.xaml", "MemoryConditionsGrid", "EventTimeLocal", Name(typeof(MemoryConditionsRow)), "EventTime" },
@@ -308,6 +318,7 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
         { ("Windows/WaitDrillDownWindow.xaml", "ResultsDataGrid", "ElapsedTimeFormatted"), "a duration (how long the request has run), not a time" },
         { ("Controls/ServerTab.xaml", "BlockedProcessReportGrid", "WaitTimeFormatted"), "a wait duration in ms, not a time; it sorts by WaitTimeMs" },
         { ("Controls/ServerTab.xaml", "DeadlockGrid", "WaitTimeFormatted"), "a wait duration in ms, not a time; it sorts by WaitTime" },
+        { ("Windows/CollectorScheduleEditorWindow.xaml", "ScheduleGrid", "RunAt"), "a 24-hour HH:MM time of day (#4938), not an instant: it is zero-padded, so its text order is its time-of-day order, and it has no date to sort by" },
     };
 
     private const string HowToFix =

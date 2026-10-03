@@ -1816,6 +1816,7 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
@@ -1830,12 +1831,20 @@
                             <TextBlock Grid.Row="1" x:Name="QueryStoreClutterServerNote" Visibility="Collapsed"
                                        Margin="8,0,8,4" FontSize="11" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <!-- "Showing since <start>" when this server's Query Store history starts after the range does: the
+                                 plan churn is an aggregate over the window from query_store_stats, and the read cost one from the
+                                 query_store collector's runs in the collection log, so the note names the later of the two starts
+                                 and a range that reaches before it would read as a verdict over the whole of it (#4966, #5022). -->
+                            <TextBlock Grid.Row="2" x:Name="QueryStoreClutterTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
                             <!-- The measured columns bind NUMBERS with StringFormat and TargetNullValue rather than
                                  pre-formatted text: this grid exists to rank, so a column must sort by magnitude, and a
                                  string column would sort 9 above 1,234 while looking like a working sort. The em-dash
                                  comes from TargetNullValue, so an unmeasured arm reads like every other absent cell in
                                  the Viewer without becoming a zero. -->
-                            <DataGrid Grid.Row="2" x:Name="QueryStoreClutterGrid" Style="{StaticResource DarkGrid}"
+                            <DataGrid Grid.Row="3" x:Name="QueryStoreClutterGrid" Style="{StaticResource DarkGrid}"
                                       SelectionChanged="QueryStoreClutterGrid_SelectionChanged"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
@@ -1881,14 +1890,14 @@
                             <!-- The row's recommendation, whole. It is a paragraph per reason, so it gets its own
                                  pane rather than a column nobody can read; the text is the composition's, never
                                  re-worded here, so this pane and the MCP payload say the same thing. -->
-                            <TextBlock Grid.Row="3" x:Name="QueryStoreClutterRecommendation" Margin="8,6,8,6"
+                            <TextBlock Grid.Row="4" x:Name="QueryStoreClutterRecommendation" Margin="8,6,8,6"
                                        FontSize="11" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
                                        Text="Select a database above for its recommendation."/>
                             <!-- Per SERVER, and labelled as such: QDS_* waits and the Query Store memory clerk are
                                  instance-wide. The proxy is the NON-sleep QDS types only — the four sleep waits are
                                  dropped at collection — which is why the excluded list is printed rather than implied. -->
-                            <Expander Grid.Row="4" Header="Query Store overhead (per server)" Margin="8,0,8,8" IsExpanded="True">
+                            <Expander Grid.Row="5" Header="Query Store overhead (per server)" Margin="8,0,8,8" IsExpanded="True">
                                 <StackPanel>
                                     <DataGrid x:Name="QueryStoreOverheadGrid" Style="{StaticResource DarkGrid}"
                                               MaxHeight="160" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -2321,9 +2330,20 @@
                 <!-- Memory Pressure Events Sub-Tab -->
                 <TabItem Header="Memory Pressure Events">
                     <Grid Margin="8">
-                        <scottplot:WpfPlot x:Name="MemoryPressureEventsChart"/>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <!-- "Showing since <start>" when this server's pressure events start after the range does: the earlier of the
+                             collector's coverage (DataWindowFloor) and the first event drawn. The chart draws bars only where pressure was
+                             recorded, so a span with no data reads as a span with no pressure (#4966). -->
+                        <TextBlock Grid.Row="0" x:Name="MemoryPressureEventsTruncationBanner" Visibility="Collapsed"
+                                   Padding="8,4" FontWeight="Bold"
+                                   Foreground="{DynamicResource ForegroundBrush}"
+                                   Background="#22FFAA00"/>
+                        <scottplot:WpfPlot Grid.Row="1" x:Name="MemoryPressureEventsChart"/>
                         <!-- Shown only where the memory_pressure_events collector does not run (Azure SQL Database) or has never run for this server. -->
-                        <TextBlock x:Name="MemoryPressureEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
+                        <TextBlock Grid.Row="1" x:Name="MemoryPressureEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
                     </Grid>
                 </TabItem>
 
@@ -2909,6 +2929,9 @@
                                     <DataGridTextColumn Binding="{Binding AdvancedDisplay}" Width="80">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AdvancedDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Advanced" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <!-- Shown only where the server_config collector does not run (Azure SQL Database) or has never run for this server. -->
@@ -3002,6 +3025,9 @@
                                 <DataGridTextColumn Binding="{Binding OptimizedLockingDisplay}" Width="125">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OptimizedLockingDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Optimized Locking" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
                     </TabItem>
@@ -3019,6 +3045,9 @@
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding ValueForSecondary}" Width="200">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueForSecondary" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Value for Secondary" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
@@ -3051,6 +3080,9 @@
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding WaitStatsCaptureModeDisplay}" Width="130">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitStatsCaptureModeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Wait Stats Capture" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
@@ -3098,6 +3130,9 @@
                                     <DataGridTextColumn Binding="{Binding SessionDisplay}" Width="80">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SessionDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Session" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <!-- Shown only where the trace_flags collector does not run (Azure SQL Database) or has never run for this server. -->
@@ -3128,7 +3163,17 @@
                 <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <TabItem Header="Server Config Changes">
                         <Grid>
-                            <DataGrid x:Name="ServerConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <!-- "Showing since <start>" when this server's server_config snapshots start after the range does: the earlier of the
+                                 collector's coverage (DataWindowFloor) and the earliest change shown (#4966). -->
+                            <TextBlock Grid.Row="0" x:Name="ServerConfigChangesTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <DataGrid Grid.Row="1" x:Name="ServerConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ConfigurationName}" Width="260"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ConfigurationName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Configuration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3142,12 +3187,21 @@
                                     <DataGridTextColumn Binding="{Binding ChangeDescription}" Width="*" MinWidth="250"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeDescription" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Description" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="ServerConfigChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No server configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
+                            <TextBlock Grid.Row="1" x:Name="ServerConfigChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No server configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
                         </Grid>
                     </TabItem>
                     <TabItem Header="Database Config Changes">
                         <Grid>
-                            <DataGrid x:Name="DatabaseConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <!-- The same note for the database_config snapshots (#4966). -->
+                            <TextBlock Grid.Row="0" x:Name="DatabaseConfigChangesTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <DataGrid Grid.Row="1" x:Name="DatabaseConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3157,12 +3211,21 @@
                                     <DataGridTextColumn Binding="{Binding ChangeDescription}" Width="*" MinWidth="250"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeDescription" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Description" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="DatabaseConfigChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No database configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
+                            <TextBlock Grid.Row="1" x:Name="DatabaseConfigChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No database configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
                         </Grid>
                     </TabItem>
                     <TabItem Header="Trace Flag Changes">
                         <Grid>
-                            <DataGrid x:Name="TraceFlagChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <!-- The same note for the trace_flags snapshots (#4966). -->
+                            <TextBlock Grid.Row="0" x:Name="TraceFlagChangesTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <DataGrid Grid.Row="1" x:Name="TraceFlagChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TraceFlag}" ElementStyle="{StaticResource NumericCell}" Width="100"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TraceFlag" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Trace Flag" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3174,7 +3237,7 @@
                                     <DataGridTextColumn Binding="{Binding ChangeDescription}" Width="*" MinWidth="230"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeDescription" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Description" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="TraceFlagChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No trace flag changes in the selected time window (needs at least two config captures bracketing an enable/disable)."/>
+                            <TextBlock Grid.Row="1" x:Name="TraceFlagChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No trace flag changes in the selected time window (needs at least two config captures bracketing an enable/disable)."/>
                         </Grid>
                     </TabItem>
                 </TabControl>
@@ -3768,7 +3831,18 @@
                     <TabItem Header="Collection Log">
                         <!-- Lite's "Open Log File" button dropped (it opens Lite's local log file; the
                              viewer has no equivalent), so the grid fills the whole sub-tab. -->
-                        <DataGrid x:Name="CollectionLogGrid" Style="{StaticResource DarkGrid}">
+                        <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <!-- "Showing since <start>" when this server's collection log starts after the range does, or when the newest 500 runs
+                             stop short of its start: the earlier of the log's coverage (DataWindowFloor) and the earliest run shown (#4966). -->
+                        <TextBlock Grid.Row="0" x:Name="CollectionLogTruncationBanner" Visibility="Collapsed"
+                                   Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
+                                   Foreground="{DynamicResource ForegroundBrush}"
+                                   Background="#22FFAA00"/>
+                        <DataGrid Grid.Row="1" x:Name="CollectionLogGrid" Style="{StaticResource DarkGrid}">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Binding="{Binding CollectionTimeFormatted}" Width="130" SortMemberPath="CollectionTime">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -3810,6 +3884,7 @@
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
+                        </Grid>
                     </TabItem>
                     <TabItem Header="Duration Trends">
                         <scottplot:WpfPlot x:Name="CollectorDurationChart" Margin="4"/>

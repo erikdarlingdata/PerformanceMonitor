@@ -44,7 +44,9 @@ public partial class ViewerServerTab
 
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = _dataService.GetLongQueriesDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var rows = await _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Long Queries");
+        var rows = dataReadTask.Result;
         _longQueryFilterMgr!.UpdateData(rows);
         /* #4966: the read windows on collection_time but the grid shows event_time, and a first collection stores the events
            the session still held, so the notice names the earlier of the coverage start and the earliest event shown; a full

@@ -109,7 +109,11 @@ async function loadPanelBody(desc, body, signal) {
   }
   const kept = keptWindowStrip(res);
   if (res.kind === "empty") {
-    mount(body, [kept, emptyStrip(res.message)]);
+    /* #4966: a grid that looked and found nothing still says where its table's data starts when that is after the
+       window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
+       new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
+       without the note. */
+    mount(body, [kept, windowFloorStrip(res.data, desc), emptyStrip(res.message)]);
     return;
   }
 

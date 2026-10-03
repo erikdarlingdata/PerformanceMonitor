@@ -1481,6 +1481,12 @@ public sealed class TsqlConventionGuardTests
            Neither is T-SQL and neither is a tempdb label, so no census reads a site of that kind here. */
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Stamp",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Window",
+        /* #4938: get_collection_health's compact row is an expression-bodied `runTime is null ? new { … } : new { … }`,
+           so the walk stops at the first anonymous object's closing brace and strands the second shape. What falls
+           outside the range is that shape's own KEY NAMES and the "o" round-trip format on last_success: not T-SQL, not
+           a tempdb label, and read by the payload censuses from the serialized payload and the tool's description rather
+           than from a member-scoped literal sweep. The Lite twin (McpHealthTools.cs, below) has the same shape. */
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs CompactCollectionHealthRow",
         /* #3691 line 70: audit_config's PostgreSQL projection row serializes through an expression-bodied
            `ObjectName is null ? new { … } : new { … }` — the two anonymous-object initializers are where the
            walk stops, the same shape as the property-pattern derivations below. What falls outside the range
@@ -1513,6 +1519,9 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs Local",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs Local",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs Timestamp",
+        /* #4938: the Lite twin of DarlingMcpDataTools' CompactCollectionHealthRow above: the same
+           `runTime is null ? new { … } : new { … }` shape, stranding the same key names and "o" format. */
+        "Lite/Mcp/McpHealthTools.cs CompactCollectionHealthRow",
         "Lite/Services/LocalDataService.CollectionHealth.cs OutputFinding",
         /* #4917: an expression-bodied property whose body opens with a property pattern
            (`Newest is { } newest`) before the rest of the expression. The walk's brace match closes the

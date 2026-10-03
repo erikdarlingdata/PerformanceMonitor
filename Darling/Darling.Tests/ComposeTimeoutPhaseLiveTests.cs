@@ -38,13 +38,34 @@ public sealed class ComposeTimeoutPhaseLiveTests
         }
     }
 
+    /// <summary>Opens the connection that fills the one-connection pool. The pool's own <c>Timeout=1</c> is the bar the
+    /// open UNDER TEST must face, but the first physical open of a data source also loads types and can take longer
+    /// than a second on a loaded machine, which failed this fixture before the exhausted open ever ran. A timed-out
+    /// open leaves the pool as it was, so only this filling open is retried, for up to a minute; the open inside
+    /// <see cref="DarlingWebEndpoints.RunComposedPanelAsync"/> keeps the one-second bar.</summary>
+    private static async Task<NpgsqlConnection> OpenHeldConnectionAsync(NpgsqlDataSource store, CancellationToken ct)
+    {
+        var giveUp = Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                return await store.OpenConnectionAsync(ct);
+            }
+            catch (NpgsqlException ex) when (ex.InnerException is TimeoutException && giveUp.Elapsed < TimeSpan.FromSeconds(60))
+            {
+                /* The physical open missed the pool's one-second bar; try again. */
+            }
+        }
+    }
+
     [Fact]
     public async Task AnExhaustedPool_IsAStoreConnectionError_NotTheStatementTimeoutText()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString, ct);
         await using var store = NpgsqlDataSource.Create(scratch.ConnectionString + ";Pooling=true;Maximum Pool Size=1;Timeout=1");
-        await using var held = await store.OpenConnectionAsync(ct);
+        await using var held = await OpenHeldConnectionAsync(store, ct);
 
         var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(
             store, (JsonObject)JsonNode.Parse(PanelJson)!, ct, null, DarlingWebEndpoints.ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true);
