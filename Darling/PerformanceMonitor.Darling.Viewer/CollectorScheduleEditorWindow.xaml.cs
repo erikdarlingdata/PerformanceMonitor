@@ -58,6 +58,15 @@ public partial class CollectorScheduleEditorWindow : Window
     private ServerClock? _scopeClock;
     private bool _scopeIsAzureSqlDatabase;
 
+    /* No successful read, no write (#4938): what a failed read said, empty while it has worked. A read that failed leaves the
+       window holding nothing for it, which looks exactly like a store with nothing stored, so the Save must not write what it
+       never saw (CollectorScheduleOverlay.BuildSavePlan), and the warning stays in front of every later status text
+       (ShowStatus) until a reload of that read succeeds. */
+    private string _scheduleReadWarning = "";
+    private string _runTimeReadWarning = "";
+    private bool SchedulesRead => _scheduleReadWarning.Length == 0;
+    private bool RunTimesRead => _runTimeReadWarning.Length == 0;
+
     /// <summary>True when the user saved changes (the caller then re-reads if it cares).</summary>
     public bool Saved { get; private set; }
 
@@ -95,16 +104,7 @@ public partial class CollectorScheduleEditorWindow : Window
             $" Delta collectors ({string.Join(", ", deltaNames)}) accept at most {CollectorDeltaCalculator.MaxDeltaFrequencyMinutes} minutes: " +
             $"past the {CollectorDeltaCalculator.DefaultMaxGapSeconds / 60}-minute delta gap policy every reading would be discarded as stale and recorded as zero.";
 
-        try
-        {
-            _allOverrides = await _dataService.GetCollectorSchedulesAsync();
-        }
-        catch (Exception ex)
-        {
-            _allOverrides = new List<CollectorScheduleRow>();
-            StatusText.Text = $"Could not read the current schedules: {ex.Message}";
-        }
-
+        await ReloadSchedulesAsync();
         await ReloadRunTimesAsync();
 
         /* Default to the fleet scope (index 0). */
@@ -115,23 +115,50 @@ public partial class CollectorScheduleEditorWindow : Window
     }
 
     /// <summary>
+    /// Reads the stored schedule rows. A failure leaves no rows shown and is recorded as a warning that <see cref="ShowStatus"/>
+    /// keeps in front of every later status text, and a Save is refused until a reload succeeds
+    /// (<see cref="CollectorScheduleOverlay.BuildSavePlan"/>): a Save of rows the window never read would replace them with the
+    /// defaults it shows (#4938).
+    /// </summary>
+    private async Task ReloadSchedulesAsync()
+    {
+        try
+        {
+            _allOverrides = await _dataService.GetCollectorSchedulesAsync();
+            _scheduleReadWarning = "";
+        }
+        catch (Exception ex)
+        {
+            _allOverrides = new List<CollectorScheduleRow>();
+            _scheduleReadWarning = $"Could not read the current schedules: {ex.Message} A Save is refused until they are read: close this window and open it again.";
+        }
+    }
+
+    /// <summary>
     /// Reads the run times (#4938) from their own table. A store below V160 has no such table, and
     /// <see cref="ViewerDataService.GetCollectorRunTimesAsync"/> answers that with no run times, so the editor opens with every
-    /// Run at cell on "Use default". Any other failure is said in the status line (appended, so it does not replace the
-    /// schedule read's) and leaves no run times shown, which a Save then treats as nothing stored for them.
+    /// Run at cell on "Use default". Any other failure leaves no run times shown and is recorded as a warning that
+    /// <see cref="ShowStatus"/> keeps visible, and the Save then sends no run-time change at all (no upsert, no delete, no clear)
+    /// until a reload succeeds, because no run times shown is the same picture as no run times stored.
     /// </summary>
     private async Task ReloadRunTimesAsync()
     {
         try
         {
             _runTimes = await _dataService.GetCollectorRunTimesAsync();
+            _runTimeReadWarning = "";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _runTimes = new List<CollectorRunTimeRow>();
-            StatusText.Text += $" Could not read the run times: {ex.Message}";
+            _runTimeReadWarning = $"Could not read the run times: {ex.Message} No run time is saved or cleared until they are read: close this window and open it again.";
         }
     }
+
+    /// <summary>The ONE place the status line is written (#4938): the warnings of any read that failed come first and stay, so a
+    /// later status text (a scope change, the reset result) cannot overwrite them.</summary>
+    private void ShowStatus(string text) =>
+        StatusText.Text = string.Join(" ", new[] { _scheduleReadWarning, _runTimeReadWarning, text }.Where(t => t.Length > 0));
 
     private void PopulateScopeCombos()
     {
@@ -257,11 +284,15 @@ public partial class CollectorScheduleEditorWindow : Window
             .FirstOrDefault(r => r.ServerId is null && string.Equals(r.CollectorName, item.Name, StringComparison.OrdinalIgnoreCase))
             ?.RunAtMinute;
 
+        /* #4938: a server on "Use default schedule" shows the FLEET's schedule in the grid, so the cell holds the fleet's own time.
+           The line reads it as the server falling through to that time and says it uses the fleet-wide run time. */
+        var usesDefaultSchedule = _scopeServerId is not null && UseDefaultCheckBox.IsChecked == true;
+
         try
         {
             RunAtDetailText.Text = $"{item.Name}: " + CollectorScheduleRunAtText.Describe(
                 item.Name, item.RunAtText, item.FrequencyMinutes, _scopeServerId, fleetRunAt,
-                _scopeClock, _scopeIsAzureSqlDatabase, DateTime.UtcNow);
+                _scopeClock, _scopeIsAzureSqlDatabase, DateTime.UtcNow, usesDefaultSchedule: usesDefaultSchedule);
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or FormatException)
         {
@@ -303,17 +334,17 @@ public partial class CollectorScheduleEditorWindow : Window
 
         if (_dataService.IsReadOnly)
         {
-            StatusText.Text = "Read-only connection — schedules can't be changed.";
+            ShowStatus("Read-only connection — schedules can't be changed.");
         }
         else if (_scopeServerId is null)
         {
-            StatusText.Text = "Fleet-wide default schedule. Applies to every server without its own override.";
+            ShowStatus("Fleet-wide default schedule. Applies to every server without its own override.");
         }
         else
         {
-            StatusText.Text = writable
+            ShowStatus(writable
                 ? "Custom schedule. Changes apply only to this server."
-                : "Using the fleet-wide default (read-only). Uncheck 'Use default schedule' to customize this server.";
+                : "Using the fleet-wide default (read-only). Uncheck 'Use default schedule' to customize this server.");
         }
     }
 
@@ -442,15 +473,18 @@ public partial class CollectorScheduleEditorWindow : Window
                change a run time sends none, so it still saves its schedules on such a store. */
             /* A schedule Reset (Reset to Defaults, or a server on "Use default schedule") also deletes this scope's run-time
                rows, by scope and in the same transaction, because the shipped defaults have no fixed time. The changes are then
-               worked out against an empty scope: no delete for a "Use default" cell, and an insert for every time the grid holds. */
-            var clearRunTimes = _resetToDefaults || usesDefault;
-            var runTimeChanges = CollectorScheduleOverlay.ToRunTimeChanges(_editing, _runTimes, _scopeServerId, usesDefault, clearRunTimes);
-            var rows = _scopeServerId is int serverId
-                ? (usesDefault
-                    ? new List<CollectorScheduleRow>()
-                    : CollectorScheduleOverlay.ToServerOverrideRows(_editing, serverId))
-                : CollectorScheduleOverlay.ToFleetOverrideRows(_editing);
-            await _dataService.SaveCollectorScheduleAsync(_scopeServerId, rows, runTimeChanges, clearRunTimes);
+               worked out against an empty scope: no delete for a "Use default" cell, and an insert for every time the grid holds.
+               No successful read, no write: after a failed run-time read the plan carries no run-time change and no clear, and
+               after a failed schedule read the Save is refused (CollectorScheduleOverlay.BuildSavePlan). */
+            var plan = CollectorScheduleOverlay.BuildSavePlan(
+                _editing, _runTimes, _scopeServerId, usesDefault, _resetToDefaults, schedulesRead: SchedulesRead, runTimesRead: RunTimesRead);
+            if (plan.Refusal is string refusal)
+            {
+                MessageBox.Show(refusal, "Collector Schedules", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            await _dataService.SaveCollectorScheduleAsync(_scopeServerId, plan.Rows, plan.RunTimeChanges, plan.ClearRunTimes);
 
             Saved = true;
             Close();
@@ -508,13 +542,12 @@ public partial class CollectorScheduleEditorWindow : Window
 
             /* Re-read the overrides so the editor reflects the reset (every per-server row is now gone) and
                reload the current scope's grid + preset detection. */
-            _allOverrides = await _dataService.GetCollectorSchedulesAsync();
+            await ReloadSchedulesAsync();
             await ReloadRunTimesAsync();
             LoadScopeSchedule();
 
-            StatusText.Text = removed > 0
-                ? $"Reset {removed} per-server schedule override(s) — every server now follows the fleet default."
-                : "No per-server overrides to reset — every server already follows the fleet default.";
+            /* #4938: the schedule overrides and the run times it removed are counted apart and each named. */
+            ShowStatus(CollectorScheduleOverlay.FormatResetStatus(removed));
         }
         catch (ViewerReadOnlyException ex)
         {

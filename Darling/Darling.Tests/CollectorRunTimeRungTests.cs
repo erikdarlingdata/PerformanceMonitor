@@ -195,15 +195,21 @@ public sealed class CollectorRunTimeRungTests
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "CollectorScheduleEditorWindow.xaml.cs"));
         var reset = window[window.IndexOf("private void ResetDefaults_Click(", StringComparison.Ordinal)..window.IndexOf("private void CopyFromServer_Click(", StringComparison.Ordinal)];
         Assert.Contains("_resetToDefaults = true;", reset, StringComparison.Ordinal);
-        Assert.Contains("var clearRunTimes = _resetToDefaults || usesDefault;", window, StringComparison.Ordinal);
-        Assert.Contains(".SaveCollectorScheduleAsync(_scopeServerId, rows, runTimeChanges, clearRunTimes)", window, StringComparison.Ordinal);
+        /* #4938: the Save's plan (CollectorScheduleOverlay.BuildSavePlan) carries the clear: the window hands it the armed Reset and
+           "Use default schedule", the plan clears on either (unless the run-time read failed), and the window sends what the plan holds. */
+        Assert.Contains("usesDefault, _resetToDefaults, schedulesRead:", window, StringComparison.Ordinal);
+        Assert.Contains(
+            "var clearRunTimes = runTimesRead && (resetToDefaults || usesDefault);",
+            CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "CollectorScheduleOverlay.cs")),
+            StringComparison.Ordinal);
+        Assert.Contains(".SaveCollectorScheduleAsync(_scopeServerId, plan.Rows, plan.RunTimeChanges, plan.ClearRunTimes)", window, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(window, @"\.ResetAllServerSchedulesAsync\("));
         Assert.DoesNotContain("ResetAllServerRunTimes", window, StringComparison.Ordinal);
 
         var viewer = CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectorSchedules.cs"));
         Assert.DoesNotContain("ResetAllServerRunTimes", viewer, StringComparison.Ordinal);
-        var start = viewer.IndexOf("public async Task<int> ResetAllServerSchedulesAsync(", StringComparison.Ordinal);
+        var start = viewer.IndexOf("public async Task<CollectorScheduleResetCounts> ResetAllServerSchedulesAsync(", StringComparison.Ordinal);
         Assert.True(start >= 0, "the all-servers reset is gone");
         var body = viewer[start..viewer.IndexOf("private static async Task<int> DeleteRunTimesAsync(", start, StringComparison.Ordinal)];
         Assert.Single(Regex.Matches(body, @"BeginTransactionAsync\("));

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Collectors;
 
@@ -396,4 +397,102 @@ public static class CollectorScheduleOverlay
 
         return changes;
     }
+
+    /// <summary>Why a Save is refused when the schedule read failed (#4938): the window then shows the code defaults for the scope,
+    /// and the Save replaces the scope's stored rows with what it shows.</summary>
+    public const string SchedulesUnreadRefusal =
+        "The collector schedules could not be read, so this window cannot tell what is stored, and a Save would replace it with what is shown. " +
+        "Nothing was saved. Close this window and open it again to read them.";
+
+    /// <summary>Why a Save is refused when the run-time read failed and the Save would have to write a run time (#4938): a time typed
+    /// into a Run at cell, or a Reset to Defaults, which also clears every run time.</summary>
+    public const string RunTimesUnreadRefusal =
+        "The run times could not be read, so they cannot be changed or cleared now. Nothing was saved. " +
+        "Set every Run at cell back to \"Use default\" and leave Reset to Defaults out to save the rest, or close this window and open it again to read them.";
+
+    /// <summary>
+    /// What one Save sends for a scope (#4938), worked out from what the window holds and from which of its reads worked: no
+    /// successful read, no write of what it would have shown. The schedule rows are a replace of the whole scope, so after a failed
+    /// schedule read the Save is refused (<see cref="SchedulesUnreadRefusal"/>), because it would delete the rows it never showed.
+    /// After a failed run-time read the schedule is saved as usual and the Save sends NO run-time change: no upsert, no delete, and
+    /// not the clear that a Reset or a server on "Use default schedule" otherwise sends. That matters most for a server whose only
+    /// override is a run-time row, which the failed read shows as a server on the default. A Save that would have to write a run time
+    /// the user asked for (a time typed into a cell, or a Reset) is refused instead of dropping it silently
+    /// (<see cref="RunTimesUnreadRefusal"/>). Pure.
+    /// </summary>
+    public static CollectorScheduleSavePlan BuildSavePlan(
+        IReadOnlyList<CollectorScheduleEditItem> edited, IReadOnlyList<CollectorRunTimeRow> runTimes, int? serverId,
+        bool usesDefault, bool resetToDefaults, bool schedulesRead, bool runTimesRead)
+    {
+        ArgumentNullException.ThrowIfNull(edited);
+        ArgumentNullException.ThrowIfNull(runTimes);
+
+        if (!schedulesRead)
+        {
+            return CollectorScheduleSavePlan.Refused(SchedulesUnreadRefusal);
+        }
+
+        if (!runTimesRead && (resetToDefaults || (!usesDefault && edited.Any(HoldsARunTime))))
+        {
+            return CollectorScheduleSavePlan.Refused(RunTimesUnreadRefusal);
+        }
+
+        var clearRunTimes = runTimesRead && (resetToDefaults || usesDefault);
+        var runTimeChanges = runTimesRead
+            ? ToRunTimeChanges(edited, runTimes, serverId, usesDefault, clearRunTimes)
+            : new List<CollectorRunTimeChange>();
+        var rows = serverId is int server
+            ? (usesDefault ? new List<CollectorScheduleRow>() : ToServerOverrideRows(edited, server))
+            : ToFleetOverrideRows(edited);
+
+        return new CollectorScheduleSavePlan(null, rows, runTimeChanges, clearRunTimes);
+    }
+
+    /// <summary>True when the Run at cell holds a time or "None", that is anything but "Use default" (a cell that does not parse is
+    /// left to <see cref="ValidateSchedule"/>).</summary>
+    private static bool HoldsARunTime(CollectorScheduleEditItem item) =>
+        TryParseRunAt(item.RunAtText, out var minute, out _) && minute is not null;
+
+    /// <summary>
+    /// The status line after "Apply Default to All Servers" (#4938), with the per-server schedule overrides and the per-server run
+    /// times it removed counted apart and each named, singular or plural: "Reset 2 per-server run times", or "Reset 1 per-server
+    /// schedule override and 2 per-server run times". Two run times are never reported as two schedule overrides. Pure.
+    /// </summary>
+    public static string FormatResetStatus(CollectorScheduleResetCounts removed)
+    {
+        ArgumentNullException.ThrowIfNull(removed);
+
+        var parts = new List<string>();
+        if (removed.ScheduleOverrides > 0)
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"{removed.ScheduleOverrides} per-server schedule {(removed.ScheduleOverrides == 1 ? "override" : "overrides")}"));
+        }
+
+        if (removed.RunTimes > 0)
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"{removed.RunTimes} per-server run {(removed.RunTimes == 1 ? "time" : "times")}"));
+        }
+
+        return parts.Count == 0
+            ? "No per-server overrides to reset — every server already follows the fleet default."
+            : $"Reset {string.Join(" and ", parts)} — every server now follows the fleet default.";
+    }
+}
+
+/// <summary>
+/// What one Save of the Collector Schedules window sends (#4938), from <see cref="CollectorScheduleOverlay.BuildSavePlan"/>: the
+/// scope's schedule rows, the run-time changes, and whether the Save also clears the scope's run-time rows. A non-null
+/// <see cref="Refusal"/> means the Save is refused with that text and nothing at all is sent.
+/// </summary>
+public sealed record CollectorScheduleSavePlan(
+    string? Refusal,
+    IReadOnlyList<CollectorScheduleRow> Rows,
+    IReadOnlyList<CollectorRunTimeChange> RunTimeChanges,
+    bool ClearRunTimes)
+{
+    /// <summary>A Save that is refused: nothing to write.</summary>
+    internal static CollectorScheduleSavePlan Refused(string refusal) =>
+        new(refusal, Array.Empty<CollectorScheduleRow>(), Array.Empty<CollectorRunTimeChange>(), false);
 }

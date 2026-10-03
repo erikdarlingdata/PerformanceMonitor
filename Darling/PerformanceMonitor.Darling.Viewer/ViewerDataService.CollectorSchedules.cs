@@ -352,7 +352,8 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     /// reset) — the fleet-scale shortcut over reverting one server at a time. Deletes all per-server schedule rows AND all
     /// per-server run times (#4938), in ONE transaction, and leaves the fleet-wide (<c>server_id IS NULL</c>) rows of both tables
     /// in place: a server's run time is part of its override, and a reset means back to the shipped defaults, which have no
-    /// fixed time. Returns the number of rows removed from the two tables together. The schedule rows go first, so a failure
+    /// fixed time. Returns the rows removed from each table, counted apart (<see cref="CollectorScheduleResetCounts"/>), so the
+    /// editor can say how many schedule overrides and how many run times it reset. The schedule rows go first, so a failure
     /// in the run-time delete leaves the schedule rows in place too. The V17 <c>trg_bump_collector_schedules</c> trigger and the
     /// run-time table's own bump <c>config_version</c> on the DELETE, so the service re-resolves schedules on its next sweep
     /// (same reload path as <see cref="ReplaceServerSchedulesAsync"/>).
@@ -364,25 +365,25 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     /// <para>A viewer released before the run-time table existed deletes the schedule rows only, so a run time set by this
     /// viewer survives a reset done in an older one.</para>
     /// </summary>
-    public async Task<int> ResetAllServerSchedulesAsync(CancellationToken cancellationToken = default)
+    public async Task<CollectorScheduleResetCounts> ResetAllServerSchedulesAsync(CancellationToken cancellationToken = default)
     {
         try
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-            int removed;
+            int scheduleOverrides;
             await using (var schedules = new NpgsqlCommand(CollectorScheduleDeleteAllServerScopesSql, connection, transaction)
             {
                 CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds,
             })
             {
-                removed = await schedules.ExecuteNonQueryAsync(cancellationToken);
+                scheduleOverrides = await schedules.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            removed += await DeleteRunTimesAsync(connection, transaction, CollectorRunTimeDeleteAllServerScopesSql, serverId: null, cancellationToken);
+            var runTimes = await DeleteRunTimesAsync(connection, transaction, CollectorRunTimeDeleteAllServerScopesSql, serverId: null, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
-            return removed;
+            return new CollectorScheduleResetCounts(scheduleOverrides, runTimes);
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {
@@ -540,3 +541,11 @@ public sealed record CollectorRunTimeRow(int? ServerId, string CollectorName, in
 /// row for the scope and collector, and null deletes it (no run time at that level, so the scope falls back to the next one).
 /// </summary>
 public sealed record CollectorRunTimeChange(int? ServerId, string CollectorName, int? RunAtMinute);
+
+/// <summary>
+/// What "Apply Default to All Servers" removed (#4938), each kind counted on its own: <see cref="ScheduleOverrides"/> is the
+/// per-server rows of <c>config.config_collector_schedules</c> and <see cref="RunTimes"/> the per-server rows of
+/// <c>config.config_collector_run_times</c> (0 on a store below V160, which has no such table). The editor's status line
+/// names each, so a reset of run times alone does not read as a reset of schedule overrides.
+/// </summary>
+public sealed record CollectorScheduleResetCounts(int ScheduleOverrides, int RunTimes);
