@@ -745,11 +745,17 @@ jobs:
           # v1 comma-splits the values and merges them into the SDK's disallowedTools). `./` is the
           # directory Claude runs in: the action's run step sets no working directory, so that is the
           # workspace root, where actions/checkout puts the tree. So the file tools do not read the
-          # checkout's .git directory or /proc, though the allowlist grants Read, Grep and Glob.
+          # checkout's .git directory or /proc.
+          #
+          # The file tools read only the checkout. The allowlist grants `Read(./**)`, the tree under
+          # that same directory, and no rule grants a path outside it, so Read, Grep and Glob are
+          # refused a file elsewhere on the runner, by absolute path or by `../`. A Bash read (`cat`,
+          # an input redirect) is held to the directory Claude runs in as well. The review reads
+          # nothing outside the tree: the traps file is .github/REVIEW-TRAPS.md.
           claude_args: |
             --model "${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }}"
             --max-turns ${{ steps.tier.outputs.max_turns || '120' }}
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff ${{ github.event.pull_request.number }}),Bash(gh pr diff ${{ github.event.pull_request.number }} --name-only),Bash(gh pr view ${{ github.event.pull_request.number }}),Bash(gh pr view ${{ github.event.pull_request.number }} --json commits),Bash(gh pr view ${{ github.event.pull_request.number }} --comments),Bash(gh pr comment ${{ github.event.pull_request.number }} --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --comment --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --request-changes --body-file -),Read,Grep,Glob${{ needs.decide.outputs.base && needs.decide.outputs.head && format(',Bash(git diff {0} {1}),Bash(git diff {0} {1} -- *)', needs.decide.outputs.base, needs.decide.outputs.head) || '' }}"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff ${{ github.event.pull_request.number }}),Bash(gh pr diff ${{ github.event.pull_request.number }} --name-only),Bash(gh pr view ${{ github.event.pull_request.number }}),Bash(gh pr view ${{ github.event.pull_request.number }} --json commits),Bash(gh pr view ${{ github.event.pull_request.number }} --comments),Bash(gh pr comment ${{ github.event.pull_request.number }} --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --comment --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --request-changes --body-file -),Read(./**)${{ needs.decide.outputs.base && needs.decide.outputs.head && format(',Bash(git diff {0} {1}),Bash(git diff {0} {1} -- *)', needs.decide.outputs.base, needs.decide.outputs.head) || '' }}"
             --disallowedTools "Read(./.git/**),Read(//proc/**)"
 
       # #3650: a review that posted nothing used to finish GREEN. The prompt mandates one formal
