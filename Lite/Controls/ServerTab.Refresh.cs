@@ -495,13 +495,16 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// #4231: probes the shared window-floor helper (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>)
-    /// for one of the <see cref="QueryWindowRelation"/> relations (the three raw-only query tables, and the Active
-    /// Queries and Current Waits tables the Lite twin of Darling's data-start notice added) and updates that
+    /// for one of the <see cref="QueryWindowRelation"/> relations and updates that
     /// surface's "Showing since &lt;time&gt;" banner —
     /// the SAME probe and the same truncation verdict (<see cref="McpQueryTools.IsWindowTruncated"/>) the
     /// matching MCP tool uses, so the grid and the tool never disagree about whether a window was cut short.
-    /// Called from the sub-tab switch and full-refresh paths below AND from the three OnXSlicerChanged
-    /// handlers in ServerTab.Slicers.cs — a slicer drag re-reads the same grid over a narrower window, which
+    /// Every surface that carries the banner reaches it here: the three Queries grids, Active Queries, Current Waits,
+    /// the Query Heatmap, Memory Pressure Events and Plan Corrections (the last one through
+    /// <see cref="RefreshCappedGridBannerAsync{T}"/>, when its read is under its cap). Called from the sub-tab switch
+    /// and full-refresh paths below, from the slicer handlers in ServerTab.Slicers.cs, from the Active Queries
+    /// drill-downs in ServerTab.DrillDown.cs and from the helpers in ServerTab.QueriesDataStart.cs — a slicer drag
+    /// re-reads the same grid over a narrower window, which
     /// can itself start after the raw table's floor, so it needs the same disclosure. A probe that throws costs
     /// only the banner (<see cref="ProbeWindowFloorOrNullAsync"/> hides it and logs): the callers' own try/catch
     /// would otherwise skip whatever follows the probe, such as the Query Stats grid bind after the Active Queries
@@ -562,19 +565,37 @@ public partial class ServerTab : UserControl
     /// #4966: the banner step for a grid whose read is capped at its newest <paramref name="rowCap"/> rows. A read that
     /// reached its cap (<see cref="CapAwareWindowFloor{T}"/> answers its oldest row) is worded from that row and needs
     /// no probe: its reach is what the grid shows, whatever the store holds. Below its cap it is the shared step,
-    /// <see cref="RefreshWindowTruncatedBannerAsync"/>, with its probe, as for every other grid.
+    /// <see cref="RefreshWindowTruncatedBannerAsync"/>, with its probe, as for every other grid. The decision itself is
+    /// <see cref="CappedGridBannerAsync{T}"/>, which this hands the two ways out: the banner worded in the tab's picker
+    /// zone from the oldest row, and that shared step.
     /// </summary>
     private System.Threading.Tasks.Task RefreshCappedGridBannerAsync<T>(
         QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc,
-        IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc)
+        IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc) =>
+        CappedGridBannerAsync(rows, rowCap, rowTimeUtc,
+            oldestRowShown => ApplyWindowFloorToBanner(banner, oldestRowShown, startUtc, GetPickerZone()),
+            () => RefreshWindowTruncatedBannerAsync(relation, banner, startUtc, endUtc));
+
+    /// <summary>
+    /// #4966: the decision inside <see cref="RefreshCappedGridBannerAsync{T}"/>. A read that reached its cap
+    /// (<see cref="CapAwareWindowFloor{T}"/>) hands its oldest row to <paramref name="wordFromOldestRow"/> and never
+    /// calls <paramref name="probeStep"/>; a read under its cap returns what <paramref name="probeStep"/> returns and
+    /// words nothing itself. <c>internal static</c> with the two ways out passed in, as
+    /// <see cref="ProbeWindowFloorOrNullAsync"/> takes its probe, so the tests run this body without building the
+    /// UserControl. The banner stays out of it: every <see cref="ApplyWindowFloorToBanner"/> call in the tab files is
+    /// handed the tab's own picker zone, and this is not a tab.
+    /// </summary>
+    internal static System.Threading.Tasks.Task CappedGridBannerAsync<T>(
+        IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc,
+        Action<DateTime> wordFromOldestRow, Func<System.Threading.Tasks.Task> probeStep)
     {
         if (CapAwareWindowFloor(null, rows, rowCap, rowTimeUtc) is DateTime oldestRowShown)
         {
-            ApplyWindowFloorToBanner(banner, oldestRowShown, startUtc, GetPickerZone());
+            wordFromOldestRow(oldestRowShown);
             return System.Threading.Tasks.Task.CompletedTask;
         }
 
-        return RefreshWindowTruncatedBannerAsync(relation, banner, startUtc, endUtc);
+        return probeStep();
     }
 
     /// <summary>

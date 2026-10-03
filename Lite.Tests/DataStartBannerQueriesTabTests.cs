@@ -216,23 +216,105 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     }
 
     /// <summary>
-    /// The grid, read at its cap (<see cref="LocalDataService.PlanCorrectionGridCap"/>), then the probe, then the floor
-    /// the banner is worded from (<see cref="ServerTab.CapAwareWindowFloor{T}"/>): (visible, text, oldest row the grid
-    /// returned, rows it returned).
+    /// The grid, read at its cap (<see cref="LocalDataService.PlanCorrectionGridCap"/>), then the capped-grid banner
+    /// step itself (<see cref="ServerTab.CappedGridBannerAsync{T}"/>, the decision inside the tab's
+    /// <c>RefreshCappedGridBannerAsync</c>): (visible, text, oldest row the grid returned, rows it returned, whether
+    /// the step handed the banner to the probing step). The probing step stands in for the shared
+    /// <c>RefreshWindowTruncatedBannerAsync</c>: it words the banner from the real probe's answer, which is awaited
+    /// BEFORE the STA block, because a continuation after an await runs on another thread and a WPF banner can only be
+    /// written by the thread that made it.
     /// </summary>
-    private async Task<(bool Visible, string Text, DateTime Oldest, int Rows)> CappedPlanCorrectionBannerAsync(DateTime startUtc, DateTime endUtc)
+    private async Task<(bool Visible, string Text, DateTime Oldest, int Rows, bool Probed)> CappedPlanCorrectionBannerAsync(DateTime startUtc, DateTime endUtc)
     {
         var service = new LocalDataService(_duckDb);
         var rows = await service.GetPlanCorrectionsAsync(ServerId, fromDate: startUtc, toDate: endUtc);
-        var probed = await service.GetQueryWindowFloorAsync(QueryWindowRelation.PlanCorrection, ServerId, startUtc, endUtc);
-        var floor = ServerTab.CapAwareWindowFloor(probed, rows, LocalDataService.PlanCorrectionGridCap, row => row.CollectionTime);
-        var (visible, text) = OnStaThread(() =>
+        var probedFloor = await service.GetQueryWindowFloorAsync(QueryWindowRelation.PlanCorrection, ServerId, startUtc, endUtc);
+        var (visible, text, probed) = OnStaThread(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
-            ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
-            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text);
+            var probeStepRan = false;
+            ServerTab.CappedGridBannerAsync(rows, LocalDataService.PlanCorrectionGridCap, row => row.CollectionTime,
+                oldestRowShown => ServerTab.ApplyWindowFloorToBanner(banner, oldestRowShown, startUtc, TimeZoneInfo.Utc),
+                () =>
+                {
+                    probeStepRan = true;
+                    ServerTab.ApplyWindowFloorToBanner(banner, probedFloor, startUtc, TimeZoneInfo.Utc);
+                    return Task.CompletedTask;
+                }).GetAwaiter().GetResult();
+            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text, probeStepRan);
         });
-        return (visible, text, rows.Min(row => row.CollectionTime), rows.Count);
+        return (visible, text, rows.Min(row => row.CollectionTime), rows.Count, probed);
+    }
+
+    /// <summary>
+    /// The capped-grid banner step on rows in memory, at a cap of three, over a range that starts 2026-06-01, in UTC.
+    /// The step's two ways out are the banner worded from the oldest row (through the real
+    /// <see cref="ServerTab.ApplyWindowFloorToBanner"/>) and a probing step that records its calls and hands back a task
+    /// of its own, so they can be told apart: (visible, text, probing-step calls, whether the step returned the probing
+    /// step's task).
+    /// </summary>
+    private static (bool Visible, string Text, int ProbeCalls, bool ReturnedProbeTask) CappedGridBannerStep(DateTime[] rows)
+    {
+        return OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock();
+            var probeTask = new TaskCompletionSource().Task;
+            var probeCalls = 0;
+            var step = ServerTab.CappedGridBannerAsync(rows, 3, row => row,
+                oldestRowShown => ServerTab.ApplyWindowFloorToBanner(banner, oldestRowShown, new DateTime(2026, 6, 1), TimeZoneInfo.Utc),
+                () =>
+                {
+                    probeCalls++;
+                    return probeTask;
+                });
+            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text, probeCalls, ReferenceEquals(step, probeTask));
+        });
+    }
+
+    /// <summary>
+    /// A read that came back at its cap words the banner from its oldest row, by time and not by position, and does not
+    /// call the probing step: its reach is what the grid shows, whatever the store holds.
+    /// </summary>
+    [Fact]
+    public void CappedGridBannerStep_AReadAtItsCap_WordsTheBannerFromItsOldestRow_AndDoesNotProbe()
+    {
+        var (visible, text, probeCalls, returnedProbeTask) = CappedGridBannerStep(
+            new[] { new DateTime(2026, 6, 5), new DateTime(2026, 6, 3), new DateTime(2026, 6, 9) });
+
+        Assert.True(visible);
+        Assert.Equal(Since(new DateTime(2026, 6, 3)), text);
+        Assert.Equal(0, probeCalls);
+        Assert.False(returnedProbeTask);
+    }
+
+    /// <summary>
+    /// A read under its cap holds everything the store has in the range: the step hands the banner to the probing step,
+    /// returns its task, and words nothing itself.
+    /// </summary>
+    [Fact]
+    public void CappedGridBannerStep_AReadUnderItsCap_FallsThroughToTheProbingStep()
+    {
+        var (_, text, probeCalls, returnedProbeTask) = CappedGridBannerStep(
+            new[] { new DateTime(2026, 6, 5), new DateTime(2026, 6, 3) });
+
+        Assert.Equal(1, probeCalls);
+        Assert.True(returnedProbeTask);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>
+    /// The tab's <c>RefreshCappedGridBannerAsync</c> is the thin step a test cannot run without building the
+    /// UserControl: it hands the decision (<see cref="ServerTab.CappedGridBannerAsync{T}"/>, run by the tests above and
+    /// by the Plan Corrections tests) the banner worded in the tab's picker zone and the shared probing step over its own
+    /// relation, banner and window. Pinned, as <c>RefreshWindowTruncatedBannerAsync</c>'s own body is, so a step that
+    /// drops either fails here.
+    /// </summary>
+    [Fact]
+    public void RefreshCappedGridBannerAsync_HandsTheDecisionThePickerZone_AndTheSharedProbingStep()
+    {
+        Assert.Matches(
+            @"private System\.Threading\.Tasks\.Task RefreshCappedGridBannerAsync<T>\(\s*QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc,\s*IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc\) =>\s*CappedGridBannerAsync\(rows, rowCap, rowTimeUtc,\s*oldestRowShown => ApplyWindowFloorToBanner\(banner, oldestRowShown, startUtc, GetPickerZone\(\)\),\s*\(\) => RefreshWindowTruncatedBannerAsync\(relation, banner, startUtc, endUtc\)\);",
+            CodeOf("ServerTab.Refresh.cs"));
     }
 
     private static string Since(DateTime instant) =>
@@ -252,13 +334,14 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         await SeedLogRunsAsync("plan_correction", added, end, 5);
         await SeedPlanCorrectionEveryAsync(added, end, 5);
 
-        var (visible, text, oldest, rows) = await CappedPlanCorrectionBannerAsync(end.AddDays(-7), end);
+        var (visible, text, oldest, rows, probed) = await CappedPlanCorrectionBannerAsync(end.AddDays(-7), end);
 
         Assert.Equal(LocalDataService.PlanCorrectionGridCap, rows);
         Assert.InRange((end - oldest).TotalHours, 16, 17);
         Assert.True(visible);
         Assert.Equal(Since(oldest), text);
         Assert.NotEqual(Since(added), text);
+        Assert.False(probed);
     }
 
     /// <summary>
@@ -277,11 +360,12 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
 
         Assert.False((await BannerForAsync(QueryWindowRelation.PlanCorrection, end.AddDays(-7), end)).Visible);
 
-        var (visible, text, oldest, rows) = await CappedPlanCorrectionBannerAsync(end.AddDays(-7), end);
+        var (visible, text, oldest, rows, probed) = await CappedPlanCorrectionBannerAsync(end.AddDays(-7), end);
 
         Assert.Equal(LocalDataService.PlanCorrectionGridCap, rows);
         Assert.True(visible);
         Assert.Equal(Since(oldest), text);
+        Assert.False(probed);
     }
 
     /// <summary>A read that came back under its cap holds everything the store has in the range, so the store's own floor is the answer, as before.</summary>
@@ -294,9 +378,10 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         await SeedLogRunsAsync("plan_correction", added, end, 5);
         await SeedPlanCorrectionEveryAsync(end.AddMinutes(-5 * 149), end, 5);
 
-        var (visible, text, _, rows) = await CappedPlanCorrectionBannerAsync(end.AddDays(-7), end);
+        var (visible, text, _, rows, probed) = await CappedPlanCorrectionBannerAsync(end.AddDays(-7), end);
 
         Assert.Equal(150, rows);
+        Assert.True(probed);
         Assert.True(visible);
         Assert.Equal(Since(added), text);
     }
@@ -746,6 +831,14 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         {
             Assert.True(stepDoc.Contains(surface, StringComparison.Ordinal), $"the banner step's doc comment does not name '{surface}'");
         }
+
+        /* The shared probing step's own summary names every surface that reaches it (the capped Plan Corrections grid
+           included, through its fall-through), so a surface added later without a mention fails here. */
+        var sharedStepDoc = DocBefore(refreshSource, "private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(");
+        foreach (var surface in new[] { "Queries grids", "Active Queries", "Current Waits", "Query Heatmap", "Memory Pressure Events", "Plan Corrections" })
+        {
+            Assert.True(sharedStepDoc.Contains(surface, StringComparison.Ordinal), $"the shared probing step's doc comment does not name '{surface}'");
+        }
     }
 
     /// <summary>
@@ -911,7 +1004,15 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         return result;
     }
 
-    /// <summary>The <c>///</c> block (and attribute lines) directly above the member that starts at <paramref name="signature"/>, in an LF-only source.</summary>
+    /// <summary>
+    /// The <c>///</c> block (and attribute lines) directly above the member that starts at <paramref name="signature"/>,
+    /// in an LF-only source. It collects a doc run by line prefix, which is what defines the run: the surfaces a pin
+    /// reads out of it live only in the comment, so a walk that strips comments would leave nothing to read. The bound
+    /// it rests on: the walk stops at the first line that is neither <c>///</c> nor an attribute, so a block comment, a
+    /// <c>//</c> line or a blank line between the run and its member truncates it and the pin reads the surfaces as
+    /// missing, which fails loudly rather than passing on half a comment. <c>CommentFilterAdoptionTests</c> lists this
+    /// site with the same bound.
+    /// </summary>
     private static string DocBefore(string lfSource, string signature)
     {
         var at = lfSource.IndexOf(signature, StringComparison.Ordinal);

@@ -80,7 +80,7 @@ public sealed class CommentFilterAdoptionTests
     /// <see cref="AnalysisPassTokenThreadingTests"/> gives: the way a wildcard grows is that nobody has to
     /// name a new entry.
     ///
-    /// <para>Four kinds live here and they are not the same kind. Seven <b>collect</b> a doc-comment run,
+    /// <para>Four kinds live here and they are not the same kind. Eight <b>collect</b> a doc-comment run,
     /// where the prefix is what defines the run. One reads a <b>stated, measured</b> bound off a named file.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
@@ -145,6 +145,16 @@ public sealed class CommentFilterAdoptionTests
             + "loud direction. Entries are matched by a quoted-key regex, so a block-comment continuation line "
             + "that happened to spell one would register as a phantom entry needing lineage of its own, "
             + "which is again loud; nothing in the table today is a block comment.",
+
+        ["Lite.Tests/DataStartBannerQueriesTabTests.cs"] =
+            "COLLECTS a doc run. DocBefore gathers the contiguous /// run (attribute lines included) above a "
+            + "named declaration, so that a pin can read which surfaces a doc comment names - the names live ONLY "
+            + "in that comment, so asking for the walker would leave nothing to read. Stated bound: the walk "
+            + "STOPS at the first line that is neither /// -prefixed nor an attribute, so a /* */ block, a // line "
+            + "or a blank line between the run and its declaration truncates it and the surfaces it names read as "
+            + "MISSING - a spurious red, the loud direction, because every surface is asserted present before the "
+            + "pin passes. A signature that is not found fails the pin on its own message rather than reading an "
+            + "empty run.",
 
         ["Lite.Tests/LiteSidebarDotRendersTheCardStatusTests.cs"] =
             "STATED BOUND, and asking for the walker would BREAK it. Its doc comment records the measurement: "
