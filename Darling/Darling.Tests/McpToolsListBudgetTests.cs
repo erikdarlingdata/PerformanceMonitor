@@ -199,8 +199,8 @@ public sealed class McpToolsListBudgetTests
     // get_finops view utilization adds 78 bytes: 177,486 -> 177,564.
     // get_finops_inventory (the FinOps fleet tool) adds 461 bytes: 177,564 -> 178,025.
     // get_finops_inventory head says which time is not UTC, with the merged tree re-measured: 178,025 -> 178,170.
-    // get_finops application_connections view, with the merged tree re-measured: 178,170 -> MEASURED.
-    private const int TotalCeilingBytes = 178_170;
+    // get_finops application_connections view, with the merged tree re-measured: 178,170 -> 178,258.
+    private const int TotalCeilingBytes = 178_258;
 
 
 
