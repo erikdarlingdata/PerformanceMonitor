@@ -157,6 +157,63 @@ public sealed class CollectorRunTimeRungTests
         Assert.DoesNotContain(Table, viewer[armProseStart..thisArm], StringComparison.Ordinal);
     }
 
+    /// <summary>The Collector Schedules window's Save is ONE call in ONE transaction (#4938): it never commits the run times as a
+    /// transaction of their own ahead of the schedule rows, because a schedule write that then fails would leave the run time
+    /// saved. The window calls the combined write once and none of the three single writes, and the combined write's scope writer
+    /// runs the run-time statements on the connection and transaction it opened for the schedule rows, ahead of their delete.</summary>
+    [Fact]
+    public void TheWindowsSave_IsOneCallInOneTransaction_AndNeverCommitsTheRunTimesOnItsOwn()
+    {
+        var window = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "CollectorScheduleEditorWindow.xaml.cs"));
+        Assert.Single(Regex.Matches(window, @"\.SaveCollectorScheduleAsync\("));
+        Assert.DoesNotContain(".SaveCollectorRunTimesAsync(", window, StringComparison.Ordinal);
+        Assert.DoesNotContain(".ReplaceFleetSchedulesAsync(", window, StringComparison.Ordinal);
+        Assert.DoesNotContain(".ReplaceServerSchedulesAsync(", window, StringComparison.Ordinal);
+
+        var viewer = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectorSchedules.cs"));
+        var start = viewer.IndexOf("private async Task ReplaceScheduleScopeAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the schedule scope writer is gone");
+        var scope = viewer[start..viewer.IndexOf("private static void AddNullableInt", start, StringComparison.Ordinal)];
+        Assert.Single(Regex.Matches(scope, @"BeginTransactionAsync\("));
+        var runTimeWrite = scope.IndexOf("WriteRunTimeChangesAsync(connection, transaction, runTimeChanges", StringComparison.Ordinal);
+        Assert.True(runTimeWrite >= 0, "the scope writer does not write the run times on its own connection and transaction");
+        Assert.True(
+            runTimeWrite < scope.IndexOf("CollectorScheduleDeleteFleetScopeSql", StringComparison.Ordinal),
+            "the run-time statements must run ahead of the schedule delete, in the same transaction");
+    }
+
+    /// <summary>A schedule Reset deletes that scope's run times in the same transaction as its schedule rows (#4938). The window's
+    /// "Reset to Defaults" arms the scope clear and its Save passes it on, "Apply Default to All Servers" is the one call that
+    /// resets both tables (and the window has no run-time reset of its own), and that call opens exactly one transaction and
+    /// deletes the schedule rows ahead of the run times.</summary>
+    [Fact]
+    public void AScheduleReset_DeletesTheScopesRunTimes_InTheSameTransactionAsItsScheduleRows()
+    {
+        var window = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "CollectorScheduleEditorWindow.xaml.cs"));
+        var reset = window[window.IndexOf("private void ResetDefaults_Click(", StringComparison.Ordinal)..window.IndexOf("private void CopyFromServer_Click(", StringComparison.Ordinal)];
+        Assert.Contains("_resetToDefaults = true;", reset, StringComparison.Ordinal);
+        Assert.Contains("var clearRunTimes = _resetToDefaults || usesDefault;", window, StringComparison.Ordinal);
+        Assert.Contains(".SaveCollectorScheduleAsync(_scopeServerId, rows, runTimeChanges, clearRunTimes)", window, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(window, @"\.ResetAllServerSchedulesAsync\("));
+        Assert.DoesNotContain("ResetAllServerRunTimes", window, StringComparison.Ordinal);
+
+        var viewer = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectorSchedules.cs"));
+        Assert.DoesNotContain("ResetAllServerRunTimes", viewer, StringComparison.Ordinal);
+        var start = viewer.IndexOf("public async Task<int> ResetAllServerSchedulesAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the all-servers reset is gone");
+        var body = viewer[start..viewer.IndexOf("private static async Task<int> DeleteRunTimesAsync(", start, StringComparison.Ordinal)];
+        Assert.Single(Regex.Matches(body, @"BeginTransactionAsync\("));
+        Assert.True(
+            body.IndexOf("CollectorScheduleDeleteAllServerScopesSql", StringComparison.Ordinal)
+                < body.IndexOf("CollectorRunTimeDeleteAllServerScopesSql", StringComparison.Ordinal),
+            "the schedule rows are deleted first, so a failed run-time delete takes that delete back with it");
+        Assert.Contains("transaction.CommitAsync(", body, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheServiceReadsTheSchedulesWithoutARunTimeColumn_AndTheRunTimesFromTheirOwnTable()
     {
@@ -774,11 +831,13 @@ public sealed class CollectorRunTimeRungLiveTests
                 "SELECT frequency_minutes FROM config.config_collector_schedules WHERE server_id = 7 AND collector_name = 'index_object_stats'", ct)));
             Assert.Equal(expected, await RowsAsync(connection, ct));
 
-            /* A Save that leaves a scope empty, and the reset of every server's rows, delete schedule rows only. */
+            /* A Save that leaves a scope empty deletes schedule rows only. The reset of every server's rows is the one call that also
+               deletes the servers' run times (#4938), and the fleet's stay. */
             await viewer.ReplaceServerSchedulesAsync(7, Array.Empty<CollectorScheduleRow>(), ct);
+            Assert.Equal(expected, await RowsAsync(connection, ct));
             await viewer.ResetAllServerSchedulesAsync(ct);
             Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM config.config_collector_schedules WHERE server_id IS NOT NULL", ct));
-            Assert.Equal(expected, await RowsAsync(connection, ct));
+            Assert.Equal("fleet/index_object_stats=120,fleet/server_properties=150", await RowsAsync(connection, ct));
 
             bodySucceeded = true;
         }

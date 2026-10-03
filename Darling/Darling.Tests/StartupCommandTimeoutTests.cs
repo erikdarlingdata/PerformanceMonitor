@@ -30,8 +30,8 @@ namespace Darling.Tests;
 /// <see cref="ServiceCommandDeadlines.BootstrapSeconds"/> covers the un-retried bootstrap sites
 /// (<see cref="ExpectedBootstrapSites"/> of them); <see cref="ServiceCommandDeadlines.BootstrapConnectProbeSeconds"/>
 /// the one inside the bootstrap's six-attempt first-connection retry, where the deadline MULTIPLIES; and
-/// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> the eleven on the collection loop's serial
-/// thread, where eleven sequential commands have to fit inside one watchdog window.</para>
+/// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> the twelve on the collection loop's serial
+/// thread, where twelve sequential commands have to fit inside one watchdog window.</para>
 ///
 /// <para><b>This is the regime whose value goes UP, and the pin has to defend that as much as the
 /// number.</b> Two of the four failure handlers on this path are <c>LogCritical</c> followed by
@@ -85,15 +85,17 @@ public sealed class StartupCommandTimeoutTests
     /// <para><b>What is deliberately absent, and why each is a different budget — the token test, member
     /// by member.</b></para>
     ///
-    /// <para><c>StoreConfigProvider.ReadConfigVersionAsync</c> (1 site) and <c>LoadViewAsync</c>'s five
+    /// <para><c>StoreConfigProvider.ReadConfigVersionAsync</c> (1 site) and <c>LoadViewAsync</c>'s six
     /// reads (<c>ReadServiceRowAsync</c>, <c>ReadAlertSettingsAsync</c>, <c>ReadNotificationAsync</c>,
-    /// <c>ReadMonitoredServersAsync</c>, <c>ReadScheduleOverridesAsync</c>),
+    /// <c>ReadNotificationRoutesAsync</c>, <c>ReadMonitoredServersAsync</c>, and
+    /// <c>ReadScheduleOverridesAsync</c>, whose two commands are <c>ReadScheduleRowsAsync</c> and
+    /// <c>ReadRunTimesAsync</c> — seven commands in all),
     /// <c>DarlingObservability.SyncServerEnabledStatesAsync</c>'s two, and
     /// <c>DarlingManagedRoles.ReassertComposeStatementTimeoutAsync</c>'s one are the CONTROL-PLANE
-    /// regime: ten sites awaited inline on the serial collection-loop thread, ahead of every per-server
+    /// regime: eleven sites awaited inline on the serial collection-loop thread, ahead of every per-server
     /// launch, on the 15 s <c>s_sweepInterval</c> tick. Their blast radius is the whole fleet while their
     /// floor is a single-row lookup, they fail OPEN (the live config stands), and their ceiling is the
-    /// tick — a strictly TIGHTER bound on both sides than this group's. Eight of them also run once on
+    /// tick — a strictly TIGHTER bound on both sides than this group's. Nine of them also run once on
     /// the bootstrap path, where <c>DarlingWorker</c> awaits them during startup, and that is exactly why they
     /// are excluded rather than claimed: a deadline is a property of the command, so the tighter of a
     /// dual-caller site's two bounds has to win, and it is not this one.</para>
@@ -157,12 +159,15 @@ public sealed class StartupCommandTimeoutTests
         ("StoreConfigProvider.cs", "SeedMonitoredServersAsync", 1, 0, 0, 0),
 
         /* The serial collection-loop thread: the control-plane reload body plus the disk-check store-size
-           read. Eight of these eleven ALSO run once on the bootstrap path above, and take this constant
-           rather than BootstrapSeconds because a dual-caller site has to take the tighter of its two
-           bounds. */
+           read. Nine of these twelve ALSO run once on the bootstrap path above (LoadViewAsync's seven
+           commands and SyncServerEnabledStatesAsync's two), and take this constant rather than
+           BootstrapSeconds because a dual-caller site has to take the tighter of its two bounds. */
         ("StoreConfigProvider.cs", "ReadServiceRowAsync", 0, 0, 1, 0),
         ("StoreConfigProvider.cs", "ReadAlertSettingsAsync", 0, 0, 1, 0),
         ("StoreConfigProvider.cs", "ReadNotificationAsync", 0, 0, 1, 0),
+        /* The notification routes LoadViewAsync reads between the notification settings and the monitored
+           servers: one command on this constant, and it runs once on the bootstrap path too. */
+        ("StoreConfigProvider.cs", "ReadNotificationRoutesAsync", 0, 0, 1, 0),
         ("StoreConfigProvider.cs", "ReadMonitoredServersAsync", 0, 0, 1, 0),
         /* #4938: the schedule read is two commands, the sparse schedule rows and the run times from their own table,
            each on this constant. ReadScheduleOverridesAsync only layers one onto the other and builds no command. */
@@ -188,7 +193,7 @@ public sealed class StartupCommandTimeoutTests
 
     private const int ExpectedConnectProbeSites = 1;
 
-    internal const int ExpectedSerialLoopSites = 11;
+    internal const int ExpectedSerialLoopSites = 12;
 
     /// <summary>
     /// The serial-loop regime's members, projected out of the census above so a second pin over the same
@@ -196,10 +201,10 @@ public sealed class StartupCommandTimeoutTests
     ///
     /// <para>Read by <see cref="SerialLoopStoreSizeSourceTests"/>, which asserts a property of what these
     /// members RUN rather than of the deadline they set. Exposed as a projection rather than as a second
-    /// list because a hand-copied enumeration of ten members is a counted claim with a numeral welded on:
+    /// list because a hand-copied enumeration of eleven members is a counted claim with a numeral welded on:
     /// it would keep passing over nine of them after the tenth moved, and the pin's message would name the
-    /// wrong population. The per-member SITE COUNT travels with it for the same reason: ten members
-    /// hold the regime's eleven commands (<c>SyncServerEnabledStatesAsync</c> builds two), so a consumer
+    /// wrong population. The per-member SITE COUNT travels with it for the same reason: eleven members
+    /// hold the regime's twelve commands (<c>SyncServerEnabledStatesAsync</c> builds two), so a consumer
     /// counting members would silently disagree with <see cref="ExpectedSerialLoopSites"/> and could
     /// not tell a dropped member from that arithmetic.</para>
     /// </summary>
@@ -591,13 +596,13 @@ public sealed class StartupCommandTimeoutTests
         Assert.True(
             seconds < ServiceCommandDeadlines.BootstrapSeconds,
             $"serial-loop deadline {seconds}s is not tighter than the bootstrap's "
-            + $"{ServiceCommandDeadlines.BootstrapSeconds}s. Eight of these eleven sites ALSO run once on "
+            + $"{ServiceCommandDeadlines.BootstrapSeconds}s. Nine of these twelve sites ALSO run once on "
             + "the bootstrap path, and a dual-caller site must take the tighter of its two bounds — if "
-            + "this is not the tighter one, those eight are on the wrong constant");
+            + "this is not the tighter one, those nine are on the wrong constant");
     }
 
     /// <summary>
-    /// <see cref="ConstructionSpan"/> is what thirty-seven sites' correctness is asserted through, so its
+    /// <see cref="ConstructionSpan"/> is what forty-eight sites' correctness is asserted through, so its
     /// own edges are pinned. The fixtures are shapes that OCCUR in the members above, and the fourth is
     /// the one that matters: the <c>using (...) { ...; }</c> block whose neighbour a two-statement window
     /// would borrow, which is the real shape of <c>BridgeTimescaleAsync</c>. The last fixture covers the

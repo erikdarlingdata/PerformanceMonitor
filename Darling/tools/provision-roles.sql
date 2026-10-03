@@ -262,6 +262,10 @@ GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_re
 REVOKE SELECT ON config.config_notification_routes FROM mcp;
 GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at)
     ON config.config_notification_routes TO mcp;
+-- The collector run times (V160, #4938): get_collection_health reads them as mcp. The blanket config SELECT above
+-- already covers the table when it exists at that point; naming it makes the grant explicit and idempotent, mirroring
+-- how the schedule tables are read, so a store that reaches V160 after an earlier provisioning is covered by the re-run.
+GRANT SELECT ON config.config_collector_run_times TO mcp;
 
 -- 3. config writes -- admin gets the whole schema.
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;
