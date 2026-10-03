@@ -1501,8 +1501,9 @@ ORDER BY 1";
     internal const int HeatmapBucketMinutes = 5;
 
     /// <summary>
-    /// #4966: one column per <see cref="HeatmapBucketMinutes"/>-minute bucket across the ASKED range, from the bucket
-    /// that holds <paramref name="startUtc"/> through the one that holds <paramref name="endUtc"/>, empty ones
+    /// #4966: one column per <see cref="HeatmapBucketMinutes"/>-minute bucket across the asked range, from the bucket
+    /// that holds <paramref name="startUtc"/> (the range's start, or where the data starts when the range starts before
+    /// it: <see cref="GetHeatmapColumnsStartAsync"/>) through the one that holds <paramref name="endUtc"/>, empty ones
     /// included, so a gap in the data draws as a gap (the columns used to be only the buckets that hold a row, and
     /// the chart's X axis counts columns: rows at the start and the end of a 7-day range drew two adjacent columns).
     /// Buckets are aligned to the epoch, which is where DuckDB's <c>time_bucket</c> puts a sub-day bucket too (its
@@ -1527,12 +1528,44 @@ ORDER BY 1";
         return columns;
     }
 
+    /// <summary>
+    /// #4991: where the heatmap's columns start: the range's start, or, when the range starts before the data, the time
+    /// the Query Heatmap's "Showing since" notice shows. The notice and these columns are decided the same way, so the
+    /// columns move exactly when the notice shows: the notice's own probe (<see cref="GetQueryWindowFloorAsync"/>, the
+    /// <see cref="QueryWindowRelation.QueryStats"/> relation, over the same UTC window the read took) and its own
+    /// verdict (<see cref="Mcp.McpQueryTools.IsWindowTruncated"/>, which gives a start 90 minutes of slack). The span
+    /// before the data is what the notice already explains, and drawing it made a year-wide range over a few days of
+    /// data ~105,000 columns, nearly all of them empty. A gap AFTER the data starts is not this: every bucket from
+    /// here to the range end still has a column. The heatmap is not a capped read, so the capped grids' floor
+    /// (<c>ServerTab.CapAwareWindowFloor</c>) does not apply. A probe that throws costs only the trim: the columns span
+    /// the range, as they did before, and the chart is still drawn (the notice step's own rule for the same probe).
+    /// </summary>
+    private async Task<DateTime> GetHeatmapColumnsStartAsync(int serverId, DateTime startUtc, DateTime endUtc)
+    {
+        try
+        {
+            var floor = await GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, serverId, startUtc, endUtc);
+            return floor is DateTime dataStart && Mcp.McpQueryTools.IsWindowTruncated(floor, startUtc) ? dataStart : startUtc;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("Heatmap", $"data-start probe failed, so the columns span the whole range: {ex.Message}");
+            return startUtc;
+        }
+    }
+
     public async Task<HeatmapResult> GetQueryHeatmapAsync(int serverId, HeatmapMetric metric, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #4991: where the columns start, probed BEFORE this read opens its connection rather than under it: the probe
+           takes its own read lock, and a read lock taken under one this thread already holds only works through
+           AcquireReadLock's recursion escape. A range with no row at all still answers the empty result below. */
+        var columnsStart = await GetHeatmapColumnsStartAsync(serverId, startTime, endTime);
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var metricExpr = GetMetricColumn(metric);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
@@ -1594,9 +1627,10 @@ ORDER BY time_bin, bucket_index";
         if (rawCells.Count == 0)
             return new HeatmapResult();
 
-        /* #4966: a column for every bucket of the asked range, not just the buckets that hold a row. A range that holds
-           no row at all still answers the empty result above, so the chart says it has no data. */
-        var times = HeatmapColumns(startTime, endTime);
+        /* #4966: a column for every bucket from the first column to the range end, not just the buckets that hold a row. A
+           range that holds no row at all still answers the empty result above, so the chart says it has no data.
+           #4991: the first column is the range start, or the notice's time when the range starts before the data. */
+        var times = HeatmapColumns(columnsStart, endTime);
         var timeIndex = new Dictionary<DateTime, int>();
         for (int i = 0; i < times.Length; i++) timeIndex[times[i]] = i;
 

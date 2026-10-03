@@ -523,6 +523,123 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         Assert.Equal(1d, result.Intensities[0, 2]);
     }
 
+    /// <summary>
+    /// #4991: a range that starts before the data shows the "Showing since" notice, and its columns start at the
+    /// 5-minute bucket that holds the notice's time, not at the range start: the span before the data is what the
+    /// notice already explains, and a year-wide range over a few days of data would otherwise draw ~105,000 columns,
+    /// nearly all of them empty. The end of the range is still the last column. The first row is at 10:17:40 on the
+    /// 4th, so its bucket is 10:15.
+    /// </summary>
+    [Fact]
+    public async Task QueryHeatmap_ARangeThatStartsBeforeTheData_StartsItsColumnsAtTheBucketHoldingTheNoticesTime()
+    {
+        await _duckDb.InitializeAsync();
+        var start = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var end = start.AddDays(7);
+        var firstRow = new DateTime(2026, 6, 4, 10, 17, 40, DateTimeKind.Unspecified);
+        await SeedQueryStatsAsync(firstRow);
+        await SeedQueryStatsAsync(end.AddHours(-1));
+
+        var (visible, text) = await BannerForAsync(QueryWindowRelation.QueryStats, start, end);
+        Assert.True(visible);
+        Assert.Equal("Showing since 2026-06-04 10:17:40", text);
+
+        var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
+
+        var noticeBucket = new DateTime(2026, 6, 4, 10, 15, 0, DateTimeKind.Unspecified);
+        var buckets = (int)((end - noticeBucket).TotalMinutes / 5) + 1;
+        Assert.Equal(1030, buckets);
+        Assert.Equal(buckets, result.TimeBuckets.Length);
+        Assert.Equal(buckets, result.Intensities.GetLength(1));
+        Assert.Equal(buckets, result.CellDetails.GetLength(1));
+        Assert.Equal(noticeBucket, result.TimeBuckets[0]);
+        Assert.Equal(end, result.TimeBuckets[^1]);
+        Assert.Equal(1d, result.Intensities[0, 0]);
+        Assert.Equal(1d, result.Intensities[0, buckets - 1 - 12]);
+    }
+
+    /// <summary>
+    /// #4991: a range the store covered shows no notice and keeps its columns from the range start, however late its
+    /// first row inside the range comes. An older row before the range proves the store reached back to it, so the
+    /// first row inside it (3 days in here) is a quiet start, not where the data begins. A guard against trimming
+    /// the columns to the first row whatever the notice says: the old code always started at the range start, so
+    /// this one passes on it too.
+    /// </summary>
+    [Fact]
+    public async Task QueryHeatmap_ACoveredRange_StillStartsItsFirstColumnAtTheRangeStart()
+    {
+        await _duckDb.InitializeAsync();
+        var start = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var end = start.AddDays(7);
+        await SeedQueryStatsAsync(start.AddDays(-20));
+        await SeedQueryStatsAsync(start.AddDays(3).AddMinutes(17));
+        await SeedQueryStatsAsync(end.AddHours(-1));
+
+        var (visible, text) = await BannerForAsync(QueryWindowRelation.QueryStats, start, end);
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+
+        var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
+
+        const int buckets = 7 * 24 * 12 + 1;
+        Assert.Equal(buckets, result.TimeBuckets.Length);
+        Assert.Equal(start, result.TimeBuckets[0]);
+        Assert.Equal(end, result.TimeBuckets[^1]);
+    }
+
+    /// <summary>
+    /// #4991: starting the columns at the data start does not close the gaps INSIDE the data: every bucket from the
+    /// notice's bucket to the range end still has a column, so the two days with no rows between the first row and
+    /// the next draw as 575 empty columns (the 576 5-minute buckets from the first row's bucket to the next row's,
+    /// less the next row's own).
+    /// </summary>
+    [Fact]
+    public async Task QueryHeatmap_AGapInsideTheData_StillDrawsEmptyColumns_WhenTheRangeStartsBeforeTheData()
+    {
+        await _duckDb.InitializeAsync();
+        var start = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var end = start.AddDays(7);
+        var dataStart = new DateTime(2026, 6, 3, 8, 0, 0, DateTimeKind.Unspecified);
+        await SeedQueryStatsAsync(dataStart.AddMinutes(2));
+        await SeedQueryStatsAsync(dataStart.AddDays(2).AddMinutes(3));
+        await SeedQueryStatsAsync(end.AddHours(-1));
+
+        var (visible, _) = await BannerForAsync(QueryWindowRelation.QueryStats, start, end);
+        Assert.True(visible);
+
+        var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
+
+        const int buckets = 4 * 24 * 12 + 16 * 12 + 1;
+        Assert.Equal(buckets, result.TimeBuckets.Length);
+        Assert.Equal(dataStart, result.TimeBuckets[0]);
+        Assert.Equal(end, result.TimeBuckets[^1]);
+        for (var i = 1; i < result.TimeBuckets.Length; i++)
+        {
+            Assert.Equal(TimeSpan.FromMinutes(5), result.TimeBuckets[i] - result.TimeBuckets[i - 1]);
+        }
+
+        /* The three stored rows sit in their own columns (the first, 2 days later, and the hour before the end); the 575 columns
+           between the first two, and every other one, are empty. */
+        var secondColumn = Array.IndexOf(result.TimeBuckets, dataStart.AddDays(2));
+        var lastColumn = Array.IndexOf(result.TimeBuckets, end.AddHours(-1));
+        Assert.Equal(2 * 24 * 12, secondColumn);
+        Assert.Equal(buckets - 1 - 12, lastColumn);
+        double total = 0;
+        for (var col = 0; col < result.Intensities.GetLength(1); col++)
+        {
+            for (var row = 0; row < result.Intensities.GetLength(0); row++)
+            {
+                total += result.Intensities[row, col];
+                if (result.Intensities[row, col] > 0)
+                {
+                    Assert.True(col == 0 || col == secondColumn || col == lastColumn, $"column {col} should be empty");
+                }
+            }
+        }
+
+        Assert.Equal(3d, total);
+    }
+
     /// <summary>A range that holds no row at all still answers the empty result, so the chart says it has no data rather than drawing a blank grid.</summary>
     [Fact]
     public async Task QueryHeatmap_ARangeWithNoRows_DrawsNoColumns()

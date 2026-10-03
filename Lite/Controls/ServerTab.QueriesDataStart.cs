@@ -38,8 +38,11 @@ public partial class ServerTab
     }
 
     /// <summary>
-    /// The Query Heatmap draws one column per 5-minute bucket across the asked range (<see cref="LocalDataService.HeatmapColumns"/>),
-    /// so a gap in the data is empty columns. The notice stays because an empty column cannot tell a server that did
+    /// The Query Heatmap draws one column per 5-minute bucket (<see cref="LocalDataService.HeatmapColumns"/>) from the
+    /// range's start to its end, so a gap in the data is empty columns. When this notice shows, the range starts before
+    /// the data and the columns start at the bucket that holds the notice's time instead (#4991): the span before it is
+    /// what the notice explains. The read decides that with the same probe and verdict as this step, over the same
+    /// window. The notice stays because an empty column cannot tell a server that did
     /// not exist yet from one that ran nothing. It reads <c>v_query_stats</c> like the Top Queries grid, so it asks the
     /// same <see cref="QueryWindowRelation.QueryStats"/> question over the same window. Called after the chart is
     /// drawn, at the sub-tab switch, at the full refresh and when the metric changes (the metric re-reads over the
