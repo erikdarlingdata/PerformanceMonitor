@@ -543,6 +543,14 @@ public sealed class DarlingWorker : BackgroundService
     internal Func<ServerRuntime, CancellationToken, Task<bool>>? LivenessProbeOverride { get; set; }
 
     /// <summary>
+    /// Test seam (#4938): replaces what one collector run does once its permits are held, so a test can block a
+    /// run and watch the scheduling around it with no store and no monitored server. It sits after every limit
+    /// <see cref="RunOneAsync"/> applies, so a limit that is held while the replacement runs is observable. Null in
+    /// production, which runs the collector for real.
+    /// </summary>
+    internal Func<ServerLoopState, string, CancellationToken, Task<int>>? RunOneBodyOverride { get; set; }
+
+    /// <summary>
     /// The sweep gate's width right now (#2170) — the ceiling minus what has been absorbed. Reported by the
     /// queued-behind-the-gate diagnostic, which an operator reads while deciding whether to raise the knob,
     /// so it must never print the compile-time default once the knob has moved. Mid-narrow this reads the
@@ -11111,7 +11119,12 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
     }
 
-    private async Task RunDueCollectorsAsync(ServerLoopState server, DarlingCollectorRunner runner, CancellationToken cancellationToken)
+    /// <summary>
+    /// One server's scheduled collector pass: runs, or detaches, every collector that has come due. Internal
+    /// (#4938) so a test can drive the pass with <see cref="RunOneBodyOverride"/> standing in for the collector
+    /// runs; production calls it only from the per-server body.
+    /// </summary>
+    internal async Task RunDueCollectorsAsync(ServerLoopState server, DarlingCollectorRunner runner, CancellationToken cancellationToken)
     {
         var runtime = server.Runtime;
         if (runtime is null)
@@ -12574,6 +12587,11 @@ LIMIT 1";
                 "Re-reads the live set next tick; no rows are lost.",
                 server.Config.DisplayName, collectorName);
             return 0;
+        }
+
+        if (RunOneBodyOverride is { } bodyOverride)
+        {
+            return await bodyOverride(server, collectorName, cancellationToken);
         }
 
         /* #2997: wall clock for the whole run, read ONLY by the fault arms below. The success path
