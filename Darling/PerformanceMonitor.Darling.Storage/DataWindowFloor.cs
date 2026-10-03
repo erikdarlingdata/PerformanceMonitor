@@ -71,7 +71,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// collection_log keeps <c>(server_id, collector_name, collection_time)</c>. A LATERAL per registered server reads
 /// the first index entry inside the window, so only the window's chunks are probed; the walk to a source with no
 /// schedule edge runs only for a server that counts, and stops at the oldest chunk that holds the server.
-/// Filtering the fact table by <c>server_name</c>, as a panel's own read does, has no index to use.</para>
+/// Filtering the fact table by <c>server_name</c>, as a panel's own read does, has no index to use. So the probe
+/// answers per server identity, through the registry's current name and <c>server_id</c>, while the panel's read
+/// filters fact rows by their stored <c>server_name</c>: for a renamed server, rows written before the rename
+/// count toward coverage even though the panel's filter misses them.</para>
 ///
 /// <para><b>Why this lives in Storage.</b> The web viewer's Custom Views runner and the desktop viewer's server tab
 /// both ask it, and the viewer does not reference the service assembly (#1661 / #2530), the same reason
@@ -86,14 +89,28 @@ public static class DataWindowFloor
     /// </summary>
     public sealed class Source
     {
-        private Source(string relation, string timeColumn, bool endExclusive, string? collectorName = null, int? retentionDefaultDays = null)
+        private Source(
+            string relation, string timeColumn, bool endExclusive, string? collectorName = null, int? retentionDefaultDays = null,
+            DateTime? lowerBoundUtc = null)
         {
             Relation = relation;
             TimeColumn = timeColumn;
             EndExclusive = endExclusive;
             CollectorName = collectorName;
             RetentionDefaultDays = retentionDefaultDays;
+            LowerBoundUtc = lowerBoundUtc;
         }
+
+        /// <summary>
+        /// The instant (naive UTC) from which a panel reads this relation, when it reads only from there up: the
+        /// successor half of a stitched rollup read, which the stitched clause takes from the stitch boundary up.
+        /// Null when the panel reads the relation whole. The window read and the oldest-row walk both start at the
+        /// bound, so a bucket the relation holds below it (a wide refresh after the boundary was measured), which the
+        /// panel did not read, moves neither the answer nor a server's coverage. Bound as a parameter, never spliced
+        /// (<see cref="FloorSql"/>). Only a rollup carries one (<see cref="TryForRollup"/>), and a rollup has no
+        /// schedule edge, so the bound always applies to the walk.
+        /// </summary>
+        public DateTime? LowerBoundUtc { get; }
 
         /// <summary>
         /// The collector that writes the table, whose runs collection_log records; null for a rollup, which no
@@ -159,8 +176,10 @@ public static class DataWindowFloor
         /// <summary>
         /// The continuous aggregate <paramref name="view"/>, or false when <see cref="RollupAvailability"/> does not
         /// know the name. Every rollup a panel reads keeps a <c>(server_id, bucket)</c> index.
+        /// <paramref name="lowerBoundUtc"/> is set for a rollup the panel reads only from that instant up
+        /// (<see cref="LowerBoundUtc"/>), and null for one it reads whole.
         /// </summary>
-        public static bool TryForRollup(string view, out Source source)
+        public static bool TryForRollup(string view, out Source source, DateTime? lowerBoundUtc = null)
         {
             source = null!;
             if (string.IsNullOrEmpty(view) || !RollupAvailability.All.Has(view))
@@ -168,7 +187,7 @@ public static class DataWindowFloor
                 return false;
             }
 
-            source = new Source(view, "bucket", endExclusive: true);
+            source = new Source(view, "bucket", endExclusive: true, lowerBoundUtc: lowerBoundUtc);
             return true;
         }
     }
@@ -195,6 +214,11 @@ public static class DataWindowFloor
     /// the window. For one it does not (see <see cref="Source.RetentionDefaultDays"/>): the oldest row the server
     /// holds at or before the window's end, a walk unbounded below that runs only for a server that counts, and
     /// the server's first collection when it holds no row at all.
+    ///
+    /// <para>A source that reads its relation only from an instant up (<see cref="Source.LowerBoundUtc"/>) takes that
+    /// instant as a further parameter, naive UTC, numbered after the scope's ($4 for a fleet probe, $5 otherwise, then
+    /// one more for each such source in order), and starts both its window read and its walk there. Binding them is
+    /// the caller's: <see cref="GetAsync"/> and <see cref="GetForServerAsync"/> add them in that order.</para>
     /// </summary>
     public static string FloorSql(IReadOnlyList<Source> sources, Scope scope)
     {
@@ -215,6 +239,7 @@ public static class DataWindowFloor
         var schema = PgSchemaGenerator.CollectSchema;
         var sql = new StringBuilder();
         sql.Append("SELECT MIN(u.t)\nFROM\n(\n");
+        var nextBoundParameter = scope == Scope.Fleet ? 4 : 5;
         for (var i = 0; i < sources.Count; i++)
         {
             var source = sources[i];
@@ -228,6 +253,13 @@ public static class DataWindowFloor
             var collector = source.CollectorName?.ToLowerInvariant();
             var time = source.TimeColumn;
             var endBound = source.EndExclusive ? " < $1" : " <= $1";
+
+            /* A relation the panel reads only from an instant up starts there, in the window read and in the walk, so
+               a row it holds below that instant (one the panel did not read) moves neither. The instant is a bind
+               parameter, numbered after the scope's; the caller adds the values in the same order. */
+            var lowerBound = source.LowerBoundUtc is null
+                ? null
+                : "$" + (nextBoundParameter++).ToString(System.Globalization.CultureInfo.InvariantCulture);
 
             string coverage;
             if (source.RetentionDefaultDays is int days && collector is not null)
@@ -247,7 +279,8 @@ public static class DataWindowFloor
                    TimescaleDB). Unbounded below, so the walk starts at the table's oldest chunk. It sits in the select
                    list, so it runs only for a server that survives the WHERE below (one that counts). With no row at
                    all, coverage falls back to the server's first collection. */
-                coverage = $"COALESCE((SELECT h.{time} FROM {schema}.{source.Relation} AS h WHERE h.server_id = s.server_id AND h.{time}{endBound} ORDER BY h.{time} LIMIT 1), s.created_date)";
+                var walkLowerBound = lowerBound is null ? string.Empty : $" AND h.{time} >= {lowerBound}";
+                coverage = $"COALESCE((SELECT h.{time} FROM {schema}.{source.Relation} AS h WHERE h.server_id = s.server_id AND h.{time}{endBound}{walkLowerBound} ORDER BY h.{time} LIMIT 1), s.created_date)";
             }
 
             sql.Append("    SELECT LEAST(").Append(coverage).Append(", w.t) AS t\n");
@@ -258,6 +291,11 @@ public static class DataWindowFloor
             sql.Append("        FROM ").Append(schema).Append('.').Append(source.Relation).Append(" AS f\n");
             sql.Append("        WHERE f.server_id = s.server_id\n");
             sql.Append("        AND   f.").Append(time).Append(" >= $2\n");
+            if (lowerBound is not null)
+            {
+                sql.Append("        AND   f.").Append(time).Append(" >= ").Append(lowerBound).Append('\n');
+            }
+
             sql.Append("        AND   f.").Append(time).Append(endBound).Append('\n');
             sql.Append("        ORDER BY f.").Append(time).Append('\n');
             sql.Append("        LIMIT 1\n");
@@ -309,6 +347,8 @@ public static class DataWindowFloor
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = serverNames!.ToArray() });
         }
 
+        AddLowerBounds(command, sources);
+
         return CoverageWithin(await command.ExecuteScalarAsync(cancellationToken), endUtc);
     }
 
@@ -328,6 +368,7 @@ public static class DataWindowFloor
         command.CommandTimeout = commandTimeoutSeconds;
         AddWindow(command, startUtc, endUtc);
         command.Parameters.AddWithValue(serverId);
+        AddLowerBounds(command, [source]);
 
         return CoverageWithin(await command.ExecuteScalarAsync(cancellationToken), endUtc);
     }
@@ -343,5 +384,18 @@ public static class DataWindowFloor
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+    }
+
+    /* One parameter per source that reads its relation only from an instant up, in source order, after the scope's:
+       the numbering FloorSql gave them. Unspecified for the same reason as the window's bounds. */
+    private static void AddLowerBounds(NpgsqlCommand command, IReadOnlyList<Source> sources)
+    {
+        foreach (var source in sources)
+        {
+            if (source.LowerBoundUtc is DateTime lowerBound)
+            {
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(lowerBound, DateTimeKind.Unspecified));
+            }
+        }
     }
 }

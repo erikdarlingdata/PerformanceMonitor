@@ -377,11 +377,17 @@ internal static class ComposeStoreAvailability
     /// The relations a compiled panel read, as data-start probe sources: the raw table on a raw route (none when
     /// the probe cannot read it by index, <see cref="DataWindowFloor.Source.TryForCollectorTable"/>), or each rollup
     /// a rollup route's FROM clause names, both halves when the route stitches a superseded rollup to its
-    /// successor. Read off the FROM clause the compiler spliced (<see cref="ComposeRoute.CaggFromClause"/>), so the
-    /// probe asks about exactly what the panel read, and each name is checked against the rollup registry
-    /// (<see cref="DataWindowFloor.Source.TryForRollup"/>) before the probe splices it. Each half is probed whole,
-    /// not split at the stitch boundary: the superseded half is the older one, so its oldest bucket is where the
-    /// stitched read starts.
+    /// successor. Read off the FROM clause the router built (<see cref="ComposeRoute.CaggFromClause"/>, set on every
+    /// rollup route, the day-grain daily included), so the probe asks about exactly what the panel read, and each
+    /// name is checked against the rollup registry (<see cref="DataWindowFloor.Source.TryForRollup"/>) before the
+    /// probe splices it. Each half is probed within the bounds the route reads it. The superseded half is probed
+    /// whole: the route reads it below the stitch boundary, and its oldest bucket is where the stitched read starts.
+    /// The successor is probed from the boundary up (<see cref="ComposeRoute.StitchBoundaryUtc"/>, the value the
+    /// router carried, never read out of the clause text), because that is all the route reads of it: a bucket it
+    /// holds below the boundary (a wide refresh after the boundary was measured) cannot move the start earlier.
+    /// The successor is the clause's relation the registry names as another one's successor, so the bound does not
+    /// depend on the order the clause lists them in. A rollup route without a FROM clause is a router defect, and
+    /// throws: there is no relation name to fall back to that is known to be the one the panel read.
     /// </summary>
     internal static IReadOnlyList<DataWindowFloor.Source> DataStartSources(string sourceTable, ComposeRoute route)
     {
@@ -390,12 +396,14 @@ internal static class ComposeStoreAvailability
             return DataWindowFloor.Source.TryForCollectorTable(sourceTable, out var raw) ? [raw] : [];
         }
 
-        var fromClause = route.CaggFromClause ?? $"{PgSchemaGenerator.CollectSchema}.{route.CaggRelation} AS {ComposeRoute.FactAlias}";
+        var fromClause = route.CaggFromClause
+            ?? throw new ArgumentException("a rollup route carries the FROM clause the router built; the data-start probe reads the relations it names off that clause.", nameof(route));
+        var relations = s_collectRelation.Matches(fromClause).Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal).ToList();
         var sources = new List<DataWindowFloor.Source>();
-        foreach (Match match in s_collectRelation.Matches(fromClause))
+        foreach (var relation in relations)
         {
-            if (DataWindowFloor.Source.TryForRollup(match.Groups[1].Value, out var rollup)
-                && !sources.Any(s => string.Equals(s.Relation, rollup.Relation, StringComparison.Ordinal)))
+            DateTime? lowerBound = route.StitchBoundaryUtc is { } boundary && IsSuccessorOfAnother(relation, relations) ? boundary : null;
+            if (DataWindowFloor.Source.TryForRollup(relation, out var rollup, lowerBound))
             {
                 sources.Add(rollup);
             }
@@ -403,6 +411,14 @@ internal static class ComposeStoreAvailability
 
         return sources;
     }
+
+    /* The registry's pairs: an hourly legacy and its successor (TimescaleSupport.SuccessorOf), a daily legacy and its
+       successor daily (TimescaleSupport.SupersededDailyRollups). */
+    private static bool IsSuccessorOfAnother(string relation, IReadOnlyList<string> clauseRelations) =>
+        clauseRelations.Any(other =>
+            string.Equals(TimescaleSupport.SuccessorOf(other), relation, StringComparison.Ordinal)
+            || TimescaleSupport.SupersededDailyRollups.Any(p =>
+                string.Equals(p.LegacyDaily, other, StringComparison.Ordinal) && string.Equals(p.SuccessorDaily, relation, StringComparison.Ordinal)));
 
     private static readonly Regex s_collectRelation =
         new(@"\b" + Regex.Escape(PgSchemaGenerator.CollectSchema) + @"\.([a-z_][a-z0-9_]*)\b", RegexOptions.CultureInvariant);

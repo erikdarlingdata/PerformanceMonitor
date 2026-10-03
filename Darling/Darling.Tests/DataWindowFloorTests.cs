@@ -269,4 +269,98 @@ public sealed class DataWindowFloorTests
                 + "The panel covers 2026-09-25 14:02 to 2026-10-02 14:00 UTC.",
             notice);
     }
+
+    /// <summary>A relation the panel reads only from an instant up (the successor half of a stitched read) starts both
+    /// its window read and its walk there, with the instant a bind parameter numbered after the scope's, never a
+    /// literal. A relation read whole keeps the text it had.</summary>
+    [Fact]
+    public void ALowerBound_StartsTheWindowReadAndTheWalk_AsABindParameter()
+    {
+        var bound = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        Assert.True(DataWindowFloor.Source.TryForRollup(TimescaleSupport.QueryStatsHourlyView, out var legacy));
+        Assert.True(DataWindowFloor.Source.TryForRollup(TimescaleSupport.QueryStatsIntervalHourlyView, out var successor, bound));
+        Assert.Null(legacy.LowerBoundUtc);
+        Assert.Equal(bound, successor.LowerBoundUtc);
+
+        var fleet = DataWindowFloor.FloorSql([legacy, successor], DataWindowFloor.Scope.Fleet);
+
+        Assert.Contains("AND   f.bucket >= $4\n", fleet, StringComparison.Ordinal);
+        Assert.Contains(
+            $"FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView} AS h WHERE h.server_id = s.server_id AND h.bucket < $1 AND h.bucket >= $4 ORDER BY h.bucket LIMIT 1",
+            fleet, StringComparison.Ordinal);
+        Assert.Contains(
+            $"FROM collect.{TimescaleSupport.QueryStatsHourlyView} AS h WHERE h.server_id = s.server_id AND h.bucket < $1 ORDER BY h.bucket LIMIT 1",
+            fleet, StringComparison.Ordinal);
+        Assert.DoesNotContain("2026-09-01", fleet, StringComparison.Ordinal);
+        Assert.DoesNotContain("$5", fleet, StringComparison.Ordinal);
+
+        var scoped = DataWindowFloor.FloorSql([legacy, successor], DataWindowFloor.Scope.ServerNames);
+        Assert.Contains("AND   f.bucket >= $5\n", scoped, StringComparison.Ordinal);
+        Assert.Contains("AND h.bucket >= $5 ORDER BY", scoped, StringComparison.Ordinal);
+        Assert.DoesNotContain("$6", scoped, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SeveralLowerBounds_AreNumberedAfterTheScope_InSourceOrder()
+    {
+        var bound = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        Assert.True(DataWindowFloor.Source.TryForRollup(TimescaleSupport.QueryStatsIntervalHourlyView, out var first, bound));
+        Assert.True(DataWindowFloor.Source.TryForRollup(TimescaleSupport.QueryStatsDbIntervalHourlyView, out var second, bound));
+
+        var sql = DataWindowFloor.FloorSql([first, second], DataWindowFloor.Scope.ServerId);
+
+        Assert.Contains("AND   s.server_id = $4", sql, StringComparison.Ordinal);
+        Assert.True(sql.IndexOf("f.bucket >= $5", StringComparison.Ordinal) < sql.IndexOf("f.bucket >= $6", StringComparison.Ordinal));
+        Assert.Contains("h.bucket >= $5 ORDER BY", sql, StringComparison.Ordinal);
+        Assert.Contains("h.bucket >= $6 ORDER BY", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>A stitched route reads the superseded half below the boundary and the successor from it up, so the
+    /// probe reads the successor from the boundary up and the superseded half whole, on both tiers, whichever order
+    /// the clause lists them in: the successor is the one the registry names, and the boundary is the route's value.</summary>
+    [Fact]
+    public void AStitchedRoute_ProbesTheSuccessorFromTheBoundaryUp_AndTheSupersededHalfWhole()
+    {
+        var boundary = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var pairs = new[]
+        {
+            (Legacy: TimescaleSupport.QueryStatsHourlyView, Successor: TimescaleSupport.QueryStatsIntervalHourlyView, Tier: ComposeSourceTier.Hourly),
+            (Legacy: TimescaleSupport.QueryStatsDailyView, Successor: TimescaleSupport.QueryStatsIntervalDailyView, Tier: ComposeSourceTier.Daily),
+        };
+
+        foreach (var pair in pairs)
+        {
+            foreach (var order in new[] { new[] { pair.Legacy, pair.Successor }, new[] { pair.Successor, pair.Legacy } })
+            {
+                var from = "(SELECT bucket FROM collect." + order[0] + " WHERE bucket < TIMESTAMP '2026-09-01 00:00:00.000000' UNION ALL SELECT bucket FROM collect."
+                    + order[1] + " WHERE bucket >= TIMESTAMP '2026-09-01 00:00:00.000000') AS f";
+                var route = new ComposeRoute(pair.Tier, pair.Legacy, from, boundary);
+
+                var sources = ComposeStoreAvailability.DataStartSources("query_stats", route).ToDictionary(s => s.Relation, StringComparer.Ordinal);
+
+                Assert.Equal(2, sources.Count);
+                Assert.Null(sources[pair.Legacy].LowerBoundUtc);
+                Assert.Equal(boundary, sources[pair.Successor].LowerBoundUtc);
+            }
+        }
+    }
+
+    [Fact]
+    public void AnUnstitchedRollupRoute_ProbesItsRollupWhole()
+    {
+        var route = new ComposeRoute(
+            ComposeSourceTier.Hourly, TimescaleSupport.QueryStatsIntervalHourlyView, "collect." + TimescaleSupport.QueryStatsIntervalHourlyView + " AS f");
+
+        Assert.Null(Assert.Single(ComposeStoreAvailability.DataStartSources("query_stats", route)).LowerBoundUtc);
+    }
+
+    /// <summary>The router sets the FROM clause on every rollup route it builds, so a rollup route without one is a
+    /// router defect: the probe refuses it rather than guess which relation the panel read.</summary>
+    [Fact]
+    public void ARollupRouteWithoutAFromClause_IsRefused()
+    {
+        var route = new ComposeRoute(ComposeSourceTier.Hourly, TimescaleSupport.QueryStatsIntervalHourlyView);
+
+        Assert.Throws<ArgumentException>(() => ComposeStoreAvailability.DataStartSources("query_stats", route));
+    }
 }
