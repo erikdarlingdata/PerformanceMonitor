@@ -101,6 +101,58 @@ public class CollectorFaultStackLogTests
         Assert.Null(log.TakeFirst("wait_stats", new OutOfMemoryException()));
     }
 
+    /// <summary>
+    /// The RDS ingestors wrap every fault that is not a cancellation in <see cref="RdsLogUnavailableException"/>, so an
+    /// out-of-memory read reaches the failure arm one level down. It takes the one-line arm like a bare one, wherever it
+    /// sits under the wrapper, and a wrapper over any other cause still gets its stack.
+    /// </summary>
+    [Fact]
+    public void AnOutOfMemoryUnderAWrapperGetsNoStackEither()
+    {
+        var log = new CollectorFaultStackLog();
+
+        var wrapped = new RdsLogUnavailableException("The log read failed.", false, new OutOfMemoryException());
+        var deeper = new InvalidOperationException("outer", new RdsLogUnavailableException("The log read failed.", false, new InsufficientMemoryException()));
+        var outerOverOther = new OutOfMemoryException("outer", new HttpRequestException("unreachable"));
+
+        Assert.Null(log.TakeFirst("pg_log_events", Thrown(wrapped)));
+        Assert.Null(log.TakeFirst("pg_log_events", Thrown(wrapped)));
+        Assert.Null(log.TakeFirst("pg_deadlocks", Thrown(deeper)));
+        Assert.Null(log.TakeFirst("pg_plan_capture", Thrown(outerOverOther)));
+
+        var network = new RdsLogUnavailableException("unreachable", false, new HttpRequestException("unreachable"));
+
+        Assert.NotNull(log.TakeFirst("pg_log_events", Thrown(network)));
+    }
+
+    /// <summary>An exception whose own <see cref="Exception.ToString"/> throws, as a type with a faulty override could.</summary>
+    private sealed class UnrenderableException : Exception
+    {
+        public UnrenderableException() : base("this exception cannot render itself") { }
+
+        public override string ToString() => throw new InvalidOperationException("ToString failed");
+    }
+
+    /// <summary>
+    /// The kind is claimed after the text is built. When building it throws, the kind still logs once, with a short line
+    /// that names the exception and what threw, and the second failure of the kind gets nothing.
+    /// </summary>
+    [Fact]
+    public void AnExceptionWhoseTextCannotBeBuiltStillLogsItsKindOnceWithAShortLine()
+    {
+        var log = new CollectorFaultStackLog();
+
+        var first = log.TakeFirst("pg_log_events", Thrown(new UnrenderableException()));
+
+        Assert.NotNull(first);
+        Assert.Contains(nameof(UnrenderableException), first, StringComparison.Ordinal);
+        Assert.Contains("System.InvalidOperationException", first, StringComparison.Ordinal);
+        Assert.DoesNotContain(Environment.NewLine, first, StringComparison.Ordinal);
+
+        Assert.Null(log.TakeFirst("pg_log_events", Thrown(new UnrenderableException())));
+        Assert.NotNull(log.TakeFirst("pg_deadlocks", Thrown(new UnrenderableException())));
+    }
+
     [Fact]
     public async Task EightRunsFailingTogetherInOneWayYieldExactlyOneStack()
     {

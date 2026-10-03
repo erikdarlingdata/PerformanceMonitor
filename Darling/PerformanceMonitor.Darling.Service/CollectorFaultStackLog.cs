@@ -23,8 +23,14 @@ namespace PerformanceMonitor.Darling.Service;
 /// (<see cref="Targets.RdsLogUnavailableException"/>), so a network fault and a bug inside the read would otherwise
 /// share one first line, and the fault that came first would use it up.</para>
 ///
-/// <para>An <see cref="OutOfMemoryException"/> is never given a stack. The failure arm is where an out-of-memory run
-/// lands, and building the text allocates; the line it already writes is the one that has to survive.</para>
+/// <para>An <see cref="OutOfMemoryException"/> is never given a stack, whether it is the exception itself or the one
+/// underneath it: the RDS ingestors wrap every fault that is not a cancellation, so an out-of-memory read arrives
+/// inside <see cref="Targets.RdsLogUnavailableException"/>. The failure arm is where an out-of-memory run lands, and
+/// building the text allocates; the line it already writes is the one that has to survive.</para>
+///
+/// <para>The text is built before the kind is claimed. If building it throws, the kind is still claimed, with one short
+/// line that names what threw, so the kind logs once and a throwing <see cref="Exception.ToString"/> does not take its
+/// only detail line with it.</para>
 /// </summary>
 internal sealed class CollectorFaultStackLog
 {
@@ -37,20 +43,53 @@ internal sealed class CollectorFaultStackLog
     /// </summary>
     public string? TakeFirst(string collectorName, Exception exception)
     {
-        if (exception is OutOfMemoryException)
-        {
-            return null;
-        }
-
         try
         {
-            return _seen.TryAdd((collectorName, exception.GetType(), exception.GetBaseException().GetType()), true)
-                ? exception.ToString()
-                : null;
+            if (exception is OutOfMemoryException || exception.GetBaseException() is OutOfMemoryException)
+            {
+                return null;
+            }
+
+            var kind = (collectorName, exception.GetType(), exception.GetBaseException().GetType());
+
+            /* A kind that has been written is not built again, so a collector that fails every cycle costs this arm
+               nothing beyond the lookup. */
+            if (_seen.ContainsKey(kind))
+            {
+                return null;
+            }
+
+            /* The text first, the claim second: a claim made before a build that throws would leave the kind with no
+               detail line at all. Runs failing together in one way all build, and exactly one of them wins the claim. */
+            var text = TextOf(exception);
+
+            return _seen.TryAdd(kind, true) ? text : null;
         }
         catch (Exception)
         {
             return null;
+        }
+    }
+
+    /// <summary>The full text of <paramref name="exception"/>, or when building it throws, one short line that names the
+    /// exception and the type that threw. Never throws.</summary>
+    private static string TextOf(Exception exception)
+    {
+        try
+        {
+            return exception.ToString();
+        }
+        catch (Exception failure)
+        {
+            try
+            {
+                return "The full text of this " + exception.GetType().FullName + " could not be built: its ToString threw "
+                    + failure.GetType().FullName + ".";
+            }
+            catch (Exception)
+            {
+                return "The full text of this exception could not be built: its ToString threw.";
+            }
         }
     }
 }
