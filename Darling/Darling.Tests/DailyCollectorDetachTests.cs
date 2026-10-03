@@ -82,22 +82,34 @@ public sealed class DailyCollectorDetachTests
     {
         private readonly object _lock = new();
         private readonly SemaphoreSlim _release = new(0);
+        private readonly bool _holdsThroughStop;
         private readonly List<(int ServerId, string Collector)> _started = [];
         private readonly List<(int ServerId, string Collector)> _finished = [];
+        private readonly Dictionary<int, ServerRuntime> _dailyRuntimes = [];
 
-        public FakeRuns(DarlingWorker worker)
+        /// <param name="worker">The worker whose collector runs this stands in for.</param>
+        /// <param name="holdsThroughStop">
+        /// A daily run's hold ignores the token the run was dispatched with, as a run in the middle of a store write
+        /// does, so a test can stop the service while runs are still going and see what the stop does to each one.
+        /// </param>
+        public FakeRuns(DarlingWorker worker, bool holdsThroughStop = false)
         {
-            worker.RunOneBodyOverride = async (server, collector, ct) =>
+            _holdsThroughStop = holdsThroughStop;
+            worker.RunOneBodyOverride = async (_, runtime, collector, ct) =>
             {
-                var key = (server.Runtime!.ServerId, collector);
+                var key = (runtime.ServerId, collector);
                 lock (_lock)
                 {
                     _started.Add(key);
+                    if (collector == Daily)
+                    {
+                        _dailyRuntimes[runtime.ServerId] = runtime;
+                    }
                 }
 
                 if (collector == Daily)
                 {
-                    await _release.WaitAsync(ct);
+                    await _release.WaitAsync(_holdsThroughStop ? CancellationToken.None : ct);
                 }
 
                 lock (_lock)
@@ -138,6 +150,15 @@ public sealed class DailyCollectorDetachTests
             lock (_lock)
             {
                 return _started.Contains((serverId, collector));
+            }
+        }
+
+        /// <summary>The runtime the daily run for this server was given when it started, or null if it has not.</summary>
+        public ServerRuntime? DailyRuntimeOf(int serverId)
+        {
+            lock (_lock)
+            {
+                return _dailyRuntimes.GetValueOrDefault(serverId);
             }
         }
 
@@ -250,6 +271,224 @@ public sealed class DailyCollectorDetachTests
         logger.Snapshot()
             .Where(e => e.Level == LogLevel.Debug && e.Message.Contains("daily-run permit", StringComparison.Ordinal))
             .ToList();
+
+    /* Shutdown. The service stops with daily runs going, and nothing but the shutdown drain (InFlightDailyRuns) holds
+       a detached run any more. Its budget is 15 s, so a drain that ends inside Patience ended because the runs did. */
+
+    [Fact]
+    public async Task TheShutdownDrain_WaitsForADailyRunThatIsStillGoing()
+    {
+        var logger = new RecordingLogger();
+        var worker = MakeWorker(logger);
+        var runs = new FakeRuns(worker, holdsThroughStop: true);
+        var server = MakeServer(4501, Daily);
+        using var stopping = new CancellationTokenSource();
+
+        try
+        {
+            await worker.RunDueCollectorsAsync(server, null!, stopping.Token);
+            Assert.True(await BecomesTrueAsync(() => runs.Started(Daily) == 1, Patience), "the daily run starts");
+            Assert.Single(worker.InFlightDailyRuns);
+
+            /* The service stops with the run still going. */
+            stopping.Cancel();
+            var drain = worker.DrainInFlightAsync([]);
+            Assert.False(
+                await EndsWithinAsync(drain, TimeSpan.FromMilliseconds(500)),
+                "the stop must wait for a daily run that is still going, not finish beside it");
+            Assert.Equal(0, runs.Finished(Daily));
+
+            runs.ReleaseAll();
+            Assert.True(await EndsWithinAsync(drain, Patience), "the stop finishes once the run has");
+            Assert.Equal(1, runs.Finished(Daily));
+            Assert.True(await BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 0, Patience), "a run that ended is no longer tracked");
+        }
+        finally
+        {
+            runs.ReleaseAll();
+        }
+    }
+
+    [Fact]
+    public async Task ADailyRunQueuedForAPermit_EndsAtOnceWhenTheServiceStops_AndNothingFaults()
+    {
+        const int Servers = 17;
+        var logger = new RecordingLogger();
+        var worker = MakeWorker(logger);
+        var runs = new FakeRuns(worker, holdsThroughStop: true);
+        var servers = Enumerable.Range(0, Servers).Select(i => MakeServer(4600 + i, Daily)).ToList();
+        using var stopping = new CancellationTokenSource();
+
+        var passes = servers.Select(s => worker.RunDueCollectorsAsync(s, null!, stopping.Token)).ToList();
+        try
+        {
+            Assert.True(await BecomesTrueAsync(() => runs.Started(Daily) == 16, Patience), "16 daily runs start at once");
+            Assert.True(await BecomesTrueAsync(() => WaitLines(logger).Count == 1, Patience), "the 17th run is queued for a permit");
+            var tracked = worker.InFlightDailyRuns.ToList();
+            Assert.Equal(Servers, tracked.Count);
+
+            /* Only the queued run can see the stop: the 16 that started hold on a wait that ignores it. */
+            stopping.Cancel();
+            Assert.True(
+                await BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 16, Patience),
+                "a run queued for a permit must end at once on the stopping token");
+            var ended = tracked.Single(t => t.IsCompleted);
+            Assert.True(
+                ended.Status == TaskStatus.RanToCompletion,
+                $"the cancel must be contained inside the run, but the run ended {ended.Status}");
+            Assert.Equal(16, runs.Started(Daily));
+            Assert.Equal(0, runs.Finished(Daily));
+
+            /* The 16 that were going are still awaited, and once they end every run is complete without a fault. */
+            var drain = worker.DrainInFlightAsync([]);
+            Assert.False(await EndsWithinAsync(drain, TimeSpan.FromMilliseconds(300)), "the stop must wait for the 16 runs still going");
+            runs.ReleaseAll();
+            Assert.True(await EndsWithinAsync(drain, Patience), "the stop finishes once the runs have");
+            Assert.All(tracked, t => Assert.Equal(TaskStatus.RanToCompletion, t.Status));
+        }
+        finally
+        {
+            runs.ReleaseAll();
+            await EndsWithinAsync(Task.WhenAll(passes), Patience);
+        }
+    }
+
+    [Fact]
+    public void TheShutdownMakesItsWaitThroughTheDrain_ThatAddsTheDailyRuns()
+    {
+        var worker = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
+
+        /* The wait the cases above call is the wait the shutdown makes: ExecuteAsync reaches it once, and it is
+           the one place the detached daily runs join the shutdown wait. */
+        Assert.Equal(1, CountOf(worker, "await DrainInFlightAsync(inFlightSweeps);"));
+        Assert.Equal(1, CountOf(worker, "inFlight.AddRange(InFlightDailyRuns);"));
+    }
+
+    /* The re-read after a long wait. A run queued for a permit can wait for hours behind other daily runs, so what it
+       works on is read again once it has its permit. The override is given the runtime the run is about to use. */
+
+    private sealed record QueuedRun(List<DarlingWorker.ServerLoopState> Servers, DarlingWorker.ServerLoopState Queued, List<Task> Passes);
+
+    /// <summary>
+    /// 17 servers come due for a daily run together: 16 start and hold a permit, and the 17th is queued for one.
+    /// Returns once the 17th is confirmed queued, so a test can change its server while the run waits.
+    /// </summary>
+    private static async Task<QueuedRun> QueueTheSeventeenthAsync(
+        DarlingWorker worker, RecordingLogger logger, FakeRuns runs, int firstServerId, CancellationToken ct)
+    {
+        var servers = Enumerable.Range(0, 17).Select(i => MakeServer(firstServerId + i, Daily)).ToList();
+        var passes = servers.Select(s => worker.RunDueCollectorsAsync(s, null!, ct)).ToList();
+
+        Assert.True(await BecomesTrueAsync(() => runs.Started(Daily) == 16, Patience), "16 daily runs start at once");
+        Assert.True(await BecomesTrueAsync(() => WaitLines(logger).Count == 1, Patience), "the 17th run is queued for a permit");
+        return new QueuedRun(servers, servers.Single(s => !runs.HasStarted(s.Runtime!.ServerId, Daily)), passes);
+    }
+
+    /// <summary>The same server after a reconnect: the same identity, and a new connection.</summary>
+    private static ServerRuntime Reconnected(ServerRuntime old) =>
+        new()
+        {
+            Config = old.Config,
+            ConnectionString = old.ConnectionString + ";Application Name=reconnected",
+            Target = old.Target,
+            StorageName = old.StorageName,
+            ServerId = old.ServerId,
+        };
+
+    [Fact]
+    public async Task ADailyRun_ThatWaitedForAPermitAndFindsItsServerRemoved_DoesNotRun()
+    {
+        var logger = new RecordingLogger();
+        var worker = MakeWorker(logger);
+        var runs = new FakeRuns(worker);
+        var ct = TestContext.Current.CancellationToken;
+        var queued = await QueueTheSeventeenthAsync(worker, logger, runs, 4700, ct);
+        try
+        {
+            var queuedId = queued.Queued.Runtime!.ServerId;
+
+            /* The server is removed while the run waits. Its connection is left in place, so it is the removal that
+               stops the run and not the missing connection (the next case). */
+            queued.Queued.Retired = true;
+
+            runs.ReleaseOne();
+            Assert.True(
+                await BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 15 || runs.HasStarted(queuedId, Daily), Patience),
+                "the queued run ends once a permit frees");
+            Assert.False(runs.HasStarted(queuedId, Daily), "a run that finds its server removed must not run");
+            Assert.Equal(16, runs.Started(Daily));
+            Assert.Equal(15, worker.InFlightDailyRuns.Count);
+        }
+        finally
+        {
+            runs.ReleaseAll();
+            await EndsWithinAsync(Task.WhenAll(queued.Passes), Patience);
+        }
+    }
+
+    [Fact]
+    public async Task ADailyRun_ThatWaitedForAPermitAndFindsItsServerDisconnected_DoesNotRun()
+    {
+        var logger = new RecordingLogger();
+        var worker = MakeWorker(logger);
+        var runs = new FakeRuns(worker);
+        var ct = TestContext.Current.CancellationToken;
+        var queued = await QueueTheSeventeenthAsync(worker, logger, runs, 4800, ct);
+        try
+        {
+            var queuedId = queued.Queued.Runtime!.ServerId;
+
+            queued.Queued.Runtime = null;
+
+            runs.ReleaseOne();
+            Assert.True(
+                await BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 15 || runs.HasStarted(queuedId, Daily), Patience),
+                "the queued run ends once a permit frees");
+            Assert.False(runs.HasStarted(queuedId, Daily), "a run that finds its server disconnected must not run");
+            Assert.Equal(16, runs.Started(Daily));
+            Assert.Equal(15, worker.InFlightDailyRuns.Count);
+        }
+        finally
+        {
+            runs.ReleaseAll();
+            await EndsWithinAsync(Task.WhenAll(queued.Passes), Patience);
+        }
+    }
+
+    [Fact]
+    public async Task ADailyRun_ThatWaitedForAPermitAndFindsItsServerReconnected_UsesTheNewConnection()
+    {
+        var logger = new RecordingLogger();
+        var worker = MakeWorker(logger);
+        var runs = new FakeRuns(worker);
+        var ct = TestContext.Current.CancellationToken;
+        var queued = await QueueTheSeventeenthAsync(worker, logger, runs, 4900, ct);
+        try
+        {
+            var capturedAtDispatch = queued.Queued.Runtime!;
+            var queuedId = capturedAtDispatch.ServerId;
+
+            /* The server reconnects while the run waits: same identity, a new connection. */
+            var reconnected = Reconnected(capturedAtDispatch);
+            queued.Queued.Runtime = reconnected;
+
+            runs.ReleaseOne();
+            Assert.True(await BecomesTrueAsync(() => runs.HasStarted(queuedId, Daily), Patience), "the queued run starts once a permit frees");
+
+            var used = runs.DailyRuntimeOf(queuedId);
+            Assert.False(
+                ReferenceEquals(used, capturedAtDispatch),
+                "a run that waited must not use the connection its server had when it was dispatched");
+            Assert.True(
+                ReferenceEquals(used, reconnected),
+                "a run that waited must use the connection its server has now");
+        }
+        finally
+        {
+            runs.ReleaseAll();
+            await EndsWithinAsync(Task.WhenAll(queued.Passes), Patience);
+        }
+    }
 
     [Fact]
     public async Task ADailyCollector_WhosePreviousDetachedRunIsStillGoing_SkipsThatTick()

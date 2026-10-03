@@ -545,10 +545,12 @@ public sealed class DarlingWorker : BackgroundService
     /// <summary>
     /// Test seam (#4938): replaces what one collector run does once its permits are held, so a test can block a
     /// run and watch the scheduling around it with no store and no monitored server. It sits after every limit
-    /// <see cref="RunOneAsync"/> applies, so a limit that is held while the replacement runs is observable. Null in
-    /// production, which runs the collector for real.
+    /// <see cref="RunOneAsync"/> applies, so a limit that is held while the replacement runs is observable. It is
+    /// given the runtime the run is about to work on, which for a daily run is the one read again after its wait
+    /// for a permit, so a test can see which connection a run got. Null in production, which runs the collector
+    /// for real.
     /// </summary>
-    internal Func<ServerLoopState, string, CancellationToken, Task<int>>? RunOneBodyOverride { get; set; }
+    internal Func<ServerLoopState, ServerRuntime, string, CancellationToken, Task<int>>? RunOneBodyOverride { get; set; }
 
     /// <summary>
     /// The sweep gate's width right now (#2170) — the ceiling minus what has been absorbed. Reported by the
@@ -3623,17 +3625,8 @@ LIMIT 1";
             inFlightSweeps.Add(_storeMetricsTick);
         }
 
-        /* #4938: the daily runs detached from those bodies. They ran inside the bodies, and so inside this wait,
-           before they were detached; the stopping token has already cancelled them, and a run still queued for a
-           permit ends at once. They never fault (RunDetachedAsync contains the cancel). */
-        inFlightSweeps.AddRange(InFlightDailyRuns);
-
-        if (inFlightSweeps.Count > 0)
-        {
-            await Task.WhenAny(
-                Task.WhenAll(inFlightSweeps),
-                Task.Delay(s_shutdownDrainBudget, CancellationToken.None));
-        }
+        /* #4938: the daily runs detached from those bodies join the wait inside DrainInFlightAsync. */
+        await DrainInFlightAsync(inFlightSweeps);
 
         /* #4130: drain the in-flight daily purge the same way as the per-server sweeps above, rather than
            abandoning it mid-DELETE. RunTrackedAsync's own try/catch swallows the OperationCanceledException
@@ -5088,6 +5081,26 @@ LIMIT 1";
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// The shutdown wait for the work that is still going when the sweep loop ends (#1553): the per-server bodies and
+    /// the store ticks the caller collected (<paramref name="inFlight"/>) and, since #4938, the detached daily runs,
+    /// which used to run inside those bodies and so inside this wait. The stopping token has already cancelled them,
+    /// and a run still queued for a daily-run permit ends at once on it. None of them faults (RunDetachedAsync
+    /// contains the cancel), so the wait completes cleanly. Bounded by the drain budget, so a run that is genuinely
+    /// hung cannot hold shutdown open. A method of its own (#4938) so a test can call it; the shutdown calls it once.
+    /// </summary>
+    internal async Task DrainInFlightAsync(List<Task> inFlight)
+    {
+        inFlight.AddRange(InFlightDailyRuns);
+
+        if (inFlight.Count > 0)
+        {
+            await Task.WhenAny(
+                Task.WhenAll(inFlight),
+                Task.Delay(s_shutdownDrainBudget, CancellationToken.None));
+        }
     }
 
     /// <summary>
@@ -12839,7 +12852,7 @@ LIMIT 1";
 
         if (RunOneBodyOverride is { } bodyOverride)
         {
-            return await bodyOverride(server, collectorName, cancellationToken);
+            return await bodyOverride(server, runtime, collectorName, cancellationToken);
         }
 
         /* #2997: wall clock for the whole run, read ONLY by the fault arms below. The success path
