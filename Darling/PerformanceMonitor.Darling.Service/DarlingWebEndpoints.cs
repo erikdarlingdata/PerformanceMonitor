@@ -1476,9 +1476,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private const string QueryStoreWideServerIdsSql =
         "SELECT server_id, server_name FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1)) ORDER BY server_id";
 
-    /// <summary>#4605: how many servers' eligibility probes run at once in a fleet check.</summary>
-    private const int QueryStoreWideEligibilityConcurrency = 4;
-
     /// <summary>
     /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
     /// may read <c>collect.query_store_interval_wide</c> (V145) instead of deduping raw — decided here, in the
@@ -1502,44 +1499,37 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         try
         {
-            var wideServers = new List<(int Id, string Name)>();
-            QueryStoreIntervalWide.StoreWideInputs? storeWide;
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
-            /* The schema version, the server list and the floors are read on one connection that is closed
-               before the fan-out, so a fleet check holds at most QueryStoreWideEligibilityConcurrency connections. */
-            await using (var connection = await postgres.OpenConnectionAsync(cancellationToken))
+            int schemaVersion;
+            await using (var probe = new NpgsqlCommand(QueryStoreWideSchemaVersionSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
-                int schemaVersion;
-                await using (var probe = new NpgsqlCommand(QueryStoreWideSchemaVersionSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
-                {
-                    schemaVersion = (int)(await probe.ExecuteScalarAsync(cancellationToken))!;
-                }
+                schemaVersion = (int)(await probe.ExecuteScalarAsync(cancellationToken))!;
+            }
 
-                if (schemaVersion < 145)
-                {
-                    return default;
-                }
+            if (schemaVersion < 145)
+            {
+                return default;
+            }
 
-                await using (var servers = new NpgsqlCommand(QueryStoreWideServerIdsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            var wideServers = new List<(int Id, string Name)>();
+            await using (var servers = new NpgsqlCommand(QueryStoreWideServerIdsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                servers.Parameters.Add(new NpgsqlParameter
                 {
-                    servers.Parameters.Add(new NpgsqlParameter
-                    {
-                        NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text,
-                        Value = serverScope is { Count: > 0 } ? (object)serverScope.ToArray() : DBNull.Value,
-                    });
-                    await using var reader = await servers.ExecuteReaderAsync(cancellationToken);
-                    while (await reader.ReadAsync(cancellationToken))
-                    {
-                        wideServers.Add((reader.GetInt32(0), reader.GetString(1)));
-                    }
-                }
-
-                if (wideServers.Count == 0)
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text,
+                    Value = serverScope is { Count: > 0 } ? (object)serverScope.ToArray() : DBNull.Value,
+                });
+                await using var reader = await servers.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
                 {
-                    return default;
+                    wideServers.Add((reader.GetInt32(0), reader.GetString(1)));
                 }
+            }
 
-                storeWide = await QueryStoreIntervalWide.ReadStoreWideInputsAsync(connection, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            if (wideServers.Count == 0)
+            {
+                return default;
             }
 
             /* #4689: every server in scope reads from ONE common start, the latest of the per-server read
@@ -1549,61 +1539,23 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var bound = QueryStoreIntervalWide.WideStartBound.Window;
             string? settingServer = null;
 
-            /* The floors are one store-wide answer: read once here, not once per server. Servers are then
-               checked QueryStoreWideEligibilityConcurrency at a time, each on its own pooled connection; the
-               first refusal cancels the rest. The reduction below walks wideServers in order, so ties for the
-               latest read start go to the earliest server exactly as a serial loop would. */
-            using var refused = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            using var gate = new System.Threading.SemaphoreSlim(QueryStoreWideEligibilityConcurrency);
-            var checks = wideServers.Select(async server =>
+            /* The floors are one store-wide answer: read once here, not once per server. */
+            var storeWide = await QueryStoreIntervalWide.ReadStoreWideInputsAsync(connection, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            foreach (var (serverId, serverName) in wideServers)
             {
-                try
+                var plan = await QueryStoreIntervalWide.ResolveReadAsync(
+                    connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
+                    McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken, storeWide);
+                if (!plan.UseTable)
                 {
-                    await gate.WaitAsync(refused.Token);
-                }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                {
-                    return (QueryStoreIntervalWide.WideReadPlan?)null;
+                    return default;
                 }
 
-                try
-                {
-                    await using var serverConnection = await postgres.OpenConnectionAsync(refused.Token);
-                    var plan = await QueryStoreIntervalWide.ResolveReadAsync(
-                        serverConnection, server.Id, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
-                        McpCommandDeadlines.ReadSeconds, logger: null, refused.Token, storeWide);
-                    if (!plan.UseTable)
-                    {
-                        refused.Cancel();
-                    }
-
-                    return (QueryStoreIntervalWide.WideReadPlan?)plan;
-                }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                {
-                    return null;
-                }
-                finally
-                {
-                    gate.Release();
-                }
-            }).ToList();
-            var plans = await Task.WhenAll(checks);
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (refused.IsCancellationRequested)
-            {
-                return default;
-            }
-
-            for (var i = 0; i < wideServers.Count; i++)
-            {
-                var plan = plans[i]!.Value;
                 if (plan.ReadStart > wideStart)
                 {
                     wideStart = plan.ReadStart;
                     bound = plan.StartBound;
-                    settingServer = wideServers[i].Name;
+                    settingServer = serverName;
                 }
             }
 
