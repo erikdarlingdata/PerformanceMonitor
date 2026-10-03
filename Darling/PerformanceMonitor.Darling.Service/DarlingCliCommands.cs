@@ -5573,6 +5573,20 @@ LEFT JOIN collect.servers s ON s.server_id = cs.server_id
 WHERE lower(cs.collector_name) = lower($1)
 ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
+    /// <summary>
+    /// The same read for a store the service has not migrated to V158 yet, which has no <c>run_at_minute</c> column (#4938): the
+    /// column list and its positions are identical, with the run time as a NULL smallint so no row prints a <c>run_at=</c>. The
+    /// verbs work against a store older than the binary (a missing column is the idiom, as <see cref="StoreIsSetToPlainTextPlansAsync"/>
+    /// reads the V62 column), so a toggle's read-back must not fail on a store whose write succeeded.
+    /// </summary>
+    internal const string CollectorScheduleReadbackWithoutRunAtSql = @"
+SELECT cs.server_id, cs.collector_name, cs.frequency_minutes, cs.retention_days, cs.enabled, cs.databases,
+       COALESCE(s.display_name, s.server_name) AS server_label, NULL::smallint AS run_at_minute
+FROM config.config_collector_schedules cs
+LEFT JOIN collect.servers s ON s.server_id = cs.server_id
+WHERE lower(cs.collector_name) = lower($1)
+ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
+
     /// <summary>One <c>config_collector_schedules</c> row as the verb reads it back: the service's
     /// <see cref="ScheduleOverride"/> columns plus the registry label the operator knows the server by.</summary>
     internal sealed record CollectorScheduleReadbackRow(
@@ -5582,12 +5596,29 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     internal static async Task<List<CollectorScheduleReadbackRow>> ReadCollectorScheduleRowsAsync(
         NpgsqlDataSource postgres, string collectorName, CancellationToken cancellationToken)
     {
+        try
+        {
+            return await ReadCollectorScheduleRowsAsync(postgres, collectorName, CollectorScheduleReadbackSql, cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)
+        {
+            /* A store the service has not migrated to V158 yet has no run_at_minute: read the rows without it, so the
+               read-back omits run_at= instead of failing after a write that already committed. A different missing
+               column fails the same way here and is reported as it is. The state code, not the message text, is what
+               is matched: lc_messages is not always English. */
+            return await ReadCollectorScheduleRowsAsync(postgres, collectorName, CollectorScheduleReadbackWithoutRunAtSql, cancellationToken);
+        }
+    }
+
+    private static async Task<List<CollectorScheduleReadbackRow>> ReadCollectorScheduleRowsAsync(
+        NpgsqlDataSource postgres, string collectorName, string sql, CancellationToken cancellationToken)
+    {
         var rows = new List<CollectorScheduleReadbackRow>();
         /* The deadline is written ON the construction, as every CLI store command in this file writes it: the
            #2874 straggler census counts this file's sites and reads the initializer from the construction span,
            so a deadline assigned a statement later would be a site it cannot certify. */
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(CollectorScheduleReadbackSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

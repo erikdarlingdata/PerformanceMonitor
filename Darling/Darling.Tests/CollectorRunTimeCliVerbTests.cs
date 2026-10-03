@@ -217,6 +217,22 @@ public sealed class CollectorRunTimeCliVerbTests
         /* A row with no run time prints exactly what the toggle verbs have always printed. */
         Assert.Contains("  sql03 (server_id 9): enabled=true  frequency=(default)  retention=(default)", lines);
     }
+
+    /// <summary>The read-back for a store that has no run-time column yet is the same read with the column swapped for a
+    /// NULL smallint in the same position, so one reader serves both stores and a row prints no <c>run_at=</c>.</summary>
+    [Fact]
+    public void TheReadBackForAStoreWithoutTheColumn_IsTheSameReadWithANullRunTimeInPlace()
+    {
+        var full = DarlingCliCommands.CollectorScheduleReadbackSql;
+        var older = DarlingCliCommands.CollectorScheduleReadbackWithoutRunAtSql;
+
+        Assert.Contains("cs.run_at_minute", full, StringComparison.Ordinal);
+        Assert.DoesNotContain("cs.run_at_minute", older, StringComparison.Ordinal);
+        Assert.Equal(full.Replace("cs.run_at_minute", "NULL::smallint AS run_at_minute", StringComparison.Ordinal), older);
+        Assert.DoesNotContain("INSERT", older, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("UPDATE", older, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("DELETE", older, StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 /// <summary>
@@ -552,6 +568,58 @@ public sealed class CollectorRunTimeCliVerbLiveTests
 
             Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(rig.Connection,
                 "SELECT COUNT(*) FROM config.config_collector_schedules", ct)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    /// <summary>The toggle verbs share the read-back, which now selects the run time. A store the service has not migrated to
+    /// the run-time column yet must still read back after the write (the CLI works against a store older than its binary), and
+    /// the rows print without a <c>run_at=</c>: the column is gone here, with its check, as it is on such a store.</summary>
+    [Fact]
+    public async Task TheToggleVerbs_ReadBackOnAStoreWithoutTheRunTimeColumn_AndPrintNoRunAt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(rig.Connection, "ALTER TABLE config.config_collector_schedules DROP COLUMN run_at_minute", ct);
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(rig.Connection,
+                "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_collector_schedules' AND column_name = 'run_at_minute'", ct)));
+            await ExecAsync(rig.Connection,
+                $"INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled) VALUES ({Sql01}, '{Daily}', FALSE)", ct);
+
+            /* --enable-collector, fleet-wide: the write commits and the read-back prints the row. */
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.ToggleCollectorAsync(
+                enable: true, new[] { "long_query_completions", "--config", rig.ConfigPath }, output, error, ct);
+            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
+            Assert.Equal(string.Empty, error.ToString());
+            Assert.Contains("[ENABLED] long_query_completions", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("  fleet-wide: enabled=true  frequency=(default)  retention=(default)", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("run_at=", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("no restart is needed", output.ToString(), StringComparison.OrdinalIgnoreCase);
+
+            /* --disable-collector for one server's row, beside a fleet row the same collector does not have. */
+            output = new StringWriter();
+            error = new StringWriter();
+            exit = await DarlingCliCommands.ToggleCollectorAsync(
+                enable: false, new[] { Daily, "--server", "sql01", "--config", rig.ConfigPath }, output, error, ct);
+            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
+            Assert.Equal(string.Empty, error.ToString());
+            Assert.Contains($"  sql01 (server_id {Sql01}): enabled=false  frequency=(default)  retention=(default)", output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("run_at=", output.ToString(), StringComparison.Ordinal);
+
+            Assert.Equal(true, await ScalarAsync(rig.Connection,
+                "SELECT enabled FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = 'long_query_completions'", ct));
 
             bodySucceeded = true;
         }
