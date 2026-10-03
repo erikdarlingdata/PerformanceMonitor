@@ -735,7 +735,13 @@ public sealed class CompressionEnableGuardTests
         Assert.True(versionCheckAt >= 0 && versionCheckAt < alterAt,
             "EnsureCollectionLogHypertableAsync must check the TimescaleDB version and compressed chunks before it attempts the settings change");
         Assert.Contains("BoundedDdlOutcome.LockBusy", collectionLog, StringComparison.Ordinal);
-        Assert.Contains("\"collection_log's compression settings\"", collectionLog, StringComparison.Ordinal);
+        /* The label is a string literal, which the stripped text above cannot hold: read it from the raw source of the same method. */
+        var rawStorage = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var rawStart = rawStorage.IndexOf("public static async Task<bool> EnsureCollectionLogHypertableAsync(", StringComparison.Ordinal);
+        Assert.True(rawStart >= 0, "could not locate EnsureCollectionLogHypertableAsync in the raw source");
+        var rawEnd = rawStorage.IndexOf("\n    }\n", rawStart, StringComparison.Ordinal);
+        Assert.True(rawEnd > rawStart, "could not find the end of EnsureCollectionLogHypertableAsync in the raw source");
+        Assert.Contains("\"collection_log's compression settings\"", rawStorage[rawStart..rawEnd], StringComparison.Ordinal);
 
         /* A read failure must issue every ALTER rather than skip every ALTER: the conservative direction,
            because a needless ALTER costs one lock and a skipped one costs a table that never compresses.
