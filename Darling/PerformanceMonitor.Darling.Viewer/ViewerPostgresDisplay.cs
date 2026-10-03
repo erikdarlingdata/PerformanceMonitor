@@ -297,7 +297,7 @@ internal static class PgDisplay
         /* datallowconn=false is why a database can sit at 99% of wraparound and never be vacuumed by
            anything that connects to it. It is the finding, not a footnote. */
         ConnectionsAllowed = row.AllowsConnections ? "allowed" : "NOT ALLOWED",
-        MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAt = SnapshotTime(row.MeasuredAt),
         MeasuredAtUtc = row.MeasuredAt,
     };
 
@@ -1390,7 +1390,7 @@ internal static class PgDisplay
         Correlation = row.Correlation,
         TopValueFrequency = row.TopValueFrequency,
         CommonValueCount = row.CommonValueCount,
-        CaptureTime = Timestamp(row.CaptureTime),
+        CaptureTime = SnapshotTime(row.CaptureTime),
         CaptureTimeUtc = row.CaptureTime,
     };
 
@@ -1593,5 +1593,29 @@ internal static class PgDisplay
         CaptureTime = SnapshotTime(row.CaptureTime),
         CaptureTimeUtc = row.CaptureTime,
         Source = row,
+    };
+
+    /// <summary>One facet of the Plan-capture readiness grid: the check's answer as words, with the time it was last observed.</summary>
+    internal sealed class PlanCaptureRow
+    {
+        public string Facet { get; init; } = "";
+        /* Words, not a checkbox or a bare bool: "False" beside a remedy sentence reads as a failure rather than as a
+           step not yet taken. */
+        public string Satisfied { get; init; } = "";
+        public string Observed { get; init; } = "";
+        public string Detail { get; init; } = "";
+        public string CaptureTime { get; init; } = "";
+        /// <summary>The UTC instant <see cref="CaptureTime"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime CaptureTimeUtc { get; init; }
+    }
+
+    internal static PlanCaptureRow PlanCapture(DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow row) => new()
+    {
+        Facet = row.Facet,
+        Satisfied = row.IsSatisfied ? "yes" : "no",
+        Observed = row.Observed ?? "(not reported)",
+        Detail = row.Detail ?? string.Empty,
+        CaptureTime = SnapshotTime(row.CaptureTime),
+        CaptureTimeUtc = row.CaptureTime,
     };
 }

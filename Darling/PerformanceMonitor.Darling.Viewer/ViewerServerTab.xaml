@@ -4743,6 +4743,8 @@
                         <DataGridTextColumn Header="Satisfied" Binding="{Binding Satisfied}" Width="80"/>
                         <DataGridTextColumn Header="Observed" Binding="{Binding Observed}" Width="240"/>
                         <DataGridTextColumn Header="What it means / what to do" Binding="{Binding Detail}" Width="*"/>
+                        <!-- Newest row per facet, so the rows can come from different snapshots. -->
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
 
