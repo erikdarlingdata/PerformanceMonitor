@@ -486,10 +486,14 @@ WHERE status = 'in_progress'
             return Fail($"{verb} requires args_json.collector_name");
         }
 
-        if (!CollectorScheduleDefaults.All.ContainsKey(collectorName))
+        /* The catalog's own spelling is what gets bound: the table's unique indexes compare the name exactly, so a typed
+           'Wait_Stats' would become a second row beside the viewer's 'wait_stats'. */
+        if (DarlingCliCommands.CanonicalCollectorName(collectorName) is not string canonical)
         {
             return Fail($"{verb}: unknown collector '{collectorName}'");
         }
+
+        collectorName = canonical;
 
         var flag = enabled ? "TRUE" : "FALSE";
         var successStatus = enabled ? "collector enabled" : "collector disabled";
@@ -541,10 +545,14 @@ WHERE status = 'in_progress'
             return Fail($"{Verb} requires args_json.collector_name");
         }
 
-        if (!CollectorScheduleDefaults.All.ContainsKey(collectorName))
+        /* The catalog's own spelling is what gets bound: the table's unique indexes compare the name exactly, so a typed
+           'Wait_Stats' would become a second row beside the viewer's 'wait_stats'. */
+        if (DarlingCliCommands.CanonicalCollectorName(collectorName) is not string canonical)
         {
             return Fail($"{Verb}: unknown collector '{collectorName}'");
         }
+
+        collectorName = canonical;
 
         var runAt = TryReadString(command.ArgsJson, "run_at", "runAt");
         if (runAt is null)

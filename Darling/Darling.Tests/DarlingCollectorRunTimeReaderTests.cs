@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -184,5 +186,30 @@ public sealed class DarlingCollectorRunTimeReaderTests
 
         Assert.Equal(bandBefore, row.HealthStatus);
         Assert.Equal(PerformanceMonitor.Common.CollectorHealthClassifier.Stale, bandBefore);
+    }
+
+    [Fact]
+    public async Task AnInsufficientPrivilegeReadAnswersNoRunTimesWithOneWarning()
+    {
+        var warnings = new List<string>();
+
+        var result = await DarlingCollectorRunTimeReader.ReadRunTimesAsync(
+            () => throw new PostgresException("permission denied", "ERROR", "ERROR", "42501"), warnings.Add);
+
+        Assert.Empty(result);
+        Assert.Single(warnings);
+    }
+
+    [Fact]
+    public async Task AMissingTableAnswersNoRunTimesAndAnythingElsePropagates()
+    {
+        var warnings = new List<string>();
+
+        Assert.Empty(await DarlingCollectorRunTimeReader.ReadRunTimesAsync(
+            () => throw new PostgresException("no table", "ERROR", "ERROR", "42P01"), warnings.Add));
+        Assert.Empty(warnings);
+
+        await Assert.ThrowsAsync<PostgresException>(() => DarlingCollectorRunTimeReader.ReadRunTimesAsync(
+            () => throw new PostgresException("boom", "ERROR", "ERROR", "XX000"), warnings.Add));
     }
 }
