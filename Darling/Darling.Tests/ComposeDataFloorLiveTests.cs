@@ -202,7 +202,15 @@ public sealed class ComposeDataFloorLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var store = await SeededStore.CreateAsync(ct);
 
-        var outcome = await RunAsync(store.DataSource, RecentServerName, hours: 720, ct);
+        var mcpOutcome = await RunAsync(store.DataSource, RecentServerName, hours: 720, ct);
+        Assert.True(mcpOutcome.Error is null, $"compose run failed: {mcpOutcome.Error}");
+        Assert.NotNull(mcpOutcome.Payload!["notice"]);
+        Assert.Null(mcpOutcome.Payload["data_start_note"]);
+        Assert.Null(mcpOutcome.Payload["data_start_utc"]);
+        Assert.Null(mcpOutcome.Payload["window_start_utc"]);
+        Assert.Null(mcpOutcome.Payload["window_end_utc"]);
+
+        var outcome = await RunAsync(store.DataSource, RecentServerName, hours: 720, ct, includeDataStartFields: true);
         Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
 
         var scenario = new JsonObject
@@ -316,11 +324,12 @@ public sealed class ComposeDataFloorLiveTests
         return outcome.Payload!["notice"]?.GetValue<string>();
     }
 
-    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(NpgsqlDataSource dataSource, string? server, int hours, CancellationToken ct) =>
-        RunAsync(dataSource, WaitDurationPanel, server, hours, ct);
+    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(
+        NpgsqlDataSource dataSource, string? server, int hours, CancellationToken ct, bool includeDataStartFields = false) =>
+        RunAsync(dataSource, WaitDurationPanel, server, hours, ct, includeDataStartFields);
 
     private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(
-        NpgsqlDataSource dataSource, string panel, string? server, int hours, CancellationToken ct)
+        NpgsqlDataSource dataSource, string panel, string? server, int hours, CancellationToken ct, bool includeDataStartFields = false)
     {
         var body = new JsonObject
         {
@@ -332,7 +341,7 @@ public sealed class ComposeDataFloorLiveTests
             body["server"] = server;
         }
 
-        return DarlingWebEndpoints.RunComposedPanelAsync(dataSource, body, ct);
+        return DarlingWebEndpoints.RunComposedPanelAsync(dataSource, body, ct, includeDataStartFields: includeDataStartFields);
     }
 
     /* A pinned Custom Views cell's run: the absolute window pair, as ISO-8601 UTC text, in place of the relative hours. */
