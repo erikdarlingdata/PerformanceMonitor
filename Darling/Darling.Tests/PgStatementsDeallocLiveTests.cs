@@ -59,10 +59,34 @@ public sealed class PgStatementsDeallocLiveTests
             await DarlingMcpTestData.ExecAsync(connection, ct, "CREATE EXTENSION pg_stat_statements");
             await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT 1");
             var major = connection.PostgreSqlVersion.Major;
-            var direct = await ScalarAsync(connection, "SELECT dealloc FROM public.pg_stat_statements_info", ct);
-            var read = await ReadOrdinal30Async(connection, Sql(major, aurora: false), ct);
+
+            /* #4981: the counter belongs to the SERVER, not to this test. pg_stat_statements_info.dealloc counts the
+               eviction passes of every session on the cluster, and a full pg_stat_statements_reset() from another
+               live class sets it back to zero and stamps a new stats_reset. Reading it directly once and asserting the
+               collector's read equals it failed whenever another session moved it between the two reads. This test
+               evicts nothing itself, so its own contribution to the counter is zero: the collector's read must lie
+               between a direct read taken just before it and one taken just after, which holds however much the other
+               sessions add. A reset between the two direct reads (a changed stats_reset) voids that attempt, and the
+               read is tried again. */
+            (int Count, long? Dealloc) read = (0, null);
+            (long Dealloc, string Epoch) before = (0, string.Empty);
+            (long Dealloc, string Epoch) after = (0, string.Empty);
+            for (var attempt = 0; attempt < 5; attempt++)
+            {
+                before = await DeallocAsync(connection, ct);
+                read = await ReadOrdinal30Async(connection, Sql(major, aurora: false), ct);
+                after = await DeallocAsync(connection, ct);
+                if (before.Epoch == after.Epoch)
+                {
+                    break;
+                }
+            }
+
+            /* Five resets in a row is not noise. */
+            Assert.Equal(before.Epoch, after.Epoch);
             Assert.True(read.Count > 0);
-            Assert.Equal(direct, read.Dealloc);
+            Assert.NotNull(read.Dealloc);
+            Assert.InRange(read.Dealloc!.Value, before.Dealloc, after.Dealloc);
 
             /* The Aurora flavor reads aurora_stat_statements(), which stock PostgreSQL does not have, so it cannot
                run here; its text must carry the same twin as its last select item. */
@@ -242,11 +266,16 @@ VALUES ($1, $2, $3, $4, 42, 16384, 10, TRUE, 100, 5000, 91.5, 250, 10, 5, 0, 0, 
         return (count, dealloc);
     }
 
-    private static async Task<long?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    /// <summary>
+    /// The extension's own eviction counter and the stamp of the last reset, read together in one statement, so a caller
+    /// can tell a reset (a new stamp) from an increase.
+    /// </summary>
+    private static async Task<(long Dealloc, string Epoch)> DeallocAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(sql, connection);
-        var value = await command.ExecuteScalarAsync(ct);
-        return value is null or DBNull ? null : Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture);
+        await using var command = new NpgsqlCommand("SELECT dealloc, stats_reset::text FROM public.pg_stat_statements_info", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return (reader.GetInt64(0), reader.IsDBNull(1) ? string.Empty : reader.GetString(1));
     }
 
     private sealed class NoOpDeltas : ICollectorDeltaCalculator
