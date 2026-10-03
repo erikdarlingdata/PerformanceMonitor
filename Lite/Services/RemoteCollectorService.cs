@@ -67,8 +67,19 @@ public class XeSessionEnsureException : Exception
 {
     public string SessionKind { get; }
 
+    /// <summary>
+    /// True when the always-on deadlock or blocked-process ensure that raised this had already failed, and logged its lines at
+    /// their full levels, on an earlier cycle of that session on that server, with no success since (#4964). The ensure sets it
+    /// from the state it keeps, so <c>RunCollectorAsync</c> logs its own line for the failure at Debug instead of Warning or
+    /// Error. The type, the message and the inner error are the same either way, so the run is classified and recorded the
+    /// same. False for every other raise: the first failing cycle, the reads (<see cref="ForFailedRead"/>) and the
+    /// long-query trace. The trace's kept failure can be any type, so its repeat travels on the run's own telemetry
+    /// (<see cref="RunTelemetry.TraceFaultRepeatsAtDebug"/>) rather than on this exception.
+    /// </summary>
+    public bool RepeatsAtDebug { get; internal set; }
+
     public XeSessionEnsureException(string sessionKind, SqlException inner)
-        : this(sessionKind, inner, $"Failed to ensure {sessionKind} XE session: {inner.Message}")
+        : this(sessionKind, inner, $"Failed to ensure {sessionKind} XE session: {PerformanceMonitor.Collectors.AlwaysOnXeSessions.DescribeFailure(inner)}")
     {
     }
 
@@ -126,6 +137,14 @@ public partial class RemoteCollectorService
     private readonly ServerManager _serverManager;
     private readonly ScheduleManager _scheduleManager;
     private readonly ILogger<RemoteCollectorService>? _logger;
+    private readonly InstallIdStore? _installIdStore;
+
+    /// <summary>
+    /// This install's id (#4961), or null when the service was built without a store. Resolved from the store on
+    /// first use rather than at construction, so the first sweeps that need it, running in parallel, share one
+    /// resolve. Nothing reads it yet: the session names are built from it in a later change.
+    /// </summary>
+    internal string? GetInstallId() => _installIdStore?.GetId();
     private readonly DeltaCalculator _deltaCalculator;
     public DeltaCalculator DeltaCalculator => _deltaCalculator;
 
@@ -211,6 +230,15 @@ public partial class RemoteCollectorService
         /// </summary>
         public bool Abandoned { get; set; }
 
+        /// <summary>
+        /// True when this run's collector rethrew a long-query trace failure that an earlier run on this server had already
+        /// logged at its full level, with the trace not created since (#4964). <c>RunCollectorAsync</c> then logs its own
+        /// lines for the failure at Debug instead of Warning or Error, whatever the failure's type. The long-query read sets
+        /// it before it rethrows, from state kept per server beside the create's own; every run resets it. It changes
+        /// nothing about how the run is classified or recorded.
+        /// </summary>
+        public bool TraceFaultRepeatsAtDebug { get; set; }
+
         /// <summary>The per-database rollup for a run that fanned out, null for one that did not (#2472).
         /// Lives beside the fetch/store split for the same reason it does: both are things one run has to
         /// hand its own collection_log row, and both are meaningless once the next run resets the slot.</summary>
@@ -275,12 +303,14 @@ public partial class RemoteCollectorService
         DuckDbInitializer duckDb,
         ServerManager serverManager,
         ScheduleManager scheduleManager,
-        ILogger<RemoteCollectorService>? logger = null)
+        ILogger<RemoteCollectorService>? logger = null,
+        InstallIdStore? installIdStore = null)
     {
         _duckDb = duckDb;
         _serverManager = serverManager;
         _scheduleManager = scheduleManager;
         _logger = logger;
+        _installIdStore = installIdStore;
         _deltaCalculator = new DeltaCalculator(logger);
         _ignoredWaitTypes = new Lazy<HashSet<string>>(LoadIgnoredWaitTypes);
     }
@@ -648,6 +678,7 @@ public partial class RemoteCollectorService
         telemetry.StorageMs = 0;
         telemetry.ResetNote();
         telemetry.Abandoned = false;
+        telemetry.TraceFaultRepeatsAtDebug = false;
 
         try
         {
@@ -827,14 +858,25 @@ public partial class RemoteCollectorService
                session. Logging that at Error made a deliberate posture read as a fault: a field log showed
                three consecutive Error lines - two from the XE layer, one from here - for a login that was
                simply not granted ALTER ANY EVENT SESSION, while every other permission denial in this method
-               logs at Warn. Only a genuine ERROR status stays at Error. */
-            if (status == "PERMISSIONS")
+               logs at Warn. Only a genuine ERROR status stays at Error.
+
+               #4964: the always-on ensures run on every cycle, so a session that cannot be ensured raises this on every
+               cycle. The first failing cycle logs this line at the level above; the cycles after it log it at Debug, the
+               same rule as the ensure's own lines (the ensure sets RepeatsAtDebug from its state; the long-query read, whose
+               ensure runs outside the run, sets it on the run's telemetry). The classification, the run row and the health
+               record above and below are the same on every cycle. */
+            var ensureFailure = $"  [{server.DisplayName}] {collectorName} {ex.Message}";
+            if (ex.RepeatsAtDebug || telemetry.TraceFaultRepeatsAtDebug)
             {
-                AppLogger.Warn("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+                AppLogger.Debug("Collector", ensureFailure);
+            }
+            else if (status == "PERMISSIONS")
+            {
+                AppLogger.Warn("Collector", ensureFailure);
             }
             else
             {
-                AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+                AppLogger.Error("Collector", ensureFailure);
             }
         }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
@@ -856,15 +898,17 @@ public partial class RemoteCollectorService
             errorMessage = $"SQL Error #{ex.Number}: {ex.Message}"
                 + AzureDmvPermissionHint.For(
                     ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5, ex.Message);
-            AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
+            /* #4964: a long-query trace failure that an earlier run already logged is logged again at Debug (LogRunError and
+               LogRunWarning); every other run's lines are at the levels below. The classification does not depend on it. */
+            LogRunError(telemetry, $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
 
             if (RetryHelper.IsTransient(ex))
             {
-                AppLogger.Warn("Collector", $"Collector '{collectorName}' transient SQL error #{ex.Number} for server '{server.DisplayName}': {ex.Message}");
+                LogRunWarning(telemetry, $"Collector '{collectorName}' transient SQL error #{ex.Number} for server '{server.DisplayName}': {ex.Message}");
             }
             else if (ex.Number == 207) /* Invalid column name - likely version incompatibility */
             {
-                AppLogger.Warn("Collector", $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
+                LogRunWarning(telemetry, $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
             }
             else if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
             {
@@ -875,11 +919,11 @@ public partial class RemoteCollectorService
                    transcription — it IS Darling's classifier, and 262 (the tempdb denial behind the
                    collector's old Azure SQL DB gate) reaches both SKUs at once. */
                 status = "PERMISSIONS";
-                AppLogger.Warn("Collector", $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
+                LogRunWarning(telemetry, $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
             }
             else
             {
-                AppLogger.Error("Collector", $"Collector '{collectorName}' SQL error #{ex.Number} for server '{server.DisplayName}'", ex);
+                LogRunError(telemetry, $"Collector '{collectorName}' SQL error #{ex.Number} for server '{server.DisplayName}'", ex);
             }
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("MFA authentication cancelled"))
@@ -899,8 +943,11 @@ public partial class RemoteCollectorService
         {
             status = "ERROR";
             errorMessage = ex.Message;
-            AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.GetType().Name}: {ex.Message}");
-            AppLogger.Error("Collector", $"Collector '{collectorName}' failed for server '{server.DisplayName}'", ex);
+
+            /* #4964: the same rule as the SQL error arm above, for a long-query trace failure that is not a SQL error (an
+               install with no id, a connection that would not open) and that an earlier run already logged. */
+            LogRunError(telemetry, $"  [{server.DisplayName}] {collectorName} {ex.GetType().Name}: {ex.Message}");
+            LogRunError(telemetry, $"Collector '{collectorName}' failed for server '{server.DisplayName}'", ex);
 
             /* A fatal DuckDB error invalidates the whole local database, and every later write fails until it is
                reopened. This starts the reopen; any other error is left alone. */
@@ -912,6 +959,36 @@ public partial class RemoteCollectorService
 
         // Log the collection attempt
         await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs, telemetry.Fanout);
+    }
+
+    /// <summary>
+    /// A failed run's Error line, or its Debug line when the run replayed a long-query trace failure that an earlier run
+    /// already logged at its full level (<see cref="RunTelemetry.TraceFaultRepeatsAtDebug"/>, #4964). The exception is
+    /// logged with the Error line only.
+    /// </summary>
+    private static void LogRunError(RunTelemetry telemetry, string message, Exception? exception = null)
+    {
+        if (telemetry.TraceFaultRepeatsAtDebug)
+        {
+            AppLogger.Debug("Collector", message);
+        }
+        else
+        {
+            AppLogger.Error("Collector", message, exception);
+        }
+    }
+
+    /// <summary>A failed run's Warning line, or its Debug line for a repeated long-query trace failure (<see cref="LogRunError"/>).</summary>
+    private static void LogRunWarning(RunTelemetry telemetry, string message)
+    {
+        if (telemetry.TraceFaultRepeatsAtDebug)
+        {
+            AppLogger.Debug("Collector", message);
+        }
+        else
+        {
+            AppLogger.Warn("Collector", message);
+        }
     }
 
     /// <summary>
@@ -1304,6 +1381,28 @@ public partial class RemoteCollectorService
         SqlErrorClassification.ShouldFallBackToSingleDatabase(errorNumber);
 
     /// <summary>
+    /// The connection string for one database on an Azure SQL DB logical server: the registration's own, so a registration
+    /// with read-only intent opens a read-only connection. <paramref name="withoutReadOnlyIntent"/> forces the intent off:
+    /// the long-query trace creates its session's definition over such a connection, because a session cannot be created on
+    /// a read-only replica (#4961). The one place the string is built, so a test that reads it sees what is opened.
+    /// </summary>
+    protected string AzureDatabaseConnectionString(ServerConnection server, string databaseName, bool withoutReadOnlyIntent = false)
+    {
+        var builder = new SqlConnectionStringBuilder(RegistrationConnectionString(server))
+        {
+            ConnectTimeout = ConnectionTimeoutSeconds,
+            InitialCatalog = databaseName
+        };
+
+        if (withoutReadOnlyIntent)
+        {
+            builder.ApplicationIntent = ApplicationIntent.ReadWrite;
+        }
+
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
     /// Opens a SQL connection to a specific database on an Azure SQL DB logical server.
     ///
     /// Deliberately NOT retried. This runs once per database per database-scoped collector, and the
@@ -1313,27 +1412,78 @@ public partial class RemoteCollectorService
     /// every minute. The next cycle is the retry, and it costs one minute of that database's data
     /// rather than delaying every other server's.
     /// </summary>
-    protected async Task<SqlConnection> OpenAzureDatabaseConnectionAsync(ServerConnection server, string databaseName, CancellationToken cancellationToken)
+    protected async Task<SqlConnection> OpenAzureDatabaseConnectionAsync(ServerConnection server, string databaseName, CancellationToken cancellationToken, bool withoutReadOnlyIntent = false)
     {
-        var baseConnStr = _serverManager.CredentialResolver.GetConnectionString(server);
-        var connStr = new SqlConnectionStringBuilder(baseConnStr)
-        {
-            ConnectTimeout = ConnectionTimeoutSeconds,
-            InitialCatalog = databaseName
-        }.ConnectionString;
+        var connStr = AzureDatabaseConnectionString(server, databaseName, withoutReadOnlyIntent);
+        var builder = new SqlConnectionStringBuilder(connStr);
 
-        var conn = new SqlConnection(connStr);
+        /* A registration that signs in interactively does so over this connection as it does over CreateConnectionAsync's
+           (#4961). The long-query trace creates its session's definition over a connection with the read-only intent forced
+           off, and any open here can be the first of a run to raise a prompt. So the opens get CreateConnectionAsync's
+           treatment, asked of the mode and not of the connection string's keyword: the sign-in lock, so two opens starting
+           together raise one window and not two, and a refusal once that server's sign-in was declined. Both interactive modes
+           need it. Begin hands the prompt window its attempt and returns null for every mode but device code, which opens
+           exactly as it did; for device code it also refuses a second sign-in while one is in flight. A mode that cannot show
+           a window takes no lock. */
+        var signsInInteractively = AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType);
+        var signInLockHeld = false;
+
         try
         {
-            await conn.OpenAsync(cancellationToken);
-            return conn;
+            if (signsInInteractively)
+            {
+                await s_mfaAuthLock.WaitAsync(cancellationToken);
+                signInLockHeld = true;
+
+                if (_serverManager.GetConnectionStatus(server.Id).UserCancelledMfa)
+                {
+                    throw new InvalidOperationException("Interactive authentication cancelled by user. Please connect to the server explicitly to retry.");
+                }
+            }
+
+            using var deviceCode = EntraDeviceCodeAuth.Begin(builder);
+            using var openCancellation = deviceCode is null
+                ? null
+                : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deviceCode.Token);
+
+            var conn = new SqlConnection(connStr);
+            try
+            {
+                await conn.OpenAsync(openCancellation?.Token ?? cancellationToken);
+                return conn;
+            }
+            catch (Exception ex)
+            {
+                conn.Dispose();
+
+                /* A declined sign-in is flagged so the opens queued behind this one stop instead of each raising a prompt of
+                   its own, and it is decided as CreateConnectionAsync decides it, by the same helper, for either interactive
+                   mode: an Entra MFA sign-in the user cancelled in the browser is as much a decline as a closed code window. */
+                if (signsInInteractively && UserDeclinedSignIn(ex, deviceCode, cancellationToken))
+                {
+                    _serverManager.GetConnectionStatus(server.Id).UserCancelledMfa = true;
+                    AppLogger.Info("Collector", $"  [{server.DisplayName}] interactive authentication cancelled by user - flagging to abort other pending connections");
+                }
+
+                throw;
+            }
         }
-        catch
+        finally
         {
-            conn.Dispose();
-            throw;
+            if (signInLockHeld)
+            {
+                s_mfaAuthLock.Release();
+            }
         }
     }
+
+    /// <summary>
+    /// The registration's own connection string. It is resolved here, in the file whose opens handle a device-code sign-in, so a
+    /// partial that needs the string beside a connection it does not open reads it through here instead of resolving it again
+    /// (#4961). The long-query trace's test seam is one.
+    /// </summary>
+    protected string RegistrationConnectionString(ServerConnection server) =>
+        _serverManager.CredentialResolver.GetConnectionString(server);
 
     /// <summary>
     /// Creates a SQL connection to a remote server.
@@ -1404,22 +1554,10 @@ public partial class RemoteCollectorService
                     if (isInteractiveServer)
                     {
                         /* Mark a user-declined sign-in immediately, so the other connections queued
-                           behind the lock abort instead of each raising their own prompt.
-
-                           Two detections, because the two interactive modes fail differently. Entra
-                           MFA reports cancellation in the exception MESSAGE, which is all the broker
-                           gives. Device code reports it as the cancellation of the token above - and
-                           the collector's own token is linked into that same source, so the token
-                           alone cannot say which side fired. A shutdown is not a decline: flagging
-                           one would leave the server skipped for the rest of the session over an app
-                           restart nobody chose. */
-                        var userDeclined =
-                            MfaAuthenticationHelper.IsMfaCancelledException(ex) ||
-                            (deviceCode is not null
-                                && deviceCode.Token.IsCancellationRequested
-                                && !cancellationToken.IsCancellationRequested);
-
-                        if (userDeclined)
+                           behind the lock abort instead of each raising their own prompt. What counts
+                           as a decline is decided in UserDeclinedSignIn, which the per-database open
+                           asks too. */
+                        if (UserDeclinedSignIn(ex, deviceCode, cancellationToken))
                         {
                             var serverStatus = _serverManager.GetConnectionStatus(server.Id);
                             serverStatus.UserCancelledMfa = true;
@@ -1444,6 +1582,25 @@ public partial class RemoteCollectorService
                 s_mfaAuthLock.Release();
             }
         }
+    }
+
+    /// <summary>
+    /// Whether an interactive open that failed failed because the user declined the sign-in. Both opens that can raise a prompt,
+    /// <see cref="CreateConnectionAsync"/> and <see cref="OpenAzureDatabaseConnectionAsync"/>, ask it here, so what counts as a
+    /// decline cannot differ between them (#4961).
+    ///
+    /// Two detections, because the two interactive modes fail differently. Entra MFA reports cancellation in the exception
+    /// MESSAGE, which is all the broker gives. Device code reports it as the cancellation of the prompt's own token - and the
+    /// collector's own token is linked into the same source the open waits on, so the token the open threw on cannot say which
+    /// side fired. A shutdown is not a decline: flagging one would leave the server skipped for the rest of the session over an
+    /// app restart nobody chose.
+    /// </summary>
+    private static bool UserDeclinedSignIn(Exception ex, EntraDeviceCodeAttempt? deviceCode, CancellationToken cancellationToken)
+    {
+        return MfaAuthenticationHelper.IsMfaCancelledException(ex) ||
+            (deviceCode is not null
+                && deviceCode.Token.IsCancellationRequested
+                && !cancellationToken.IsCancellationRequested);
     }
 
     /// <summary>

@@ -79,7 +79,7 @@ public sealed class McpQueryTools
                young install can cut a "Last 7 days" ask well short of 7 days with nothing on the page saying
                so. One probe, shared with the Queries-tab grid (LocalDataService.GetQueryWindowFloorAsync). */
             var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, resolved.ServerId, requestedStart, nowUtc);
-            var effectiveStart = floor ?? requestedStart;
+            var effectiveStart = EffectiveWindowStart(floor, requestedStart);
             var truncated = IsWindowTruncated(floor, requestedStart);
 
             /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
@@ -212,7 +212,7 @@ public sealed class McpQueryTools
             /* #4231: what the window ACTUALLY reached, from the SAME relation (v_procedure_stats) the ranking
                read above just used. One probe, shared with the Queries-tab grid. */
             var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.ProcedureStats, resolved.ServerId, requestedStart, nowUtc);
-            var effectiveStart = floor ?? requestedStart;
+            var effectiveStart = EffectiveWindowStart(floor, requestedStart);
             var truncated = IsWindowTruncated(floor, requestedStart);
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation, one
@@ -341,7 +341,7 @@ public sealed class McpQueryTools
                so the honest move is to report what was served rather than echo what was asked for. Deliberately
                unfiltered: the floor is a property of the tier, not narrowed by database/execution_type/module. */
             var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, requestedStart, nowUtc);
-            var effectiveStart = floor ?? requestedStart;
+            var effectiveStart = EffectiveWindowStart(floor, requestedStart);
             var truncated = IsWindowTruncated(floor, requestedStart);
 
             if (rows.Count == 0)
@@ -969,10 +969,26 @@ public sealed class McpQueryTools
     /// data starting LATER than the window asked for, by more than <see cref="TruncationSlack"/> — the window
     /// floor, not a page cut; no <c>top</c>/<c>limit</c> changes it. Shared so <c>get_top_queries_by_cpu</c>,
     /// <c>get_top_procedures_by_cpu</c>, <c>get_query_store_top</c> and the Queries-tab grids that read the
-    /// same three tables all compute the same verdict from the same probe instead of drifting apart.
+    /// same three tables all compute the same verdict from the same probe instead of drifting apart. A null floor
+    /// is never truncated: the probe answers null only when the window holds nothing to report (no row, and for
+    /// the Active Queries and Current Waits relations, which the probe reads by coverage, no logged run of the
+    /// collector either), and an empty panel already says so.
     /// </summary>
     internal static bool IsWindowTruncated(DateTime? floor, DateTime requestedStart) =>
         floor is DateTime f && f > requestedStart + TruncationSlack;
+
+    /// <summary>
+    /// The instant the served window really starts: the probe's floor, but never earlier than the start that was
+    /// asked for. The probe (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>) answers the requested start
+    /// itself when the server also holds a row before the window (the window's start is covered), and the
+    /// server's first row inside the window when its data starts late, so only a floor AFTER the requested start
+    /// moves the served window. The clamp stays so that a floor at or before the start can never read as the window
+    /// having begun earlier. A null floor leaves the requested start in place, as it always did. Null means the
+    /// window holds nothing: no row, and for the Active Queries and Current Waits relations no logged run of the
+    /// collector either (a window the collector ran in, with nothing to record, answers the start, not null).
+    /// </summary>
+    internal static DateTime EffectiveWindowStart(DateTime? floor, DateTime requestedStart) =>
+        floor is DateTime f && f > requestedStart ? f : requestedStart;
 
     /// <summary>
     /// The disclosure block every Performance-Trends payload carries (#3541 A2), written in the same key order

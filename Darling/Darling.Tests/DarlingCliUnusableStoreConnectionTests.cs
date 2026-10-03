@@ -238,10 +238,12 @@ public sealed class DarlingCliUnusableStoreConnectionTests
 
         /* Eight verbs open the store through it: --validate-config, --check-settings, the four endpoint toggles (one
            shared body), --collapse-legacy-slices, --recompress-plan-dim, --add-server, --backfill-rollups, and the
-           two collector toggles (one shared body). That is eight call sites; a ninth verb that opens the store
-           adds a ninth here, and growing this count is the point. */
+           two collector toggles (one shared body). That is eight call sites. The ninth is --drop-xe-sessions reading
+           this install's id, the long-query schedule rows and the instance names (#4961), after it has resolved the
+           server through the first one's shared body. A tenth verb that opens the store adds a tenth here, and growing
+           this count is the point. */
         var calls = Regex.Matches(code, @"(?<!bool\s)TryBuildStoreConnectionString\(").Count;
-        Assert.Equal(8, calls);
+        Assert.Equal(9, calls);
 
         /* The stored credential is read bare in exactly two places: inside that method, and in the firewall verb's
            best-effort read (TryReadEndpointTogglesAsync), which turns a failure into a reason it prints rather than

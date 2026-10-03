@@ -2121,7 +2121,11 @@ public sealed class DarlingCollectorToggleVerbTests
         Assert.Contains("--disable-collector long_query_completions", readme, StringComparison.Ordinal);
         Assert.Contains("--enable-collector long_query_completions --server", readme, StringComparison.Ordinal);
         Assert.Contains("fleet-wide**", readme, StringComparison.Ordinal);
-        Assert.Contains("creates the `PerformanceMonitor_LongQueryCompletions` Extended Events session", readme, StringComparison.Ordinal);
+        /* The session names are per install since #4961, so the README says the verb creates THIS install's own session, under
+           the name the install id makes, and not the shared name older versions used. */
+        Assert.Contains("creates this install's own long-query Extended Events session", readme, StringComparison.Ordinal);
+        Assert.Contains("`PerformanceMonitor_Darling_<id>_LongQueryCompletions`", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("creates the `PerformanceMonitor_LongQueryCompletions` Extended Events session", readme, StringComparison.Ordinal);
         Assert.Contains("disabling it drops that session", readme, StringComparison.Ordinal);
         Assert.Contains("no MCP tool", readme, StringComparison.Ordinal);
     }

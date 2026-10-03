@@ -347,6 +347,19 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
+    /// Where this server's waiting_tasks coverage starts for the range, through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its
+    /// first row in the range if that is earlier. Current Waits compares it with the range's start and shows
+    /// "Showing since" when a custom range reaches back past what the store covers. A quiet stretch, when nothing
+    /// waited, does not raise it. Null when the range holds no row and no logged run, and when the range lies wholly
+    /// before the coverage (the run log outlives the table, so a logged run there makes the server count though its
+    /// rows are purged, and its coverage starts after the range ends).
+    /// </summary>
+    public Task<DateTime?> GetWaitingTasksDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("waiting_tasks"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>
     /// Waiting-task total duration by wait type for one server over the window (Current Waits).
     /// <para>#4349: bucketed the same way as <see cref="GetLockWaitTrendAsync"/> — see its remarks for
     /// the width and singleton-stamping rules, which this read shares verbatim.</para>

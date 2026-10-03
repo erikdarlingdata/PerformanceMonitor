@@ -305,6 +305,10 @@ public class StoredEventCopiesTests : IDisposable
             ("system_health_events", SystemHealthEventsCollector.Instance.BuildQuery),
         };
 
+        /* The long-query read names the session this install made (#4961), and refuses to build without it: the host
+           puts the name on the context. Only that read looks at it, so the other collectors ignore it. */
+        var sessionName = LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, "0a1b2c3d");
+
         foreach (var (name, buildQuery) in collectors)
         {
             var query = buildQuery(new CollectorContext
@@ -313,6 +317,7 @@ public class StoredEventCopiesTests : IDisposable
                 ServerName = "S1",
                 CollectionTime = collectionTime,
                 Deltas = new RecordingCollectorDeltaCalculator(),
+                LongQuerySessionName = sessionName,
             });
 
             var cutoff = (DateTime)query.Parameters.Single(p => p.Name == "@cutoff_time").Value!;

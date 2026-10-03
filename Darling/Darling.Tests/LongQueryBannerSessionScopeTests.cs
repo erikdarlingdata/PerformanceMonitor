@@ -39,11 +39,23 @@ public sealed class LongQueryBannerSessionScopeTests
         var text = ViewerServerTab.LongQueriesDisabledText(CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
 
         Assert.EndsWith(
-            "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from every database that has it, except where another registration of that database still has the trace on. A database that is also monitored as its own server follows that server's setting.",
+            "Enabling it creates this install's Extended Events session in each monitored database. Disabling it drops that session from every database that has it, except where another registration of that database still has the trace on. A database that is also monitored as its own server follows that server's setting.",
             text,
             StringComparison.Ordinal);
         Assert.DoesNotContain("session on this server", text, StringComparison.Ordinal);
         Assert.Contains("Settings → Collection Schedule → Edit Collector Schedules…", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(CollectorEngineCapability.AzureSqlDatabaseEngineEdition)]
+    [InlineData(CollectorEngineCapability.UnknownEngineEdition)]
+    [InlineData(2)]
+    public void TheViewerBanner_NamesTheSessionAsThisInstalls_NotAsOneSessionEveryInstallShares(int engineEdition)
+    {
+        var text = ViewerServerTab.LongQueriesDisabledText(engineEdition);
+
+        Assert.Contains("this install's Extended Events session", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("PerformanceMonitor_LongQueryCompletions", text, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -57,7 +69,7 @@ public sealed class LongQueryBannerSessionScopeTests
         var text = ViewerServerTab.LongQueriesDisabledText(engineEdition);
 
         Assert.EndsWith(
-            "Enabling it creates the Extended Events session on this server. Disabling it drops the session.",
+            "Enabling it creates this install's Extended Events session on this server. Disabling it drops that session, unless another registration of this install on the same instance still has the trace on.",
             text,
             StringComparison.Ordinal);
         Assert.DoesNotContain("monitored database", text, StringComparison.Ordinal);

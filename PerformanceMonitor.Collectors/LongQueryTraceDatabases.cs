@@ -29,6 +29,8 @@ namespace PerformanceMonitor.Collectors;
 /// <item>A drop also skips a database while another registration of the same logical server has the trace on and
 /// keeps the session there (<see cref="KeptElsewhere"/>), whatever either registration's read-only intent. The
 /// session is one object per database, so a drop by one registration removes it for every other one.</item>
+/// <item>Where the session is the server's own, a drop skips it while another registration of the same instance has the
+/// trace on (<see cref="KeptOnInstance"/>), for the trace turned off and for a removed server alike.</item>
 /// </list>
 /// The always-on deadlock and blocked-process sessions do not use this. They follow the inventory: they are
 /// created in every inventoried database whatever the database scope, because they are cheap and the alerts read
@@ -57,6 +59,53 @@ public static class LongQueryTraceDatabases
     private const char PartSeparator = '\u001E';
 
     /// <summary>
+    /// Whether a database can hold the trace's database-scoped session at all: every database but <c>master</c>. The
+    /// plan, the check for where another registration keeps the session, and the long-query read of a logical server
+    /// all ask this one rule, so the read never opens a database the trace cannot create its session in (#4961).
+    /// Whether another registration owns the database is a separate question, which the plan answers from the
+    /// separately monitored databases.
+    /// </summary>
+    public static bool CanHoldSession(string database) =>
+        !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The error a database that is read-only answers a <c>CREATE EVENT SESSION</c> with: "Failed to update database
+    /// because the database is read-only". A registration that points straight at one, such as an Azure geo-secondary,
+    /// lands there without read-only intent (#4961).
+    /// </summary>
+    public const int ReadOnlyDatabaseErrorNumber = 3906;
+
+    /// <summary>
+    /// Whether one of the errors a refused create carries is <see cref="ReadOnlyDatabaseErrorNumber"/>. Plain error
+    /// numbers, because this project has no SqlClient: each app reads them off its own exception.
+    /// </summary>
+    public static bool IsReadOnlyDatabaseRefusal(IEnumerable<int> errorNumbers) =>
+        errorNumbers.Any(number => number == ReadOnlyDatabaseErrorNumber);
+
+    /// <summary>
+    /// The error a replica answers <c>ALTER EVENT SESSION</c> with for a session whose definition it does not show: "Cannot
+    /// alter the event session, because it does not exist or you do not have permission". A definition created over the
+    /// primary reaches a read-only replica a moment later, so a start right after the create can get it (#4961).
+    /// </summary>
+    public const int EventSessionNotVisibleErrorNumber = 15151;
+
+    /// <summary>
+    /// Whether one of the errors a refused start carries is <see cref="EventSessionNotVisibleErrorNumber"/>. Plain error
+    /// numbers, like <see cref="IsReadOnlyDatabaseRefusal"/>.
+    /// </summary>
+    public static bool IsEventSessionNotVisible(IEnumerable<int> errorNumbers) =>
+        errorNumbers.Any(number => number == EventSessionNotVisibleErrorNumber);
+
+    /// <summary>
+    /// The one message for a create that a read-only database refused: why it cannot work, and what to change. Both apps
+    /// log it, so the two cannot word it apart. The refusal is not retried for <see cref="RetryInterval"/>.
+    /// </summary>
+    public static string ReadOnlyDatabaseMessage() =>
+        "The long-query trace could not create its Extended Events session: the database this registration reaches is read-only "
+        + $"(error {ReadOnlyDatabaseErrorNumber}), as an Azure geo-secondary is, and a read-only database cannot hold a session. "
+        + "Register the primary database instead, or turn the long-query trace off for this registration.";
+
+    /// <summary>
     /// The databases one reconcile creates the session in and drops it from.
     /// </summary>
     /// <param name="enabled">Whether the trace is on for this registration.</param>
@@ -76,9 +125,7 @@ public static class LongQueryTraceDatabases
     {
         var ownedElsewhere = new HashSet<string>(separatelyMonitoredDatabases, StringComparer.OrdinalIgnoreCase);
         var kept = new HashSet<string>(keptElsewhere, StringComparer.OrdinalIgnoreCase);
-        bool CanTouch(string database) =>
-            !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase)
-            && !ownedElsewhere.Contains(database);
+        bool CanTouch(string database) => CanHoldSession(database) && !ownedElsewhere.Contains(database);
 
         if (!enabled)
         {
@@ -152,6 +199,30 @@ public static class LongQueryTraceDatabases
 
         var ownedElsewhere = new HashSet<string>(separatelyMonitored, StringComparer.OrdinalIgnoreCase);
         return DistinctInOrder(candidates.Where(database => owners.Any(owner => Keeps(owner, database, ownedElsewhere))));
+    }
+
+    /// <summary>
+    /// Where the session is the server's own (every engine but Azure SQL Database), whether another registration of
+    /// this install keeps it on the same instance, so a drop by this registration would stop its trace (#4961). That
+    /// is the on-premises counterpart of <see cref="KeptElsewhere"/>. A host name can be written many ways, so the
+    /// instance decides, not the host: two registrations are the same instance when each one's last-known
+    /// <c>@@SERVERNAME</c> is known and the two agree, ignoring case. A name that is not known matches nothing.
+    /// </summary>
+    /// <param name="serverName">This registration's last-known <c>@@SERVERNAME</c>, or null when it is not known.</param>
+    /// <param name="others">The other registrations of this install, with each one's last-known name.</param>
+    public static bool KeptOnInstance(string? serverName, IEnumerable<LongQueryTraceInstance> others)
+    {
+        if (string.IsNullOrWhiteSpace(serverName))
+        {
+            return false;
+        }
+
+        var name = serverName.Trim();
+        return others.Any(other =>
+            other.Enabled
+            && other.TraceOn
+            && !string.IsNullOrWhiteSpace(other.ServerName)
+            && string.Equals(other.ServerName.Trim(), name, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -231,6 +302,17 @@ public static class LongQueryTraceDatabases
         + " It tries again once an hour, and right away after a restart, a change to the trace's settings, or a change to another registration of these databases."
         + retryNote;
 
+    /// <summary>
+    /// <see cref="GiveUpWarning(IReadOnlyList{string}, string?)"/> for the failure the cap gave up on. Where the session is
+    /// the server's (<see cref="LongQueryTraceDropException.OnServer"/>), there are no databases to name or to list, and the
+    /// restart and the change to the trace's settings are the only other things that try again.
+    /// </summary>
+    public static string GiveUpWarning(LongQueryTraceDropException failure, string? retryNote = null) => failure.OnServer
+        ? $"Stopped retrying the long-query trace cleanup after {DropAttemptCap} failed attempts in a row. The session may remain on the server."
+            + " It tries again once an hour, and right away after a restart or a change to the trace's settings."
+            + retryNote
+        : GiveUpWarning(failure.Databases, retryNote);
+
     private static IEnumerable<LongQueryTraceRegistration> OtherOwners(
         string selfId, string host, IEnumerable<LongQueryTraceRegistration> registrations)
     {
@@ -249,7 +331,7 @@ public static class LongQueryTraceDatabases
             return string.Equals(owner.Database!.Trim(), database, StringComparison.OrdinalIgnoreCase);
         }
 
-        return !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase)
+        return CanHoldSession(database)
             && !separatelyMonitored.Contains(database)
             && !owner.ExcludedDatabases.Any(excluded => string.Equals(excluded.Trim(), database, StringComparison.OrdinalIgnoreCase))
             && (owner.DatabaseScope is null
@@ -311,6 +393,66 @@ public sealed record LongQueryTraceRegistration(
     bool TraceOn,
     IReadOnlyCollection<string> ExcludedDatabases,
     IReadOnlyCollection<string>? DatabaseScope);
+
+/// <summary>
+/// One other registration of this install, as <see cref="LongQueryTraceDatabases.KeptOnInstance"/> sees it: whether it is
+/// monitored, whether its long-query trace is on, and the <c>@@SERVERNAME</c> its instance last reported.
+/// </summary>
+/// <param name="Enabled">Whether it is monitored.</param>
+/// <param name="TraceOn">Whether its long-query trace is on.</param>
+/// <param name="ServerName">The last-known <c>@@SERVERNAME</c>, or null when no collector run has reported it yet.</param>
+public sealed record LongQueryTraceInstance(bool Enabled, bool TraceOn, string? ServerName);
+
+/// <summary>
+/// What an on-premises drop needs to know about the instance (<see cref="LongQueryTraceDatabases.KeptOnInstance"/>): this
+/// registration's own last-known <c>@@SERVERNAME</c>, beside the other registrations of this install that are monitored
+/// with their trace on, each with its own. An app reads the names only when another registration could keep the
+/// session, so a fleet with no trace on reads none.
+///
+/// <para>The two callers treat a name that is not known differently, so the guard answers each question apart. The trace
+/// turned off drops as it always did unless a positive match says another registration keeps the session
+/// (<see cref="Kept"/>). A removed server is checked once and never again, so it leaves its session in place whenever
+/// another registration could keep it and the match cannot be ruled out (<see cref="RemovalSkipReason"/>): a wrong drop
+/// is worse than a stopped session left behind.</para>
+/// </summary>
+/// <param name="ServerName">This registration's last-known <c>@@SERVERNAME</c>, or null when it is not known.</param>
+/// <param name="Keepers">The other registrations of this install that are monitored with their trace on.</param>
+public sealed record LongQueryTraceInstanceGuard(string? ServerName, IReadOnlyList<LongQueryTraceInstance> Keepers)
+{
+    /// <summary>The guard of a registration that no other registration could keep a session for.</summary>
+    public static LongQueryTraceInstanceGuard NoKeepers { get; } = new(null, Array.Empty<LongQueryTraceInstance>());
+
+    /// <summary>True on a positive match: another registration keeps the trace on this registration's instance.</summary>
+    public bool Kept => LongQueryTraceDatabases.KeptOnInstance(ServerName, Keepers);
+
+    /// <summary>
+    /// Why a removed server's session must stay, or null when it may be dropped. No other registration could keep it:
+    /// drop, whatever the names. Otherwise a name that is not known cannot rule the others out, this registration's own or
+    /// that of a registration which keeps the trace on, and a match says one of them keeps it.
+    /// </summary>
+    public string? RemovalSkipReason()
+    {
+        var traceOn = Keepers.Where(keeper => keeper.Enabled && keeper.TraceOn).ToList();
+        if (traceOn.Count == 0)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(ServerName))
+        {
+            return "this server's instance name is not known, so another registration of this install on the same instance cannot be ruled out";
+        }
+
+        if (Kept)
+        {
+            return "another registration of this install keeps it on the same instance";
+        }
+
+        return traceOn.Any(keeper => string.IsNullOrWhiteSpace(keeper.ServerName))
+            ? "the instance name of another registration of this install that keeps the trace on is not known, so it cannot be ruled out as the same instance"
+            : null;
+    }
+}
 
 /// <summary>
 /// What a failed cleanup pass leads to (<see cref="LongQueryTraceDropRetry.RecordFailure"/>).
@@ -415,10 +557,12 @@ public sealed class LongQueryTraceDropRetry
 }
 
 /// <summary>
-/// A long-query trace reconcile that could not finish its drops on Azure SQL Database: the database list could not
-/// be read, or the drop failed in some databases (the others were still dropped). The caller does not mark the
+/// A long-query trace reconcile that could not finish its drops: on Azure SQL Database, the database list could not
+/// be read or the drop failed in some databases (the others were still dropped); on every other engine
+/// (<see cref="ForServer"/>), the drop of the server's session failed. The caller does not mark the
 /// reconcile done, so the next cycle tries again, up to <see cref="LongQueryTraceDatabases.DropAttemptCap"/> passes
-/// in a row, and then once an hour (<see cref="LongQueryTraceDropRetry"/>).
+/// in a row, and then once an hour (<see cref="LongQueryTraceDropRetry"/>). Every failure of the drop half reaches
+/// the caller as this type, which is what lets the caller's general handler stay for the create side.
 /// </summary>
 public sealed class LongQueryTraceDropException : Exception
 {
@@ -429,6 +573,22 @@ public sealed class LongQueryTraceDropException : Exception
         Databases = databases;
         CreateNote = createNote;
     }
+
+    private LongQueryTraceDropException(Exception firstFailure)
+        : base($"Could not drop the long-query trace session: {firstFailure.Message}", firstFailure)
+    {
+        Databases = Array.Empty<string>();
+        OnServer = true;
+    }
+
+    /// <summary>
+    /// Creates the exception for a drop that failed where the session is the server's, on every engine but Azure SQL
+    /// Database. There is no database to name and no list to read.
+    /// </summary>
+    public static LongQueryTraceDropException ForServer(Exception firstFailure) => new(firstFailure);
+
+    /// <summary>True when the failed drop was of the server's own session, not of a database's. <see cref="Databases"/> is empty then.</summary>
+    public bool OnServer { get; }
 
     /// <summary>The databases where the drop failed, so the session may remain there. Empty when the list could not be read.</summary>
     public IReadOnlyList<string> Databases { get; }

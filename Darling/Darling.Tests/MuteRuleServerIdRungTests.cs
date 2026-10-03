@@ -35,7 +35,7 @@ public sealed class MuteRuleServerIdRungTests
 {
     public const string RungName = "mute-rule-server-id";
 
-    /// <summary>This rung's sentinel ordinal in the probe. No longer the last argument, since V158 appended its own.</summary>
+    /// <summary>This rung's sentinel ordinal in the probe; the ordinal is a fact of the probe's shape.</summary>
     private const int ProbeOrdinal = 132;
 
     public static int RungVersion => Rung.Version;
@@ -43,14 +43,14 @@ public sealed class MuteRuleServerIdRungTests
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Name == RungName);
 
     [Fact]
-    public void TheRungIsRegisteredAtVersion157_InADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder_AtVersion157()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal(157, Rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        /* No longer the top rung: V158 (the collector run time) landed above it. */
+        /* No longer the top rung: V158 (the install id) landed above it. */
         Assert.True(Rung.Version < StorageVersion.SchemaVersion);
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
     }
@@ -67,7 +67,7 @@ public sealed class MuteRuleServerIdRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheColumn_AndAStoreThatStopsHereMapsToThisRung()
+    public void TheProbeCarriesTheColumn_AndMapsAStoreThroughThisRungToIt()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = "table_schema = 'config' AND table_name = 'config_mute_rules' AND column_name = 'server_id'";
@@ -78,7 +78,7 @@ public sealed class MuteRuleServerIdRungTests
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.True(ProbeOrdinal < arity - 1);
+        Assert.True(ProbeOrdinal < arity - 1, "a newer rung's sentinel follows this one");
         Assert.Equal("hasMuteRuleServerId", method.GetParameters()[ProbeOrdinal].Name);
 
         var all = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();

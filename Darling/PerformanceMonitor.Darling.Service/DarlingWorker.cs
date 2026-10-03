@@ -292,7 +292,8 @@ public sealed class DarlingWorker : BackgroundService
         string Name,
         StoreObjectConvergenceStage Stage,
         StoreObjectChangeSignal Signal,
-        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> EnsureAsync);
+        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> EnsureAsync,
+        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>>? HourlyEnsureAsync = null);
 
     /// <summary>
     /// THE list: every idempotent store-object ensure, in the one order both the start path and the hourly
@@ -331,10 +332,11 @@ public sealed class DarlingWorker : BackgroundService
     /// are on the steps. The two that are worth an operator's attention: the compression ENABLE statements
     /// (<c>ALTER TABLE ... SET (timescaledb.compress ...)</c>, inside
     /// <see cref="TimescaleSupport.ApplyCompressionPolicyAsync"/> and
-    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/>) are re-executed on every pass rather
-    /// than skipped under a catalog check, so those two steps are the pass's only unconditional DDL; they take
-    /// a brief lock on the hypertable's parent and nothing else. That is measured in the PR body rather than
-    /// asserted here, and it is why the summary line carries an elapsed.</para>
+    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/>) take an ACCESS EXCLUSIVE lock even
+    /// when they change nothing, so since #3817 each is issued only for a table whose compression settings
+    /// differ from what the product wants, and a converged store's pass issues none. collection_log's waits at
+    /// most <see cref="TimescaleSupport.HourlyDdlLockTimeout"/> for its lock (#4951). The summary
+    /// line carries an elapsed so a slow pass shows.</para>
     /// </summary>
     private static readonly StoreObjectConvergenceStep[] s_storeObjectConvergence =
     {
@@ -343,13 +345,14 @@ public sealed class DarlingWorker : BackgroundService
         new("hypertable conversion", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
             (connection, logger, ct) => TimescaleSupport.ConvertToHypertablesAsync(connection, logger, ct)),
 
-        /* The compression ENABLE is unconditional DDL (see the class remark); add_compression_policy's
-           if_not_exists returns -1 for a policy that exists. */
+        /* The compression ENABLE runs only for a table whose settings differ (#3817, see the class remark);
+           add_compression_policy's if_not_exists returns -1 for a policy that exists. */
         new("compression policies", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
-            (connection, logger, ct) => TimescaleSupport.ApplyCompressionPolicyAsync(connection, logger, ct)),
+            (connection, logger, ct) => TimescaleSupport.ApplyCompressionPolicyAsync(connection, logger, ct),
+            (connection, logger, ct) => TimescaleSupport.ApplyCompressionPolicyAsync(connection, logger, hourly: true, ct)),
 
-        /* collection_log is outside the collector catalog, so the two steps above never reach it; same three
-           idempotent statements. */
+        /* collection_log is outside the collector catalog, so the two steps above never reach it; the same three
+           idempotent statements, with its own segmentby and a bounded lock wait on its ALTER (#4951). */
         new("collection_log hypertable", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
             async (connection, logger, ct) => await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, logger, ct) ? 1 : 0),
 
@@ -429,7 +432,8 @@ public sealed class DarlingWorker : BackgroundService
            at its own call site today, which the issue names: one failure costs every index in the pass — so
            on this cadence the next hour retries it, which is the change. */
         new("composer performance tuning", StoreObjectConvergenceStage.Tuning, StoreObjectChangeSignal.InPlace,
-            (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, ct)),
+            (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, ct),
+            (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, hourly: true, ct)),
     };
 
     /// <summary>What one convergence pass did, accumulated across its segments so the start path's three
@@ -745,6 +749,16 @@ public sealed class DarlingWorker : BackgroundService
     private NpgsqlDataSource? _postgres;
 
     /// <summary>
+    /// #4961: this install's id, the eight characters that tell its Extended Events sessions from another install's on
+    /// a server both monitor. Made (or read back) once at start, after the store's migrations and before any worker,
+    /// so everything a worker starts sees it set; null only before that point.
+    /// </summary>
+    private string? _installId;
+
+    /// <summary>The install id (#4961), for the code that names this install's sessions on a monitored server.</summary>
+    internal string? CurrentInstallId => _installId;
+
+    /// <summary>
     /// #4535: the plan analyzer's per-rule config (darling.json's optional "analyzer" section), set
     /// once at startup config load, same lifetime as <see cref="_capturePlans"/>-style file knobs.
     /// Null (section omitted) is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>.
@@ -762,7 +776,7 @@ public sealed class DarlingWorker : BackgroundService
        shutdown drain that awaits the start-path launch (holeRepair, above) also awaits this one — before
        this field existed the Periodic launch was fired with a bare "_ = ", neither drained on shutdown nor
        observed for a fault, so an exception it threw after the calling tick returned would go unlogged. */
-    private Task? _periodicHoleRepair;
+    private volatile Task? _periodicHoleRepair;
 
     /* #2138 phase 1: the auto force-plan bot, constructed by RunCollectionLoopAsync alongside the
        analysis pieces. Null until then. It holds no executor and this build ships none, so its whole
@@ -922,6 +936,12 @@ public sealed class DarlingWorker : BackgroundService
        failure-isolated tenants. */
     private DateTime _nextCompressionCheckUtc = DateTime.MinValue;
 
+    /* #4970: the in-flight hourly store-maintenance tick. Only the launch loop writes it. */
+    private Task? _storeMaintenanceTick;
+
+    /* #4970: the in-flight hourly store self-metrics tick. Only the launch loop writes it. */
+    private Task? _storeMetricsTick;
+
     /* MinValue = the first loop pass after startup runs the fleet sweep (#3466 lane 2), then on the
        operator-configured cadence (fleet_sweep_interval_minutes, default hourly, clamped by
        FleetSweepEngine.ClampIntervalMinutes). Fleet-level by definition — a sweep is one statement about
@@ -970,7 +990,7 @@ public sealed class DarlingWorker : BackgroundService
        re-decided hourly rather than at startup only. Every consumer reads it at call time — the retention
        purge's drop_chunks branch, the self-metrics sweep's hypertable arm, the two provider delegates — so a
        flip mid-run is picked up by each of them on its next pass with no further wiring. */
-    private bool _timescaleAvailable;
+    private volatile bool _timescaleAvailable;
 
     /* #4659: the one fence the collector runner's Query Store COPY and the alert read adapter's saved
        forced-plan failure answer share. */
@@ -1469,6 +1489,63 @@ LIMIT 1";
         /* Failed cleanup passes in a row, for LongQueryTraceDatabases.DropAttemptCap, and the clock for the hourly
            attempts after the cap. Reset on every (re)connect. */
         public LongQueryTraceDropRetry LongQueryTraceDropRetry { get; } = new();
+
+        /* #4964: true once a pass that was creating the trace's session has logged its failure at Warning, until a pass
+           succeeds or the server reconnects. The create side retries on every sweep, on purpose: each attempt records the
+           fault again, so collection health reads SESSION_MISSING. What changes is the log level of the repeats, from Warning
+           to Debug. A pass while the trace is off neither reads it nor sets it, because the drop side has its own cap
+           (LongQueryTraceDropRetry). Reset on every (re)connect. */
+        public bool LongQueryTraceCreateWarned { get; set; }
+
+        /* #4961: when the always-on deadlock and blocked-process sessions were last ensured on this server: at connect, then
+           once an hour (AlwaysOnXeSessions.EnsureInterval), so a session dropped from outside comes back within the hour. Null
+           means due. Reset on every (re)connect, where the connect path ensures and stamps it again. */
+        public DateTime? XeSessionsEnsuredAtUtc { get; set; }
+
+        /* #4964: the collectors that have already logged their missing-session line at Warning on this server (the long-query,
+           deadlock and blocked-process collectors raise it). Their runs fail on every sweep, on purpose: each one records
+           SESSION_MISSING again, so collection health reads it. What changes is the level of the repeated line, from Warning to
+           Debug, until a run of that collector succeeds. In memory, so a restart warns again. */
+        public XeSessionMissingWarnings XeSessionMissingWarnings { get; } = new();
+
+        /* #4961: the long-query latch and its hourly create clock, cleared when a collector run sees the instance's
+           identity move (ForgetLongQueryTraceLatchOnRestart), so the next sweep runs the whole reconcile. Not the fault,
+           the partial note or the retry count: the reconcile that follows replaces them. */
+        internal void ForgetLongQueryTraceLatch()
+        {
+            LongQueryTraceApplied = null;
+            LongQueryTraceAppliedKey = null;
+            LongQueryTraceAppliedAtUtc = null;
+
+            /* #4961: and the always-on sessions' clock, so the next sweep ensures them as well: an instance restart can leave
+               them stopped or gone, and the hour is not waited out. */
+            XeSessionsEnsuredAtUtc = null;
+        }
+    }
+
+    /// <summary>
+    /// The hourly ensure of the always-on deadlock and blocked-process sessions (#4961). The connect path ensures them and
+    /// stamps <see cref="ServerLoopState.XeSessionsEnsuredAtUtc"/>; the sweep calls this, and the ensure runs again once the
+    /// stamp is <see cref="AlwaysOnXeSessions.EnsureInterval"/> old. On-premises, Managed Instance and RDS that creates a
+    /// missing server-scoped session and starts a stopped one, under the shared names as ever. On Azure SQL Database it also
+    /// carries the per-database choice (shared or own session) and its switch back. A server that is not SQL Server has no
+    /// Extended Events and is left alone.
+    /// </summary>
+    internal static async Task EnsureAlwaysOnXeSessionsAsync(
+        ServerLoopState server, DarlingCollectorRunner runner, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
+    {
+        /* #4961: a retired server's ensure would create the sessions its removal has just dropped. */
+        if (server.Runtime is null
+            || server.Retired
+            || server.Runtime.Target.Engine != CollectorTargetEngine.SqlServer
+            || !AlwaysOnXeSessions.EnsureIsDue(server.XeSessionsEnsuredAtUtc, utcNow))
+        {
+            return;
+        }
+
+        /* Stamped before the ensure, so a server that refuses it is asked once an hour and not on every sweep. */
+        server.XeSessionsEnsuredAtUtc = utcNow;
+        await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -2213,6 +2290,11 @@ LIMIT 1";
                 var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, stoppingToken);
                 _logger.LogInformation("Postgres store ready (schema v{Version}, {Applied} migration(s) applied)",
                     StorageVersion.SchemaVersion, applied);
+                /* #4961: this install's id, made (or read back) now that the schema is current and before any worker
+                   starts. Inside this try, on the same connection, so a failure to make it is retried and triaged exactly
+                   like a failed migration. The CLI and the Viewer only read the row. */
+                _installId = await StoreInstallId.EnsureAsync(migrateConnection, _logger, stoppingToken);
+                _logger.LogInformation("Install id {InstallId}", _installId);
                 break;
             }
             catch (Exception ex) when (ex is not OperationCanceledException
@@ -2311,12 +2393,14 @@ LIMIT 1";
            its own connection, its own catch, drained with the other background startup work below. */
         var planForceDetailScrub = RunPlanForceActionDetailScrubAsync(postgres, stoppingToken);
 
-        /* #4605: the BRIN index on collect.query_store_interval_wide (collection_time), built CONCURRENTLY in the
-           background QueryStoreIntervalWideBrinIndex.StartDelay after start so the full-heap read stays off the
-           post-restart IO burst. Launched after migrations confirm the table exists, never awaited on the startup
-           path, one attempt per start, and RunDelayedAsync never throws. Drained with the other background work. */
-        var intervalWideBrin = QueryStoreIntervalWideBrinIndex.RunDelayedAsync(
-            postgres, _logger, QueryStoreIntervalWideBrinIndex.StartDelay, stoppingToken);
+        /* #4605, #4952: the Query Store read indexes - the BRIN on collect.query_store_interval_wide (collection_time)
+           and the btree on its (server_id, first_execution_time) - built in the background
+           QueryStoreBackgroundIndexes.StartDelay after start so their heap reads stay off the post-restart IO burst,
+           one after another, each failure-isolated. Launched after migrations confirm the tables exist, never awaited
+           on the startup path, one attempt per start, and RunDelayedAsync never throws. Drained with the other
+           background work. */
+        var queryStoreIndexes = QueryStoreBackgroundIndexes.RunDelayedAsync(
+            postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, QueryStoreBackgroundIndexes.All, stoppingToken);
 
         /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
            the first MCP or web call finds each rollup's floor already measured and does not wait ~10 s on the
@@ -2673,7 +2757,9 @@ LIMIT 1";
                 runtime.ServerId.ToString(CultureInfo.InvariantCulture),
                 runtime.Config.Host,
                 runtime.Config.Database,
-                LiveAlertTargets(_registryState.Read()?.Servers)));
+                LiveAlertTargets(_registryState.Read()?.Servers)),
+            /* #4961: this install's id, made at start before any worker runs. */
+            installId: () => _installId);
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the
@@ -3003,7 +3089,7 @@ LIMIT 1";
                    Self-healing rather than lossy, but it is the same class of imprecision as the defect
                    above ("the version recorded as applied must be the version that was applied"), and the
                    startup path at :1179 already does it this way. */
-                var appliedVersion = await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, stoppingToken);
+                var appliedVersion = await ReloadFromStoreAsync(configProvider, config, servers, muteRuleService, runner, stoppingToken);
                 if (appliedVersion.HasValue)
                 {
                     _lastConfigVersion = appliedVersion.Value;
@@ -3402,91 +3488,7 @@ LIMIT 1";
             if (StampIsDue(_nextCompressionCheckUtc, CompressionCheckSpan, DateTime.UtcNow))
             {
                 _nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);
-
-                /* #3815: the availability re-probe, and the one tenant of this tick that runs OUTSIDE the
-                   _timescaleAvailable gate below — because it is the tenant that CORRECTS that flag. Behind
-                   the gate it would be unreachable in exactly the state it exists for: a latch reading false
-                   cannot be re-opened from inside the block the latch closes. That is why this tick's guard
-                   is the due time alone and the flag moved down one level, and why the stamp is taken above
-                   the probe rather than behind the flag — on a store whose latch reads false the due time
-                   has to advance anyway, or the probe would fire on every 15-second sweep pass instead of
-                   hourly.
-
-                   The cost on a store that is genuinely plain PostgreSQL, a fully supported configuration
-                   that must not be punished for it: one CREATE EXTENSION IF NOT EXISTS that fails, once an
-                   hour, on a pooled connection, saying nothing above Debug. The only other thing this tick
-                   runs for such a store is the store-object convergence pass's non-TimescaleDB steps (#3913,
-                   the else branch below). */
-                if (!_timescaleAvailable)
-                {
-                    await ReprobeTimescaleAvailabilityAsync(stoppingToken);
-                }
-
-                if (_timescaleAvailable)
-                {
-                    await EvaluateCompressionJobHealthAsync(stoppingToken);
-
-                    /* #3812: the retention coverage gate, re-judged on the RUNNING service. Until this line
-                       the only thing that armed a held retention policy was the start-path ensure above, so
-                       "the gate releases the hold by itself once the backfill covers raw" was true only after
-                       a restart — a store on a stable build sat held indefinitely after a backfill that had
-                       worked, with the Retention Held alert still firing and reading like the backfill had
-                       failed. Same tick as the compression check (the constant's comment says why this cadence
-                       and why this order), each half failure-isolated inside its own method with its own
-                       catch, so a retention pass that throws or runs out its budget cannot skip the
-                       compression read and a compression fault cannot skip the retention pass. The Retention
-                       Held self-alert rides INSIDE the compression method and therefore reads the flags as
-                       they stood before this pass: a policy armed here shows as held on this tick's alert read
-                       and resolves on the next hour's, one tick of lag on the resolution edge that is stated
-                       rather than traded for #3575's phase. The first pass after startup fires within seconds
-                       of the start-path ensure (this stamp seeds at MinValue); that pass is deliberately not
-                       skipped — its "Retention re-evaluation:" line is the proof the hourly path is wired on
-                       this store, visible in the same log window an operator reads after a restart, and it
-                       costs twenty catalog rows and twenty chunk-pruned min() reads.
-
-                       THE HOURLY STORE-MAINTENANCE TICK, named. It is the home for every "we decided this at
-                       startup and never re-decided it" defect on the store side: #3812 and #3815 are its
-                       tenants, and #3816 (job self-heal covers compression only) and #3817 (store-object
-                       convergence only at startup) are queued as further ones — not built here. The contract
-                       a tenant signs: its own method, its own catch-all, awaited as its own statement in the
-                       gated block AFTER the compression read (the #3575 phase argument on
-                       s_compressionCheckInterval), in the order it appears; a new tenant is one more await
-                       line below this one. A tenant that CORRECTS the gate is the single exception and signs a
-                       different contract — it goes above the gate, not below the compression read, because
-                       inside it a false flag would block its own correction. #3815 is that case, and the gate
-                       has exactly one input, so there is no second one to write. No delegate list yet,
-                       deliberately — three tenants do not justify the indirection, and a list would hide the
-                       order the phase argument depends on. */
-                    await ReevaluateRetentionPoliciesAsync(stoppingToken);
-
-                    /* #3817: the FOURTH tenant, and the one that signs the contract the comment above spells
-                       out — its own method, its own catch-all, one awaited statement, LAST. The store-object
-                       convergence pass: every idempotent ensure the start path runs, re-run here, so one
-                       failed item heals within the hour instead of at the next restart. It is last for the
-                       same #3575 reason the retention pass is third: the compression read must sample the job
-                       catalog at :30 past the minute, and this pass — the heaviest of the four on a store
-                       that is NOT converged — must not be ahead of it pushing that sample toward the :MM:00
-                       instant the policies fire on. The ordering is pinned in RetentionReevaluationTests and
-                       TimescaleAvailabilityReprobeTests, both of which now name four tenants.
-
-                       Its first pass fires within seconds of the start-path pass (the tick's stamp seeds at
-                       MinValue), and that is deliberate for the reason #3812 gives about its own: the
-                       "Store object convergence:" line without the "at startup" prefix is the proof the
-                       hourly path is wired on THIS store, in the same log window an operator reads after a
-                       restart. On a converged store that pass costs catalog reads and two metadata ALTERs. */
-                    await ConvergeStoreObjectsAsync(stoppingToken);
-                }
-                else
-                {
-                    /* #3913: the same convergence pass on a store WITHOUT TimescaleDB, walking only the steps
-                       that run on every store shape (the Ungated and Tuning stages the start path already
-                       runs there): the baseline relations, the store's statement statistics, the composer's
-                       covering indexes. Before this, nothing re-ran on such a store between restarts, so a
-                       dropped fallback view, or an extension a DBA created by hand, waited for the next
-                       start. None of the compression-phase reasoning above applies, since a store without
-                       TimescaleDB has no policy jobs to sample. */
-                    await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
-                }
+                TryStartStoreMaintenanceTick(token => RunStoreMaintenanceTickAsync(token), stoppingToken);
             }
 
             /* #2068: the store self-metrics sweep. Capacity forecasting previously required ad-hoc
@@ -3569,81 +3571,10 @@ LIMIT 1";
             /* #4732: NextGridStamp writes at most one interval ahead, and s_storeMetricsInterval is the one it uses. */
             if (StampIsDue(_nextStoreMetricsUtc, s_storeMetricsInterval, DateTime.UtcNow))
             {
-                _nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, DateTime.UtcNow, s_storeMetricsInterval);
-
-                /* #4834: the longest single checkpoint sync the minute samples saw since the last tick, taken ONCE and
-                   here, so the window closes on the hour whatever the sweep below goes on to do. The sweep stores it on
-                   the hour's checkpointer row; the checkpointer evaluation and get_store_metrics both read it back from
-                   that row, so neither is handed a window. */
-                var checkpointWindow = _checkpointSyncSampler.TakeWindowMax();
-
                 /* #4012's review: the deadlock re-mask inside the sweep keys an alert whose report is gone under the
                    same log-hash key the runner's log-event runs share. */
                 _pgDeadlockRemaskKey = runner.LogHashKey;
-                await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);
-
-                /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
-                   regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
-                if (_selfAlerts is not null)
-                {
-                    try
-                    {
-                        await _selfAlerts.EvaluateCollectorCostAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "collector-cost self-alert evaluation failed");
-                    }
-
-                    /* #3783: the two store physical-health conditions the sweep just wrote the evidence for —
-                       the dimensions' TOAST utilisation (dormant until the store carries pg_freespacemap; the
-                       evaluator says why) and the checkpointer's last interval, differenced from the newest
-                       two checkpointer rows. Same tick as the sweep on purpose: the rows are seconds old, so
-                       the alert judges the hour the sweep measured rather than the one before it. Both
-                       master-gated inside and failure-isolated inside; the outer catch is the belt.
-                       #4834: the checkpointer check reads the hour's longest single sync from the row the
-                       sweep just wrote, the same value get_store_metrics publishes. */
-                    try
-                    {
-                        await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
-                        await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "store TOAST slack / checkpointer pressure self-alert evaluation failed");
-                    }
-
-                    /* #3466 (lane 4): the fleet sweep's DAILY channel rollup — the delivery half the sweep
-                       engine deliberately does not have. Attempted on this same hourly tick because the
-                       ceiling is enforced inside (one post per trailing day, and only on a day with
-                       something to say — 23 of every 24 ticks cost one dictionary lookup); master-gated
-                       inside like every self-alert, so master-off delivers nothing while the sweeps keep
-                       publishing to the web feed. Deliberately NOT gated on FleetSweepEnabled: sweeps
-                       recorded before the switch went off are still the trailing day's record, and with the
-                       sweep off the store simply serves an empty day, which posts nothing. Failure-isolated
-                       like its sibling above. */
-                    try
-                    {
-                        await _selfAlerts.EvaluateFleetSweepRollupAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "fleet-sweep rollup evaluation failed");
-                    }
-
-                    /* #3712: the third daily document — the analysis singles digest, the once-a-day channel copy
-                       of the findings the corroboration gate routed away from the paging channels. Same hourly
-                       tick, same one-post-per-trailing-day ceiling enforced inside, same master gate inside,
-                       same failure isolation as the two siblings above. */
-                    try
-                    {
-                        await _selfAlerts.EvaluateAnalysisSinglesDigestAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "analysis singles digest evaluation failed");
-                    }
-                }
+                TryStartStoreMetricsTick(DateTime.UtcNow, _checkpointSyncSampler.TakeWindowMax, (window, token) => RunStoreMetricsTickAsync(window, token), stoppingToken);
             }
 
             try
@@ -3672,6 +3603,16 @@ LIMIT 1";
                 .Where(t => t is not null)
                 .Select(t => t!)
                 .ToList();
+        }
+
+        if (_storeMaintenanceTick is { IsCompleted: false })
+        {
+            inFlightSweeps.Add(_storeMaintenanceTick);
+        }
+
+        if (_storeMetricsTick is { IsCompleted: false })
+        {
+            inFlightSweeps.Add(_storeMetricsTick);
         }
 
         if (inFlightSweeps.Count > 0)
@@ -3818,8 +3759,8 @@ LIMIT 1";
             /* Expected on shutdown. */
         }
 
-        /* And the interval-wide BRIN index ensure (#4605), which absorbs its own failures. */
-        await intervalWideBrin;
+        /* And the Query Store read index ensures (#4605, #4952), which absorb their own failures. */
+        await queryStoreIndexes;
 
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
         await rollupCoverageWarm;
@@ -3954,6 +3895,10 @@ LIMIT 1";
                never dispatched by RunDueCollectorsAsync and so the DROP-on-disable has nowhere else to run. */
             await ReconcileLongQueryTraceAsync(server, runner, stoppingToken);
 
+            /* #4961: the always-on deadlock and blocked-process sessions are ensured at connect and then once an hour, so a
+               session dropped from outside comes back within the hour. */
+            await EnsureAlwaysOnXeSessionsAsync(server, runner, DateTime.UtcNow, _logger, stoppingToken);
+
             await RunDueCollectorsAsync(server, runner, stoppingToken);
 
             /* After the server's collector sweep: evaluate alerts against the freshly collected store — on
@@ -4075,7 +4020,21 @@ LIMIT 1";
             serverSeparatelyMonitored = LongQueryTraceServerSeparatelyMonitored(server.Runtime.Config.Host, live);
         }
 
-        await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger, cancellationToken);
+        /* #4961: where the session is the server's own (every engine but Azure SQL Database), the drop while the trace is off
+           would stop the trace another registration of this install keeps on the same instance. The guard that says so is a
+           function, resolved only when a drop is about to run, so a server whose trace is on, or already reconciled off,
+           reads no registry and no state. Each registration's setting is its own override, else the install's default. */
+        Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null;
+        if (!server.Runtime.Target.IsAzureSqlDb)
+        {
+            instanceGuard = () => LongQueryTraceInstanceGuardFor(
+                serverId,
+                _registryState.Read()?.Servers,
+                otherId => StoreConfigProvider.ResolveSchedule("long_query_completions", otherId, _scheduleOverrides).Enabled,
+                (id, carrier) => runner.GetCollectorStateAsync(id, carrier, cancellationToken));
+        }
+
+        await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger, cancellationToken, instanceGuard);
     }
 
     /// <summary>
@@ -4125,6 +4084,72 @@ LIMIT 1";
             isAzureSqlDb: true, selfId: string.Empty, host, database: null, LiveAlertTargets(live));
 
     /// <summary>
+    /// #4961: where the session is the server's own (every engine but Azure SQL Database), this registration's last-known
+    /// <c>@@SERVERNAME</c> beside the other registrations of this install that could keep the session on the same instance
+    /// (<see cref="LongQueryTraceInstanceGuard"/>): each SQL Server registration in the live registry, which holds only the
+    /// monitored servers, whose long-query trace is on. A PostgreSQL registration holds no Extended Events session, so it is
+    /// none. <paramref name="traceOn"/> is the effective setting, a registration's own override or else the install's
+    /// default. The names come from the identity row a wait_stats or cpu_utilization run persisted
+    /// (<see cref="ServerEpoch.LastKnownNameAsync"/>), and are read only when another registration could keep the session,
+    /// so an install with no other trace on reads none. With no name of its own this registration matches nothing, so the
+    /// names of the others are not read either, and the drop runs as before. Lite's twin is
+    /// <c>RemoteCollectorService.LongQueryTraceInstanceGuardFor</c>.
+    /// </summary>
+    /// <param name="serverId">This registration's store id.</param>
+    /// <param name="live">The live registry, or null when none has been published yet.</param>
+    /// <param name="traceOn">Whether a registration's long-query trace is on, by its store id.</param>
+    /// <param name="readCarrierState">Reads one carrier collector's persisted state for a registration, by its store id.</param>
+    internal static async Task<LongQueryTraceInstanceGuard> LongQueryTraceInstanceGuardFor(
+        int serverId,
+        IReadOnlyList<MonitoredServer>? live,
+        Func<int, bool> traceOn,
+        Func<int, string, Task<Dictionary<string, string>>> readCarrierState)
+    {
+        ArgumentNullException.ThrowIfNull(traceOn);
+        ArgumentNullException.ThrowIfNull(readCarrierState);
+
+        var candidates = (live ?? Array.Empty<MonitoredServer>())
+            .Where(other => other.ServerId != serverId && !other.IsPostgres && traceOn(other.ServerId))
+            .ToList();
+        if (candidates.Count == 0)
+        {
+            return LongQueryTraceInstanceGuard.NoKeepers;
+        }
+
+        var ownName = await ServerEpoch.LastKnownNameAsync(carrier => readCarrierState(serverId, carrier));
+        var keepers = new List<LongQueryTraceInstance>(candidates.Count);
+        foreach (var other in candidates)
+        {
+            var otherId = other.ServerId;
+            var name = ownName is null ? null : await ServerEpoch.LastKnownNameAsync(carrier => readCarrierState(otherId, carrier));
+            keepers.Add(new LongQueryTraceInstance(Enabled: true, TraceOn: true, name));
+        }
+
+        return new LongQueryTraceInstanceGuard(ownName, keepers);
+    }
+
+    /// <summary>
+    /// #4961: a SQL Server restart stops the long-query trace's session, because the per-install session is created
+    /// with <c>STARTUP_STATE = OFF</c>, and a stopped session reads as a quiet one. When a collector run saw the
+    /// instance's identity move (<see cref="ServerEpoch.IdentityChangesMeasurement"/>: the start time, or the name
+    /// after a failover), this clears the long-query latch and its hourly create clock, so the next sweep runs the
+    /// whole reconcile and starts the session, instead of waiting for the hourly pass. Returns true when it cleared.
+    /// </summary>
+    internal static bool ForgetLongQueryTraceLatchOnRestart(ServerLoopState server, IReadOnlyList<CollectorMeasurement> measurements)
+    {
+        ArgumentNullException.ThrowIfNull(server);
+        ArgumentNullException.ThrowIfNull(measurements);
+
+        if (!measurements.Any(m => string.Equals(m.Label, ServerEpoch.IdentityChangesMeasurement, StringComparison.Ordinal) && m.Value > 0))
+        {
+            return false;
+        }
+
+        server.ForgetLongQueryTraceLatch();
+        return true;
+    }
+
+    /// <summary>
     /// The half of <see cref="ReconcileLongQueryTraceAsync(ServerLoopState, DarlingCollectorRunner, CancellationToken)"/> that
     /// runs after the engine gate and the schedule: it decides whether the trace needs reconciling, runs it, and records
     /// the outcome on the loop state. Static, with the enabled flag and the time passed in, so a test can drive it.
@@ -4137,9 +4162,12 @@ LIMIT 1";
         IReadOnlyList<string> serverSeparatelyMonitored,
         DateTime utcNow,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<Task<LongQueryTraceInstanceGuard>>? instanceGuard = null)
     {
-        if (server.Runtime is null)
+        /* #4961: a removed server's sweep that was already running reaches here after the removal retired the server and
+           dropped its session, and a create now would outlive the server. */
+        if (server.Runtime is null || server.Retired)
         {
             return;
         }
@@ -4187,13 +4215,25 @@ LIMIT 1";
             return;
         }
 
+        /* #4964: the pass decides its log level once, from what the passes before it did. A create that has already
+           warned logs its failure again at Debug, in the reconcile's own lines and in the catch below. */
+        var createFailureWarned = enabled && server.LongQueryTraceCreateWarned;
+
         try
         {
+            var outcome = new LongQueryTraceReconcileOutcome();
             var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
-                server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, logger, cancellationToken);
-            server.LongQueryTraceApplied = enabled;
-            server.LongQueryTraceAppliedKey = stateKey;
-            server.LongQueryTraceAppliedAtUtc = utcNow;
+                server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken, instanceGuard, outcome);
+
+            /* #4961: a start the replica refused just after this reconcile created the definition (it does not show it yet) is
+               not applied: the latch stays where it was, so the next sweep tries again and starts the session, instead of the
+               retry waiting for the hourly create pass. */
+            if (!outcome.StartPending)
+            {
+                server.LongQueryTraceApplied = enabled;
+                server.LongQueryTraceAppliedKey = stateKey;
+                server.LongQueryTraceAppliedAtUtc = utcNow;
+            }
 
             /* Only a pass that ran the cleanup ends its retries: the create side alone leaves the hourly attempt. */
             if (pass != LongQueryTracePass.CreateOnly)
@@ -4208,10 +4248,17 @@ LIMIT 1";
                and the next reconcile (which runs first, in this same sweep) has already replaced it. */
             server.LongQueryTraceFault = null;
             server.LongQueryTracePartialNote = enabled ? partialNote : null;
+
+            /* #4964: a create that succeeded ends the run of failures, so the next one warns again. */
+            server.LongQueryTraceCreateWarned = false;
         }
         catch (LongQueryTraceDropException ex)
         {
-            /* Azure SQL Database: a drop failed, or the databases could not be listed for it. While enabling, the
+            /* #4964: only the drop failed, so the create side finished: its run of failures is over. */
+            server.LongQueryTraceCreateWarned = false;
+
+            /* A drop failed: on Azure SQL Database, in some databases or in listing them, and on every other engine, the
+               server's own (#4964). While enabling, the
                create side had finished, so the fault clears and its partial note stands. The latch stays unset so
                the next sweep tries again, until the cap: then the reconcile counts as applied, and one warning
                names the databases where the session may remain. After that, one attempt an hour, logged at Debug,
@@ -4229,7 +4276,7 @@ LIMIT 1";
                     server.LongQueryTraceApplied = enabled;
                     server.LongQueryTraceAppliedKey = stateKey;
                     logger.LogWarning("[{Server}] {Message}", server.Config.DisplayName,
-                        LongQueryTraceDatabases.GiveUpWarning(ex.Databases, " It also tries again after it reconnects."));
+                        LongQueryTraceDatabases.GiveUpWarning(ex, " It also tries again after it reconnects."));
                     break;
                 case LongQueryTraceDropOutcome.TryAgainInAnHour:
                     logger.LogDebug("[{Server}] {Message} The next attempt is in an hour.", server.Config.DisplayName, ex.Message);
@@ -4241,8 +4288,26 @@ LIMIT 1";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning("[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
-                server.Config.DisplayName, ex.Message);
+            /* #4964: the first failure of a create that cannot succeed logs at Warning. The sweeps after it retry the
+               create just the same, and record the fault just the same below, but log at Debug until a create succeeds
+               or the server reconnects. */
+            /* #4961: a read-only database's refusal was already logged where it happened, with why and what to change. */
+            var readOnlyRefusal = enabled && DarlingXeSessions.IsReadOnlyDatabaseRefusal(ex);
+            logger.Log(createFailureWarned || readOnlyRefusal ? LogLevel.Debug : LogLevel.Warning,
+                "[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
+                server.Config.DisplayName, AlwaysOnXeSessions.DescribeFailure(ex));
+            server.LongQueryTraceCreateWarned = enabled;
+
+            /* #4961: a read-only database stays read-only until the registration or the database changes, so a create it
+               refused is not tried again on every sweep. The latch counts the reconcile as applied for this state: the next
+               attempt is the hourly create pass, logged at Debug, and a reconnect or a change of the state key runs the
+               whole reconcile again. The fault below stays set, so every run still records it. */
+            if (readOnlyRefusal)
+            {
+                server.LongQueryTraceApplied = enabled;
+                server.LongQueryTraceAppliedKey = stateKey;
+                server.LongQueryTraceAppliedAtUtc = utcNow;
+            }
 
             /* A pass that ran and threw must move its hourly clock, or every later sweep is another pass and another
                warning, with no cap. The full pass keeps its retry on each sweep: the latch is still unset. The hourly
@@ -4273,9 +4338,14 @@ LIMIT 1";
             if (enabled)
             {
                 var refusedIn = CollectorFaultDatabase.For(ex, fallback: null);
+                /* #4961: this install's own session, named from its id. With no id there is no name to give. */
+                var sessionLabel = runner.LongQuerySessionName() ?? "(unnamed: this install has no id)";
+
+                /* #4961: the sentence about Azure SQL Database's caps rides on a failed create or start there, and on nothing else. */
+                var refusal = AlwaysOnXeSessions.DescribeFailure(ex);
                 server.LongQueryTraceFault = refusedIn is null
-                    ? $"XE session {LongQueryCompletionsCollector.XeSessionName} could not be created, so no completions can be captured until it is: {ex.Message}"
-                    : $"XE session {LongQueryCompletionsCollector.XeSessionName} could not be created in any monitored database (first refusal in [{refusedIn}]), so no completions can be captured until it is: {ex.Message}";
+                    ? $"XE session {sessionLabel} could not be created, so no completions can be captured until it is: {refusal}"
+                    : $"XE session {sessionLabel} could not be created in any monitored database (first refusal in [{refusedIn}]), so no completions can be captured until it is: {refusal}";
                 server.LongQueryTracePartialNote = null;
             }
         }
@@ -5182,7 +5252,7 @@ LIMIT 1";
     /// </summary>
     private async Task<long?> ReloadFromStoreAsync(
         StoreConfigProvider provider, DarlingConfig config, List<ServerLoopState> servers,
-        MuteRuleService muteRuleService, CancellationToken cancellationToken)
+        MuteRuleService muteRuleService, DarlingCollectorRunner runner, CancellationToken cancellationToken)
     {
         var view = await provider.LoadViewAsync(config, cancellationToken);
         if (view is null)
@@ -5229,10 +5299,18 @@ LIMIT 1";
         /* Structural reconcile mutates the server list; the command loop reads it concurrently, so hold
            the lock across the add/remove. NextDue recompute mutates only per-server state (safe against a
            concurrent id lookup) so it stays outside the lock. */
+        List<RemovedLongQueryServer> removedServers;
         lock (_serversLock)
         {
+            /* #4961: the reconcile clears a removed server's runtime and drops its state in one synchronous step, so what the
+               drop below needs (the definition, the runtime, the long-query latch) is taken first. */
+            removedServers = DarlingRemovedServerSessions.Capture(servers, view.EnabledServers, runner);
             ReconcileServers(servers, view.EnabledServers);
         }
+
+        /* #4961: a removed server's sessions of this install's go with it, awaited here, after the lock is released: the
+           servers' lock is never held across a connection. */
+        await DropRemovedServerSessionsAsync(removedServers, runner, cancellationToken);
 
         await RecomputeNextDueAsync(servers, cancellationToken);
 
@@ -5252,6 +5330,38 @@ LIMIT 1";
             view.ConfigVersion, servers.Count, _paused);
 
         return view.ConfigVersion;
+    }
+
+    /// <summary>
+    /// The removed servers of one reload drop this install's sessions on them (#4961), one at a time, each in one attempt
+    /// within <see cref="DarlingRemovedServerSessions.Timeout"/>. The registry already holds the servers that remain, so
+    /// the removed one holds nothing back. Nothing it meets stops the reload: the drop logs its own failures.
+    /// </summary>
+    private async Task DropRemovedServerSessionsAsync(
+        List<RemovedLongQueryServer> removedServers, DarlingCollectorRunner runner, CancellationToken stoppingToken)
+    {
+        if (removedServers.Count == 0)
+        {
+            return;
+        }
+
+        var remaining = _registryState.Read()?.Servers;
+        bool TraceOn(int otherId) => StoreConfigProvider.ResolveSchedule("long_query_completions", otherId, _scheduleOverrides).Enabled;
+        foreach (var removed in removedServers)
+        {
+            using var sessionDrop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            sessionDrop.CancelAfter(DarlingRemovedServerSessions.Timeout);
+            /* On premises the guard reads the other registrations' last-known instance names, inside the same timeout. */
+            await DarlingRemovedServerSessions.DropAsync(
+                removed,
+                runner,
+                remaining,
+                TraceOn,
+                token => LongQueryTraceInstanceGuardFor(
+                    removed.Runtime.ServerId, remaining, TraceOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)),
+                _logger,
+                sessionDrop.Token);
+        }
     }
 
     /// <summary>
@@ -8775,7 +8885,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                     continue;
                 }
 
-                await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token);
+                await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token, hourly: true);
             }
 
             LogStoreObjectConvergence(tally, passClock.ElapsedMilliseconds, startup: false);
@@ -8859,11 +8969,13 @@ AND   j.hypertable_name = '{relation}'", connection))
         StoreObjectConvergenceStep step,
         StoreObjectConvergenceTally tally,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool hourly = false)
     {
         try
         {
-            var count = await step.EnsureAsync(connection, logger, cancellationToken);
+            var ensure = hourly && step.HourlyEnsureAsync is not null ? step.HourlyEnsureAsync : step.EnsureAsync;
+            var count = await ensure(connection, logger, cancellationToken);
             tally.Steps++;
             if (step.Signal == StoreObjectChangeSignal.Delta && count > 0)
             {
@@ -9824,6 +9936,252 @@ AND   j.hypertable_name = '{relation}'", connection))
     }
 
     /// <summary>
+    /// The hourly store-maintenance tick's launcher (#4970). The tick used to be awaited inline in the collection
+    /// launch loop, so a slow pass delayed every sweep launch; it now runs as a tracked background task, one at a
+    /// time. When the previous tick is still running at the next due time this hour is skipped: the caller has
+    /// already advanced the due stamp, which keeps the :30 phase the compression read depends on (#3575). That
+    /// differs on purpose from the daily purge, which retries on the next pass, because a skipped hour costs one
+    /// hour and a retry would sample the job catalog off phase.
+    /// </summary>
+    internal bool TryStartStoreMaintenanceTick(Func<CancellationToken, Task> runTick, CancellationToken stoppingToken)
+    {
+        if (_storeMaintenanceTick is { IsCompleted: false })
+        {
+            _logger.LogWarning(
+                "the previous hourly store-maintenance tick was still running at this tick's due time — skipping this hour; the next due time keeps its :30 phase");
+            return false;
+        }
+
+        _storeMaintenanceTick = RunTrackedTickAsync("hourly store-maintenance tick", runTick, stoppingToken);
+        return true;
+    }
+
+    /// <summary>
+    /// The hourly store self-metrics tick's launcher (#4970). The sweep and the self-alert evaluators that judge
+    /// its rows used to be awaited inline in the collection launch loop; they now run as one tracked background
+    /// task, one at a time. While the store-maintenance tick still runs this returns false WITHOUT advancing the
+    /// due stamp or taking the checkpoint window, so the next 15-second pass retries and maintenance keeps
+    /// running first. Once it launches (or skips), the stamp advances on the grid. If the previous metrics tick
+    /// is still running at this due time the hour is skipped with a Warning, so a late tick never doubles up.
+    /// </summary>
+    internal bool TryStartStoreMetricsTick(
+        DateTime nowUtc,
+        Func<CheckpointSyncMax?> takeWindow,
+        Func<CheckpointSyncMax?, CancellationToken, Task> runTick,
+        CancellationToken stoppingToken)
+    {
+        if (_storeMaintenanceTick is { IsCompleted: false })
+        {
+            return false;
+        }
+
+        _nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, nowUtc, s_storeMetricsInterval);
+
+        if (_storeMetricsTick is { IsCompleted: false })
+        {
+            _logger.LogWarning(
+                "the previous hourly store self-metrics tick was still running at this tick's due time — skipping this hour");
+            return false;
+        }
+
+        /* #4834: the longest single checkpoint sync the minute samples saw since the last tick, taken ONCE and
+           here, so the window closes when the tick LAUNCHES, whatever the sweep goes on to do. A deferral behind
+           maintenance moves that close to the first pass after maintenance ends. A skip (above) returns before
+           this call, so the window is not taken and carries into the next tick: that tick's window covers both
+           hours and its checkpointer row keeps the longest sync of the two, which is the safe direction since
+           dropping the window would lose a real long sync. The sweep stores it on the hour's checkpointer row;
+           the checkpointer evaluation and get_store_metrics both read it back from that row, so neither is
+           handed a window. */
+        var checkpointWindow = takeWindow();
+        _storeMetricsTick = RunTrackedTickAsync("hourly store self-metrics tick", token => runTick(checkpointWindow, token), stoppingToken);
+        return true;
+    }
+
+    /// <summary>
+    /// The hourly store self-metrics tick's body: the store self-metrics sweep, then the self-alerts that judge
+    /// the rows it just wrote, moved out of the launch loop (#4970) unchanged.
+    /// </summary>
+    private async Task RunStoreMetricsTickAsync(CheckpointSyncMax? checkpointWindow, CancellationToken stoppingToken)
+    {
+            await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);
+
+            /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
+               regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
+            if (_selfAlerts is not null)
+            {
+                try
+                {
+                    await _selfAlerts.EvaluateCollectorCostAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "collector-cost self-alert evaluation failed");
+                }
+
+                /* #3783: the two store physical-health conditions the sweep just wrote the evidence for —
+                   the dimensions' TOAST utilisation (dormant until the store carries pg_freespacemap; the
+                   evaluator says why) and the checkpointer's last interval, differenced from the newest
+                   two checkpointer rows. Same tick as the sweep on purpose: the rows are seconds old, so
+                   the alert judges the hour the sweep measured rather than the one before it. Both
+                   master-gated inside and failure-isolated inside; the outer catch is the belt.
+                   #4834: the checkpointer check reads the hour's longest single sync from the row the
+                   sweep just wrote, the same value get_store_metrics publishes. */
+                try
+                {
+                    await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
+                    await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "store TOAST slack / checkpointer pressure self-alert evaluation failed");
+                }
+
+                /* #3466 (lane 4): the fleet sweep's DAILY channel rollup — the delivery half the sweep
+                   engine deliberately does not have. Attempted on this same hourly tick because the
+                   ceiling is enforced inside (one post per trailing day, and only on a day with
+                   something to say — 23 of every 24 ticks cost one dictionary lookup); master-gated
+                   inside like every self-alert, so master-off delivers nothing while the sweeps keep
+                   publishing to the web feed. Deliberately NOT gated on FleetSweepEnabled: sweeps
+                   recorded before the switch went off are still the trailing day's record, and with the
+                   sweep off the store simply serves an empty day, which posts nothing. Failure-isolated
+                   like its sibling above. */
+                try
+                {
+                    await _selfAlerts.EvaluateFleetSweepRollupAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "fleet-sweep rollup evaluation failed");
+                }
+
+                /* #3712: the third daily document — the analysis singles digest, the once-a-day channel copy
+                   of the findings the corroboration gate routed away from the paging channels. Same hourly
+                   tick, same one-post-per-trailing-day ceiling enforced inside, same master gate inside,
+                   same failure isolation as the two siblings above. */
+                try
+                {
+                    await _selfAlerts.EvaluateAnalysisSinglesDigestAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "analysis singles digest evaluation failed");
+                }
+            }
+    }
+
+    /// <summary>
+    /// Wraps a tick delegate so the tracked task can never fault unobserved: nothing awaits it while it runs.
+    /// <see cref="OperationCanceledException"/> is the normal shutdown outcome and is swallowed.
+    /// </summary>
+    private async Task RunTrackedTickAsync(string name, Func<CancellationToken, Task> run, CancellationToken ct)
+    {
+        try
+        {
+            await run(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown drain. */
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "{Tick} failed", name);
+        }
+    }
+
+    /// <summary>
+    /// The hourly store-maintenance tick's body: the availability re-probe, then compression job health,
+    /// retention re-evaluation and store-object convergence, moved out of the launch loop (#4970) unchanged.
+    /// </summary>
+    private async Task RunStoreMaintenanceTickAsync(CancellationToken stoppingToken)
+    {
+        /* #3815: the availability re-probe, and the one tenant of this tick that runs OUTSIDE the
+           _timescaleAvailable gate below — because it is the tenant that CORRECTS that flag. Behind
+           the gate it would be unreachable in exactly the state it exists for: a latch reading false
+           cannot be re-opened from inside the block the latch closes. That is why this tick's guard
+           is the due time alone and the flag moved down one level, and why the stamp is taken above
+           the probe rather than behind the flag — on a store whose latch reads false the due time
+           has to advance anyway, or the probe would fire on every 15-second sweep pass instead of
+           hourly.
+
+           The cost on a store that is genuinely plain PostgreSQL, a fully supported configuration
+           that must not be punished for it: one CREATE EXTENSION IF NOT EXISTS that fails, once an
+           hour, on a pooled connection, saying nothing above Debug. The only other thing this tick
+           runs for such a store is the store-object convergence pass's non-TimescaleDB steps (#3913,
+           the else branch below). */
+        if (!_timescaleAvailable)
+        {
+            await ReprobeTimescaleAvailabilityAsync(stoppingToken);
+        }
+
+        if (_timescaleAvailable)
+        {
+            await EvaluateCompressionJobHealthAsync(stoppingToken);
+
+            /* #3812: the retention coverage gate, re-judged on the RUNNING service. Until this line
+               the only thing that armed a held retention policy was the start-path ensure above, so
+               "the gate releases the hold by itself once the backfill covers raw" was true only after
+               a restart — a store on a stable build sat held indefinitely after a backfill that had
+               worked, with the Retention Held alert still firing and reading like the backfill had
+               failed. Same tick as the compression check (the constant's comment says why this cadence
+               and why this order), each half failure-isolated inside its own method with its own
+               catch, so a retention pass that throws or runs out its budget cannot skip the
+               compression read and a compression fault cannot skip the retention pass. The Retention
+               Held self-alert rides INSIDE the compression method and therefore reads the flags as
+               they stood before this pass: a policy armed here shows as held on this tick's alert read
+               and resolves on the next hour's, one tick of lag on the resolution edge that is stated
+               rather than traded for #3575's phase. The first pass after startup fires within seconds
+               of the start-path ensure (this stamp seeds at MinValue); that pass is deliberately not
+               skipped — its "Retention re-evaluation:" line is the proof the hourly path is wired on
+               this store, visible in the same log window an operator reads after a restart, and it
+               costs twenty catalog rows and twenty chunk-pruned min() reads.
+
+               THE HOURLY STORE-MAINTENANCE TICK, named. It is the home for every "we decided this at
+               startup and never re-decided it" defect on the store side: #3812 and #3815 are its
+               tenants, and #3816 (job self-heal covers compression only) and #3817 (store-object
+               convergence only at startup) are queued as further ones — not built here. The contract
+               a tenant signs: its own method, its own catch-all, awaited as its own statement in the
+               gated block AFTER the compression read (the #3575 phase argument on
+               s_compressionCheckInterval), in the order it appears; a new tenant is one more await
+               line below this one. A tenant that CORRECTS the gate is the single exception and signs a
+               different contract — it goes above the gate, not below the compression read, because
+               inside it a false flag would block its own correction. #3815 is that case, and the gate
+               has exactly one input, so there is no second one to write. No delegate list yet,
+               deliberately — three tenants do not justify the indirection, and a list would hide the
+               order the phase argument depends on. */
+            await ReevaluateRetentionPoliciesAsync(stoppingToken);
+
+            /* #3817: the FOURTH tenant, and the one that signs the contract the comment above spells
+               out — its own method, its own catch-all, one awaited statement, LAST. The store-object
+               convergence pass: every idempotent ensure the start path runs, re-run here, so one
+               failed item heals within the hour instead of at the next restart. It is last for the
+               same #3575 reason the retention pass is third: the compression read must sample the job
+               catalog at :30 past the minute, and this pass — the heaviest of the four on a store
+               that is NOT converged — must not be ahead of it pushing that sample toward the :MM:00
+               instant the policies fire on. The ordering is pinned in RetentionReevaluationTests and
+               TimescaleAvailabilityReprobeTests, both of which now name four tenants.
+
+               Its first pass fires within seconds of the start-path pass (the tick's stamp seeds at
+               MinValue), and that is deliberate for the reason #3812 gives about its own: the
+               "Store object convergence:" line without the "at startup" prefix is the proof the
+               hourly path is wired on THIS store, in the same log window an operator reads after a
+               restart. On a converged store that pass costs catalog reads and two metadata ALTERs. */
+            await ConvergeStoreObjectsAsync(stoppingToken);
+        }
+        else
+        {
+            /* #3913: the same convergence pass on a store WITHOUT TimescaleDB, walking only the steps
+               that run on every store shape (the Ungated and Tuning stages the start path already
+               runs there): the baseline relations, the store's statement statistics, the composer's
+               covering indexes. Before this, nothing re-ran on such a store between restarts, so a
+               dropped fallback view, or an extension a DBA created by hand, waited for the next
+               start. None of the compression-phase reasoning above applies, since a store without
+               TimescaleDB has no policy jobs to sample. */
+            await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
+        }
+    }
+
+    /// <summary>
     /// The plain-text collection_log run-record for <c>purge_now</c>'s raw-table step (#4825): a header line naming
     /// the run, then one line per relation with its outcome and note. Status is WARNING when a relation ended
     /// <c>gate_error</c> or <c>run_failed</c> (the step itself failed), otherwise SUCCESS, because a relation the
@@ -10517,6 +10875,10 @@ AND   j.hypertable_name = '{relation}'", connection))
             server.LongQueryTraceAppliedKey = null;
             server.LongQueryTraceAppliedAtUtc = null;
             server.LongQueryTraceDropRetry.Reset();
+            /* #4964: and the create side's "already warned" state, so a failure after the reconnect is a new one. */
+            server.LongQueryTraceCreateWarned = false;
+            /* #4961: and the always-on sessions' clock, so the connect path ensures them and stamps it again. */
+            server.XeSessionsEnsuredAtUtc = null;
             /* Capture the id once, while the connection is freshly established and non-null: an on-load
                RunOneAsync below can drop server.Runtime on a mid-collection connection-level failure, so any
                later read of server.Runtime.ServerId (the schedule resolve, the connection edge) would NRE. */
@@ -10574,6 +10936,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             if (runtime.Target.Engine == CollectorTargetEngine.SqlServer)
             {
                 await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken);
+                server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
             }
 
             /* On-load config snapshots (effective FrequencyMinutes 0) run once per connect, then every
@@ -12235,6 +12598,10 @@ LIMIT 1";
 
             var result = await run(runner, runtime, cancellationToken);
 
+            /* #4964: a run of this collector succeeded, so its run of missing-session failures is over: the next failure
+               logs its line at Warning again (XeSessionMissingWarnings). */
+            server.XeSessionMissingWarnings.Clear(collectorName);
+
             /* #3754, the partial case: the Azure reconcile created the session in some databases and was
                refused in others. The run just read the survivors and its SUCCESS is a real success - but
                its row has to say that the refused databases are not in it, or a zero here reads as a quiet
@@ -12327,6 +12694,16 @@ LIMIT 1";
                 }
             }
 
+            /* #4961: the instance's identity moved (a restart, or a failover to another instance). A restart stops the
+               long-query trace's session, which is created stopped at startup, so the latch is cleared and the next
+               sweep's reconcile starts it again. Without this the gap lasts until the hourly create pass. */
+            if (ForgetLongQueryTraceLatchOnRestart(server, result.Measurements))
+            {
+                _logger.LogInformation(
+                    "[{Server}] The instance's identity moved (a restart or a failover): the long-query trace is checked again on the next sweep",
+                    server.Config.DisplayName);
+            }
+
             /* #2851: the server-scoped phase split rides its OWN line, for the same reason #2811's fetch
                sub-splits do — the line above is parsed by tooling outside this repo, and "don't break the
                parser" outranks "one line to grep". Gated on the MEASURED flag rather than on a value being
@@ -12417,8 +12794,15 @@ LIMIT 1";
                #3754: the second producer is the pre-dispatch check at the top of the try, for
                long_query_completions alone - the reconcile recorded that its session could not be created
                anywhere this run would read, so the run is classified here without opening a connection.
-               Same type, same arm, same row shape; only the message's origin differs. */
-            _logger.LogWarning("  [{Server}] {Collector} => XE session missing (capture down): {Message}",
+               Same type, same arm, same row shape; only the message's origin differs.
+
+               #4964: this arm runs on every sweep for as long as the session cannot be ensured, and the row below is
+               written on every one of them, on purpose, so collection health keeps reading SESSION_MISSING. The log line is
+               what would repeat without end: the first failing run of a collector on this server logs it at Warning, and the
+               runs after it log the same line at Debug, until a run of that collector succeeds (the clear after its run
+               above). */
+            _logger.Log(server.XeSessionMissingWarnings.TryMarkWarned(collectorName) ? LogLevel.Warning : LogLevel.Debug,
+                "  [{Server}] {Collector} => XE session missing (capture down): {Message}",
                 server.Config.DisplayName, collectorName, ex.Message);
 
             await DarlingObservability.LogCollectionAsync(

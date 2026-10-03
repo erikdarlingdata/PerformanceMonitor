@@ -601,7 +601,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                sees. Only THIS web mapping (see ComposeRunFailureResult) stops putting a STORE fault's text on
                the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
             var stopwatch = Stopwatch.StartNew();
-            var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder);
+            var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true);
             if (outcome.Payload is not null)
             {
                 return JsonNodeResult(outcome.Payload);
@@ -1075,6 +1075,96 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal const string TempFileLimitExceededMessage =
         "This panel needed more temporary disk space than a dashboard read may use. Narrow the time window, choose an hourly or daily grain, or add a filter.";
 
+    /// <summary>Seconds the WEB compose path adds to the resolved <c>compose_statement_timeout_seconds</c> when it
+    /// sets the client <c>CommandTimeout</c>, so the server's 57014 (recorded as Timeout, with the actionable
+    /// text) arrives before Npgsql's own client timer fires. The client deadline is then a backstop for a server
+    /// that never answers. The client deadline still fires first in two cases, and the outcome is Timeout in
+    /// both: pooled sessions keep an older, higher <c>statement_timeout</c> after an operator lowers
+    /// <c>compose_statement_timeout_seconds</c> (the new value takes effect on each role's next session), and the
+    /// owner-login fallback has no server-side <c>statement_timeout</c>, so the client deadline is the only bound.
+    /// The MCP <c>run_custom_view_panel</c> caller passes no headroom and keeps its equal-deadline race; either
+    /// side's timeout answers the same statement-timeout text there, because it passes the remap flag too.</summary>
+    internal const int ComposeClientDeadlineHeadroomSeconds = 5;
+
+    /// <summary>The client <c>CommandTimeout</c> for a composed query whose server-side statement_timeout is
+    /// <paramref name="serverSeconds"/>, with <paramref name="headroomSeconds"/> of headroom.</summary>
+    internal static int ComposeClientDeadlineSeconds(int serverSeconds, int headroomSeconds) => serverSeconds + headroomSeconds;
+
+    /// <summary>The caller-facing text of a composed read cancelled by the statement timeout, whether the server's
+    /// 57014 or the client's own timer got there first.</summary>
+    internal const string StatementTimeoutText = "Query failed: canceling statement due to statement timeout";
+
+    /// <summary>Raised by the compose runners when Npgsql's own client timer fires inside
+    /// <c>ExecuteReaderAsync</c> or the row <c>ReadAsync</c> loop of a connection that was already open. The
+    /// original <see cref="NpgsqlException"/> rides as the inner exception. Two cases look the same to the driver
+    /// and both become this marker: a stalled send of the query (the write timeout is the command's
+    /// <c>CommandTimeout</c>), and a pooled connection whose peer went away, whose first I/O happens inside
+    /// <c>ExecuteReaderAsync</c>. A failure to open the connection never becomes this marker (see
+    /// <see cref="ComposeStoreOpenException"/>). One limit: with <c>Multiplexing=true</c> in a bring-your-own
+    /// store connection string, a connect failure surfaces from <c>ExecuteReaderAsync</c> and becomes this
+    /// marker; the managed store's connection string does not set it (Npgsql's default is off).</summary>
+    internal sealed class ComposeStatementClientTimeoutException : Exception
+    {
+        internal ComposeStatementClientTimeoutException(NpgsqlException inner)
+            : base(inner.Message, inner)
+        {
+        }
+    }
+
+    /// <summary>Raised when a compose runner cannot open its store connection (pool wait, DNS, TCP connect, TLS or
+    /// startup or login exchange). The original <see cref="NpgsqlException"/> rides as the inner exception. No
+    /// statement ran, so this is never a statement timeout.</summary>
+    internal sealed class ComposeStoreOpenException : Exception
+    {
+        internal ComposeStoreOpenException(NpgsqlException inner)
+            : base(inner.Message, inner)
+        {
+        }
+    }
+
+    /// <summary>Opens a compose runner's store connection, before any statement runs. An <see cref="NpgsqlException"/>
+    /// from the open (other than a <see cref="PostgresException"/> the server sent at login) is raised as
+    /// <see cref="ComposeStoreOpenException"/>.</summary>
+    private static async Task<NpgsqlConnection> OpenComposeConnectionAsync(
+        NpgsqlDataSource postgres, System.Threading.CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await postgres.OpenConnectionAsync(cancellationToken);
+        }
+        catch (NpgsqlException ex) when (ex is not PostgresException)
+        {
+            throw new ComposeStoreOpenException(ex);
+        }
+    }
+
+    /// <summary>The generic-exception arm of the compose runner, pulled out so a test runs it. When
+    /// <paramref name="remapClientTimeout"/> is true (the web route and the MCP <c>run_custom_view_panel</c>
+    /// caller), a client timer that fired while the statement executed
+    /// (<see cref="ComposeStatementClientTimeoutException"/>) is the same event as the server's 57014, so it
+    /// records Timeout and answers with the same text; with the flag false it stays a server error carrying the
+    /// original message. A failure to open the store connection (<see cref="ComposeStoreOpenException"/>) is
+    /// never a statement timeout: it answers a server error whose text says whether the open timed out, and is
+    /// logged at Error with the original message.</summary>
+    internal static ComposeRunOutcome FromRunException(Exception ex, bool remapClientTimeout = false)
+    {
+        if (ex is ComposeStatementClientTimeoutException marker)
+        {
+            return remapClientTimeout
+                ? ComposeRunOutcome.AuthorQueryError(StatementTimeoutText, CollectorFaultCancelOrigin.QueryCanceled)
+                : ComposeRunOutcome.ServerError($"Error running query: {marker.InnerException!.Message}");
+        }
+
+        if (ex is ComposeStoreOpenException open)
+        {
+            return open.InnerException!.InnerException is TimeoutException
+                ? ComposeRunOutcome.ServerError($"Error running query: could not get a store connection in time: {open.InnerException.Message}")
+                : ComposeRunOutcome.ServerError($"Error running query: could not open a store connection: {open.InnerException!.Message}");
+        }
+
+        return ComposeRunOutcome.ServerError($"Error running query: {ex.Message}");
+    }
+
     /// <summary>#4293 round 2 (R2-L1, R2-L2): the compose runner's PostgresException decision, pulled out of the
     /// catch so a test runs it. <see cref="IsComposeRunAuthorActionable"/>'s SQLSTATEs count only at ERROR
     /// severity: a FATAL or PANIC is a connection-level store fault whatever its class (a startup parameter the
@@ -1104,7 +1194,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(
         NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken,
-        ReadLatencyRecorder? readLatency = null)
+        ReadLatencyRecorder? readLatency = null, int clientDeadlineHeadroomSeconds = 0, bool remapClientTimeout = false)
     {
         /* #4442 scope 2: recorded ONCE per call, here, so the web /api/compose/run route and the MCP
            run_custom_view_panel tool -- both of which call this ONE runner -- contribute exactly one
@@ -1114,7 +1204,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            a bucket update is the only work in the try, and any failure there is swallowed and logged at
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
-        var outcome = await RunComposedPanelCoreAsync(postgres, body, cancellationToken);
+        var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, cancellationToken, readLatency?.Logger);
         RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken);
         return outcome;
     }
@@ -1179,9 +1269,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>The compile-and-run body <see cref="RunComposedPanelAsync"/> wraps with latency recording --
-    /// unchanged from before #4442 scope 2 added the wrapper.</summary>
+    /// unchanged from before #4442 scope 2 added the wrapper. <paramref name="logger"/> is the one the host's
+    /// read-latency recorder carries (<see cref="ReadLatencyRecorder.Logger"/>), where the data-start probe reports
+    /// a failure it swallows.</summary>
     private static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
-        NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, System.Threading.CancellationToken cancellationToken,
+        ILogger? logger = null)
     {
         if (body["panel"] is not JsonObject panel)
         {
@@ -1300,11 +1393,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                statement_timeout they all run under. */
             var composedQuerySeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);
 
-            var rows = await RunComposedQueryAsync(postgres, compiled!, composedQuerySeconds, cancellationToken);
+            var clientSeconds = ComposeClientDeadlineSeconds(composedQuerySeconds, clientDeadlineHeadroomSeconds);
+            var rows = await RunComposedQueryAsync(postgres, compiled!, clientSeconds, cancellationToken);
             /* Event-annotation overlays (design D5): one bounded, catalog-only event query per requested
                source, on the SAME window + server scope, under the same statement_timeout. Additive —
                {sql, rows} are unchanged; a panel that requests no annotations returns an empty array. */
-            var annotations = await RunAnnotationsAsync(postgres, plan!, runContext, composedQuerySeconds, cancellationToken);
+            var annotations = await RunAnnotationsAsync(postgres, plan!, runContext, clientSeconds, cancellationToken);
             var payload = new JsonObject { ["sql"] = compiled!.Sql, ["rows"] = rows, ["annotations"] = annotations };
             /* Partial window, and says so (#1665): when the route landed on a tier whose retention cannot
                reach the window's start on a retention-active store, tell the caller instead of quietly
@@ -1313,8 +1407,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                ends — retention loses the oldest points, the row cap now drops them too by keeping the
                newest buckets — and a panel can genuinely hit both at once. Showing one and swallowing
                the other would under-report exactly the panel that is worst off. */
+            var retentionNotice = ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups, coverage);
+
+            /* The tier notice judges a tier by the store-wide floors, so it is silent for a source with no rollups,
+               a store with no TimescaleDB, and one server whose rows start later than the rest. When it is silent,
+               ask where this panel's own rows start. The Query Store wide table reports its own start in the
+               history note below, so a panel it served is not asked twice. */
+            if (retentionNotice is null && !queryStoreWideEligible)
+            {
+                retentionNotice = await ComposeStoreAvailability.BuildDataStartNoticeAsync(
+                    postgres, plan.Measure.SourceTable, compiled.Route, serverScope, start, end, composedQuerySeconds, cancellationToken, logger);
+            }
+
             if (ComposeStoreAvailability.CombineNotices(
-                    ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups, coverage),
+                    retentionNotice,
                     ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
             {
                 payload["notice"] = notice;
@@ -1349,7 +1455,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return ComposeRunOutcome.ServerError($"Error running query: {ex.Message}");
+            return FromRunException(ex, remapClientTimeout);
         }
     }
 
@@ -1576,26 +1682,37 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>Runs a compiled composed query on the viewer pool and serializes its rows to a JSON array of
     /// <c>{column: value}</c> objects — generic over the SELECT shape (bucket / group dims / value).</summary>
     private static async Task<JsonArray> RunComposedQueryAsync(
-        NpgsqlDataSource postgres, ComposeCompiled compiled, int composedQuerySeconds, System.Threading.CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, ComposeCompiled compiled, int clientDeadlineSeconds, System.Threading.CancellationToken cancellationToken)
     {
-        await using var command = postgres.CreateCommand(compiled.Sql);
-        command.CommandTimeout = composedQuerySeconds;
+        /* The connection is opened first and on its own, so a pool-wait or connect timeout (also an
+           NpgsqlException over a TimeoutException) is never mistaken for the client timer of a running
+           statement. Only a timeout raised below, while the statement executes, becomes the marker. */
+        await using var connection = await OpenComposeConnectionAsync(postgres, cancellationToken);
+        await using var command = new NpgsqlCommand(compiled.Sql, connection);
+        command.CommandTimeout = clientDeadlineSeconds;
         foreach (var parameter in compiled.Parameters)
         {
             command.Parameters.Add(parameter);
         }
 
         var rows = new JsonArray();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        try
         {
-            var row = new JsonObject();
-            for (var i = 0; i < reader.FieldCount; i++)
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
-                row[reader.GetName(i)] = reader.IsDBNull(i) ? null : DbValueToJson(reader.GetValue(i));
-            }
+                var row = new JsonObject();
+                for (var i = 0; i < reader.FieldCount; i++)
+                {
+                    row[reader.GetName(i)] = reader.IsDBNull(i) ? null : DbValueToJson(reader.GetValue(i));
+                }
 
-            rows.Add(row);
+                rows.Add(row);
+            }
+        }
+        catch (NpgsqlException ex) when (ex.InnerException is TimeoutException)
+        {
+            throw new ComposeStatementClientTimeoutException(ex);
         }
 
         return rows;
@@ -1609,15 +1726,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// caller's try/catch exactly like the measure query's (a runaway overlay fails the run with a clear 400,
     /// rather than silently dropping markers the caller can't tell are missing).</summary>
     private static async Task<JsonArray> RunAnnotationsAsync(
-        NpgsqlDataSource postgres, PanelPlan plan, ComposeRunContext runContext, int composedQuerySeconds, System.Threading.CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, PanelPlan plan, ComposeRunContext runContext, int clientDeadlineSeconds, System.Threading.CancellationToken cancellationToken)
     {
         var annotations = new JsonArray();
         var serverClocks = plan.Annotations.Any(a => a.Frame == AnnotationClockFrame.ServerLocal)
-            ? await ReadServerClocksAsync(postgres, runContext, composedQuerySeconds, cancellationToken)
+            ? await ReadServerClocksAsync(postgres, runContext, clientDeadlineSeconds, cancellationToken)
             : ComposeCompiler.NoServerClocks;
         foreach (var (source, compiled) in ComposeCompiler.CompileAnnotations(plan, runContext, serverClocks))
         {
-            var events = await RunComposedQueryAsync(postgres, compiled, composedQuerySeconds, cancellationToken);
+            var events = await RunComposedQueryAsync(postgres, compiled, clientDeadlineSeconds, cancellationToken);
             annotations.Add(new JsonObject { ["source"] = source, ["events"] = events });
         }
 
@@ -1628,18 +1745,26 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// every marker by the offset in force on its own date (#4821). Same pool and same timeout as the
     /// annotation queries; a failure surfaces through the caller's try/catch the same way.</summary>
     private static async Task<IReadOnlyDictionary<string, PerformanceMonitor.Analysis.Baselines.ServerClock>> ReadServerClocksAsync(
-        NpgsqlDataSource postgres, ComposeRunContext runContext, int composedQuerySeconds, System.Threading.CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, ComposeRunContext runContext, int clientDeadlineSeconds, System.Threading.CancellationToken cancellationToken)
     {
         var compiled = ComposeCompiler.CompileServerClockRead(runContext);
-        await using var command = postgres.CreateCommand(compiled.Sql);
-        command.CommandTimeout = composedQuerySeconds;
+        await using var connection = await OpenComposeConnectionAsync(postgres, cancellationToken);
+        await using var command = new NpgsqlCommand(compiled.Sql, connection);
+        command.CommandTimeout = clientDeadlineSeconds;
         foreach (var parameter in compiled.Parameters)
         {
             command.Parameters.Add(parameter);
         }
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        return await ComposeCompiler.ReadServerClocksAsync(reader, cancellationToken);
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await ComposeCompiler.ReadServerClocksAsync(reader, cancellationToken);
+        }
+        catch (NpgsqlException ex) when (ex.InnerException is TimeoutException)
+        {
+            throw new ComposeStatementClientTimeoutException(ex);
+        }
     }
 
     private static JsonValue? DbValueToJson(object value) => value switch
