@@ -211,9 +211,10 @@ public partial class ViewerServerTab
         /* #4966: say where the reports start (the Queries tab's "Showing since" banner), the earlier of the collector's
            coverage and the earliest report shown (an event time can reach before the server was added). */
         var dataStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var rows = await _dataService.GetRecentBlockedProcessReportsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var read = await _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var rows = read.Rows;
         _blockedProcessFilterMgr!.UpdateData(rows);
-        await ShowEventDataStartAsync(BlockedProcessReportsTruncationBanner, dataStartTask, "Blocked Process Reports", startUtc, rows.Select(r => r.EventTime), ViewerDataService.BlockedProcessReportsRowCap);
+        await ShowEventDataStartAsync(BlockedProcessReportsTruncationBanner, dataStartTask, "Blocked Process Reports", startUtc, rows.Select(r => r.EventTime), ViewerDataService.BlockedProcessReportsRowCap, read.CappedSourceStartUtc);
         await ShowSeparatelyMonitoredNotesAsync();
         await LoadBlockingSlicerAsync(startUtc, endUtc);
     }
@@ -278,9 +279,10 @@ public partial class ViewerServerTab
         try
         {
             var dataStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var rows = await _dataService.GetRecentBlockedProcessReportsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var read = await _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var rows = read.Rows;
             _blockedProcessFilterMgr!.UpdateData(rows);
-            await ShowEventDataStartAsync(BlockedProcessReportsTruncationBanner, dataStartTask, "Blocked Process Reports", e.StartUtc, rows.Select(r => r.EventTime), ViewerDataService.BlockedProcessReportsRowCap);
+            await ShowEventDataStartAsync(BlockedProcessReportsTruncationBanner, dataStartTask, "Blocked Process Reports", e.StartUtc, rows.Select(r => r.EventTime), ViewerDataService.BlockedProcessReportsRowCap, read.CappedSourceStartUtc);
         }
         catch (Exception ex)
         {

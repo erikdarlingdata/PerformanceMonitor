@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -17,6 +18,16 @@ using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
+
+/// <summary>
+/// The Blocked Process Reports grid's rows, and where a read that filled its own cap stops the grid being complete
+/// (<see cref="ViewerDataService.ReadRecentBlockedProcessReportsAsync"/>, #4966).
+/// </summary>
+/// <param name="Rows">The merged rows, newest first, at most <see cref="ViewerDataService.BlockedProcessReportsRowCap"/>.</param>
+/// <param name="CappedSourceStartUtc">The oldest event time the XE read or the DMV read returned, for the one that returned a
+/// full page (the later, when both did): the older reports of that read are not in the grid, whatever the merged count is.
+/// Null when neither read filled its cap.</param>
+public sealed record ViewerBlockedProcessReportsRead(List<ViewerBlockedProcessRow> Rows, DateTime? CappedSourceStartUtc);
 
 /// <summary>
 /// The Blocking-tab grid row — widened to Lite parity (W1e). All alert-consumed members (event time,
@@ -237,32 +248,59 @@ public sealed partial class ViewerDataService
     /// the alert path's semantics, on the shared row shape.
     /// </summary>
     public async Task<List<ViewerBlockedProcessRow>> GetRecentBlockedProcessReportsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default) =>
+        (await ReadRecentBlockedProcessReportsAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken)).Rows;
+
+    /// <summary>
+    /// The grid's rows (<see cref="GetRecentBlockedProcessReportsAsync"/>) and where the grid stops being complete when one
+    /// of the two reads behind it filled its own cap (#4966). Each read keeps its newest 200 rows, and the merge then drops
+    /// the DMV rows an XE report already covers and the DMV rows that repeat a pair within a minute, so the merged list can
+    /// hold fewer than 200 rows while the DMV read stopped at its LIMIT and left older reports out. The count of the merged
+    /// list cannot show that, so each read's own count is checked here, before the merge
+    /// (<see cref="ViewerEventDataStart.CappedSourceStart"/>).
+    /// </summary>
+    public async Task<ViewerBlockedProcessReportsRead> ReadRecentBlockedProcessReportsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var items = await ReadBlockedProcessRowsAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken);
         var dmvItems = await ReadDmvBlockedProcessRowsAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken);
 
+        var cappedSourceStart = ViewerEventDataStart.CappedSourceStart(
+            BlockedProcessReportsRowCap, items.Select(r => r.EventTime).ToList(), dmvItems.Select(r => r.EventTime).ToList());
+
         BlockedProcessReportMerge.AppendDmvFallbackRows(items, dmvItems);
 
-        return items;
+        return new ViewerBlockedProcessReportsRead(items, cappedSourceStart);
     }
 
     /// <summary>The grid's row cap: the newest 200 reports, after the DMV fallback rows are merged in. The SQL's own LIMIT is the same number.</summary>
     public const int BlockedProcessReportsRowCap = BlockedProcessReportMerge.DefaultCap;
 
     /// <summary>
-    /// Where this server's blocked_process_reports coverage starts for the window, through the shared probe
+    /// Where this server's coverage of the Blocked Process Reports grid starts for the window, through the shared probe
     /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its first
-    /// row in the window if that is earlier (#4966). The coverage is read from the XE collector, the table the grid is
-    /// named for; the always-on DMV snapshots beside it fill gaps in the same range. The grid windows on the report's
-    /// own event time, which can reach before the coverage (the server's first collection stores its history), so the
-    /// caller names the earlier of this and the earliest report it shows
-    /// (<see cref="ViewerEventDataStart.Of"/>). Null when the window holds no row and no logged run, and when it lies
-    /// wholly before the coverage.
+    /// row in the window if that is earlier (#4966). The grid is fed by two collectors, the XE blocked_process_reports
+    /// table and the always-on DMV snapshots beside it, which stand in for it when XE collection is off (a server whose
+    /// blocked process threshold is unset); the coverage is the EARLIER of the two, so a server with only the DMV
+    /// collector running does not read as uncovered, and one whose DMV rows are quiet at the start does not read as cut.
+    /// The grid windows on the report's own event time, which can reach before the coverage (the server's first
+    /// collection stores its history), so the caller names the earlier of this and the earliest report it shows
+    /// (<see cref="ViewerEventDataStart.Of"/>). Null when neither collector holds a row or a logged run in the window, and
+    /// when the window lies wholly before both coverages. A probe that throws throws here, so the caller's notice hides.
     /// </summary>
-    public Task<DateTime?> GetBlockedProcessReportsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("blocked_process_reports"), serverId, startUtc, endUtc,
+    public async Task<DateTime?> GetBlockedProcessReportsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        /* The two probes run side by side, so the deadline each is handed is priced for two reads in flight. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var xe = DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("blocked_process_reports"), serverId, startUtc, endUtc,
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        var dmv = DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("dmv_blocking_snapshots"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+        var answers = await Task.WhenAll(xe, dmv);
+
+        return answers.Where(a => a is not null).Min();
+    }
 
     /// <summary>Maps the full 37-column blocked-process-report read into the widened grid row.</summary>
     private async Task<List<ViewerBlockedProcessRow>> ReadBlockedProcessRowsAsync(

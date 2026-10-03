@@ -28,21 +28,71 @@ public static class ViewerEventDataStart
 {
     /// <summary>
     /// The instant an event surface's "Showing since" notice names: <paramref name="coverageStartUtc"/>, or the earliest
-    /// event the grid shows (<paramref name="earliestShownUtc"/>) when that is earlier. Null when the probe has no
-    /// answer (<paramref name="coverageStartUtc"/> null: nothing in the range, or the probe failed), so a surface never
-    /// names a start the store could not vouch for.
+    /// event the grid shows (<paramref name="earliestShownUtc"/>) when that is earlier.
+    ///
+    /// <para>The probe answers one of three ways, and they are not the same. It found coverage
+    /// (<paramref name="coverageStartUtc"/> set): the rule above. It found NONE in the window
+    /// (<paramref name="coverageStartUtc"/> null: the range ends before the server's first collection, or the collector never
+    /// ran in it), yet the grid can still list history, because an event carries its own time and a server's first collection
+    /// stores the events that came before it: the notice names the earliest event shown, and the notice's own check
+    /// (<see cref="PerformanceMonitor.Darling.Storage.RawWindowFloor.IsTruncated"/>) raises it only when that comes later than
+    /// the range's start by more than the slack. Or it FAILED (<paramref name="probeFailed"/>): the store could not vouch
+    /// for anything, so the notice names nothing, and the grid's own first row does not stand in for the coverage.</para>
     ///
     /// <para>A read that hit its row cap (<paramref name="readHitCap"/>, see <see cref="ReadHitCap"/>) returns the newest
     /// rows and stops, so the grid does not reach back further than its oldest row, whatever the store covers: the
-    /// notice names that row. It comes from the rows themselves, so it needs no answer from the probe. A read that
-    /// stayed under its cap keeps the rule above.</para>
+    /// notice names that row. It comes from the rows themselves, so it needs no answer from the probe. A grid fed by
+    /// several reads can hold fewer rows than its cap while one of its reads filled its own: that read's oldest row
+    /// (<paramref name="cappedSourceOldestUtc"/>, see <see cref="CappedSourceStart"/>) bounds the grid the same way,
+    /// and when both name one the later wins, since the grid is complete only from there. A read that stayed under its
+    /// cap keeps the rule above.</para>
     /// </summary>
-    public static DateTime? Of(DateTime? coverageStartUtc, DateTime? earliestShownUtc, bool readHitCap = false) =>
-        readHitCap && earliestShownUtc is DateTime oldest
-            ? oldest
-            : coverageStartUtc is not DateTime coverage
-                ? null
-                : earliestShownUtc is DateTime shown && shown < coverage ? shown : coverage;
+    public static DateTime? Of(
+        DateTime? coverageStartUtc, DateTime? earliestShownUtc, bool readHitCap = false, bool probeFailed = false, DateTime? cappedSourceOldestUtc = null)
+    {
+        var capStart = readHitCap && earliestShownUtc is DateTime oldest ? oldest : (DateTime?)null;
+        if (cappedSourceOldestUtc is DateTime sourceOldest && (capStart is not DateTime named || sourceOldest > named))
+        {
+            capStart = sourceOldest;
+        }
+
+        if (capStart is not null)
+        {
+            return capStart;
+        }
+
+        if (probeFailed)
+        {
+            return null;
+        }
+
+        return coverageStartUtc is not DateTime coverage
+            ? earliestShownUtc
+            : earliestShownUtc is DateTime shown && shown < coverage ? shown : coverage;
+    }
+
+    /// <summary>
+    /// Where a grid fed by several newest-first reads, each with its own <paramref name="rowCap"/>, is complete from: the
+    /// later of the oldest rows of the reads that filled their cap, or null when none did. A merge can leave fewer rows
+    /// than the cap while one read stopped at its own (the rows another read already holds, or its own repeats within a
+    /// minute, drop out), so the merged count never shows it; the older rows of that read are missing all the same. Rows with
+    /// no event time never name a start.
+    /// </summary>
+    public static DateTime? CappedSourceStart(int rowCap, params IReadOnlyCollection<DateTime?>[] sourceEventTimesUtc)
+    {
+        ArgumentNullException.ThrowIfNull(sourceEventTimesUtc);
+
+        DateTime? start = null;
+        foreach (var source in sourceEventTimesUtc)
+        {
+            if (ReadHitCap(source.Count, rowCap) && EarliestOf(source) is DateTime oldest && (start is null || oldest > start))
+            {
+                start = oldest;
+            }
+        }
+
+        return start;
+    }
 
     /// <summary>
     /// True when a read that keeps its newest <paramref name="rowCap"/> rows returned that many: it may have left older
