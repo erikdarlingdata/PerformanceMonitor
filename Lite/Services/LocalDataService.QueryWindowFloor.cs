@@ -108,10 +108,15 @@ public partial class LocalDataService
     /// <c>collection_time</c> for most relations, <c>capture_time</c> for the three config snapshots (their collectors stamp
     /// it instead, <c>ICollectorSchemaInfo.PrefixTimeColumnName</c>, and the archive purges by it), and <c>event_time</c>
     /// for the two event relations (#4989): the System Events grids that read system_health events and the Default Trace
-    /// grid filter on the event's own time, not on the time a run stored it. A server's first run stores the history the
-    /// server already holds, every row stamped with that run's <c>collection_time</c> while its <c>event_time</c> goes back
-    /// days, and the probe reading <c>collection_time</c> there named the run above rows from before it. The archive still
-    /// purges those two tables by <c>collection_time</c>. The system_health <c>event_time</c> is the XE <c>@timestamp</c>,
+    /// grid filter on the event's own time, not on the time a run stored it. A server's first run can store events from
+    /// before itself, every row stamped with that run's <c>collection_time</c> while its <c>event_time</c> is older, and the
+    /// probe reading <c>collection_time</c> there named the run above rows from before it. How far back depends on the
+    /// collector: the Default Trace's first run stores the history the trace files already hold, which can go back days,
+    /// while a first run of the system_health collector (and of Long Queries) reads back only
+    /// <see cref="PerformanceMonitor.Collectors.CollectorContext.EventFallbackWindow"/>, 10 minutes. Long Queries stays on
+    /// <c>collection_time</c>, the column its grid filters on; the grid's notice also takes the oldest completion it shows
+    /// into account (<c>ServerTab.EarlierOfFloorAndRowShown</c>). The archive still purges those two tables by
+    /// <c>collection_time</c>. The system_health <c>event_time</c> is the XE <c>@timestamp</c>,
     /// UTC, like every other column here. The Default Trace's <c>event_time</c> is the exception: it is the monitored server's
     /// wall clock as stored (its grid converts each row through the server's clock), so the probe does the same
     /// (<see cref="QueryWindowRelationTimeIsServerLocal"/>, #4989): it reads that relation's rows over the grid's padded

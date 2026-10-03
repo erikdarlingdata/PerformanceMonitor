@@ -26,10 +26,12 @@ namespace PerformanceMonitor.Ui;
 internal sealed class ChartHoverHelper
 {
     /// <summary>A registered series: the scatter, its full (untruncated) label, and the unmutated
-    /// identity color captured at registration (see <see cref="Add"/>).</summary>
+    /// identity color captured at registration (see <see cref="Add"/>). <paramref name="PointDetails"/> is an optional
+    /// extra hover line per point, by the point's index in the scatter (see <see cref="Add"/>).</summary>
     internal readonly record struct SeriesEntry(
         ScottPlot.Plottables.Scatter Scatter, string Label, ScottPlot.Color Identity,
-        ScottPlot.Color OrigLineColor, float OrigLineWidth, float OrigMarkerSize, bool OrigFillY);
+        ScottPlot.Color OrigLineColor, float OrigLineWidth, float OrigMarkerSize, bool OrigFillY,
+        IReadOnlyList<string>? PointDetails = null);
 
     private readonly ScottPlot.WPF.WpfPlot _chart;
     private readonly List<SeriesEntry> _series = new();
@@ -180,7 +182,14 @@ internal sealed class ChartHoverHelper
         PlainTimeAt = null;
     }
 
-    public void Add(ScottPlot.Plottables.Scatter scatter, string label) =>
+    /// <param name="scatter">The series to hover.</param>
+    /// <param name="label">The series' name, the popup's first line.</param>
+    /// <param name="pointDetails">
+    /// Optional, one entry per point of <paramref name="scatter"/> in the order it was built (#4989): a fourth popup line
+    /// for the nearest point, for a series whose point stands for more than its value (a bucket's maximum drawn over the
+    /// runs behind it). Left out, the popup is the three lines it always was.
+    /// </param>
+    public void Add(ScottPlot.Plottables.Scatter scatter, string label, IReadOnlyList<string>? pointDetails = null) =>
         /* Capture the IDENTITY color from the marker fill, NOT scatter.Color: Add runs after
            ChartStyle.StyleScatter, which has already mutated the line color to identity.WithAlpha(215)
            but never touches the marker fill — so MarkerStyle.FillColor still holds the pure identity
@@ -189,7 +198,7 @@ internal sealed class ChartHoverHelper
            no fill, and never call StyleScatter) as well as the StyleScatter'd fill charts. */
         _series.Add(new SeriesEntry(
             scatter, label, scatter.MarkerStyle.FillColor,
-            scatter.LineColor, scatter.LineWidth, scatter.MarkerSize, scatter.FillY));
+            scatter.LineColor, scatter.LineWidth, scatter.MarkerSize, scatter.FillY, pointDetails));
 
     public void Add(ScottPlot.Plottables.BarPlot barPlot, string label) =>
         _barPlots.Add((barPlot, label));
@@ -292,6 +301,7 @@ internal sealed class ChartHoverHelper
             double bestYDistance = double.MaxValue;
             ScottPlot.DataPoint bestPoint = default;
             string bestLabel = "";
+            string? bestDetail = null;
             bool found = false;
 
             foreach (var entry in _series)
@@ -311,11 +321,20 @@ internal sealed class ChartHoverHelper
                     bestYDistance = dy;
                     bestPoint = nearest;
                     bestLabel = entry.Label;
+                    bestDetail = entry.PointDetails is { } details && nearest.Index >= 0 && nearest.Index < details.Count
+                        ? details[nearest.Index]
+                        : null;
                     found = true;
                 }
             }
 
+            /* A bar that beats the series' nearest point (it lowers the Y distance) carries no detail line. */
+            var distanceBeforeBars = bestYDistance;
             FindNearestBar(pixel, ref bestYDistance, ref bestPoint, ref bestLabel, ref found);
+            if (bestYDistance < distanceBeforeBars)
+            {
+                bestDetail = null;
+            }
 
             if (found)
             {
@@ -324,7 +343,7 @@ internal sealed class ChartHoverHelper
                 string valueFormatted = (bestPoint.Y == Math.Floor(bestPoint.Y))
                     ? bestPoint.Y.ToString("N0")
                     : bestPoint.Y.ToString("N1");
-                _text.Text = $"{bestLabel}\n{valueFormatted} {_unit}\n{time}";
+                _text.Text = HoverText(bestLabel, valueFormatted, _unit, time, bestDetail);
                 _popup.HorizontalOffset = pos.X + 15;
                 _popup.VerticalOffset = pos.Y + 15;
                 /* Updating the offsets above moves an already-open popup, so only toggle IsOpen
@@ -356,6 +375,14 @@ internal sealed class ChartHoverHelper
     {
         _popup.IsOpen = false;
     }
+
+    /// <summary>
+    /// The popup's text: the series' <paramref name="label"/>, the value with its <paramref name="unit"/>, the time and,
+    /// when the nearest point has one (<see cref="Add(ScottPlot.Plottables.Scatter, string, IReadOnlyList{string}?)"/>),
+    /// its <paramref name="detail"/> line (#4989). Without a detail it is the three lines it always was.
+    /// </summary>
+    internal static string HoverText(string label, string valueFormatted, string unit, string time, string? detail = null) =>
+        detail is null ? $"{label}\n{valueFormatted} {unit}\n{time}" : $"{label}\n{valueFormatted} {unit}\n{time}\n{detail}";
 
     /// <summary>
     /// The time line of a hover for the plotted X <paramref name="plottedX"/>. With no zone, X is the app's

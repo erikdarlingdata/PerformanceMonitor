@@ -531,6 +531,66 @@ LIMIT $4";
     }
 
     /// <summary>
+    /// The Duration Trends chart's own read (#4989): per collector and time bucket over the WHOLE asked range, the slowest
+    /// run, the average run and the run count, over the successful runs that carry a duration (the runs the chart has always
+    /// drawn). The chart used to be handed the Collection Log grid's page, the newest <see cref="CollectionLogGridCap"/>
+    /// runs, while its X axis is pinned to the asked range: at about twenty runs a minute that page holds the newest
+    /// twenty-five minutes, so "Last 24 hours" drew the newest 25 minutes and left 23 hours and 35 minutes of axis empty
+    /// though the store holds those runs. This read has no row cap and answers at the width the other desktop trend charts
+    /// use for the range (<see cref="AutoChartBucketMinutes"/>, one series' share of <see cref="TrendBudget.Chart"/>, as the
+    /// Performance Trends charts size their buckets), so the number of points is bounded by the range, not by the runs.
+    ///
+    /// <para>Each bucket's start is clamped to the window's start (<c>GREATEST</c>, as the bucketed duration-trend reads
+    /// do), so an unaligned window's first, partial bucket does not draw before it. The chart draws each bucket's MAXIMUM,
+    /// so a slow run still shows as it did when every run was a point; the average and the count ride along for its hover.
+    /// The window is the grid's own (<see cref="GetTimeRange"/>), so the chart and the grid beside it describe one span.</para>
+    /// </summary>
+    public async Task<List<CollectorDurationBucket>> GetCollectorDurationTrendAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        command.CommandText = $@"
+SELECT
+    collector_name,
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    MAX(duration_ms) AS max_duration_ms,
+    AVG(duration_ms) AS average_duration_ms,
+    COUNT(*) AS run_count
+FROM v_collection_log
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   status = 'SUCCESS'
+AND   duration_ms IS NOT NULL
+GROUP BY 1, 2
+ORDER BY 1, 2";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = AutoChartBucketMinutes(startTime, endTime) });
+
+        var items = new List<CollectorDurationBucket>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new CollectorDurationBucket
+            {
+                CollectorName = reader.GetString(0),
+                BucketStart = reader.GetDateTime(1),
+                MaxDurationMs = Convert.ToDouble(reader.GetValue(2)),
+                AverageDurationMs = Convert.ToDouble(reader.GetValue(3)),
+                RunCount = Convert.ToInt64(reader.GetValue(4))
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
     /// Whether ANY of the given (enabled) servers has EVER recorded a collector run — the fleet-wide twin of
     /// <see cref="HasAnyCollectionLogAsync"/> (#4199), used the same way: to tell a genuinely quiet fleet-wide
     /// window from a fleet that has never once collected.
@@ -726,6 +786,21 @@ public class CollectionLogRow
     public string SqlDurationFormatted => SqlDurationMs.HasValue ? $"{SqlDurationMs.Value} ms" : "";
 
     public string DuckDbDurationFormatted => DuckDbDurationMs.HasValue ? $"{DuckDbDurationMs.Value} ms" : "";
+}
+
+/// <summary>
+/// One point of the Duration Trends chart (#4989): a collector's successful runs inside one time bucket of the asked
+/// range (<see cref="LocalDataService.GetCollectorDurationTrendAsync"/>). The chart draws <see cref="MaxDurationMs"/>; the
+/// hover also names <see cref="AverageDurationMs"/> and <see cref="RunCount"/>. <see cref="BucketStart"/> is a UTC
+/// instant, clamped to the start of the range.
+/// </summary>
+public class CollectorDurationBucket
+{
+    public string CollectorName { get; set; } = "";
+    public DateTime BucketStart { get; set; }
+    public double MaxDurationMs { get; set; }
+    public double AverageDurationMs { get; set; }
+    public long RunCount { get; set; }
 }
 
 /// <summary>

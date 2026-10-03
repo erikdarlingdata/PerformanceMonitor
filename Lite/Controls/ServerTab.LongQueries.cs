@@ -47,7 +47,11 @@ public partial class ServerTab
     /// <para>The grid reads only the newest <see cref="LocalDataService.LongQueryGridCap"/> completions, so its "Showing
     /// since" notice goes through the cap-aware step (#4989): a read that hit the cap is worded from the oldest completion
     /// it returned, even where the store covers the range, and with no slack (the notice shows whenever that completion is
-    /// later than the range's start, on a range of an hour too). A read under the cap keeps the coverage notice.</para>
+    /// later than the range's start, on a range of an hour too). A read under the cap keeps the coverage notice, unless a
+    /// completion it shows has an earlier event time: a server's first run stores completions up to
+    /// <see cref="CollectorContext.EventFallbackWindow"/> older than itself, and the grid shows each at its event time
+    /// (<see cref="LongQueryRowTimeUtc"/>), so the notice then names the oldest completion shown
+    /// (<see cref="EarlierOfFloorAndRowShown"/>), the same rule the Darling viewer's event grids follow.</para>
     /// </summary>
     private async Task RefreshLongQueriesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {

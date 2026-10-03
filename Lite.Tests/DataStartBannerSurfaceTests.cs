@@ -34,9 +34,9 @@ namespace PerformanceMonitorLite.Tests;
 /// quiet start (the collector covered the whole range, the first row comes late) shows none.
 ///
 /// <para>The surfaces with no notice are pinned too (<see cref="SurfacesWithoutANotice_KeepTheShapeThatNeedsNone"/>):
-/// the Health Summary is a fixed seven-day aggregate that does not read the toolbar's range, and the Duration Trends,
-/// Corruption Events and Contention Events charts pin their time axis to the asked range, so an empty span is already
-/// drawn as one.</para>
+/// the Health Summary is a fixed seven-day aggregate that does not read the toolbar's range, the Corruption Events and
+/// Contention Events charts pin their time axis to the asked range, so an empty span is already drawn as one, and the
+/// Duration Trends chart reads its own full-range buckets, with its axis pinned the same way.</para>
 /// </summary>
 [Collection("server-time-helper")]
 public sealed class DataStartBannerSurfaceTests : IDisposable
@@ -326,7 +326,9 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
 
     /// <summary>
     /// #4989: a server's first run stores the server's event history, every row stamped with that run's
-    /// <c>collection_time</c> (T0) while its <c>event_time</c> goes back days. The grids filter on <c>event_time</c>, so a
+    /// <c>collection_time</c> (T0) while its <c>event_time</c> is older: days for the Default Trace, whose first run stores the
+    /// history its trace files hold, and about 10 minutes for system_health, whose first run reads back
+    /// <c>CollectorContext.EventFallbackWindow</c>. The tests seed the history at whatever depth they test. The grids filter on <c>event_time</c>, so a
     /// range that starts before the oldest event (S &lt; H &lt; T0) shows rows from H, and the banner names H, never T0: a
     /// banner never names a time later than the earliest row its grid shows. RED before the fix: the probe measured
     /// <c>collection_time</c>, found only T0, and said "Showing since T0" above rows from before T0.
@@ -963,10 +965,13 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
 
     /// <summary>
     /// The surfaces that need no notice, and the shape that makes it true. The Health Summary reads a fixed seven
-    /// days per collector, with no range parameter, so a picked range never starts before its data. The Duration
-    /// Trends, Corruption Events and Contention Events charts set their X axis to the asked range, so a span with no
-    /// data is drawn as the empty span it is. If one of them starts reading the toolbar's range as a grid, or stops
-    /// pinning its axis, it needs a notice and this test says so.
+    /// days per collector, with no range parameter, so a picked range never starts before its data. The Corruption Events
+    /// and Contention Events charts set their X axis to the asked range, so a span with no data is drawn as the empty
+    /// span it is. The Duration Trends chart needs none for its own reason (#4989): it reads its own full-range buckets
+    /// (<see cref="LocalDataService.GetCollectorDurationTrendAsync"/>, not the Collection Log grid's capped page) with its
+    /// X axis pinned to the asked range, so what it draws is the range's data and the empty span is the span with none; the
+    /// <c>DurationTrends_*</c> tests below pin that. If one of the others starts reading the toolbar's range as a grid, or
+    /// stops pinning its axis, it needs a notice and this test says so.
     /// </summary>
     [Fact]
     public void SurfacesWithoutANotice_KeepTheShapeThatNeedsNone()
@@ -975,10 +980,8 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
         Assert.Contains("public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId)", health, StringComparison.Ordinal);
         Assert.Contains("GetCollectionHealthAsync(_serverId)", File.ReadAllText(ControlsFile("ServerTab.Refresh.cs")), StringComparison.Ordinal);
 
-        var durationChart = Regex.Match(File.ReadAllText(ControlsFile("ServerTab.Charts.cs")).Replace("\r\n", "\n"),
-            @"private void UpdateCollectorDurationChart\(.*?\n    \}\n", RegexOptions.Singleline);
-        Assert.True(durationChart.Success);
-        Assert.Contains("SetLimitsX(xMin, xMax)", durationChart.Value, StringComparison.Ordinal);
+        /* The Duration Trends chart is no longer pinned here: it reads its own buckets over the whole range, and the tests
+           below (DurationTrends_*) say what it draws. */
 
         var systemCharts = File.ReadAllText(ControlsFile("ServerTab.SystemHealthCharts.cs"));
         Assert.Contains("ChartPalette.CyclingColor(3), xMin, xMax)", systemCharts, StringComparison.Ordinal);
@@ -986,6 +989,186 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
         Assert.Contains("RenderCpuComparisonChart(CpuComparisonChart, _cpuComparisonHover, data, xMin, xMax)", systemCharts, StringComparison.Ordinal);
         Assert.Equal(3, Regex.Matches(File.ReadAllText(RepoFile("PerformanceMonitor.Ui", "SystemHealthChartRenderer.cs")),
             Regex.Escape("chart.Plot.Axes.SetLimitsX(xMin, xMax)")).Count);
+    }
+
+    /// <summary>What a chart draws, as (first X, last X) of each plotted line: the series drawn on a real chart.</summary>
+    private static List<(double First, double Last)> DrawnSpans(IReadOnlyList<ServerTab.CollectorDurationSeries> series) =>
+        OnStaThread(() =>
+        {
+            var chart = new ScottPlot.WPF.WpfPlot();
+            ServerTab.PlotCollectorDurationSeries(chart, null, series);
+            return chart.Plot.PlottableList.OfType<ScottPlot.Plottables.Scatter>()
+                .Select(scatter => scatter.Data.GetScatterPoints().Select(p => p.X).ToList())
+                .Select(xs => (xs.Min(), xs.Max()))
+                .ToList();
+        });
+
+    /// <summary>
+    /// #4989: a 24-hour range holding more runs than the Collection Log grid's page (the newest 500) draws points across
+    /// the WHOLE range. The chart used to be handed that page, so at three runs a minute it drew the newest 2 hours 47
+    /// minutes of a day (and at twenty a minute, 25 minutes) and left the rest of its pinned axis empty though the store
+    /// held those runs. The first assertions say the page is the sliver it is; the rest, that each collector's line starts
+    /// at the range's start and ends at its end.
+    /// </summary>
+    [Fact]
+    public async Task DurationTrends_ADayHoldingMoreRunsThanTheGridsPage_DrawsPointsAcrossTheWholeRange()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var start = end.AddHours(-24);
+        foreach (var collector in new[] { "wait_stats", "cpu_utilization_stats", "memory_stats" })
+        {
+            await SeedLogRunsAsync(collector, start, end, 1);
+        }
+
+        var service = new LocalDataService(_duckDb);
+        var page = await service.GetRecentCollectionLogAsync(ServerId, fromDate: start, toDate: end);
+        Assert.Equal(LocalDataService.CollectionLogGridCap, page.Count);
+        Assert.True(page.Max(r => r.CollectionTime) - page.Min(r => r.CollectionTime) < TimeSpan.FromHours(4),
+            "the grid's page is the newest runs only");
+
+        var spans = DrawnSpans(ServerTab.BuildCollectorDurationSeries(await service.GetCollectorDurationTrendAsync(ServerId, fromDate: start, toDate: end)));
+
+        Assert.Equal(3, spans.Count);
+        foreach (var (first, last) in spans)
+        {
+            Assert.True(first <= start.AddMinutes(2).ToOADate(), $"a line starts {DateTime.FromOADate(first):O}, after the range's start {start:O}");
+            Assert.True(last >= end.AddMinutes(-2).ToOADate(), $"a line ends {DateTime.FromOADate(last):O}, before the range's end {end:O}");
+        }
+    }
+
+    /// <summary>
+    /// #4989: the chart draws each bucket's slowest run, so one slow run still shows as it did when every run was a point,
+    /// and the hover says what stands behind the point: how many runs it is the slowest of and their average. A 7-day range
+    /// of one run a minute is bucketed (far fewer points than runs, and every run counted once), and the one 9-second run
+    /// in it is the height of its bucket's point.
+    /// </summary>
+    [Fact]
+    public async Task DurationTrends_ASevenDayRange_DrawsEachBucketsSlowestRun_AndNamesTheAverageAndCountInTheHover()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var start = end.AddDays(-7);
+        await SeedLogRunsAsync("wait_stats", start, end, 1);
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync();
+            using var readLock = _duckDb.AcquireReadLock();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = $@"
+UPDATE collection_log SET duration_ms = 9000
+WHERE collector_name = 'wait_stats' AND collection_time = (SELECT MIN(collection_time) FROM collection_log WHERE collection_time >= {Literal(start.AddDays(3))})";
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var buckets = await new LocalDataService(_duckDb).GetCollectorDurationTrendAsync(ServerId, fromDate: start, toDate: end);
+
+        Assert.True(buckets.Count < 2000, $"{buckets.Count} points for 10,081 runs: the read buckets");
+        Assert.Equal(10081, buckets.Sum(b => b.RunCount));
+        Assert.True(buckets.All(b => b.BucketStart >= start.AddTicks(-10)), "no bucket starts before the range");
+        var slow = Assert.Single(buckets, b => b.MaxDurationMs == 9000);
+        Assert.True(slow.RunCount >= 2);
+        Assert.Equal((9000 + 12.0 * (slow.RunCount - 1)) / slow.RunCount, slow.AverageDurationMs, 6);
+
+        var series = Assert.Single(ServerTab.BuildCollectorDurationSeries(buckets));
+        var at = Array.IndexOf(series.MaxMs, 9000d);
+        Assert.True(at >= 0, "the slow run is a point's height");
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        var average = slow.AverageDurationMs == Math.Floor(slow.AverageDurationMs) ? slow.AverageDurationMs.ToString("N0", culture) : slow.AverageDurationMs.ToString("N1", culture);
+        Assert.Equal($"Slowest of {slow.RunCount.ToString("N0", culture)} runs; average {average} ms", series.Details[at]);
+
+        Assert.Equal("wait_stats\n9,000 ms\n10:00:00\nSlowest of 10 runs; average 910.8 ms",
+            PerformanceMonitor.Ui.ChartHoverHelper.HoverText("wait_stats", "9,000", "ms", "10:00:00", "Slowest of 10 runs; average 910.8 ms"));
+        Assert.Equal("wait_stats\n9,000 ms\n10:00:00", PerformanceMonitor.Ui.ChartHoverHelper.HoverText("wait_stats", "9,000", "ms", "10:00:00"));
+    }
+
+    /// <summary>
+    /// #4989: the Refresh hands the chart its own read (<c>GetCollectorDurationTrendAsync</c>), started beside the grid's
+    /// read and awaited with it, and never the grid's page.
+    /// </summary>
+    [Fact]
+    public void DurationTrends_TheChartIsFedItsOwnRead_StartedBesideTheGridsRead()
+    {
+        var code = StripComments(File.ReadAllText(ControlsFile("ServerTab.Refresh.cs")).Replace("\r\n", "\n"));
+        var start = code.IndexOf("private async System.Threading.Tasks.Task RefreshCollectionHealthAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var body = code[start..code.IndexOf("private static async Task<List<T>> SafeQueryAsync<T>", start, StringComparison.Ordinal)];
+
+        Assert.Contains("_dataService.GetCollectorDurationTrendAsync(_serverId, hoursBack, fromDate, toDate)", body, StringComparison.Ordinal);
+        Assert.Contains("Task.WhenAll(collectionHealthTask, collectionLogTask, collectorDurationTask)", body, StringComparison.Ordinal);
+        Assert.Contains("UpdateCollectorDurationChart(collectorDurationTask.Result, hoursBack, fromDate, toDate)", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("UpdateCollectorDurationChart(collectionLogTask", body, StringComparison.Ordinal);
+    }
+
+    private async Task SeedLongQueryAsync(DateTime eventUtc, DateTime collectedUtc)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $@"
+INSERT INTO long_query_completions (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, statement_text, duration_microseconds)
+VALUES ({_nextId++}, {Literal(collectedUtc)}, {ServerId}, '{ServerName}', {Literal(eventUtc)}, 'rpc_completed', 'Db', 'SELECT 1', 5000000)";
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>The Long Queries notice for a read UNDER its cap: the real read, the real probe, then the tab's own rule for
+    /// the floor (<see cref="ServerTab.EarlierOfFloorAndRowShown"/> over <see cref="ServerTab.EarliestRowShown{T}"/>, the pair
+    /// <c>RefreshCappedGridBannerAsync</c> hands the shared step) and its banner step: (visible, text, rows shown).</summary>
+    private async Task<(bool Visible, string Text, int Rows)> UnderCapLongQueriesBannerAsync(DateTime startUtc, DateTime endUtc)
+    {
+        var service = new LocalDataService(_duckDb);
+        var rows = await service.GetRecentLongQueryCompletionsAsync(ServerId, fromDate: startUtc, toDate: endUtc);
+        var probed = await service.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, ServerId, startUtc, endUtc, ServerClock.Utc);
+        var floor = ServerTab.EarlierOfFloorAndRowShown(probed, ServerTab.EarliestRowShown(rows, ServerTab.LongQueryRowTimeUtc));
+        var (visible, text) = OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock();
+            ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
+            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text);
+        });
+        return (visible, text, rows.Count);
+    }
+
+    /// <summary>
+    /// #4989: a server's first run (T0, 48 hours ago) stores a completion from 8 minutes before itself (a first run reads
+    /// back <see cref="PerformanceMonitor.Collectors.CollectorContext.EventFallbackWindow"/>), and the grid shows it at its
+    /// event time. Under the cap, on a 7-day range, the notice names that completion's time, T0 less 8 minutes, and not the
+    /// run's T0.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_UnderTheCap_NameTheOldestCompletionShown_WhenItPredatesTheFirstRun()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var firstRun = new DateTime(end.AddHours(-48).Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+        await SeedLogRunsAsync("long_query_completions", firstRun, end, 60);
+        await SeedLongQueryAsync(firstRun.AddMinutes(-8), firstRun);
+        await SeedLongQueryAsync(firstRun.AddHours(2), firstRun.AddHours(2).AddSeconds(CollectedAfterSeconds));
+
+        var (visible, text, rows) = await UnderCapLongQueriesBannerAsync(end.AddDays(-7), end);
+
+        Assert.InRange(rows, 1, LocalDataService.LongQueryGridCap - 1);
+        Assert.True(visible);
+        Assert.Equal(Since(firstRun.AddMinutes(-8)), text);
+    }
+
+    /// <summary>
+    /// #4989: with no completion older than the first run, the notice still names the run, as before.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_UnderTheCap_StillNameTheFirstRun_WhenNoCompletionShownIsOlderThanIt()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var firstRun = new DateTime(end.AddHours(-48).Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+        await SeedLogRunsAsync("long_query_completions", firstRun, end, 60);
+        await SeedLongQueryAsync(firstRun.AddMinutes(30), firstRun.AddMinutes(30).AddSeconds(CollectedAfterSeconds));
+
+        var (visible, text, _) = await UnderCapLongQueriesBannerAsync(end.AddDays(-7), end);
+
+        Assert.True(visible);
+        Assert.Equal(Since(firstRun), text);
     }
 
     private static string StripComments(string lfSource) =>

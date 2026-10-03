@@ -522,14 +522,36 @@ public partial class ServerTab : UserControl
     /// <para>#4966: a window no longer than the 90-minute slack (<see cref="McpQueryTools.CanWindowBeTruncated"/>) can
     /// never get a coverage note, so the probe is not called for it: the banner is hidden and its text cleared, as for
     /// any window the probe finds nothing to report on.</para>
+    ///
+    /// <para>#4989: a capped grid under its cap hands <paramref name="earliestRowShownUtc"/>, the oldest of its rows by the
+    /// time each is shown on. The notice then names the earlier of the probe's floor and that row
+    /// (<see cref="EarlierOfFloorAndRowShown"/>): the Long Queries grid shows each completion at its event time, which on a
+    /// server's first run can be up to <see cref="PerformanceMonitor.Collectors.CollectorContext.EventFallbackWindow"/> before the run that stored it,
+    /// and the probe measures the run's time. Every other caller leaves it out and gets the probe's floor as before.</para>
     /// </summary>
-    private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc)
+    private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc, DateTime? earliestRowShownUtc = null)
     {
         var floor = await ProbeWindowFloorOrNullAsync(
             () => Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc)),
             $"[{_server.DisplayName}] {relation}", startUtc, endUtc);
-        ApplyWindowFloorToBanner(banner, floor, startUtc, GetPickerZone());
+        ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestRowShownUtc), startUtc, GetPickerZone());
     }
+
+    /// <summary>
+    /// #4989: the floor a capped grid's notice is worded from when its read stayed UNDER its cap: the probe's floor
+    /// (<paramref name="probedFloor"/>), or the oldest row the grid shows (<paramref name="earliestRowShownUtc"/>) when that is
+    /// earlier, so a notice never names a time later than a row on the screen. The same rule as the Darling viewer's event
+    /// grids (<c>ViewerEventDataStart.Of</c>). A null floor stays null: the probe found nothing to report on, its failure
+    /// hides the banner, and a window no longer than the slack never gets one, and a row shown does not change any of those.
+    /// For a grid whose rows are shown on the probe's own column (the Collection Log and Plan Corrections) the probe's floor is
+    /// never later than its oldest row, so this returns the floor unchanged.
+    /// </summary>
+    internal static DateTime? EarlierOfFloorAndRowShown(DateTime? probedFloor, DateTime? earliestRowShownUtc) =>
+        probedFloor is DateTime floor && earliestRowShownUtc is DateTime shown && shown < floor ? shown : probedFloor;
+
+    /// <summary>The oldest of a capped grid's <paramref name="rows"/> by <paramref name="rowTimeUtc"/>, or null when it shows none.</summary>
+    internal static DateTime? EarliestRowShown<T>(IReadOnlyCollection<T> rows, Func<T, DateTime> rowTimeUtc) =>
+        rows.Count == 0 ? null : rows.Min(rowTimeUtc);
 
     /// <summary>
     /// The answer of a window-floor probe, or null when the probe throws, or when the window is no longer than the
@@ -583,7 +605,8 @@ public partial class ServerTab : UserControl
     /// no probe, and no slack: its reach is what the grid shows, whatever the store holds, and the banner shows whenever
     /// that oldest row is later than the window's start (<see cref="ApplyCappedWindowFloorToBanner"/>), even on a range
     /// of an hour. Below its cap it is the shared step,
-    /// <see cref="RefreshWindowTruncatedBannerAsync"/>, with its probe, as for every other grid. The decision itself is
+    /// <see cref="RefreshWindowTruncatedBannerAsync"/>, with its probe, as for every other grid, handed the oldest row the
+    /// grid shows so that the notice never names a time later than it (<see cref="EarlierOfFloorAndRowShown"/>, #4989). The decision itself is
     /// <see cref="CappedGridBannerAsync{T}"/>, which this hands the two ways out: the banner worded in the tab's picker
     /// zone from the oldest row, and that shared step.
     /// </summary>
@@ -592,7 +615,7 @@ public partial class ServerTab : UserControl
         IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc) =>
         CappedGridBannerAsync(rows, rowCap, rowTimeUtc,
             oldestRowShown => ApplyCappedWindowFloorToBanner(banner, oldestRowShown, startUtc, GetPickerZone()),
-            () => RefreshWindowTruncatedBannerAsync(relation, banner, startUtc, endUtc));
+            () => RefreshWindowTruncatedBannerAsync(relation, banner, startUtc, endUtc, EarliestRowShown(rows, rowTimeUtc)));
 
     /// <summary>
     /// #4966: the decision inside <see cref="RefreshCappedGridBannerAsync{T}"/>. A read that reached its cap
@@ -1066,8 +1089,11 @@ public partial class ServerTab : UserControl
         {
             var collectionHealthTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Health", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId))));
             var collectionLogTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Log", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack, fromDate, toDate))));
+            /* #4989: the Duration Trends chart reads its own buckets over the whole range, beside the grid's read. The grid's
+               page is the newest CollectionLogGridCap runs, a sliver of a long range, so the chart is not fed from it. */
+            var collectorDurationTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.DurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectorDurationTrendAsync(_serverId, hoursBack, fromDate, toDate))));
 
-            await System.Threading.Tasks.Task.WhenAll(collectionHealthTask, collectionLogTask);
+            await System.Threading.Tasks.Task.WhenAll(collectionHealthTask, collectionLogTask, collectorDurationTask);
 
             /* #4766: every row reads its time on THIS tab's server clock, not on whichever clock is active when the
                grid renders. Both grids sit in this server's own tab, so the two are the same while the tab is showing,
@@ -1078,7 +1104,7 @@ public partial class ServerTab : UserControl
 
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
             _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
-            UpdateCollectorDurationChart(collectionLogTask.Result, hoursBack, fromDate, toDate);
+            UpdateCollectorDurationChart(collectorDurationTask.Result, hoursBack, fromDate, toDate);
             /* #4989: the grid reads only the newest CollectionLogGridCap runs, so its notice goes through the cap-aware step. */
             var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
             await RefreshCappedGridBannerAsync(QueryWindowRelation.CollectionLog, CollectionLogWindowTruncatedBanner, windowStart, windowEnd, collectionLogTask.Result, LocalDataService.CollectionLogGridCap, row => row.CollectionTime);

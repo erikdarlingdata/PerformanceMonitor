@@ -1574,7 +1574,72 @@ public partial class ServerTab : UserControl
 
     /* ========== Collection Health ========== */
 
-    private void UpdateCollectorDurationChart(List<CollectionLogRow> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    /// <summary>
+    /// One collector's line on the Duration Trends chart (#4989): the X of each point (a UTC instant as an OADate, the
+    /// bucket's start), the Y it draws (the bucket's slowest run, in ms) and the hover line that says what stands behind
+    /// the point (<see cref="CollectorDurationDetail"/>), all in the same order.
+    /// </summary>
+    internal sealed record CollectorDurationSeries(string Collector, double[] Xs, double[] MaxMs, string[] Details);
+
+    /// <summary>
+    /// The hover line of one Duration Trends point (#4989): the point draws its bucket's slowest run, so the line says how
+    /// many runs it is the slowest of and what the average run took.
+    /// </summary>
+    internal static string CollectorDurationDetail(CollectorDurationBucket bucket)
+    {
+        static string Ms(double value) => value == Math.Floor(value)
+            ? value.ToString("N0", System.Globalization.CultureInfo.CurrentCulture)
+            : value.ToString("N1", System.Globalization.CultureInfo.CurrentCulture);
+
+        return $"Slowest of {bucket.RunCount.ToString("N0", System.Globalization.CultureInfo.CurrentCulture)} {(bucket.RunCount == 1 ? "run" : "runs")}; average {Ms(bucket.AverageDurationMs)} ms";
+    }
+
+    /// <summary>
+    /// What the Duration Trends chart draws from its own read (<see cref="LocalDataService.GetCollectorDurationTrendAsync"/>,
+    /// #4989): one series per collector, in collector order, each point a bucket at its start and the bucket's slowest
+    /// run as its height. A collector with fewer than two buckets draws no line, as before. <c>internal static</c> so the
+    /// tests see exactly what is drawn without building the UserControl.
+    /// </summary>
+    internal static List<CollectorDurationSeries> BuildCollectorDurationSeries(IEnumerable<CollectorDurationBucket> buckets) =>
+        buckets
+            .GroupBy(b => b.CollectorName)
+            .OrderBy(g => g.Key)
+            .Select(g => g.OrderBy(b => b.BucketStart).ToList())
+            .Where(points => points.Count >= 2)
+            .Select(points => new CollectorDurationSeries(
+                points[0].CollectorName,
+                points.Select(b => b.BucketStart.ToOADate()).ToArray(),
+                points.Select(b => b.MaxDurationMs).ToArray(),
+                points.Select(CollectorDurationDetail).ToArray()))
+            .ToList();
+
+    /// <summary>
+    /// Draws the series on <paramref name="chart"/> (the lines only: the axes, the legend and the refresh stay with the
+    /// caller) and registers each with <paramref name="hover"/> when there is one, with its per-point detail lines.
+    /// <c>internal static</c> so the tests drive it on a real chart.
+    /// </summary>
+    internal static void PlotCollectorDurationSeries(ScottPlot.WPF.WpfPlot chart, ChartHoverHelper? hover, IReadOnlyList<CollectorDurationSeries> series)
+    {
+        int colorIdx = 0;
+        foreach (var line in series)
+        {
+            var scatter = chart.Plot.Add.TimeSeries(line.Xs, line.MaxMs);
+            scatter.LegendText = line.Collector;
+            scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
+            scatter.LineWidth = 2;
+            scatter.MarkerSize = 0;
+            hover?.Add(scatter, line.Collector, line.Details);
+            colorIdx++;
+        }
+    }
+
+    /// <summary>
+    /// The Duration Trends chart (#4989): each collector's slowest run per time bucket over the WHOLE asked range, read
+    /// beside the Collection Log grid (<see cref="LocalDataService.GetCollectorDurationTrendAsync"/>), not the grid's page of
+    /// the newest <see cref="LocalDataService.CollectionLogGridCap"/> runs it used to be handed. The X axis is pinned to the
+    /// asked range, so a range the store does not cover from its start still draws the empty span it is.
+    /// </summary>
+    private void UpdateCollectorDurationChart(List<CollectorDurationBucket> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(CollectorDurationChart);
         ApplyTheme(CollectorDurationChart);
@@ -1595,31 +1660,10 @@ public partial class ServerTab : UserControl
             return;
         }
 
-        /* Group by collector, plot each as a separate series */
-        var groups = data
-            .Where(d => d.DurationMs.HasValue && d.Status == "SUCCESS")
-            .GroupBy(d => d.CollectorName)
-            .OrderBy(g => g.Key)
-            .ToList();
-
+        /* One series per collector, each point a bucket's slowest successful run (the read keeps only the runs the chart
+           has always drawn: SUCCESS with a duration). */
         _collectorDurationHover?.Clear();
-        int colorIdx = 0;
-        foreach (var group in groups)
-        {
-            var points = group.OrderBy(d => d.CollectionTime).ToList();
-            if (points.Count < 2) continue;
-
-            var times = points.Select(d => d.CollectionTime.ToOADate()).ToArray();
-            var durations = points.Select(d => (double)d.DurationMs!.Value).ToArray();
-
-            var scatter = CollectorDurationChart.Plot.Add.TimeSeries(times, durations);
-            scatter.LegendText = group.Key;
-            scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
-            scatter.LineWidth = 2;
-            scatter.MarkerSize = 0;
-            _collectorDurationHover?.Add(scatter, group.Key);
-            colorIdx++;
-        }
+        PlotCollectorDurationSeries(CollectorDurationChart, _collectorDurationHover, BuildCollectorDurationSeries(data));
 
         CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         ReapplyAxisColors(CollectorDurationChart);
