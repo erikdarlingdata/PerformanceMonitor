@@ -3788,12 +3788,19 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Text="Long-Running Query Completions (RPC / batch completions over the duration threshold, plus attentions / cancels)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" TextWrapping="Wrap"/>
                 <TextBlock Grid.Row="1" x:Name="LongQueriesDisabledWarning" Visibility="Collapsed"
                            Foreground="{DynamicResource WarningTextBrush}" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"/>
-                <DataGrid Grid.Row="2" x:Name="LongQueryCompletionsGrid"
+                <!-- "Showing since <start>" when this server's long-query completions start after the range does: the earlier of the
+                     collector's coverage (DataWindowFloor) and the earliest event shown (#4966). -->
+                <TextBlock Grid.Row="2" x:Name="LongQueriesTruncationBanner" Visibility="Collapsed"
+                           Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Background="#22FFAA00"/>
+                <DataGrid Grid.Row="3" x:Name="LongQueryCompletionsGrid"
                           Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                           CanUserSortColumns="True">
