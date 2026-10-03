@@ -214,21 +214,21 @@ public static class ComposeCompiler
                 + $"WHERE w.{timeColumn} >= {wideStartParam ?? startParam} AND w.{timeColumn} <= {endParam})";
         }
 
-        return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY " + QueryStorePartitionColumns
-            + $" ORDER BY {timeColumn} DESC, execution_count DESC) AS qs_rn "
+        return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
+            + $"server_id, server_name, database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role "
+            + $"ORDER BY {timeColumn} DESC, execution_count DESC) AS qs_rn "
             + $"FROM {PgSchemaGenerator.CollectSchema}.{QueryStoreTable} "
             + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}"
             + QueryStorePartitionRestriction(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe)
             + ") AS qs_ranked WHERE qs_rn = 1)";
     }
 
-    /* The ONE partition key: the dedupe's PARTITION BY text and the restriction's join keys both come from it. */
-    private static readonly string[] s_queryStorePartitionKey =
+    /* The partition key the restriction joins on. The dedupe's PARTITION BY text above spells the same list as a literal (the tie-break
+       source guard reads it there); a test pins the two equal. */
+    internal static readonly string[] s_queryStorePartitionKey =
     {
         "server_id", "server_name", "database_name", "query_id", "plan_id", "runtime_stats_interval_id", "first_execution_time", "execution_type_desc", "replica_role",
     };
-
-    private static readonly string QueryStorePartitionColumns = string.Join(", ", s_queryStorePartitionKey);
 
     /// <summary>
     /// The raw dedupe's input restriction when the panel carries dimension filters (#4605): only the partitions
