@@ -2127,10 +2127,14 @@
                     <Grid Margin="8">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="2*"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
                         <scottplot:WpfPlot Grid.Row="0" x:Name="CpuSchedulerChart"/>
-                        <DataGrid Grid.Row="1" x:Name="CpuSchedulerGrid" Style="{StaticResource DarkGrid}" Margin="0,8,0,0"
+                        <!-- "Snapshot at <time>": the collection the metric grid shows (#4966). -->
+                        <TextBlock Grid.Row="1" x:Name="CpuSchedulerSnapshotTime" Visibility="Collapsed" Margin="0,8,0,0" FontSize="11"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                        <DataGrid Grid.Row="2" x:Name="CpuSchedulerGrid" Style="{StaticResource DarkGrid}" Margin="0,8,0,0"
                                   HeadersVisibility="Column" AutoGenerateColumns="False">
                             <DataGrid.RowStyle>
                                 <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
@@ -2147,7 +2151,7 @@
                             </DataGrid.Columns>
                         </DataGrid>
                         <!-- Shown only where the cpu_scheduler_stats collector does not run (Azure SQL Database). -->
-                        <TextBlock Grid.Row="1" x:Name="CpuSchedulerNoDataMessage" Style="{StaticResource EmptyHint}"/>
+                        <TextBlock Grid.Row="2" x:Name="CpuSchedulerNoDataMessage" Style="{StaticResource EmptyHint}"/>
                     </Grid>
                 </TabItem>
             </TabControl>
@@ -2832,14 +2836,18 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Text="Currently Running SQL Agent Jobs" Style="{StaticResource SectionHeader}"/>
+                <!-- "Snapshot at <time>": the collection the grid shows (#4966). -->
+                <TextBlock Grid.Row="2" x:Name="RunningJobsSnapshotTime" Visibility="Collapsed" Margin="0,0,0,4" FontSize="11"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 <TextBlock Grid.Row="1" x:Name="RunningJobsMsdbWarning"
                            Text="Running Jobs requires msdb access. Grant the login access to msdb to enable this feature."
                            Foreground="{DynamicResource WarningTextBrush}" FontSize="12" Margin="0,0,0,8" Visibility="Collapsed"
                            TextWrapping="Wrap"/>
-                <DataGrid Grid.Row="2" x:Name="RunningJobsGrid" Style="{StaticResource DarkGrid}">
+                <DataGrid Grid.Row="3" x:Name="RunningJobsGrid" Style="{StaticResource DarkGrid}">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
                             <Style.Triggers>
@@ -2877,7 +2885,7 @@
                     </DataGrid.Columns>
                 </DataGrid>
                 <!-- Shown only where the running_jobs collector does not run (Azure SQL Database has no SQL Server Agent) or has never run for this server (AWS RDS). -->
-                <TextBlock Grid.Row="2" x:Name="RunningJobsNoDataMessage" Style="{StaticResource EmptyHint}"/>
+                <TextBlock Grid.Row="3" x:Name="RunningJobsNoDataMessage" Style="{StaticResource EmptyHint}"/>
             </Grid>
         </TabItem>
 
@@ -3610,16 +3618,31 @@
         <TabItem Header="Latches &amp; Spinlocks">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
                 <!-- Latch wait-time trend (top 5 classes by delta wait) + per-class latest-snapshot grid. -->
-                <scottplot:WpfPlot Grid.Row="0" x:Name="LatchStatsChart"/>
-                <Expander Grid.Row="1" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
-                    <DataGrid x:Name="LatchStatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220" Margin="0,4,0,0">
+                <!-- "Showing since <start>" when this server's latch_stats rows start after the range does: the trend draws a flat zero over an empty stretch (#4966). -->
+                <TextBlock Grid.Row="0" x:Name="LatchStatsTruncationBanner" Visibility="Collapsed"
+                           Padding="8,4" FontWeight="Bold"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Background="#22FFAA00"/>
+                <scottplot:WpfPlot Grid.Row="1" x:Name="LatchStatsChart"/>
+                <Expander Grid.Row="2" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <!-- "Snapshot at <time>": the collection the grid shows (#4966). -->
+                        <TextBlock Grid.Row="0" x:Name="LatchStatsSnapshotTime" Visibility="Collapsed" Margin="0,4,0,0" FontSize="11"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <DataGrid x:Name="LatchStatsGrid" Style="{StaticResource DarkGrid}" Grid.Row="1" MaxHeight="220" Margin="0,4,0,0">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Latch Class" Binding="{Binding LatchClass}" Width="*"/>
                             <!-- #3653 A7: the two deltas are null on a restart / first-sample row (stored interval 0 — the
@@ -3633,12 +3656,26 @@
                             <DataGridTextColumn Header="Waiting Reqs (total)" Binding="{Binding WaitingRequestsCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                         </DataGrid.Columns>
                     </DataGrid>
+                    </Grid>
                 </Expander>
 
                 <!-- Spinlock collisions trend (top 5 spinlocks by delta collisions) + per-spinlock snapshot grid. -->
-                <scottplot:WpfPlot Grid.Row="2" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
-                <Expander Grid.Row="3" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
-                    <DataGrid x:Name="SpinlockStatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220" Margin="0,4,0,0">
+                <!-- "Showing since <start>" when this server's spinlock_stats rows start after the range does: the trend draws a flat zero over an empty stretch (#4966). -->
+                <TextBlock Grid.Row="3" x:Name="SpinlockStatsTruncationBanner" Visibility="Collapsed"
+                           Padding="8,4" FontWeight="Bold"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Background="#22FFAA00"/>
+                <scottplot:WpfPlot Grid.Row="4" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
+                <Expander Grid.Row="5" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <!-- "Snapshot at <time>": the collection the grid shows (#4966). -->
+                        <TextBlock Grid.Row="0" x:Name="SpinlockStatsSnapshotTime" Visibility="Collapsed" Margin="0,4,0,0" FontSize="11"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <DataGrid x:Name="SpinlockStatsGrid" Style="{StaticResource DarkGrid}" Grid.Row="1" MaxHeight="220" Margin="0,4,0,0">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Spinlock" Binding="{Binding SpinlockName}" Width="*"/>
                             <!-- #3653 A7: null deltas on the restart marker row render "—"; see the latch grid above. -->
@@ -3652,6 +3689,7 @@
                             <DataGridTextColumn Header="Backoffs" Binding="{Binding Backoffs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         </DataGrid.Columns>
                     </DataGrid>
+                    </Grid>
                 </Expander>
             </Grid>
         </TabItem>

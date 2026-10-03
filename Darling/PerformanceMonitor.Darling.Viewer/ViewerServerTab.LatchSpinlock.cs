@@ -62,19 +62,29 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        using var readFanOut = ViewerReadFanOut.Of(4);
+        /* Six reads in flight: the four feeds below and the two charts' data-start probes (#4966). */
+        using var readFanOut = ViewerReadFanOut.Of(6);
 
         var latchTrendTask = _dataService.GetLatchStatsTrendAsync(_server.ServerId, startUtc, endUtc);
         var latchSnapshotTask = _dataService.GetLatchStatsSnapshotAsync(_server.ServerId, startUtc, endUtc);
         var spinlockTrendTask = _dataService.GetSpinlockStatsTrendAsync(_server.ServerId, startUtc, endUtc);
         var spinlockSnapshotTask = _dataService.GetSpinlockStatsSnapshotAsync(_server.ServerId, startUtc, endUtc);
 
+        /* #4966: each chart draws a flat zero over an empty stretch, so each says where its collector's coverage starts. The probes stay OUT
+           of the join below: a probe that throws costs the chart's note (DataStartOrNullAsync catches it), never the rows. */
+        var latchDataStartTask = _dataService.GetLatchStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var spinlockDataStartTask = _dataService.GetSpinlockStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
+
         await Task.WhenAll(latchTrendTask, latchSnapshotTask, spinlockTrendTask, spinlockSnapshotTask);
 
         RenderLatchStatsChart(latchTrendTask.Result);
         LatchStatsGrid.ItemsSource = latchSnapshotTask.Result;
+        ShowSnapshotTime(LatchStatsSnapshotTime, latchSnapshotTask.Result.Count == 0 ? null : latchSnapshotTask.Result[0].CollectionTime);
+        UpdateTruncationBanner(LatchStatsTruncationBanner, await DataStartOrNullAsync(latchDataStartTask, "Latch Stats"), startUtc);
         RenderSpinlockStatsChart(spinlockTrendTask.Result);
         SpinlockStatsGrid.ItemsSource = spinlockSnapshotTask.Result;
+        ShowSnapshotTime(SpinlockStatsSnapshotTime, spinlockSnapshotTask.Result.Count == 0 ? null : spinlockSnapshotTask.Result[0].CollectionTime);
+        UpdateTruncationBanner(SpinlockStatsTruncationBanner, await DataStartOrNullAsync(spinlockDataStartTask, "Spinlock Stats"), startUtc);
     }
 
     private void RenderLatchStatsChart(List<LatchStatsTrendPoint> data)

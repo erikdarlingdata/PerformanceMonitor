@@ -114,6 +114,17 @@ public static class ViewerTimeHelper
     }
 
     /// <summary>
+    /// The label a newest-snapshot surface shows instead of a data-start note (#4966): "Snapshot at &lt;time&gt;" for the
+    /// collection <paramref name="naiveUtc"/> in <paramref name="zone"/>, to the second, with the ambiguous-hour offset suffix and on
+    /// the invariant culture (one line of disclosure, not a grid cell; the same text <c>BannerTime</c> gives the "Showing since" notes).
+    /// </summary>
+    public static string FormatSnapshotLabel(DateTime naiveUtc, TimeZoneInfo zone) =>
+        "Snapshot at " + DisplayZone.Format(naiveUtc, zone, "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary><see cref="FormatSnapshotLabel(DateTime, TimeZoneInfo)"/> in the current display zone.</summary>
+    public static string FormatSnapshotLabel(DateTime naiveUtc) => FormatSnapshotLabel(naiveUtc, CurrentDisplayZone());
+
+    /// <summary>
     /// <see cref="FormatForDisplay(DateTime, string)"/> for a value that may be missing: an empty string for
     /// <c>null</c>, so a grid cell with no time shows nothing.
     /// </summary>
