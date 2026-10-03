@@ -13,6 +13,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Ui;
@@ -23,7 +24,7 @@ namespace PerformanceMonitorLite.Controls;
 /// <summary>
 /// Fleet-wide retained SQL Agent job-run history (issue #1433) — a structural sibling of
 /// <see cref="AlertsHistoryTab"/> reading <c>v_job_history</c> via
-/// <see cref="LocalDataService.GetJobHistoryAsync"/>. Time-range + Server + Status + Category filters,
+/// <see cref="LocalDataService.GetJobHistoryAsync(DateTime, int, int?, IReadOnlyDictionary{int, ServerClock}?)"/>. Time-range + Server + Status + Category filters,
 /// per-column filter popups, failure / long-runtime / retry row color-coding, and CSV export. Job history
 /// is a durable record, so there is no dismiss/mute surface (unlike alerts).
 /// </summary>
@@ -31,6 +32,7 @@ public partial class JobHistoryTab : UserControl
 {
     private LocalDataService? _dataService;
     private Func<IReadOnlyDictionary<int, string>>? _displayNames;
+    private Func<IReadOnlyDictionary<int, ServerClock>>? _openTabClocks;
     private DataGridFilterManager<JobHistoryRow>? _filterManager;
     private readonly ScopedLoadGenerations _loads = new();
     private Popup? _filterPopup;
@@ -51,11 +53,17 @@ public partial class JobHistoryTab : UserControl
     /// concept lives on <c>ServerConnection</c>, not in DuckDB (the stored <c>servers.display_name</c>
     /// column is unpopulated), so the shell supplies the mapping the same way the Overview tab passes
     /// <c>DisplayNameWithIntent</c> into <c>GetServerSummaryAsync</c>.
+    /// <para><paramref name="openTabClocks"/> (#4966) snapshots the clock of every open server tab by server id, the second place
+    /// a server's clock comes from after its own collected one, as <see cref="AlertsHistoryTab"/>'s open-tab lookup does. It is
+    /// called on the UI thread, at the start of each load, because the open tabs are UI objects, and the read gets the snapshot.</para>
     /// </summary>
-    public void Initialize(LocalDataService dataService, Func<IReadOnlyDictionary<int, string>>? displayNames = null)
+    public void Initialize(
+        LocalDataService dataService, Func<IReadOnlyDictionary<int, string>>? displayNames = null,
+        Func<IReadOnlyDictionary<int, ServerClock>>? openTabClocks = null)
     {
         _dataService = dataService;
         _displayNames = displayNames;
+        _openTabClocks = openTabClocks;
         _filterManager = new DataGridFilterManager<JobHistoryRow>(JobHistoryDataGrid);
         _staleDataTimer.Start();
     }
@@ -67,8 +75,9 @@ public partial class JobHistoryTab : UserControl
     }
 
     /// <summary>The read's row cap (#4478) — the 2,000 <see cref="LoadJobsAsync"/> passes to
-    /// <see cref="LocalDataService.GetJobHistoryAsync"/>.</summary>
-    private const int RowCap = 2000;
+    /// <see cref="LocalDataService.GetJobHistoryAsync(DateTime, int, int?, IReadOnlyDictionary{int, ServerClock}?)"/>. The
+    /// "Showing since" note names the oldest run of a page this full (#4966).</summary>
+    internal const int RowCap = 2000;
 
     private async System.Threading.Tasks.Task LoadJobsAsync()
     {
@@ -86,7 +95,14 @@ public partial class JobHistoryTab : UserControl
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
 
-            var all = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryAsync(hoursBack, RowCap, serverId));
+            /* #4966: the window's start is worked out ONCE, and the read and the data-start probe both take that instant: the note is
+               worded against the window the rows were read over. The open tabs' clocks are taken here, on the UI thread (they are
+               UI objects), and the read gets them as a plain snapshot. */
+            var nowUtc = DateTime.UtcNow;
+            var startUtc = nowUtc.AddHours(-hoursBack);
+            var openTabClocks = _openTabClocks?.Invoke();
+
+            var all = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryAsync(startUtc, RowCap, serverId, openTabClocks));
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             /* #2126: rows carry the raw collected server name; swap in the operator's alias where the
@@ -129,10 +145,7 @@ public partial class JobHistoryTab : UserControl
             /* The cap applies to the UNFILTERED read (all.Count), not the client-side-filtered display count:
                a Status/Category filter narrowing the grid must not make the "newest 2,000" label disappear when
                the underlying read still hit the cap. */
-            var capLabel = JobHistoryCap.Label(all.Count, RowCap);
-            JobCountIndicator.Text = displayCount == 0
-                ? ""
-                : capLabel.Length > 0 ? $"{displayCount} run(s) ({capLabel})" : $"{displayCount} run(s)";
+            JobCountIndicator.Text = JobHistoryCap.CountText(displayCount, all.Count, RowCap);
             AppLogger.Debug("JobHistory", $"Loaded {displayCount} job run(s) (query returned {all.Count}, hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"})");
 
             _lastRefreshed = DateTime.UtcNow;
@@ -142,6 +155,11 @@ public partial class JobHistoryTab : UserControl
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             LoadingMessage.Visibility = Visibility.Collapsed;
+
+            /* #4966: the rows are bound and the loading note is down; the note comes last, from the UNFILTERED read (all): the Status
+               and Category filters narrow the grid on the client and say nothing about where the data starts. A probe that fails
+               costs the note and never the grid. */
+            await ShowDataStartNoteAsync(serverId, openTabClocks, startUtc, nowUtc, all, gen);
         }
         catch (Exception ex)
         {
@@ -150,6 +168,108 @@ public partial class JobHistoryTab : UserControl
 
             LoadingMessage.Visibility = Visibility.Collapsed;
         }
+    }
+
+    /// <summary>
+    /// The "Showing since" note of the grid (#4966), worked out for one load: the frame it is worded in, the servers the probe asks,
+    /// then the step below. For one server the note is worded on that server's wall clock, the clock the read windowed on (the
+    /// server's collected clock, else its open tab's, else the machine's, <see cref="LocalDataService.ReadJobHistoryClockAsync"/>),
+    /// which is the clock the Run Time column prints in. For the All Servers view the rows sit on different servers' clocks, so
+    /// the note is worded in UTC and says so; the probe has no all-servers form, so it asks the servers the Server combo lists
+    /// (<see cref="LocalDataService.GetJobHistoryDataStartAsync"/> takes the earliest coverage among them and bounds its own work).
+    /// A load that a newer one has superseded writes nothing.
+    /// </summary>
+    private async System.Threading.Tasks.Task ShowDataStartNoteAsync(
+        int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks, DateTime startUtc, DateTime endUtc,
+        IReadOnlyCollection<JobHistoryRow> read, int gen)
+    {
+        if (_dataService == null) return;
+        var service = _dataService;
+
+        TimeZoneInfo zone;
+        IReadOnlyCollection<int> asked;
+        if (serverId is int one)
+        {
+            var tabClock = openTabClocks is not null && openTabClocks.TryGetValue(one, out var found) ? found : null;
+            var clock = await System.Threading.Tasks.Task.Run(() => service.ReadJobHistoryClockAsync(one, tabClock));
+            zone = clock.AsTimeZone();
+            asked = [one];
+        }
+        else
+        {
+            zone = TimeZoneInfo.Utc;
+            asked = ListedServerIds();
+        }
+
+        if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+
+        await ShowJobHistoryDataStartAsync(
+            JobHistoryWindowTruncatedBanner,
+            () => System.Threading.Tasks.Task.Run(() => service.GetJobHistoryDataStartAsync(asked, startUtc, endUtc)),
+            startUtc, endUtc, read, zone, inUtc: serverId is null,
+            superseded: () => _loads.Superseded(nameof(LoadJobsAsync), gen));
+    }
+
+    /// <summary>The server ids the Server combo lists (every item after "All Servers"): the servers with a run in the read just
+    /// bound, which is the set the All Servers note asks (#4966).</summary>
+    private List<int> ListedServerIds() =>
+        ServerFilterComboBox.Items
+            .OfType<ComboBoxItem>()
+            .Skip(1)
+            .Select(i => int.TryParse(i.Tag?.ToString(), out var id) ? id : (int?)null)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .ToList();
+
+    /// <summary>
+    /// The "Showing since" banner of the grid (#4966), through the steps the server tab's grids share. Job history is an event
+    /// surface: the read windows on the run's own time, and a server's first collection copies the history msdb already holds, so a
+    /// run can sit long before the coverage the probe found. Below its cap the note names the earlier of the coverage start and the
+    /// earliest run in <paramref name="read"/> (<see cref="ServerTab.EarlierOfFloorAndRowShown"/>). The read lists the newest
+    /// <see cref="RowCap"/> runs, so a full page names its oldest run whatever the store covers, with no slack and no probe
+    /// (<see cref="ServerTab.CappedGridBannerAsync{T}"/>). A window of 90 minutes or less makes no probe call, and a probe that
+    /// throws shows no note (<see cref="ServerTab.ProbeWindowFloorOrNullAsync"/>). <paramref name="read"/> is the read's own result,
+    /// before the Status and Category filters. The time is worded to the second in <paramref name="zone"/>; with
+    /// <paramref name="inUtc"/> (the All Servers view, whose rows sit on different servers' clocks) the text ends in "UTC". The cap
+    /// label beside the count (<see cref="JobHistoryCap"/>) stays: it says how many runs the page is cut to, and this note says the
+    /// time that page reaches back to. A step of its own so the tests run the tab's banner call without building the control.
+    /// </summary>
+    /// <param name="banner">The grid's banner.</param>
+    /// <param name="probe">The data-start probe, called at most once and not at all for a window of 90 minutes or less or a full page.</param>
+    /// <param name="startUtc">The window's start: the one the read and the probe took.</param>
+    /// <param name="endUtc">The window's end.</param>
+    /// <param name="read">The runs the read returned.</param>
+    /// <param name="zone">The zone the time is worded in.</param>
+    /// <param name="inUtc">Whether the text names UTC.</param>
+    /// <param name="superseded">True when a newer load has started: checked after the probe answers and before the banner is written.</param>
+    internal static System.Threading.Tasks.Task ShowJobHistoryDataStartAsync(
+        TextBlock banner, Func<System.Threading.Tasks.Task<DateTime?>> probe, DateTime startUtc, DateTime endUtc,
+        IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, bool inUtc, Func<bool>? superseded = null)
+    {
+        var runTimes = read.Where(r => r.RunDateTimeUtc.HasValue).Select(r => r.RunDateTimeUtc!.Value).ToList();
+
+        void Word()
+        {
+            if (inUtc && banner.Visibility == Visibility.Visible)
+            {
+                banner.Text += " UTC";
+            }
+        }
+
+        return ServerTab.CappedGridBannerAsync(runTimes, RowCap, t => t,
+            oldestRowShown =>
+            {
+                ServerTab.ApplyCappedWindowFloorToBanner(banner, oldestRowShown, startUtc, zone);
+                Word();
+            },
+            async () =>
+            {
+                var floor = await ServerTab.ProbeWindowFloorOrNullAsync(probe, "Job History", startUtc, endUtc);
+                if (superseded?.Invoke() == true) return;
+
+                ServerTab.ApplyWindowFloorToBanner(banner, ServerTab.EarlierOfFloorAndRowShown(floor, ServerTab.EarliestRowShown(runTimes, t => t)), startUtc, zone);
+                Word();
+            });
     }
 
     /// <summary>
