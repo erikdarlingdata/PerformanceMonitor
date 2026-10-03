@@ -41,10 +41,18 @@ public static class CollectorScheduleRunAtText
     /// <param name="clock">The server's clock from its newest <c>server_properties</c> row, or null when it has none yet.</param>
     /// <param name="azureSqlDatabase">The server is an Azure SQL Database, which always reports UTC.</param>
     /// <param name="nowUtc">The current instant, UTC.</param>
+    /// <param name="usesDefaultSchedule">The server is on "Use default schedule": the grid then shows the FLEET's schedule, so the
+    /// row's cell holds the fleet's own time and not one of the server's. The cell is read as "Use default", which takes the
+    /// fleet-wide time and says so. Ignored on a fleet row, which has no such checkbox.</param>
     public static string Describe(
         string collector, string runAtText, int frequencyMinutes, int? serverId, int? fleetRunAtMinute,
-        ServerClock? clock, bool azureSqlDatabase, DateTime nowUtc)
+        ServerClock? clock, bool azureSqlDatabase, DateTime nowUtc, bool usesDefaultSchedule = false)
     {
+        if (usesDefaultSchedule && serverId is not null)
+        {
+            runAtText = CollectorScheduleOverlay.UseDefaultRunAtText;
+        }
+
         if (!CollectorScheduleOverlay.TryParseRunAt(runAtText, out var typed, out var invalid))
         {
             return invalid;

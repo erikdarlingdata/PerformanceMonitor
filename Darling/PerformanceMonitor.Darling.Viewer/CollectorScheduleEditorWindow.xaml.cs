@@ -257,11 +257,15 @@ public partial class CollectorScheduleEditorWindow : Window
             .FirstOrDefault(r => r.ServerId is null && string.Equals(r.CollectorName, item.Name, StringComparison.OrdinalIgnoreCase))
             ?.RunAtMinute;
 
+        /* #4938: a server on "Use default schedule" shows the FLEET's schedule in the grid, so the cell holds the fleet's own time.
+           The line reads it as the server falling through to that time and says it uses the fleet-wide run time. */
+        var usesDefaultSchedule = _scopeServerId is not null && UseDefaultCheckBox.IsChecked == true;
+
         try
         {
             RunAtDetailText.Text = $"{item.Name}: " + CollectorScheduleRunAtText.Describe(
                 item.Name, item.RunAtText, item.FrequencyMinutes, _scopeServerId, fleetRunAt,
-                _scopeClock, _scopeIsAzureSqlDatabase, DateTime.UtcNow);
+                _scopeClock, _scopeIsAzureSqlDatabase, DateTime.UtcNow, usesDefaultSchedule: usesDefaultSchedule);
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or FormatException)
         {
