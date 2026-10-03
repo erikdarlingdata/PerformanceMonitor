@@ -92,6 +92,21 @@ public sealed class InstallIdStore
     internal Action? BeforeCreate { get; set; }
 
     /// <summary>
+    /// Runs between a new id's temp file being written and its move into place, so a test can stop the create at the
+    /// point a crash would. Nothing in the app sets it.
+    /// </summary>
+    internal Action? BeforeMove { get; set; }
+
+    /// <summary>How long a read waits for a locked file. A test shortens it; the app keeps the default.</summary>
+    internal TimeSpan LockedReadBudget { get; set; } = s_lockedReadBudget;
+
+    /// <summary>The clock the retry interval runs on. A test sets it; the app keeps the real one.</summary>
+    internal Func<DateTime> UtcNowForTests { get; set; } = () => DateTime.UtcNow;
+
+    /// <summary>Why this store has no id right now, or null while it has one (or has not tried).</summary>
+    internal string? Failure => null;
+
+    /// <summary>
     /// A store for the running user on this machine: the real machine name and the current Windows user's SID.
     /// </summary>
     public static InstallIdStore ForCurrentUser(string directory)
@@ -117,7 +132,7 @@ public sealed class InstallIdStore
     /// parallel first sweeps share one resolve; every later call returns the cached value without touching the
     /// disk.
     /// </summary>
-    public string GetId()
+    public string? GetId()
     {
         var cached = Volatile.Read(ref _id);
         if (cached is not null)
@@ -301,7 +316,7 @@ public sealed class InstallIdStore
             {
                 return new ReadResult(ReadKind.Missing, null, "");
             }
-            catch (IOException) when (waited.Elapsed < s_lockedReadBudget)
+            catch (IOException) when (waited.Elapsed < LockedReadBudget)
             {
                 Thread.Sleep(s_lockedReadPause);
             }
