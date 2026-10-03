@@ -21,11 +21,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// and the analyze_*_plan reads return identical rows with or without them, just slower, so they must NOT bump
 /// <see cref="StorageVersion"/> — that would gate the Viewer's connect-time schema check on perf indexes it does
 /// not need (the same reasoning that keeps role GUCs / GRANTs in role provisioning rather than a migration). The
-/// service applies them once at startup AFTER migrations and the TimescaleDB block, BEFORE collectors: so a fresh
+/// service applies them at startup AFTER migrations and the TimescaleDB block, BEFORE collectors: so a fresh
 /// store's collector tables are already hypertables when indexed (CREATE INDEX / ALTER TABLE SET propagate to all
 /// existing and future chunks), a plain-PostgreSQL store gets them too, and a first build on a large adopted store
-/// never contends with live inserts. Idempotent (CREATE INDEX IF NOT EXISTS / ALTER TABLE SET), so every restart
-/// re-converges and a store that already has them (a field box hand-indexed, or a prior start) no-ops.
+/// never contends with live inserts. The same pass also runs on the hourly convergence tick beside live
+/// collection, so a CREATE is issued only when the catalog shows the index absent (<c>IF NOT EXISTS</c> takes
+/// its table locks BEFORE it looks, and would stall every writer once an hour) and then under a bounded
+/// <c>lock_timeout</c> (<see cref="GuardedCreate"/>). Idempotent (catalog check / ALTER TABLE SET), so every
+/// run re-converges and a store that already has them (a field box hand-indexed, or a prior run) issues no CREATE.
 ///
 /// <para>EXPLAIN-backed field fix (2026-07-22): the composer filtered by <c>object_name</c> / <c>query_hash</c>
 /// fell to a Seq Scan and timed out at the 15 s statement_timeout; a PLAIN index still paid a Bitmap Heap Scan
@@ -73,9 +76,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class PgTableTuning
 {
-    /* A first CREATE INDEX on a large adopted store can take a while (it runs pre-collection, so it blocks no
-       live inserts, but the build itself is real work) — the same generous budget the TimescaleDB first
-       conversion uses. */
+    /* A first CREATE INDEX on a large adopted store can take a while (at startup it runs before collection and
+       blocks no live inserts; the build itself is real work) — the same generous budget the TimescaleDB first
+       conversion uses. On the hourly pass a CREATE is bounded by CreateLockTimeoutSeconds first. */
     private const int SetupTimeoutSeconds = 300;
 
     /// <summary>
@@ -87,6 +90,35 @@ public static class PgTableTuning
     /// transaction either way.
     /// </summary>
     private const string DropLockTimeoutSeconds = "5s";
+
+    /// <summary>
+    /// The lock_timeout a CREATE INDEX that is still issued runs under. The build takes ShareLock on the table
+    /// (and every chunk), which conflicts with every writer's RowExclusiveLock; on the hourly pass, beside live
+    /// collection, an unbounded wait behind a chunk compression would hold every INSERT for up to
+    /// <see cref="SetupTimeoutSeconds"/>. The CREATE gives up with <c>55P03</c>, and the next pass retries.
+    /// </summary>
+    private const string CreateLockTimeoutSeconds = "5s";
+
+    private const string CreateIndexPrefix = "CREATE INDEX IF NOT EXISTS ";
+
+    /// <summary>
+    /// Wraps a <c>CREATE INDEX IF NOT EXISTS</c> in its own transaction under <see cref="CreateLockTimeoutSeconds"/>.
+    /// Plain (not <c>CONCURRENTLY</c>: hypertables refuse it, and it cannot run inside a transaction block).
+    /// </summary>
+    private static string GuardedCreate(string statement) =>
+        "BEGIN; SET LOCAL lock_timeout = '" + CreateLockTimeoutSeconds + "'; " + statement + "; COMMIT;";
+
+    /// <summary>The index name in a <c>CREATE INDEX IF NOT EXISTS &lt;name&gt; ON ...</c> statement.</summary>
+    private static string CreatedIndexName(string statement)
+    {
+        var rest = statement.Substring(CreateIndexPrefix.Length);
+        return rest.Substring(0, rest.IndexOf(' ', StringComparison.Ordinal));
+    }
+
+    /// <summary>NULL when no such index exists in <c>collect</c>, otherwise whether it is valid.</summary>
+    private const string IndexValidSql =
+        "SELECT i.indisvalid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        + "JOIN pg_index i ON i.indexrelid = c.oid WHERE n.nspname = 'collect' AND c.relname = $1";
 
     /// <summary>CommandTimeout for the post-failure recovery <c>ROLLBACK</c> in <see cref="ApplyAsync"/> — a
     /// ROLLBACK never waits on a lock, so this is a generous ceiling, not a measured budget.</summary>
@@ -309,11 +341,42 @@ public static class PgTableTuning
         var applied = 0;
         foreach (var statement in Statements)
         {
+            var sql = statement;
             try
             {
-                using var command = new NpgsqlCommand(statement, connection) { CommandTimeout = SetupTimeoutSeconds };
+                if (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal))
+                {
+                    var indexName = CreatedIndexName(statement);
+                    using var probe = new NpgsqlCommand(IndexValidSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    probe.Parameters.AddWithValue(indexName);
+                    var valid = await probe.ExecuteScalarAsync(cancellationToken);
+                    if (valid is not null and not DBNull)
+                    {
+                        if (valid is false)
+                        {
+                            logger?.LogWarning(
+                                "Index collect.{Index} exists but is not valid; it is left as it is and is not rebuilt",
+                                indexName);
+                        }
+
+                        applied++;
+                        continue;
+                    }
+
+                    sql = GuardedCreate(statement);
+                }
+
+                using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds };
                 await command.ExecuteNonQueryAsync(cancellationToken);
                 applied++;
+            }
+            catch (PostgresException lockBusy) when (lockBusy.SqlState == PostgresErrorCodes.LockNotAvailable
+                && statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal))
+            {
+                logger?.LogInformation(
+                    "Index {Index} not built this pass: the table was busy; the next pass tries again",
+                    CreatedIndexName(statement));
+                await RollbackBestEffortAsync(connection, logger, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -330,17 +393,7 @@ public static class PgTableTuning
                    way. ROLLBACK outside a transaction is a harmless no-op (a WARNING, not an error), so this is
                    always safe; if it too fails the connection is unusable and every later statement's own
                    failure will say so. */
-                try
-                {
-                    using var rollback = new NpgsqlCommand("ROLLBACK", connection) { CommandTimeout = DropLockTimeoutRollbackSeconds };
-                    await rollback.ExecuteNonQueryAsync(cancellationToken);
-                }
-                catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
-                {
-                    logger?.LogWarning(
-                        "Post-failure ROLLBACK also failed — the connection may be unusable for the rest of this sweep: {Message}",
-                        rollbackEx.Message);
-                }
+                await RollbackBestEffortAsync(connection, logger, cancellationToken);
             }
         }
 
@@ -350,6 +403,22 @@ public static class PgTableTuning
 
         applied += await ApplyHypertableInsertTuningAsync(connection, logger, cancellationToken);
         return applied;
+    }
+
+    /// <summary>Best-effort <c>ROLLBACK</c> that leaves the connection usable after a failed statement.</summary>
+    private static async Task RollbackBestEffortAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var rollback = new NpgsqlCommand("ROLLBACK", connection) { CommandTimeout = DropLockTimeoutRollbackSeconds };
+            await rollback.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Post-failure ROLLBACK also failed — the connection may be unusable for the rest of this sweep: {Message}",
+                rollbackEx.Message);
+        }
     }
 
     /// <summary>The reloptions every pure-insert hypertable gets. Shared with the literal statements above so

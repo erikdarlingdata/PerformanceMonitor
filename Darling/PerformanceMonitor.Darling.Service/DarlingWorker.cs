@@ -9752,9 +9752,13 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
 
         /* #4834: the longest single checkpoint sync the minute samples saw since the last tick, taken ONCE and
-           here, so the window closes on the hour whatever the sweep goes on to do. The sweep stores it on the
-           hour's checkpointer row; the checkpointer evaluation and get_store_metrics both read it back from
-           that row, so neither is handed a window. */
+           here, so the window closes when the tick LAUNCHES, whatever the sweep goes on to do. A deferral behind
+           maintenance moves that close to the first pass after maintenance ends. A skip (above) returns before
+           this call, so the window is not taken and carries into the next tick: that tick's window covers both
+           hours and its checkpointer row keeps the longest sync of the two, which is the safe direction since
+           dropping the window would lose a real long sync. The sweep stores it on the hour's checkpointer row;
+           the checkpointer evaluation and get_store_metrics both read it back from that row, so neither is
+           handed a window. */
         var checkpointWindow = takeWindow();
         _storeMetricsTick = RunTrackedTickAsync("hourly store self-metrics tick", token => runTick(checkpointWindow, token), stoppingToken);
         return true;
