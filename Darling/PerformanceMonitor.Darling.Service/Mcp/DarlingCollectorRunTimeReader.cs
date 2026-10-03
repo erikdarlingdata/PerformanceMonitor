@@ -110,32 +110,51 @@ internal static class DarlingCollectorRunTimeReader
     }
 
     /// <summary>The fleet's and this server's run-time rows. A store below V160 has no such table, and that is "no run times"
-    /// (every collector had none before the table existed), so the 42P01 is answered with an empty list; any other failure
-    /// propagates. The state code, not the message text, is matched: lc_messages is not always English.</summary>
-    private static async Task<IReadOnlyList<RunTimeOverride>> ReadRunTimesAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    /// (every collector had none before the table existed), so the 42P01 is answered with an empty list. A role that may not
+    /// read the table (42501, an mcp role provisioned before the grant existed) is answered the same way, with one warning,
+    /// so the health tool never fails as a whole for a missing optional layer; any other failure propagates. The state code,
+    /// not the message text, is matched: lc_messages is not always English.</summary>
+    private static Task<IReadOnlyList<RunTimeOverride>> ReadRunTimesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken) =>
+        ReadRunTimesAsync(
+            async () =>
+            {
+                var runTimes = new List<RunTimeOverride>();
+                await using var command = postgres.CreateCommand(RunTimeSql);
+                command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                DarlingMcpReadParameters.AddInt(command, serverId);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    runTimes.Add(new RunTimeOverride(
+                        reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                        reader.GetString(1),
+                        reader.GetInt16(2)));
+                }
+
+                return runTimes;
+            },
+            message => System.Diagnostics.Trace.TraceWarning(message));
+
+    /// <summary>The state-code handling of <see cref="ReadRunTimesAsync(NpgsqlDataSource,int,CancellationToken)"/>, with the read
+    /// and the warning passed in so the two refusals are testable without a store.</summary>
+    internal static async Task<IReadOnlyList<RunTimeOverride>> ReadRunTimesAsync(
+        Func<Task<List<RunTimeOverride>>> read, Action<string> warn)
     {
-        var runTimes = new List<RunTimeOverride>();
         try
         {
-            await using var command = postgres.CreateCommand(RunTimeSql);
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            DarlingMcpReadParameters.AddInt(command, serverId);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                runTimes.Add(new RunTimeOverride(
-                    reader.IsDBNull(0) ? null : reader.GetInt32(0),
-                    reader.GetString(1),
-                    reader.GetInt16(2)));
-            }
+            return await read();
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
             return Array.Empty<RunTimeOverride>();
         }
-
-        return runTimes;
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+        {
+            warn("get_collection_health: the MCP role cannot read config.config_collector_run_times (42501), so collector run times are not shown. "
+                + "Re-run provision-roles.sql to grant it SELECT.");
+            return Array.Empty<RunTimeOverride>();
+        }
     }
 
     /// <summary>

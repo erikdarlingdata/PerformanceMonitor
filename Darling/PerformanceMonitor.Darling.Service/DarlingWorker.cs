@@ -6589,7 +6589,7 @@ LIMIT 1";
 
                 if (await command.ExecuteScalarAsync(cancellationToken) is string zone && !string.IsNullOrWhiteSpace(zone))
                 {
-                    return new ServerClockStamp(ServerClock.Resolve(zone.Trim(), null));
+                    return ResolvePgServerClock(serverId, zone.Trim(), logger);
                 }
             }
 
@@ -6600,6 +6600,28 @@ LIMIT 1";
             logger?.LogDebug("Observability: server clock read for server_id {ServerId} failed: {Message}", serverId, ex.Message);
             return null;
         }
+    }
+
+    /* Servers already warned about an unresolvable PostgreSQL TimeZone, keyed by server id and zone text, so the
+       warning is logged once per server and zone rather than on every clock read. */
+    private static readonly ConcurrentDictionary<(int ServerId, string Zone), byte> UnresolvedPgZonesWarned = new();
+
+    /// <summary>
+    /// #4938: the clock for a PostgreSQL server's <c>TimeZone</c> text. A zone this host cannot resolve (a POSIX string such
+    /// as <c>EST5EDT,M3.2.0,M11.1.0</c>, or <c>localtime</c>) reads as UTC, so the run times of that server's collectors
+    /// are placed on a UTC clock; that is logged as a warning, once per server and zone text, naming the text.
+    /// </summary>
+    internal static ServerClockStamp ResolvePgServerClock(int serverId, string zone, ILogger? logger)
+    {
+        var clock = ServerClock.Resolve(zone, null);
+        if (ReferenceEquals(clock, ServerClock.Utc) && UnresolvedPgZonesWarned.TryAdd((serverId, zone), 0))
+        {
+            logger?.LogWarning(
+                "Server {ServerId} reports the PostgreSQL TimeZone '{Zone}', which this host cannot resolve to a time zone; its collector run times use UTC.",
+                serverId, zone);
+        }
+
+        return new ServerClockStamp(clock);
     }
 
     /// <summary>
