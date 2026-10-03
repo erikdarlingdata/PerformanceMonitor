@@ -575,7 +575,8 @@ jobs:
             change: leave it alone unless a new commit interacts with it. This paragraph REPLACES
             PHASE 1 and PHASE 2 below: read the new diff and the files it changes in context, apply
             the CALLERS RULE and the traps file to what the new commits changed, and run
-            `gh pr view ${{ github.event.pull_request.number }}` only for notes that explain them.
+            `gh pr view ${{ github.event.pull_request.number }}` only for notes that explain them (and
+            `gh pr view ${{ github.event.pull_request.number }} --comments` for the earlier reviews).
             Everything from POSTING on applies unchanged, and the verdict keeps the same shape, with
             its sections scoped to the new commits.
 
@@ -624,10 +625,19 @@ jobs:
             not assert what the body says it does. Divergence is the finding; agreement between the
             body and the diff is not evidence of correctness.
 
-            POSTING. Use `gh pr comment` for top-level notes and
+            POSTING. Use `gh pr comment ${{ github.event.pull_request.number }} --body-file - <<'EOF'` (the note, then a
+            line with EOF) for top-level notes and
             `mcp__github_inline_comment__create_inline_comment` (with confirmed: true) for
             line-level findings. Only post GitHub comments and reviews — do not emit review text
             as plain messages.
+
+            GH COMMANDS. Every `gh` command this run may use is one of these, exactly, where N is
+            ${{ github.event.pull_request.number }}: `gh pr diff N`, `gh pr diff N --name-only`, `gh pr view N`,
+            `gh pr view N --json commits`, `gh pr view N --comments`, and the three posts
+            `gh pr comment N --body-file -`, `gh pr review N --comment --body-file -` and
+            `gh pr review N --request-changes --body-file -`, each followed by a quoted heredoc
+            (`<<'EOF'`). Any other flag, a body given with `--body`, or an unquoted heredoc is
+            refused.
 
             VERDICT PROTOCOL — ALWAYS POST a verdict, in the STRUCTURED SHAPE below. After every
             comment is posted, end the review by submitting exactly ONE formal GitHub review whose
@@ -693,16 +703,22 @@ jobs:
           # about thirteen runs, one night). Read-only tools are enough: the reviewer needs to open
           # the files the diff touches, find a symbol's other callers and read a parity twin, and
           # nothing about reviewing needs a write. Nothing here can edit, commit, push or post
-          # outside the gh verbs already listed; the one git verb is `git diff`, and it takes only a
-          # follow-up's range (see the git rules below).
+          # outside the gh forms listed (see the gh rules below); the one git verb is `git diff`, and
+          # it takes only a follow-up's range (see the git rules below).
           #
           # #3710 adds no tool. The callers rule is Grep; the traps file is Read; the blind read is
           # an ORDERING of the gh verbs already here, enforced by instruction and by the prompt
           # withholding the body. The structured verdict is posted through `gh pr review
-          # --body-file -` with a quoted heredoc -- the same `gh pr review` prefix the allowlist
-          # already matches, and no Write tool is needed to stage a body file. --model and
+          # --body-file -` with a quoted heredoc -- one of the exact `gh pr review` forms the
+          # allowlist grants, and no Write tool is needed to stage a body file. --model and
           # --max-turns are the tier's; both are plain claude_args per claude-code-action's
           # docs/configuration.md ("Custom Model", "Limiting Conversation Turns").
+          #
+          # The gh rules are exact commands with this pull request's number, the forms the prompt
+          # names: the diff, with or without --name-only; the view, its commits and its comments; and
+          # the three posts, which read their body from standard input (`--body-file -` with a quoted
+          # heredoc). A rule with no `*` matches only that command, so no other flag or argument
+          # reaches gh. The number is the event's own integer.
           #
           # The git rules take only the forms the review runs. A full review needs no `git diff` (it
           # reads `gh pr diff` and works from a one-commit checkout), so it gets none. A follow-up gets
@@ -726,7 +742,7 @@ jobs:
           claude_args: |
             --model "${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }}"
             --max-turns ${{ steps.tier.outputs.max_turns || '120' }}
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read,Grep,Glob${{ needs.decide.outputs.base && needs.decide.outputs.head && format(',Bash(git diff {0} {1}),Bash(git diff {0} {1} -- *)', needs.decide.outputs.base, needs.decide.outputs.head) || '' }}"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff ${{ github.event.pull_request.number }}),Bash(gh pr diff ${{ github.event.pull_request.number }} --name-only),Bash(gh pr view ${{ github.event.pull_request.number }}),Bash(gh pr view ${{ github.event.pull_request.number }} --json commits),Bash(gh pr view ${{ github.event.pull_request.number }} --comments),Bash(gh pr comment ${{ github.event.pull_request.number }} --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --comment --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --request-changes --body-file -),Read,Grep,Glob${{ needs.decide.outputs.base && needs.decide.outputs.head && format(',Bash(git diff {0} {1}),Bash(git diff {0} {1} -- *)', needs.decide.outputs.base, needs.decide.outputs.head) || '' }}"
             --disallowedTools "Read(./.git/**),Read(//proc/**)"
 
       # #3650: a review that posted nothing used to finish GREEN. The prompt mandates one formal
