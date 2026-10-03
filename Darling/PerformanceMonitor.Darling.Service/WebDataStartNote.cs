@@ -59,7 +59,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>When it says nothing.</b> The window is covered (whether or not it holds rows: a quiet start is not a
 /// cut) and the read did not hit a row cap that cuts by time (or hit it, and its oldest row is at or before the
 /// window's start), nothing in scope holds a row or logged a run in it, the
-/// answer is an envelope (empty, unavailable, invalid) or an error rather than rows, the read cannot be resolved, the
+/// answer is an envelope other than the read's own "looked and found nothing" word (<see cref="NothingFoundStatusByRead"/>:
+/// <c>empty</c>, or <c>no_changes</c> for the PostgreSQL changes, which are probed like rows; unavailable, not_collected and
+/// invalid are not) or an error rather than rows, the read cannot be resolved, the
 /// window is no longer than the 90-minute slack (a window that short can never be cut by the store's coverage, so the
 /// probe is not asked), or the probe fails. A failed probe costs the grid its notice, never its rows.</para>
 /// </summary>
@@ -128,6 +130,34 @@ internal static class WebDataStartNote
     private static readonly HashSet<string> RowStatuses = new(StringComparer.Ordinal) { "config_changes" };
 
     /// <summary>
+    /// The one <c>status</c> word each listed read answers with when it LOOKED and found nothing in the window (#4966): the
+    /// word a reader takes for "nothing happened". Over a short history an empty span reads as quiet when it is only short, and
+    /// empty is these grids' usual state, so an answer carrying the word goes through the coverage probe and gets the same
+    /// note rows do. Every other word (<c>unavailable</c>, <c>not_collected</c>, <c>invalid</c>) keeps its own message and gets
+    /// none: it says something other than "nothing happened".
+    ///
+    /// <para>The change histories and the collection log answer <c>empty</c> (the PostgreSQL changes read says
+    /// <c>no_changes</c>), as do waiting tasks, wait sampling, kernel stats, lock stats and predicate stats: each ran its
+    /// query and found no rows in the window. The collection log's <c>empty</c> covers a quiet window and a filter that matched
+    /// nothing, and the coverage fact holds for both; its <c>unavailable</c> (never collected) stays as it is. Latch stats,
+    /// spinlock stats, wait stats and PostgreSQL wait events are left out: their no-rows answer is <c>unavailable</c>. A test
+    /// reads each tool's source and holds both halves.</para>
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> NothingFoundStatusByRead = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["get_waiting_tasks"] = "empty",
+        ["get_pg_wait_sampling"] = "empty",
+        ["get_pg_kernel_stats"] = "empty",
+        ["get_pg_lock_stats"] = "empty",
+        ["get_pg_predicate_stats"] = "empty",
+        ["get_server_config_changes"] = "empty",
+        ["get_database_config_changes"] = "empty",
+        ["get_trace_flag_changes"] = "empty",
+        ["get_pg_server_config_changes"] = "no_changes",
+        ["get_collection_log"] = "empty",
+    };
+
+    /// <summary>
     /// The listed reads whose tool takes any window length (<see cref="McpHelpers.ValidateUncappedWindow"/>), not the
     /// 168-hour ceiling: the collection log keeps 60 days, and its tool exists to look further back than the other
     /// reads allow, so a note that checked the shared ceiling would stay silent on exactly those windows.
@@ -184,10 +214,13 @@ internal static class WebDataStartNote
             return result;
         }
 
-        /* Rows only: an envelope (status), an error, or a tool that already reports its own window floor is left
-           as it is. An empty answer says so itself, and the probe would count a server by its logged runs. */
+        /* Rows, or the answer that says the read looked and found nothing (#4966, NothingFoundStatusByRead): an empty span
+           over a short history reads as "nothing happened" when it is only short, so that answer gets the note too. The
+           probe counts a server only when it holds a row or logged a run in the window, so a server that did neither is
+           left without one, as before. Any other envelope (unavailable, not_collected, invalid), an error, or a tool that
+           already reports its own window floor is left as it is. */
         if (payload is null
-            || (payload.ContainsKey("status") && !IsRowStatus(payload))
+            || (payload.ContainsKey("status") && !IsRowStatus(payload) && !IsNothingFoundStatus(tool, payload))
             || payload.ContainsKey("error")
             || payload.ContainsKey("window_truncated"))
         {
@@ -370,6 +403,13 @@ internal static class WebDataStartNote
     /* Whether the answer's status word is one a listed read puts on its ROWS (RowStatuses) rather than an envelope. */
     private static bool IsRowStatus(JsonObject payload) =>
         payload["status"] is JsonValue word && word.TryGetValue<string>(out var status) && RowStatuses.Contains(status);
+
+    /* Whether the answer's status word is this read's own "looked and found nothing" one (NothingFoundStatusByRead). */
+    private static bool IsNothingFoundStatus(string tool, JsonObject payload) =>
+        NothingFoundStatusByRead.TryGetValue(tool, out var expected)
+        && payload["status"] is JsonValue word
+        && word.TryGetValue<string>(out var status)
+        && string.Equals(status, expected, StringComparison.Ordinal);
 
     /* The earliest changed_at on the page, as the tool wrote it; null when no row carries a readable one. Compared as
        instants (the store's times carry no zone, and are read as UTC), and returned as the text of the earliest. */

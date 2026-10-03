@@ -106,6 +106,24 @@ public sealed class ConfigAndLogNoteStore : IAsyncLifetime
             await SnapshotAsync(connection, read, quietId, quietName, End.AddDays(-3), changed: true);
         }
 
+        /* Added two days ago and nothing has changed: two identical snapshots, so each history answers "empty" (#4966), the
+           answer a short history makes look like a quiet one. */
+        foreach (var read in new[] { ServerConfigRead, DatabaseConfigRead, TraceFlagRead })
+        {
+            var (flatId, flatName) = await AddServerAsync(connection, ServerName(read, "flat"), End.AddDays(-2));
+            await SnapshotAsync(connection, read, flatId, flatName, End.AddDays(-2).AddMinutes(1), changed: false);
+            await SnapshotAsync(connection, read, flatId, flatName, End.AddDays(-1), changed: false);
+        }
+
+        /* The same answer over a server monitored for months: its snapshots sit inside a covered week. */
+        var (oldFlatId, oldFlatName) = await AddServerAsync(connection, ServerName(ServerConfigRead, "flat-old"), End.AddDays(-120));
+        await SnapshotAsync(connection, ServerConfigRead, oldFlatId, oldFlatName, End.AddDays(-10), changed: false);
+        await SnapshotAsync(connection, ServerConfigRead, oldFlatId, oldFlatName, End.AddDays(-3), changed: false);
+
+        var (pgFlatId, pgFlatName) = await AddServerAsync(connection, ServerName(PgConfigRead, "flat"), End.AddDays(-2));
+        await PgSettingAsync(connection, pgFlatId, pgFlatName, End.AddDays(-2).AddMinutes(1), "work_mem", "4096");
+        await PgSettingAsync(connection, pgFlatId, pgFlatName, End.AddDays(-1), "work_mem", "4096");
+
         /* PostgreSQL: the changes read compares snapshots inside the window, so a baseline sits inside it. The quiet and
            capped servers also hold one older row (a setting that never changes) so the store plainly covered the range. */
         var (pgNewId, pgNewName) = await AddServerAsync(connection, ServerName(PgConfigRead, "new"), End.AddDays(-2));
@@ -351,6 +369,34 @@ public sealed class WebDataStartNoteConfigAndLogLiveTests : IClassFixture<Config
         AssertRows(read, answer);
         Assert.NotEqual(true, answer["truncated"]?.GetValue<bool>());
         AssertCoverageNote(answer, _store.End.AddDays(-2), hours: 168);
+    }
+
+    /// <summary>A server added two days ago whose configuration has not changed, read over a week: the tool answers that
+    /// nothing changed (<c>empty</c>, and <c>no_changes</c> for PostgreSQL), and the note still says the data starts at the
+    /// server's first collection, with the three instants beside it, so the grid does not read as a quiet week.</summary>
+    [Theory]
+    [InlineData(ConfigAndLogNoteStore.ServerConfigRead, "empty")]
+    [InlineData(ConfigAndLogNoteStore.DatabaseConfigRead, "empty")]
+    [InlineData(ConfigAndLogNoteStore.TraceFlagRead, "empty")]
+    [InlineData(ConfigAndLogNoteStore.PgConfigRead, "no_changes")]
+    public async Task AnEmptyAnswerOverANewServer_GetsTheNoteNamingTheCoverageStart_OnEachChangeRead_AgainstDevPostgres(string read, string status)
+    {
+        var answer = await AskAsync(read, "flat", hours: 168);
+
+        Assert.Equal(status, answer["status"]?.GetValue<string>());
+        Assert.NotNull(answer["message"]);
+        AssertCoverageNote(answer, _store.End.AddDays(-2), hours: 168);
+    }
+
+    /// <summary>The same envelope over a server monitored for months, whose snapshots sit inside a covered week, says
+    /// nothing: the note follows the coverage, not the empty answer.</summary>
+    [Fact]
+    public async Task AnEmptyAnswerOverACoveredServer_GetsNoNote_AgainstDevPostgres()
+    {
+        var answer = await AskAsync(ConfigAndLogNoteStore.ServerConfigRead, "flat-old", hours: 168);
+
+        Assert.Equal("empty", answer["status"]?.GetValue<string>());
+        AssertNoNote(answer);
     }
 
     /// <summary>A server monitored for months whose first change or run in the window comes days after it starts: the store

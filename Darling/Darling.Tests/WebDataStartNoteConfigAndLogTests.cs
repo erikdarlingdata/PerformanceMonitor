@@ -157,10 +157,115 @@ public sealed class WebDataStartNoteConfigAndLogTests
         Assert.Equal(3, answer["changes"]!.AsArray().Count);
 
         await using var store = NeverConnects();
-        const string Envelope = "{\"status\":\"no_changes\",\"message\":\"No configuration parameter changed value.\"}";
-        Assert.Same(Envelope, await WebDataStartNote.AddAsync(store, "get_pg_server_config_changes", "pg01", 168, null, Envelope, null, Cancelled));
+        /* The envelope that says nothing changed (no_changes) is probed like rows since #4966, so the answer for a new server says
+           where its data starts; one that keeps its own message (not_collected) is still left as it is. */
+        const string Unchanged = "{\"status\":\"no_changes\",\"message\":\"No configuration parameter changed value.\"}";
+        const string Elsewhere = "{\"status\":\"not_collected\",\"message\":\"This engine has no configuration parameters.\"}";
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => WebDataStartNote.AddAsync(store, "get_pg_server_config_changes", "pg01", 168, null, Unchanged, null, Cancelled));
+        Assert.Same(Elsewhere, await WebDataStartNote.AddAsync(store, "get_pg_server_config_changes", "pg01", 168, null, Elsewhere, null, Cancelled));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => WebDataStartNote.AddAsync(store, "get_pg_server_config_changes", "pg01", 168, null, Rows("get_pg_server_config_changes"), null, Cancelled));
+    }
+
+    private static string Envelope(string status) =>
+        "{\"status\":\"" + status + "\",\"message\":\"Nothing in this window.\"}";
+
+    /* An empty span over a short history reads as "nothing happened" when it is only short (#4966), so the answer that says the
+       read looked and found nothing goes to the coverage probe the way rows do: a store that never connects and a cancelled
+       token make the probe show as an OperationCanceledException. Each admitted read answers its own word (the PostgreSQL
+       changes read says no_changes, every other one says empty). */
+    [Fact]
+    public async Task AnAnswerSayingTheReadLookedAndFoundNothing_GoesToTheCoverageProbe_OnEachAdmittedRead()
+    {
+        await using var store = NeverConnects();
+
+        foreach (var (read, word) in WebDataStartNote.NothingFoundStatusByRead)
+        {
+            Assert.Contains(read, WebDataStartNote.TableByRead.Keys);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => WebDataStartNote.AddAsync(store, read, "sql01", 168, null, Envelope(word), null, Cancelled));
+        }
+
+        Assert.Equal("no_changes", WebDataStartNote.NothingFoundStatusByRead["get_pg_server_config_changes"]);
+        foreach (var read in new[] { "get_server_config_changes", "get_database_config_changes", "get_trace_flag_changes", "get_collection_log", "get_waiting_tasks" })
+        {
+            Assert.Equal("empty", WebDataStartNote.NothingFoundStatusByRead[read]);
+        }
+    }
+
+    /* not_collected, unavailable, invalid and an error keep their own message on every listed read, and so does a word that is
+       not the read's own "nothing found" one: the answer comes back as the same instance without a probe. */
+    [Fact]
+    public async Task EveryOtherStatus_KeepsItsOwnMessage_AndGetsNoNote_OnEveryListedRead()
+    {
+        await using var store = NeverConnects();
+
+        foreach (var read in WebDataStartNote.TableByRead.Keys)
+        {
+            foreach (var status in new[] { "not_collected", "unavailable", "invalid", "error", "empty", "no_changes" })
+            {
+                if (WebDataStartNote.NothingFoundStatusByRead.TryGetValue(read, out var admitted) && admitted == status)
+                {
+                    continue;
+                }
+
+                var envelope = Envelope(status);
+                Assert.Same(envelope, await WebDataStartNote.AddAsync(store, read, "sql01", 168, null, envelope, null, Cancelled));
+            }
+        }
+    }
+
+    /* The reads left out answer "no rows" with unavailable, which keeps its own message, and the admitted ones really answer the
+       word the list gives. Read from the tools' source, so a tool that changes its word fails here and gets decided on purpose. */
+    [Fact]
+    public void TheAdmittedReads_AnswerTheirWord_AndTheOthersAnswerUnavailable()
+    {
+        (string File, string Method)[] Where(string read) => read switch
+        {
+            "get_waiting_tasks" => [("DarlingMcpSessionTools.cs", "GetWaitingTasks")],
+            "get_pg_wait_sampling" => [("DarlingMcpPgWaitSamplingTools.cs", "GetPgWaitSampling")],
+            "get_pg_kernel_stats" => [("DarlingMcpPgKernelStatsTools.cs", "GetPgKernelStats")],
+            "get_pg_lock_stats" => [("DarlingMcpPgServerStateTools.cs", "GetPgLockStats")],
+            "get_pg_predicate_stats" => [("DarlingMcpPgPredicateTools.cs", "GetPgPredicateStats")],
+            "get_server_config_changes" => [("DarlingMcpConfigHistoryTools.cs", "GetServerConfigChanges")],
+            "get_database_config_changes" => [("DarlingMcpConfigHistoryTools.cs", "GetDatabaseConfigChanges")],
+            "get_trace_flag_changes" => [("DarlingMcpConfigHistoryTools.cs", "GetTraceFlagChanges")],
+            "get_pg_server_config_changes" => [("DarlingMcpPgServerStateTools.cs", "GetPgServerConfigChanges")],
+            "get_collection_log" => [("DarlingMcpDataTools.cs", "GetCollectionLog")],
+            "get_latch_stats" => [("DarlingMcpLatchSpinlockTools.cs", "GetLatchStats")],
+            "get_spinlock_stats" => [("DarlingMcpLatchSpinlockTools.cs", "GetSpinlockStats")],
+            "get_wait_stats" => [("DarlingMcpDataTools.cs", "GetWaitStats")],
+            "get_pg_wait_stats" => [("DarlingMcpPgWaitTools.cs", "GetPgWaitStats")],
+            _ => throw new ArgumentOutOfRangeException(nameof(read), read, "a listed read this test does not know"),
+        };
+
+        string Body(string read)
+        {
+            var (file, method) = Where(read).Single();
+            var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
+            var start = source.IndexOf("public static async Task<string> " + method + "(", StringComparison.Ordinal);
+            Assert.True(start > 0, read + ": " + method + " not found");
+            var end = source.IndexOf("[McpServerTool(", start, StringComparison.Ordinal);
+            return end < 0 ? source[start..] : source[start..end];
+        }
+
+        foreach (var read in WebDataStartNote.TableByRead.Keys)
+        {
+            var body = Body(read);
+            if (WebDataStartNote.NothingFoundStatusByRead.TryGetValue(read, out var word))
+            {
+                /* The three SQL Server histories answer through the one NoChanges helper, whose word is empty. */
+                var answersIt = body.Contains("\"" + word + "\"", StringComparison.Ordinal)
+                    || (word == "empty" && body.Contains("NoChanges(", StringComparison.Ordinal));
+                Assert.True(answersIt, read + " is admitted for " + word + " but its tool never answers it");
+            }
+            else
+            {
+                Assert.Contains("\"unavailable\"", body, StringComparison.Ordinal);
+                Assert.DoesNotContain("\"empty\"", body, StringComparison.Ordinal);
+            }
+        }
     }
 
     /* A capped page's note shows only when its oldest row is LATER than the window's start, with no slack: a page whose
