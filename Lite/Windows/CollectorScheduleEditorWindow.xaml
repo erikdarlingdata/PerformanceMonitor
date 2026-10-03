@@ -63,12 +63,14 @@
                   CanUserAddRows="False" CanUserDeleteRows="False"
                   SelectionMode="Single"
                   Background="Transparent" BorderThickness="0"
-                  HeadersVisibility="Column" GridLinesVisibility="Horizontal">
+                  HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                  RowEditEnding="ScheduleGrid_RowEditEnding">
             <DataGrid.Columns>
                 <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled, UpdateSourceTrigger=PropertyChanged}" Width="65"/>
                 <DataGridTextColumn Header="Collector" Binding="{Binding Name}" Width="160" IsReadOnly="True"/>
                 <DataGridTextColumn Header="Frequency (min)" Binding="{Binding FrequencyMinutes, UpdateSourceTrigger=LostFocus}" Width="110"/>
                 <DataGridTextColumn Header="Retention (days)" Binding="{Binding RetentionDays, UpdateSourceTrigger=LostFocus}" Width="110"/>
+                <DataGridTextColumn Header="Run at (HH:MM)" Binding="{Binding RunAt, UpdateSourceTrigger=LostFocus}" Width="110"/>
                 <DataGridTextColumn Header="Schedule" Binding="{Binding FrequencyDisplay}" Width="140" IsReadOnly="True"/>
                 <DataGridTextColumn Header="Description" Binding="{Binding Description}" Width="*" IsReadOnly="True"/>
             </DataGrid.Columns>
@@ -79,6 +81,11 @@
             <TextBlock x:Name="StatusText" FontSize="11" FontStyle="Italic"
                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
             <TextBlock x:Name="DeltaBoundText" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <!-- #4938: what the Run at column means, and when each collector that has a run time runs next (text set in code) -->
+            <TextBlock x:Name="RunAtHintText" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <TextBlock x:Name="NextRunText" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"
                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
         </StackPanel>
 

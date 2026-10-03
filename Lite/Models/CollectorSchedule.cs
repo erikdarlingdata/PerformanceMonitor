@@ -48,6 +48,15 @@ public class CollectorSchedule
     public string? Description { get; set; }
 
     /// <summary>
+    /// #4938: the time of day this collector should run, as 24-hour HH:MM on the monitored server's clock, such as
+    /// "02:00". Missing means none. It applies only where the collector runs once a day or less often; on any other
+    /// interval it is ignored, with a log warning. Written to the file only when set, and an older Lite skips it as a
+    /// field it does not know.
+    /// </summary>
+    [JsonPropertyName("run_at")]
+    public string? RunAt { get; set; }
+
+    /// <summary>
     /// The last time this collector was run successfully.
     /// </summary>
     [JsonIgnore]
