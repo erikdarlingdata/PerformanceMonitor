@@ -107,11 +107,14 @@ public partial class JobHistoryTab : UserControl
                never the grid. */
             var nowUtc = DateTime.UtcNow;
             var sinceUtc = nowUtc.AddHours(-hoursBack);
+            /* The read and the data-start probe run together: priced as two. */
+            using var readFanOut = ViewerReadFanOut.Of(2);
             var dataStartTask = _dataService.GetJobHistoryDataStartAsync(serverId, sinceUtc, nowUtc);
 
             var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap);
             await ViewerServerTab.AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Job History");
             var all = await readTask;
+            readFanOut.Release();
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             /* Populate the Server / Category combos from the full (pre status/category) result, then apply
