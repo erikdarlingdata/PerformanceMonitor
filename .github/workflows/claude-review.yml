@@ -57,7 +57,8 @@ name: Claude Auto Review
 # real). Since #3650 the job also fails ITSELF when the run submitted no verdict, with the cause and
 # the result block's counts in its log -- a green here means a verdict exists, and the guard is the
 # second line. The review keeps no transcript: the file the action writes stays on the runner, and
-# the log carries only that file's result fields, never its message text. It no-ops cleanly until
+# the log carries only that file's result fields, never its message text, even with debug logging
+# on (the review step pins ACTIONS_STEP_DEBUG to "false"). It no-ops cleanly until
 # the CLAUDE_CODE_OAUTH_TOKEN repo secret is set, and on fork PRs (which do not receive secrets),
 # so neither case shows a failed check.
 #
@@ -538,6 +539,12 @@ jobs:
         id: review
         if: ${{ env.HAS_OAUTH_TOKEN == 'true' }}
         uses: anthropics/claude-code-action@v1
+        # The action prints every message, tool results included, when ACTIONS_STEP_DEBUG is "true"
+        # (base-action/src/parse-sdk-options.ts at v1). Pinned "false" here, the log keeps only the
+        # result fields even on a run with debug logging turned on. show_full_output is left at its
+        # default, "false".
+        env:
+          ACTIONS_STEP_DEBUG: 'false'
         with:
           # The one place the token's value is read: no other step, and no job-level environment,
           # holds it.
