@@ -343,6 +343,16 @@ public sealed class CaggGroupIndexDropLiveTests
             await dropEnd.ExecuteNonQueryAsync(ct);
         }
 
+        if (simulatedVersion < InstallIdTableOidRungTests.RungVersion)
+        {
+            /* V159 (#4961) - the install id table's own OID and the server's major version, which arrive in the one
+               statement; the OID's column is the probe's sentinel. IF EXISTS on the table, because a store simulated below
+               the install id's own rung has had the table dropped already. */
+            await using var dropTableOid = new NpgsqlCommand(
+                "ALTER TABLE IF EXISTS config.config_install_id DROP COLUMN IF EXISTS table_oid, DROP COLUMN IF EXISTS server_major", connection);
+            await dropTableOid.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < InstallIdRungTests.RungVersion)
         {
             /* V158 (#4961) - the install id's one-row table; the table is the probe's sentinel. */
