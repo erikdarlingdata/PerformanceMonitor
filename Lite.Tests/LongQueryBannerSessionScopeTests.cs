@@ -45,7 +45,7 @@ public sealed class LongQueryBannerSessionScopeTests
         var text = ServerTab.LongQueriesDisabledText(isAzureSqlDatabase: true);
 
         Assert.EndsWith(
-            "Enabling it creates the Extended Events session in each monitored database. Disabling it drops the session from every database that has it, except where another registration of that database still has the trace on. A database that is also monitored as its own server follows that server's setting.",
+            "Enabling it creates this install's Extended Events session in each monitored database. Disabling it drops that session from every database that has it, except where another registration of that database still has the trace on. A database that is also monitored as its own server follows that server's setting.",
             text,
             StringComparison.Ordinal);
         Assert.DoesNotContain("session on this server", text, StringComparison.Ordinal);
@@ -58,10 +58,22 @@ public sealed class LongQueryBannerSessionScopeTests
         var text = ServerTab.LongQueriesDisabledText(isAzureSqlDatabase: false);
 
         Assert.EndsWith(
-            "Enabling it creates the Extended Events session on this server. Disabling it drops the session.",
+            "Enabling it creates this install's Extended Events session on this server. Disabling it drops that session, unless another registration of this install on the same instance still has the trace on.",
             text,
             StringComparison.Ordinal);
         Assert.DoesNotContain("monitored database", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheLiteBanner_NamesTheSessionAsThisInstalls_NotAsOneSessionEveryInstallShares()
+    {
+        foreach (var isAzureSqlDatabase in new[] { true, false })
+        {
+            var text = ServerTab.LongQueriesDisabledText(isAzureSqlDatabase);
+
+            Assert.Contains("this install's Extended Events session", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("PerformanceMonitor_LongQueryCompletions", text, StringComparison.Ordinal);
+        }
     }
 
     private static string RepoPath(params string[] parts) => Path.Combine([RepoRoot(), .. parts]);

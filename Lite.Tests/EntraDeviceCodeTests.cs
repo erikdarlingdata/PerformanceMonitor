@@ -10,6 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -18,6 +20,7 @@ using Darling.Tests;
 using Lite.Tests;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -1949,6 +1952,332 @@ public class EntraDeviceCodeTests
         }
     }
 
+    /// <summary>Exposes the protected database open, so a test can drive the connection the long-query trace creates its definition over.</summary>
+    private sealed class DatabaseOpenProbe : RemoteCollectorService
+    {
+        public DatabaseOpenProbe(DuckDbInitializer duckDb, ServerManager servers, ScheduleManager schedules)
+            : base(duckDb, servers, schedules)
+        {
+        }
+
+        public Task<SqlConnection> OpenAsync(ServerConnection server, string database, bool withoutReadOnlyIntent, CancellationToken cancellationToken) =>
+            OpenAzureDatabaseConnectionAsync(server, database, cancellationToken, withoutReadOnlyIntent);
+    }
+
+    [Fact]
+    public async Task ADatabaseOpenForADeviceCodeRegistration_ClaimsTheSignInSlot_WithOrWithoutReadOnlyIntent()
+    {
+        /* #4961: the long-query trace creates its session's definition on Azure SQL Database over a second connection of the
+           registration, with the read-only intent forced off, and every database open can be the first connection of a run to
+           raise the device-code prompt. Opens that did not claim the sign-in slot gave the prompt window no attempt to
+           publish onto, and no early return to hand a waiting UI thread back.
+
+           Observed without a tenant: while another sign-in holds the one slot, an open that claims it is refused with the
+           concurrent-sign-in message at once, and one that does not would start a real connect to a host this test never
+           reaches, which the bound below turns into a failure of the assertion. Both intents are driven in turn, and the
+           second one is also the proof that the first refusal gave back the lock the opens share. */
+        var tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
+        var configDir = Path.Combine(tempDir, "config");
+        Directory.CreateDirectory(configDir);
+
+        EntraDeviceCodeAuth.ResetForTests();
+        try
+        {
+            var servers = new ServerManager(configDir);
+            var server = new ServerConnection
+            {
+                ServerName = "example.database.windows.net",
+                DisplayName = "device-code-" + Guid.NewGuid().ToString("N")[..8],
+                DatabaseName = "alpha",
+                AuthenticationType = AuthenticationTypes.EntraDeviceCode,
+                ReadOnlyIntent = true,
+            };
+            servers.AddServer(server);
+            var probe = new DatabaseOpenProbe(
+                new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb")), servers, new ScheduleManager(configDir));
+
+            var builder = new SqlConnectionStringBuilder();
+            ServerConnection.ApplyAuthentication(builder, AuthenticationTypes.EntraDeviceCode, null, null, null, null);
+
+            using var holder = EntraDeviceCodeAuth.Begin(builder);
+            Assert.NotNull(holder);
+
+            foreach (var withoutReadOnlyIntent in new[] { true, false })
+            {
+                using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                var refused = await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => probe.OpenAsync(server, "alpha", withoutReadOnlyIntent, bound.Token));
+
+                Assert.Equal(EntraDeviceCodeAuth.ConcurrentSignInMessage, refused.Message);
+            }
+
+            /* A refusal must not have taken the slot from the attempt that holds it. */
+            Assert.True(EntraDeviceCodeAuth.SignInInFlight);
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+
+            try
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+            catch (IOException)
+            {
+                /* Best-effort cleanup */
+            }
+        }
+    }
+
+    [Fact]
+    public void TheDatabaseOpen_TakesTheSignInLockBeforeItClaimsTheSlot_AndOwnsTheOneResolutionOfTheString()
+    {
+        /* The behaviour above shows the claim; this pins the order the claim depends on. Begin refuses an overlapping
+           sign-in, so the claim has to sit behind the lock CreateConnectionAsync takes, and the attempt has to exist before the
+           connection is built so a failed Begin leaves nothing open. And the registration's string is resolved in the wrapped
+           file: the long-query trace's seam reads it through there, which is why that partial is in neither bucket of the census. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Services/RemoteCollectorService.cs"));
+        var at = code.IndexOf("Task<SqlConnection> OpenAzureDatabaseConnectionAsync(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the per-database open must still exist");
+        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
+
+        var signInLock = body.IndexOf("s_mfaAuthLock.WaitAsync(", StringComparison.Ordinal);
+        var claim = body.IndexOf("EntraDeviceCodeAuth.Begin(", StringComparison.Ordinal);
+        var connection = body.IndexOf("new SqlConnection(", StringComparison.Ordinal);
+
+        Assert.True(signInLock >= 0 && claim >= 0 && connection >= 0, "the per-database open must lock, claim and open");
+        Assert.True(signInLock < claim, "the sign-in lock must be taken before the slot is claimed");
+        Assert.True(claim < connection, "the slot must be claimed before the connection is built");
+        Assert.Contains("deviceCode.Token", body, StringComparison.Ordinal);
+        Assert.Contains("s_mfaAuthLock.Release()", body, StringComparison.Ordinal);
+
+        var resolution = code.IndexOf("string RegistrationConnectionString(", StringComparison.Ordinal);
+        Assert.True(resolution >= 0, "the registration's string must be resolved in this file");
+        Assert.Contains(
+            "CredentialResolver.GetConnectionString",
+            code[resolution..Math.Min(code.Length, resolution + 200)],
+            StringComparison.Ordinal);
+
+        foreach (var partial in new[]
+                 {
+                     "Lite/Services/RemoteCollectorService.LongQueryCompletions.cs",
+                     "Lite/Services/RemoteCollectorService.LegacyLongQuerySession.cs",
+                 })
+        {
+            var trace = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile(partial));
+            Assert.DoesNotContain("CredentialResolver.GetConnectionString", trace, StringComparison.Ordinal);
+            Assert.Contains("RegistrationConnectionString(server)", trace, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheDatabaseOpen_LocksAndChecksTheDeclineForEveryInteractiveMode_NotOnlyDeviceCode()
+    {
+        /* CreateConnectionAsync asks about the mode, AuthenticationTypes.RequiresInteractiveSignIn, for the lock and the declined
+           check, because both interactive modes need the same single-file treatment. The per-database open asks the same
+           question. Reading the connection string's keyword for device code instead would leave Entra MFA out of both. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Services/RemoteCollectorService.cs"));
+        var at = code.IndexOf("Task<SqlConnection> OpenAzureDatabaseConnectionAsync(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the per-database open must still exist");
+        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
+
+        Assert.Contains("AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType)", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("ActiveDirectoryDeviceCodeFlow", body, StringComparison.Ordinal);
+        Assert.Contains("UserCancelledMfa", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A server that accepts a socket and never answers: an open pointed at it connects and then waits for a reply that does not
+    /// come, so a test can tell whether an open reached the network at all, with no tenant and no sign-in.
+    /// </summary>
+    private sealed class SilentServerSetup : IDisposable
+    {
+        private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+
+        public SilentServerSetup(string authenticationType)
+        {
+            _listener.Start();
+            var configDir = Path.Combine(_tempDir, "config");
+            Directory.CreateDirectory(configDir);
+
+            Servers = new ServerManager(configDir);
+            Server = new ServerConnection
+            {
+                ServerName = IPAddress.Loopback + "," + ((IPEndPoint)_listener.LocalEndpoint).Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                DisplayName = "database-open-" + Guid.NewGuid().ToString("N")[..8],
+                DatabaseName = "alpha",
+                AuthenticationType = authenticationType,
+                ReadOnlyIntent = true,
+            };
+            Servers.AddServer(Server);
+            Probe = new DatabaseOpenProbe(
+                new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb")), Servers, new ScheduleManager(configDir));
+        }
+
+        public ServerManager Servers { get; }
+
+        public ServerConnection Server { get; }
+
+        public DatabaseOpenProbe Probe { get; }
+
+        /// <summary>Whether an open connected to the server: its socket is waiting to be accepted.</summary>
+        public bool WasReached => _listener.Pending();
+
+        public void Dispose()
+        {
+            _listener.Stop();
+
+            try
+            {
+                Directory.Delete(_tempDir, recursive: true);
+            }
+            catch (IOException)
+            {
+                /* Best-effort cleanup */
+            }
+        }
+    }
+
+    /// <summary>The lock that lets one interactive sign-in run at a time. It is private, so a test reads it by its name.</summary>
+    private static SemaphoreSlim SignInLock()
+    {
+        var field = typeof(RemoteCollectorService).GetField("s_mfaAuthLock", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(field);
+        return (SemaphoreSlim)field.GetValue(null)!;
+    }
+
+    /// <summary>Ends an open that waits on the server that never answers, and waits for it to finish, so a failed test leaves nothing running.</summary>
+    private static async Task EndAsync(Task? open, CancellationTokenSource bound)
+    {
+        await bound.CancelAsync();
+
+        if (open is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await open.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or SqlException or TimeoutException or InvalidOperationException)
+        {
+            /* The open was cancelled or refused: that is how it ends. */
+        }
+    }
+
+    [Fact]
+    public async Task ADatabaseOpenForAnInteractiveMfaRegistration_RefusesWithoutConnecting_OnceThatServersSignInWasDeclined()
+    {
+        /* #4961: the long-query trace opens a database over a second connection of the registration, so a prompt the user
+           declined on the registration's own connection has to stop these opens as it stops CreateConnectionAsync's. Entra MFA
+           raises a window as device code does, and the flag is the same one. The server these opens point at accepts a socket and
+           never answers: an open that did not refuse would connect to it and wait, which the listener shows. Two refusals in
+           turn, and the second is also the proof that the first gave back the sign-in lock. */
+        using var setup = new SilentServerSetup(AuthenticationTypes.EntraMFA);
+        setup.Servers.GetConnectionStatus(setup.Server.Id).UserCancelledMfa = true;
+
+        foreach (var withoutReadOnlyIntent in new[] { true, false })
+        {
+            using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            Task<SqlConnection>? open = null;
+
+            try
+            {
+                var refused = await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => open = setup.Probe.OpenAsync(setup.Server, "alpha", withoutReadOnlyIntent, bound.Token));
+
+                Assert.StartsWith("Interactive authentication cancelled by user", refused.Message, StringComparison.Ordinal);
+            }
+            finally
+            {
+                await EndAsync(open, bound);
+            }
+        }
+
+        Assert.False(setup.WasReached, "an open for a server whose sign-in was declined must refuse before it connects");
+    }
+
+    [Fact]
+    public async Task ADatabaseOpenForAnInteractiveMfaRegistration_WaitsWhileTheSignInLockIsHeld_ThenIsRefusedWithoutConnecting()
+    {
+        /* One window at a time, for both interactive modes: two opens that start together must not raise two prompts. The test
+           holds the lock, as a prompt that is up would, and starts an open of a registration whose sign-in was declined. An open
+           that takes the lock waits behind it and is refused only once the lock is released. One that does not take it goes
+           straight on and connects to the server that never answers. The hold is short, and given back in finally: the lock
+           belongs to the whole process. */
+        using var setup = new SilentServerSetup(AuthenticationTypes.EntraMFA);
+        setup.Servers.GetConnectionStatus(setup.Server.Id).UserCancelledMfa = true;
+
+        var signInLock = SignInLock();
+        Assert.True(await signInLock.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None), "the sign-in lock should be free when the test starts");
+        var released = false;
+        using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        Task<SqlConnection>? open = null;
+
+        try
+        {
+            open = setup.Probe.OpenAsync(setup.Server, "alpha", withoutReadOnlyIntent: false, bound.Token);
+            await Task.Delay(TimeSpan.FromSeconds(1), CancellationToken.None);
+
+            Assert.False(open.IsCompleted, "an open must wait while another sign-in holds the lock");
+            Assert.False(setup.WasReached, "an open that waits for the sign-in lock has not connected");
+
+            signInLock.Release();
+            released = true;
+
+            var refused = await Assert.ThrowsAsync<InvalidOperationException>(() => open);
+            Assert.StartsWith("Interactive authentication cancelled by user", refused.Message, StringComparison.Ordinal);
+            Assert.False(setup.WasReached, "the refusal came before any connection");
+        }
+        finally
+        {
+            if (!released)
+            {
+                signInLock.Release();
+            }
+
+            await EndAsync(open, bound);
+        }
+    }
+
+    [Fact]
+    public async Task ADatabaseOpenForASqlLoginRegistration_TakesNoSignInLock()
+    {
+        /* Only a mode that can put a window up is made to queue: a SQL login has no prompt for the lock to serialise, so its opens
+           must not wait behind one. The same hold as above, and this open goes straight to the server that never answers. */
+        using var setup = new SilentServerSetup(AuthenticationTypes.SqlServer);
+
+        var signInLock = SignInLock();
+        Assert.True(await signInLock.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None), "the sign-in lock should be free when the test starts");
+        using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        Task<SqlConnection>? open = null;
+
+        try
+        {
+            open = setup.Probe.OpenAsync(setup.Server, "alpha", withoutReadOnlyIntent: true, bound.Token);
+
+            var reached = false;
+            for (var waited = 0; waited < 100 && !reached; waited++)
+            {
+                reached = setup.WasReached;
+
+                if (!reached)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(50), CancellationToken.None);
+                }
+            }
+
+            Assert.True(reached, "an open that takes no lock goes straight on to connect, while another sign-in holds the lock");
+        }
+        finally
+        {
+            signInLock.Release();
+            await EndAsync(open, bound);
+        }
+    }
+
     // ---- Cancelling is recognised as a decision, not a fault -----------------------------
 
     [Fact]
@@ -1986,17 +2315,125 @@ public class EntraDeviceCodeTests
            opening the server by hand.
 
            The discriminating half is the second condition: without !cancellationToken, every
-           shutdown becomes a decline, and no test of the decline path alone would notice. */
+           shutdown becomes a decline, and no test of the decline path alone would notice.
+
+           The decision lives in one helper that both opens call (#4961), so the pin reads the
+           helper's body: both conditions, and the message check the Entra MFA path depends on. */
         var code = CSharpSourceWalker.StripCommentsAndStrings(
             ParitySource.ReadFile("Lite/Services/RemoteCollectorService.cs"));
 
-        var at = code.IndexOf("userDeclined", StringComparison.Ordinal);
-        Assert.True(at >= 0, "the collector must classify a failed interactive sign-in");
+        var at = code.IndexOf("bool UserDeclinedSignIn(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the collector must classify a failed interactive sign-in, in one place");
 
-        var window = code[at..Math.Min(code.Length, at + 500)];
+        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
 
-        Assert.Contains("deviceCode.Token.IsCancellationRequested", window, StringComparison.Ordinal);
-        Assert.Contains("!cancellationToken.IsCancellationRequested", window, StringComparison.Ordinal);
+        Assert.Contains("MfaAuthenticationHelper.IsMfaCancelledException(", body, StringComparison.Ordinal);
+        Assert.Contains("deviceCode.Token.IsCancellationRequested", body, StringComparison.Ordinal);
+        Assert.Contains("!cancellationToken.IsCancellationRequested", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BothOpensDecideADeclineThroughTheOneHelper()
+    {
+        /* #4961: CreateConnectionAsync flagged a declined Entra MFA sign-in by the broker's message and a declined device-code
+           prompt by its token, and the per-database open flagged only the second, so an Entra MFA registration whose user
+           cancelled the browser sign-in during a per-database open left every open queued behind the sign-in lock to raise a
+           prompt of its own. The two opens now ask one helper, so they cannot drift apart again: it is defined once, each open
+           calls it, and neither carries a copy of its conditions. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            ParitySource.ReadFile("Lite/Services/RemoteCollectorService.cs"));
+
+        var first = code.IndexOf("bool UserDeclinedSignIn(", StringComparison.Ordinal);
+        Assert.True(first >= 0, "the shared decision must exist");
+        Assert.Equal(-1, code.IndexOf("bool UserDeclinedSignIn(", first + 1, StringComparison.Ordinal));
+
+        foreach (var open in new[]
+                 {
+                     "Task<SqlConnection> OpenAzureDatabaseConnectionAsync(",
+                     "Task<SqlConnection> CreateConnectionAsync(",
+                 })
+        {
+            var at = code.IndexOf(open, StringComparison.Ordinal);
+            Assert.True(at >= 0, open + " must still exist");
+            var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
+
+            Assert.Contains("UserDeclinedSignIn(", body, StringComparison.Ordinal);
+            Assert.DoesNotContain("IsMfaCancelledException", body, StringComparison.Ordinal);
+            Assert.DoesNotContain("deviceCode.Token.IsCancellationRequested", body, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The decision both opens ask, "did the user decline this sign-in". It is private, so a test reads it by its name.</summary>
+    private static bool UserDeclinedSignIn(Exception ex, EntraDeviceCodeAttempt? deviceCode, CancellationToken cancellationToken)
+    {
+        var method = typeof(RemoteCollectorService).GetMethod("UserDeclinedSignIn", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+        return (bool)method.Invoke(null, [ex, deviceCode, cancellationToken])!;
+    }
+
+    /// <summary>A device-code attempt as an open starts one, for a test to cancel the way the prompt window's Cancel does.</summary>
+    private static EntraDeviceCodeAttempt BeginDeviceCodeAttempt()
+    {
+        var builder = new SqlConnectionStringBuilder();
+        ServerConnection.ApplyAuthentication(builder, AuthenticationTypes.EntraDeviceCode, null, null, null, null);
+        var attempt = EntraDeviceCodeAuth.Begin(builder);
+        Assert.NotNull(attempt);
+        return attempt;
+    }
+
+    [Theory]
+    [InlineData("User canceled authentication.")]
+    [InlineData("The authentication was cancelled by the user.")]
+    public void ASignInTheBrokerReportsAsCancelled_IsADecline(string brokerMessage)
+    {
+        /* Entra MFA reports a declined sign-in in the exception's message and nowhere else, so the message is what decides. */
+        Assert.True(UserDeclinedSignIn(new InvalidOperationException(brokerMessage), deviceCode: null, CancellationToken.None));
+    }
+
+    [Fact]
+    public void AnUnrelatedFailure_IsNotADecline()
+    {
+        EntraDeviceCodeAuth.ResetForTests();
+
+        try
+        {
+            using var attempt = BeginDeviceCodeAttempt();
+
+            Assert.False(UserDeclinedSignIn(new InvalidOperationException("Login failed for user."), deviceCode: null, CancellationToken.None));
+
+            /* A device-code prompt still on screen is no decline either: the open failed for some other reason. */
+            Assert.False(UserDeclinedSignIn(new TimeoutException("The connection timed out."), attempt, CancellationToken.None));
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
+    }
+
+    [Fact]
+    public void ACancelledDeviceCodePrompt_IsADecline_UnlessTheCallersOwnTokenWasCancelled()
+    {
+        /* The prompt's Cancel and the caller's token end the same open, so the token the open waits on cannot say which fired:
+           the prompt's own token can. A cancel from the prompt is the user declining, and one from the caller is a shutdown,
+           which is no decline. */
+        EntraDeviceCodeAuth.ResetForTests();
+
+        try
+        {
+            using var attempt = BeginDeviceCodeAttempt();
+            attempt.Cancel();
+
+            Assert.True(UserDeclinedSignIn(new OperationCanceledException(attempt.Token), attempt, CancellationToken.None));
+
+            using var shutdown = new CancellationTokenSource();
+            shutdown.Cancel();
+
+            Assert.False(UserDeclinedSignIn(new OperationCanceledException(shutdown.Token), attempt, shutdown.Token));
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
     }
 
     // ---- The label ------------------------------------------------------------------------
