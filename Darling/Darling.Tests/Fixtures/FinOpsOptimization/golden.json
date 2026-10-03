@@ -129,6 +129,18 @@
         "FullQueryText": "SELECT gamma",
         "MonthlyCostShare": 0,
         "QueryPlanXml": null
+      },
+      {
+        "DatabaseName": "Delta",
+        "TotalCpuMs": 3000,
+        "AvgCpuMsPerExec": 1000.00,
+        "TotalReads": 50,
+        "AvgReadsPerExec": 17,
+        "Executions": 3,
+        "QueryPreview": "SELECT ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "FullQueryText": "SELECT dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "MonthlyCostShare": 0,
+        "QueryPlanXml": null
       }
     ]
   },
