@@ -340,8 +340,13 @@ LIMIT 1";
         return inputs;
     }
 
-    /// <summary>Reads the server's latest collected edition/version/start-time facts and derives the analyzer options.</summary>
-    public static async Task<IndexCleanupOptions> GetIndexCleanupOptionsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Reads the server's latest collected edition/version/start-time facts and derives the analyzer options.
+    /// The uptime comparison is an exception to the naive-UTC rule: <c>sqlserver_start_time</c> is the target's
+    /// LOCAL wall-clock start time, so it is compared against the service host's local clock
+    /// (<paramref name="referenceLocalTime"/>, or <see cref="DateTime.Now"/> when null).
+    /// </summary>
+    public static async Task<IndexCleanupOptions> GetIndexCleanupOptionsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, DateTime? referenceLocalTime = null, CancellationToken cancellationToken = default)
     {
         int? engineEdition = null;
         string? productVersion = null;
@@ -359,9 +364,9 @@ LIMIT 1";
             startTime = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
         }
 
-        /* sqlserver_start_time is the server's LOCAL wall clock, compared to the viewer's local now — mirrors
+        /* sqlserver_start_time is the server's LOCAL wall clock, compared to the caller's local now — mirrors
            the proc's SYSDATETIME() derivation (both wall-clock; the coarse days measure tolerates any offset). */
-        return DeriveIndexCleanupOptions(engineEdition, productVersion, startTime, DateTime.Now);
+        return DeriveIndexCleanupOptions(engineEdition, productVersion, startTime, referenceLocalTime ?? DateTime.Now);
     }
 
     /// <summary>
@@ -371,7 +376,7 @@ LIMIT 1";
     public static async Task<IndexCleanupAnalysisResult> GetIndexAnalysisAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
         var inputs = await GetIndexCleanupInputsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
-        var options = await GetIndexCleanupOptionsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+        var options = await GetIndexCleanupOptionsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken: cancellationToken);
         return await Task.Run(() => IndexCleanupAnalyzer.Analyze(inputs, options), cancellationToken);
     }
 

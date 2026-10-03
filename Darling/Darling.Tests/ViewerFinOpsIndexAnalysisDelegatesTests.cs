@@ -28,7 +28,10 @@ public sealed class ViewerFinOpsIndexAnalysisDelegatesTests
     [Fact]
     public void TheIndexAnalysisPartial_HoldsNoSqlText()
     {
-        Assert.DoesNotContain("@\"", ViewerSource(), StringComparison.Ordinal);
+        var source = ViewerSource();
+        Assert.DoesNotContain("@\"", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("CreateCommand(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("new NpgsqlCommand(", source, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -85,51 +85,6 @@ public sealed partial class ViewerDataService
         public long? PageIoLatchWaitCount { get; init; }
         public long? PageIoLatchWaitInMs { get; init; }
 
-        /// <summary>Builds the viewer row from the Storage read result.</summary>
-        public static IndexObjectStatsRow From(DarlingFinOpsIndexAnalysisReader.IndexObjectStatsDto dto) => new()
-        {
-            DatabaseName = dto.DatabaseName,
-            DatabaseId = dto.DatabaseId,
-            SchemaName = dto.SchemaName,
-            ObjectId = dto.ObjectId,
-            TableName = dto.TableName,
-            IndexId = dto.IndexId,
-            IndexName = dto.IndexName,
-            IndexTypeDesc = dto.IndexTypeDesc,
-            KeyColumns = dto.KeyColumns,
-            IncludedColumns = dto.IncludedColumns,
-            FilterDefinition = dto.FilterDefinition,
-            IsUnique = dto.IsUnique,
-            IsUniqueConstraint = dto.IsUniqueConstraint,
-            IsPrimaryKey = dto.IsPrimaryKey,
-            IsForeignKey = dto.IsForeignKey,
-            IsForeignKeyReference = dto.IsForeignKeyReference,
-            IsDisabled = dto.IsDisabled,
-            IsIndexedView = dto.IsIndexedView,
-            DataCompressionDesc = dto.DataCompressionDesc,
-            OptimizeForSequentialKey = dto.OptimizeForSequentialKey,
-            FillFactor = dto.FillFactor,
-            IsPadded = dto.IsPadded,
-            AllowPageLocks = dto.AllowPageLocks,
-            AllowRowLocks = dto.AllowRowLocks,
-            UserSeeks = dto.UserSeeks,
-            UserScans = dto.UserScans,
-            UserLookups = dto.UserLookups,
-            UserUpdates = dto.UserUpdates,
-            ReservedMb = dto.ReservedMb,
-            TotalRows = dto.TotalRows,
-            PartitionCount = dto.PartitionCount,
-            SqlServerStartTime = dto.SqlServerStartTime,
-            RowLockWaitCount = dto.RowLockWaitCount,
-            RowLockWaitInMs = dto.RowLockWaitInMs,
-            PageLockWaitCount = dto.PageLockWaitCount,
-            PageLockWaitInMs = dto.PageLockWaitInMs,
-            PageLatchWaitCount = dto.PageLatchWaitCount,
-            PageLatchWaitInMs = dto.PageLatchWaitInMs,
-            PageIoLatchWaitCount = dto.PageIoLatchWaitCount,
-            PageIoLatchWaitInMs = dto.PageIoLatchWaitInMs,
-        };
-
         /// <summary>Converts back to the Storage shape the shared mapper takes.</summary>
         public DarlingFinOpsIndexAnalysisReader.IndexObjectStatsDto ToDto() => new()
         {
@@ -200,7 +155,7 @@ public sealed partial class ViewerDataService
     /// <summary>Reads the server's latest collected edition/version/start-time facts and derives the analyzer options.</summary>
     public Task<IndexCleanupOptions> GetIndexCleanupOptionsAsync(int serverId, CancellationToken cancellationToken = default) =>
         DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(
-            _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken: cancellationToken);
 
     /// <summary>
     /// The full monitor-side index-cleanup analysis for one server. Returns the analyzer result verbatim; the tab
@@ -332,9 +287,7 @@ public sealed class IndexCleanupRollupRow
     public string AvgLockWaitMs =>
         IsOverall
             ? "N/A"
-            : _rollup.LockWaitCount > 0
-                ? ((decimal)_rollup.LockWaitInMs / _rollup.LockWaitCount).ToString("N2")
-                : "0";
+            : IndexCleanupRollupFigures.AverageWaitMsText(_rollup.LockWaitInMs, _rollup.LockWaitCount);
 
     /// <summary>Page + page-IO latch waits across analyzed indexes; 'N/A' on the overall row.</summary>
     public string LatchWaitCount => IsOverall ? "N/A" : _rollup.LatchWaitCount.ToString("N0");
@@ -343,15 +296,13 @@ public sealed class IndexCleanupRollupRow
     public string AvgLatchWaitMs =>
         IsOverall
             ? "N/A"
-            : _rollup.LatchWaitCount > 0
-                ? ((decimal)_rollup.LatchWaitInMs / _rollup.LatchWaitCount).ToString("N2")
-                : "0";
+            : IndexCleanupRollupFigures.AverageWaitMsText(_rollup.LatchWaitInMs, _rollup.LatchWaitCount);
 
     /* Numeric sort keys for the workload columns — the overall ('N/A') row sorts below every real value, like
        Lite's NumericSortHelper parse of "N/A" (→ -1). ReadsBreakdown sorts as text (no key), matching Lite. */
     public decimal WritesSort => IsOverall ? -1m : _rollup.TotalWrites;
     public decimal LockWaitCountSort => IsOverall ? -1m : _rollup.LockWaitCount;
-    public decimal AvgLockWaitMsSort => IsOverall ? -1m : (_rollup.LockWaitCount > 0 ? (decimal)_rollup.LockWaitInMs / _rollup.LockWaitCount : 0m);
+    public decimal AvgLockWaitMsSort => IsOverall ? -1m : IndexCleanupRollupFigures.AverageWaitMs(_rollup.LockWaitInMs, _rollup.LockWaitCount);
     public decimal LatchWaitCountSort => IsOverall ? -1m : _rollup.LatchWaitCount;
-    public decimal AvgLatchWaitMsSort => IsOverall ? -1m : (_rollup.LatchWaitCount > 0 ? (decimal)_rollup.LatchWaitInMs / _rollup.LatchWaitCount : 0m);
+    public decimal AvgLatchWaitMsSort => IsOverall ? -1m : IndexCleanupRollupFigures.AverageWaitMs(_rollup.LatchWaitInMs, _rollup.LatchWaitCount);
 }

@@ -20,8 +20,8 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
-using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Darling.Storage.FinOps;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -30,7 +30,7 @@ namespace Darling.Tests;
 /// Golden-fixture pin for the FinOps Index Analysis reads (<c>GetIndexCleanupInputsAsync</c>,
 /// <c>GetIndexCleanupOptionsAsync</c>, <c>GetIndexAnalysisAsync</c> and the row projections). A deterministic seeded
 /// store is read and the results are serialized (public readable properties in declaration order, decimals at their
-/// stored scale, times as offsets from the seed anchor, an uptime of 30 days or more as 30) and compared
+/// stored scale, times as offsets from the seed anchor with their <c>Kind</c>, an uptime as whole days) and compared
 /// byte-for-byte to <c>Fixtures/FinOpsIndexAnalysis/golden.json</c>. Set <c>DARLING_WRITE_GOLDEN=1</c> to regenerate it.
 /// </summary>
 [Collection("live-postgres")]
@@ -62,8 +62,8 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
         {
             await using var dataSource = NpgsqlDataSource.Create(connectionString);
             var inputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, ServerIdA, 30, ct);
-            var options = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdA, 30, ct);
-            var noProps = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdB, 30, ct);
+            var options = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdA, 30, cancellationToken: ct);
+            var noProps = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdB, 30, cancellationToken: ct);
             var result = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(dataSource, ServerIdA, 30, ct);
             var empty = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(dataSource, ServerIdB, 30, ct);
             return Serialize(anchor, inputs, options, noProps, result,
@@ -100,7 +100,7 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
         }
     }
 
-    /// <summary>Server A: an older and a newer snapshot of one index (the newest wins), a clustered key, two exact
+    /// <summary>Server A: an older and a newer snapshot of one index (the newest wins; its start time is five days back), one index with two rows at the same time, a clustered key, two exact
     /// duplicates, an unused index and a second database. Server B has no collected data at all.</summary>
     private static async Task SeedAsync(NpgsqlConnection connection, DateTime anchor, CancellationToken ct)
     {
@@ -114,11 +114,12 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
             CollectionIdGenerator.Next(), old, ServerIdA, ServerNameA, "Standard Edition", 2, "12.0.2000.8", anchor.AddDays(-400));
         await DarlingMcpTestData.ExecAsync(connection, ct,
             "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, engine_edition, product_version, sqlserver_start_time) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-            CollectionIdGenerator.Next(), recent, ServerIdA, ServerNameA, "Standard Edition", 2, "16.0.1000.6", anchor.AddDays(-400));
+            CollectionIdGenerator.Next(), recent, ServerIdA, ServerNameA, "Standard Edition", 2, "16.0.1000.6", DateTime.Now.AddDays(-5).AddHours(-1));
 
         await InsertIndexAsync(connection, old, "SalesDb", 1, 100, 1, "PK_Orders", "CLUSTERED", "[OrderId]", null, true, true, 900m, 50000, 10, 5, 0, 700, ct);
         await InsertIndexAsync(connection, recent, "SalesDb", 1, 100, 1, "PK_Orders", "CLUSTERED", "[OrderId]", null, true, true, 910.5m, 51000, 12, 6, 1, 800, ct);
         await InsertIndexAsync(connection, recent, "SalesDb", 1, 100, 2, "IX_Orders_Cust", "NONCLUSTERED", "[CustomerId]", "[Total]", false, false, 120.25m, 51000, 400, 20, 0, 800, ct);
+        await InsertIndexAsync(connection, recent, "SalesDb", 1, 100, 2, "IX_Orders_Cust", "NONCLUSTERED", "[CustomerId]", "[Total]", false, false, 121m, 51000, 77, 9, 3, 801, ct);
         await InsertIndexAsync(connection, recent, "SalesDb", 1, 100, 3, "IX_Orders_Cust_Dup", "NONCLUSTERED", "[CustomerId]", "[Total]", false, false, 118m, 51000, 0, 0, 0, 800, ct);
         await InsertIndexAsync(connection, recent, "SalesDb", 1, 100, 4, "IX_Orders_Unused", "NONCLUSTERED", "[ShipDate]", null, false, false, 64m, 51000, 0, 0, 0, 800, ct);
         await InsertIndexAsync(connection, recent, "OpsDb", 2, 200, 1, "PK_Jobs", "CLUSTERED", "[JobId]", null, true, true, 5m, 900, 3, 1, 0, 40, ct);
@@ -169,10 +170,10 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
             case long l: writer.WriteNumberValue(l); break;
             case decimal m: writer.WriteNumberValue(m); break;
             case Enum e: writer.WriteStringValue(e.ToString()); break;
-            case double dd: writer.WriteNumberValue(dd >= 30 ? 30 : dd); break;
+            case double dd: writer.WriteNumberValue(Math.Floor(dd)); break;
             case DateTime t:
                 var offset = t - anchor;
-                writer.WriteStringValue($"anchor{(offset < TimeSpan.Zero ? "-" : "+")}{Math.Abs(offset.TotalDays).ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}d");
+                writer.WriteStringValue($"anchor{(offset < TimeSpan.Zero ? "-" : "+")}{Math.Abs(offset.TotalDays).ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}d[{t.Kind}]");
                 break;
             case System.Collections.IEnumerable list:
                 writer.WriteStartArray();
@@ -199,7 +200,10 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
     private static void AssertGolden(string actual)
     {
         if (Environment.GetEnvironmentVariable("DARLING_WRITE_GOLDEN") == "1")
+        {
             File.WriteAllText(GoldenSourcePath(), actual);
+            Assert.Skip("Regenerated the golden fixture source copy; run again without DARLING_WRITE_GOLDEN to compare.");
+        }
 
         var golden = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "FinOpsIndexAnalysis", "golden.json"))
             .ReplaceLineEndings("\n");
