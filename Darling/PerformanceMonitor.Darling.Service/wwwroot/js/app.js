@@ -42,6 +42,7 @@ import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
 import { renderSweeps } from "./pages/sweeps.js";
 import { renderServer } from "./pages/server.js";
+import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderAlertRuleList } from "./pages/alert-rules.js";
 import { renderViewList, renderView, currentViewRefresh, onViewRefreshChange, clearViewRefresh } from "./pages/views.js";
@@ -67,6 +68,7 @@ const statusbar = document.getElementById("statusbar");
 function currentRoute() {
   const h = location.hash || "#/fleet";
   if (h.startsWith("#/server/")) return serverRoute(h.slice("#/server/".length));
+  if (h === "#/finops" || h.startsWith("#/finops/")) return finopsRoute(h.slice("#/finops".length).replace(/^\//, ""));
   if (h === "#/ag" || h === "#/ag/") return { name: "ag" };
   if (h === "#/sweeps" || h === "#/sweeps/") return { name: "sweeps" };
   /* #/triage?server=...&metric=...&at=...&dedup=... (#2710) — the deep-link every alert webhook carries.
@@ -119,6 +121,27 @@ function serverRoute(rest) {
   };
 }
 
+/* #/finops, #/finops/{server} and #/finops/{server}/{tab}: the server and the sub-tab id ride in the hash, as on
+   the server page. The server name is encodeURIComponent'd, so a '/' inside it arrives as %2F. */
+function safeDecode(s) {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+function finopsRoute(rest) {
+  if (!rest) return { name: "finops" };
+  const slash = rest.indexOf("/");
+  if (slash < 0) return { name: "finops", param: safeDecode(rest) };
+  return {
+    name: "finops",
+    param: safeDecode(rest.slice(0, slash)),
+    tab: safeDecode(rest.slice(slash + 1)),
+  };
+}
+
 /**
  * @param {object} [opts] — forwarded to renderServer; `{ poll: true }` marks this call as the 60s poll's own
  * refresh rather than a hashchange (sub-tab click, deep link) or the first paint (#4190/#4191). Also forwarded
@@ -137,6 +160,7 @@ function route(opts) {
   markPageRenderStart(r.name, !!(opts && opts.poll === true));
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param, r.tab, opts);
+  else if (r.name === "finops") renderFinops(main, r.param, r.tab, opts);
   else if (r.name === "ag") renderAg(main);
   else if (r.name === "sweeps") renderSweeps(main, opts);
   else if (r.name === "alerts") renderAlerts(main);

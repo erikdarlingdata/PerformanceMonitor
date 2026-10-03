@@ -373,6 +373,16 @@ internal static class ComposeStoreAvailability
             CultureInfo.InvariantCulture,
             $"partial window: this panel's data starts at {dataStartUtc:yyyy-MM-dd HH:mm} UTC, after the window's start at {windowStartUtc:yyyy-MM-dd HH:mm} UTC. The panel covers {dataStartUtc:yyyy-MM-dd HH:mm} to {windowEndUtc:yyyy-MM-dd HH:mm} UTC.");
 
+    /// <summary>The notice for a newest-first list that hit its row cap (#4966): the grid shows the newest rows back to
+    /// <paramref name="oldestShownUtc"/> and stops there because of its row limit, whatever the store holds before it.
+    /// The window's start and end are in UTC like <see cref="BuildDataStartNotice"/>'s, and the sentence keeps its
+    /// "partial window:" opening, so the page draws both the same way. It makes no claim about the store: the
+    /// rows before that time may exist, and the grid does not show them.</summary>
+    internal static string BuildCappedListNotice(DateTime oldestShownUtc, DateTime windowStartUtc, DateTime windowEndUtc) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"partial window: this grid shows only the newest rows, back to {oldestShownUtc:yyyy-MM-dd HH:mm} UTC, because it stops at its row limit. The window started at {windowStartUtc:yyyy-MM-dd HH:mm} UTC. The grid covers {oldestShownUtc:yyyy-MM-dd HH:mm} to {windowEndUtc:yyyy-MM-dd HH:mm} UTC.");
+
     /// <summary>
     /// The relations a compiled panel read, as data-start probe sources: the raw table on a raw route (none when
     /// the probe cannot read it by index, <see cref="DataWindowFloor.Source.TryForCollectorTable"/>), or each rollup

@@ -573,6 +573,8 @@ public sealed class DarlingSelfAlertTests
         var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
         typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingWorker>.Instance);
+        typeof(DarlingWorker).GetField("_collectorFaultStacks", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, new CollectorFaultStackLog());
         typeof(DarlingWorker).GetField("_selfAlerts", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, e);
 

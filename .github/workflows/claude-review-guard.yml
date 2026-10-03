@@ -18,8 +18,10 @@ name: Claude review guard
 # #3470: posting is not the same as being read. One night's PR train collected six review findings
 # as comments (one real) and auto-merge outran every one, because nothing made a finding cost
 # anything. So when the prompt promises a verdict review (the same sentinel), this guard also reads
-# the bot's newest formal review and fails while it says CHANGES_REQUESTED -- newest-verdict-wins,
-# so the fresh clean verdict a re-review submits clears the gate by itself, no --approve required.
+# the bot's newest VERDICT -- its newest review that carries a body, because the inline-comment
+# tool files each comment in a bodiless review of its own -- and fails while it says
+# CHANGES_REQUESTED. Newest-verdict-wins: the fresh clean verdict a re-review submits clears the
+# check by itself, no --approve required.
 #
 # This guard is a SEPARATE workflow on purpose. Editing claude-review.yml makes this branch's copy
 # differ from the default branch, which triggers cause (1) for EVERY pull request in the repo until
@@ -44,26 +46,73 @@ name: Claude review guard
 # unreviewed edit -- the drift is hostile and the arm fails exactly as before. When the guard cannot
 # tell, because a lookup died, it fails CLOSED with its own message: an unexplained drift is the one
 # condition this check exists to make loud, and a 503 must not wave one through.
+#
+# It runs on pull requests into dev only, the branch claude-review.yml reviews. A release pull request
+# into main gets no review, so this check has no verdict to read there and does not run.
+#
+# What the review does per event (claude-review.yml decides it, once, in its `decide` job; this guard
+# does not repeat the decision, it reads what the review run did): a full review when a pull request
+# opens, reopens or is marked ready, and on the `re-review` label; ONE cheaper follow-up review per
+# full one on a push, and nothing for the push after that; nothing for a draft or another label. So
+# "the review did not run" is no longer always a defect. A run whose review job was SKIPPED on
+# purpose (the decide job succeeded, the review job was skipped) is not a failure here, but it is
+# not a clean bill either: the newest verdict still stands, and a changes-requested one still fails
+# the check until a fresh full review (the `re-review` label) or a human dismissal replaces it. A
+# decide job that FAILED is not a skip on purpose and fails the check. A review run that was
+# CANCELLED is not one either: it fails the check unless a newer push has replaced the head it was
+# reviewing, in which case that push's own check judges the new head, or a newer review run for the
+# same head has replaced it, in which case this check waits for that run and judges it instead.
+#
+# Every read that decides the result fails the check when it fails. A GET that hits a rate limit, a
+# server error or a failed later page is not a verdict, and it is not "no review" or "no standing
+# objection" either, so the check goes red, names the read, and a re-run of the guard retries it.
+# The one retried read is the review-run listing: a failed poll uses up one attempt, and "no review
+# run exists" is concluded only from a listing that succeeded and came back empty. A review that
+# was skipped on purpose, a review the action itself skipped, a pull request that edits the review
+# workflow, and a review that did not finish inside the guard window each read the standing verdict
+# before they pass.
+#
+# Known limit: `pull_request` runs the pull request's own copy of this file, so a pull request can
+# edit the guard itself.
 on:
   pull_request:
     # A draft is skipped, as claude-review.yml skips it: with no review to wait for, a draft run could
-    # only fail. Marking the pull request ready for review runs both.
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [dev, main]
+    # only fail. Marking the pull request ready for review runs both. `labeled` re-checks the standing
+    # verdict (and waits for a `re-review` review); the poll below ignores the review runs that a
+    # draft or an unrelated label skipped, so such a run finds the review that matters.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    # Pull requests into dev only, the same branch claude-review.yml reviews.
+    branches: [dev]
 
 # Match the review's own cancel-in-progress behavior. A new push cancels the review it is watching,
 # so the guard has to go too, or it waits out its deadline on a run that was cancelled by design.
+# A run that supersedes nothing (a draft, or a label other than re-review) gets a group of its own,
+# for the reason the review gives: with cancel-in-progress a run that will not wait on anything new
+# would cancel the guard that is. The suffix is `cond && value || ''`, never `cond && '' || value`
+# (the empty string is falsy in an expression). A guard in a group of its own is not cancelled by
+# the next guard, so when the review it watches is cancelled it looks for the review run that
+# replaced it (the cancelled arm below). An unrelated label still runs the guard rather than
+# skipping it: a job skipped by a condition reports as passing, and that report would be the
+# newest result on the head.
 concurrency:
-  group: claude-review-guard-${{ github.event.pull_request.number }}
+  group: claude-review-guard-${{ github.event.pull_request.number }}${{ (github.event.pull_request.draft || (github.event.action == 'labeled' && github.event.label.name != 're-review')) && format('-solo-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   verify:
-    # The DISPLAY name is the check-run name, and the check-run name is what branch protection's
-    # required-status-checks match on — the bare job id "verify" is what reported before this line
-    # existed, which made a required context of "Claude review guard" a phantom no run could ever
-    # satisfy (#3492's first CI cycle sat green-but-BLOCKED on exactly that). The name below is the
-    # enforcement contract: change it and the required context in branch protection must move with it.
+    # The DISPLAY name is the check-run name. Anything that matches this check by name (a branch
+    # rule that lists it as a required check, a script that reads check runs) sees this string and
+    # not the job id: before this line the check reported as the bare job id "verify". Renaming it
+    # changes the name every such match has to use. Whether a branch rule requires this check is a
+    # repository setting that this file neither reads nor sets.
+    #
+    # What the check does. It FAILS when the review bot's newest verdict (its newest review that
+    # has a body) is CHANGES_REQUESTED; when the review run for this head failed, was cancelled and
+    # not replaced, or left nothing the review workflow promises; when the review step cannot be
+    # found, or the action never ran for a reason nothing explains; and when a read it needs fails.
+    # It PASSES otherwise, for example: a review that finished with a clean verdict, a review
+    # skipped on purpose or by the action while no CHANGES_REQUESTED stands, a pull request that no
+    # review run covers, and a head that a newer push has replaced.
     name: Claude review guard
     # Skips while the pull request is a draft, as claude-review.yml does: there is no review to wait for.
     if: github.event.pull_request.draft == false
@@ -87,8 +136,8 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           SHA: ${{ github.event.pull_request.head.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          # The branch this PR merges INTO -- dev for the nightly train, main only for a release PR
-          # from dev. The pending-release arm asks whose copy of $WF this branch carries, so it must
+          # The branch this PR merges INTO: dev, the one branch the trigger lists. The
+          # pending-release arm asks whose copy of $WF this branch carries, so it must
           # read the base, not the head and not the default branch (which is the other side of the
           # comparison).
           BASE: ${{ github.base_ref }}
@@ -96,6 +145,10 @@ jobs:
           # Coupling to a step NAME in the other workflow. Deliberate: the step's conclusion is the
           # only structured way to tell "no token, skipped cleanly" from "ran and said nothing".
           REVIEW_STEP: Claude review
+          # The review JOB's name (its id, since it sets no name:). A decided skip shows up here as
+          # this job concluding `skipped` while the run itself succeeded. Renaming the job in
+          # claude-review.yml blinds that arm; update this to match.
+          REVIEW_JOB: review
           # Author of every artifact the review leaves behind (the action reports bot_name).
           REVIEW_BOT: claude[bot]
           # Whether silence, or a missing verdict, is a DEFECT depends on what the review prompt
@@ -128,14 +181,16 @@ jobs:
           # because an exit inside $() only leaves the subshell -- the one shape that CANNOT work
           # here.
           #
-          # One capture, two wrappers, differing ONLY in what a failed call becomes. lookup() is the
-          # #2309 shape: a lookup failure is not a review verdict (the same rule the sentinel read at
-          # the bottom already encodes), so it names the endpoint, marks the review UNCONFIRMED, and
-          # exits 0. lookup_closed() serves the drift-origin read in the never-ran arm, where the
-          # question is no longer "did the review post" but "is this drift a merged change awaiting
-          # release, or an unreviewed edit" -- and there a lookup that dies must NOT pass, because
-          # passing IS the false verdict: a hostile drift waved through on a 503. It names the
-          # endpoint the same way and exits 1.
+          # One capture, two wrappers, differing ONLY in the message a failed call becomes. Both end
+          # the step with exit 1, because a lookup failure is not a review verdict and it is not a
+          # pass either: every read below decides the result, so a read that fails (a rate limit,
+          # a 5xx, a failed later page) fails the check, names the read, and a re-run of the guard
+          # retries it.
+          # lookup() names the endpoint and says the result depends on that read. lookup_closed()
+          # serves the drift-origin read in the never-ran arm, where the question is no longer "did
+          # the review post" but "is this drift a merged change awaiting release, or an unreviewed
+          # edit" -- and there a lookup that dies must NOT pass, because passing IS the false
+          # verdict: a hostile drift waved through on a 503. It names the endpoint the same way.
           LOOKUP_OUT=''; LOOKUP_ERR=''
           gh_capture() {
             # stderr goes to its OWN capture, never into LOOKUP_OUT: a SUCCESSFUL gh call that
@@ -157,11 +212,11 @@ jobs:
           lookup() {
             local what=$1; shift
             if ! gh_capture "$@"; then
-              echo "::warning title=Guard lookup failed::gh api (${what}) failed: ${LOOKUP_ERR:-$LOOKUP_OUT}."\
-                "A lookup failure must not become a review verdict (#2309), so the review is"\
-                "UNCONFIRMED -- read the PR's comments to confirm it by eye, or re-run this guard."
-              summary "- Guard lookup failed at ${what}; review UNCONFIRMED (#2309)."
-              exit 0
+              echo "::error title=Guard read failed::gh api (${what}) failed: ${LOOKUP_ERR:-$LOOKUP_OUT}."\
+                "The result of this check depends on that read, and a read that fails is not a"\
+                "verdict (#2309), so the check fails. Re-run this guard to retry it."
+              summary "- Guard read failed at ${what}; failing the check (#2309)."
+              exit 1
             fi
           }
           lookup_closed() {
@@ -178,63 +233,242 @@ jobs:
             fi
           }
 
+          # The obligation read: what does $WF promise, on the DEFAULT branch -- the copy the action
+          # validated and ran? Sets must_post to 1 when the sentinel is in it and to '' when it is
+          # not, and a prompt without the sentinel promises no verdict, so nothing is enforced. The
+          # read itself is not allowed to answer "no obligation" by failing: a GET that fails, or
+          # comes back empty or undecodable, fails the check, because that is not the answer "the
+          # prompt has no sentinel". The decode reads a here-string rather
+          # than a pipe, so a grep that stops at its first match cannot fail the producer.
+          read_must_post() {
+            local decoded
+            lookup "$WF on $DEFAULT_BRANCH (verdict promise)" \
+              "repos/$R/contents/$WF?ref=$DEFAULT_BRANCH" --jq '.content // empty'
+            if [ -z "$LOOKUP_OUT" ] \
+                || ! decoded=$(printf '%s' "$LOOKUP_OUT" | base64 -d 2>/dev/null); then
+              echo "::error title=Guard read failed::$WF on $DEFAULT_BRANCH came back empty or"\
+                "undecodable, so the verdict promise in its prompt cannot be read. A read that"\
+                "fails is not a verdict (#2309), so the check fails. Re-run this guard to retry it."
+              summary "- Guard read failed: $WF on $DEFAULT_BRANCH is empty or undecodable;"\
+                "failing the check (#2309)."
+              exit 1
+            fi
+            must_post=''
+            if grep -qF "$MUST_POST_SENTINEL" <<<"$decoded"; then must_post=1; fi
+          }
+
+          # The newest verdict, for a run that has no review of its own to read: a decided skip, no
+          # secret, a pull request that edits the review workflow, a workflow copy the action will
+          # not run, or a review that did not finish inside the guard window. Having no review is not
+          # a clean bill: the standing verdict still counts, newest wins, and a changes-requested
+          # one still fails the check, as it does after a review that ran. $1 says why this head
+          # has no review of its own, as a clause for the failure message ("this push got no
+          # review on purpose"); the rest say what clears it, joined with "$*" so that a message
+          # wrapped across lines is one text, not a first argument and lost ones. It ends the step
+          # either way (exit 0 or 1), like lookup(), so the caller never falls through.
+          # Same obligation read as the verdict arm below: with no sentinel on the default branch's
+          # copy there is no verdict promise to hold anything to, so nothing is enforced.
+          # Only a review WITH A BODY is a verdict. The inline-comment tool files each comment inside
+          # a review of its own with an EMPTY body, so a run that died after its comments leaves a
+          # bodiless COMMENTED review newest, and reading that as the verdict would clear a standing
+          # CHANGES_REQUESTED. Both verdict shapes carry a body, and a DISMISSED review keeps its
+          # own, so the filter drops only those carriers and a human dismissal still overrides.
+          standing_verdict() {
+            local why=$1 fix newest verdict_state verdict_url
+            shift
+            fix="$*"
+            read_must_post
+            if [ -z "$must_post" ]; then exit 0; fi
+            lookup "verdict scan (standing verdict)" "repos/$R/pulls/$PR/reviews" --paginate \
+              --jq ".[] | select(.user.login == env.REVIEW_BOT) | select(.submitted_at != null)
+                    | select(((.body // \"\") | length) > 0) | \"\(.state)\t\(.html_url)\""
+            newest=$(printf '%s\n' "$LOOKUP_OUT" | tail -n 1)
+            if [ -z "$newest" ]; then exit 0; fi
+            IFS=$'\t' read -r verdict_state verdict_url <<<"$newest"
+            summary "- standing verdict: $verdict_state -- $verdict_url"
+            if [ "$verdict_state" = "CHANGES_REQUESTED" ]; then
+              echo "::error title=Review requested changes::The newest verdict by $REVIEW_BOT on"\
+                "PR #$PR is CHANGES_REQUESTED: $verdict_url, and $why. $fix"
+              summary "### Claude review requested changes; $why"
+              summary "- $fix"
+              exit 1
+            fi
+            echo "::notice title=Review verdict clean::Newest verdict by $REVIEW_BOT is"\
+              "$verdict_state; no standing changes-requested."
+            exit 0
+          }
+
           # Wait for the review run on this exact commit. Nothing appearing inside the grace window
           # means review is not operating here at all -- no secret, or a fork PR, which the review
-          # workflow no-ops by design and which is not this guard's business.
+          # workflow no-ops by design and which is not this guard's business. Runs that a draft or
+          # an unrelated label SKIPPED are not the run to wait for and are filtered out: the newest
+          # run that is not skipped is the one whose review (or decided skip) this check judges.
           # The poll deliberately does NOT use lookup(): a transient API failure mid-poll should
-          # consume one attempt and try again, not end the guard -- `|| line=''` keeps `set -e`
-          # out of it, and an empty line is already the loop's no-run-yet case (#2309).
-          run_id=''; status=''; conclusion=''; created=''; seen=''
-          for attempt in $(seq 1 70); do
-            line=$(gh api \
-              "repos/$R/actions/workflows/claude-review.yml/runs?head_sha=$SHA&per_page=1" \
-              --jq '.workflow_runs[0] // empty
-                    | "\(.id) \(.status) \(.conclusion // "-") \(.created_at)"' \
-              2>/dev/null || true)
-            if [ -n "$line" ]; then
-              read -r run_id status conclusion created <<<"$line"
-              seen=1
-              [ "$status" = "completed" ] && break
-            # Keyed on never having seen a run, not on this poll being empty: a transient empty
-            # listing after one was found must not be read as "review is not operating here".
-            elif [ -z "$seen" ] && [ "$attempt" -ge 6 ]; then
-              echo "::notice title=No review run::No Claude Auto Review run exists for $SHA, so"\
-                "review is not operating on this PR (missing secret, or a fork). Nothing to verify."
+          # consume one attempt and try again, not end the guard (#2309). What a failed listing may
+          # not do is answer "no run exists": that is concluded only from a listing that succeeded
+          # and came back empty, and when no run was ever seen and no listing from the grace point
+          # on succeeded, the check fails.
+          RUNS_URL="repos/$R/actions/workflows/claude-review.yml/runs?head_sha=$SHA&per_page=100"
+          # The newest run for $SHA that is not skipped, as "id status conclusion created_at", or
+          # nothing. $1 keeps only the runs whose id is above it (ids rise with creation order), and
+          # 0 keeps them all. A failed call returns non-zero; the caller must not read LOOKUP_OUT then.
+          newest_run() {
+            gh_capture "$RUNS_URL" \
+              --jq "[.workflow_runs[] | select(.conclusion != \"skipped\" and .id > $1)][0] // empty
+                    | \"\(.id) \(.status) \(.conclusion // \"-\") \(.created_at)\""
+          }
+          # One 35-minute budget for the whole step: a cancelled review that a newer run replaced is
+          # followed with what is left of it, so the step stays inside its own timeout.
+          run_id=''; status=''; conclusion=''; created=''; seen=''; attempt=0
+          wait_for_review() {
+            local line listed
+            while [ "$status" != "completed" ] && [ "$attempt" -lt 70 ]; do
+              attempt=$((attempt + 1))
+              line=''; listed=''
+              if newest_run 0; then listed=1; line=$LOOKUP_OUT; fi
+              if [ -n "$line" ]; then
+                read -r run_id status conclusion created <<<"$line"
+                seen=1
+                [ "$status" = "completed" ] && break
+              # Keyed on never having seen a run, not on this poll being empty: a transient empty
+              # listing after one was found must not be read as "review is not operating here".
+              elif [ -z "$seen" ] && [ -n "$listed" ] && [ "$attempt" -ge 6 ]; then
+                echo "::notice title=No review run::No Claude Auto Review run exists for $SHA, so"\
+                  "review is not operating on this PR (missing secret, or a fork). Nothing to verify."
+                exit 0
+              fi
+              sleep 30
+            done
+            if [ -z "$seen" ]; then
+              echo "::error title=Review runs unreadable::This guard could not list the Claude Auto"\
+                "Review runs for $SHA (${LOOKUP_ERR:-no listing returned}), so it cannot tell whether"\
+                "a review is running. A read that fails is not an answer, so the check fails. Re-run"\
+                "this guard."
+              summary "- The review-run listing for $SHA failed on every poll; failing the check."
+              exit 1
+            fi
+          }
+
+          while :; do
+            wait_for_review
+
+            # Out of budget with the run still going: the guard stops waiting, and reads the standing
+            # verdict before it passes. The run's own 30-minute timeout marks it, and a standing
+            # CHANGES_REQUESTED still fails this check.
+            if [ "$status" != "completed" ]; then
+              echo "::warning title=Review did not finish::Gave up waiting on review run $run_id for"\
+                "PR #$PR after 35 minutes. Its own 30-minute timeout will mark it; this PR is NOT"\
+                "Claude-reviewed."
+              summary '### Claude review did not finish inside the guard window'
+              standing_verdict "review run $run_id did not finish inside the guard window" \
+                "Re-run this check once that run has finished (its fresh verdict replaces this one)," \
+                "or dismiss the review if the findings are wrong."
+            fi
+
+            [ "$conclusion" = "cancelled" ] || break
+
+            # A cancelled review run did not review this head unless something replaced it. Once
+            # only a newer push could cancel a review, and that push's own check judged the new head,
+            # so "cancelled" meant "nothing to verify". Now the review job joins its concurrency group
+            # after the decide job, so an older run's review can cancel a newer one, and a manual
+            # cancel does the same: the review meant to cover $SHA never finished, and passing here
+            # would let the pull request through with no review of it. So ask where the head is now.
+            # A different head: a newer push owns the review and its own check judges it. Still $SHA:
+            # ask which review run covers it now. A guard started by an unrelated label sits in a
+            # concurrency group of its own, so no newer guard cancels it while another review run for
+            # the same head replaces the one it watches, and it would fail on the cancelled run until
+            # the replacement's guard finished. So list the runs for $SHA again: a newer run (a higher
+            # id) that was not skipped is the one to judge, and the loop goes back to wait on it with
+            # what is left of the bound. None, or a listing that fails, and nothing replaced the
+            # cancelled review: the check fails. A read that fails (or returns no head) is neither
+            # answer, so it fails CLOSED, as the drift-origin lookups do -- through gh_capture
+            # directly, because lookup()'s message is not about the head or the runs and
+            # lookup_closed() words its error for the drift arm.
+            if ! gh_capture "repos/$R/pulls/$PR" --jq '.head.sha // empty' || [ -z "$LOOKUP_OUT" ]; then
+              echo "::error title=Review cancelled, head unknown::Review run $run_id was cancelled, and"\
+                "this guard could not read the head of PR #$PR to tell whether a newer push replaced"\
+                "it (${LOOKUP_ERR:-no head returned}). A cancelled review is not a pass, so this check"\
+                "fails closed. Re-run this guard."
+              summary "- Review run $run_id was cancelled and the head of PR #$PR could not be read."\
+                "Failing closed."
+              exit 1
+            fi
+            current_head=$LOOKUP_OUT
+            if [ "$current_head" != "$SHA" ]; then
+              echo "::notice title=Review cancelled::run $run_id was cancelled, and the head of PR #$PR"\
+                "has moved on to ${current_head:0:12}; that push's own check judges it."
+              summary "- Review run $run_id was cancelled; the head moved on to ${current_head:0:12},"\
+                "whose own check judges it."
               exit 0
             fi
-            sleep 30
+            cancelled_run=$run_id
+            if ! newest_run "$cancelled_run"; then
+              echo "::error title=Review cancelled, replacement unknown::Review run $cancelled_run was"\
+                "cancelled, and this guard could not list the review runs for $SHA to tell whether a"\
+                "newer run replaced it (${LOOKUP_ERR:-$LOOKUP_OUT}). A cancelled review is not a pass,"\
+                "so this check fails closed. Re-run this guard."
+              summary "- Review run $cancelled_run was cancelled and the review runs for $SHA could not"\
+                "be listed. Failing closed."
+              exit 1
+            fi
+            if [ -z "$LOOKUP_OUT" ]; then
+              echo "::error title=Review cancelled::The review of this head ($SHA, run $cancelled_run) was"\
+                "cancelled and nothing replaced it, so PR #$PR has no review of its current commit."\
+                "Re-run the Claude Auto Review run, then re-run this check."
+              summary '### Claude review was cancelled; this head has no review'
+              summary '- Re-run the Claude Auto Review run, then re-run this check.'
+              exit 1
+            fi
+            read -r run_id status conclusion created <<<"$LOOKUP_OUT"
+            echo "::notice title=Review cancelled, replaced::Review run $cancelled_run for $SHA was"\
+              "cancelled, and run $run_id was created after it, so this check judges run $run_id."
+            summary "- Review run $cancelled_run was cancelled; run $run_id replaced it and is judged"\
+              "instead."
           done
-
-          if [ "$status" != "completed" ]; then
-            echo "::warning title=Review did not finish::Gave up waiting on review run $run_id for"\
-              "PR #$PR after 35 minutes. Its own 30-minute timeout will mark it; this PR is NOT"\
-              "Claude-reviewed."
-            summary '### Claude review did not finish inside the guard window'
-            exit 0
-          fi
-
-          if [ "$conclusion" = "cancelled" ] || [ "$conclusion" = "skipped" ]; then
+          if [ "$conclusion" = "skipped" ]; then
             echo "::notice title=Review $conclusion::run $run_id was $conclusion; nothing to verify."
             exit 0
           fi
 
-          # The step's own conclusion, which separates a clean no-op from a real run.
+          # The step's own conclusion, which separates a clean no-op from a real run. This read and
+          # the review-job read below take ONE item with `.[0]`, and --paginate would apply that once
+          # per page of the jobs list. It is safe here: a run of the review workflow has two jobs
+          # (decide and review), so the list is one page, and the step and the job named each
+          # appear in it once.
           lookup "review-run jobs (step conclusion)" "repos/$R/actions/runs/$run_id/jobs" --paginate \
-            --jq '[.jobs[].steps[] | select(.name == env.REVIEW_STEP)] | .[0].conclusion // empty'
+            --jq '[.jobs[].steps[]? | select(.name == env.REVIEW_STEP)] | .[0].conclusion // empty'
           step=$LOOKUP_OUT
 
           if [ -z "$step" ]; then
+            # A SKIPPED review job has no steps. That is a decided skip (a push after the follow-up,
+            # or no secret) only when the run itself succeeded, which means the decide job did too:
+            # a decide job that failed skips the review job as well, and must not pass as a skip.
+            lookup "review-run jobs (review job conclusion)" "repos/$R/actions/runs/$run_id/jobs" --paginate \
+              --jq '[.jobs[] | select(.name == env.REVIEW_JOB)] | .[0].conclusion // empty'
+            if [ "$LOOKUP_OUT" = "skipped" ] && [ "$conclusion" = "success" ]; then
+              echo "::notice title=Review skipped on purpose::The '$REVIEW_JOB' job of run $run_id was"\
+                "skipped by the decide job (a push after the follow-up, or no CLAUDE_CODE_OAUTH_TOKEN"\
+                "or a fork PR). This push has no review to verify; the standing verdict is checked."
+              summary '- Review skipped on purpose (decide job succeeded, review job skipped).'
+              standing_verdict "this push got no review on purpose (one follow-up per full review)" \
+                "Add the re-review label to get a fresh full review (its verdict replaces this one)," \
+                "or dismiss the review if the findings are wrong."
+            fi
             echo "::error title=Guard cannot find the review step::No step named"\
-              "'$REVIEW_STEP' in run $run_id. This guard reads that step to verify the review, so"\
-              "renaming it in $WF blinds the guard -- update REVIEW_STEP here to match."
+              "'$REVIEW_STEP' in run $run_id, and the run did not skip its review job on purpose"\
+              "(run conclusion: $conclusion). This guard reads that step to verify the review, so"\
+              "renaming it in $WF blinds the guard -- update REVIEW_STEP here to match. A run that"\
+              "ended '$conclusion' with the review job skipped means the decide job failed: read it."
             summary "### Guard is blind: no step named \`$REVIEW_STEP\` in the review run"
             exit 1
           fi
 
           if [ "$step" = "skipped" ]; then
             echo "::notice title=Review skipped cleanly::The '$REVIEW_STEP' step was skipped"\
-              "(no CLAUDE_CODE_OAUTH_TOKEN, or a fork PR). Nothing to verify."
-            exit 0
+              "(no CLAUDE_CODE_OAUTH_TOKEN, or a fork PR). Nothing to verify, beyond the standing verdict."
+            standing_verdict "the review step was skipped (no CLAUDE_CODE_OAUTH_TOKEN, or a fork PR)" \
+              "No new review can replace it while the step is skipped, so handle the findings and" \
+              "dismiss the review."
           fi
 
           # Did the action invoke Claude at all? Its workflow-validation skip reaches the outside
@@ -242,11 +476,13 @@ jobs:
           # but that output is not declared in the composite action's outputs block, and it returns
           # before execution_file and conclusion are ever set. Actions job ids double as check-run
           # ids, which is what makes the annotation readable from a different workflow.
+          # A job whose annotations cannot be read is not a job that has none: a read that fails
+          # fails the check, because "the action never ran" turns on exactly this scan.
           never_ran=''
           lookup "review-run jobs (annotation scan)" "repos/$R/actions/runs/$run_id/jobs" --paginate --jq '.jobs[].id'
           for job in $LOOKUP_OUT; do
-            if gh api "repos/$R/check-runs/$job/annotations" --jq '.[].message' 2>/dev/null \
-                 | grep -qF 'Skipping action due to workflow validation'; then
+            lookup "annotations of job $job" "repos/$R/check-runs/$job/annotations" --jq '.[].message'
+            if grep -qF 'Skipping action due to workflow validation' <<<"$LOOKUP_OUT"; then
               never_ran=1
               break
             fi
@@ -264,7 +500,9 @@ jobs:
                 "which claude-code-action refuses to run until it matches $DEFAULT_BRANCH. This PR"\
                 "is NOT Claude-reviewed and cannot be until it merges -- a human must review it."
               summary "- Expected: this PR edits \`$WF\`, so a human must review it."
-              exit 0
+              standing_verdict "this PR changes $WF, so this head cannot be reviewed until it merges" \
+                "No new review can replace it before then, so handle the findings and dismiss the" \
+                "review."
             fi
 
             # THE PENDING-RELEASE ARM. Nothing in this PR explains the skip, so the copy of $WF that
@@ -287,7 +525,8 @@ jobs:
             # blob of $WF is the blob at its merge commit -- so the branch carries exactly what that
             # merge produced and nothing after it. Blob shas compare content (git's are
             # content-addressed), so no decode is needed. All three hold: pending release, a
-            # warning, exit 0 -- still NOT reviewed, still a human's job, the same as the arm above.
+            # warning, then the standing verdict -- still NOT reviewed, still a human's job, the
+            # same as the arm above, and a CHANGES_REQUESTED that stands still fails the check.
             # Any fails, or no PR claims the commit: the hostile error below, unchanged. Every read
             # goes through lookup_closed(): a lookup that dies here fails the check with its own
             # message, because an unresolved drift must not pass on a 503.
@@ -335,7 +574,9 @@ jobs:
                   summary "- Pending release: \`$WF\` on \`$BASE\` is what merged PR #$origin_pr"\
                     "produced, and \`$DEFAULT_BRANCH\` has not synced. Reviews resume at the next"\
                     "release; a human must review this PR."
-                  exit 0
+                  standing_verdict "$WF on $BASE is awaiting release, so this head cannot be reviewed" \
+                    "No new review can replace it before the release, so handle the findings and" \
+                    "dismiss the review."
                 fi
                 summary "- \`$WF\` on \`$BASE\` was last touched by \`${drift_commit:0:12}\` (PR"\
                   "#$origin_pr), but that PR's diff and merge blob do not account for the branch's"\
@@ -374,16 +615,24 @@ jobs:
           # ever renamed this reports a false "posted nothing" -- loud and wrong, which is the safer
           # direction for a guard to fail.
           mine='select(.user.login == env.REVIEW_BOT)'
+          # --paginate runs each --jq once PER PAGE, so a tally that ends in `length` prints one
+          # count per page: one number for a list of 30 items or fewer, several for a longer one.
+          # Every user's items count toward a page, and the inline-comment tool files one review
+          # per comment, so a long pull request does reach a second page. The count over every page
+          # is the SUM of those numbers, and sum_pages() adds them; the bare output would make the
+          # arithmetic below a syntax error. A one-page list sums to its own count, and a page that
+          # fails to read still fails the check in lookup(), before any sum.
+          sum_pages() { printf '%s\n' "$1" | awk '{ s += $1 } END { print s + 0 }'; }
           lookup "issue-comment tally" "repos/$R/issues/$PR/comments" --paginate \
             --jq "[.[] | $mine | select(.created_at > \"$created\")] | length"
-          issue=$LOOKUP_OUT
+          issue=$(sum_pages "$LOOKUP_OUT")
           lookup "inline-comment tally" "repos/$R/pulls/$PR/comments" --paginate \
             --jq "[.[] | $mine | select(.created_at > \"$created\")] | length"
-          inline=$LOOKUP_OUT
+          inline=$(sum_pages "$LOOKUP_OUT")
           lookup "review tally" "repos/$R/pulls/$PR/reviews" --paginate \
             --jq "[.[] | $mine | select(.submitted_at != null
                                         and .submitted_at > \"$created\")] | length"
-          reviews=$LOOKUP_OUT
+          reviews=$(sum_pages "$LOOKUP_OUT")
           total=$(( issue + inline + reviews ))
           echo "posted by $REVIEW_BOT since $created -- issue: $issue, inline: $inline,"\
             "reviews: $reviews"
@@ -393,17 +642,11 @@ jobs:
           summary "- reviews: $reviews"
 
           # The obligation read, feeding BOTH arms below: what does $WF promise, on the DEFAULT
-          # branch -- the copy the action validated and ran? A missing file or an unreadable one
-          # reads as "no obligation", the same as a prompt without the sentinel: a lookup failure
-          # must not become a review verdict.
-          # The trailing `|| true` is load-bearing under `set -euo pipefail`: without it a 404 on
-          # $WF, or a payload base64 cannot decode, fails the PIPELINE and kills this step -- turning
-          # a lookup failure into exactly the hard guard failure the comment above forbids. Verified
-          # against all four inputs: sentinel present, sentinel absent, empty, undecodable.
-          encoded=$(gh api "repos/$R/contents/$WF?ref=$DEFAULT_BRANCH" --jq '.content' 2>/dev/null \
-            || true)
-          must_post=$(printf '%s' "$encoded" | base64 -d 2>/dev/null \
-            | { grep -qF "$MUST_POST_SENTINEL" && echo 1 || true; } || true)
+          # branch -- the copy the action validated and ran? Only a prompt without the sentinel reads
+          # as "no obligation". A read of $WF that fails, or comes back empty or undecodable, is not
+          # that answer: read_must_post fails the check with a message naming the read, because a
+          # lookup failure is not a review verdict and must not stand the verdict arm down either.
+          read_must_post
 
           if [ "$total" -ne 0 ]; then
             # The VERDICT ARM. Posting was never the whole story: the #3470-#3473 train shipped six
@@ -429,23 +672,30 @@ jobs:
             # that is the manual override. --approve is no part of the protocol (the review token
             # cannot approve without an org toggle this repo does not enable) and none is needed:
             # a clean COMMENTED verdict clears the gate just as well.
+            # Only a review WITH A BODY is a verdict. The inline-comment tool files each comment
+            # inside a review of its own with an EMPTY body, so a run that dies after its comments
+            # leaves a bodiless COMMENTED review newest, and the scan would read it as a clean
+            # verdict over a standing CHANGES_REQUESTED. The body test is the one claude-review.yml's
+            # decide step and verdict check apply. A DISMISSED review keeps its body, so the manual
+            # override above still works.
             # The API returns reviews oldest-first (documented: chronological order), and --paginate
             # runs the --jq once PER PAGE -- a max_by here would be per-page, not global -- so the
             # newest is the last LINE of the emitted stream, which pagination cannot break.
             lookup "verdict scan (bot reviews)" "repos/$R/pulls/$PR/reviews" --paginate \
-              --jq ".[] | $mine | select(.submitted_at != null) | \"\(.state)\t\(.html_url)\""
+              --jq ".[] | $mine | select(.submitted_at != null)
+                    | select(((.body // \"\") | length) > 0) | \"\(.state)\t\(.html_url)\""
             newest=$(printf '%s\n' "$LOOKUP_OUT" | tail -n 1)
 
             if [ -z "$newest" ]; then
-              # Comments landed but no formal review ever did, and the prompt promises one every
-              # run. The same broken-promise class as "posted nothing" below -- and worse, it is
-              # exactly the pre-verdict failure shape: findings living only in comments, which is
-              # the thing auto-merge outruns.
+              # Comments landed but no verdict review (one with a body) ever did, and the prompt
+              # promises one every run. The same broken-promise class as "posted nothing" below --
+              # and worse, it is exactly the pre-verdict failure shape: findings living only in
+              # comments, which is the thing auto-merge outruns.
               echo "::error title=Review posted no verdict::Review run $run_id posted comments, but"\
-                "$REVIEW_BOT has never submitted a formal review on PR #$PR, and $WF promises one"\
-                "verdict review per run. Findings that live only in comments are what auto-merge"\
-                "outruns (#3470), so do NOT read this PR as verdict-clean. Re-run the review"\
-                "workflow, then re-run this guard."
+                "$REVIEW_BOT has never submitted a verdict review (a review with a body) on PR"\
+                "#$PR, and $WF promises one verdict review per run. Findings that live only in"\
+                "comments are what auto-merge outruns (#3470), so do NOT read this PR as"\
+                "verdict-clean. Re-run the review workflow, then re-run this guard."
               summary '### Claude review posted comments but no verdict review'
               summary '- The prompt promises a verdict every run; none exists. Re-run the review.'
               exit 1
@@ -457,10 +707,11 @@ jobs:
             if [ "$verdict_state" = "CHANGES_REQUESTED" ]; then
               echo "::error title=Review requested changes::The newest verdict by $REVIEW_BOT on"\
                 "PR #$PR is CHANGES_REQUESTED: $verdict_url. A substantive finding is a failed"\
-                "check now, not a comment auto-merge can outrun. Address the findings and push --"\
-                "the re-review reads the new diff and submits a fresh verdict, and"\
-                "newest-verdict-wins clears this gate by itself -- or, if the findings are wrong,"\
-                "a human dismisses the review and DISMISSED reads as cleared."
+                "check now, not only a comment. Address the findings and push --"\
+                "a follow-up reads the new commits and submits a fresh verdict, and"\
+                "newest-verdict-wins clears this check by itself. After a follow-up a push gets no"\
+                "review: add the re-review label for a fresh full review. Or, if the findings are"\
+                "wrong, a human dismisses the review and DISMISSED reads as cleared."
               summary '### Claude review requested changes'
               summary "- $verdict_url"
               summary '- Address the findings and push (the fresh verdict clears this), or dismiss'\

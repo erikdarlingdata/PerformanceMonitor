@@ -39,7 +39,7 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
             return;
         }
 
-        const string role = "pm_test_pgreadbinaryfile_role";
+        var role = "pm_test_pgreadbinaryfile_" + Guid.NewGuid().ToString("N")[..8]; // #4981: unique to the run, roles are cluster-wide
 
         await using var adminConnection = new NpgsqlConnection(connectionStringRoot);
         await adminConnection.OpenAsync();

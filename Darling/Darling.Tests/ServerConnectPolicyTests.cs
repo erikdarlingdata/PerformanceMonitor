@@ -69,6 +69,8 @@ public sealed class ServerConnectBackoffTests
         var worker = (DarlingWorker)RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
         typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, NullLogger<DarlingWorker>.Instance);
+        typeof(DarlingWorker).GetField("_collectorFaultStacks", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, new CollectorFaultStackLog());
 
         var list = Activator.CreateInstance(typeof(List<>).MakeGenericType(loopState))!;
         list.GetType().GetMethod("Add")!.Invoke(list, new[] { state });
@@ -125,6 +127,8 @@ public sealed class ServerConnectGateOccupancyTests
         var worker = (DarlingWorker)RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
         typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, NullLogger<DarlingWorker>.Instance);
+        typeof(DarlingWorker).GetField("_collectorFaultStacks", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, new CollectorFaultStackLog());
         typeof(DarlingWorker).GetField("_connectProbeGate", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, probeGate);
         /* A dead server: the connect parks (SqlClient's 15 s) and never answers. */
@@ -249,6 +253,8 @@ public sealed class ServerConnectStageStampTests
         var worker = (DarlingWorker)RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
         typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, NullLogger<DarlingWorker>.Instance);
+        typeof(DarlingWorker).GetField("_collectorFaultStacks", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, new CollectorFaultStackLog());
         typeof(DarlingWorker).GetField("_connectProbeGate", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, probeGate);
         worker.ConnectOverride = connect;
@@ -375,6 +381,8 @@ public sealed class ServerConnectDefinitionEditTests
         var worker = (DarlingWorker)RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
         typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, NullLogger<DarlingWorker>.Instance);
+        typeof(DarlingWorker).GetField("_collectorFaultStacks", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, new CollectorFaultStackLog());
         typeof(DarlingWorker).GetField("_connectProbeGate", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, new SemaphoreSlim(ServerConnectProbe.GateWidth, ServerConnectProbe.GateWidth));
         return worker;

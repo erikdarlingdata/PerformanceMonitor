@@ -139,11 +139,12 @@ public sealed class DarlingEmptyEnumerationNoteTests
            both readers. A broadening to error_message IS NOT NULL would turn every quiet enumeration
            cycle into a fake last-error.
 
-           #1855 replaced the value-MAX with a newest-first rank, so the gate now reads as the status
-           re-check on the rank-1 row. It is the SAME claim: the column can only ever be filled from a
-           failing run. Without the re-check the rank falls through to the newest row of any class when
-           no failure carried text, and a SUCCESS row's note would land here. Lite's twin pin asserts the
-           identical expression against its DuckDB read. */
+           #1855 replaced the value-MAX with a newest-first rank, and #4955 replaced the rank with a lookup
+           of the newest failing run that carried text, so the gate now reads as the failing-status filter
+           on the row the lookup returns. It is the SAME claim: the column can only ever be filled from a
+           failing run. A lookup keyed on the instant alone would land on a SUCCESS row's note when that run
+           shares the instant, and a note would land here. Lite's twin pin asserts the identical expression
+           against its DuckDB read. */
         foreach (var relative in new[]
         {
             Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectionHealth.cs"),
@@ -155,8 +156,16 @@ public sealed class DarlingEmptyEnumerationNoteTests
                remedy (the extension, named), so keeping it out would band a collector EXTENSION_MISSING
                beside a blank Last Error. Still a STATUS gate — the broadening this pin refuses is to
                message PRESENCE, and that refusal is unchanged. */
-            Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error", source);
-            Assert.DoesNotContain("error_message IS NOT NULL", source);
+            Assert.Contains("failed.error_message AS last_error", source);
+            Assert.Matches(@"AND\s+f\.status IN \('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING'\)\s+AND\s+f\.error_message IS NOT NULL", source);
+            Assert.Matches(@"status IN \('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING'\)\s+AND error_message IS NOT NULL\s+THEN collection_time END\) AS last_failure_text_time", source);
+
+            /* Message presence is only ever the second half of a class whose first half is a status: every
+               error_message IS NOT NULL in the read follows a status gate, so no clause admits a row on
+               its text alone. */
+            Assert.Equal(
+                Regex.Matches(source, @"error_message IS NOT NULL").Count,
+                Regex.Matches(source, @"(?:status IN \('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING'\)|status = 'SUCCESS')\s+AND\s+(?:\w+\.)?error_message IS NOT NULL").Count);
         }
     }
 
@@ -169,8 +178,8 @@ public sealed class DarlingEmptyEnumerationNoteTests
            runners attach a note only to the SUCCESS write, and the looser complement of last_error would
            drag Darling's SESSION_MISSING rows — a real capture fault with its own self-alert — into a
            column whose tooltip promises it is NOT an error. Every gate on this surface is still a STATUS
-           gate — #1855's rank orders on whether the status-gated CASE came back empty, never on message
-           presence alone (the pin above). */
+           gate — #1855's rank (now #4955's lookup) takes the newest row of the status-gated class, never
+           a row on message presence alone (the pin above). */
         foreach (var relative in new[]
         {
             Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectionHealth.cs"),
@@ -178,7 +187,8 @@ public sealed class DarlingEmptyEnumerationNoteTests
         })
         {
             var source = ReadRepoFile(relative);
-            Assert.Contains("MAX(CASE WHEN note_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS last_note", source);
+            Assert.Contains("noted.error_message AS last_note", source);
+            Assert.Matches(@"AND\s+t\.status = 'SUCCESS'\s+AND\s+t\.error_message IS NOT NULL", source);
             Assert.Contains("COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count", source);
         }
     }
