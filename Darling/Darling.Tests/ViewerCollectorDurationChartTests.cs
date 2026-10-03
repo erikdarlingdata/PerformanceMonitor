@@ -63,12 +63,13 @@ public sealed class ViewerCollectorDurationChartTests
         var load = MethodBody(TabFile(), @"private async Task LoadHealthAsync\(");
 
         /* The chart's read starts beside the grid's, from the same window, and the chart draws what it returned. */
-        Assert.Equal(1, Matches(load, @"var durationTask = _dataService\.GetCollectorDurationTrendAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
-        Assert.Equal(1, Matches(load, @"RenderCollectorDurationChart\(durationTask\.Result\);"));
+        Assert.Equal(1, Matches(load, @"var durationTask = ReadOrEmptyAsync\(\(\) => _dataService\.GetCollectorDurationTrendAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\),"));
+        Assert.Equal(1, Matches(load, @"durationTask\.Result,"));
+        Assert.Equal(1, Matches(load, @"\bRenderCollectorDurationChart,"));
         Assert.DoesNotContain("RenderCollectorDurationChart(logTask", load, StringComparison.Ordinal);
 
-        /* The grid's page goes to the grid's filter manager and to its banner, and nowhere else. */
-        Assert.Equal(2, Matches(load, @"logTask\.Result"));
+        /* The grid's page goes to the one step, which hands it to the grid's filter manager and its banner, and nowhere else. */
+        Assert.Equal(1, Matches(load, @"logTask\.Result"));
 
         /* The chart cannot be handed the page: its parameter is the buckets, and its body never names a log row. */
         var render = typeof(ViewerServerTab).GetMethod("RenderCollectorDurationChart", BindingFlags.Instance | BindingFlags.NonPublic);

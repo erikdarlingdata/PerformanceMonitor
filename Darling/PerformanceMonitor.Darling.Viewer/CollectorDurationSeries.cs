@@ -8,6 +8,7 @@
 
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -16,7 +17,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// each at its bucket's start. <see cref="Times"/> is the X the chart plots (the store's naive-UTC instant as an OLE date, drawn in
 /// the display zone) and <see cref="MaxMs"/> the Y: the longest successful run in each bucket, so a slow run still shows however wide
 /// the bucket is. <see cref="AvgMs"/> and <see cref="Runs"/> carry each bucket's average and run count, index for index; the line
-/// does not draw them, and the shared hover popup prints a series label, a value and a time only.
+/// does not draw them, and the hover prints them as the popup's fourth line (<see cref="DetailsByX"/>).
 /// A pure step of the chart (no WPF), so a test drives it with the rows the read returned.
 /// </summary>
 internal sealed record CollectorDurationSeries(string Collector, double[] Times, double[] MaxMs, double[] AvgMs, long[] Runs)
@@ -44,5 +45,22 @@ internal sealed record CollectorDurationSeries(string Collector, double[] Times,
         }
 
         return series;
+    }
+
+    /// <summary>
+    /// The hover's fourth line for each point, the line of how many runs a point is the slowest of and what the bucket averaged (<see cref="CollectorDurationHoverText"/>, the
+    /// words Lite's chart uses), keyed by the X the point is drawn at: the very <see cref="Times"/> the scatter is built from, so the
+    /// hover's lookup by the nearest point's X is exact. Keyed by X and not by position because the line breaks at every collection
+    /// gap by inserting a point of its own, which shifts every position after the first break; that point has no key and so no line.
+    /// </summary>
+    internal IReadOnlyDictionary<double, string> DetailsByX()
+    {
+        var byX = new Dictionary<double, string>(Times.Length);
+        for (var i = 0; i < Times.Length && i < AvgMs.Length && i < Runs.Length; i++)
+        {
+            byX[Times[i]] = CollectorDurationHoverText.Detail(Runs[i], AvgMs[i]);
+        }
+
+        return byX;
     }
 }

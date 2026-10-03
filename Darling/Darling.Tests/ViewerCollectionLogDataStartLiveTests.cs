@@ -390,14 +390,14 @@ public sealed class ViewerCollectionLogDataStartLiveTests : IClassFixture<Collec
     }
 
     /* The drill's end is pinned three days back, so its week runs from ten days back to three. A run 9 days back and one 8 days back
-       are inside that week and outside the week that ends now: the read starts where the probe's window starts, so both are in the
-       rows (the run a day back is after the week's end, which the read does not bound). */
+       are inside that week and outside the week that ends now: the read takes the probe's window, so both are in the rows. The run a
+       day back is after the week's end, so the read leaves it out (#4966: a read with no end listed it). */
     [Fact]
-    public void APinnedDrillWindow_ReadsFromTheProbesStart()
+    public void APinnedDrillWindow_ReadsTheProbesWindow_FromItsStartToItsEnd()
     {
         var drill = Drill(CollectionLogDataStartStore.PinnedDrillServerId, CollectionLogDataStartStore.WaitStats, asOfUtc: End.AddDays(-3));
 
-        Assert.Equal(new[] { End.AddDays(-1), End.AddDays(-8), End.AddDays(-9) }, drill.Rows.Select(r => r.CollectionTime).ToArray());
+        Assert.Equal(new[] { End.AddDays(-8), End.AddDays(-9) }, drill.Rows.Select(r => r.CollectionTime).ToArray());
         Assert.Null(drill.Banner);
     }
 }

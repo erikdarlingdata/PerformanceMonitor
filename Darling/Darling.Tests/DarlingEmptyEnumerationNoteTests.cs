@@ -194,42 +194,40 @@ public sealed class DarlingEmptyEnumerationNoteTests
     }
 
     [Fact]
-    public void The_Viewers_Fleet_Read_Projects_The_Same_Columns_As_The_Per_Server_One()
+    public void The_Per_Server_Health_Read_Projects_The_Columns_Its_Mapper_Reads_And_The_Fleet_Read_Projects_No_Message()
     {
-        /* Both viewer health reads feed ONE mapper (MapHealthRow), so a column added to the per-server
-           projection alone would make the fleet read throw on the new ordinal at runtime — a defect no
-           per-SQL test would catch, because each SQL string is individually valid. */
+        /* The per-server read is the one statement that feeds the viewer's mapper (MapHealthRow), ordinal for ordinal: a column
+           added to the mapper alone would make the read throw on the new ordinal at runtime, a defect no per-SQL test would
+           catch, because each SQL string is individually valid. The fleet-cumulative statement that once shared the mapper was
+           removed (#4999); the status bar and the Overview cards read the by-server fleet statement through a mapper of their own. */
         var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectionHealth.cs"));
 
         var perServer = ViewerDataService.CollectionHealthSql;
-        var fleet = ViewerDataService.FleetCollectionHealthSql;
+        var fleet = ViewerDataService.FleetCollectionHealthByServerSql;
         foreach (var column in new[] { "AS last_note", "AS note_count", "AS has_user_databases" })
         {
             Assert.Contains(column, perServer);
-            Assert.Contains(column, fleet);
         }
 
         Assert.Contains("LastNote = reader.IsDBNull(11)", source);
         Assert.Contains("NoteCount = reader.IsDBNull(12)", source);
         Assert.Contains("TargetHasUserDatabases = !reader.IsDBNull(13)", source);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(source, @"\bMapHealthRow\(reader\)"));
 
-        /* #1855: the fleet read holds the ORDINALS but deliberately not the exemplar TEXT. Its only
-           caller bands and counts; no surface renders a fleet row's message, and ranking them turns a
-           parallel hash aggregate into a serial sort of the whole window (measured 0.84s -> 13.9s over
-           200 servers / 4M rows on PG 18.4). NULL rather than the pre-#1855 lexicographic MAX, because a
-           blank is honestly nothing while that MAX was quietly the wrong run's text. Pinned so a future
-           edit that "completes the parity" has to meet the cost first — the note_count aggregate, which
-           is order-independent and cheap, deliberately stays real on both. */
-        Assert.Contains("CAST(NULL AS text) AS last_note", fleet);
-        Assert.Contains("CAST(NULL AS text) AS last_error", fleet);
-        Assert.Contains("COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count", fleet);
+        /* #1855: the fleet read carries band INPUTS and not exemplar TEXT. No surface renders a fleet row's message, and ranking
+           them turns a parallel hash aggregate into a serial sort of the whole window (measured 0.84s -> 13.9s over 200 servers /
+           4M rows on PG 18.4). Pinned so a future edit that "completes the parity" has to meet the cost first. The per-server read
+           owns the exemplars outright: real text, never a NULL placeholder, and the note_count aggregate (order-independent and
+           cheap) is real there. */
+        Assert.DoesNotContain("last_error", fleet);
+        Assert.DoesNotContain("AS last_note", fleet);
+        Assert.DoesNotContain("ROW_NUMBER()", fleet);
+        Assert.Contains("COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count", perServer);
         Assert.DoesNotContain("CAST(NULL AS text)", perServer);
 
-        /* #1852 holds the same line for the same reasons plus one of its own: the fleet read groups
-           server_id INTO the result, so there is no single server to probe an inventory for. A truthful
-           fleet version would be a cross-collector join across every enabled server on a query the status
-           bar re-runs on every aggregate-tab refresh. The per-server read owns the subquery outright. */
-        Assert.Contains("CAST(NULL AS integer) AS has_user_databases", fleet);
+        /* #1852 holds the same line for the same reasons plus one of its own: the fleet read groups server_id INTO the result,
+           so there is no single server to probe an inventory for, and a truthful fleet version would be a cross-collector join
+           across every server on a query the status bar re-runs on every refresh. The per-server read owns the subquery. */
         Assert.Contains("FROM v_database_size_stats", perServer);
         Assert.DoesNotContain("v_database_size_stats", fleet);
     }
