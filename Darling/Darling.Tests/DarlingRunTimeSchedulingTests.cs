@@ -286,6 +286,159 @@ public sealed class DarlingRunTimeSchedulingTests
     }
 
     [Fact]
+    public async Task Pass_WhileYesterdaysRunStillHoldsTheSlot_DoesNotCountTodayAsRun_AndRetriesInsideTheGrace()
+    {
+        var runAt = RunTimeTwelveHoursAway();
+        var worker = MakeWorker(FleetRunTime(Collector, runAt));
+        var started = 0;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker.RunOneBodyOverride = async (_, _, _, _) =>
+        {
+            Interlocked.Increment(ref started);
+            await release.Task;
+            return 1;
+        };
+        var server = MakeServer(0);
+        var ct = TestContext.Current.CancellationToken;
+        server.NextDue[Collector] = DateTime.UtcNow.AddMinutes(-5);
+        server.RunTimeSlots[Collector] = new DarlingWorker.RunTimeSlot(runAt, Daily, server.Clock.Id, null);
+        try
+        {
+            /* Yesterday's run: handed off, it takes the slot and holds it (the fleet cap, or a long run). */
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(await BecomesTrueAsync(() => Volatile.Read(ref started) == 1), "yesterday's run took the slot");
+            Assert.Equal(1, worker.FleetGateStatsForTest!.Snapshot().Run);
+
+            /* Today's slot comes due with that run still going. */
+            var yesterday = DateTime.UtcNow.AddDays(-1);
+            var due = DateTime.UtcNow.AddMinutes(-5);
+            server.NextDue[Collector] = due;
+            server.RunTimeSlots[Collector] = server.RunTimeSlots[Collector] with { LastRunUtc = yesterday };
+
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            await Task.Delay(200, ct);
+
+            Assert.Equal(1, Volatile.Read(ref started));
+            Assert.Equal(1, worker.FleetGateStatsForTest!.Snapshot().Run);
+            Assert.Equal(due, server.NextDue[Collector]);
+            Assert.Equal(yesterday, server.RunTimeSlots[Collector].LastRunUtc);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await Task.WhenAll(worker.InFlightDetachedRuns);
+        }
+
+        /* Once the slot is free, the next tick inside the grace hands today's run off and only then counts it. */
+        await worker.RunDueCollectorsAsync(server, null!, ct);
+        Assert.True(await BecomesTrueAsync(() => Volatile.Read(ref started) == 2), "today's run took the slot");
+        Assert.True(await BecomesTrueAsync(() => worker.FleetGateStatsForTest!.Snapshot().Run == 2), "today counts once it took the slot");
+        Assert.True(server.NextDue[Collector] > DateTime.UtcNow.AddHours(10), "and the stamp moves to the next slot");
+        Assert.True(server.RunTimeSlots[Collector].LastRunUtc > DateTime.UtcNow.AddMinutes(-1));
+    }
+
+    [Fact]
+    public async Task Pass_WhileYesterdaysRunStillHoldsTheSlot_PastTheGrace_CountsOneSkippedSlot()
+    {
+        var runAt = RunTimeTwelveHoursAway();
+        var worker = MakeWorker(FleetRunTime(Collector, runAt));
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker.RunOneBodyOverride = async (_, _, _, _) =>
+        {
+            await release.Task;
+            return 1;
+        };
+        var server = MakeServer(0);
+        var ct = TestContext.Current.CancellationToken;
+        server.NextDue[Collector] = DateTime.UtcNow.AddMinutes(-5);
+        server.RunTimeSlots[Collector] = new DarlingWorker.RunTimeSlot(runAt, Daily, server.Clock.Id, null);
+        try
+        {
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(await BecomesTrueAsync(() => worker.InFlightDetachedRuns.Count == 1));
+
+            server.NextDue[Collector] = DateTime.UtcNow.AddMinutes(-90);
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+
+            var snapshot = worker.FleetGateStatsForTest!.Snapshot();
+            Assert.Equal(1, snapshot.Run);
+            Assert.Equal(1, snapshot.Skipped);
+            Assert.True(server.NextDue[Collector] > DateTime.UtcNow.AddHours(10), "past the grace the stamp moves to the next slot");
+        }
+        finally
+        {
+            release.TrySetResult();
+            await Task.WhenAll(worker.InFlightDetachedRuns);
+        }
+    }
+
+    /* The at-connect run of an on-load collector that has a run time: the connect seeds its slot, and the run at connect
+       counts as the day's run only when it succeeded. */
+
+    private const string OnLoadCollector = "server_config";
+
+    private static int RunTimeTenMinutesAgo() => (int)((DateTime.UtcNow.TimeOfDay.TotalMinutes - 10 + Daily) % Daily);
+
+    [Fact]
+    public async Task OnLoadSeed_AfterAFailedRunAtConnect_LeavesTheSlotDueInsideTheGrace()
+    {
+        var runAt = RunTimeTenMinutesAgo();
+        var worker = MakeWorker(FleetRunTime(OnLoadCollector, runAt));
+        worker.RunOneBodyOverride = (_, _, _, _) => Task.FromResult(-1);
+        var server = MakeServer(0);
+        var effective = StoreConfigProvider.ResolveSchedule(OnLoadCollector, 0, worker.ScheduleOverridesForTest);
+
+        var ran = await worker.RunOnLoadAsync(server, null!, OnLoadCollector, 0, effective, TestContext.Current.CancellationToken);
+        worker.SeedOnLoadRunTime(server, OnLoadCollector, 0, runAt, Daily, ran, null);
+
+        Assert.False(ran);
+        Assert.Null(server.RunTimeSlots[OnLoadCollector].LastRunUtc);
+        Assert.True(server.NextDue[OnLoadCollector] < DateTime.UtcNow.AddMinutes(5), "today's slot is still owed: the next tick hands it off");
+    }
+
+    [Fact]
+    public async Task OnLoadSeed_AfterASuccessfulRunAtConnect_CountsTodayAsServed()
+    {
+        var runAt = RunTimeTenMinutesAgo();
+        var worker = MakeWorker(FleetRunTime(OnLoadCollector, runAt));
+        worker.RunOneBodyOverride = (_, _, _, _) => Task.FromResult(0);
+        var server = MakeServer(0);
+        var effective = StoreConfigProvider.ResolveSchedule(OnLoadCollector, 0, worker.ScheduleOverridesForTest);
+
+        var ran = await worker.RunOnLoadAsync(server, null!, OnLoadCollector, 0, effective, TestContext.Current.CancellationToken);
+        worker.SeedOnLoadRunTime(server, OnLoadCollector, 0, runAt, Daily, ran, null);
+
+        Assert.True(ran);
+        Assert.NotNull(server.RunTimeSlots[OnLoadCollector].LastRunUtc);
+        Assert.True(server.NextDue[OnLoadCollector] > DateTime.UtcNow.AddHours(10), "served: the next slot is tomorrow's");
+    }
+
+    [Fact]
+    public void TheAtConnectLoop_SeedsTheRunTimeSlotFromTheOutcomeOfTheRunAtConnect()
+    {
+        var worker = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs").ReplaceLineEndings("\n");
+
+        Assert.Contains("var ranAtConnect = await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken);", worker, StringComparison.Ordinal);
+        Assert.Contains("SeedOnLoadRunTime(server, name, serverId, onLoadRunAt, onLoadInterval, ranAtConnect, onLoadLastRun);", worker, StringComparison.Ordinal);
+    }
+
+    private static async Task<bool> BecomesTrueAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition())
+            {
+                return true;
+            }
+
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
+
+        return condition();
+    }
+
+    [Fact]
     public async Task Pass_ANewClock_ComputesTheSlotAgainFromTheLastRun()
     {
         var runAt = RunTimeTwelveHoursAway();

@@ -549,7 +549,8 @@ public sealed class DarlingWorker : BackgroundService
     /// <see cref="RunOneAsync"/> applies, so a limit that is held while the replacement runs is observable. It is
     /// given the runtime the run is about to work on, which for a daily run is the one read again after its wait
     /// for a permit, so a test can see which connection a run got. Null in production, which runs the collector
-    /// for real.
+    /// for real. A negative
+    /// return stands for a run that failed (the real run records its failure and returns 0).
     /// </summary>
     internal Func<ServerLoopState, ServerRuntime, string, CancellationToken, Task<int>>? RunOneBodyOverride { get; set; }
 
@@ -1366,6 +1367,17 @@ LIMIT 1";
     /// <summary>#4938: one decision of <see cref="DarlingWorker.StepRunTimeCollector"/>: the action, the stamp to write, and the
     /// skipped slots to record (1 for a day the sweep loop lost while it was running, else 0).</summary>
     internal readonly record struct RunTimeStep(RunTimeAction Action, DateTime NextDue, long Skipped);
+
+    /// <summary>#4938: what a hand-off of a collector that has a run time carries to the run: the slot as it stands and the
+    /// next stamp. The run records them, and counts the slot as served, only once it has taken its (server, collector) slot.</summary>
+    internal sealed record RunTimeHandOff(RunTimeSlot Slot, DateTime NextDue);
+
+    /// <summary>#4938: whether one collector run succeeded, for a caller that must know (the at-connect run of an on-load
+    /// collector). A zero-row run is a success; a run that failed, or never started, is not.</summary>
+    internal sealed class RunOutcome
+    {
+        public bool Succeeded { get; set; }
+    }
 
     internal sealed class ServerLoopState
     {
@@ -6577,7 +6589,7 @@ LIMIT 1";
 
                 if (await command.ExecuteScalarAsync(cancellationToken) is string zone && !string.IsNullOrWhiteSpace(zone))
                 {
-                    return new ServerClockStamp(ServerClock.Resolve(zone.Trim(), null));
+                    return ResolvePgServerClock(serverId, zone.Trim(), logger);
                 }
             }
 
@@ -6588,6 +6600,28 @@ LIMIT 1";
             logger?.LogDebug("Observability: server clock read for server_id {ServerId} failed: {Message}", serverId, ex.Message);
             return null;
         }
+    }
+
+    /* Servers already warned about an unresolvable PostgreSQL TimeZone, keyed by server id and zone text, so the
+       warning is logged once per server and zone rather than on every clock read. */
+    private static readonly ConcurrentDictionary<(int ServerId, string Zone), byte> UnresolvedPgZonesWarned = new();
+
+    /// <summary>
+    /// #4938: the clock for a PostgreSQL server's <c>TimeZone</c> text. A zone this host cannot resolve (a POSIX string such
+    /// as <c>EST5EDT,M3.2.0,M11.1.0</c>, or <c>localtime</c>) reads as UTC, so the run times of that server's collectors
+    /// are placed on a UTC clock; that is logged as a warning, once per server and zone text, naming the text.
+    /// </summary>
+    internal static ServerClockStamp ResolvePgServerClock(int serverId, string zone, ILogger? logger)
+    {
+        var clock = ServerClock.Resolve(zone, null);
+        if (ReferenceEquals(clock, ServerClock.Utc) && UnresolvedPgZonesWarned.TryAdd((serverId, zone), 0))
+        {
+            logger?.LogWarning(
+                "Server {ServerId} reports the PostgreSQL TimeZone '{Zone}', which this host cannot resolve to a time zone; its collector run times use UTC.",
+                serverId, zone);
+        }
+
+        return new ServerClockStamp(clock);
     }
 
     /// <summary>
@@ -11763,7 +11797,7 @@ AND   j.hypertable_name = '{relation}'", connection))
 
                 if (effective.FrequencyMinutes == 0)
                 {
-                    await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken);
+                    var ranAtConnect = await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken);
 
                     /* #3929/#3930: ALSO becomes due again on CollectorScheduleDefaults.OnLoadRecaptureMinutes,
                        seeded from the SAME pre-dispatch watermark used below - the run just above updates it
@@ -11777,16 +11811,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                     var onLoadJitter = SeedJitter(serverId, onLoadInterval * 60);
                     if (effective.RunAtMinute is int onLoadRunAt)
                     {
-                        /* #4938: a run time moves the daily re-run of an on-load collector and leaves the run at connect
-                           as it is. That run just happened, so it is the last run: it counts for today when it fell at or
-                           after today's slot, and for the day before when it fell earlier, which leaves today's slot owed.
-                           Seeded from the older mark instead, a connect inside the hour after the slot would run the
-                           collector a second time within seconds. */
-                        var ranAt = DateTime.UtcNow;
-                        var clock = server.Clock;
-                        server.NextDue[name] = ComputeSeededNextDue(
-                            ranAt, onLoadInterval, ranAt, onLoadJitter, new RunTimeRule(onLoadRunAt, serverId, clock.ToUtc));
-                        server.RunTimeSlots[name] = new RunTimeSlot(onLoadRunAt, onLoadInterval, clock.Id, ranAt);
+                        SeedOnLoadRunTime(server, name, serverId, onLoadRunAt, onLoadInterval, ranAtConnect, onLoadLastRun);
                     }
                     else
                     {
@@ -11901,7 +11926,8 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// </summary>
     /// <param name="serverId">The id the connect captured, which stays valid after a run nulls the server's runtime.</param>
     /// <param name="effective">The collector's effective schedule, resolved by the caller.</param>
-    internal async Task RunOnLoadAsync(
+    /// <returns>True when the collector ran and succeeded; false when its slot was held or the run failed.</returns>
+    internal async Task<bool> RunOnLoadAsync(
         ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int serverId, EffectiveSchedule effective,
         CancellationToken cancellationToken)
     {
@@ -11911,13 +11937,43 @@ AND   j.hypertable_name = '{relation}'", connection))
             _logger.LogInformation(
                 "  [{Server}] {Collector} not run at connect: its scheduled daily run is still going (#4999)",
                 server.Config.DisplayName, collectorName);
-            return;
+            return false;
         }
 
         /* null, not the live mark: the on-load dispatch is not a scheduled sweep body and
            never resets it, so folding it in would mix a previous body's bookkeeping
            into these rows - the cross-body contamination the reset exists to prevent. */
-        await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs: null, cancellationToken);
+        var runOutcome = new RunOutcome();
+        await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs: null, cancellationToken, runOutcome: runOutcome);
+        return runOutcome.Succeeded;
+    }
+
+    /// <summary>
+    /// #4938: seeds an on-load collector's daily re-run when it has a run time. A run at connect that succeeded is the last
+    /// run: it counts for today when it fell at or after today's slot, and for the day before when it fell earlier, which
+    /// leaves today's slot owed. Seeded from the older mark instead, a connect inside the hour after the slot would run the
+    /// collector a second time within seconds. A run that failed, or never started because the scheduled run holds the slot,
+    /// is not a run: the slot is seeded from the last run on record, so it stays due inside its grace.
+    /// </summary>
+    internal void SeedOnLoadRunTime(
+        ServerLoopState server, string name, int serverId, int runAtMinute, int intervalMinutes, bool ranAtConnect, DateTime? watermark)
+    {
+        var jitter = SeedJitter(serverId, intervalMinutes * 60);
+        var clock = server.Clock;
+        var rule = new RunTimeRule(runAtMinute, serverId, clock.ToUtc);
+        var now = DateTime.UtcNow;
+        var lastRun = watermark;
+        if (ranAtConnect)
+        {
+            lastRun = now;
+        }
+        else if (server.RunTimeSlots.TryGetValue(name, out var held) && held.LastRunUtc is { } heldRun && (lastRun is null || heldRun > lastRun))
+        {
+            lastRun = heldRun;
+        }
+
+        server.NextDue[name] = ComputeSeededNextDue(lastRun, intervalMinutes, now, jitter, rule);
+        server.RunTimeSlots[name] = new RunTimeSlot(runAtMinute, intervalMinutes, clock.Id, lastRun);
     }
 
     /// <summary>
@@ -12022,6 +12078,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                    dropped for waiting. The clock is read from memory (ServerLoopState.Clock); a clock that has changed
                    since the stamp was computed, such as a server's own zone arriving after its first
                    server_properties row, computes the slot again from the last run held beside the stamp. */
+                RunTimeHandOff? handOff = null;
                 if (effective.RunAtMinute is int runAtMinute)
                 {
                     var clock = server.Clock;
@@ -12046,9 +12103,9 @@ AND   j.hypertable_name = '{relation}'", connection))
                         continue;
                     }
 
-                    server.NextDue[name] = step.NextDue;
                     if (step.Action == RunTimeAction.SkipDay)
                     {
+                        server.NextDue[name] = step.NextDue;
                         _fleetGateStats?.RecordSkippedSlots(step.Skipped);
                         _logger.LogInformation(
                             "  [{Server}] {Collector} skipped today's run: the pass could not hand it off within {Grace} minutes of its run time, so it waits for its next run time, {Next:u} (#4938)",
@@ -12056,8 +12113,22 @@ AND   j.hypertable_name = '{relation}'", connection))
                         continue;
                     }
 
-                    _fleetGateStats?.RecordSlot(0);
-                    server.RunTimeSlots[name] = slot with { LastRunUtc = now };
+                    /* Yesterday's run still holds the (server, collector) slot, going or queued for a permit: today's run
+                       would be refused at once, so it is not handed off, and the slot stays unserved with its stamp where it
+                       is. The next tick asks again inside the grace. */
+                    if (_detachedCollectorGates.TryGetValue((runtime.ServerId, name), out var heldGate) && heldGate.IsHeld)
+                    {
+                        _logger.LogDebug(
+                            "  [{Server}] {Collector} not handed off this tick: its previous daily run still holds its slot (#4938)",
+                            server.Config.DisplayName, name);
+                        continue;
+                    }
+
+                    /* Today's slot is served only when today's run takes its (server, collector) slot, so the stamp, the
+                       slot's last run and the count of a run wait for it (RunOneAsync records them through this). When
+                       yesterday's run still holds the slot, nothing is recorded and the stamp stays where it is: the next
+                       tick hands the run off again inside the grace, and past the grace it counts as one skipped slot. */
+                    handOff = new RunTimeHandOff(slot, step.NextDue);
                 }
                 else
                 {
@@ -12124,14 +12195,14 @@ AND   j.hypertable_name = '{relation}'", connection))
                    disagree about what runs in the body. */
                 if (!RunsDetached(name, interval))
                 {
-                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
+                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, runTimeHandOff: handOff);
                 }
                 else if (IsDetachedByName(name))
                 {
                     /* #4999: tracked like the daily runs below, so the shutdown drain waits for a run that is still
                        going. Dropped on the floor, as these three used to be, nothing held them once the pass that
                        dispatched them ended. */
-                    TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken));
+                    TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, runTimeHandOff: handOff));
                 }
                 /* #4938: and every DAILY collector, by cadence rather than by name. index_object_stats took 43
                    minutes across 72 databases in a field case, and awaited here that stalled the server's
@@ -12147,7 +12218,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                    the analysis read right after connecting, and it runs once per connect, outside any pass. */
                 else
                 {
-                    TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true));
+                    TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true, runTimeHandOff: handOff));
                 }
             }
         }
@@ -13448,9 +13519,15 @@ LIMIT 1";
     /// permits, and does not fold its duration into the sweep body's peer mark (see <see cref="FoldsIntoSweepPeerMark"/>).
     /// False for every other caller, including the at-connect run of an on-load collector and snapshot_now.
     /// </param>
+    /// <param name="runTimeHandOff">
+    /// #4938: set by the pass for a collector that has a run time. Once the run holds its slot, today's slot counts as served:
+    /// the stamp moves to the next slot, the slot's last run is now, and the fleet's gate stats count one run. A run that
+    /// finds the slot held records none of it, so the slot stays due and the next tick tries again.
+    /// </param>
+    /// <param name="runOutcome">#4938: when given, set to whether this run succeeded.</param>
     private async Task<int> RunOneAsync(
         ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken,
-        bool detachedDaily = false)
+        bool detachedDaily = false, RunTimeHandOff? runTimeHandOff = null, RunOutcome? runOutcome = null)
     {
         var runtime = server.Runtime;
         if (runtime is null || !s_dispatch.TryGetValue(collectorName, out var run))
@@ -13514,6 +13591,13 @@ LIMIT 1";
             return 0;
         }
 
+        if (runTimeHandOff is not null)
+        {
+            _fleetGateStats?.RecordSlot(0);
+            server.NextDue[collectorName] = runTimeHandOff.NextDue;
+            server.RunTimeSlots[collectorName] = runTimeHandOff.Slot with { LastRunUtc = DateTime.UtcNow };
+        }
+
         /* #4938: a daily run waits here for one of the fleet's permits, holding its single-flight slot while it
            waits, so a run that has not yet started still counts as unfinished. The permit is held to the end of
            the run, through the store writes. The wait can last hours behind other daily runs, so what the run
@@ -13548,7 +13632,13 @@ LIMIT 1";
 
         if (RunOneBodyOverride is { } bodyOverride)
         {
-            return await bodyOverride(server, runtime, collectorName, cancellationToken);
+            var overrideRows = await bodyOverride(server, runtime, collectorName, cancellationToken);
+            if (runOutcome is not null)
+            {
+                runOutcome.Succeeded = overrideRows >= 0;
+            }
+
+            return Math.Max(overrideRows, 0);
         }
 
         /* #2997: wall clock for the whole run, read ONLY by the fault arms below. The success path
@@ -13779,6 +13869,11 @@ LIMIT 1";
             {
                 await TryRefreshPgStatementTextAsync(runtime, cancellationToken);
             }
+            if (runOutcome is not null)
+            {
+                runOutcome.Succeeded = true;
+            }
+
             return result.Rows;
         }
         catch (OperationCanceledException)
@@ -14336,11 +14431,11 @@ LIMIT 1";
     /// </summary>
     private async Task RunDetachedAsync(
         ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken,
-        bool detachedDaily = false)
+        bool detachedDaily = false, RunTimeHandOff? runTimeHandOff = null)
     {
         try
         {
-            await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs, cancellationToken, detachedDaily);
+            await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs, cancellationToken, detachedDaily, runTimeHandOff);
         }
         catch (OperationCanceledException)
         {
