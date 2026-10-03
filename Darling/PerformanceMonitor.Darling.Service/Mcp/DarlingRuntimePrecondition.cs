@@ -91,15 +91,20 @@ SELECT (
     /// <summary>
     /// The most recent run of one collector for one server. Ordered by <c>collection_time DESC</c> first (#4974):
     /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c> serves that first key,
-    /// so ChunkAppend walks the chunks newest-first and stops at the first row, where a <c>log_id</c>-first order
+    /// so ChunkAppend walks the chunks newest-first and stops once the newest row is found, where a <c>log_id</c>-first order
     /// (no index on <c>log_id</c>) read every retained row of the pair. The trade: after the wall clock steps back,
     /// this read can return a run from before the step, for as long as the step lasts.
     ///
     /// <para><c>, log_id DESC</c> only makes the order deterministic; two runs of one server and collector do not
-    /// share a microsecond in practice. It costs a sort of the pair's rows in each chunk the read visits, since
-    /// no index carries <c>log_id</c>. The newest chunk answers a collector that ran recently. A collector with no
-    /// row in the newest chunk (a daily collector, or one that never ran) walks back through older chunks, which
-    /// are compressed. $1 server_id, $2 collector.</para>
+    /// share a microsecond in practice. No index carries <c>log_id</c>, so the tiebreak is a sort. Under a sort
+    /// in each chunk it sorts the pair's rows in every chunk the read visits. Under an Incremental Sort above
+    /// the chunk walk (the shape the eight-chunk test store gets) it sorts only the rows at the newest
+    /// timestamp and reads one more row to close that group; when the newest chunk holds a single row for the
+    /// pair, that extra row opens the next older chunk. The newest chunk answers a collector that ran recently.
+    /// A collector with no row in the newest chunk (a daily collector, or one that never ran) walks back
+    /// through older chunks, which are compressed. <see cref="DarlingSelfAlertEvaluator.MissingCaptureSessionsSql"/>
+    /// is a one-collector read of the same table that leaves this tiebreak out, because a sort on a key no index
+    /// carries read the server's whole newest chunk there. $1 server_id, $2 collector.</para>
     /// </summary>
     public const string LatestCollectorOutcomeSql = @"
 SELECT status, error_message, collection_time

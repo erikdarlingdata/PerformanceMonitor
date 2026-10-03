@@ -66,6 +66,12 @@ public sealed class LatestCollectorOutcomePlanTests
         }
 
         var plan = await ExplainShippedReadAsync(connection, ct);
+        using (var chunkCount = new NpgsqlCommand("SELECT count(*) FROM show_chunks('collect.collection_log')", connection))
+        {
+            var chunks = Convert.ToInt32(await chunkCount.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+            Assert.True(chunks == 8, "expected the seed to make exactly eight 1-day chunks, got " + chunks + ":\n" + plan);
+        }
+
         var lines = plan.Split('\n');
         var chunkScans = lines.Where(PlanChunkScans.IsChunkScan).ToList();
         var visited = lines
@@ -94,17 +100,21 @@ public sealed class LatestCollectorOutcomePlanTests
         Assert.Null(await DarlingRuntimePrecondition.StatusAsync(postgres, TestServerId, TestServerName, Collector, ct));
     }
 
-    /// <summary>Eight days of one collector every five minutes: eight 1-day chunks. The ids follow time order.</summary>
+    /// <summary>
+    /// Eight 1-day chunks aligned to the UTC day: one collector every five minutes from 00:00 eight days ago to 23:55
+    /// yesterday. Every chunk is in the past, the newest is yesterday's with 288 rows, at any time of day. The ids
+    /// follow time order.
+    /// </summary>
     private static async Task SeedHistoryAsync(NpgsqlConnection connection, DateTime utcNow, CancellationToken ct)
     {
         using var insert = new NpgsqlCommand(
             "INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) " +
             "SELECT 9_000_000_000 + EXTRACT(EPOCH FROM t)::bigint, $1, $2, $3, t, 20, 'SUCCESS', 0 " +
-            "FROM generate_series($4::timestamp, $4::timestamp + interval '8 days' - interval '2 minutes', interval '5 minutes') AS t", connection);
+            "FROM generate_series($4::timestamp, $4::timestamp + interval '8 days' - interval '5 minutes', interval '5 minutes') AS t", connection);
         insert.Parameters.AddWithValue(TestServerId);
         insert.Parameters.AddWithValue(TestServerName);
         insert.Parameters.AddWithValue(Collector);
-        insert.Parameters.AddWithValue(utcNow.AddDays(-8));
+        insert.Parameters.AddWithValue(utcNow.Date.AddDays(-8));
         await insert.ExecuteNonQueryAsync(ct);
     }
 
