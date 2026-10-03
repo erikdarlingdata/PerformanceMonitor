@@ -33,6 +33,12 @@ internal static class HistoryTime
     /// <summary>Formats a naive-UTC collection timestamp in the current display mode (Server / Local / UTC).</summary>
     public static string CollectionLocal(DateTime collectionTimeUtc)
         => ViewerTimeHelper.FormatForDisplay(collectionTimeUtc, "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary>#4966: the figure a newest-snapshot summary strip shows for when its snapshot was collected: the
+    /// <see cref="CollectionLocal"/> text, or <paramref name="emptyText"/> (the strip's own no-value marker) when
+    /// there is no snapshot, so an empty strip names no time. The twin of Lite's <c>SnapshotCollectedText</c>.</summary>
+    public static string SnapshotCollected(DateTime? collectionTimeUtc, string emptyText)
+        => collectionTimeUtc.HasValue ? CollectionLocal(collectionTimeUtc.Value) : emptyText;
 }
 
 /// <summary>One collected query_stats snapshot for a single (database, query_hash) — Lite's

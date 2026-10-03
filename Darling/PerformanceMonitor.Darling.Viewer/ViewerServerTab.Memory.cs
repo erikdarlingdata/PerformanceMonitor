@@ -154,6 +154,7 @@ public partial class ViewerServerTab
             AvailablePageFileText.Text = "--";
             MemoryStateText.Text = "--";
             SqlMemoryModelText.Text = "--";
+            MemoryCollectedText.Text = HistoryTime.SnapshotCollected(null, "--");
             return;
         }
 
@@ -167,6 +168,9 @@ public partial class ViewerServerTab
         AvailablePageFileText.Text = PageFileText(stats.AvailablePageFileMb, _server.EngineEdition);
         MemoryStateText.Text = SystemMemoryStateText(stats.SystemMemoryState, _server.EngineEdition);
         SqlMemoryModelText.Text = MemoryModelText(stats.SqlMemoryModel);
+        /* #4966: the strip draws the newest snapshot of the whole store, not the chart window below it, so it says when that
+           snapshot was collected. */
+        MemoryCollectedText.Text = HistoryTime.SnapshotCollected(stats.CollectionTime, "--");
     }
 
     private static string FormatMb(double mb)
