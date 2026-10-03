@@ -263,9 +263,11 @@ export function windowNoteText(data) {
 
 /* A read's answer with its window note composed in the browser's zone (windowNoteText), so every strip that draws
    `truncation_note` (the grids' floor note, the Queries tab's noteKey notes, the hand-built composites) shows one
-   clock. Anything but a data answer, and a data answer whose note is already as it should be, comes back as it is. */
+   clock. An empty envelope carries the note too, in its `data` (#4966: a grid that looked and found nothing says where its
+   data starts, so a new server's empty week does not read as a quiet one). Anything but a data or empty answer, and an answer
+   whose note is already as it should be, comes back as it is. */
 function localizeWindowNote(res) {
-  if (!res || res.kind !== "data") return res;
+  if (!res || (res.kind !== "data" && res.kind !== "empty")) return res;
   const note = windowNoteText(res.data);
   return note === null || note === res.data.truncation_note ? res : { ...res, data: { ...res.data, truncation_note: note } };
 }

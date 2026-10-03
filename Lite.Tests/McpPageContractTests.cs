@@ -118,12 +118,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         AssertPage(cut, "deadlocks", returnedKey: "deadlocks_returned", returned: 2, truncated: true);
         Assert.Equal("deadlock_time_desc", cut.GetProperty("order").GetString());
         /* Newest-first: the page is the two newest, so its oldest stamp is 10 minutes back, not 20. */
-        Assert.Equal(Stamp(now.AddMinutes(-10)), cut.GetProperty("oldest_returned_deadlock_time").GetString());
-        Assert.Equal(Stamp(now), cut.GetProperty("newest_returned_deadlock_time").GetString());
+        Assert.Equal(Stamp(now.AddMinutes(-10)) + "Z", cut.GetProperty("oldest_returned_deadlock_time").GetString());
+        Assert.Equal(Stamp(now) + "Z", cut.GetProperty("newest_returned_deadlock_time").GetString());
 
         var whole = Parse(await McpBlockingTools.GetDeadlocks(_dataService, _serverManager, ServerName, 24, 3));
         AssertPage(whole, "deadlocks", "deadlocks_returned", returned: 3, truncated: false);
-        Assert.Equal(Stamp(now.AddMinutes(-20)), whole.GetProperty("oldest_returned_deadlock_time").GetString());
+        Assert.Equal(Stamp(now.AddMinutes(-20)) + "Z", whole.GetProperty("oldest_returned_deadlock_time").GetString());
     }
 
     /// <summary>
@@ -217,8 +217,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         var cut = Parse(await McpBlockingTools.GetBlockedProcessReports(_dataService, _serverManager, ServerName, 24, 3));
         AssertPage(cut, "reports", "reports_returned", returned: 3, truncated: true);
         Assert.Equal("event_time_desc", cut.GetProperty("order").GetString());
-        Assert.Equal(Stamp(now.AddMinutes(-20)), cut.GetProperty("oldest_returned_event_time").GetString());
-        Assert.Equal(Stamp(now), cut.GetProperty("newest_returned_event_time").GetString());
+        Assert.Equal(Stamp(now.AddMinutes(-20)) + "Z", cut.GetProperty("oldest_returned_event_time").GetString());
+        Assert.Equal(Stamp(now) + "Z", cut.GetProperty("newest_returned_event_time").GetString());
 
         var whole = Parse(await McpBlockingTools.GetBlockedProcessReports(_dataService, _serverManager, ServerName, 24, 4));
         AssertPage(whole, "reports", "reports_returned", returned: 4, truncated: false);
@@ -399,8 +399,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(0, lifted.GetProperty("dismissed_excluded_count").GetInt64());
         Assert.Equal(2, lifted.GetProperty("alerts").EnumerateArray().Count(a => a.GetProperty("dismissed").GetBoolean()));
         /* The lifted page reaches the dismissed rows, which are the OLDEST two; the default page cannot. */
-        Assert.Equal(Stamp(now.AddMinutes(-20)), lifted.GetProperty("oldest_returned_alert_time").GetString());
-        Assert.Equal(Stamp(now.AddMinutes(-10)), whole.GetProperty("oldest_returned_alert_time").GetString());
+        Assert.Equal(Stamp(now.AddMinutes(-20)) + "Z", lifted.GetProperty("oldest_returned_alert_time").GetString());
+        Assert.Equal(Stamp(now.AddMinutes(-10)) + "Z", whole.GetProperty("oldest_returned_alert_time").GetString());
     }
 
     /// <summary>
@@ -474,8 +474,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(5000.0, top.GetProperty("completions")[0].GetProperty("duration_ms").GetDouble());
         /* Under a duration RANKING the two stamps bound the slowest run, not the reach — both are the
            80-minute-old row, and the description says that is what they mean here. */
-        Assert.Equal(Stamp(now.AddMinutes(-80)), top.GetProperty("oldest_returned_event_time").GetString());
-        Assert.Equal(Stamp(now.AddMinutes(-80)), top.GetProperty("newest_returned_event_time").GetString());
+        Assert.Equal(Stamp(now.AddMinutes(-80)) + "Z", top.GetProperty("oldest_returned_event_time").GetString());
+        Assert.Equal(Stamp(now.AddMinutes(-80)) + "Z", top.GetProperty("newest_returned_event_time").GetString());
 
         var whole = Parse(await McpLongQueryTools.GetLongQueryCompletions(_dataService, _serverManager, ServerName, 24, 5));
         AssertPage(whole, "completions", "completions_returned", returned: 5, truncated: false);
@@ -492,11 +492,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var cut = Parse(await McpPlanCorrectionTools.GetPlanCorrections(_dataService, _serverManager, ServerName, 24, 2));
         AssertPage(cut, "recommendations", "recommendations_returned", returned: 2, truncated: true);
         Assert.Equal("collection_time_desc", cut.GetProperty("order").GetString());
-        Assert.Equal(Stamp(now.AddMinutes(-5)), cut.GetProperty("oldest_returned_collection_time").GetString());
+        /* #4966: where the page's rows stop describes the window, so it prints as UTC with the Z: the same instant as before. */
+        Assert.Equal(Stamp(now.AddMinutes(-5)) + "Z", cut.GetProperty("oldest_returned_collection_time").GetString());
 
         var whole = Parse(await McpPlanCorrectionTools.GetPlanCorrections(_dataService, _serverManager, ServerName, 24, 3));
         AssertPage(whole, "recommendations", "recommendations_returned", returned: 3, truncated: false);
-        Assert.Equal(Stamp(now.AddMinutes(-10)), whole.GetProperty("oldest_returned_collection_time").GetString());
+        Assert.Equal(Stamp(now.AddMinutes(-10)) + "Z", whole.GetProperty("oldest_returned_collection_time").GetString());
     }
 
     [Fact]
@@ -737,7 +738,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(6, all.GetProperty("snapshots_returned").GetInt32());
         Assert.False(all.GetProperty("truncated").GetBoolean());
         Assert.Equal("collection_time_desc", all.GetProperty("order").GetString());
-        Assert.Equal(Stamp(t), all.GetProperty("newest_returned_collection_time").GetString());
+        Assert.Equal(Stamp(t) + "Z", all.GetProperty("newest_returned_collection_time").GetString());
 
         var head = Row(rows, 60);
         Assert.True(head.GetProperty("is_head_blocker").GetBoolean());

@@ -79,7 +79,18 @@ public sealed class DataStartBannerSurfaceTests : IDisposable
     public static TheoryData<QueryWindowRelation> EventRelations => new()
     {
         QueryWindowRelation.SystemHealthEvents,
-        QueryWindowRelation.DefaultTraceEvents
+        QueryWindowRelation.DefaultTraceEvents,
+        // #4966: the Blocking tab's grids filter on the report's event_time and the deadlock's deadlock_time, both UTC.
+        QueryWindowRelation.BlockedProcessReports,
+        QueryWindowRelation.Deadlocks
+    };
+
+    /// <summary>The Blocking tab's two capped lists: the newest <see cref="LocalDataService.BlockedProcessReportGridCap"/> reports
+    /// and the newest <see cref="LocalDataService.DeadlockGridCap"/> deadlocks.</summary>
+    public static TheoryData<QueryWindowRelation> BlockingRelations => new()
+    {
+        QueryWindowRelation.BlockedProcessReports,
+        QueryWindowRelation.Deadlocks
     };
 
     private static DateTime Naive(DateTime instant) => DateTime.SpecifyKind(instant, DateTimeKind.Unspecified);
@@ -100,7 +111,8 @@ public sealed class DataStartBannerSurfaceTests : IDisposable
     {
         var table = LocalDataService.QueryWindowRelationView(relation)[2..];
         var times = relation is QueryWindowRelation.SystemHealthEvents or QueryWindowRelation.DefaultTraceEvents
-            ? new Dictionary<string, DateTime> { ["event_time"] = at, ["collection_time"] = collectedAt ?? at }
+                or QueryWindowRelation.BlockedProcessReports or QueryWindowRelation.Deadlocks
+            ? new Dictionary<string, DateTime> { [LocalDataService.QueryWindowRelationTimeColumn(relation)] = at, ["collection_time"] = collectedAt ?? at }
             : new Dictionary<string, DateTime> { [LocalDataService.QueryWindowRelationTimeColumn(relation)] = at };
 
         using var connection = _duckDb.CreateConnection();
@@ -207,10 +219,11 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     /// </summary>
     private async Task<(bool Visible, string Text, DateTime Oldest, int Rows, bool Probed)> CappedBannerOverTheRealReadAsync<T>(
         Func<LocalDataService, Task<List<T>>> read, QueryWindowRelation relation, int rowCap, Func<T, DateTime> rowTimeUtc,
-        DateTime startUtc, DateTime endUtc)
+        DateTime startUtc, DateTime endUtc, Func<DateTime?>? cappedSourceOldestUtc = null)
     {
         var service = new LocalDataService(_duckDb);
         var rows = await read(service);
+        var cappedSource = cappedSourceOldestUtc?.Invoke();
         var probedFloor = await service.GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc, ServerClock.Utc);
         var (visible, text, probed) = OnStaThread(() =>
         {
@@ -223,7 +236,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
                     probeStepRan = true;
                     ServerTab.ApplyWindowFloorToBanner(banner, probedFloor, startUtc, TimeZoneInfo.Utc);
                     return Task.CompletedTask;
-                }).GetAwaiter().GetResult();
+                }, cappedSource).GetAwaiter().GetResult();
             return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text, probeStepRan);
         });
         return (visible, text, rows.Count == 0 ? default : rows.Min(rowTimeUtc), rows.Count, probed);
@@ -386,6 +399,193 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
 
         Assert.True(visible);
         Assert.Contains(Naive(firstRun).ToString("yyyy-MM-dd HH:", CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <paramref name="everySeconds"/>-spaced rows of one of the Blocking tab's event tables (or the DMV snapshots), in one
+    /// statement: <paramref name="firstUtc"/> to <paramref name="lastUtc"/>, every time column of the table at the row's time
+    /// (an event's two clocks agree), every other required column a placeholder of its type, so every row of the DMV table
+    /// carries the same blocked/blocking pair (the merge keeps one of a pair per minute).
+    /// </summary>
+    private async Task SeedManyAsync(QueryWindowRelation relation, DateTime firstUtc, DateTime lastUtc, int everySeconds)
+    {
+        var table = LocalDataService.QueryWindowRelationView(relation)[2..];
+        var timeColumns = new[] { "collection_time", "event_time", "deadlock_time" };
+
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var readLock = _duckDb.AcquireReadLock();
+        var names = new List<string>();
+        var values = new List<string>();
+        using (var info = connection.CreateCommand())
+        {
+            info.CommandText = $"SELECT name, type, \"notnull\", pk, dflt_value IS NOT NULL FROM pragma_table_info('{table}') ORDER BY cid";
+            using var reader = await info.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                var name = reader.GetString(0);
+                var pk = reader.GetBoolean(3);
+                var isTime = Array.IndexOf(timeColumns, name) >= 0;
+                if (!isTime && (!(reader.GetBoolean(2) || pk) || reader.GetBoolean(4)))
+                {
+                    continue;
+                }
+
+                names.Add(name);
+                values.Add(isTime ? "g.t"
+                    : pk ? $"{_nextId} + row_number() OVER ()"
+                    : PlaceholderFor(name, reader.GetString(1), false, new Dictionary<string, DateTime>(), firstUtc));
+            }
+        }
+
+        using var insert = connection.CreateCommand();
+        insert.CommandText = $"INSERT INTO {table} ({string.Join(", ", names)}) SELECT {string.Join(", ", values)} " +
+            $"FROM generate_series({Literal(firstUtc)}, {Literal(lastUtc)}, INTERVAL {everySeconds} SECOND) AS g(t)";
+        _nextId += await insert.ExecuteNonQueryAsync() + 1;
+    }
+
+    private static int GridCapOf(QueryWindowRelation relation) =>
+        relation == QueryWindowRelation.BlockedProcessReports ? LocalDataService.BlockedProcessReportGridCap : LocalDataService.DeadlockGridCap;
+
+    /// <summary>A Blocking-tab grid's read at its cap and the capped-grid banner step over it (#4966), the read being the grid's own:
+    /// the Blocked Process Reports read hands the step the oldest event time of the XE or DMV read that filled its page.</summary>
+    private Task<(bool Visible, string Text, DateTime Oldest, int Rows, bool Probed)> CappedBlockingBannerAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc)
+    {
+        if (relation == QueryWindowRelation.Deadlocks)
+        {
+            return CappedBannerOverTheRealReadAsync(
+                service => service.GetRecentDeadlocksAsync(ServerId, fromDate: startUtc, toDate: endUtc),
+                relation, LocalDataService.DeadlockGridCap, ServerTab.DeadlockRowTimeUtc, startUtc, endUtc);
+        }
+
+        DateTime? cappedSource = null;
+        return CappedBannerOverTheRealReadAsync(
+            async service =>
+            {
+                var read = await service.ReadRecentBlockedProcessReportsAsync(ServerId, fromDate: startUtc, toDate: endUtc);
+                cappedSource = read.CappedSourceStartUtc;
+                return read.Rows;
+            },
+            relation, LocalDataService.BlockedProcessReportGridCap, ServerTab.BlockedProcessRowTimeUtc, startUtc, endUtc, () => cappedSource);
+    }
+
+    /// <summary>
+    /// #4966: the Blocked Process Reports and Deadlocks grids read the newest 200 and 50. A read that fills its page is worded from
+    /// its oldest row, whatever the store covers (the collector ran for 30 days here): the rows older than it are not in the grid.
+    /// The read's row count is the constant the notice caps by (<see cref="LocalDataService.BlockedProcessReportGridCap"/>,
+    /// <see cref="LocalDataService.DeadlockGridCap"/>), and the step needs no probe.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(BlockingRelations))]
+    public async Task BlockingGrids_AReadThatFillsItsCap_NamesItsOldestRow_AlsoOverARangeTheStoreCovers(QueryWindowRelation relation)
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var cap = GridCapOf(relation);
+        await SeedLogRunsAsync(LocalDataService.QueryWindowRelationCollector(relation)!, end.AddDays(-30), end, 60);
+        await SeedManyAsync(relation, end.AddMinutes(-cap - 40), end.AddMinutes(-2), 60);
+
+        var (visible, text, oldest, rows, probed) = await CappedBlockingBannerAsync(relation, end.AddDays(-1), end);
+
+        Assert.Equal(cap, rows);
+        Assert.False(probed);
+        Assert.True(visible);
+        Assert.Equal(Since(oldest), text);
+    }
+
+    /// <summary>A range of an hour, no longer than the probe's 90-minute slack, whose grid still fills its cap: the notice names the
+    /// oldest row with no slack (it is later than the range's start), and no probe runs.</summary>
+    [Theory]
+    [MemberData(nameof(BlockingRelations))]
+    public async Task BlockingGrids_AOneHourRange_WhoseGridHitsItsCap_ShowsTheNoticeAtItsOldestRow_WithNoSlack(QueryWindowRelation relation)
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var cap = GridCapOf(relation);
+        await SeedLogRunsAsync(LocalDataService.QueryWindowRelationCollector(relation)!, end.AddDays(-30), end, 60);
+        await SeedManyAsync(relation, end.AddMinutes(-50), end.AddMinutes(-1), 10);
+
+        var (visible, text, oldest, rows, probed) = await CappedBlockingBannerAsync(relation, end.AddHours(-1), end);
+
+        Assert.Equal(cap, rows);
+        Assert.False(probed);
+        Assert.True(oldest > end.AddHours(-1));
+        Assert.True(visible);
+        Assert.Equal(Since(oldest), text);
+    }
+
+    /// <summary>A page under its cap holds everything the store has in the range: the coverage notice stands, and a range the
+    /// collector covered (it ran for 30 days) shows none.</summary>
+    [Theory]
+    [MemberData(nameof(BlockingRelations))]
+    public async Task BlockingGrids_AReadUnderItsCap_KeepsTheCoverageNotice(QueryWindowRelation relation)
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedLogRunsAsync(LocalDataService.QueryWindowRelationCollector(relation)!, end.AddDays(-30), end, 60);
+        await SeedManyAsync(relation, end.AddHours(-5), end.AddHours(-1), 600);
+
+        var (visible, text, _, rows, probed) = await CappedBlockingBannerAsync(relation, end.AddDays(-7), end);
+
+        Assert.InRange(rows, 1, GridCapOf(relation) - 1);
+        Assert.True(probed);
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>The grid also lists the always-on DMV blocking snapshots, so with XE collection off (no blocked process threshold)
+    /// a range that starts before the DMV collector's first run names where the DMV collector's coverage starts.</summary>
+    [Fact]
+    public async Task BlockedProcessReports_XeCollectionOff_ARangeStartingBeforeTheDmvCollector_NamesTheDmvCoverage()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var started = end.AddDays(-2);
+        await SeedLogRunsAsync("dmv_blocking_snapshot", started, end, 60);
+
+        var (visible, text) = await BannerForAsync(QueryWindowRelation.BlockedProcessReports, end.AddDays(-7), end);
+
+        Assert.True(visible);
+        Assert.Equal(Since(started), text);
+    }
+
+    /// <summary>XE collection off, and a range the DMV collector covered from before its start: nothing is missing, no notice.</summary>
+    [Fact]
+    public async Task BlockedProcessReports_XeCollectionOff_ARangeTheDmvCollectorCovers_ShowsNoNotice()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedLogRunsAsync("dmv_blocking_snapshot", end.AddDays(-30), end, 60);
+
+        var (visible, text) = await BannerForAsync(QueryWindowRelation.BlockedProcessReports, end.AddDays(-7), end);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>
+    /// A full read can merge to FEWER rows than its cap. The DMV read fetches the cap plus the XE rows in hand, and the merge keeps
+    /// one DMV row per blocked/blocking pair per minute, so 200 snapshots of one pair taken every 10 seconds merge to about 34
+    /// rows while the DMV read stopped at its LIMIT and left older snapshots out. The merged count (under the cap) cannot show
+    /// it, so the notice is worded from the oldest snapshot the DMV read returned, over a range the collector covers.
+    /// </summary>
+    [Fact]
+    public async Task BlockedProcessReports_ADmvReadThatFillsItsCap_MergingToFewerRows_NamesItsOldestSnapshot()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var cap = LocalDataService.BlockedProcessReportGridCap;
+        await SeedLogRunsAsync("dmv_blocking_snapshot", end.AddDays(-30), end, 60);
+        var last = end.AddMinutes(-5);
+        var first = last.AddSeconds(-10 * (cap - 1));
+        await SeedManyAsync(QueryWindowRelation.DmvBlockingSnapshots, first, last, 10);
+
+        var (visible, text, _, rows, probed) = await CappedBlockingBannerAsync(QueryWindowRelation.BlockedProcessReports, end.AddDays(-7), end);
+
+        Assert.InRange(rows, 1, cap - 1);
+        Assert.False(probed);
+        Assert.True(visible);
+        Assert.Equal(Since(first), text);
     }
 
     private static DateTime NowUtcSeconds()
@@ -628,6 +828,9 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [InlineData(QueryWindowRelation.TraceFlags, "v_trace_flags", "trace_flags", "capture_time")]
     [InlineData(QueryWindowRelation.LongQueryCompletions, "v_long_query_completions", "long_query_completions", "collection_time")]
     [InlineData(QueryWindowRelation.JobHistory, "v_job_history", "job_history", "collection_time")]
+    [InlineData(QueryWindowRelation.BlockedProcessReports, "v_blocked_process_reports", "blocked_process_report", "event_time")]
+    [InlineData(QueryWindowRelation.Deadlocks, "v_deadlocks", "deadlocks", "deadlock_time")]
+    [InlineData(QueryWindowRelation.DmvBlockingSnapshots, "v_dmv_blocking_snapshots", "dmv_blocking_snapshot", "collection_time")]
     public void Relations_NameTheViewCollectorAndTimeColumnTheirGridReads(
         QueryWindowRelation relation, string view, string? collector, string timeColumn)
     {

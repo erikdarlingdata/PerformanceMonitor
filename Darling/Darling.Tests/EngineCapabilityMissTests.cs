@@ -530,15 +530,22 @@ public sealed class EngineCapabilityReadWiringTests
             CollectorEngineCapability.NotCollectedMessage("probe", edition, kind, collectorName) is not null));
     }
 
-    /// <summary>get_finops lives in DarlingMcpFinOpsTools.cs and asks its question through a helper in the
-    /// partial DarlingMcpFinOpsTools.HighImpact.cs; the scan reads both parts as one source.</summary>
+    /// <summary>get_finops lives in DarlingMcpFinOpsTools.cs and its views ask their questions through helpers in the
+    /// partials DarlingMcpFinOpsTools.Utilization.cs (set A) and DarlingMcpFinOpsTools.HighImpact.cs (set B); the scan
+    /// reads all the parts as one source.</summary>
     [Fact]
-    public void GetFinOps_IsWiredToQueryStats_AcrossThePartialClass()
+    public void GetFinOps_IsWiredToItsViewsCollectors_AcrossThePartialClass()
     {
         var wired = WiredReads(DarlingMcp);
 
         Assert.True(wired.TryGetValue("get_finops", out var collectors), "get_finops has no wired read");
-        Assert.Equal(new[] { "query_stats" }, collectors!.ToArray());
+        /* Set A views: append their collectors here. */
+        var setA = new[] { "memory_stats" };
+        /* Set B views: append their collectors here. */
+        var setB = new[] { "query_stats" };
+
+        /* Exact: the sorted union of the per-set lists equals the scanned set, so an unlisted collector still fails. */
+        Assert.Equal(setA.Concat(setB).OrderBy(c => c, StringComparer.Ordinal).ToArray(), collectors!.OrderBy(c => c, StringComparer.Ordinal).ToArray());
     }
 
     /// <summary>

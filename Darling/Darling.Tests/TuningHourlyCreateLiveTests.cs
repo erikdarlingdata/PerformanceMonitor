@@ -32,6 +32,7 @@ public sealed class TuningHourlyCreateLiveTests
         "idx_query_stats_server_hash_time",
         "idx_query_store_stats_server_db_query_plan_time",
         PgTableTuning.ForcePlanFailuresIndexName,
+        PgTableTuning.LegacyRowIndexName,
         "idx_store_metrics_kind_name_time",
     };
 
