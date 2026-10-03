@@ -669,6 +669,9 @@ VALUES ($1, $2, $3, $4, 'appdb', 1000, 10, 100, 9000, 0, 0, 0, NULL)");
         SetField(worker, "_logger", NullLogger<DarlingWorker>.Instance);
         SetField(worker, "_postgres", postgres);
         SetField(worker, "_scheduleOverrides", SingleEnabledCollectorOverrides(serverId));
+        /* A collector that fails here lands in RunOneAsync's general arm, which records the first failure of each
+           kind in this log. An uninitialized worker skips the field initializer, so the log is set here. */
+        SetField(worker, "_collectorFaultStacks", new CollectorFaultStackLog());
 
         var runner = new DarlingCollectorRunner(
             postgres, new CollectorDeltaCalculator(), NullLogger<DarlingCollectorRunner>.Instance);
