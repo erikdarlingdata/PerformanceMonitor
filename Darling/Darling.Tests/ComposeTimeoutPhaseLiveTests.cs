@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -64,11 +65,12 @@ public sealed class ComposeTimeoutPhaseLiveTests
         {
             await setup.OpenAsync(ct);
             await PgMigrations.MigrateAsync(setup, ct);
-            await using var update = new NpgsqlCommand("UPDATE config.config_service SET compose_statement_timeout_seconds = 5 WHERE id = 1", setup);
+            await using var update = new NpgsqlCommand("INSERT INTO config.config_service (id, updated_at, compose_statement_timeout_seconds) VALUES (1, now() AT TIME ZONE 'UTC', 5) ON CONFLICT (id) DO UPDATE SET compose_statement_timeout_seconds = EXCLUDED.compose_statement_timeout_seconds", setup);
             await update.ExecuteNonQueryAsync(ct);
         }
 
         await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+        Assert.Equal(5, await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(store, ct));
         await using var locker = new NpgsqlConnection(scratch.ConnectionString);
         await locker.OpenAsync(ct);
         await using var tx = await locker.BeginTransactionAsync(ct);
@@ -79,9 +81,12 @@ public sealed class ComposeTimeoutPhaseLiveTests
                 await lockCommand.ExecuteNonQueryAsync(ct);
             }
 
+            var clock = Stopwatch.StartNew();
             var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(
                 store, (JsonObject)JsonNode.Parse(PanelJson)!, ct, null, DarlingWebEndpoints.ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true);
+            clock.Stop();
 
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(60), $"The 5 s compose timeout plus headroom should bound the measure query; it took {clock.Elapsed.TotalSeconds:F1} s.");
             Assert.Equal("57014", outcome.AuthorSqlState);
             Assert.Equal(DarlingWebEndpoints.StatementTimeoutText, outcome.Error);
         }
