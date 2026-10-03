@@ -167,7 +167,7 @@ public sealed class FinOpsOptimizationGoldenLiveTests
         await Wait(connection, ct, now.AddHours(-30), "OUTSIDE_WAIT", 5000, 50);
 
         /* Expensive queries: six statements, top-N 4 (Echo is cut by it). Two tie on CPU (Beta and Gamma, 4000 ms). One carries a plan, one has
-           a long text (Delta, 260 characters, so the 200-character preview cut shows), one has a zero sample interval and is dropped, and one has only a tiny CPU figure. */
+           a long text (Delta, 267 characters, so the 200-character preview cut shows), one has a zero sample interval and is dropped, and one has only a tiny CPU figure. */
         await Query(connection, ct, now.AddHours(-2), "Alpha", "0xE1", "SELECT alpha", 9_000_000, 30, 1000, 60, null, "<ShowPlanXML />");
         await Query(connection, ct, now.AddHours(-3), "Alpha", "0xE1", "SELECT alpha", 2_500_000, 7, 400, 60, null, null);
         await Query(connection, ct, now.AddHours(-2), "Beta", "0xE2", "SELECT beta", 4_000_000, 8, 300, 60, null, null);
