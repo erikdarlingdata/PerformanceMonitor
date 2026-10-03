@@ -59,6 +59,7 @@
          synthetic plan, so the "every operator warning knows its operator" pin runs against the same
          shapes PerformanceStudio's own test relies on. -->
     <None Include="Fixtures\OriginPlans\*.sqlplan" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\FinOpsDatabaseResources\golden.json" CopyToOutputDirectory="PreserveNewest" />
     <!-- #2538: a REAL auto_explain block, captured from a PostgreSQL container with auto_explain
          loaded. Real rather than hand-written because the parser's whole job is the log's exact
          shape - the tab-indented continuation, the %Q query id in the prefix, the JSON body - and a
