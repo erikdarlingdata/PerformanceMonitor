@@ -1461,8 +1461,15 @@ internal static class PgDisplay
        UTC; the text is the display zone to the second, and the UTC instant beside it is what the column sorts by. */
 
     /// <summary>The snapshot time text every grid below shows: the display zone, to the second.</summary>
-    internal static string SnapshotTime(DateTime? utc) =>
-        utc is { } value ? ViewerTimeHelper.FormatForDisplay(value, "yyyy-MM-dd HH:mm:ss") : string.Empty;
+    internal static string SnapshotTime(DateTime? utc)
+    {
+        if (!utc.HasValue)
+        {
+            return string.Empty;
+        }
+
+        return ViewerTimeHelper.FormatForDisplay(utc.Value, "yyyy-MM-dd HH:mm:ss");
+    }
 
     /// <summary>One extension of the Extensions grid, with the time of the snapshot that row came from.</summary>
     internal sealed class ExtensionRow
