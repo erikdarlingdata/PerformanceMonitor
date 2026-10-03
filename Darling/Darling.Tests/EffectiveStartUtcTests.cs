@@ -60,13 +60,19 @@ public sealed class EffectiveStartUtcTests
 
     /// <summary>
     /// #4966: where a page's rows stop (<c>oldest_returned_collection_time</c>) describes the window the page covers, so
-    /// the two tools that carry it beside <c>effective_start</c> print it the same way: UTC, with the Z, through the
-    /// shared formatter, in both apps. The newest row's time is the row's own and keeps the store's form.
+    /// every tool that carries it prints it the same way as <c>effective_start</c>: UTC, with the Z, through the shared
+    /// formatter, in both apps (the two window tools, <c>get_collection_log</c> in its one-server and fleet forms, and
+    /// <c>get_plan_corrections</c>, which writes null for a page that holds no recommendation). The newest row's time is
+    /// the row's own and keeps the store's form.
     /// </summary>
     [Theory]
     [InlineData("Lite/Mcp/McpSessionTools.cs", 1)]
     [InlineData("Lite/Mcp/McpWaitTools.cs", 1)]
+    [InlineData("Lite/Mcp/McpHealthTools.cs", 2)]
+    [InlineData("Lite/Mcp/McpPlanCorrectionTools.cs", 1)]
     [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSessionTools.cs", 2)]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", 2)]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs", 1)]
     public void EveryOldestReturnedWrite_OfTheWindowTools_RoutesThroughTheSharedFormatter(string path, int expectedWrites)
     {
         var source = RepoFile.ReadRepoFile(path.Split('/'));
@@ -77,6 +83,9 @@ public sealed class EffectiveStartUtcTests
             .ToList();
 
         Assert.Equal(expectedWrites, writes.Count);
-        Assert.All(writes, line => Assert.StartsWith("oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(", line, StringComparison.Ordinal));
+        Assert.All(writes, line => Assert.True(
+            line.StartsWith("oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(", StringComparison.Ordinal)
+                || line.StartsWith("oldest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(", StringComparison.Ordinal),
+            $"{path} writes oldest_returned_collection_time without the shared formatter: {line}"));
     }
 }

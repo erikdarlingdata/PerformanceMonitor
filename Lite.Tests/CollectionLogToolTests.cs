@@ -341,6 +341,35 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
             root.GetProperty("runs")[2].GetProperty("collection_time").GetString()![..19]);
     }
 
+    /// <summary>
+    /// #4966: where the page's rows stop (<c>oldest_returned_collection_time</c>) describes the window the page covers,
+    /// so it prints as UTC with the trailing Z like <c>effective_start</c> does, on the one-server form and the fleet
+    /// form alike. The newest row's time is the row's own and keeps the store's naive form. The instant is the same one
+    /// the field always named: only its zone marker is new.
+    /// </summary>
+    [Fact]
+    public async Task TheOldestReturnedTime_EndsInZ_OnBothForms_AndTheNewestKeepsTheRowsOwnForm()
+    {
+        var service = new LocalDataService(_duckDb);
+        var oldest = DateTime.UtcNow.AddMinutes(-30);
+        var newest = DateTime.UtcNow.AddMinutes(-10);
+        await SeedLogAsync("query_store", oldest);
+        await SeedLogAsync("deadlocks", newest);
+
+        var oneServer = JsonDocument.Parse(await McpHealthTools.GetCollectionLog(service, _serverManager, ServerName, 24, 10)).RootElement;
+        var fleet = JsonDocument.Parse(await McpHealthTools.GetCollectionLog(service, _serverManager, null, 24, 10)).RootElement;
+
+        foreach (var root in new[] { oneServer, fleet })
+        {
+            var oldestText = root.GetProperty("oldest_returned_collection_time").GetString()!;
+            Assert.EndsWith("Z", oldestText, StringComparison.Ordinal);
+            Assert.True(Math.Abs((DateTime.Parse(oldestText, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal) - oldest).TotalSeconds) < 2,
+                $"oldest_returned_collection_time {oldestText} should name the oldest run, {oldest:o}");
+            Assert.False(root.GetProperty("newest_returned_collection_time").GetString()!.EndsWith('Z'),
+                "a row's own time keeps the store's naive form");
+        }
+    }
+
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
         if (_seedConn is null)

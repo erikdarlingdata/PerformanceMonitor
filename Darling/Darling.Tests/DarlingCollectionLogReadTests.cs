@@ -304,6 +304,9 @@ public sealed class DarlingCollectionLogReadTests
             */
             Assert.Equal(t30, reachRoot.GetProperty("oldest_returned_collection_time").GetDateTime());
             Assert.Equal(t10, reachRoot.GetProperty("newest_returned_collection_time").GetDateTime());
+            /* #4966: the oldest one describes the window the page covers, so it names its instant as UTC, with the Z; the newest is a row's own time. */
+            Assert.EndsWith("Z", reachRoot.GetProperty("oldest_returned_collection_time").GetString(), StringComparison.Ordinal);
+            Assert.False(reachRoot.GetProperty("newest_returned_collection_time").GetString()!.EndsWith('Z'));
 
             /* The last row really is neither, so the two assertions above cannot be passing by coincidence. */
             var last = reachRoot.GetProperty("runs")[2].GetProperty("collection_time").GetDateTime();

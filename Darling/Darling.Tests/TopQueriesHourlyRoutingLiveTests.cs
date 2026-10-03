@@ -578,7 +578,8 @@ public sealed class TopQueriesHourlyRoutingLiveTests
                 hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, as_of: asOf));
             Assert.Equal("hourly", doc.RootElement.GetProperty("tier_used").GetString());
             var note = doc.RootElement.GetProperty("precision_note").GetString()!;
-            Assert.Contains("the hourly rollup is materialized only to " + WindowStart.AddHours(2).ToString("o") + "; nothing after it was read", note, StringComparison.Ordinal);
+            /* #4966: the instants the note names are UTC with the Z, as effective_start is. */
+            Assert.Contains("the hourly rollup is materialized only to " + PerformanceMonitor.Common.McpHelpers.FormatEffectiveStart(WindowStart.AddHours(2)) + "; nothing after it was read", note, StringComparison.Ordinal);
             Assert.DoesNotContain("included whole", note, StringComparison.Ordinal);
             /* An end cut is not a start cut: the window flag stays about the start. */
             Assert.False(doc.RootElement.GetProperty("window_truncated").GetBoolean());

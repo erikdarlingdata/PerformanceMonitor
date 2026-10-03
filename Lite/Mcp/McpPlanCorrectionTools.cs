@@ -122,7 +122,8 @@ public sealed class McpPlanCorrectionTools
                    held no recommendation rows and only the tuning snapshot answered. */
                 recommendations_returned = page.Count,
                 truncated,
-                oldest_returned_collection_time = page.Count == 0 ? null : page.Min(r => r.CollectionTime).ToString("o"),
+                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                oldest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime)),
                 newest_returned_collection_time = page.Count == 0 ? null : page.Max(r => r.CollectionTime).ToString("o"),
                 order = "collection_time_desc",
                 recommendations,

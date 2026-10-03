@@ -492,11 +492,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var cut = Parse(await McpPlanCorrectionTools.GetPlanCorrections(_dataService, _serverManager, ServerName, 24, 2));
         AssertPage(cut, "recommendations", "recommendations_returned", returned: 2, truncated: true);
         Assert.Equal("collection_time_desc", cut.GetProperty("order").GetString());
-        Assert.Equal(Stamp(now.AddMinutes(-5)), cut.GetProperty("oldest_returned_collection_time").GetString());
+        /* #4966: where the page's rows stop describes the window, so it prints as UTC with the Z: the same instant as before. */
+        Assert.Equal(Stamp(now.AddMinutes(-5)) + "Z", cut.GetProperty("oldest_returned_collection_time").GetString());
 
         var whole = Parse(await McpPlanCorrectionTools.GetPlanCorrections(_dataService, _serverManager, ServerName, 24, 3));
         AssertPage(whole, "recommendations", "recommendations_returned", returned: 3, truncated: false);
-        Assert.Equal(Stamp(now.AddMinutes(-10)), whole.GetProperty("oldest_returned_collection_time").GetString());
+        Assert.Equal(Stamp(now.AddMinutes(-10)) + "Z", whole.GetProperty("oldest_returned_collection_time").GetString());
     }
 
     [Fact]

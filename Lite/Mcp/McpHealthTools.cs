@@ -983,7 +983,8 @@ public sealed class McpHealthTools
                     thing only under time ordering, and the ranked page would report the wrong ends while
                     the time-ordered test kept passing.
                 */
-                oldest_returned_collection_time = rows.Min(r => r.CollectionTime).ToString("o"),
+                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.CollectionTime)),
                 newest_returned_collection_time = rows.Max(r => r.CollectionTime).ToString("o"),
                 /* Which ordering this page came back in, stated rather than left to be inferred from the
                    filters sent. Same two tokens as Darling's twin, from the shared constants. */
@@ -1098,7 +1099,8 @@ public sealed class McpHealthTools
                 hours_back = hours,
                 run_count = rows.Count,
                 truncated,
-                oldest_returned_collection_time = rows.Min(r => r.CollectionTime).ToString("o"),
+                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.CollectionTime)),
                 newest_returned_collection_time = rows.Max(r => r.CollectionTime).ToString("o"),
                 order = min_duration_ms is null
                     ? McpHelpers.CollectionLogOrderNewestFirst

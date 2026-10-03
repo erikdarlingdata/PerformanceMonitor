@@ -482,7 +482,235 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         AssertCovered(root, now.AddHours(-1));
     }
 
+    /* ───────────────────────── an empty answer says where the data starts too ───────────────────────── */
+
+    /// <summary>
+    /// #4966: an empty answer over a window the store does not reach back to is NOT a true negative: nothing in the
+    /// part of the window the store holds says nothing about the part it does not. The four tools wrote the three
+    /// window keys on a data answer only, so the empty one read as "nothing happened". An <c>empty</c> status now
+    /// carries <c>effective_start</c>, <c>window_truncated</c> and <c>truncation_note</c> under <c>hints</c>, the shape
+    /// <c>get_query_store_top</c>'s module miss already uses, with the data answer's values and wording. A status that
+    /// says the collector never ran (<c>not_collected</c>) keeps its shape.
+    /// </summary>
+    [Fact]
+    public async Task GetActiveQueries_AnEmptyWindowTheCollectorRanIn_PastCoverage_CarriesTheFloorAndTheNote()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        /* The collector ran every half hour for two days and nothing was running at any of them: the store holds
+           the last two days of a 7-day ask, and nothing but the three keys says the older five were never read. */
+        await SeedLogRunsAsync("query_snapshots", now.AddDays(-2), now, everyMinutes: 30);
+
+        var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 168));
+
+        AssertTruncatedAt(EmptyHints(root), now.AddDays(-2), "query_snapshots");
+    }
+
+    [Fact]
+    public async Task GetActiveQueries_AFilteredMiss_PastCoverage_CarriesTheSameKeys()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        var floor = now.AddDays(-2);
+        await SeedSnapshotAsync(floor);
+        await SeedSnapshotAsync(now.AddDays(-1));
+
+        var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 168, database_name: "NoSuchDb"));
+
+        Assert.Contains("matched database_name 'NoSuchDb'", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        /* The probe is deliberately unfiltered: the floor is a property of the table, not of the filter that missed. */
+        AssertTruncatedAt(EmptyHints(root), floor, "query_snapshots");
+    }
+
+    [Fact]
+    public async Task GetActiveQueries_AFilteredMiss_OverACoveredRange_SaysCovered()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedSnapshotAsync(now.AddDays(-8));
+        await SeedSnapshotAsync(now.AddDays(-2));
+
+        var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 168, database_name: "NoSuchDb"));
+
+        AssertCovered(EmptyHints(root), now.AddHours(-168));
+    }
+
+    [Fact]
+    public async Task GetActiveQueries_AnEmptyOneHourWindow_MakesNoProbeCall_AndNamesItsOwnStart()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        /* A run 35 minutes in: the probe would have answered that run and put effective_start 25 minutes after the start. */
+        await SeedLogRunsAsync("query_snapshots", now.AddMinutes(-35), now.AddMinutes(-35), everyMinutes: 30);
+
+        var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 1));
+
+        AssertCovered(EmptyHints(root), now.AddHours(-1));
+    }
+
+    [Fact]
+    public async Task GetWaitingTasks_AnEmptyWindowTheCollectorRanIn_PastCoverage_CarriesTheFloorAndTheNote()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        /* Nothing waits for hours on a quiet server: the collector ran, and no task was waiting at any of its runs. */
+        await SeedLogRunsAsync("waiting_tasks", now.AddDays(-2), now, everyMinutes: 30);
+
+        var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 168));
+
+        AssertTruncatedAt(EmptyHints(root), now.AddDays(-2), "waiting_tasks");
+    }
+
+    [Fact]
+    public async Task GetWaitingTasks_AnEmptyWindow_OverACoveredRange_SaysCovered()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedLogRunsAsync("waiting_tasks", now.AddHours(-168 - 1), now, everyMinutes: 30);
+
+        var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 168));
+
+        AssertCovered(EmptyHints(root), now.AddHours(-168));
+    }
+
+    [Fact]
+    public async Task GetWaitingTasks_AnEmptyOneHourWindow_MakesNoProbeCall_AndNamesItsOwnStart()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedLogRunsAsync("waiting_tasks", now.AddMinutes(-35), now.AddMinutes(-35), everyMinutes: 30);
+
+        var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 1));
+
+        AssertCovered(EmptyHints(root), now.AddHours(-1));
+    }
+
+    [Fact]
+    public async Task GetQueryStoreRegressions_AnAllClear_TheBaselineStartsInsideTheSevenDays_CarriesTheFloorAndTheNote()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        var floor = now.AddDays(-3);
+        /* The same average on both sides: no regression, so the answer is the all-clear. The baseline holds three of
+           its seven days, and a bare "no query regressed" would read as a verdict on all seven. */
+        await SeedRegressionAsync(floor, queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 1000, intervalId: 2);
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24));
+
+        Assert.Contains("this IS the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
+        Assert.Contains("baseline_start", EmptyHints(root).GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetQueryStoreRegressions_AFilteredMiss_CarriesTheSameKeys_AndTheFloorIsTheTablesNotTheFilters()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        var floor = now.AddDays(-3);
+        await SeedRegressionAsync(floor, queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 3000, intervalId: 2);
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, database_name: "NoSuchDb"));
+
+        AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
+    }
+
+    [Fact]
+    public async Task GetQueryStoreRegressions_AnEmptyRecentSide_CarriesTheSameKeys()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        var floor = now.AddDays(-3);
+        /* History from before the recent window and nothing inside it: the answer names the missing recent side. */
+        await SeedRegressionAsync(floor, queryId: 1, avgUs: 1000, intervalId: 1);
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24));
+
+        Assert.Contains("nothing collected IN the last 24 hour(s)", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
+    }
+
+    [Fact]
+    public async Task GetQueryStoreRegressions_AnAllClear_OverACoveredBaseline_SaysCovered_AtTheBaselinesStart()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedRegressionAsync(now.AddDays(-9), queryId: 2, avgUs: 1000, intervalId: 3);
+        await SeedRegressionAsync(now.AddDays(-3), queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 1000, intervalId: 2);
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24));
+
+        AssertCovered(EmptyHints(root), now.AddHours(-24 - 7 * 24));
+    }
+
+    [Fact]
+    public async Task GetQueryHeatmap_AFilteredMiss_PastCoverage_CarriesTheFloorAndTheNote()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        var floor = now.AddDays(-2);
+        await SeedQueryStatsAsync(floor, "0xH1");
+        await SeedQueryStatsAsync(now.AddDays(-1), "0xH2");
+
+        var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 168, database_name: "NoSuchDb"));
+
+        Assert.Contains("a database_name filter matching nothing collected", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        AssertTruncatedAt(EmptyHints(root), floor, "query_stats");
+    }
+
+    [Fact]
+    public async Task GetQueryHeatmap_AFilteredMiss_OverACoveredRange_SaysCovered()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedQueryStatsAsync(now.AddDays(-8), "0xH0");
+        await SeedQueryStatsAsync(now.AddDays(-2), "0xH1");
+
+        var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 168, database_name: "NoSuchDb"));
+
+        AssertCovered(EmptyHints(root), now.AddHours(-168));
+    }
+
+    [Fact]
+    public async Task GetQueryHeatmap_AnEmptyOneHourWindow_MakesNoProbeCall_AndNamesItsOwnStart()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedQueryStatsAsync(now.AddMinutes(-35), "0xH1");
+
+        var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 1, database_name: "NoSuchDb"));
+
+        AssertCovered(EmptyHints(root), now.AddHours(-1));
+    }
+
+    [Fact]
+    public async Task GetQueryHeatmap_NothingCollectedInTheWindow_CarriesTheSameKeys()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        /* Query stats from outside the window and none inside it: the grid has no columns, and says where the data starts. */
+        await SeedQueryStatsAsync(now.AddDays(-30), "0xH0");
+
+        var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 1));
+
+        Assert.Contains("nothing collected IN the last 1 hour(s)", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        AssertCovered(EmptyHints(root), now.AddHours(-1));
+    }
+
     /* ───────────────────────── assertions ───────────────────────── */
+
+    /// <summary>
+    /// The window read of an <c>empty</c> status: the three keys sit under <c>hints</c> (the shape the Query Store module
+    /// miss uses), so the assertions below read them off that object, exactly as they read a data answer's root.
+    /// </summary>
+    private static JsonElement EmptyHints(JsonElement root)
+    {
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        return root.GetProperty("hints");
+    }
 
     /// <summary>The store's data starts at <paramref name="floor"/>, later than the window asked for.</summary>
     private static void AssertTruncatedAt(JsonElement root, DateTime floor, string table)
