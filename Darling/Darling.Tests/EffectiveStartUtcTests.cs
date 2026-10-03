@@ -57,4 +57,26 @@ public sealed class EffectiveStartUtcTests
         Assert.True(routed >= minimumRouted, $"{file} writes effective_start through McpHelpers.FormatEffectiveStart {routed} time(s); expected at least {minimumRouted}.");
         Assert.All(others, line => Assert.Equal("effective_start = (string?)null,", line));
     }
+
+    /// <summary>
+    /// #4966: where a page's rows stop (<c>oldest_returned_collection_time</c>) describes the window the page covers, so
+    /// the two tools that carry it beside <c>effective_start</c> print it the same way: UTC, with the Z, through the
+    /// shared formatter, in both apps. The newest row's time is the row's own and keeps the store's form.
+    /// </summary>
+    [Theory]
+    [InlineData("Lite/Mcp/McpSessionTools.cs", 1)]
+    [InlineData("Lite/Mcp/McpWaitTools.cs", 1)]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSessionTools.cs", 2)]
+    public void EveryOldestReturnedWrite_OfTheWindowTools_RoutesThroughTheSharedFormatter(string path, int expectedWrites)
+    {
+        var source = RepoFile.ReadRepoFile(path.Split('/'));
+        var writes = source
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("oldest_returned_collection_time = ", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(expectedWrites, writes.Count);
+        Assert.All(writes, line => Assert.StartsWith("oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(", line, StringComparison.Ordinal));
+    }
 }

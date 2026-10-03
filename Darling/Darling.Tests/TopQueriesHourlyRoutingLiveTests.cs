@@ -258,6 +258,11 @@ public sealed class TopQueriesHourlyRoutingLiveTests
             using var emptyDoc = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
                 hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, min_dop: 5, as_of: asOf));
             Assert.Contains("still holds (from", emptyDoc.RootElement.GetProperty("message").GetString() ?? emptyDoc.RootElement.ToString());
+
+            /* #4966: the miss message names the floor in the text effective_start prints beside it (UTC, with the Z). */
+            var missStart = emptyDoc.RootElement.GetProperty("hints").GetProperty("effective_start").GetString()!;
+            Assert.EndsWith("Z", missStart, StringComparison.Ordinal);
+            Assert.Contains("still holds (from " + missStart + ";", emptyDoc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.True(emptyDoc.RootElement.ToString().Contains("window_truncated", StringComparison.Ordinal));
 
             bodySucceeded = true;

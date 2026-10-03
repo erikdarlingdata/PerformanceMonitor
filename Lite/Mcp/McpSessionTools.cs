@@ -72,9 +72,9 @@ public sealed class McpSessionTools
                view the page was read from, and is deliberately unfiltered by database_name / blocking_only: the
                floor is a property of the table. */
             var requestedStart = windowEnd.AddHours(-hours_back);
-            var notice = McpQueryTools.WindowNotice(
-                await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QuerySnapshots, resolved.ServerId, requestedStart, windowEnd),
-                requestedStart, "query_snapshots");
+            var notice = await McpQueryTools.WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QuerySnapshots, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "query_snapshots");
 
             /* The page's own (capture, session) pairs, so a victim can say whether its blocker made the page. */
             var onPage = new HashSet<(DateTime, int)>(shown.Select(r => (r.CollectionTime, r.SessionId)));
@@ -129,7 +129,9 @@ public sealed class McpSessionTools
                 snapshots_returned = result.Count,
                 truncated,
                 order = "collection_time_desc",
-                oldest_returned_collection_time = shown[^1].CollectionTime.ToString("o"),
+                /* #4966: where the page's rows stop describes the window the page covers, so it prints like
+                   effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(shown[^1].CollectionTime),
                 newest_returned_collection_time = shown[0].CollectionTime.ToString("o"),
                 queries = result
             }, McpHelpers.JsonOptions);

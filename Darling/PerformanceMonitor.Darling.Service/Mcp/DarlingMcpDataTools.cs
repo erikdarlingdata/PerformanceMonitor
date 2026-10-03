@@ -675,7 +675,7 @@ public sealed class DarlingMcpDataTools
                     return McpHelpers.Status(
                         "empty",
                         windowTruncated
-                            ? $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the part of the window raw query_stats still holds (from {effectiveStart:o}; the older part was not read), so this is that part's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan."
+                            ? $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the part of the window raw query_stats still holds (from {McpHelpers.FormatEffectiveStart(effectiveStart)}; the older part was not read), so this is that part's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan."
                             : $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
                         new
                         {
@@ -1140,7 +1140,7 @@ public sealed class DarlingMcpDataTools
                         ? "The window reaches further back than this server's raw query_store_stats retains, so the "
                           + "older part of it was not read. This tool reads the raw tier only: the corrected rollups "
                           + "carry no query_id or plan_id, and plan identity is what it exists to return."
-                        : QueryStoreIntervalWide.HistoryNote(effectiveStart, tablePlan.Value.StartBound, manyServers: false),
+                        : QueryStoreTableNote(effectiveStart, tablePlan.Value.StartBound),
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -1149,6 +1149,17 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.FormatError("get_query_store_top", ex);
         }
     }
+
+    /// <summary>
+    /// #4966: <c>get_query_store_top</c>'s interval-table note, which names the window's start in the one text the
+    /// <c>effective_start</c> beside it prints (<see cref="McpHelpers.FormatEffectiveStart"/>: UTC, with the Z). The
+    /// start is formatted here, once, and handed to <see cref="QueryStoreIntervalWide.HistoryNote"/> as text, so the
+    /// field and the sentence cannot spell the instant two ways. The web shows the instant in the browser's zone by
+    /// finding the field's exact text in the note; a plain "o" of the interval table's naive floor has no Z, so the
+    /// note was drawn in bare UTC above a grid of local times.
+    /// </summary>
+    internal static string QueryStoreTableNote(DateTime effectiveStart, QueryStoreIntervalWide.WideStartBound bound) =>
+        QueryStoreIntervalWide.HistoryNote(McpHelpers.FormatEffectiveStart(effectiveStart), bound, manyServers: false);
 
     /* ═══════════════════════════ discovery / health ═══════════════════════════ */
 

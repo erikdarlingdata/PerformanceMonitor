@@ -472,9 +472,9 @@ public sealed class McpQueryTools
                compares against a shorter baseline than baseline_is names, and nothing else on the payload says so.
                The probe reads v_query_store_stats, the view both sides of the comparison read, and is unfiltered by
                database_name (the floor is a property of the table). */
-            var notice = WindowNotice(
-                await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd),
-                baselineStart, "query_store_stats",
+            var notice = await WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd),
+                baselineStart, windowEnd, "query_store_stats",
                 "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.");
 
             return JsonSerializer.Serialize(new
@@ -700,9 +700,9 @@ public sealed class McpQueryTools
                The probe reads v_query_stats, the view the cells came from, and is unfiltered by database_name (the
                floor is a property of the table). */
             var requestedStart = windowEnd.AddHours(-hours_back);
-            var notice = WindowNotice(
-                await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, resolved.ServerId, requestedStart, windowEnd),
-                requestedStart, "query_stats");
+            var notice = await WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "query_stats");
 
             return JsonSerializer.Serialize(new
             {
@@ -1060,6 +1060,18 @@ public sealed class McpQueryTools
                     + (tail is null ? "" : " " + tail)
                 : null);
     }
+
+    /// <summary>
+    /// #4966: <see cref="WindowNotice"/> with its coverage probe, which a window no longer than <see cref="TruncationSlack"/>
+    /// never needs (<see cref="CanWindowBeTruncated"/>: the probe cannot find a floor later than the start by more than
+    /// the slack, so the answer is covered whatever it would read). The four tools that carry the three window-floor
+    /// keys all go through here, so a read of an hour or less makes no probe call, as the Lite tabs' banner step does.
+    /// The probe is passed as a delegate and is not started for a short window. A short window's
+    /// <c>effective_start</c> is the start that was asked for, because no floor was read.
+    /// </summary>
+    internal static async Task<McpWindowNotice> WindowNoticeAsync(
+        Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null) =>
+        WindowNotice(CanWindowBeTruncated(requestedStart, windowEnd) ? await probe() : null, requestedStart, table, tail);
 
     /// <summary>The three window-floor keys <see cref="WindowNotice"/> answers, as the values a tool writes into its payload.</summary>
     internal readonly record struct McpWindowNotice(string EffectiveStart, bool WindowTruncated, string? TruncationNote);

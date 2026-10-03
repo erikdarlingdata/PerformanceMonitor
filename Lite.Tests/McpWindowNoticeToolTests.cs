@@ -384,6 +384,104 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         AssertCovered(root, now.AddHours(-24));
     }
 
+    /* ───────────────────────── a window the slack covers needs no probe ───────────────────────── */
+
+    /// <summary>
+    /// #4966: a window of 90 minutes or less can never be called cut by the store (the probe cannot find a floor later
+    /// than the start by more than the slack), so the helper does not start the probe for one, as the Lite tabs' banner
+    /// step does not. The answer is the covered one, at the start that was asked for.
+    /// </summary>
+    [Theory]
+    [InlineData(60)]
+    [InlineData(90)]
+    public async Task WindowNoticeAsync_AWindowOf90MinutesOrLess_MakesNoProbeCall_AndIsCovered(int minutes)
+    {
+        var end = DateTime.UtcNow;
+        var start = end.AddMinutes(-minutes);
+        var probes = 0;
+
+        var notice = await McpQueryTools.WindowNoticeAsync(
+            () => { probes++; return Task.FromResult<DateTime?>(Naive(start.AddMinutes(30))); },
+            start, end, "query_snapshots");
+
+        Assert.Equal(0, probes);
+        Assert.False(notice.WindowTruncated);
+        Assert.Null(notice.TruncationNote);
+        Assert.Equal(PerformanceMonitor.Common.McpHelpers.FormatEffectiveStart(start), notice.EffectiveStart);
+    }
+
+    [Fact]
+    public async Task WindowNoticeAsync_AWindowPastTheSlack_AsksTheProbeOnce_AndReadsItsFloor()
+    {
+        var end = DateTime.UtcNow;
+        var start = end.AddHours(-2);
+        var floor = Naive(start.AddMinutes(100));
+        var probes = 0;
+
+        var notice = await McpQueryTools.WindowNoticeAsync(
+            () => { probes++; return Task.FromResult<DateTime?>(floor); },
+            start, end, "query_snapshots");
+
+        Assert.Equal(1, probes);
+        Assert.True(notice.WindowTruncated);
+        Assert.Equal(PerformanceMonitor.Common.McpHelpers.FormatEffectiveStart(floor), notice.EffectiveStart);
+    }
+
+    /// <summary>
+    /// The first row sits 35 minutes into the hour: the probe would have answered that row and put effective_start 25
+    /// minutes after the window's start. With no probe the answer is the window's own start. The page cut never used
+    /// the probe: the newest two rows, with the older of them named by oldest_returned_collection_time (UTC, with the Z).
+    /// </summary>
+    [Fact]
+    public async Task GetActiveQueries_AOneHourWindow_MakesNoProbeCall_AndACappedPageStillNamesItsOldestRow()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedSnapshotAsync(now.AddMinutes(-35));
+        await SeedSnapshotAsync(now.AddMinutes(-25));
+        await SeedSnapshotAsync(now.AddMinutes(-15));
+        await SeedSnapshotAsync(now.AddMinutes(-5));
+
+        var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 1, limit: 2));
+
+        AssertCovered(root, now.AddHours(-1));
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.Equal(2, root.GetProperty("snapshots_returned").GetInt32());
+        AssertOldestReturned(root, now.AddMinutes(-15));
+    }
+
+    [Fact]
+    public async Task GetWaitingTasks_AOneHourWindow_MakesNoProbeCall_AndACappedPageStillNamesItsOldestRow()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedWaitingTaskAsync(now.AddMinutes(-35));
+        await SeedWaitingTaskAsync(now.AddMinutes(-25));
+        await SeedWaitingTaskAsync(now.AddMinutes(-15));
+        await SeedWaitingTaskAsync(now.AddMinutes(-5));
+
+        var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 1, limit: 2));
+
+        AssertCovered(root, now.AddHours(-1));
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.Equal(2, root.GetProperty("tasks_returned").GetInt32());
+        AssertOldestReturned(root, now.AddMinutes(-15));
+    }
+
+    [Fact]
+    public async Task GetQueryHeatmap_AOneHourWindow_MakesNoProbeCall_AndIsCoveredAtTheWindowsStart()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedQueryStatsAsync(now.AddMinutes(-35), "0xH1");
+        await SeedQueryStatsAsync(now.AddMinutes(-15), "0xH2");
+
+        var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 1));
+
+        Assert.True(root.GetProperty("cell_count").GetInt32() > 0);
+        AssertCovered(root, now.AddHours(-1));
+    }
+
     /* ───────────────────────── assertions ───────────────────────── */
 
     /// <summary>The store's data starts at <paramref name="floor"/>, later than the window asked for.</summary>
@@ -412,6 +510,15 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         Assert.True(Math.Abs((effectiveStart - requestedStart).TotalMinutes) < 2,
             $"effective_start {effectiveStart:o} should be the requested start {requestedStart:o}");
         AssertNoReachKey(root);
+    }
+
+    /// <summary>#4966: where the page's rows stop names the oldest row it returned, as UTC with the Z.</summary>
+    private static void AssertOldestReturned(JsonElement root, DateTime oldestRow)
+    {
+        var text = root.GetProperty("oldest_returned_collection_time").GetString()!;
+        Assert.EndsWith("Z", text, StringComparison.Ordinal);
+        Assert.True(Math.Abs((ParseUtc(text) - oldestRow).TotalSeconds) < 2,
+            $"oldest_returned_collection_time {text} should be the oldest returned row {oldestRow:o}");
     }
 
     /// <summary>

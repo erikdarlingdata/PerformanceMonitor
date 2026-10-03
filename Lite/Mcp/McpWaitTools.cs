@@ -231,9 +231,9 @@ public sealed class McpWaitTools
                quiet server, so its first row can come long after the store began covering the window), from the
                same view the page was read from. */
             var requestedStart = windowEnd.AddHours(-hours_back);
-            var notice = McpQueryTools.WindowNotice(
-                await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.WaitingTasks, resolved.ServerId, requestedStart, windowEnd),
-                requestedStart, "waiting_tasks");
+            var notice = await McpQueryTools.WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.WaitingTasks, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "waiting_tasks");
 
             var result = page.Select(r => new
             {
@@ -261,7 +261,9 @@ public sealed class McpWaitTools
                 truncation_note = notice.TruncationNote,
                 tasks_returned = page.Count,
                 truncated,
-                oldest_returned_collection_time = page.Min(r => r.CollectionTime).ToString("o"),
+                /* #4966: where the page's rows stop describes the window the page covers, so it prints like
+                   effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime)),
                 newest_returned_collection_time = page.Max(r => r.CollectionTime).ToString("o"),
                 order = "collection_time_desc",
                 tasks = result
