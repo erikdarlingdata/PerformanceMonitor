@@ -138,7 +138,7 @@ public sealed class ScratchDatabaseSweepLiveTests
     }
 
     /// <summary>
-    /// A test that fails before it can dispose, or a rig factory that throws between the create and the return, leaves
+    /// A test that fails before it can dispose, or a setup helper that throws between the create and the return, leaves
     /// its database undisposed. The process-exit drain exists for exactly that; this leaves one undisposed on purpose
     /// and runs the drain's own drop for just that name (the drain itself would also drop the databases other tests,
     /// running in parallel, still use).
