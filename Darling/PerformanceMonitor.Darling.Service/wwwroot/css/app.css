@@ -1098,3 +1098,18 @@ pre.code {
 .liveness-block { max-width: 720px; }
 .liveness-notes { margin: 0.5rem 0 0; padding-left: 1.2rem; font-size: 0.82rem; color: var(--muted); }
 .liveness-notes li { margin: 0.2rem 0; }
+
+/* FinOps page (#4843): tab strip, banner, bars and heat cells shared by the sub-tabs. */
+.finops-tabs { flex-wrap: wrap; overflow-x: visible; }
+.finops-body { display: block; }
+.finops-panel { min-width: 0; }
+.finops-banner { padding: 0.6rem 0.9rem; margin-bottom: 1rem; border-left: 4px solid var(--muted); background: var(--card); border-radius: var(--radius-sm); }
+.finops-banner.healthy { border-left-color: var(--band-healthy); }
+.finops-banner.warning { border-left-color: var(--band-warning); }
+.finops-banner.critical { border-left-color: var(--band-critical); }
+.finops-bar { display: inline-block; height: 0.6rem; min-width: 2px; background: var(--muted); border-radius: var(--radius-sm); vertical-align: middle; }
+.finops-bar-track { display: inline-block; width: 8rem; background: var(--lighter); border-radius: var(--radius-sm); }
+.finops-heat { text-align: right; font-variant-numeric: tabular-nums; }
+.finops-heat.heat-1 { background: rgba(255, 213, 79, 0.12); }
+.finops-heat.heat-2 { background: rgba(255, 213, 79, 0.28); }
+.finops-heat.heat-3 { background: rgba(229, 115, 115, 0.35); }

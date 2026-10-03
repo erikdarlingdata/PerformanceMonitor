@@ -135,6 +135,7 @@ public sealed class RepoFileAdoptionTests
            that follows it, so the CODE spelling is told apart from the same words inside the arms' own
            comments, which continue on the same line. */
         "DarlingPgOperationalAlertTests.cs",
+        "FinOpsPageShellTests.cs",
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         /* #3735: its source pin anchors the collection-health statement's tail across three line breaks
            (`FROM v_collection_log` / `WHERE` / `AND` / `GROUP BY`) and the CreateCommand line on the
