@@ -49,6 +49,10 @@ public sealed class PgTableTuningTests
            The column list is pinned against the read itself in ForcePlanFailuresAccessPathTests. */
         Assert.Contains("idx_query_store_stats_server_time_forcing ON collect.query_store_stats (server_id, collection_time DESC) INCLUDE (database_name, query_id, plan_id, force_failure_count, is_forced_plan, plan_forcing_type, last_force_failure_reason)", sql, StringComparison.Ordinal);
 
+        /* #4972: the legacy-row check's partial index — only rows with no interval start, so it is empty on a
+           field store. The statement text is exact: the predicate is what keeps it empty. */
+        Assert.Contains("CREATE INDEX IF NOT EXISTS idx_query_store_stats_server_time_null_start ON collect.query_store_stats (server_id, collection_time) WHERE interval_start_time_utc IS NULL", sql, StringComparison.Ordinal);
+
         /* #3934: the store-metrics latest read's skip-scan index — the (kind, name) prefix for the loose
            index scan that walks distinct objects, the full three columns for each object's per-key
            ORDER BY metric_time DESC LIMIT 1 probe. No INCLUDE: DarlingStoreMetricsReader.StoreMetricsLatestSql
@@ -58,7 +62,7 @@ public sealed class PgTableTuningTests
 
         /* Every remaining index is idempotent (no-op where a field box already hand-applied it, or a prior
            start made it); every #4247 drop is idempotent the same way (IF EXISTS no-ops once it is gone). */
-        Assert.Equal(4, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* server_hash_time; server_db_query_plan_time; #3573 forced-plan covering index; #3934 store-metrics skip-scan index */
+        Assert.Equal(5, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* server_hash_time; server_db_query_plan_time; #3573 forced-plan covering index; #4972 legacy-row partial index; #3934 store-metrics skip-scan index */
         Assert.Equal(5, CountOccurrences(sql, "DROP INDEX IF EXISTS"));         /* #4247: the two handle indexes + the three composer covering indexes */
         Assert.DoesNotContain("CREATE INDEX ON", sql, StringComparison.Ordinal);
 
@@ -78,7 +82,7 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collect.query_plan_dim SET (autovacuum_vacuum_insert_scale_factor", sql, StringComparison.Ordinal);
 
-        Assert.Equal(14, PgTableTuning.Statements.Count);   /* unchanged by #4247: 5 CREATEs became 5 guarded DROPs in place, so the list is still 4 CREATE INDEX + 5 DROP INDEX + 5 ALTER TABLE */
+        Assert.Equal(15, PgTableTuning.Statements.Count);   /* 5 CREATE INDEX (#4972 added the legacy-row partial index) + 5 DROP INDEX + 5 ALTER TABLE */
     }
 
     /// <summary>

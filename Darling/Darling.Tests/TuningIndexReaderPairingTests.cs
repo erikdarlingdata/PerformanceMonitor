@@ -36,6 +36,7 @@ public sealed class TuningIndexReaderPairingTests
             ["idx_query_stats_server_hash_time"] = ("server_id", DarlingStoredPlanReader.QueryStatsPlanXmlByHashSql),
             ["idx_query_store_stats_server_db_query_plan_time"] = ("server_id", DarlingStoredPlanReader.QueryStorePlanTextSql),
             ["idx_query_store_stats_server_time_forcing"] = ("server_id", DarlingAlertReadAdapter.ForcePlanFailuresSql),
+            [PgTableTuning.LegacyRowIndexName] = ("server_id", QueryStoreIntervalWide.HasLegacyRowSql),
             ["idx_store_metrics_kind_name_time"] = ("object_kind", DarlingStoreMetricsReader.StoreMetricsLatestSql),
         };
 
@@ -63,9 +64,9 @@ public sealed class TuningIndexReaderPairingTests
     {
         var created = CreatedIndexes().ToList();
 
-        /* Sanity: this must actually see the four indexes the list ships today (#4247 dropped the other
-           five), or the regex/list drifted and the pairing check below would be vacuously true. */
-        Assert.Equal(4, created.Count);
+        /* Sanity: this must actually see the five indexes the list ships today (#4247 dropped five others),
+           or the regex/list drifted and the pairing check below would be vacuously true. */
+        Assert.Equal(5, created.Count);
 
         foreach (var (indexName, leadingColumn) in created)
         {
