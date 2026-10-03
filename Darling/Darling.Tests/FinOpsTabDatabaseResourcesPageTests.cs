@@ -27,12 +27,10 @@ public sealed class FinOpsTabDatabaseResourcesPageTests
     [Fact]
     public void TheTabReadsGetFinOpsWithTheDatabaseResourcesViewWindow()
     {
+        // The exact call is a no-noise guard: a limit would only cap the top lists, which this tab does not show.
         const string call = "readTool(\"get_finops\", { server, view: \"database_resources\", hours: HOURS }, ctx && ctx.signal)";
         var tab = Tab();
         Assert.Contains(call, tab);
-        Assert.DoesNotContain("limit", call);
-        var line = tab.Split('\n').First(l => l.Contains("readTool(\"get_finops\""));
-        Assert.DoesNotContain("limit", line);
     }
 
     [Fact]
@@ -43,14 +41,36 @@ public sealed class FinOpsTabDatabaseResourcesPageTests
         Assert.DoesNotContain("LIMIT", tab);
     }
 
+    private static string RowSlice()
+    {
+        var source = ToolSource();
+        var start = source.IndexOf("internal static object DatabaseResourcesRow(", System.StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var end = source.IndexOf("\n    };", start, System.StringComparison.Ordinal);
+        Assert.True(end > start);
+        return source.Substring(start, end - start);
+    }
+
     [Fact]
-    public void EveryShownColumnKeyIsEmittedByTheTool()
+    public void EveryShownColumnKeyIsEmittedByTheDatabaseResourcesRow()
     {
         var keys = Regex.Matches(Tab(), "\\bkey: \"([a-z_]+)\"").Select(m => m.Groups[1].Value).ToList();
-        Assert.NotEmpty(keys);
-        var source = ToolSource();
+        var row = RowSlice();
         foreach (var key in keys)
-            Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", source);
+            Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", row);
+        var emitted = Regex.Matches(row, "(?m)^\\s+[a-z_]+ = ").Count;
+        Assert.Equal(11, emitted);
+        Assert.Equal(emitted, keys.Count);
+    }
+
+    [Fact]
+    public void TheColumnsAreInTheDesktopGridOrder()
+    {
+        var keys = Regex.Matches(Tab(), "\\bkey: \"([a-z_]+)\"").Select(m => m.Groups[1].Value);
+        Assert.Equal(
+            "database_name,cpu_time_ms,cpu_share_pct,logical_reads,physical_reads,logical_writes,execution_count,io_read_mb,io_write_mb,io_share_pct,io_stall_ms",
+            string.Join(",", keys));
+        Assert.Contains("{ key: \"io_stall_ms\", label: \"I/O stall\", format: \"ms\" }", Tab());
     }
 
     [Fact]
@@ -58,17 +78,15 @@ public sealed class FinOpsTabDatabaseResourcesPageTests
     {
         var tab = Tab();
         Assert.Contains("(data.rows || []).length", tab);
-        Assert.Contains("data.hours_back", tab);
-        Assert.Contains("\" databases\"", tab);
-        Assert.Contains("\"1 database\"", tab);
+        Assert.Contains("(n === 1 ? \"1 database\" : n + \" databases\") + \", last \" + (data.hours_back ?? HOURS) + \" hours\";", tab);
     }
 
     [Fact]
-    public void TheNoticeReadsTheTruncatedFlagAndTheDatabaseCount()
+    public void TheTruncatedNoticeNamesTheShownCountThenTheTotal()
     {
-        var tab = Tab();
-        Assert.Contains("data.truncated", tab);
-        Assert.Contains("data.database_count", tab);
+        Assert.Contains(
+            "text += data.truncated ? \"; the top \" + n + \" of \" + data.database_count + \" databases by CPU, then I/O.\" : \".\";",
+            Tab());
     }
 
     [Fact]

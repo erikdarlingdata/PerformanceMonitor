@@ -24,15 +24,15 @@ const COLUMNS = [
   { key: "execution_count", label: "Executions", format: "int" },
   { key: "io_read_mb", label: "I/O read MB", format: "num2" },
   { key: "io_write_mb", label: "I/O write MB", format: "num2" },
-  { key: "io_stall_ms", label: "I/O stall", format: "int" },
   { key: "io_share_pct", label: "I/O %", format: "num2" },
+  { key: "io_stall_ms", label: "I/O stall", format: "ms" },
 ];
 
 // The count, the window and the truncation all come from the answer.
 function noticeText(data) {
   const n = (data.rows || []).length;
   let text = (n === 1 ? "1 database" : n + " databases") + ", last " + (data.hours_back ?? HOURS) + " hours";
-  text += data.truncated ? "; the " + n + " with the most CPU of " + data.database_count + "." : ".";
+  text += data.truncated ? "; the top " + n + " of " + data.database_count + " databases by CPU, then I/O." : ".";
   return text;
 }
 
