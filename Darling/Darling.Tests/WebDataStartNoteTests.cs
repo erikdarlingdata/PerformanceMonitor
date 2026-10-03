@@ -72,7 +72,7 @@ public sealed class WebDataStartNoteTests
         {
             Assert.True(dispatch.ContainsKey(read), read + " is not a read the web mirror serves");
             Assert.True(
-                DataWindowFloor.Source.TryForCollectorTable(table, out _),
+                WebDataStartNote.TryGetSource(table, out _),
                 read + " names " + table + ", which the data-start probe cannot read by index");
             Assert.Contains("\"" + read + "\"", tabs, StringComparison.Ordinal);
         }
@@ -174,19 +174,23 @@ public sealed class WebDataStartNoteTests
         Assert.Same(NoOldest, await Run("get_waiting_tasks", NoOldest));
         Assert.Same(BadOldest, await Run("get_waiting_tasks", BadOldest));
 
-        // Every other listed read, with the same cap fields on its answer.
-        foreach (var read in WebDataStartNote.TableByRead.Keys.Where(k => k != "get_waiting_tasks"))
+        // Every listed read the cap does not cut (the capped list names its own), with the same cap fields on its answer.
+        foreach (var read in WebDataStartNote.TableByRead.Keys.Where(k => !WebDataStartNote.NewestFirstCappedReads.Contains(k)))
         {
             Assert.Same(CappedTasks, await Run(read, CappedTasks));
         }
     }
 
-    /// <summary>The capped rule's premises, in the source: the list is the one read ordered by time, newest first, and
-    /// the tool answers the two fields the rule reads (the live tests run the real tool).</summary>
+    /// <summary>The capped rule's premises, in the source: each list is a read ordered by time, newest first, and
+    /// the tool answers the two fields the rule reads (the live tests run the real tool). The collection log and the
+    /// PostgreSQL configuration changes join the waiting tasks (#4966): <c>WebDataStartNoteConfigAndLogTests</c> pins
+    /// theirs.</summary>
     [Fact]
-    public void TheCappedRule_IsOneReadOrderedByTime_WhoseToolAnswersTheTwoFieldsItReads()
+    public void TheCappedRule_IsThreeReadsOrderedByTime_WhoseToolsAnswerTheFieldsItReads()
     {
-        Assert.Equal(["get_waiting_tasks"], WebDataStartNote.NewestFirstCappedReads.ToArray());
+        Assert.Equal(
+            ["get_collection_log", "get_pg_server_config_changes", "get_waiting_tasks"],
+            WebDataStartNote.NewestFirstCappedReads.Order(StringComparer.Ordinal).ToArray());
         foreach (var read in WebDataStartNote.NewestFirstCappedReads)
         {
             Assert.Contains(read, WebDataStartNote.TableByRead.Keys);

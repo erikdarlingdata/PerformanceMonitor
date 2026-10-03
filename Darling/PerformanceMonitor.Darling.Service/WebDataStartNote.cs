@@ -75,7 +75,63 @@ internal static class WebDataStartNote
         ["get_pg_kernel_stats"] = "pg_kernel_stats",
         ["get_pg_lock_stats"] = "pg_lock_stats",
         ["get_pg_predicate_stats"] = "pg_predicate_stats",
+
+        /* The change histories (#4966): each diffs the snapshots a config collector writes, so the rows' own times
+           can never come before the table's coverage, and the notice says how far back the snapshots go. The
+           trace-flag history is the third grid on the SQL Server Config Changes tab, and the PostgreSQL one is the
+           Configuration tab's Changes grid. */
+        ["get_server_config_changes"] = "server_config",
+        ["get_database_config_changes"] = "database_config",
+        ["get_trace_flag_changes"] = "trace_flags",
+        ["get_pg_server_config_changes"] = "pg_server_config",
+
+        /* The raw run log under Collection Health on a SQL Server page and on Overview for PostgreSQL (#4966): not a
+           collector table, so its source is the collection log's own (TryGetSource). */
+        ["get_collection_log"] = CollectionLogTable,
     };
+
+    /// <summary>
+    /// The name <see cref="TableByRead"/> gives the collection log. It is not a collector table
+    /// (<see cref="DataWindowFloor.Source.TryForCollectorTable"/> refuses it), so <see cref="TryGetSource"/> answers
+    /// it with <see cref="DataWindowFloor.Source.ForCollectionLog"/>: its edge is the log's own fixed horizon.
+    /// </summary>
+    internal const string CollectionLogTable = "collection_log";
+
+    /// <summary>
+    /// The probe source for a table <see cref="TableByRead"/> names: the collection log's own source for
+    /// <see cref="CollectionLogTable"/>, the collector table's for every other name, false for a table the probe
+    /// cannot read by index.
+    /// </summary>
+    internal static bool TryGetSource(string table, out DataWindowFloor.Source source)
+    {
+        if (string.Equals(table, CollectionLogTable, StringComparison.Ordinal))
+        {
+            source = DataWindowFloor.Source.ForCollectionLog();
+            return true;
+        }
+
+        return DataWindowFloor.Source.TryForCollectorTable(table, out source);
+    }
+
+    /// <summary>
+    /// The <c>status</c> words a listed read answers its ROWS with. Any other <c>status</c> is an envelope
+    /// (<c>empty</c>, <c>unavailable</c>, <c>invalid</c>) and is left as it is. <c>get_pg_server_config_changes</c>
+    /// names its page <c>config_changes</c>, and the page reads an answer as an envelope only when it carries a
+    /// <c>message</c> too.
+    /// </summary>
+    private static readonly HashSet<string> RowStatuses = new(StringComparer.Ordinal) { "config_changes" };
+
+    /// <summary>
+    /// The listed reads whose tool takes any window length (<see cref="McpHelpers.ValidateUncappedWindow"/>), not the
+    /// 168-hour ceiling: the collection log keeps 60 days, and its tool exists to look further back than the other
+    /// reads allow, so a note that checked the shared ceiling would stay silent on exactly those windows.
+    /// </summary>
+    private static readonly HashSet<string> UncappedWindowReads = new(StringComparer.Ordinal) { "get_collection_log" };
+
+    private static string? ValidateWindowFor(string tool, int hours, string? asOf, out DateTime endUtc) =>
+        UncappedWindowReads.Contains(tool)
+            ? McpHelpers.ValidateUncappedWindow(hours, asOf, out endUtc)
+            : McpHelpers.ValidateWindow(hours, asOf, out endUtc);
 
     /// <summary>
     /// The listed reads that LIST rows newest first under a row cap, so a capped answer ends at a time inside the
@@ -88,6 +144,8 @@ internal static class WebDataStartNote
     internal static readonly IReadOnlySet<string> NewestFirstCappedReads = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_waiting_tasks",
+        "get_collection_log",
+        "get_pg_server_config_changes",
     };
 
     /// <summary>
@@ -105,7 +163,7 @@ internal static class WebDataStartNote
             || string.IsNullOrWhiteSpace(server)
             || hoursBack is not int hours
             || hours < 1
-            || !DataWindowFloor.Source.TryForCollectorTable(table, out var source))
+            || !TryGetSource(table, out var source))
         {
             return result;
         }
@@ -123,7 +181,7 @@ internal static class WebDataStartNote
         /* Rows only: an envelope (status), an error, or a tool that already reports its own window floor is left
            as it is. An empty answer says so itself, and the probe would count a server by its logged runs. */
         if (payload is null
-            || payload.ContainsKey("status")
+            || (payload.ContainsKey("status") && !IsRowStatus(payload))
             || payload.ContainsKey("error")
             || payload.ContainsKey("window_truncated"))
         {
@@ -134,9 +192,9 @@ internal static class WebDataStartNote
            the store's coverage cannot move, so the note names that row. The answer carries it, so no probe: a store
            that covers the whole range still gets the note, and a store that does not names the same row, never an
            earlier one the grid does not show. */
-        if (NewestFirstCappedReads.Contains(tool) && TryReadCappedStart(payload, out var oldestShown, out var oldestText))
+        if (NewestFirstCappedReads.Contains(tool) && TryReadCappedStart(tool, payload, out var oldestShown, out var oldestText))
         {
-            if (McpHelpers.ValidateWindow(hours, asOf, out var cappedEnd) is not null)
+            if (ValidateWindowFor(tool, hours, asOf, out var cappedEnd) is not null)
             {
                 return result;
             }
@@ -160,7 +218,7 @@ internal static class WebDataStartNote
         try
         {
             var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server, cancellationToken);
-            if (error is not null || McpHelpers.ValidateWindow(hours, asOf, out var windowEnd) is not null)
+            if (error is not null || ValidateWindowFor(tool, hours, asOf, out var windowEnd) is not null)
             {
                 return result;
             }
@@ -201,6 +259,25 @@ internal static class WebDataStartNote
     internal const string WindowEndField = "window_end_utc";
 
     /// <summary>
+    /// The data-start sentence a Custom Views panel's answer carries (#4966), the one <c>notice</c> holds, so the page
+    /// can write that sentence again in the browser's zone and leave any row-cap sentence beside it as it is.
+    /// </summary>
+    internal const string DataStartNoteField = "data_start_note";
+
+    /// <summary>
+    /// The same three instants a grid's coverage note carries (<see cref="DataStartField"/>, <see cref="WindowStartField"/>,
+    /// <see cref="WindowEndField"/>), added to a Custom Views panel's answer beside <c>notice</c> (#4966). The panel's
+    /// <c>notice</c> names its times in UTC for any other reader; the page composes it again from these in the clock its
+    /// own times are printed in. <paramref name="sentence"/> is the data-start sentence inside <c>notice</c>.
+    /// </summary>
+    internal static void AddComposedPanelInstants(
+        JsonObject payload, string sentence, DateTime dataStartUtc, DateTime windowStartUtc, DateTime windowEndUtc)
+    {
+        payload[DataStartNoteField] = sentence;
+        AddInstants(payload, DataStartField, dataStartUtc, windowStartUtc, windowEndUtc);
+    }
+
+    /// <summary>
     /// The note's instants as fields beside its sentence (#4966). The sentence names them in UTC, which is all an
     /// MCP client or any other reader of the tool's answer can use; the page prints every time in the browser's zone
     /// (<c>localTime</c>) and so composes the note again from these (<c>util.js</c>, the way <c>keptWindowStrip</c>
@@ -225,16 +302,41 @@ internal static class WebDataStartNote
     /// store's times carry no zone). False for an answer that did not hit its cap, or that names no readable time:
     /// those take the coverage rule.
     /// </summary>
-    private static bool TryReadCappedStart(JsonObject payload, out DateTime oldestShownUtc, out string oldestText)
+    private static bool TryReadCappedStart(string tool, JsonObject payload, out DateTime oldestShownUtc, out string oldestText)
     {
         oldestShownUtc = default;
         oldestText = string.Empty;
 
         if (payload["truncated"] is not JsonValue cap
             || !cap.TryGetValue<bool>(out var hitCap)
-            || !hitCap
-            || payload["oldest_returned_collection_time"] is not JsonValue oldest
-            || !oldest.TryGetValue<string>(out var text)
+            || !hitCap)
+        {
+            return false;
+        }
+
+        /* A read that can rank its page by something other than time says which order it answered in: a page ranked
+           slowest first (get_collection_log with a duration floor) is a sample of the whole window, so its oldest row
+           names no reach and the coverage rule applies. A page with no order field is the time-ordered one. */
+        if (payload["order"] is JsonValue order
+            && order.TryGetValue<string>(out var orderText)
+            && !string.Equals(orderText, McpHelpers.CollectionLogOrderNewestFirst, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string? text;
+        if (string.Equals(tool, PgConfigChangesRead, StringComparison.Ordinal))
+        {
+            /* The changes page names no oldest-returned field: its rows are the changes, newest first, each stamped
+               changed_at, so the oldest row it returned is the earliest of those. */
+            text = OldestChangeTime(payload);
+        }
+        else
+        {
+            text = payload["oldest_returned_collection_time"] is JsonValue oldest && oldest.TryGetValue<string>(out var read) ? read : null;
+        }
+
+        if (text is null
             || !DateTime.TryParse(
                 text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out oldestShownUtc))
         {
@@ -243,5 +345,40 @@ internal static class WebDataStartNote
 
         oldestText = text;
         return true;
+    }
+
+    /// <summary>The PostgreSQL configuration changes read: a newest-first list of changes under <c>limit</c>, whose answer
+    /// says it was cut (<c>truncated</c>) but carries its rows' times only on the rows (<c>changes[].changed_at</c>).</summary>
+    internal const string PgConfigChangesRead = "get_pg_server_config_changes";
+
+    /* Whether the answer's status word is one a listed read puts on its ROWS (RowStatuses) rather than an envelope. */
+    private static bool IsRowStatus(JsonObject payload) =>
+        payload["status"] is JsonValue word && word.TryGetValue<string>(out var status) && RowStatuses.Contains(status);
+
+    /* The earliest changed_at on the page, as the tool wrote it; null when no row carries a readable one. Compared as
+       instants (the store's times carry no zone, and are read as UTC), and returned as the text of the earliest. */
+    private static string? OldestChangeTime(JsonObject payload)
+    {
+        if (payload["changes"] is not JsonArray changes)
+        {
+            return null;
+        }
+
+        string? oldestText = null;
+        DateTime oldest = default;
+        foreach (var change in changes)
+        {
+            if (change?["changed_at"] is JsonValue value
+                && value.TryGetValue<string>(out var text)
+                && DateTime.TryParse(
+                    text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at)
+                && (oldestText is null || at < oldest))
+            {
+                oldestText = text;
+                oldest = at;
+            }
+        }
+
+        return oldestText;
     }
 }

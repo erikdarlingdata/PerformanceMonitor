@@ -1420,10 +1420,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                a store with no TimescaleDB, and one server whose rows start later than the rest. When it is silent,
                ask where this panel's own rows start. The Query Store wide table reports its own start in the
                history note below, so a panel it served is not asked twice. */
+            ComposeStoreAvailability.DataStartNotice? dataStartNotice = null;
             if (retentionNotice is null && !queryStoreWideEligible)
             {
-                retentionNotice = await ComposeStoreAvailability.BuildDataStartNoticeAsync(
+                dataStartNotice = await ComposeStoreAvailability.FindDataStartNoticeAsync(
                     postgres, plan.Measure.SourceTable, compiled.Route, serverScope, start, end, composedQuerySeconds, cancellationToken, logger);
+                retentionNotice = dataStartNotice?.Text;
             }
 
             if (ComposeStoreAvailability.CombineNotices(
@@ -1431,6 +1433,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
             {
                 payload["notice"] = notice;
+
+                /* #4966: the sentence names its times in UTC, which is what any other reader of this answer (the MCP
+                   tool) needs, but the page prints every time in the browser's zone. When the notice is the data-start
+                   one, the answer also carries the instants it names, and the sentence, so the page can write it again
+                   in its own clock. The tier notice names no instant the page prints, and carries none. */
+                if (dataStartNotice is { } found)
+                {
+                    WebDataStartNote.AddComposedPanelInstants(payload, found.Text, found.DataStartUtc, start, end);
+                }
             }
 
             /* #4689: the interval table served this panel from a start later than the window's, so say where it
