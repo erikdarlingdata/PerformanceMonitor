@@ -1726,6 +1726,14 @@ GROUP BY server_id, collector_name";
         NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken)
     {
         var counts = new Dictionary<int, CollectorCounts>();
+        /* #4999: every collector is banded against the interval it is scheduled at on ITS server, the one the
+           per-server get_collection_health read judges it by, so the roll-up and that read cannot disagree about a
+           collector an operator moved off its shipped cadence. The schedule table is sparse and read once here, before
+           the health statement's reader opens, so one call never holds two connections; a server's rows are
+           picked out of it once, the first time that server appears. A read that fails leaves every row on its
+           shipped cadence, as the per-server read does. */
+        var scheduleOverrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, cancellationToken);
+        var overridesByServer = new Dictionary<int, IReadOnlyList<ScheduleOverride>>();
         /* #3893 arm 2, #4477: the composed read (hourly aggregate + raw head slice + any hole hours read raw
            alongside it) when the guard passes, else the raw scan. Same fourteen ordinals either way, so
            everything below is shared. */
@@ -1748,7 +1756,13 @@ GROUP BY server_id, collector_name";
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverId = reader.GetInt32(0);
-            var health = MapFleetHealthRow(reader);
+            if (!overridesByServer.TryGetValue(serverId, out var serverOverrides))
+            {
+                serverOverrides = scheduleOverrides.Where(o => o.ServerId is null || o.ServerId == serverId).ToList();
+                overridesByServer[serverId] = serverOverrides;
+            }
+
+            var health = MapFleetHealthRow(reader, serverId, serverOverrides);
 
             counts.TryGetValue(serverId, out var existing);
             var status = health.HealthStatus;
@@ -1790,7 +1804,19 @@ GROUP BY server_id, collector_name";
     /// ordinals 0-13; <c>server_id</c> is read by the caller) to the <see cref="CollectorHealth"/> the shared
     /// banding reads. Its own method so a test can drive the banding through the same mapping the fleet read
     /// uses (#4812).</summary>
-    internal static CollectorHealth MapFleetHealthRow(System.Data.Common.DbDataReader reader)
+    internal static CollectorHealth MapFleetHealthRow(System.Data.Common.DbDataReader reader) =>
+        MapFleetHealthRow(reader, serverId: null, overrides: null);
+
+    /// <summary>
+    /// #4999: <see cref="MapFleetHealthRow(System.Data.Common.DbDataReader)"/> for a row whose server's schedule
+    /// overrides are known. The row is stamped with the interval its collector is scheduled at on that server
+    /// (<see cref="DarlingDataReader.ApplyScheduledFrequency"/>, the per-server read's own step) BEFORE the
+    /// trailing-run estimate is taken, because the estimate reads the cadence too. The band then judges an
+    /// overridden collector against the interval it runs at, as get_collection_health does for the same server.
+    /// With no <paramref name="serverId"/> or no <paramref name="overrides"/> the row keeps the shipped cadence.
+    /// </summary>
+    internal static CollectorHealth MapFleetHealthRow(
+        System.Data.Common.DbDataReader reader, int? serverId, IReadOnlyList<ScheduleOverride>? overrides)
     {
         var health = new CollectorHealth
         {
@@ -1817,6 +1843,12 @@ GROUP BY server_id, collector_name";
                the ladder. Unset, a collector that lost half its databases bands HEALTHY here. */
             LatestRunNote = reader.IsDBNull(13) ? null : reader.GetString(13),
         };
+
+        /* #4999: the cadence is stamped before anything below reads it. */
+        if (serverId is int scheduledServerId && overrides is not null)
+        {
+            DarlingDataReader.ApplyScheduledFrequency(health, scheduledServerId, overrides);
+        }
 
         /* #3885: the produced-then-stopped arm's input, set AFTER construction because it is derived
            from two of this row's own members plus the cadence rather than read from a column. The

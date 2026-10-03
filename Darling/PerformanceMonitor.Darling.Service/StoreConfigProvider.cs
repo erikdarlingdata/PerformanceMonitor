@@ -2036,27 +2036,9 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     {
         var def = CollectorScheduleDefaults.All[collectorName];
 
-        ScheduleOverride? perServer = null;
-        ScheduleOverride? fleet = null;
-        if (overrides is not null)
-        {
-            foreach (var o in overrides)
-            {
-                if (!string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                if (o.ServerId == serverId)
-                {
-                    perServer = o;
-                }
-                else if (o.ServerId is null)
-                {
-                    fleet = o;
-                }
-            }
-        }
+        /* #4999: the rows are picked where every collection-health surface picks them, so a surface that judges a
+           collector against its interval cannot pick a different row than the one this schedules it by. */
+        var (perServer, fleet) = CollectorScheduleDefaults.SelectScheduleOverrides(collectorName, serverId, overrides);
 
         /* Sanitize operator-supplied overrides before they drive scheduling / a destructive purge: a
            negative frequency, a retention < 1 (0 would invert the purge cutoff and wipe the table), or a
@@ -2218,7 +2200,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
 /// clock, -1 = no fixed time at this level (it stops a fleet-wide time), null = no run time at this level, which falls
 /// through; defaulted for the same reason. <see cref="Enabled"/> is null only on the entry a run time makes for a scope and
 /// collector that has no schedule row: such an entry sets no enabled state, so it falls through like the other nulls.</summary>
-public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool? Enabled, IReadOnlyList<string>? Databases = null, int? RunAtMinute = null);
+public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool? Enabled, IReadOnlyList<string>? Databases = null, int? RunAtMinute = null) : IScheduleFrequencyOverride;
 
 /// <summary>One row of <c>config_collector_run_times</c> (#4938): a run time for a collector, fleet-wide when
 /// <see cref="ServerId"/> is null. <see cref="RunAtMinute"/> is minutes after midnight on the server's clock, or -1 on a
