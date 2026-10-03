@@ -253,4 +253,67 @@ public sealed class CollectorRunTimeSweepTests : IDisposable
             duckDb.Dispose();
         }
     }
+
+    [Fact]
+    public async Task ADailyCollectorWithNoRunTime_ThatKeepsFailing_RunsOncePerDay_NotOnEverySweep()
+    {
+        var (duckDb, servers, server) = await OpenAsync();
+        try
+        {
+            var t0 = new DateTime(2026, 7, 15, 9, 0, 0, DateTimeKind.Utc);
+
+            /* A made-up collector fails on every attempt and writes one ERROR row per attempt. The scheduler counted only a
+               success for a daily collector with no run time, so a failing one (a missing permission, say) ran on every
+               sweep of the day, while the startup read of the log had always counted that row as the run. */
+            var scheduler = NewScheduler(server, ("no_such_failing_daily", 1440, null));
+            var service = new RemoteCollectorService(duckDb, servers, scheduler);
+
+            foreach (var minutes in new[] { 0, 1, 2, 3, 10, 30, 59, 120, 600 })
+            {
+                await service.RunDueCollectorsAsync(t0 + TimeSpan.FromMinutes(minutes), CancellationToken.None);
+            }
+
+            Assert.Equal(1, await RowsAsync(duckDb, server, "no_such_failing_daily"));
+
+            /* A day after the attempt it is due again, runs once more, fails once more, and ends that day too. */
+            await service.RunDueCollectorsAsync(t0 + TimeSpan.FromDays(1) - TimeSpan.FromMinutes(1), CancellationToken.None);
+            Assert.Equal(1, await RowsAsync(duckDb, server, "no_such_failing_daily"));
+
+            foreach (var minutes in new[] { 0, 5, 45 })
+            {
+                await service.RunDueCollectorsAsync(t0 + TimeSpan.FromDays(1) + TimeSpan.FromMinutes(minutes), CancellationToken.None);
+            }
+
+            Assert.Equal(2, await RowsAsync(duckDb, server, "no_such_failing_daily"));
+        }
+        finally
+        {
+            duckDb.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task AFailingCollectorThatRunsEveryFifteenMinutes_StillTriesAgainOnTheNextSweep()
+    {
+        var (duckDb, servers, server) = await OpenAsync();
+        try
+        {
+            var t0 = new DateTime(2026, 7, 15, 9, 0, 0, DateTimeKind.Utc);
+
+            /* A shorter interval keeps the old rule: only a success counts, so a failing collector runs on every sweep. */
+            var scheduler = NewScheduler(server, ("no_such_failing_frequent", 15, null));
+            var service = new RemoteCollectorService(duckDb, servers, scheduler);
+
+            foreach (var minutes in new[] { 0, 1, 2, 3 })
+            {
+                await service.RunDueCollectorsAsync(t0 + TimeSpan.FromMinutes(minutes), CancellationToken.None);
+            }
+
+            Assert.Equal(4, await RowsAsync(duckDb, server, "no_such_failing_frequent"));
+        }
+        finally
+        {
+            duckDb.Dispose();
+        }
+    }
 }

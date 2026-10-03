@@ -648,11 +648,12 @@ public class ScheduleManager
 
     /// <summary>
     /// #4938: records an attempt that did not succeed (an error, a denied permission, a declined sign-in, a lock yield)
-    /// as that day's run of a collector that has a run time. The attempt wrote its collection_log row, and the
-    /// start-up read counts every row as the last run whatever its status, so the session counts it too: a collector that
-    /// keeps failing runs once inside the 60-minute hour that follows its time, not on every sweep of the hour, and its
-    /// next due time is the next day's. A collector with no run time, or one whose run time does not apply, is left
-    /// alone: it stays due on the next sweep, as before.
+    /// as the run of a daily-or-longer collector (an effective interval of a whole number of days), with or without a
+    /// run time. The attempt wrote its collection_log row, and the start-up read counts every row as the last run whatever
+    /// its status, so the session counts it too: a collector that keeps failing runs once, not on every sweep, and is due
+    /// again an interval after the attempt (with a run time, inside the 60-minute hour that follows its next time). A
+    /// collector that runs more often than that, one the schedule does not list, and one that is switched off are left
+    /// alone: they stay due on the next sweep, as before.
     /// </summary>
     public void MarkCollectorAttemptForServer(string serverId, string collectorName, DateTime attemptTime)
     {
@@ -666,7 +667,7 @@ public class ScheduleManager
                 s.Name.Equals(collectorName, StringComparison.OrdinalIgnoreCase));
             if (schedule is null
                 || !schedule.Enabled
-                || ResolveRunAtMinute(serverId, schedule, CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)) is null)
+                || !CollectorRunTime.AllowsRunAt(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)))
             {
                 return;
             }
@@ -679,7 +680,7 @@ public class ScheduleManager
 
             runState[collectorName] = attemptTime;
 
-            _logger?.LogDebug("Marked collector '{Name}' as attempted for server {ServerId} at {Time}; its run time ends that day's run",
+            _logger?.LogDebug("Marked collector '{Name}' as attempted for server {ServerId} at {Time}; the attempt ends its period's run",
                 collectorName, serverId, attemptTime);
         }
     }

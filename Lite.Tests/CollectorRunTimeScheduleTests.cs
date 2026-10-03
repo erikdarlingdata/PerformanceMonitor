@@ -160,15 +160,52 @@ public sealed class CollectorRunTimeScheduleTests : IDisposable
     }
 
     [Fact]
-    public void AnAttempt_OfACollectorWithNoRunTime_OrOneWhoseRunTimeDoesNotApply_ChangesNothing()
+    public void AnAttemptThatDidNotSucceed_EndsTheDay_OfADailyCollectorWithNoRunTime_AndItIsDueAnIntervalLater()
     {
         var plainDaily = Manager(runAt: null, clock: Eastern);
+        var attemptAt = Slot(Day, 120, Eastern) + TimeSpan.FromMinutes(2);
+
+        /* A failed run writes its collection_log row, and a restart reads that row as the last run. The session counts the
+           attempt the same way, so a daily collector that keeps failing (a missing permission, say) runs once, not on every
+           sweep of the day, and is due again an interval after the attempt. */
+        Assert.Equal(new[] { Daily }, Due(plainDaily, attemptAt));
+        plainDaily.MarkCollectorAttemptForServer(ServerKey, Daily, attemptAt);
+
+        Assert.Empty(Due(plainDaily, attemptAt + TimeSpan.FromMinutes(1)));
+        Assert.Empty(Due(plainDaily, attemptAt + TimeSpan.FromHours(12)));
+        Assert.Empty(Due(plainDaily, attemptAt + TimeSpan.FromDays(1) - TimeSpan.FromMinutes(1)));
+        Assert.Equal(new[] { Daily }, Due(plainDaily, attemptAt + TimeSpan.FromDays(1)));
+    }
+
+    [Fact]
+    public void AnAttemptThatDidNotSucceed_EndsTheirPeriod_OfACollectorWhoseIntervalIsSeveralWholeDays_WithOrWithoutARunTime()
+    {
+        var attemptAt = Slot(Day, 120, Eastern) + TimeSpan.FromMinutes(2);
+
+        foreach (var runAt in new string?[] { null, "02:00" })
+        {
+            var weekly = Manager(runAt: runAt, frequency: 7 * 1440, clock: Eastern);
+            weekly.MarkCollectorAttemptForServer(ServerKey, Daily, attemptAt);
+
+            Assert.Empty(Due(weekly, attemptAt + TimeSpan.FromMinutes(1)));
+            Assert.Empty(Due(weekly, attemptAt + TimeSpan.FromDays(3)));
+        }
+
+        /* An interval that is not a whole number of days is not a daily one: its attempt changes nothing. */
+        var odd = Manager(runAt: null, frequency: 2000, clock: Eastern);
+        odd.MarkCollectorAttemptForServer(ServerKey, Daily, attemptAt);
+        Assert.Equal(new[] { Daily }, Due(odd, attemptAt + TimeSpan.FromMinutes(1)));
+    }
+
+    [Fact]
+    public void AnAttempt_OfACollectorThatRunsMoreOftenThanADay_OrOneTheScheduleDoesNotList_ChangesNothing()
+    {
         var now = Slot(Day, 120, Eastern) + TimeSpan.FromMinutes(2);
 
-        /* No run time: the interval rule stands, and a collector that has never run is due on every sweep until one
-           succeeds. */
-        plainDaily.MarkCollectorAttemptForServer(ServerKey, Daily, now);
-        Assert.Equal(new[] { Daily }, Due(plainDaily, now + TimeSpan.FromMinutes(1)));
+        /* A shorter interval keeps today's rule: a failing collector is due again on the next sweep. */
+        var frequent = Manager(runAt: null, frequency: 15, clock: Eastern, collector: "wait_stats");
+        frequent.MarkCollectorAttemptForServer(ServerKey, "wait_stats", now);
+        Assert.True(IsDue(frequent, "wait_stats", now + TimeSpan.FromMinutes(1)));
 
         /* A run time on an hourly interval is refused and ignored with a warning, so the interval rule stands there too. */
         var hourly = ManagerFromFile("wait_stats", "02:00", frequency: 60);
@@ -176,8 +213,21 @@ public sealed class CollectorRunTimeScheduleTests : IDisposable
         Assert.True(IsDue(hourly, "wait_stats", now + TimeSpan.FromMinutes(1)));
 
         /* A collector the schedule does not list has nothing to record. */
+        var plainDaily = Manager(runAt: null, clock: Eastern);
         plainDaily.MarkCollectorAttemptForServer(ServerKey, "not_in_the_schedule", now);
         Assert.Equal(new[] { Daily }, Due(plainDaily, now + TimeSpan.FromMinutes(2)));
+    }
+
+    [Fact]
+    public void ASuccessfulRun_OfADailyCollectorWithNoRunTime_IsDueADayLater_AsBefore()
+    {
+        var plainDaily = Manager(runAt: null, clock: Eastern);
+        var ranAt = Slot(Day, 120, Eastern) + TimeSpan.FromMinutes(2);
+
+        plainDaily.MarkCollectorRunForServer(ServerKey, Daily, ranAt);
+
+        Assert.Empty(Due(plainDaily, ranAt + TimeSpan.FromHours(23)));
+        Assert.Equal(new[] { Daily }, Due(plainDaily, ranAt + TimeSpan.FromHours(24)));
     }
 
     [Fact]
