@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
@@ -76,18 +77,21 @@ public sealed class ViewerPostgresDataStartTests
     public void EveryGridTable_IsOneTheCoverageProbeAccepts(string table) =>
         Assert.True(DataWindowFloor.Source.TryForCollectorTable(table, out _), $"{table} is refused by the coverage probe");
 
-    [Theory]
-    [MemberData(nameof(GridRows))]
-    public void EveryCollector_MapsToItsTableThroughTheCatalog(string collector, string table, string banner, string loader, bool eventGrid)
-        => AssertMaps(collector, table, banner, loader, eventGrid);
-
-    private static void AssertMaps(string collector, string table, string banner, string loader, bool eventGrid)
+    public static TheoryData<string, string> CollectorTables()
     {
-        Assert.NotEmpty(banner + loader);
-        Assert.Equal(eventGrid, eventGrid);
-        _ = (banner, loader, eventGrid);
-        Assert.Equal(table, CollectorCatalog.All.Single(c => c.Name == collector).TargetTable);
+        var data = new TheoryData<string, string>();
+        foreach (var g in Grids)
+        {
+            data.Add(g.Collector, g.Table);
+        }
+
+        return data;
     }
+
+    [Theory]
+    [MemberData(nameof(CollectorTables))]
+    public void EveryCollector_MapsToItsTableThroughTheCatalog(string collector, string table)
+        => Assert.Equal(table, CollectorCatalog.All.Single(c => c.Name == collector).TargetTable);
 
     [Theory]
     [MemberData(nameof(GridRows))]
@@ -118,10 +122,18 @@ public sealed class ViewerPostgresDataStartTests
             Assert.DoesNotContain("dataStartTask", line);
         }
 
-        if (loader != "LoadPgActivityAsync")
-        {
-            Assert.Contains($"StartPgDataStartProbe(\"{collector}\"", body);
-        }
+        /* The probe starts inside this loader, into a variable of its own, and THAT variable feeds this banner: a loader with several
+           banners (Activity, Vacuum, Storage) fails if two banners swap their probe tasks. */
+        var task = Regex.Match(body, $@"var (\w+) = [^;]*StartPgDataStartProbe\(""{collector}""").Groups[1].Value;
+        Assert.NotEmpty(task);
+        Assert.Matches(
+            eventGrid
+                ? $@"ShowEventDataStartAsync\({banner}, {task},"
+                : $@"UpdateTruncationBanner\({banner}, await DataStartOrNullAsync\({task},",
+            body);
+
+        /* #5022: the same variable is also watched while the read is awaited, so a read that throws does not leave it unobserved. */
+        Assert.Matches($@"AwaitReadWatchingProbeAsync\([^;]*?\b{task},\s*""", body);
     }
 
     [Fact]
