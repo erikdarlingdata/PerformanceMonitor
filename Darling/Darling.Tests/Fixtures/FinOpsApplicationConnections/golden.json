@@ -87,6 +87,28 @@
       "SampleCount": 1,
       "FirstSeenUtc": -240,
       "LastSeenUtc": -240
+    },
+    {
+      "ApplicationName": "Edge",
+      "AvgConnections": 2,
+      "MaxConnections": 2,
+      "AvgRunning": 0,
+      "MaxRunning": 0,
+      "AvgSleeping": 1,
+      "MaxSleeping": 1,
+      "AvgDormant": 1,
+      "MaxDormant": 1,
+      "AvgCpuTimeMs": 5,
+      "MaxCpuTimeMs": 5,
+      "AvgReads": 6,
+      "MaxReads": 6,
+      "AvgWrites": 7,
+      "MaxWrites": 7,
+      "AvgLogicalReads": 8,
+      "MaxLogicalReads": 8,
+      "SampleCount": 1,
+      "FirstSeenUtc": -1439,
+      "LastSeenUtc": -1439
     }
   ],
   "b": []

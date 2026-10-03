@@ -37,6 +37,8 @@ namespace Darling.Tests;
 /// fixture: they depend on the viewer's display mode, a process-wide static that other classes change, and on the
 /// machine's zone. They are checked against the UTC instants in a class that owns that static.</para>
 ///
+/// <para>The tie on peak connections is compared as a set: the order of tied rows is the engine's, not a contract.</para>
+///
 /// <para>Server A holds: two programs tied on their peak connection count; a NULL program name; programs whose
 /// resource columns are NULL on some rows and on every row; averages that do not divide evenly, so the
 /// <c>CAST(AVG(...) AS INTEGER)</c> rounding shows; and a row just outside the 24-hour window (a program seen only
@@ -49,6 +51,24 @@ public sealed class FinOpsApplicationConnectionsGoldenLiveTests
     internal static readonly int ServerIdA = ServerIdHelper.GetDeterministicHashCode(ServerNameA);
     internal static readonly int ServerIdB = ServerIdHelper.GetDeterministicHashCode(ServerNameB);
 
+    /// <summary>The tie order is the engine's, not a contract: the SQL sorts on <c>max_connections</c> only, so rows that
+    /// tie on it can come back in either order. Both sides are put in (MaxConnections desc, ApplicationName ordinal)
+    /// order before they are compared, which makes a tied run compare as a set.</summary>
+    internal static List<ApplicationConnectionRow> TieStable(List<ApplicationConnectionRow> rows) =>
+        rows.OrderByDescending(r => r.MaxConnections).ThenBy(r => r.ApplicationName, StringComparer.Ordinal).ToList();
+
+    /// <summary>Every row carries its clock, and both display times are the UTC instants converted on that clock in the
+    /// current display mode. The mode is read only, never set (other classes own that static).</summary>
+    private static void AssertDisplayTimes(List<ApplicationConnectionRow> rows)
+    {
+        foreach (var row in rows)
+        {
+            Assert.NotNull(row.Clock);
+            Assert.Equal(ViewerTimeHelper.ConvertToDisplay(row.FirstSeenUtc, ViewerTimeHelper.CurrentDisplayMode, row.Clock), row.FirstSeenLocal);
+            Assert.Equal(ViewerTimeHelper.ConvertToDisplay(row.LastSeenUtc, ViewerTimeHelper.CurrentDisplayMode, row.Clock), row.LastSeenLocal);
+        }
+    }
+
     /// <summary>Names the row properties that depend on the display mode or the machine zone (left out of the fixture).</summary>
     internal static readonly string[] DisplayOnly = ["FirstSeenLocal", "LastSeenLocal", "Clock"];
 
@@ -57,11 +77,11 @@ public sealed class FinOpsApplicationConnectionsGoldenLiveTests
         RunAsync(async (connectionString, anchor, ct) =>
         {
             await using var viewer = new ViewerDataService(connectionString);
-            return Serialize(anchor, new Dictionary<string, object?>
-            {
-                ["a"] = await viewer.GetApplicationConnectionsAsync(ServerIdA, ct),
-                ["b"] = await viewer.GetApplicationConnectionsAsync(ServerIdB, ct),
-            });
+            var a = await viewer.GetApplicationConnectionsAsync(ServerIdA, ct);
+            var b = await viewer.GetApplicationConnectionsAsync(ServerIdB, ct);
+            AssertDisplayTimes(a);
+            AssertDisplayTimes(b);
+            return Serialize(anchor, new Dictionary<string, object?> { ["a"] = TieStable(a), ["b"] = TieStable(b) });
         });
 
     [Fact]
@@ -74,7 +94,7 @@ public sealed class FinOpsApplicationConnectionsGoldenLiveTests
             async Task<List<ApplicationConnectionRow>> Read(int id) =>
                 (await DarlingFinOpsApplicationConnectionsReader.GetApplicationConnectionsAsync(dataSource, id, cutoff, 30, ct))
                     .ConvertAll(d => ApplicationConnectionRow.From(d, clock));
-            return Serialize(anchor, new Dictionary<string, object?> { ["a"] = await Read(ServerIdA), ["b"] = await Read(ServerIdB) });
+            return Serialize(anchor, new Dictionary<string, object?> { ["a"] = TieStable(await Read(ServerIdA)), ["b"] = TieStable(await Read(ServerIdB)) });
         });
 
     /// <summary>The mapper converts both times on the clock it is given and keeps the UTC instants and the clock.</summary>
@@ -123,6 +143,8 @@ public sealed class FinOpsApplicationConnectionsGoldenLiveTests
         await Row(connection, ct, now.AddHours(-1), "Alpha", 12, 1, 4, 2, 1000, 500, 50, 9000);
         await Row(connection, ct, now.AddHours(-5), "Alpha", 5, 2, 3, 0, 1001, 501, 51, 9001);
         await Row(connection, ct, now.AddHours(-9), "Alpha", 6, 2, 4, 1, null, null, null, null);
+        /* One minute inside the edge (-23h59m): the >= side of the cutoff keeps it. */
+        await Row(connection, ct, now.AddHours(-23).AddMinutes(-59), "Edge", 2, 0, 1, 1, 5, 6, 7, 8);
         /* Just outside the window: it must not move Alpha's figures. */
         await Row(connection, ct, now.AddHours(-25), "Alpha", 900, 90, 90, 90, 9_999_999, 9_999_999, 9_999_999, 9_999_999);
         /* Bravo ties Alpha on peak connections (12); its resource columns are NULL on every row. */
