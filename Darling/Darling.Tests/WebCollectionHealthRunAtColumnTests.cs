@@ -49,7 +49,7 @@ public sealed class WebCollectionHealthRunAtColumnTests
     public void TheToolsHeaviestCollectorRows_CarryTheRunTime()
     {
         var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
-        var heaviest = Slice(tools, "var heaviest = rows", "var peakCollector");
+        var heaviest = Slice(tools, "var heaviest = SweepBodyRows(rows)", "var peakCollector");
         Assert.Contains("frequency_minutes = r.FrequencyMinutes,", heaviest, StringComparison.Ordinal);
         Assert.Contains("run_at = ", heaviest, StringComparison.Ordinal);
     }
