@@ -44,6 +44,14 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// that table with <see cref="GetCollectorRunTimesAsync"/> and writes it with <see cref="SaveCollectorRunTimesAsync"/>,
 /// each change its own statement (an upsert of one row, or the delete of the row for "no run time"). The schedule
 /// statements never name the run time, so a Save here leaves every run time as it was.</para>
+///
+/// <para><b>A schedule Reset also deletes that scope's run times, in the same transaction as the schedule rows (#4938).</b> A
+/// reset means back to the shipped defaults, and they have no fixed time. The window's "Reset to Defaults" and a server's "Use
+/// default schedule" Save through <see cref="SaveCollectorScheduleAsync(int?, IEnumerable{CollectorScheduleRow}, IReadOnlyList{CollectorRunTimeChange}, bool, CancellationToken)"/>
+/// with the scope's run-time rows cleared first, and "Apply Default to All Servers" is the single call
+/// <see cref="ResetAllServerSchedulesAsync"/>, which deletes every server's schedule rows and run times together. A viewer
+/// released before the run-time table existed resets the schedule rows only, so a run time set by this viewer survives a Reset
+/// done in an older one.</para>
 /// </summary>
 public sealed partial class ViewerDataService
 {
@@ -128,6 +136,22 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     /// the run-time half of the fleet-wide "Apply Default to All" reset, which sends every server back to the fleet's schedule.</summary>
     public const string CollectorRunTimeDeleteAllServerScopesSql =
         "DELETE FROM config.config_collector_run_times WHERE server_id IS NOT NULL";
+
+    /// <summary>Deletes EVERY fleet-wide run time, whatever the collector: the run-time half of a fleet-scope schedule Reset, which
+    /// goes back to the shipped defaults, and they have no fixed time.</summary>
+    public const string CollectorRunTimeDeleteFleetScopeSql =
+        "DELETE FROM config.config_collector_run_times WHERE server_id IS NULL";
+
+    /// <summary>Deletes EVERY run time of one server, whatever the collector: the run-time half of a server-scope schedule Reset.
+    /// $1 server_id.</summary>
+    public const string CollectorRunTimeDeleteServerScopeSql =
+        "DELETE FROM config.config_collector_run_times WHERE server_id = $1";
+
+    /// <summary>Whether the run-time table exists, looked up by name in the catalog, so the answer does not depend on the connecting
+    /// role's privileges on it (the connect gate's probe asks the same way). A statement that fails aborts its transaction, so a
+    /// delete that has to tolerate a store below V160 asks first and is skipped there.</summary>
+    public const string CollectorRunTimeTableExistsSql =
+        "SELECT to_regclass('config.config_collector_run_times') IS NOT NULL";
 
     /// <summary>All override rows in the store (both fleet + per-server), for the editor overlay.</summary>
     public async Task<List<CollectorScheduleRow>> GetCollectorSchedulesAsync(CancellationToken cancellationToken = default)
@@ -237,10 +261,27 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     /// </summary>
     public Task SaveCollectorScheduleAsync(
         int? serverId, IEnumerable<CollectorScheduleRow> rows, IReadOnlyList<CollectorRunTimeChange> runTimeChanges,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        SaveCollectorScheduleAsync(serverId, rows, runTimeChanges, clearScopeRunTimes: false, cancellationToken);
+
+    /// <summary>
+    /// The same ONE-transaction Save for a schedule that is being reset (#4938): with <paramref name="clearScopeRunTimes"/> the scope's
+    /// run-time rows are deleted FIRST, in the same transaction, whatever collector they are for and whether or not the window ever
+    /// showed them, and then <paramref name="runTimeChanges"/> are written as the statements they are, so a time the grid holds
+    /// after the reset is inserted anew. A reset means back to the shipped defaults, which have no fixed time, and the window's
+    /// "Reset to Defaults" and a server's "Use default schedule" are that reset. The scope is the fleet's rows when
+    /// <paramref name="serverId"/> is null and that server's rows otherwise; no other scope is touched.
+    ///
+    /// <para>A store below V160 has no run-time table and so no run times to delete: the clear is skipped there (asked of the
+    /// catalog first, because a failed statement would abort the transaction), and a Save with no run-time change still saves its
+    /// schedules.</para>
+    /// </summary>
+    public Task SaveCollectorScheduleAsync(
+        int? serverId, IEnumerable<CollectorScheduleRow> rows, IReadOnlyList<CollectorRunTimeChange> runTimeChanges,
+        bool clearScopeRunTimes, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(runTimeChanges);
-        return ReplaceScheduleScopeAsync(serverId, rows, runTimeChanges, cancellationToken);
+        return ReplaceScheduleScopeAsync(serverId, rows, runTimeChanges, clearScopeRunTimes, cancellationToken);
     }
 
     /// <summary>The run-time changes, each one a statement on the caller's connection and transaction (#4938), so the caller
@@ -297,64 +338,102 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     /// <see cref="ViewerReadOnlyException"/>.
     /// </summary>
     public Task ReplaceFleetSchedulesAsync(IEnumerable<CollectorScheduleRow> rows, CancellationToken cancellationToken = default) =>
-        ReplaceScheduleScopeAsync(serverId: null, rows, Array.Empty<CollectorRunTimeChange>(), cancellationToken);
+        ReplaceScheduleScopeAsync(serverId: null, rows, Array.Empty<CollectorRunTimeChange>(), clearScopeRunTimes: false, cancellationToken);
 
     /// <summary>
     /// Atomically replaces one SERVER's overrides: delete the server's rows, then upsert the supplied ones. Pass
     /// an empty sequence to revert the server to the fleet/default schedule (the "use default" case).
     /// </summary>
     public Task ReplaceServerSchedulesAsync(int serverId, IEnumerable<CollectorScheduleRow> rows, CancellationToken cancellationToken = default) =>
-        ReplaceScheduleScopeAsync(serverId, rows, Array.Empty<CollectorRunTimeChange>(), cancellationToken);
+        ReplaceScheduleScopeAsync(serverId, rows, Array.Empty<CollectorRunTimeChange>(), clearScopeRunTimes: false, cancellationToken);
 
     /// <summary>
-    /// Reverts EVERY server's per-server schedule override back to the fleet/default schedule in one statement
-    /// (the "Apply Default to All" bulk reset) — the fleet-scale shortcut over reverting one server at a time.
-    /// Deletes all per-server rows and leaves the fleet-wide (<c>server_id IS NULL</c>) overrides in place;
-    /// returns the number of override rows removed. The V17 <c>trg_bump_collector_schedules</c> trigger bumps
-    /// <c>config_version</c> on the DELETE, so the service re-resolves schedules on its next sweep (same reload
-    /// path as <see cref="ReplaceServerSchedulesAsync"/>). A read-only seat throws <see cref="ViewerReadOnlyException"/>.
+    /// Reverts EVERY server's per-server schedule override back to the fleet/default schedule (the "Apply Default to All" bulk
+    /// reset) — the fleet-scale shortcut over reverting one server at a time. Deletes all per-server schedule rows AND all
+    /// per-server run times (#4938), in ONE transaction, and leaves the fleet-wide (<c>server_id IS NULL</c>) rows of both tables
+    /// in place: a server's run time is part of its override, and a reset means back to the shipped defaults, which have no
+    /// fixed time. Returns the number of rows removed from the two tables together. The schedule rows go first, so a failure
+    /// in the run-time delete leaves the schedule rows in place too. The V17 <c>trg_bump_collector_schedules</c> trigger and the
+    /// run-time table's own bump <c>config_version</c> on the DELETE, so the service re-resolves schedules on its next sweep
+    /// (same reload path as <see cref="ReplaceServerSchedulesAsync"/>).
     ///
-    /// <para>It deletes schedule rows only, exactly as a released viewer does (#4938): the run times live in their own table
-    /// and this statement never touches them. The editor's "Apply Default to All Servers" follows it with
-    /// <see cref="ResetAllServerRunTimesAsync"/>, a statement of its own.</para>
+    /// <para>A read-only seat (42501) throws <see cref="ViewerReadOnlyException"/>, and a missing table or column (42P01,
+    /// 42703) throws <see cref="ViewerSchemaSkewException"/>. A store below V160 has no run-time table and so no run times to
+    /// remove: that half is skipped there and the schedule rows are still reset.</para>
+    ///
+    /// <para>A viewer released before the run-time table existed deletes the schedule rows only, so a run time set by this
+    /// viewer survives a reset done in an older one.</para>
     /// </summary>
     public async Task<int> ResetAllServerSchedulesAsync(CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(CollectorScheduleDeleteAllServerScopesSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        return await ExecuteWriteAsync(command, cancellationToken);
-    }
-
-    /// <summary>
-    /// Removes EVERY server's run time in one statement of its own (#4938), leaving the fleet-wide run times alone: the run-time
-    /// half of "Apply Default to All Servers", because a server's run time is part of its override and the reset sends every
-    /// server back to the fleet's schedule. Returns the rows removed. A store below V160 has no such table, which is no run
-    /// times to remove (42P01), so it returns 0. A read-only seat throws <see cref="ViewerReadOnlyException"/>.
-    /// </summary>
-    public async Task<int> ResetAllServerRunTimesAsync(CancellationToken cancellationToken = default)
-    {
         try
         {
-            await using var command = _dataSource.CreateCommand(CollectorRunTimeDeleteAllServerScopesSql);
-            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            return await command.ExecuteNonQueryAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            int removed;
+            await using (var schedules = new NpgsqlCommand(CollectorScheduleDeleteAllServerScopesSql, connection, transaction)
+            {
+                CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds,
+            })
+            {
+                removed = await schedules.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            removed += await DeleteRunTimesAsync(connection, transaction, CollectorRunTimeDeleteAllServerScopesSql, serverId: null, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return removed;
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {
             throw new ViewerReadOnlyException(ex);
         }
-        catch (PostgresException ex) when (ex.SqlState == UndefinedTableSqlState)
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
         {
-            return 0;
+            throw new ViewerSchemaSkewException(ex);
         }
+    }
+
+    /// <summary>One run-time delete on the caller's connection and transaction (#4938), for a scope, one server or every server
+    /// (<paramref name="deleteSql"/>, with <paramref name="serverId"/> bound as $1 when the statement takes it), and the rows it
+    /// removed. A store below V160 has no run-time table, which is no run times to remove: the table is asked of the catalog first
+    /// (<see cref="CollectorRunTimeTableExistsSql"/>), because a failed statement would abort the caller's transaction and the
+    /// 42P01 could not be caught and carried on from, and a store without it removes 0. Every other failure propagates for the
+    /// caller's own mapping.</summary>
+    private static async Task<int> DeleteRunTimesAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, string deleteSql, int? serverId, CancellationToken cancellationToken)
+    {
+        await using (var exists = new NpgsqlCommand(CollectorRunTimeTableExistsSql, connection, transaction)
+        {
+            CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds,
+        })
+        {
+            if (await exists.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return 0;
+            }
+        }
+
+        await using var delete = new NpgsqlCommand(deleteSql, connection, transaction)
+        {
+            CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds,
+        };
+        if (serverId is int sid)
+        {
+            delete.Parameters.Add(new NpgsqlParameter<int> { TypedValue = sid });
+        }
+
+        return await delete.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>One scope's schedule rows, and with <paramref name="runTimeChanges"/> the run times too (#4938), in ONE transaction
     /// on one connection. The schedule statements are the released viewers' own, unchanged; the run-time statements run first
-    /// and only when there are changes, so a store without the run-time table still saves a Save that changed no run time.</summary>
+    /// and only when there are changes, so a store without the run-time table still saves a Save that changed no run time. A
+    /// schedule Reset (<paramref name="clearScopeRunTimes"/>) deletes the scope's run-time rows ahead of those changes, in the same
+    /// transaction.</summary>
     private async Task ReplaceScheduleScopeAsync(
         int? serverId, IEnumerable<CollectorScheduleRow> rows, IReadOnlyList<CollectorRunTimeChange> runTimeChanges,
-        CancellationToken cancellationToken)
+        bool clearScopeRunTimes, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(rows);
 
@@ -362,6 +441,17 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            if (clearScopeRunTimes)
+            {
+                /* Reset means back to the shipped defaults, which have no fixed time: every run-time row of this scope goes,
+                   by scope and not by what the window loaded, so a row for a collector this build does not define, or one
+                   another writer added while the window was open, goes too. */
+                await DeleteRunTimesAsync(
+                    connection, transaction,
+                    serverId is null ? CollectorRunTimeDeleteFleetScopeSql : CollectorRunTimeDeleteServerScopeSql,
+                    serverId, cancellationToken);
+            }
 
             if (runTimeChanges.Count > 0)
             {

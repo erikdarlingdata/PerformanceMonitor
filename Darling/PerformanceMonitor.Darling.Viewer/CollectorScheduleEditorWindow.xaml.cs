@@ -34,6 +34,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <see cref="ViewerDataService.ReplaceFleetSchedulesAsync"/> / <see cref="ViewerDataService.ReplaceServerSchedulesAsync"/>
 /// always have, all in ONE call and ONE transaction (<see cref="ViewerDataService.SaveCollectorScheduleAsync"/>), so a Save
 /// that fails leaves neither the run times nor the schedule rows written.</para>
+///
+/// <para>A schedule Reset also deletes that scope's run times, in the same transaction as the schedule rows: the shipped defaults
+/// have no fixed time. "Reset to Defaults" and a server's "Use default schedule" are saved with the scope's run-time rows cleared
+/// first, and "Apply Default to All Servers" deletes every server's schedule rows and run times in one call.</para>
 /// </summary>
 public partial class CollectorScheduleEditorWindow : Window
 {
@@ -44,6 +48,7 @@ public partial class CollectorScheduleEditorWindow : Window
     private List<CollectorRunTimeRow> _runTimes = new();
     private List<CollectorScheduleEditItem> _editing = new();
     private int? _scopeServerId;           // null = fleet-wide default scope
+    private bool _resetToDefaults;         // Reset to Defaults was confirmed for this scope and not saved yet (#4938)
     private bool _suppressPresetChange;
     private bool _suppressScopeReload;
 
@@ -163,6 +168,7 @@ public partial class CollectorScheduleEditorWindow : Window
     private void LoadScopeSchedule()
     {
         _scopeServerId = (ScopeCombo.SelectedItem as ComboBoxItem)?.Tag as int?;
+        _resetToDefaults = false;   /* a Reset belongs to the scope it was made in, and a reload shows what is stored */
 
         var isServerScope = _scopeServerId is not null;
         UseDefaultCheckBox.Visibility = isServerScope ? Visibility.Visible : Visibility.Collapsed;
@@ -385,6 +391,9 @@ public partial class CollectorScheduleEditorWindow : Window
         }
 
         _editing = CollectorSchedulePresets.BuildDefaultSchedule();
+        /* #4938: back to the shipped defaults means no fixed time, so the Save deletes this scope's run-time rows by scope, in
+           its own transaction with the schedule rows, and not only the ones this window loaded. */
+        _resetToDefaults = true;
         BindGrid();
         DetectActivePreset();
     }
@@ -431,13 +440,17 @@ public partial class CollectorScheduleEditorWindow : Window
                whose schedule write fails does not leave the run time saved, and a store that cannot take the run times
                (below V160, which the viewer says in its own words) is refused with nothing written. A Save that did not
                change a run time sends none, so it still saves its schedules on such a store. */
-            var runTimeChanges = CollectorScheduleOverlay.ToRunTimeChanges(_editing, _runTimes, _scopeServerId, usesDefault);
+            /* A schedule Reset (Reset to Defaults, or a server on "Use default schedule") also deletes this scope's run-time
+               rows, by scope and in the same transaction, because the shipped defaults have no fixed time. The changes are then
+               worked out against an empty scope: no delete for a "Use default" cell, and an insert for every time the grid holds. */
+            var clearRunTimes = _resetToDefaults || usesDefault;
+            var runTimeChanges = CollectorScheduleOverlay.ToRunTimeChanges(_editing, _runTimes, _scopeServerId, usesDefault, clearRunTimes);
             var rows = _scopeServerId is int serverId
                 ? (usesDefault
                     ? new List<CollectorScheduleRow>()
                     : CollectorScheduleOverlay.ToServerOverrideRows(_editing, serverId))
                 : CollectorScheduleOverlay.ToFleetOverrideRows(_editing);
-            await _dataService.SaveCollectorScheduleAsync(_scopeServerId, rows, runTimeChanges);
+            await _dataService.SaveCollectorScheduleAsync(_scopeServerId, rows, runTimeChanges, clearRunTimes);
 
             Saved = true;
             Close();
@@ -476,7 +489,7 @@ public partial class CollectorScheduleEditorWindow : Window
 
         var result = MessageBox.Show(
             "Reset EVERY server to the fleet-wide default schedule?\n\n" +
-            "This removes all per-server schedule overrides; the fleet-wide default schedule is not changed. " +
+            "This removes all per-server schedule overrides and run times; the fleet-wide default schedule and run times are not changed. " +
             "This can't be undone.",
             "Apply Default to All Servers", MessageBoxButton.YesNo, MessageBoxImage.Warning);
 
@@ -488,9 +501,9 @@ public partial class CollectorScheduleEditorWindow : Window
         ApplyDefaultToAllButton.IsEnabled = false;
         try
         {
+            /* #4938: a server's run time is part of its override, so this one call deletes every server's schedule rows and
+               run times together, in one transaction. */
             var removed = await _dataService.ResetAllServerSchedulesAsync();
-            /* #4938: a server's run time is part of its override, so the reset takes those too, in a statement of its own. */
-            removed += await _dataService.ResetAllServerRunTimesAsync();
             Saved = true;
 
             /* Re-read the overrides so the editor reflects the reset (every per-server row is now gone) and

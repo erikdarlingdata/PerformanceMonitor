@@ -338,13 +338,23 @@ public static class CollectorScheduleOverlay
     /// different letter case is removed too. Pure.</para>
     /// </summary>
     public static List<CollectorRunTimeChange> ToRunTimeChanges(
-        IReadOnlyList<CollectorScheduleEditItem> edited, IReadOnlyList<CollectorRunTimeRow> runTimes, int? serverId, bool usesDefault)
+        IReadOnlyList<CollectorScheduleEditItem> edited, IReadOnlyList<CollectorRunTimeRow> runTimes, int? serverId, bool usesDefault) =>
+        ToRunTimeChanges(edited, runTimes, serverId, usesDefault, clearScope: false);
+
+    /// <summary>
+    /// The same changes for a Save that is also a schedule Reset (<paramref name="clearScope"/>, #4938): the Save deletes every
+    /// run-time row of the scope itself, ahead of these changes (<see cref="ViewerDataService.SaveCollectorScheduleAsync(int?, IEnumerable{CollectorScheduleRow}, IReadOnlyList{CollectorRunTimeChange}, bool, CancellationToken)"/>),
+    /// so nothing is stored for the scope by the time they run: no delete is needed for a "Use default" cell, and every time the
+    /// grid holds is an insert, including one the window showed before the Reset and the grid still holds. Pure.
+    /// </summary>
+    public static List<CollectorRunTimeChange> ToRunTimeChanges(
+        IReadOnlyList<CollectorScheduleEditItem> edited, IReadOnlyList<CollectorRunTimeRow> runTimes, int? serverId, bool usesDefault, bool clearScope)
     {
         ArgumentNullException.ThrowIfNull(edited);
         ArgumentNullException.ThrowIfNull(runTimes);
 
         var changes = new List<CollectorRunTimeChange>();
-        var stored = runTimes.Where(r => r.ServerId == serverId).ToList();
+        var stored = clearScope ? new List<CollectorRunTimeRow>() : runTimes.Where(r => r.ServerId == serverId).ToList();
 
         foreach (var item in edited)
         {

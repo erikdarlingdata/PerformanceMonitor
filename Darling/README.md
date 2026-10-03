@@ -797,7 +797,7 @@ The overrides that do exist live in the **store**, not the file: `config.config_
 
 #### What the run time sets
 
-The run time sets one thing: the time of day a collector that runs once a day or less often starts. The `config.config_collector_run_times` table holds it, one row per collector (fleet-wide or for one server), as minutes after midnight on the *monitored server's own clock*; a collector with no row has no run time, and the Viewer's schedule Save never touches the table. The Viewer and the CLI take it as a 24-hour `HH:MM` time such as `02:00`.
+The run time sets one thing: the time of day a collector that runs once a day or less often starts. The `config.config_collector_run_times` table holds it, one row per collector (fleet-wide or for one server), as minutes after midnight on the *monitored server's own clock*; a collector with no row has no run time. The Viewer's Collector Schedules window writes it in the same Save as the schedule rows, and its Reset to Defaults, a server's Use default schedule and Apply Default to All Servers delete the run times of the schedule they reset (the shipped defaults have no fixed time). A Viewer released before the table existed resets the schedule rows only, so a run time set here survives a Reset done in an older one. The Viewer and the CLI take it as a 24-hour `HH:MM` time such as `02:00`.
 
 Without a run time, such a collector starts when the service happened to start. That can be the busiest hour of the server's day. With one, it starts in the hour you chose.
 
