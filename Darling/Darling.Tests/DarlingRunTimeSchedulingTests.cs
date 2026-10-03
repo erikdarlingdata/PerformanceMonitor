@@ -498,4 +498,77 @@ public sealed class DarlingRunTimeSchedulingTests
         Assert.Equal(lastRun.AddMinutes(Daily), server.NextDue[Collector]);
         Assert.False(server.RunTimeSlots.ContainsKey(Collector));
     }
+
+    /* ---- a run recorded while a reload is reading the watermarks (#5033) ---- */
+
+    [Fact]
+    public async Task Reload_ARunRecordedDuringTheWatermarkRead_KeepsTheRunsLastRun_Changed()
+    {
+        var runAt = RunTimeTenMinutesAgo();
+        var oldRunAt = (runAt + 120) % Daily;
+        var worker = MakeWorker(FleetRunTime(Collector, oldRunAt));
+        var server = MakeServer(0);
+        server.NextDue[Collector] = DateTime.UtcNow.AddHours(5);
+        server.RunTimeSlots[Collector] = new DarlingWorker.RunTimeSlot(oldRunAt, Daily, server.Clock.Id, null);
+        worker.ScheduleOverridesForTest = [FleetRunTime(Collector, runAt)];
+        worker.AfterRecomputeWatermarkReadForTest = (s, name) =>
+        {
+            if (string.Equals(name, Collector, StringComparison.OrdinalIgnoreCase))
+            {
+                worker.RecordRunTimeHandOff(
+                    s, 0, Collector, new DarlingWorker.RunTimeHandOff(s.RunTimeSlots[Collector], DateTime.UtcNow.AddDays(1)));
+            }
+
+            return Task.CompletedTask;
+        };
+
+        await worker.RecomputeNextDueAsync([server], TestContext.Current.CancellationToken);
+
+        Assert.NotNull(server.RunTimeSlots[Collector].LastRunUtc);
+        Assert.Equal(runAt, server.RunTimeSlots[Collector].RunAtMinute);
+        Assert.True(server.NextDue[Collector] > DateTime.UtcNow.AddHours(10), "the run just recorded counts: the next slot is tomorrow's");
+    }
+
+    [Fact]
+    public async Task Reload_ARunRecordedDuringTheWatermarkRead_KeepsTheRunsLastRun_Cleared()
+    {
+        var runAt = RunTimeTenMinutesAgo();
+        var worker = MakeWorker(FleetRunTime(Collector, runAt));
+        var server = MakeServer(0);
+        server.NextDue[Collector] = DateTime.UtcNow.AddHours(5);
+        server.RunTimeSlots[Collector] = new DarlingWorker.RunTimeSlot(runAt, Daily, server.Clock.Id, DateTime.UtcNow.AddDays(-2));
+        worker.ScheduleOverridesForTest = [FleetRunTime(Collector, -1)];
+        worker.AfterRecomputeWatermarkReadForTest = (s, name) =>
+        {
+            if (string.Equals(name, Collector, StringComparison.OrdinalIgnoreCase))
+            {
+                worker.RecordRunTimeHandOff(
+                    s, 0, Collector, new DarlingWorker.RunTimeHandOff(s.RunTimeSlots[Collector], DateTime.UtcNow.AddDays(1)));
+            }
+
+            return Task.CompletedTask;
+        };
+
+        await worker.RecomputeNextDueAsync([server], TestContext.Current.CancellationToken);
+
+        Assert.False(server.RunTimeSlots.ContainsKey(Collector));
+        Assert.True(server.NextDue[Collector] > DateTime.UtcNow.AddHours(23), "the run just recorded counts: the collector waits a full interval");
+    }
+
+    [Fact]
+    public void Record_AfterAReloadChangedTheRunTime_KeepsTheNewRunTime()
+    {
+        var runAt = RunTimeTwelveHoursAway();
+        var newRunAt = (runAt + 120) % Daily;
+        var worker = MakeWorker();
+        var server = MakeServer(0);
+        var handOff = new DarlingWorker.RunTimeHandOff(
+            new DarlingWorker.RunTimeSlot(runAt, Daily, server.Clock.Id, null), DateTime.UtcNow.AddDays(1));
+        server.RunTimeSlots[Collector] = new DarlingWorker.RunTimeSlot(newRunAt, Daily, server.Clock.Id, null);
+
+        worker.RecordRunTimeHandOff(server, 0, Collector, handOff);
+
+        Assert.Equal(newRunAt, server.RunTimeSlots[Collector].RunAtMinute);
+        Assert.NotNull(server.RunTimeSlots[Collector].LastRunUtc);
+    }
 }

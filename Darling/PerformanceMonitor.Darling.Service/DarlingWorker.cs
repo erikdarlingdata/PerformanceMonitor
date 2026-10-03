@@ -555,6 +555,13 @@ public sealed class DarlingWorker : BackgroundService
     internal Func<ServerLoopState, ServerRuntime, string, CancellationToken, Task<int>>? RunOneBodyOverride { get; set; }
 
     /// <summary>
+    /// Test seam: awaited by <see cref="RecomputeNextDueAsync"/> right after it reads the persisted watermarks for a
+    /// collector, before it writes that collector's schedule, so a test can land a run's record in that window (#5033).
+    /// Null in production.
+    /// </summary>
+    internal Func<ServerLoopState, string, Task>? AfterRecomputeWatermarkReadForTest { get; set; }
+
+    /// <summary>
     /// The sweep gate's width right now (#2170) — the ceiling minus what has been absorbed. Reported by the
     /// queued-behind-the-gate diagnostic, which an operator reads while deciding whether to raise the knob,
     /// so it must never print the compile-time default once the knob has moved. Mid-narrow this reads the
@@ -6148,6 +6155,10 @@ LIMIT 1";
                         /* #4938: a run time that was just set or changed, or a clock that changed, computes the slot again,
                            from the last run held in memory when there is one and the persisted mark when not. */
                         watermarks ??= await ReadCollectorWatermarksAsync(_postgres!, runtime.ServerId, _logger, cancellationToken);
+                        if (AfterRecomputeWatermarkReadForTest is { } afterRead)
+                        {
+                            await afterRead(server, name);
+                        }
                         var changedLastRun = slot?.LastRunUtc ?? (watermarks.TryGetValue(name, out var cw) ? cw : (DateTime?)null);
                         server.NextDue[name] = ComputeSeededNextDue(
                             changedLastRun, interval, now, SeedJitter(runtime.ServerId, interval * 60), changed);
@@ -6160,6 +6171,10 @@ LIMIT 1";
                         /* #4938: the run time was cleared, so the collector returns to the rule it had without one: its
                            last run plus the interval, or now plus the seed jitter when that has passed. */
                         watermarks ??= await ReadCollectorWatermarksAsync(_postgres!, runtime.ServerId, _logger, cancellationToken);
+                        if (AfterRecomputeWatermarkReadForTest is { } afterRead)
+                        {
+                            await afterRead(server, name);
+                        }
                         var clearedLastRun = slot.LastRunUtc ?? (watermarks.TryGetValue(name, out var xw) ? xw : (DateTime?)null);
                         server.RunTimeSlots.TryRemove(name, out _);
                         server.NextDue[name] = ComputeSeededNextDue(clearedLastRun, interval, now, SeedJitter(runtime.ServerId, interval * 60));
@@ -6180,6 +6195,10 @@ LIMIT 1";
                        jitter still de-clusters an overdue / never-run fleet-wide enable. With a run time (#4938)
                        the seed is the slot instead, so a collector enabled at noon waits for its run time. */
                     watermarks ??= await ReadCollectorWatermarksAsync(_postgres!, runtime.ServerId, _logger, cancellationToken);
+                    if (AfterRecomputeWatermarkReadForTest is { } afterRead)
+                    {
+                        await afterRead(server, name);
+                    }
                     var lastRun = watermarks.TryGetValue(name, out var w) ? w : (DateTime?)null;
                     var jitter = SeedJitter(runtime.ServerId, interval * 60);
                     server.NextDue[name] = ComputeSeededNextDue(lastRun, interval, now, jitter, rule);
@@ -13501,6 +13520,17 @@ LIMIT 1";
         server.SweepPeerMaxMs >= 0 ? server.SweepPeerMaxMs : null;
 
     /// <summary>
+    /// Records a run that took its slot: the stamp moves to the next slot and the slot's last run is now (#5033).
+    /// </summary>
+    internal void RecordRunTimeHandOff(ServerLoopState server, int serverId, string name, RunTimeHandOff handOff)
+    {
+        _ = serverId;
+        server.NextDue[name] = handOff.NextDue;
+        server.RunTimeSlots[name] = handOff.Slot with { LastRunUtc = DateTime.UtcNow };
+    }
+
+
+    /// <summary>
     /// Runs one collector for a server and logs its outcome to collection_log. Returns the rows written
     /// (0 on skip/permissions/error) so an on-demand snapshot can tally them; the scheduled/on-load callers
     /// simply discard the count.
@@ -13594,8 +13624,7 @@ LIMIT 1";
         if (runTimeHandOff is not null)
         {
             _fleetGateStats?.RecordSlot(0);
-            server.NextDue[collectorName] = runTimeHandOff.NextDue;
-            server.RunTimeSlots[collectorName] = runTimeHandOff.Slot with { LastRunUtc = DateTime.UtcNow };
+            RecordRunTimeHandOff(server, runtime.ServerId, collectorName, runTimeHandOff);
         }
 
         /* #4938: a daily run waits here for one of the fleet's permits, holding its single-flight slot while it
