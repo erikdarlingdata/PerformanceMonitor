@@ -4,11 +4,26 @@ name: Claude Auto Review
 # one pays. WHAT RUNS depends on the event, and the `decide` job makes that call once:
 #   - opened, reopened, ready_for_review: a FULL review, at the tier described further down.
 #   - a push (synchronize): at most ONE follow-up review after each full one. It runs on Sonnet
-#     with 30 turns and covers only the commits since the newest verdict's commit_id. A push after
-#     that follow-up gets no review. A push with no verdict yet (the full review was cancelled or
-#     never ran), or whose last-reviewed commit is no longer an ancestor of the head (a
-#     force-push), gets a FULL review. A verdict with no `review-pass` line counts as full, so the
-#     push after it gets a follow-up.
+#     with 30 turns and covers only the commits since the commit the newest verdict reviewed. That
+#     commit is compared with the pushed head FIRST, whatever kind the verdict is: only a head
+#     that is ahead of it is skipped or given a follow-up (a follow-up after a full review, no
+#     review after a follow-up). Everything else gets a FULL review: a push with no verdict yet
+#     (the full review was cancelled or never ran), one whose reviewed commit is no longer an
+#     ancestor of the head (a force-push), a re-run on the head the verdict already covers, and
+#     any read that fails. A verdict with no `review-pass` line counts as full, so the push after
+#     it gets a follow-up.
+#     Two more reads can change a push's answer. (1) A push that would get no review, because the
+#     newest verdict is already a follow-up, gets a FULL one when another run of this workflow for
+#     the pull request has not finished. After a follow-up only a full trigger (ready for review,
+#     reopened, the label) starts a review, so that run may be a full review of an older head,
+#     and its verdict would land with no later check to read it; this push's full review replaces
+#     it through the concurrency group of the `review` job. A second push seconds after another
+#     sees the first push's run unfinished and gets the full review as well; that cost is
+#     accepted. (2) The step's last read: a push whose head is no longer the pull request's head
+#     gets no review. A newer push replaced it and that push's run decides, and a review job from
+#     this run could join the group after the newer one and cancel it. The other events skip that
+#     read, because the review they asked for would be lost when the newer push answers with no
+#     review.
 #   - the `re-review` label: a FULL review on request. The review removes the label when it is
 #     done. A push while the label is still on the pull request is also a full review, so a
 #     request that a push cancelled is not lost and the label cannot get stuck.
@@ -16,9 +31,13 @@ name: Claude Auto Review
 # Measured on 2026-10-02: a full-tier review (Opus, 120 turns) cost a median $7.53 and took 18
 # minutes, a light-tier one about $0.64, and every push to every pull request, drafts included,
 # started a full one. Rounds after the first found mostly comment accuracy, so the later pushes
-# now get the cheap follow-up. Each review marks its kind in its body with a hidden
-# `<!-- review-pass: full -->` or `<!-- review-pass: follow-up -->` line, which is what the next
-# push reads.
+# now get the cheap follow-up. Each review marks its kind and the head it reviewed in its body
+# with a hidden `<!-- review-pass: full head=<sha> -->` or `<!-- review-pass: follow-up
+# head=<sha> -->` line, which is what the next push reads. The head is the pull request's head
+# when the run started. GitHub stamps a review with the head at the moment it is SUBMITTED (`gh pr
+# review` sends no commit), so a review that runs while a push lands is stamped with the newer
+# head, and a follow-up that started there would skip commits nobody reviewed. A verdict posted
+# before the marker named a head has none, and its commit_id stands in.
 #
 # The review posts
 # comments for its findings and ends every run with ONE formal verdict review (the VERDICT
@@ -80,8 +99,8 @@ jobs:
   # guard looks, the review this run posted has changed the very history the decision reads. The
   # decision cannot move into a shared script, composite action or reusable workflow either:
   # claude-code-action runs only while THIS file matches the default branch's copy byte for byte, and
-  # a file the pull request can edit would sit outside that check while running in a job that holds
-  # the OAuth token. The decision is a step of this file for that reason.
+  # a file the pull request can edit would sit outside that check while steering the review job,
+  # which holds the OAuth token. The decision is a step of this file for that reason.
   decide:
     # No runner for a draft, or for a label other than re-review. The script below repeats both rules
     # in its first lines, so a dry run of it covers the whole table; this line only saves the runner.
@@ -89,11 +108,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      # The one read of this workflow's own runs, which a push after a follow-up makes. Without
+      # the scope that read is refused, and every such push would fall back to a full review.
+      actions: read
       contents: read
       pull-requests: read
     env:
-      # Mapped to env so the step guard below can skip cleanly when the secret is absent.
-      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      # This job reads no secret. The flag only lets the step guard below skip cleanly when the
+      # repository has no token (a fork pull request gets none either); the comparison is made
+      # here, so the token's value never enters this job's environment.
+      HAS_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     outputs:
       pass: ${{ steps.pass.outputs.pass }}
       base: ${{ steps.pass.outputs.base }}
@@ -103,7 +127,7 @@ jobs:
       # HAS_LABEL expression below, the label-removal step, the RE_REVIEW value): rename it in all.
       - name: Decide the review pass
         id: pass
-        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        if: ${{ env.HAS_OAUTH_TOKEN == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           R: ${{ github.repository }}
@@ -112,6 +136,9 @@ jobs:
           LABEL: ${{ github.event.label.name }}
           DRAFT: ${{ github.event.pull_request.draft }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # The branch the head came from and this run's id, for the one read of the workflow's runs.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          RUN_ID: ${{ github.run_id }}
           HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 're-review') }}
           RE_REVIEW: re-review
           # Author of every review the action leaves behind (the action's bot_name default).
@@ -174,30 +201,85 @@ jobs:
                 if ! lookup "repos/$R/pulls/$PR/reviews/$last_id" --jq '.body // ""'; then
                   pass=full; reason="the newest verdict could not be read ($LOOKUP_ERR)"
                 else
-                  # The kind the verdict marked itself with. The LAST matching line wins: the prompt
-                  # puts it directly above the ledger at the end of the body. A verdict with no
-                  # marker (one posted before the marker existed) counts as full.
+                  # The kind the verdict marked itself with, and the head it reviewed. The LAST matching
+                  # line wins: the prompt puts it directly above the ledger at the end of the body. The
+                  # reviewed commit is the marker's head when it has one. GitHub stamps a review with the
+                  # pull request's head at the moment it is submitted, so a review that ran while a push
+                  # landed carries a commit_id newer than the head it read, and a follow-up that started
+                  # there would skip commits nobody reviewed. A verdict posted before the marker named a
+                  # head has none, and its commit_id stands in. A verdict with no marker at all (posted
+                  # before the marker existed) counts as full.
                   marker=$(printf '%s\n' "$LOOKUP_OUT" | tr -d '\r' \
-                    | grep -E '^<!-- review-pass: (full|follow-up) -->[[:space:]]*$' | tail -n 1 || true)
-                  if [[ "$marker" == '<!-- review-pass: follow-up -->'* ]]; then
-                    # At most ONE follow-up after each full review.
-                    pass=skip; reason="the newest verdict is already a follow-up"
-                  elif [ -z "$last_commit" ]; then
+                    | grep -E '^<!-- review-pass: (full|follow-up)( head=[0-9a-f]{40})? -->[[:space:]]*$' | tail -n 1 || true)
+                  kind=''; reviewed=$last_commit
+                  marker_re='^<!-- review-pass: (full|follow-up)( head=([0-9a-f]{40}))? -->'
+                  if [[ "$marker" =~ $marker_re ]]; then
+                    kind=${BASH_REMATCH[1]}
+                    if [ -n "${BASH_REMATCH[3]:-}" ]; then reviewed=${BASH_REMATCH[3]}; fi
+                  fi
+                  # The reviewed commit is compared with this head BEFORE the kind is looked at, so only a
+                  # head that is ahead of it is ever skipped or given a follow-up.
+                  if [ -z "$reviewed" ]; then
                     pass=full; reason="the newest verdict names no commit"
-                  elif ! lookup "repos/$R/compare/$last_commit...$HEAD_SHA?per_page=1" --jq '.status'; then
+                  elif ! lookup "repos/$R/compare/$reviewed...$HEAD_SHA?per_page=1" --jq '.status'; then
                     # Unknown to the repository: a force-push dropped it.
-                    pass=full; reason="the last-reviewed commit ${last_commit:0:12} cannot be compared with this head ($LOOKUP_ERR)"
+                    pass=full; reason="the last-reviewed commit ${reviewed:0:12} cannot be compared with this head ($LOOKUP_ERR)"
                   elif [ "$LOOKUP_OUT" != "ahead" ]; then
                     # diverged (a force-push or rebase), behind, or identical (a re-run on a head that
-                    # already has its verdict): not a range a follow-up can cover. A re-run of a
-                    # review that failed its shape check must produce a review, so identical is full.
-                    pass=full; reason="the last-reviewed commit ${last_commit:0:12} is not an ancestor of this head (compare says $LOOKUP_OUT)"
+                    # already has its verdict): not a range a follow-up can cover, and not one to skip
+                    # either, whatever kind the verdict is. A re-run of a review that failed its shape
+                    # check must produce a review, so identical is full.
+                    pass=full; reason="the last-reviewed commit ${reviewed:0:12} is not an ancestor of this head (compare says $LOOKUP_OUT)"
+                  elif [ "$kind" = follow-up ]; then
+                    # At most ONE follow-up after each full review, so this push gets no review, unless
+                    # another run of this workflow for this pull request has not finished. After a
+                    # follow-up only a full trigger (ready for review, reopened, the label) starts a
+                    # review, so that run may be a full review of an older head, and the verdict it posts
+                    # would have no check left to read it. This push's full review replaces it through
+                    # the concurrency group instead. A run is this pull request's when its list names the
+                    # number; a run with none listed (the field is empty once a pull request closes) counts
+                    # through the branch the query is limited to. This run is not counted. One page is
+                    # enough: a run that has not finished is among the newest. A second push seconds after
+                    # another sees that run too and gets a full review; that cost is accepted, so there is
+                    # no waiting. A read that fails is a full review, as above.
+                    if ! lookup -X GET "repos/$R/actions/workflows/claude-review.yml/runs" \
+                        -f event=pull_request -f branch="$HEAD_REF" -f per_page=50 \
+                        --jq '.workflow_runs[]
+                              | select(.status != "completed" and (.id | tostring) != env.RUN_ID
+                                       and (((.pull_requests // []) | length) == 0
+                                            or any((.pull_requests // [])[]; (.number | tostring) == env.PR)))
+                              | .status'; then
+                      pass=full; reason="the runs of this workflow could not be read ($LOOKUP_ERR)"
+                    elif [ -n "$LOOKUP_OUT" ]; then
+                      IFS= read -r run_status <<<"$LOOKUP_OUT"
+                      pass=full; reason="the newest verdict is already a follow-up, but another run of this workflow for this pull request has not finished ($run_status): it may be a full review of an older head, whose verdict would have no check left to read it, so this push gets a full review, which replaces it"
+                    else
+                      pass=skip; reason="the newest verdict is already a follow-up"
+                    fi
                   else
-                    pass=follow-up; base=$last_commit
-                    reason="the newest verdict (${last_commit:0:12}) was a full review, so the commits since it get one follow-up"
+                    pass=follow-up; base=$reviewed
+                    reason="the newest verdict (${reviewed:0:12}) was a full review, so the commits since it get one follow-up"
                   fi
                 fi
               fi
+            fi
+          fi
+
+          # A push that a newer push has already replaced decides nothing. The newer push has a run of
+          # its own, and that run decides; a review job from this run could join the concurrency group
+          # after the newer one and cancel it. This is the step's last read, so the head it compares is
+          # as fresh as the step can get. Pushes only: a newer push may answer with no review, and the
+          # full review that opening, reopening, ready for review and the label asked for would be
+          # lost with it. A read that fails keeps the decision.
+          if [ "$ACTION" = "synchronize" ] && [ "$pass" != skip ]; then
+            sha_re='^[0-9a-f]{40}$'
+            if lookup "repos/$R/pulls/$PR" --jq '.head.sha'; then
+              if [[ "$LOOKUP_OUT" =~ $sha_re ]] && [ "$LOOKUP_OUT" != "$HEAD_SHA" ]; then
+                pass=skip; base=''
+                reason="a newer push replaced this head (${HEAD_SHA:0:12}), and the run for ${LOOKUP_OUT:0:12} decides"
+              fi
+            else
+              reason="$reason (the pull request's head could not be read again: $LOOKUP_ERR)"
             fi
           fi
 
@@ -503,15 +585,18 @@ jobs:
             <where the two accounts disagree, or: None — the body's account matches the diff on every claim graded above.>
             ### Reviewer checklist
             - [ ] <what a human should check by hand that a read-only tree could not: a live read, a build, a rig, a production page>
-            <!-- review-pass: ${{ needs.decide.outputs.pass }} -->
+            <!-- review-pass: ${{ needs.decide.outputs.pass }} head=${{ github.event.pull_request.head.sha }} -->
             <!-- review-ledger: verdict=LGTM verified=<N> unverified=<N> refuted=<N> traps=<N> tier=${{ steps.tier.outputs.tier || 'full' }} model=${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }} -->
 
             Ledger arithmetic: verified / unverified / refuted are the bullet counts under Claims
             in each state; traps is the bullet count under Traps near this diff; verdict matches
             the header (`LGTM`, or `CHANGES_REQUESTED` for a changes-requested review); tier and
             model are the REVIEW TIER and MODEL lines at the top of this prompt, verbatim. The
-            review-pass line is the REVIEW PASS line at the top, verbatim: the next push reads it to
-            decide what it gets, so a wrong or missing one costs a review or hides one.
+            review-pass line is the REVIEW PASS value from the top of this prompt and the head SHA
+            this review started on, written exactly as the shape above writes it, `head=` included:
+            the next push reads it to decide what it gets, and a follow-up starts after that SHA,
+            so a wrong or missing one costs a review or hides one, and the verdict check fails the
+            job when the line differs.
           # #3650: the prompt above says the branch is checked out and asks for a correctness,
           # parity and security review -- an invitation to read code -- while the allowlist used to
           # permit only the four gh verbs and the inline-comment tool. Every Read, Grep, Glob and
@@ -591,9 +676,11 @@ jobs:
           # What the tier step decided, to cross-check the ledger's own tier claim (a warning,
           # not a failure: a mislabelled tier does not compromise the verdict, only the ledger).
           TIER: ${{ steps.tier.outputs.tier }}
-          # The pass the decide job chose; the verdict's review-pass line must say the same, because
-          # the next push reads that line to decide what it gets.
+          # The pass the decide job chose and the head this run started on; the verdict's review-pass
+          # line must say both, because the next push reads that line to decide what it gets and where
+          # its follow-up starts.
           PASS: ${{ needs.decide.outputs.pass }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
@@ -655,17 +742,18 @@ jobs:
             header=$(printf '%s\n' "$body" | grep -E -m1 '^## Verdict: (LGTM|CHANGES REQUESTED)[[:space:]]*$' || true)
             ledger=$(printf '%s\n' "$body" | grep -E -m1 '^<!-- review-ledger: verdict=(LGTM|CHANGES_REQUESTED) verified=[0-9]+ unverified=[0-9]+ refuted=[0-9]+ traps=[0-9]+ tier=(full|light) model=[^[:space:]]+ -->[[:space:]]*$' || true)
             sections=$(printf '%s\n' "$body" | grep -E '^### ' | tr '\n' ';' || true)
-            marker=$(printf '%s\n' "$body" | grep -E '^<!-- review-pass: (full|follow-up) -->[[:space:]]*$' | tail -n 1 | sed -E 's/[[:space:]]+$//' || true)
+            marker=$(printf '%s\n' "$body" | grep -E '^<!-- review-pass: (full|follow-up)( head=[0-9a-f]{40})? -->[[:space:]]*$' | tail -n 1 | sed -E 's/[[:space:]]+$//' || true)
+            expected_marker="<!-- review-pass: $PASS head=$HEAD_SHA -->"
             echo "newest verdict: $verdict_state $verdict_url"
             echo "  header: ${header:-<missing>}"
             echo "  ledger: ${ledger:-<missing>}"
-            echo "  pass marker: ${marker:-<missing>} (decided: $PASS)"
+            echo "  pass marker: ${marker:-<missing>} (expected: $expected_marker)"
             echo "  sections: ${sections:-<none>}"
 
             missing=''
             [ -z "$header" ] && missing="$missing the '## Verdict: LGTM | CHANGES REQUESTED' header;"
             [ -z "$ledger" ] && missing="$missing the '<!-- review-ledger: ... -->' line;"
-            [ "$marker" != "<!-- review-pass: $PASS -->" ] && missing="$missing the '<!-- review-pass: $PASS -->' line (found: ${marker:-none});"
+            [ "$marker" != "$expected_marker" ] && missing="$missing the '$expected_marker' line (found: ${marker:-none});"
             if [ -n "$header" ] && [ -n "$ledger" ]; then
               ledger_verdict=$(printf '%s' "$ledger" | sed -E 's/.*verdict=([A-Z_]+).*/\1/')
               case "$verdict_state:$ledger_verdict" in
