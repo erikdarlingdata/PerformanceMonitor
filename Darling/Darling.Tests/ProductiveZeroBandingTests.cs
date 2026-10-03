@@ -313,12 +313,14 @@ public sealed class ProductiveZeroBandingTests
     [Fact]
     public void BothDarlingBandingReads_ProjectWhatTheStreakArmReads()
     {
-        /* The per-server read: the EXACT width, off the recency_rank #3819 already added. */
+        /* The per-server read: the EXACT width, from a lookup that ranks only the runs from the newest
+           streak break on (#4955), and the run count when nothing breaks the streak. */
         Assert.Contains(
             "AS trailing_zero_row_success_runs",
             DarlingDataReader.CollectionHealthSql,
             StringComparison.Ordinal);
-        Assert.Contains("THEN recency_rank END) - 1", DarlingDataReader.CollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains("THEN run_rank END) - 1 AS runs_ahead_of_break", DarlingDataReader.CollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(streak.runs_ahead_of_break, h.total_runs) AS trailing_zero_row_success_runs", DarlingDataReader.CollectionHealthSql, StringComparison.Ordinal);
 
         /* The fleet read: ONE plain aggregate and no subquery, which is the whole reason the width is
            estimated there. A ROW_NUMBER appearing in this statement would mean a fleet-wide sort landed in
