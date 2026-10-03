@@ -125,10 +125,14 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
 
     /// <summary>
     /// The relation list is a closed enum, so no view name ever comes from the caller. Each member must name a real
-    /// archive view (<c>v_</c> plus a table in the archivable set, archived by <c>collection_time</c>), with a
-    /// <c>server_id</c> column and the column the probe windows on (<c>QueryWindowRelationTimeColumn</c>:
-    /// <c>collection_time</c>, or <c>sample_time</c> for Memory Pressure Events, whose chart filters on it), which is
-    /// what the probe's SQL assumes.
+    /// archive view (<c>v_</c> plus a table in the archivable set) whose time column is the one
+    /// <see cref="LocalDataService.QueryWindowRelationTimeColumn"/> names for it (<c>collection_time</c>; <c>capture_time</c>
+    /// on the three config snapshots; <c>event_time</c> on the two event tables, #4966, #4989; <c>sample_time</c> for Memory
+    /// Pressure Events, whose chart filters on it), with a <c>server_id</c> column, which is what the probe's SQL assumes.
+    /// The archive purges each table by that same column except for the two event tables and Memory Pressure Events: their
+    /// grids and chart filter on the event's own time (<c>event_time</c>, <c>sample_time</c>), which is the column the probe
+    /// measures, while the archive still purges them by <c>collection_time</c>, the time a run stored the row. The purge
+    /// column is pinned for those three as <c>collection_time</c>, and the view must carry both.
     /// </summary>
     [Fact]
     public async Task EveryRelation_NamesARealArchiveView_WithServerIdAndItsProbeTimeColumn()
@@ -138,18 +142,22 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         {
             var view = LocalDataService.QueryWindowRelationView(relation);
             var timeColumn = LocalDataService.QueryWindowRelationTimeColumn(relation);
-            Assert.Contains(timeColumn, new[] { "collection_time", "sample_time" });
+            Assert.Contains(timeColumn, new[] { "collection_time", "capture_time", "event_time", "sample_time" });
             Assert.StartsWith("v_", view, StringComparison.Ordinal);
             var table = view[2..];
+            var purgeColumn = relation is QueryWindowRelation.SystemHealthEvents or QueryWindowRelation.DefaultTraceEvents
+                or QueryWindowRelation.MemoryPressureEvents
+                ? "collection_time"
+                : timeColumn;
             Assert.Contains(table, DuckDbInitializer.ArchivableTables);
-            Assert.Contains(ArchiveService.ArchivableTables, t => t.Table == table && t.TimeColumn == "collection_time");
+            Assert.Contains(ArchiveService.ArchivableTables, t => t.Table == table && t.TimeColumn == purgeColumn);
 
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync();
             using var readLock = _duckDb.AcquireReadLock();
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = $"SELECT COUNT(*) FROM information_schema.columns WHERE table_name = '{view}' AND column_name IN ('server_id', '{timeColumn}')";
-            Assert.Equal(2L, Convert.ToInt64(await cmd.ExecuteScalarAsync()));
+            cmd.CommandText = $"SELECT COUNT(*) FROM information_schema.columns WHERE table_name = '{view}' AND column_name IN ('server_id', '{timeColumn}', '{purgeColumn}')";
+            Assert.Equal(purgeColumn == timeColumn ? 2L : 3L, Convert.ToInt64(await cmd.ExecuteScalarAsync()));
         }
     }
 

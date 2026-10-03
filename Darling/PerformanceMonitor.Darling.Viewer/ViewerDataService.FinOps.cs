@@ -420,6 +420,36 @@ public sealed class ServerPropertyRow
     private string? _hardwareUnavailableReason;
     private bool HostHardware => ServerHardwareScope.HardwareIsTheHosts(EngineEdition);
 
+    /// <summary>Builds the grid row from the Storage read; the display conversion (the row's own server clock) happens here.</summary>
+    public static ServerPropertyRow From(ServerInventoryDto dto, ServerClock clock) => new()
+    {
+        ServerId = dto.ServerId,
+        Clock = clock,
+        ServerName = dto.ServerName,
+        Edition = dto.Edition,
+        ProductVersion = dto.ProductVersion,
+        EngineEdition = dto.EngineEdition,
+        CpuCount = dto.CpuCount,
+        PhysicalMemoryMb = dto.PhysicalMemoryMb,
+        HardwareUnavailableReason = dto.HardwareUnavailableReason,
+        SocketCount = dto.SocketCount,
+        CoresPerSocket = dto.CoresPerSocket,
+        IsHadrEnabled = dto.IsHadrEnabled,
+        IsClustered = dto.IsClustered,
+        /* #2359: the CONFIG SNAPSHOT time, not a freshness heartbeat. */
+        InventoryAsOf = dto.InventoryAsOfUtc is DateTime asOf ? ViewerTimeHelper.ConvertToDisplay(asOf, ViewerTimeHelper.CurrentDisplayMode, clock) : null,
+        /* #4766: the UTC instants too, so the columns' text can name the offset in the repeated autumn hour. */
+        InventoryAsOfUtc = dto.InventoryAsOfUtc,
+        /* sqlserver_start_time is the server's LOCAL clock — shown as-is like Lite. */
+        SqlServerStartTime = dto.SqlServerStartTime,
+        HostOsVersion = dto.HostOsVersion,
+        AgReplicaRole = dto.AgReplicaRole,
+        IsEnabled = dto.IsEnabled,
+        MonthlyCost = dto.MonthlyCost,
+        LastCollected = dto.LastCollectedUtc is DateTime last ? ViewerTimeHelper.ConvertToDisplay(last, ViewerTimeHelper.CurrentDisplayMode, clock) : null,
+        LastCollectedUtc = dto.LastCollectedUtc
+    };
+
     public int? CpuCount { get => _cpuCount; set => _cpuCount = value ?? 0; }
     public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }
     public int? SocketCount { get => HostHardware ? null : _socketCount; set => _socketCount = value; }
