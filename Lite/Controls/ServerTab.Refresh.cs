@@ -596,8 +596,20 @@ public partial class ServerTab : UserControl
     /// the newest N rows (Plan Corrections, the Collection Log and Long Queries now; Blocked Process Reports and
     /// Deadlocks as they adopt it) pass their rows, their cap and the time their rows are shown and capped on.
     /// </summary>
-    internal static DateTime? CapAwareWindowFloor<T>(DateTime? probedFloor, IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc) =>
-        rowCap > 0 && rows.Count >= rowCap ? rows.Min(rowTimeUtc) : probedFloor;
+    internal static DateTime? CapAwareWindowFloor<T>(DateTime? probedFloor, IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc, DateTime? cappedSourceOldestUtc = null)
+    {
+        DateTime? capStart = rowCap > 0 && rows.Count >= rowCap ? rows.Min(rowTimeUtc) : null;
+
+        /* #4966: a grid fed by two reads (Blocked Process Reports: XE reports and DMV snapshots) can hold fewer rows than its
+           cap while ONE of its reads filled its own, because the merge drops rows. That read's oldest event time bounds the
+           grid the same way, and when both name one the later wins, since the grid is complete only from there. */
+        if (cappedSourceOldestUtc is DateTime sourceOldest && (capStart is not DateTime named || sourceOldest > named))
+        {
+            capStart = sourceOldest;
+        }
+
+        return capStart ?? probedFloor;
+    }
 
     /// <summary>
     /// #4966: the banner step for a grid whose read is capped at its newest <paramref name="rowCap"/> rows. A read that
@@ -612,10 +624,11 @@ public partial class ServerTab : UserControl
     /// </summary>
     private System.Threading.Tasks.Task RefreshCappedGridBannerAsync<T>(
         QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc,
-        IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc) =>
+        IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc, DateTime? cappedSourceOldestUtc = null) =>
         CappedGridBannerAsync(rows, rowCap, rowTimeUtc,
             oldestRowShown => ApplyCappedWindowFloorToBanner(banner, oldestRowShown, startUtc, GetPickerZone()),
-            () => RefreshWindowTruncatedBannerAsync(relation, banner, startUtc, endUtc, EarliestRowShown(rows, rowTimeUtc)));
+            () => RefreshWindowTruncatedBannerAsync(relation, banner, startUtc, endUtc, EarliestRowShown(rows, rowTimeUtc)),
+            cappedSourceOldestUtc);
 
     /// <summary>
     /// #4966: the decision inside <see cref="RefreshCappedGridBannerAsync{T}"/>. A read that reached its cap
@@ -629,9 +642,9 @@ public partial class ServerTab : UserControl
     /// </summary>
     internal static System.Threading.Tasks.Task CappedGridBannerAsync<T>(
         IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc,
-        Action<DateTime> wordFromOldestRow, Func<System.Threading.Tasks.Task> probeStep)
+        Action<DateTime> wordFromOldestRow, Func<System.Threading.Tasks.Task> probeStep, DateTime? cappedSourceOldestUtc = null)
     {
-        if (CapAwareWindowFloor(null, rows, rowCap, rowTimeUtc) is DateTime oldestRowShown)
+        if (CapAwareWindowFloor(null, rows, rowCap, rowTimeUtc, cappedSourceOldestUtc) is DateTime oldestRowShown)
         {
             wordFromOldestRow(oldestRowShown);
             return System.Threading.Tasks.Task.CompletedTask;
@@ -867,7 +880,8 @@ public partial class ServerTab : UserControl
                         }
                         break;
                     case 2: // Blocked Process Reports
-                        var bpr = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
+                        var bprRead = await Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
+                        var bpr = bprRead.Rows;
                         using (Helpers.MethodProfiler.StartTiming("Locking.BindBlockedGrid"))
                             _blockedProcessFilterMgr!.UpdateData(bpr);
                         ApplySeparatelyMonitoredListNote(BlockedProcessReportNoteText);
@@ -875,7 +889,7 @@ public partial class ServerTab : UserControl
                             /* Where the stored blocked-process coverage starts (#4966), over the SAME UTC window the grid read
                                resolves from GetTimeRange. */
                             var (windowStart6, windowEnd6) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, windowStart6, windowEnd6);
+                            await RefreshCappedGridBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, windowStart6, windowEnd6, bpr, LocalDataService.BlockedProcessReportGridCap, BlockedProcessRowTimeUtc, bprRead.CappedSourceStartUtc);
                         }
                         await LoadBlockingSlicerAsync();
                         break;
@@ -889,7 +903,7 @@ public partial class ServerTab : UserControl
                             /* Where the stored deadlock coverage starts (#4966), over the SAME UTC window the grid read
                                resolves from GetTimeRange. */
                             var (windowStart7, windowEnd7) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, windowStart7, windowEnd7);
+                            await RefreshCappedGridBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, windowStart7, windowEnd7, dlr, LocalDataService.DeadlockGridCap, DeadlockRowTimeUtc);
                         }
                         await LoadDeadlockSlicerAsync();
                         break;
@@ -911,7 +925,7 @@ public partial class ServerTab : UserControl
             }
 
             /* Full refresh: load all sub-tabs */
-            var blockedProcessTask = Helpers.MethodProfiler.TimeAsync("Locking.BlockedProcessReports", () => Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
+            var blockedProcessTask = Helpers.MethodProfiler.TimeAsync("Locking.BlockedProcessReports", () => Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
             var deadlockTask = Helpers.MethodProfiler.TimeAsync("Locking.Deadlocks", () => Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, hoursBack, fromDate, toDate)));
             var lockWaitTrendTask = Helpers.MethodProfiler.TimeAsync("Locking.LockWaitTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLockWaitTrendAsync(_serverId, hoursBack, fromDate, toDate))));
             var blockingTrendTask = Helpers.MethodProfiler.TimeAsync("Locking.BlockingTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
@@ -931,7 +945,7 @@ public partial class ServerTab : UserControl
                remaining UI-thread render steps so any new hot spot is pinpointed (bind vs charts). */
             var deadlockDetails = await ParseDeadlocksOffUiThreadAsync(deadlockTask.Result);
             using (Helpers.MethodProfiler.StartTiming("Locking.BindBlockedGrid"))
-                _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result);
+                _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result.Rows);
             using (Helpers.MethodProfiler.StartTiming("Locking.BindDeadlockGrid"))
                 _deadlockFilterMgr!.UpdateData(deadlockDetails);
 
@@ -963,20 +977,20 @@ public partial class ServerTab : UserControl
                 /* Where the stored blocked-process and deadlock coverage starts (#4966), over the SAME UTC window the two
                    grids read (both resolve it from GetTimeRange); after both grids are bound above. */
                 var (windowStart8, windowEnd8) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, windowStart8, windowEnd8);
-                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, windowStart8, windowEnd8);
+                await RefreshCappedGridBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, windowStart8, windowEnd8, blockedProcessTask.Result.Rows, LocalDataService.BlockedProcessReportGridCap, BlockedProcessRowTimeUtc, blockedProcessTask.Result.CappedSourceStartUtc);
+                await RefreshCappedGridBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, windowStart8, windowEnd8, deadlockTask.Result, LocalDataService.DeadlockGridCap, DeadlockRowTimeUtc);
             }
 
             await LoadBlockingSlicerAsync();
             await LoadDeadlockSlicerAsync();
 
             /* Notify parent of alert counts for tab badge */
-            var blockingCount = blockedProcessTask.Result.Count;
+            var blockingCount = blockedProcessTask.Result.Rows.Count;
             var deadlockCount = deadlockTask.Result.Count;
             DateTime? latestEventTime = null;
             if (blockingCount > 0 || deadlockCount > 0)
             {
-                var latestBlocking = blockedProcessTask.Result.Max(r => (DateTime?)r.EventTime);
+                var latestBlocking = blockedProcessTask.Result.Rows.Max(r => (DateTime?)r.EventTime);
                 var latestDeadlock = deadlockTask.Result.Max(r => (DateTime?)r.DeadlockTime);
                 latestEventTime = latestBlocking > latestDeadlock ? latestBlocking : latestDeadlock;
             }

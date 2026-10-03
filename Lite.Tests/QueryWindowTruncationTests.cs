@@ -698,7 +698,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     {
         var slicersSource = File.ReadAllText(ControlsFile("ServerTab.Slicers.cs"));
         var slicerBannerCallsOnUtc = Regex.Matches(slicersSource,
-            @"RefreshWindowTruncatedBannerAsync\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*e\.StartUtc,\s*e\.EndUtc\)").Count;
+            @"(?:RefreshWindowTruncatedBannerAsync|RefreshCappedGridBannerAsync)\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*e\.StartUtc,\s*e\.EndUtc[,)]").Count;
         /* 3 -> 4: Active Queries' slicer handler joined the three Queries grids' (the Lite twin of #4953's data-start notice).
            4 -> 6: the Blocked Process Reports and Deadlocks slicer handlers joined them (#4966). */
         Assert.True(slicerBannerCallsOnUtc == 6,
@@ -710,13 +710,16 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         var refreshSource = File.ReadAllText(ControlsFile("ServerTab.Refresh.cs"));
         var refreshBannerCallsOnHelperOutput = Regex.Matches(refreshSource,
-            @"RefreshWindowTruncatedBannerAsync\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*windowStart\d?,\s*windowEnd\d?\)").Count;
+            @"(?:RefreshWindowTruncatedBannerAsync|RefreshCappedGridBannerAsync)\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*windowStart\d?,\s*windowEnd\d?[,)]").Count;
         /* 6 -> 10: Active Queries (sub-tab switch + full refresh) and Current Waits (sub-tab switch + full refresh)
            each take their banner window from GetQueriesTabWindowUtc too (see DataStartBannerTests).
            10 -> 14, and 10 -> 13 declarations: the Blocked Process Reports and Deadlocks banners (#4966) add two calls
            to the sub-tab switch (one declaration each) and two to the full refresh (one shared declaration). */
-        Assert.True(refreshBannerCallsOnHelperOutput == 14,
-            $"expected all 14 ServerTab.Refresh.cs banner calls to pass a GetQueriesTabWindowUtc result " +
+        /* 14 -> 15 (the pattern now counts the cap-aware step too): the Blocked Process Reports and Deadlocks banners (4 of the 14)
+           moved from RefreshWindowTruncatedBannerAsync to RefreshCappedGridBannerAsync (#4966), and the Collection Log's cap-aware
+           call (#4989) is one more call on a GetQueriesTabWindowUtc pair. */
+        Assert.True(refreshBannerCallsOnHelperOutput == 15,
+            $"expected all 15 ServerTab.Refresh.cs banner calls to pass a GetQueriesTabWindowUtc result " +
             $"(windowStart/windowEnd) (found {refreshBannerCallsOnHelperOutput}) -- a server-local cStart must " +
             "not feed the banner (#4279/#4284).");
         /* 10 -> 11: the Collection Log's cap-aware notice (RefreshCappedGridBannerAsync, #4989) takes its window from

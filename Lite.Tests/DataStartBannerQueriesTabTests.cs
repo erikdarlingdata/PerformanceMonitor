@@ -316,7 +316,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     public void RefreshCappedGridBannerAsync_HandsTheDecisionThePickerZone_AndTheSharedProbingStep()
     {
         Assert.Matches(
-            @"private System\.Threading\.Tasks\.Task RefreshCappedGridBannerAsync<T>\(\s*QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc,\s*IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc\) =>\s*CappedGridBannerAsync\(rows, rowCap, rowTimeUtc,\s*oldestRowShown => ApplyCappedWindowFloorToBanner\(banner, oldestRowShown, startUtc, GetPickerZone\(\)\),\s*\(\) => RefreshWindowTruncatedBannerAsync\(relation, banner, startUtc, endUtc, EarliestRowShown\(rows, rowTimeUtc\)\)\);",
+            @"private System\.Threading\.Tasks\.Task RefreshCappedGridBannerAsync<T>\(\s*QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc,\s*IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc, DateTime\? cappedSourceOldestUtc = null\) =>\s*CappedGridBannerAsync\(rows, rowCap, rowTimeUtc,\s*oldestRowShown => ApplyCappedWindowFloorToBanner\(banner, oldestRowShown, startUtc, GetPickerZone\(\)\),\s*\(\) => RefreshWindowTruncatedBannerAsync\(relation, banner, startUtc, endUtc, EarliestRowShown\(rows, rowTimeUtc\)\),\s*cappedSourceOldestUtc\);",
             CodeOf("ServerTab.Refresh.cs"));
     }
 

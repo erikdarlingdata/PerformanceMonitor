@@ -23,6 +23,16 @@ namespace PerformanceMonitorLite.Controls;
 public partial class ServerTab
 {
     /// <summary>
+    /// #4966: the time a Blocked Process Reports row is shown, ordered and capped on: the report's own event time (the XE
+    /// <c>@timestamp</c>, or the DMV snapshot's collection time, which is its event time), or the time a run stored it where
+    /// a row carries none. The cap-aware notice names the oldest row by this time.
+    /// </summary>
+    internal static DateTime BlockedProcessRowTimeUtc(BlockedProcessReportRow row) => row.EventTime ?? row.CollectionTime;
+
+    /// <summary>#4966: the time a Deadlocks row is shown, ordered and capped on: the deadlock's own time, or the time a run stored it where a row carries none.</summary>
+    internal static DateTime DeadlockRowTimeUtc(DeadlockRow row) => row.DeadlockTime ?? row.CollectionTime;
+
+    /// <summary>
     /// Plan Corrections (<c>v_plan_correction</c>, coverage from the <c>plan_correction</c> collector's runs: the
     /// table holds a row only while the engine has a recommendation, so a quiet first stretch is not a gap in what
     /// was collected). Called after the grid is bound, at the sub-tab switch and at the full refresh.

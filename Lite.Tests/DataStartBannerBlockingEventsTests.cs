@@ -244,30 +244,35 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     /// comments stripped, so a sentence that names the call cannot satisfy the pin.
     /// </summary>
     [Theory]
-    [InlineData("BlockedProcessReports", "BlockedProcessReportsWindowTruncatedBanner", "_blockedProcessFilterMgr!.UpdateData(", "OnBlockingSlicerChanged", "OnBlockingDrillDown")]
-    [InlineData("Deadlocks", "DeadlocksWindowTruncatedBanner", "_deadlockFilterMgr!.UpdateData(", "OnDeadlockSlicerChanged", "OnDeadlockDrillDown")]
+    [InlineData("BlockedProcessReports", "BlockedProcessReportsWindowTruncatedBanner", "_blockedProcessFilterMgr!.UpdateData(", "OnBlockingSlicerChanged", "OnBlockingDrillDown",
+        @"LocalDataService\.BlockedProcessReportGridCap,\s*BlockedProcessRowTimeUtc")]
+    [InlineData("Deadlocks", "DeadlocksWindowTruncatedBanner", "_deadlockFilterMgr!.UpdateData(", "OnDeadlockSlicerChanged", "OnDeadlockDrillDown",
+        @"LocalDataService\.DeadlockGridCap,\s*DeadlockRowTimeUtc")]
     public void EveryReadPath_RefreshesTheBanner_OverTheWindowItRead_AfterTheRowsAreBound(
-        string relation, string banner, string bindCall, string slicerHandler, string drillHandler)
+        string relation, string banner, string bindCall, string slicerHandler, string drillHandler, string capAndRowTime)
     {
-        var call = @"await RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\." + relation + @",\s*" + banner + @",\s*";
+        /* #4966: both grids read a capped page, so every path goes through the cap-aware step with the rows the grid shows, the
+           ONE constant that is the read's cap, and the time each row is capped on. */
+        var call = @"await RefreshCappedGridBannerAsync\(QueryWindowRelation\." + relation + @",\s*" + banner + @",\s*";
+        var rowsCapAndTime = @",\s*[\w.]+,\s*" + capAndRowTime + @"[^;]*\);";
 
         /* The slicer handler: its own e.StartUtc / e.EndUtc, after the bind. */
         var slicer = MethodBody(Code("ServerTab.Slicers.cs"), "private async void " + slicerHandler + "(");
-        var slicerCall = Regex.Matches(slicer, call + @"e\.StartUtc,\s*e\.EndUtc\);");
+        var slicerCall = Regex.Matches(slicer, call + @"e\.StartUtc,\s*e\.EndUtc" + rowsCapAndTime);
         Assert.True(slicerCall.Count == 1, $"{slicerHandler} must refresh the {relation} banner exactly once over e.StartUtc, e.EndUtc; found {slicerCall.Count}");
         Assert.True(slicerCall[0].Index > slicer.IndexOf(bindCall, StringComparison.Ordinal) && slicer.Contains(bindCall, StringComparison.Ordinal),
             $"{slicerHandler} must refresh the banner after it binds the rows");
 
         /* The drill-down: the pair its grid read takes, after the bind. */
         var drill = MethodBody(Code("ServerTab.DrillDown.cs"), "private async void " + drillHandler + "(");
-        var drillCall = Regex.Matches(drill, call + @"fromDate,\s*toDate\);");
+        var drillCall = Regex.Matches(drill, call + @"fromDate,\s*toDate" + rowsCapAndTime);
         Assert.True(drillCall.Count == 1, $"{drillHandler} must refresh the {relation} banner exactly once over fromDate, toDate; found {drillCall.Count}");
         Assert.True(drillCall[0].Index > drill.IndexOf(bindCall, StringComparison.Ordinal) && drill.Contains(bindCall, StringComparison.Ordinal),
             $"{drillHandler} must refresh the banner after it binds the rows");
 
         /* The sub-tab switch and the full refresh: each over GetQueriesTabWindowUtc's pair, after its bind. */
         var refresh = MethodBody(Code("ServerTab.Refresh.cs"), "private async System.Threading.Tasks.Task RefreshBlockingAsync(");
-        var refreshCalls = Regex.Matches(refresh, call + @"(?<s>windowStart\w*),\s*(?<e>windowEnd\w*)\);");
+        var refreshCalls = Regex.Matches(refresh, call + @"(?<s>windowStart\w*),\s*(?<e>windowEnd\w*)" + rowsCapAndTime);
         Assert.True(refreshCalls.Count == 2, $"RefreshBlockingAsync must refresh the {relation} banner twice (sub-tab switch, full refresh); found {refreshCalls.Count}");
         foreach (Match refreshCall in refreshCalls)
         {
