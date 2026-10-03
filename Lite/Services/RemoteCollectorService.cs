@@ -1417,17 +1417,20 @@ public partial class RemoteCollectorService
         var connStr = AzureDatabaseConnectionString(server, databaseName, withoutReadOnlyIntent);
         var builder = new SqlConnectionStringBuilder(connStr);
 
-        /* A device-code registration signs in over this connection as it does over CreateConnectionAsync's (#4961). The
-           long-query trace creates its session's definition over a connection with the read-only intent forced off, and any
-           open here can be the first of a run to raise the prompt. Begin hands the prompt window its attempt and returns null
-           for every other mode, which opens exactly as it did. Begin also refuses a second sign-in while one is in flight, so
-           the database opens of a device-code registration take the lock CreateConnectionAsync takes and never overlap one. */
-        var signsInByDeviceCode = builder.Authentication == SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow;
+        /* A registration that signs in interactively does so over this connection as it does over CreateConnectionAsync's
+           (#4961). The long-query trace creates its session's definition over a connection with the read-only intent forced
+           off, and any open here can be the first of a run to raise a prompt. So the opens get CreateConnectionAsync's
+           treatment, asked of the mode and not of the connection string's keyword: the sign-in lock, so two opens starting
+           together raise one window and not two, and a refusal once that server's sign-in was declined. Both interactive modes
+           need it. Begin hands the prompt window its attempt and returns null for every mode but device code, which opens
+           exactly as it did; for device code it also refuses a second sign-in while one is in flight. A mode that cannot show
+           a window takes no lock. */
+        var signsInInteractively = AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType);
         var signInLockHeld = false;
 
         try
         {
-            if (signsInByDeviceCode)
+            if (signsInInteractively)
             {
                 await s_mfaAuthLock.WaitAsync(cancellationToken);
                 signInLockHeld = true;
