@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -136,7 +137,8 @@ public class ScheduleManager
     /// <summary>
     /// Updates a collector's schedule settings (default schedule).
     /// </summary>
-    public void UpdateSchedule(string collectorName, bool? enabled = null, int? frequencyMinutes = null, int? retentionDays = null)
+    public void UpdateSchedule(string collectorName, bool? enabled = null, int? frequencyMinutes = null, int? retentionDays = null,
+        string? runAt = null, bool changeRunAt = false)
     {
         lock (_lock)
         {
@@ -155,6 +157,15 @@ public class ScheduleManager
                 throw new InvalidOperationException(frequencyError);
             }
 
+            /* #4938: the run time that will stand after this update (the one passed, null clearing it, or the one already
+               set) must fit the frequency that will stand, so changing a daily collector to hourly while it has a run
+               time is refused with the editor's text instead of leaving a run time that is then ignored. */
+            var standingRunAt = changeRunAt ? NormalizeRunAt(runAt) : schedule.RunAt;
+            if (RunAtError(collectorName, frequencyMinutes ?? schedule.FrequencyMinutes, standingRunAt) is string runAtError)
+            {
+                throw new InvalidOperationException(runAtError);
+            }
+
             if (enabled.HasValue)
             {
                 schedule.Enabled = enabled.Value;
@@ -168,6 +179,11 @@ public class ScheduleManager
             if (retentionDays.HasValue)
             {
                 schedule.RetentionDays = retentionDays.Value;
+            }
+
+            if (changeRunAt)
+            {
+                schedule.RunAt = standingRunAt;
             }
 
             SaveSchedules();
@@ -228,8 +244,12 @@ public class ScheduleManager
     /// substitution Darling's worker makes, so a server tab left open for weeks still re-captures its config
     /// snapshot (#3930) and a trace flag turned off since the last connect eventually clears (#3929) instead of
     /// only on the next reconnect. The tab-open path (<see cref="RemoteCollectorService.RunAllCollectorsForServerAsync"/>)
-    /// still runs every enabled collector unconditionally (on-load included), so the on-connect capture is
-    /// unchanged.</para>
+    /// still runs every on-load collector (the on-connect capture is unchanged), but since #4938 it takes its other
+    /// collectors from <see cref="GetCollectorsForTabOpen"/> instead of running them all.</para>
+    ///
+    /// <para>#4938: a collector with a run time (<see cref="CollectorSchedule.RunAt"/>) is due once a day inside the
+    /// 60-minute grace that follows its slot, by <see cref="CollectorRunTime.NextDue"/>, and a daily collector's last
+    /// run is the one <see cref="SeedLastRunsForServer"/> read from collection_log at start-up.</para>
     /// </summary>
     public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId)
         => GetDueCollectorsForServer(serverId, DateTime.UtcNow);
@@ -279,16 +299,7 @@ public class ScheduleManager
 
         if (ResolveRunAtMinute(serverId, s, intervalMinutes) is int runAtMinute)
         {
-            _runTimeServers.TryGetValue(serverId, out var server);
-            /* The spread takes an int id: the stable id Lite stores for the server (the deterministic hash of its
-               storage name), registered by RemoteCollectorService. Before one is registered, a hash of the connection id. */
-            var spreadId = server?.StorageId ?? PerformanceMonitor.Common.ServerIdHelper.GetDeterministicHashCode(serverId);
-            Func<DateTime, DateTime> localToUtc = CollectorRunTime.LocalIsUtc;
-            if (server?.Clock is { } clock)
-            {
-                localToUtc = clock.ToUtc;
-            }
-
+            var (spreadId, localToUtc, _) = RunTimeBasis(serverId);
             var next = CollectorRunTime.NextDue(atUtc, lastRun, runAtMinute, intervalMinutes, spreadId, localToUtc);
 
             /* The clock-step check with the room a run-time stamp needs (an interval, the spread, a 25-hour day). */
@@ -346,6 +357,78 @@ public class ScheduleManager
         }
 
         return minute;
+    }
+
+    /// <summary>
+    /// #4938: what a run time on this server is computed from. The spread takes an int id: the stable id Lite stores
+    /// for the server (the deterministic hash of its storage name), registered by RemoteCollectorService; before one is
+    /// registered, a hash of the connection id. The conversion is the server's clock, or UTC until one is known (the
+    /// third value says which). Called with the lock held.
+    /// </summary>
+    private (int SpreadId, Func<DateTime, DateTime> LocalToUtc, ServerClock? Clock) RunTimeBasis(string serverId)
+    {
+        _runTimeServers.TryGetValue(serverId, out var server);
+        var spreadId = server?.StorageId ?? PerformanceMonitor.Common.ServerIdHelper.GetDeterministicHashCode(serverId);
+        Func<DateTime, DateTime> localToUtc = server?.Clock is { } clock ? clock.ToUtc : CollectorRunTime.LocalIsUtc;
+        return (spreadId, localToUtc, server?.Clock);
+    }
+
+    /// <summary>
+    /// #4938: one line per enabled collector that has a valid run time, for the schedule editor, so a collector that
+    /// waits for its time shows when. With a <paramref name="serverId"/> a line gives the exact next run, in the server's
+    /// clock and in UTC; with none (the default schedule, which every server without a custom schedule uses) it gives the
+    /// hour the servers spread across. A server Lite has not collected from yet has no clock or run history, and its
+    /// line says so. A collector whose time falls inside today's hour and has not run yet shows as due now.
+    /// </summary>
+    internal IReadOnlyList<string> DescribeRunTimes(string? serverId, IEnumerable<CollectorSchedule> schedules, DateTime atUtc)
+    {
+        var lines = new List<string>();
+        lock (_lock)
+        {
+            foreach (var s in schedules)
+            {
+                if (!s.Enabled
+                    || RunAtError(s.Name, s.FrequencyMinutes, s.RunAt) is not null
+                    || !CollectorRunTime.TryParse(s.RunAt, out var runAtMinute))
+                {
+                    continue;
+                }
+
+                if (serverId is null)
+                {
+                    var end = CollectorRunTime.Format((runAtMinute + CollectorRunTime.GraceMinutes) % 1440);
+                    lines.Add(string.Create(CultureInfo.InvariantCulture,
+                        $"{s.Name}: runs between {CollectorRunTime.Format(runAtMinute)} and {end} on each server's clock, each server at its own minute."));
+                    continue;
+                }
+
+                if (!_runTimeServers.ContainsKey(serverId))
+                {
+                    lines.Add($"{s.Name}: the next run shows once Lite has collected from this server.");
+                    continue;
+                }
+
+                var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(s.FrequencyMinutes);
+                _serverRunState.TryGetValue(serverId, out var runState);
+                DateTime? lastRun = runState != null && runState.TryGetValue(s.Name, out var last) ? last : null;
+                var (spreadId, localToUtc, clock) = RunTimeBasis(serverId);
+                var next = CollectorRunTime.NextDue(atUtc, lastRun, runAtMinute, intervalMinutes, spreadId, localToUtc);
+
+                if (next <= atUtc)
+                {
+                    lines.Add($"{s.Name}: due now, inside today's hour.");
+                    continue;
+                }
+
+                lines.Add(clock is null
+                    ? string.Create(CultureInfo.InvariantCulture,
+                        $"{s.Name}: next run {next:yyyy-MM-dd HH:mm} UTC (the server's clock is not known yet, so the run time is read as UTC).")
+                    : string.Create(CultureInfo.InvariantCulture,
+                        $"{s.Name}: next run {clock.ToServerLocal(next):yyyy-MM-dd HH:mm} server time ({next:yyyy-MM-dd HH:mm} UTC)."));
+            }
+        }
+
+        return lines;
     }
 
     /// <summary>
@@ -531,6 +614,13 @@ public class ScheduleManager
                 if (FrequencyError(schedule.Name, schedule.FrequencyMinutes) is string frequencyError)
                 {
                     throw new InvalidOperationException(frequencyError);
+                }
+
+                /* #4938: a blank run time is none; it is stored as null, so the file carries run_at only where one is set. */
+                schedule.RunAt = NormalizeRunAt(schedule.RunAt);
+                if (RunAtError(schedule.Name, schedule.FrequencyMinutes, schedule.RunAt) is string runAtError)
+                {
+                    throw new InvalidOperationException(runAtError);
                 }
             }
 
@@ -790,6 +880,38 @@ public class ScheduleManager
 
         return CollectorDeltaCalculator.DeltaFrequencyError(collectorName, frequencyMinutes);
     }
+
+    /// <summary>The note the editor shows beside the run time: Lite collects only while it is open (#4938).</summary>
+    internal const string RunAtLiteClosedNote =
+        "Lite collects only while it is open. If Lite is closed at this time, that day's run is skipped.";
+
+    /// <summary>
+    /// #4938: why a run time can't be honored for this collector, or null when it can. A blank run time is none, and
+    /// always fine. Otherwise it must be a 24-hour HH:MM time, and the collector must run once a day or less often:
+    /// judged on the effective interval, so an on-load collector's daily re-run counts and an hourly collector is
+    /// refused. The texts are the shared ones (<see cref="CollectorRunTime"/>), so the editors and the CLI agree. The
+    /// editor shows this message before saving; the write APIs throw it as a backstop.
+    /// </summary>
+    internal static string? RunAtError(string collectorName, int frequencyMinutes, string? runAt)
+    {
+        if (string.IsNullOrWhiteSpace(runAt))
+        {
+            return null;
+        }
+
+        if (!CollectorRunTime.TryParse(runAt, out _))
+        {
+            return CollectorRunTime.InvalidRunAtMessage;
+        }
+
+        var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(frequencyMinutes);
+        return CollectorRunTime.AllowsRunAt(intervalMinutes)
+            ? null
+            : CollectorRunTime.IntervalRefusalMessage(collectorName, intervalMinutes);
+    }
+
+    /// <summary>#4938: a blank run time is none (null); anything else loses its surrounding spaces.</summary>
+    internal static string? NormalizeRunAt(string? runAt) => string.IsNullOrWhiteSpace(runAt) ? null : runAt.Trim();
 
     /// <summary>
     /// Clamps any loaded delta-family frequency above the gap-policy cap back to the cap (#3532) — the

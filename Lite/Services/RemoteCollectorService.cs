@@ -580,8 +580,11 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
-    /// Runs all enabled collectors for a single server immediately (ignoring schedule).
-    /// Used for initial data population when a server tab is first opened.
+    /// Runs the collectors a newly opened server tab needs, immediately, for initial data population: every enabled
+    /// on-load and sub-daily collector, and a collector that runs once a day or less often only when it is due (#4938).
+    /// A collector with a run time is left to its time, so opening a tab does not run it; an on-load collector with a
+    /// run time still runs, because the run time moves only its daily re-run, not its connect capture. See
+    /// <see cref="ScheduleManager.GetCollectorsForTabOpen"/>.
     /// </summary>
     public async Task RunAllCollectorsForServerAsync(ServerConnection server, CancellationToken cancellationToken = default)
     {

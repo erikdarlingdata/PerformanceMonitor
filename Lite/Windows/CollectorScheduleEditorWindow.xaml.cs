@@ -81,6 +81,8 @@ public partial class CollectorScheduleEditorWindow : Window
         ScheduleGrid.ItemsSource = _editingSchedules;
         DetectActivePreset();
         SetDeltaBoundHint();
+        SetRunAtHint();
+        RefreshNextRunText();
     }
 
     private void SetupCopyFromServerCombo()
@@ -109,6 +111,8 @@ public partial class CollectorScheduleEditorWindow : Window
         ScheduleGrid.ItemsSource = _editingSchedules;
         UpdateEditableState(usesDefault);
         DetectActivePreset();
+        SetRunAtHint();
+        RefreshNextRunText();
     }
 
     private void UpdateEditableState(bool usesDefault)
@@ -138,6 +142,7 @@ public partial class CollectorScheduleEditorWindow : Window
 
         UpdateEditableState(usesDefault);
         DetectActivePreset();
+        RefreshNextRunText();
     }
 
     private void DetectActivePreset()
@@ -187,6 +192,7 @@ public partial class CollectorScheduleEditorWindow : Window
         ScheduleGrid.ItemsSource = null;
         ScheduleGrid.ItemsSource = _editingSchedules;
         DetectActivePreset();
+        RefreshNextRunText();
     }
 
     private void CopyFromDefault_Click(object sender, RoutedEventArgs e)
@@ -202,6 +208,7 @@ public partial class CollectorScheduleEditorWindow : Window
         _editingSchedules = CloneScheduleList(_scheduleManager.GetDefaultSchedule());
         ScheduleGrid.ItemsSource = _editingSchedules;
         DetectActivePreset();
+        RefreshNextRunText();
     }
 
     private void CopyFromServer_Click(object sender, RoutedEventArgs e)
@@ -220,12 +227,19 @@ public partial class CollectorScheduleEditorWindow : Window
         _editingSchedules = CloneScheduleList(_scheduleManager.GetSchedulesForServer(sourceServerId));
         ScheduleGrid.ItemsSource = _editingSchedules;
         DetectActivePreset();
+        RefreshNextRunText();
     }
 
     private void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         /* Flush any in-progress cell edit into the bound items before we read them. */
         ScheduleGrid.CommitEdit(DataGridEditingUnit.Row, true);
+
+        /* #4938: a blank Run at cell is no run time, and the file carries run_at only where one is set. */
+        foreach (var row in _editingSchedules)
+        {
+            row.RunAt = ScheduleManager.NormalizeRunAt(row.RunAt);
+        }
 
         bool revertingToDefault = !_isEditingDefault && UseDefaultCheckBox.IsChecked == true;
         if (!revertingToDefault && !ValidateSchedule(out var error))
@@ -242,7 +256,9 @@ public partial class CollectorScheduleEditorWindow : Window
                 _scheduleManager.UpdateSchedule(edited.Name,
                     enabled: edited.Enabled,
                     frequencyMinutes: edited.FrequencyMinutes,
-                    retentionDays: edited.RetentionDays);
+                    retentionDays: edited.RetentionDays,
+                    runAt: edited.RunAt,
+                    changeRunAt: true);
             }
         }
         else if (UseDefaultCheckBox.IsChecked == true)
@@ -287,10 +303,43 @@ public partial class CollectorScheduleEditorWindow : Window
                 error = $"'{item.Name}': retention (days) must be at least 1.";
                 return false;
             }
+
+            /* #4938: the run time's own texts (a bad time, or a collector that runs more often than once a day). They
+               do not name the row, so the row is selected. */
+            if (ScheduleManager.RunAtError(item.Name, item.FrequencyMinutes, item.RunAt) is string runAtError)
+            {
+                ScheduleGrid.SelectedItem = item;
+                error = runAtError;
+                return false;
+            }
         }
 
         error = "";
         return true;
+    }
+
+    /// <summary>#4938: what the Run at column means, and the sentence that says Lite runs a collector only while it is open.</summary>
+    private void SetRunAtHint()
+    {
+        RunAtHintText.Text =
+            "Run at is an optional 24-hour time (HH:MM) on the monitored server's clock, for a collector that runs once a day " +
+            "or less often (a frequency of 1440 minutes or a multiple of it, or an on-load collector). Each server runs within " +
+            $"the hour after that time, at its own minute. {ScheduleManager.RunAtLiteClosedNote}";
+    }
+
+    /// <summary>#4938: lists when each collector that has a run time runs next, so a collector that waits for its time shows when.
+    /// Text only: it never touches the grid, so it is safe while a row is being edited.</summary>
+    private void RefreshNextRunText()
+    {
+        var lines = _scheduleManager.DescribeRunTimes(_isEditingDefault ? null : _serverId, _editingSchedules, DateTime.UtcNow);
+        NextRunText.Text = string.Join(Environment.NewLine, lines);
+        NextRunText.Visibility = lines.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /* The row commits after this event, so the list is read once it has: a change to a run time or a frequency shows its next run. */
+    private void ScheduleGrid_RowEditEnding(object? sender, DataGridRowEditEndingEventArgs e)
+    {
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(RefreshNextRunText));
     }
 
     /// <summary>The always-visible cadence-cap note under the grid, built from the shared constants so
