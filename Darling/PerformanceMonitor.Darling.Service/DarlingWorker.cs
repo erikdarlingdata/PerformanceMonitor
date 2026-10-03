@@ -331,10 +331,11 @@ public sealed class DarlingWorker : BackgroundService
     /// are on the steps. The two that are worth an operator's attention: the compression ENABLE statements
     /// (<c>ALTER TABLE ... SET (timescaledb.compress ...)</c>, inside
     /// <see cref="TimescaleSupport.ApplyCompressionPolicyAsync"/> and
-    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/>) are re-executed on every pass rather
-    /// than skipped under a catalog check, so those two steps are the pass's only unconditional DDL; they take
-    /// a brief lock on the hypertable's parent and nothing else. That is measured in the PR body rather than
-    /// asserted here, and it is why the summary line carries an elapsed.</para>
+    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/>) take an ACCESS EXCLUSIVE lock even
+    /// when they change nothing, so since #3817 each is issued only for a table whose compression settings
+    /// differ from what the product wants, and a converged store's pass issues none. collection_log's waits at
+    /// most <see cref="TimescaleSupport.CollectionLogSettingsLockTimeout"/> for its lock (#4951). The summary
+    /// line carries an elapsed so a slow pass shows.</para>
     /// </summary>
     private static readonly StoreObjectConvergenceStep[] s_storeObjectConvergence =
     {
@@ -343,13 +344,13 @@ public sealed class DarlingWorker : BackgroundService
         new("hypertable conversion", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
             (connection, logger, ct) => TimescaleSupport.ConvertToHypertablesAsync(connection, logger, ct)),
 
-        /* The compression ENABLE is unconditional DDL (see the class remark); add_compression_policy's
-           if_not_exists returns -1 for a policy that exists. */
+        /* The compression ENABLE runs only for a table whose settings differ (#3817, see the class remark);
+           add_compression_policy's if_not_exists returns -1 for a policy that exists. */
         new("compression policies", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
             (connection, logger, ct) => TimescaleSupport.ApplyCompressionPolicyAsync(connection, logger, ct)),
 
-        /* collection_log is outside the collector catalog, so the two steps above never reach it; same three
-           idempotent statements. */
+        /* collection_log is outside the collector catalog, so the two steps above never reach it; the same three
+           idempotent statements, with its own segmentby and a bounded lock wait on its ALTER (#4951). */
         new("collection_log hypertable", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
             async (connection, logger, ct) => await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, logger, ct) ? 1 : 0),
 
