@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// The Blocking tab's chart floors against a real store (#4966): the viewer's own data-start reads for blocked process reports,
 /// deadlocks and wait_stats, over a server added 2 days ago whose first event came a day later.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to CREATE and drop its own scratch database. */
 public sealed class ViewerBlockingChartsDataStartLiveTests
 {
     private const int ServerId = -496701;
