@@ -62,14 +62,24 @@ public partial class ViewerServerTab
            settable window EXACTLY — a preset or a custom From/To — via GetWindowUtc(), matching the Wait
            Stats / Blocking tabs (the old GetWindowHoursBack() rounded a custom range to a now-relative span). */
         var (startUtc, endUtc) = GetWindowUtc();
-        using var readFanOut = ViewerReadFanOut.Of(3);
+        using var readFanOut = ViewerReadFanOut.Of(4);
         var healthTask = _dataService.GetCollectionHealthAsync(_server.ServerId);
+        var dataStartTask = _dataService.GetCollectionLogDataStartAsync(_server.ServerId, startUtc, endUtc);
         var logTask = _dataService.GetRecentCollectionLogAsync(_server.ServerId, startUtc, endUtc);
         var caveatsTask = _dataService.GetCollectionCaveatsAsync(_server.ServerId);
         await Task.WhenAll(healthTask, logTask, caveatsTask);
 
+        /* The three reads are done: end the declared width here, before the data-start note below awaits its probe (#4966), so that
+           await is not priced against contention that has already finished. */
+        readFanOut.Release();
+
         _collectionHealthFilterMgr!.UpdateData(healthTask.Result);
         _collectionLogFilterMgr!.UpdateData(logTask.Result);
+        /* #4966: the grid says where the log starts when the range reaches before it. The read keeps the newest CollectionLogRowCap
+           runs, so a full page names its oldest run, whatever the store covers; a page under the cap names the earlier of the probe's
+           answer and its earliest run. */
+        await ShowEventDataStartAsync(CollectionLogTruncationBanner, dataStartTask, "Collection Log", startUtc,
+            logTask.Result.Select(r => (DateTime?)r.CollectionTime), ViewerDataService.CollectionLogRowCap);
         RenderCollectorDurationChart(logTask.Result);
 
         /* #3691 part a2: collapse the section entirely when there is nothing to report — the common case

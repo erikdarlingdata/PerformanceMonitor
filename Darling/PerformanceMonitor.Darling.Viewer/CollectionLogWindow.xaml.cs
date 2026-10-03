@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer
@@ -45,11 +47,32 @@ namespace PerformanceMonitor.Darling.Viewer
             await LoadCollectionLogAsync();
         }
 
+        /// <summary>
+        /// The drill's read and its "Showing since" note in one call (#4966): one collector's runs over the trailing week
+        /// (<see cref="ViewerDataService.CollectionLogDrillHours"/>), and the note on <paramref name="banner"/> saying where this
+        /// server's collection log starts when that is later than the week's start. The read has no row cap, so the note follows the
+        /// coverage rule: the later of the server's first collection and the log's retention edge, never the collector's first run,
+        /// so a collector that ran late in a covered week says nothing. The probe starts beside the read and asks about the same
+        /// span; the note names its times in the viewer's display zone, as the tabs' notes do.
+        /// </summary>
+        /// <param name="asOfUtc">The window's end; null for now. A test names it to pin the window.</param>
+        internal static async Task<List<CollectionLogRow>> ReadDrillAsync(
+            ViewerDataService dataService, int serverId, string collectorName, TextBlock banner, DateTime? asOfUtc = null)
+        {
+            var endUtc = asOfUtc ?? DateTime.UtcNow;
+            var startUtc = endUtc.AddHours(-ViewerDataService.CollectionLogDrillHours);
+            var dataStartTask = dataService.GetCollectionLogDataStartAsync(serverId, startUtc, endUtc);
+            var logs = await dataService.GetCollectionLogByCollectorAsync(serverId, collectorName, ViewerDataService.CollectionLogDrillHours);
+            await ViewerServerTab.ShowEventDataStartAsync(
+                banner, dataStartTask, "Collection Log Drill", startUtc, logs.Select(l => (DateTime?)l.CollectionTime));
+            return logs;
+        }
+
         private async Task LoadCollectionLogAsync()
         {
             try
             {
-                var logs = await _dataService.GetCollectionLogByCollectorAsync(_serverId, _collectorName);
+                var logs = await ReadDrillAsync(_dataService, _serverId, _collectorName, CollectionLogTruncationBanner);
                 LogDataGrid.ItemsSource = logs;
 
                 if (logs.Count > 0)

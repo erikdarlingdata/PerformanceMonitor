@@ -53,6 +53,11 @@
             <StackPanel>
                 <TextBlock x:Name="CollectorNameText" FontSize="16" FontWeight="Bold"/>
                 <TextBlock x:Name="SummaryText" Margin="0,5,0,0"/>
+                <!-- "Showing since <start>" when this server's collection log starts after the 7 days this window reads (#4966). -->
+                <TextBlock x:Name="CollectionLogTruncationBanner" Visibility="Collapsed" Margin="0,5,0,0"
+                           Padding="8,4" FontWeight="Bold"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Background="#22FFAA00"/>
             </StackPanel>
         </Border>
 
