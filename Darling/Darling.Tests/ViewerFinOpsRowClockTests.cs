@@ -11,6 +11,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
 using Xunit;
@@ -121,6 +122,40 @@ public sealed class ViewerFinOpsRowClockTests : IDisposable
         Assert.Equal("2026-11-01 01:30 -05:00", unstamped.InventoryAsOfText);
         Assert.Equal("2026-11-01 01:30 -05:00", unstamped.LastCollectedText);
     }
+
+    [Fact]
+    public void Inventory_StorageRowMapper_ShiftsEachStoredInstantByTheRowsOffset_AndKeepsNullNull()
+    {
+        var saved = ViewerTimeHelper.CurrentDisplayMode;
+        try
+        {
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+            var offset = TimeSpan.FromHours(-5);
+            var clock = ServerClock.FixedOffset(-300);
+            var asOf = Utc(2026, 7, 1, 14, 30);
+            var collected = Utc(2026, 7, 1, 15, 45);
+
+            var both = ServerPropertyRow.From(Dto(1, asOf, collected), clock);
+            Assert.Equal(asOf + offset, both.InventoryAsOf);
+            Assert.Equal(collected + offset, both.LastCollected);
+
+            var none = ServerPropertyRow.From(Dto(2, null, null), clock);
+            Assert.Null(none.InventoryAsOf);
+            Assert.Null(none.LastCollected);
+
+            var mixed = ServerPropertyRow.From(Dto(3, asOf, null), clock);
+            Assert.Equal(asOf + offset, mixed.InventoryAsOf);
+            Assert.Null(mixed.LastCollected);
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = saved;
+        }
+    }
+
+    private static ServerInventoryDto Dto(int id, DateTime? asOfUtc, DateTime? collectedUtc) => new(
+        id, "SQL" + id, "Standard", "16.0", 2, 4, 8192, null, 1, 4, false, false,
+        asOfUtc, null, "Windows", "", true, 0m, collectedUtc);
 
     [Fact]
     public void AppConnections_ARowReadsItsOwnServersWallTime_NotTheActiveTabs()

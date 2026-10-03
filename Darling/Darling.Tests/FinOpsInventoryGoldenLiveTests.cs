@@ -77,33 +77,9 @@ public sealed class FinOpsInventoryGoldenLiveTests
             var dtos = await DarlingFinOpsInventoryReader.GetServerMetricsAsync(dataSource, rollups, coverage, 30, cancellationToken: ct);
             var metrics = dtos.Where(kv => Ids.Contains(kv.Key)).OrderBy(kv => NameOf(kv.Key))
                 .Select(kv => new MetricsEntry { Server = NameOf(kv.Key), Metrics = ViewerDataService.ServerMetricsRow.From(kv.Value) }).ToList();
-            var dtoRows = (await DarlingFinOpsInventoryReader.GetServerInventoryAsync(dataSource, 30, ct))
-                .Where(d => Ids.Contains(d.ServerId)).ToList();
-            var inventory = dtoRows.Select(d => ServerPropertyRow.From(d, PerformanceMonitor.Analysis.Baselines.ServerClock.FixedOffset(0))).ToList();
+            var inventory = (await DarlingFinOpsInventoryReader.GetServerInventoryAsync(dataSource, 30, ct))
+                .Where(d => Ids.Contains(d.ServerId)).Select(d => ServerPropertyRow.From(d, PerformanceMonitor.Analysis.Baselines.ServerClock.FixedOffset(0))).ToList();
 
-            /* The display step: a fixed non-zero offset clock in Server mode must shift each stored instant by exactly that
-               offset, whatever this machine's zone is. */
-            var savedMode = ViewerTimeHelper.CurrentDisplayMode;
-            try
-            {
-                ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-                var offset = TimeSpan.FromHours(-5);
-                var clock = PerformanceMonitor.Analysis.Baselines.ServerClock.FixedOffset(-300);
-                var shifted = 0;
-                foreach (var d in dtoRows)
-                {
-                    var row = ServerPropertyRow.From(d, clock);
-                    if (d.InventoryAsOfUtc is DateTime asOf) { Assert.Equal(asOf + offset, row.InventoryAsOf); shifted++; }
-                    else Assert.Null(row.InventoryAsOf);
-                    if (d.LastCollectedUtc is DateTime last) { Assert.Equal(last + offset, row.LastCollected); shifted++; }
-                    else Assert.Null(row.LastCollected);
-                }
-                Assert.True(shifted > 0, "no seeded row carried a time to shift.");
-            }
-            finally
-            {
-                ViewerTimeHelper.CurrentDisplayMode = savedMode;
-            }
             return Serialize(anchor, metrics, inventory);
         });
 
