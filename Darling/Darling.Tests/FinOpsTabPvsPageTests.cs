@@ -36,10 +36,11 @@ public sealed class FinOpsTabPvsPageTests
     public void Tab_EveryShownKeyIsEmittedByTheTool()
     {
         var tool = Tool;
-        var keys = Regex.Matches(Tab, "key: \"([a-z_]+)\"").Select(m => m.Groups[1].Value)
+        var columnKeys = Regex.Matches(Tab, "key: \"([a-z_]+)\"").Select(m => m.Groups[1].Value).ToList();
+        Assert.True(columnKeys.Count >= 13, "expected the column keys to be found");
+        var keys = columnKeys
             .Concat(new[] { "databases", "trend", "points", "collection_time", "pvs_size_mb", "as_of", "database_name", "pct_of_database_reason" })
             .Distinct().ToList();
-        Assert.True(keys.Count >= 13, "expected the column keys to be found");
         foreach (var key in keys)
         {
             Assert.True(tool.Contains(key + " = ") || tool.Contains("\"" + key + "\"") || tool.Contains(key + ","),

@@ -7,20 +7,20 @@
  */
 
 /* FinOps "Version Store (PVS)" tab: the latest persistent version store state per database and a size trend for the
-   top databases, both from one get_pvs_stats read. A server whose engine has no PVS shows the read's own message. */
+   top databases, both from one get_pvs_stats read. A server whose engine has no PVS shows the read's own message. PVS counts off-row versions only, matching the desktop label. */
 
 import { VIZ } from "../../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../../charts.js";
-import { el, readTool, readErrorStrip, emptyStrip, errorStrip, loadingStrip, mount, fmtMb, localTime } from "../../util.js";
+import { el, readTool, readErrorStrip, emptyStrip, errorStrip, loadingStrip, mount, fmtNum, localTime, windowFromHours } from "../../util.js";
 
 const TREND_HOURS = 24;
 
 const COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "is_adr_on", label: "ADR on", format: "bool" },
-  { key: "pvs_size_mb", label: "PVS size", format: "mb" },
+  { key: "pvs_size_mb", label: "PVS off-row MB", format: "num2" },
   { key: "pct_of_database", label: "% of database", format: "num2", nullKey: "pct_of_database_reason", wrap: true },
-  { key: "online_index_version_store_mb", label: "Online index version store", format: "mb" },
+  { key: "online_index_version_store_mb", label: "Online index store MB", format: "num2" },
   { key: "database_data_size_mb", label: "Database data size", format: "mb" },
   { key: "aborted_transaction_count", label: "Aborted transactions", format: "int" },
   { key: "aborted_version_cleaner_start_time", label: "Aborted cleaner start", format: "time" },
@@ -86,12 +86,12 @@ async function load(server, ctx, body) {
     });
     const { points, series } = pivotTrend(data.trend);
     const chart = points.length
-      ? renderLineChart({ points, xKey: "collection_time", series, formatValue: fmtMb, unit: "PVS size" })
+      ? renderLineChart({ points, xKey: "collection_time", series, formatValue: (v) => fmtNum(v, 2), unit: "PVS off-row MB", ...windowFromHours(TREND_HOURS) })
       : emptyStrip("No PVS size history in the last " + TREND_HOURS + " hours.");
     mount(body, [
       el("div", { class: "strip notice", role: "status", text: "As of " + localTime(data.as_of) + " (latest snapshot)." }),
       table,
-      el("h4", { text: "PVS size, last " + TREND_HOURS + " hours, top databases by current size" }),
+      el("h4", { text: "PVS off-row size (MB), last " + TREND_HOURS + " hours, top databases by current size" }),
       chart,
     ]);
   } catch (e) {
