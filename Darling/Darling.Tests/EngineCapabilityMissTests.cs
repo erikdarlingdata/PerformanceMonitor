@@ -538,7 +538,7 @@ public sealed class EngineCapabilityReadWiringTests
         var wired = WiredReads(DarlingMcp);
 
         Assert.True(wired.TryGetValue("get_finops", out var collectors), "get_finops has no wired read");
-        Assert.Equal(new[] { "query_stats" }, collectors!.ToArray());
+        Assert.Equal(new[] { "file_io_stats", "query_stats" }, collectors!.ToArray());
     }
 
     /// <summary>

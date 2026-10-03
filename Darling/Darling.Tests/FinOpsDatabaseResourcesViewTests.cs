@@ -46,7 +46,13 @@ public sealed class FinOpsDatabaseResourcesViewTests
         var tail = McpToolGuideTests.Served("get_finops").Tail;
         Assert.NotNull(tail);
         Assert.Contains("rounded to 0.01", tail, StringComparison.Ordinal);
-        Assert.Contains("ordered by CPU, highest first, then capped at limit", tail, StringComparison.Ordinal);
+        Assert.Contains("rows lists every database up to 500, ordered by CPU, then I/O, then name", tail, StringComparison.Ordinal);
+        Assert.Contains("limit caps only these two lists", tail, StringComparison.Ordinal);
+        Assert.Contains("top_by_total can include databases with 0 CPU that only had file I/O", tail, StringComparison.Ordinal);
+        Assert.Contains("top_by_avg is empty when no database has executions in the window", tail, StringComparison.Ordinal);
+        Assert.Contains("Above 72 hours, rows reads the per-database rollup and the top lists read the query-grain rollup", tail, StringComparison.Ordinal);
+        Assert.Contains("avg_cpu_ms is rounded to a whole millisecond, avg_io_mb has 4 decimals, io_total_mb has 2, and total_cpu_ms is the total behind the average", tail, StringComparison.Ordinal);
+        Assert.Contains("the desktop's top-consumer grids always cover 24 hours, so send hours_back=24 to match them", tail, StringComparison.Ordinal);
         Assert.Contains("database_count", tail, StringComparison.Ordinal);
         Assert.Contains("truncated", tail, StringComparison.Ordinal);
         Assert.Contains("hourly or daily rollups", tail, StringComparison.Ordinal);
@@ -66,8 +72,11 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
 {
     private const string ServerName = "darling-finops-dbres-view-a";
     private const string EmptyServerName = "darling-finops-dbres-view-b";
+    private const string PostgresServerName = "darling-finops-dbres-view-c";
+    private const int SeededDatabases = 8;
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private static readonly int EmptyServerId = ServerIdHelper.GetDeterministicHashCode(EmptyServerName);
+    private static readonly int PostgresServerId = ServerIdHelper.GetDeterministicHashCode(PostgresServerName);
 
     private static async Task<ScratchPostgres> SeedAsync(string cs, CancellationToken ct)
     {
@@ -77,8 +86,9 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
         await PgMigrations.MigrateAsync(c, ct);
         await DarlingMcpTestData.RegisterServerAsync(c, ServerId, ServerName, ct);
         await DarlingMcpTestData.RegisterServerAsync(c, EmptyServerId, EmptyServerName, ct);
+        await PgTargetFactCollectorTests.RegisterServerAsync(c, PostgresServerId, PostgresServerName, MonitoredEngineKind.Postgres, 16, ct);
         var at = DarlingMcpTestData.Naive(DateTime.UtcNow).AddHours(-2);
-        var dbs = new[] { "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot" };
+        var dbs = new[] { "tenant_a", "tenant_b", "tenant_c", "tenant_d", "tenant_e", "tenant_f" };
         for (var i = 0; i < dbs.Length; i++)
         {
             await DarlingMcpTestData.ExecAsync(c, ct,
@@ -97,6 +107,19 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
                 100m, 10L, 10L, 1_054_000L * (i + 1), 3_333_333L + i, 120L + i, 30L + i);
         }
 
+        /* Two databases with file I/O only (no query stats), different I/O totals: tenant_h has more I/O but the later name. */
+        var ioOnly = new[] { ("tenant_g", 500_000L), ("tenant_h", 900_000L) };
+        for (var i = 0; i < ioOnly.Length; i++)
+        {
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                @"INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name,
+                    file_type, physical_name, size_mb, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes,
+                    delta_stall_read_ms, delta_stall_write_ms)
+                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+                CollectionIdGenerator.Next(), at, ServerId, ServerName, ioOnly[i].Item1, "g" + i + ".mdf", "ROWS", "D:\\data\\g" + i + ".mdf",
+                100m, 5L, 5L, ioOnly[i].Item2, 1_000L, 10L, 5L);
+        }
+
         return scratch;
     }
 
@@ -106,7 +129,7 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(ds, ct);
         var (byTotal, byAvg) = await DarlingFinOpsDatabaseResourcesReader.GetTopResourceConsumersAsync(
             ds, ServerId, rollups, coverage, cutoff, 60, limit, ct);
-        Assert.DoesNotContain(byAvg, r => r.DatabaseName == "Foxtrot");
+        Assert.DoesNotContain(byAvg, r => r.DatabaseName == "tenant_f");
         return (JsonSerializer.Serialize(byTotal.Select(DarlingMcpFinOpsTools.TopByTotalRow).ToList(), McpHelpers.JsonOptions),
             JsonSerializer.Serialize(byAvg.Select(DarlingMcpFinOpsTools.TopByAvgRow).ToList(), McpHelpers.JsonOptions));
     }
@@ -118,7 +141,7 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
         var rows = await DarlingFinOpsDatabaseResourcesReader.GetDatabaseResourceUsageAsync(
             ds, ServerId, rollups, coverage, cutoff, 60, ct);
         return JsonSerializer.Serialize(
-            rows.OrderByDescending(r => r.CpuTimeMs).Take(limit).Select(DarlingMcpFinOpsTools.DatabaseResourcesRow).ToList(),
+            DarlingMcpFinOpsTools.OrderDatabaseRows(rows).Take(limit).Select(DarlingMcpFinOpsTools.DatabaseResourcesRow).ToList(),
             McpHelpers.JsonOptions);
     }
 
@@ -137,9 +160,18 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", ServerName, 24, 50, ct));
-        Assert.Equal(6, tool.RootElement.GetProperty("database_count").GetInt32());
+        Assert.Equal(SeededDatabases, tool.RootElement.GetProperty("database_count").GetInt32());
         Assert.False(tool.RootElement.GetProperty("truncated").GetBoolean());
-        Assert.Equal("Foxtrot", tool.RootElement.GetProperty("rows")[0].GetProperty("database_name").GetString());
+        var names = tool.RootElement.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("database_name").GetString()).ToArray();
+        Assert.Equal("tenant_f", names[0]);
+        /* The I/O-only databases tie at 0 CPU: more I/O first, whatever the name. */
+        Assert.Equal(new[] { "tenant_h", "tenant_g" }, names.TakeLast(2).ToArray());
+        var ioOnlyTotal = tool.RootElement.GetProperty("top_by_total").EnumerateArray()
+            .Where(r => r.GetProperty("database_name").GetString() is "tenant_g" or "tenant_h").ToList();
+        Assert.Equal(2, ioOnlyTotal.Count);
+        Assert.All(ioOnlyTotal, r => Assert.Equal(0, r.GetProperty("cpu_time_ms").GetInt64()));
+        Assert.DoesNotContain(tool.RootElement.GetProperty("top_by_avg").EnumerateArray(),
+            r => r.GetProperty("database_name").GetString() is "tenant_g" or "tenant_h");
         Assert.Equal(await ExpectedRowsJsonAsync(ds, 50, ct), tool.RootElement.GetProperty("rows").GetRawText());
         var top = await ExpectedTopJsonAsync(ds, 50, ct);
         Assert.Equal(top.Total, tool.RootElement.GetProperty("top_by_total").GetRawText());
@@ -147,17 +179,19 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
     }
 
     [Fact]
-    public async Task Limit_CapsTheRows_AndSaysSo()
+    public async Task Limit_CapsTheTopLists_AndNotTheRows()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", ServerName, 24, 2, ct));
-        Assert.Equal(2, tool.RootElement.GetProperty("rows").GetArrayLength());
-        Assert.True(tool.RootElement.GetProperty("truncated").GetBoolean());
-        Assert.Equal(6, tool.RootElement.GetProperty("database_count").GetInt32());
-        Assert.Equal(await ExpectedRowsJsonAsync(ds, 2, ct), tool.RootElement.GetProperty("rows").GetRawText());
+        Assert.Equal(2, tool.RootElement.GetProperty("top_by_total").GetArrayLength());
+        Assert.Equal(2, tool.RootElement.GetProperty("top_by_avg").GetArrayLength());
+        Assert.Equal(SeededDatabases, tool.RootElement.GetProperty("rows").GetArrayLength());
+        Assert.False(tool.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.Equal(SeededDatabases, tool.RootElement.GetProperty("database_count").GetInt32());
+        Assert.Equal(await ExpectedRowsJsonAsync(ds, int.MaxValue, ct), tool.RootElement.GetProperty("rows").GetRawText());
         var top = await ExpectedTopJsonAsync(ds, 2, ct);
         Assert.Equal(top.Total, tool.RootElement.GetProperty("top_by_total").GetRawText());
         Assert.Equal(top.Avg, tool.RootElement.GetProperty("top_by_avg").GetRawText());
@@ -172,7 +206,18 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
 
         using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", EmptyServerName, 24, 10, ct));
         var status = tool.RootElement.GetProperty("status").GetString();
-        Assert.Contains(status, new[] { "empty", "not_collected" });
+        Assert.Equal("empty", status);
+    }
+
+    [Fact]
+    public async Task PostgresServerWithNoRows_IsNotCollected_WhenBothCollectorsAreGated()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", PostgresServerName, 24, 10, ct));
+        Assert.Equal("not_collected", tool.RootElement.GetProperty("status").GetString());
     }
 
     [Fact]
