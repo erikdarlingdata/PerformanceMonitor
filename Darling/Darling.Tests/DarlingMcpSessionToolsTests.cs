@@ -240,7 +240,15 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             DarlingMcpTestData.AssertEnvelope(aq, ServerName, "queries");
             Assert.Contains("SELECT * FROM Posts", aq, StringComparison.Ordinal);
             DarlingMcpTestData.AssertEnvelope(await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, 1, Db, true), ServerName, "queries");
-            DarlingMcpTestData.AssertEnvelope(await DarlingMcpSessionTools.GetWaitingTasks(postgres, ServerName), ServerName, "tasks");
+            var tasks = await DarlingMcpSessionTools.GetWaitingTasks(postgres, ServerName);
+            DarlingMcpTestData.AssertEnvelope(tasks, ServerName, "tasks");
+
+            /* #4966: where the page's rows stop prints as UTC with the Z, at the instant the rows carry. */
+            foreach (var page in new[] { aq, tasks })
+            {
+                var oldest = System.Text.Json.JsonDocument.Parse(page).RootElement.GetProperty("oldest_returned_collection_time").GetString()!;
+                Assert.Equal(DateTime.SpecifyKind(t, DateTimeKind.Utc).ToString("o", System.Globalization.CultureInfo.InvariantCulture), oldest);
+            }
 
             await DeleteRowsAsync(connection, ct, keepServer: true);
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpSessionTools.GetSessionStats(postgres, ServerName)));

@@ -441,6 +441,7 @@ AND   hypertable_name = 'query_store_stats';";
         Assert.Equal(S.AddHours(12), DateTime.Parse(filled.GetProperty("effective_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
         Assert.True(filled.GetProperty("window_truncated").GetBoolean());
         Assert.Contains("began keeping complete history", filled.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+        AssertTheNoteNamesTheField(filled);
 
         await ForceFilledSinceAsync(rig.Connection, S.AddDays(-1), ct);
         await PurgeTableAsync(rig.Connection, S.AddMinutes(90), ct);
@@ -449,6 +450,17 @@ AND   hypertable_name = 'query_store_stats';";
         Assert.Equal("interval_table", edge.GetProperty("history_source").GetString());
         Assert.Equal(S.AddHours(2).Add(QueryStoreIntervalWide.PurgeEdgeMargin), DateTime.Parse(edge.GetProperty("effective_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
         Assert.Contains("keeps 9 days", edge.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+        AssertTheNoteNamesTheField(edge);
+    }
+
+    /// <summary>#4966: <c>effective_start</c> prints in UTC with the Z, and the note names the start in that exact text.
+    /// The page shows the instant in the browser's zone by finding the field's text in the note; a note that spelled the
+    /// store's naive floor on its own carried no Z, so it was found nowhere and drawn in bare UTC above local times.</summary>
+    private static void AssertTheNoteNamesTheField(JsonElement answer)
+    {
+        var start = answer.GetProperty("effective_start").GetString()!;
+        Assert.EndsWith("Z", start, StringComparison.Ordinal);
+        Assert.Contains(start, answer.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
     }
 
     /* ---- helpers ------------------------------------------------------------------------------------------ */

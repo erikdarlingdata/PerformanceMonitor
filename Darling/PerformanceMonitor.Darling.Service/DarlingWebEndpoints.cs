@@ -1437,7 +1437,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                starts and why. Absent when the table did not serve or nothing was cut. */
             if (queryStoreWideEligible && wideResolution.WideStart is DateTime historyStart && historyStart > start)
             {
-                payload["query_store_history_starts"] = historyStart.ToString("o");
+                payload["query_store_history_starts"] = McpHelpers.FormatEffectiveStart(historyStart);
                 payload["query_store_history_note"] = QueryStoreHistoryNote(historyStart, wideResolution.Bound, wideResolution.SettingServer);
                 if (wideResolution.SettingServer is not null)
                 {
@@ -1580,9 +1580,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>#4689: the note a Compose Query Store panel carries when the interval table served it from a
-    /// start later than the window's. Same wording as the MCP top-queries table route.</summary>
+    /// start later than the window's. Same wording as the MCP top-queries table route, and #4966 the same text for
+    /// the start: the one <c>query_store_history_starts</c> prints beside it, UTC with the Z.</summary>
     internal static string QueryStoreHistoryNote(DateTime historyStart, QueryStoreIntervalWide.WideStartBound bound, string? settingServer = null) =>
-        QueryStoreIntervalWide.HistoryNote(historyStart, bound, manyServers: true, settingServer);
+        QueryStoreIntervalWide.HistoryNote(McpHelpers.FormatEffectiveStart(historyStart), bound, manyServers: true, settingServer);
 
     /// <summary>Maps a failed (non-<see cref="ComposeRunOutcome.Payload"/>) <see cref="ComposeRunOutcome"/> onto
     /// its HTTP answer — factored out of the <c>/api/compose/run</c> route (the <see cref="ToHttpResult"/> /
