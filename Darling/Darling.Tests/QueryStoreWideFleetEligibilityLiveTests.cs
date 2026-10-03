@@ -59,12 +59,12 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
 
             await using var ins = new NpgsqlCommand(
                 "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) "
-                + $"VALUES ({id}, 'qsiw-fleet-{i:00}', 'qsiw-fleet-{i:00}', TRUE, 16, now(), now()) ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", connection);
+                + $"VALUES ({id}, 'qsiw-fleetsrv-{(char)('a' + i)}', 'qsiw-fleetsrv-{(char)('a' + i)}', TRUE, 16, now(), now()) ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", connection);
             await ins.ExecuteNonQueryAsync(ct);
             await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, id, S.AddDays(-60), S.AddDays(4), null, null, ct);
         }
 
-        /* Different read starts: servers 0 and 3 share the latest claim, so the tie goes to the lower server_id, qsiw-fleet-03. */
+        /* Different read starts: servers 0 and 3 share the latest claim, so the tie goes to the lower server_id, qsiw-fleetsrv-d. */
         for (var i = 0; i < eligibleIds.Length; i++)
         {
             var hours = i == 0 || i == 3 ? 14 : 12 + (i % 2);
@@ -153,7 +153,7 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         var expected = await SerialAsync(connection, end, ct);
         Assert.True(expected.Eligible);
         Assert.Equal(S.AddHours(14), expected.WideStart);
-        Assert.Equal("qsiw-fleet-03", expected.SettingServer);
+        Assert.Equal("qsiw-fleetsrv-d", expected.SettingServer);
 
         /* Scoped to this scratch database by name, so a class running in parallel against another database is
            invisible to the count. */
