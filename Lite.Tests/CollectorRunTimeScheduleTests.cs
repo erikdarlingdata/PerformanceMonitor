@@ -141,6 +141,46 @@ public sealed class CollectorRunTimeScheduleTests : IDisposable
     }
 
     [Fact]
+    public void AnAttemptThatDidNotSucceed_EndsTheDay_OfACollectorWithARunTime_AndTheNextDaysSlotIsDue()
+    {
+        var manager = Manager(clock: Eastern);
+        var slot = Slot(Day, 120, Eastern);
+        var attemptAt = slot + TimeSpan.FromMinutes(2);
+
+        /* A failed run writes its collection_log row, and a restart reads that row as the day's run. The session
+           counts the attempt the same way, so the failing collector is not run again on every sweep of the hour. */
+        Assert.Equal(new[] { Daily }, Due(manager, attemptAt));
+        manager.MarkCollectorAttemptForServer(ServerKey, Daily, attemptAt);
+
+        Assert.Empty(Due(manager, attemptAt + TimeSpan.FromMinutes(1)));
+        Assert.Empty(Due(manager, slot + CollectorRunTime.Grace));
+        Assert.Empty(Due(manager, slot + TimeSpan.FromHours(12)));
+        Assert.Empty(Due(manager, Slot(Day.AddDays(1), 120, Eastern) - TimeSpan.FromMinutes(1)));
+        Assert.Equal(new[] { Daily }, Due(manager, Slot(Day.AddDays(1), 120, Eastern) + TimeSpan.FromMinutes(1)));
+    }
+
+    [Fact]
+    public void AnAttempt_OfACollectorWithNoRunTime_OrOneWhoseRunTimeDoesNotApply_ChangesNothing()
+    {
+        var plainDaily = Manager(runAt: null, clock: Eastern);
+        var now = Slot(Day, 120, Eastern) + TimeSpan.FromMinutes(2);
+
+        /* No run time: the interval rule stands, and a collector that has never run is due on every sweep until one
+           succeeds. */
+        plainDaily.MarkCollectorAttemptForServer(ServerKey, Daily, now);
+        Assert.Equal(new[] { Daily }, Due(plainDaily, now + TimeSpan.FromMinutes(1)));
+
+        /* A run time on an hourly interval is refused and ignored with a warning, so the interval rule stands there too. */
+        var hourly = ManagerFromFile("wait_stats", "02:00", frequency: 60);
+        hourly.MarkCollectorAttemptForServer(ServerKey, "wait_stats", now);
+        Assert.True(IsDue(hourly, "wait_stats", now + TimeSpan.FromMinutes(1)));
+
+        /* A collector the schedule does not list has nothing to record. */
+        plainDaily.MarkCollectorAttemptForServer(ServerKey, "not_in_the_schedule", now);
+        Assert.Equal(new[] { Daily }, Due(plainDaily, now + TimeSpan.FromMinutes(2)));
+    }
+
+    [Fact]
     public void ANeverRunCollectorWithARunTime_WaitsForTheNextDaysTime_ThenRunsInsideItsGrace()
     {
         var manager = Manager(clock: Eastern);

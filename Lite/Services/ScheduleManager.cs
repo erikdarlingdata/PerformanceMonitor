@@ -603,6 +603,44 @@ public class ScheduleManager
     }
 
     /// <summary>
+    /// #4938: records an attempt that did not succeed (an error, a denied permission, a declined sign-in, a lock yield)
+    /// as that day's run of a collector that has a run time. The attempt wrote its collection_log row, and the
+    /// start-up read counts every row as the last run whatever its status, so the session counts it too: a collector that
+    /// keeps failing runs once inside the 60-minute hour that follows its time, not on every sweep of the hour, and its
+    /// next due time is the next day's. A collector with no run time, or one whose run time does not apply, is left
+    /// alone: it stays due on the next sweep, as before.
+    /// </summary>
+    public void MarkCollectorAttemptForServer(string serverId, string collectorName, DateTime attemptTime)
+    {
+        lock (_lock)
+        {
+            var schedules = _serverOverrides.TryGetValue(serverId, out var over)
+                ? over.Collectors
+                : _defaultSchedule;
+
+            var schedule = schedules.FirstOrDefault(s =>
+                s.Name.Equals(collectorName, StringComparison.OrdinalIgnoreCase));
+            if (schedule is null
+                || !schedule.Enabled
+                || ResolveRunAtMinute(serverId, schedule, CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)) is null)
+            {
+                return;
+            }
+
+            if (!_serverRunState.TryGetValue(serverId, out var runState))
+            {
+                runState = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+                _serverRunState[serverId] = runState;
+            }
+
+            runState[collectorName] = attemptTime;
+
+            _logger?.LogDebug("Marked collector '{Name}' as attempted for server {ServerId} at {Time}; its run time ends that day's run",
+                collectorName, serverId, attemptTime);
+        }
+    }
+
+    /// <summary>
     /// Creates or updates a per-server schedule override.
     /// </summary>
     public void SetScheduleForServer(string serverId, List<CollectorSchedule> schedules)

@@ -198,13 +198,55 @@ public sealed class CollectorRunTimeSweepTests : IDisposable
             await service.RunDueCollectorsAsync(slot + CollectorRunTime.Grace + TimeSpan.FromMinutes(1), CancellationToken.None);
             Assert.Equal(0, await RowsAsync(duckDb, server, "no_such_run_time"));
 
-            /* Inside the hour: one run. A made-up collector fails, and a failed run is not recorded as a run, so the run a
-               real collector records is recorded here; the same hour then does not run it twice. */
+            /* Inside the hour: one run. A made-up collector fails, and a failed attempt still ends that day's run (#4938),
+               so the same hour does not run it twice. */
             await service.RunDueCollectorsAsync(slot + TimeSpan.FromMinutes(10), CancellationToken.None);
             Assert.Equal(1, await RowsAsync(duckDb, server, "no_such_run_time"));
-            scheduler.MarkCollectorRunForServer(server.Id, "no_such_run_time", slot + TimeSpan.FromMinutes(10));
             await service.RunDueCollectorsAsync(slot + TimeSpan.FromMinutes(20), CancellationToken.None);
             Assert.Equal(1, await RowsAsync(duckDb, server, "no_such_run_time"));
+        }
+        finally
+        {
+            duckDb.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task ACollectorWithARunTime_ThatKeepsFailing_RunsOnceInsideItsHour_NotOnEverySweep_AndTheNextDaysSlotRunsItAgain()
+    {
+        var (duckDb, servers, server) = await OpenAsync();
+        try
+        {
+            var today = DateOnly.FromDateTime(DateTime.UtcNow);
+            var id = RemoteCollectorService.GetServerId(server);
+            var slot = CollectorRunTime.SlotUtc(today, 120, id, CollectorRunTime.LocalIsUtc);
+            var nextSlot = CollectorRunTime.SlotUtc(today.AddDays(1), 120, id, CollectorRunTime.LocalIsUtc);
+
+            /* A made-up collector fails on every attempt and writes one ERROR row per attempt. The scheduler used to
+               treat the failure as "not run", so every sweep of the hour ran the collector again, while the startup
+               read of the log had always counted that row as the run. */
+            var scheduler = NewScheduler(server, ("no_such_failing_run_time", 1440, "02:00"));
+            var service = new RemoteCollectorService(duckDb, servers, scheduler);
+
+            foreach (var minutes in new[] { 1, 2, 3, 10, 30, 59 })
+            {
+                await service.RunDueCollectorsAsync(slot + TimeSpan.FromMinutes(minutes), CancellationToken.None);
+            }
+
+            Assert.Equal(1, await RowsAsync(duckDb, server, "no_such_failing_run_time"));
+
+            /* The rest of the day: no run. The next due time is the next day's slot, not another try on a later sweep. */
+            await service.RunDueCollectorsAsync(slot + TimeSpan.FromHours(5), CancellationToken.None);
+            await service.RunDueCollectorsAsync(nextSlot - TimeSpan.FromMinutes(1), CancellationToken.None);
+            Assert.Equal(1, await RowsAsync(duckDb, server, "no_such_failing_run_time"));
+
+            /* The next day's slot runs it once more, and fails once more, and ends that day too. */
+            foreach (var minutes in new[] { 5, 15, 45 })
+            {
+                await service.RunDueCollectorsAsync(nextSlot + TimeSpan.FromMinutes(minutes), CancellationToken.None);
+            }
+
+            Assert.Equal(2, await RowsAsync(duckDb, server, "no_such_failing_run_time"));
         }
         finally
         {

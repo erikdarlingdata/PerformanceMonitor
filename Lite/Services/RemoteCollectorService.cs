@@ -925,6 +925,15 @@ public partial class RemoteCollectorService
         // Track collector health
         RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable);
 
+        /* #4938: a run that did not succeed still wrote a collection_log row below, and the start-up read counts that
+           row as the last run whatever its status. For a collector with a run time the session counts it too, so a
+           failing collector runs once inside the hour after its time and waits for the next day's, instead of running
+           on every sweep of the hour. A success was recorded above, right after its collection. */
+        if (status != "SUCCESS")
+        {
+            _scheduleManager.MarkCollectorAttemptForServer(server.Id, collectorName, scheduledAtUtc ?? startTime);
+        }
+
         // Log the collection attempt
         await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs, telemetry.Fanout);
     }
