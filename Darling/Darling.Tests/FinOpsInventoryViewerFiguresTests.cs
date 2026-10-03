@@ -28,6 +28,7 @@ public sealed class FinOpsInventoryViewerFiguresTests
     {
         int? cpu = avgCpu is int a ? FinOpsHealthCalculator.CpuScore(a) : null;
         Assert.Equal(expected, FinOpsHealthCalculator.Overall(cpu, 80, FinOpsHealthCalculator.StorageScore(50)));
+        Assert.Equal(expected, FinOpsInventoryFigures.HealthScore(avgCpu));
     }
 
     [Theory]
@@ -50,6 +51,7 @@ public sealed class FinOpsInventoryViewerFiguresTests
     {
         var row = new ServerPropertyRow { Edition = edition, CpuCount = cpus, PhysicalMemoryMb = memoryMb };
         Assert.Equal(expected, row.LicenseWarning);
+        Assert.Equal(expected, FinOpsInventoryFigures.LicenseWarning(edition, cpus, memoryMb));
     }
 
     [Fact]
@@ -61,6 +63,10 @@ public sealed class FinOpsInventoryViewerFiguresTests
         Assert.Null(row.SocketCount);
         Assert.Null(row.CoresPerSocket);
         Assert.Equal(ServerHardwareScope.InventoryHardwareNote, row.HardwareUnavailableReason);
+        Assert.Null(FinOpsInventoryFigures.PhysicalMemoryMb(5, 934000));
+        Assert.Null(FinOpsInventoryFigures.SocketCount(5, 0));
+        Assert.Null(FinOpsInventoryFigures.CoresPerSocket(5, 32));
+        Assert.Equal(row.HardwareUnavailableReason, FinOpsInventoryFigures.HardwareNote(5, null));
     }
 
     [Fact]
@@ -73,5 +79,8 @@ public sealed class FinOpsInventoryViewerFiguresTests
         Assert.Null(row.HardwareUnavailableReason);
         row.HardwareUnavailableReason = "no permission";
         Assert.Equal("no permission", row.HardwareUnavailableReason);
+        Assert.Equal(65536L, FinOpsInventoryFigures.PhysicalMemoryMb(3, 65536));
+        Assert.Equal("no permission", FinOpsInventoryFigures.HardwareNote(5, "no permission"));
+        Assert.Null(FinOpsInventoryFigures.HardwareNote(3, null));
     }
 }
