@@ -247,6 +247,9 @@ public sealed partial class ViewerDataService
         return items;
     }
 
+    /// <summary>The grid's row cap: the newest 200 reports, after the DMV fallback rows are merged in. The SQL's own LIMIT is the same number.</summary>
+    public const int BlockedProcessReportsRowCap = BlockedProcessReportMerge.DefaultCap;
+
     /// <summary>
     /// Where this server's blocked_process_reports coverage starts for the window, through the shared probe
     /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its first

@@ -123,6 +123,9 @@ public sealed partial class ViewerDataService
         LIMIT 50
         """;
 
+    /// <summary>The grid's row cap: the newest 50 deadlocks. <see cref="RecentDeadlocksSql"/>'s LIMIT is the same number.</summary>
+    public const int DeadlocksRowCap = 50;
+
     /// <summary>
     /// Where this server's deadlocks coverage starts for the window, through the shared probe
     /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its first

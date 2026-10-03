@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Controls;
 
@@ -28,10 +29,14 @@ public partial class ViewerServerTab
     /// <param name="surface">The surface's name, for the log line a failed probe writes.</param>
     /// <param name="startUtc">The start of the window the grid just drew.</param>
     /// <param name="shownEventTimesUtc">The event time of each row the grid shows (naive UTC; null when a row has none).</param>
+    /// <param name="rowCap">The newest-first row cap of the grid's read, or null for a read with none. A read that returned that
+    /// many rows names its oldest row, whatever the store covers (<see cref="ViewerEventDataStart.ReadHitCap"/>).</param>
     internal static async Task ShowEventDataStartAsync(
-        TextBlock banner, Task<DateTime?> probe, string surface, DateTime startUtc, IEnumerable<DateTime?> shownEventTimesUtc)
+        TextBlock banner, Task<DateTime?> probe, string surface, DateTime startUtc, IEnumerable<DateTime?> shownEventTimesUtc, int? rowCap = null)
     {
         var coverageStart = await DataStartOrNullAsync(probe, surface);
-        UpdateTruncationBanner(banner, ViewerEventDataStart.Of(coverageStart, ViewerEventDataStart.EarliestOf(shownEventTimesUtc)), startUtc);
+        var shown = shownEventTimesUtc.ToList();
+        UpdateTruncationBanner(banner,
+            ViewerEventDataStart.Of(coverageStart, ViewerEventDataStart.EarliestOf(shown), ViewerEventDataStart.ReadHitCap(shown.Count, rowCap)), startUtc);
     }
 }

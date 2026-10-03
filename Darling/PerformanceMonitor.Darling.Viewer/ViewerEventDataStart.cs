@@ -31,11 +31,25 @@ public static class ViewerEventDataStart
     /// event the grid shows (<paramref name="earliestShownUtc"/>) when that is earlier. Null when the probe has no
     /// answer (<paramref name="coverageStartUtc"/> null: nothing in the range, or the probe failed), so a surface never
     /// names a start the store could not vouch for.
+    ///
+    /// <para>A read that hit its row cap (<paramref name="readHitCap"/>, see <see cref="ReadHitCap"/>) returns the newest
+    /// rows and stops, so the grid does not reach back further than its oldest row, whatever the store covers: the
+    /// notice names that row. It comes from the rows themselves, so it needs no answer from the probe. A read that
+    /// stayed under its cap keeps the rule above.</para>
     /// </summary>
-    public static DateTime? Of(DateTime? coverageStartUtc, DateTime? earliestShownUtc) =>
-        coverageStartUtc is not DateTime coverage
-            ? null
-            : earliestShownUtc is DateTime shown && shown < coverage ? shown : coverage;
+    public static DateTime? Of(DateTime? coverageStartUtc, DateTime? earliestShownUtc, bool readHitCap = false) =>
+        readHitCap && earliestShownUtc is DateTime oldest
+            ? oldest
+            : coverageStartUtc is not DateTime coverage
+                ? null
+                : earliestShownUtc is DateTime shown && shown < coverage ? shown : coverage;
+
+    /// <summary>
+    /// True when a read that keeps its newest <paramref name="rowCap"/> rows returned that many: it may have left older
+    /// rows out, so the grid's oldest row is where its data starts. A read with no cap (<paramref name="rowCap"/> null)
+    /// never hits one.
+    /// </summary>
+    public static bool ReadHitCap(int shownRowCount, int? rowCap) => rowCap is int cap && shownRowCount >= cap;
 
     /// <summary>The earliest of <paramref name="eventTimesUtc"/>, ignoring the rows that carry no event time; null when none does.</summary>
     public static DateTime? EarliestOf(IEnumerable<DateTime?> eventTimesUtc)
