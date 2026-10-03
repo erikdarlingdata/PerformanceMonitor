@@ -159,7 +159,7 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", ServerName, 24, 50, ct));
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", ServerName, 24, 50, cancellationToken: ct));
         Assert.Equal(SeededDatabases, tool.RootElement.GetProperty("database_count").GetInt32());
         Assert.False(tool.RootElement.GetProperty("truncated").GetBoolean());
         var names = tool.RootElement.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("database_name").GetString()).ToArray();
@@ -185,7 +185,7 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", ServerName, 24, 2, ct));
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", ServerName, 24, 2, cancellationToken: ct));
         Assert.Equal(2, tool.RootElement.GetProperty("top_by_total").GetArrayLength());
         Assert.Equal(2, tool.RootElement.GetProperty("top_by_avg").GetArrayLength());
         Assert.Equal(SeededDatabases, tool.RootElement.GetProperty("rows").GetArrayLength());
@@ -204,7 +204,7 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", EmptyServerName, 24, 10, ct));
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", EmptyServerName, 24, 10, cancellationToken: ct));
         var status = tool.RootElement.GetProperty("status").GetString();
         Assert.Equal("empty", status);
     }
@@ -216,7 +216,7 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", PostgresServerName, 24, 10, ct));
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", PostgresServerName, 24, 10, cancellationToken: ct));
         Assert.Equal("not_collected", tool.RootElement.GetProperty("status").GetString());
     }
 
@@ -227,7 +227,7 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        var tool = await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", ServerName, 24, 50, ct);
+        var tool = await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", ServerName, 24, 50, cancellationToken: ct);
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {

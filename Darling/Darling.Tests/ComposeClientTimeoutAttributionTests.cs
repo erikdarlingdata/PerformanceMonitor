@@ -240,7 +240,7 @@ public class ComposeClientTimeoutAttributionTests
 
         Assert.Contains("Stopwatch.StartNew()", helper, StringComparison.Ordinal);
         Assert.Contains("PostgresOpenTimeout.IsTimedOutByClock(open.Cause, started.Elapsed, timeout, cancellationToken.IsCancellationRequested)", helper, StringComparison.Ordinal);
-        Assert.Equal(1, Regex.Matches(helper, Regex.Escape("{ FailedAfterTimeout = true }")).Count);
+        Assert.Single(Regex.Matches(helper, Regex.Escape("{ FailedAfterTimeout = true }")));
         Assert.Contains("|| open.FailedAfterTimeout", code, StringComparison.Ordinal);
     }
 }
