@@ -44,7 +44,12 @@ public partial class ViewerServerTab : UserControl
         var databaseTask = _dataService.GetDatabaseConfigChangesAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         var traceFlagTask = _dataService.GetTraceFlagChangesAsync(_server.ServerId, startUtc, endUtc);
 
-        await Task.WhenAll(serverTask, databaseTask, traceFlagTask);
+        /* One probe per grid: each wraps the read so a failing read watches all three. */
+        await AwaitReadWatchingProbeAsync(
+            AwaitReadWatchingProbeAsync(
+                AwaitReadWatchingProbeAsync(Task.WhenAll(serverTask, databaseTask, traceFlagTask), serverStartTask, "Server Config Changes"),
+                databaseStartTask, "Database Config Changes"),
+            traceFlagStartTask, "Trace Flag Changes");
 
         /* The three are done, and the not-collected notes below may read the store again. Release here so those reads are not
            priced against contention that has already finished. */

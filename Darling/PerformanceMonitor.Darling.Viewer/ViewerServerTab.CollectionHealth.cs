@@ -78,7 +78,7 @@ public partial class ViewerServerTab
            and leave both grids, the note and the caveats undrawn. */
         var durationTask = ReadOrEmptyAsync(() => _dataService.GetCollectorDurationTrendAsync(_server.ServerId, startUtc, endUtc), "Collection Health duration chart");
         var caveatsTask = _dataService.GetCollectionCaveatsAsync(_server.ServerId);
-        await Task.WhenAll(healthTask, logTask, durationTask, caveatsTask);
+        await AwaitReadWatchingProbeAsync(Task.WhenAll(healthTask, logTask, durationTask, caveatsTask), dataStartTask, "Collection Log");
 
         /* The four reads are done: end the declared width here, before the data-start note below awaits its probe (#4966), so that
            await is not priced against contention that has already finished. */
