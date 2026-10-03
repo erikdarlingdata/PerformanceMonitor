@@ -533,12 +533,12 @@ public sealed class EngineCapabilityReadWiringTests
     /// <summary>get_finops lives in DarlingMcpFinOpsTools.cs and asks its question through a helper in the
     /// partial DarlingMcpFinOpsTools.HighImpact.cs; the scan reads both parts as one source.</summary>
     [Fact]
-    public void GetFinOps_IsWiredToQueryStats_AcrossThePartialClass()
+    public void GetFinOps_IsWiredToItsViewsCollectors_AcrossThePartialClass()
     {
         var wired = WiredReads(DarlingMcp);
 
         Assert.True(wired.TryGetValue("get_finops", out var collectors), "get_finops has no wired read");
-        Assert.Equal(new[] { "query_stats" }, collectors!.ToArray());
+        Assert.Equal(new[] { "memory_stats", "query_stats" }, collectors!.ToArray());
     }
 
     /// <summary>
