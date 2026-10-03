@@ -59,7 +59,6 @@ let renderGeneration = 0;
 let panelAbort = null;
 /* The last list_servers rows, so a hashchange paints in the same tick and only the poll re-reads them. */
 let lastRows = null;
-let painted = false;
 
 function storedGet(key) {
   try {
@@ -145,14 +144,9 @@ export function renderFinops(main, server, tabId, opts) {
   const active = findTab(tabId || storedGet(TAB_KEY));
   const wanted = server || storedGet(SERVER_KEY);
 
-  /* Abort the previous render's reads and open this render's controller before any await. A poll over a page
-     that is already painted keeps its controller: nothing is redrawn, so its reads are still wanted. */
-  const keepPainted = isPoll && lastRows !== null && painted;
-  let controller = panelAbort;
-  if (!keepPainted) {
-    if (panelAbort) panelAbort.abort();
-    controller = panelAbort = new AbortController();
-  }
+  /* Abort the previous render's reads and open this render's controller before any await. */
+  if (panelAbort) panelAbort.abort();
+  let controller = panelAbort = new AbortController();
 
   const paint = (rows) => {
     const head = el("div", { class: "page-head" }, [el("h2", { text: "FinOps" })]);
@@ -168,15 +162,16 @@ export function renderFinops(main, server, tabId, opts) {
       tabBar(chosen, active),
       el("div", { class: "finops-panel" }, [active.build(chosen, { signal: controller.signal })]),
     ]);
-    painted = true;
   };
 
-  if (lastRows !== null && !isPoll) return paint(lastRows);
+  /* Every render, poll included, paints from the cache in the same tick: that rebuilds the tab's panels,
+     which is how the open tab refreshes its data. The server list is re-read only when there is no cache or on a poll. */
+  const hadCache = lastRows !== null;
+  if (lastRows !== null) paint(lastRows);
+  else mount(main, [el("div", { class: "page-head" }, [el("h2", { text: "FinOps" })]), el("div", { class: "finops-body" }, [loadingStrip("Loading servers")])]);
 
-  if (!keepPainted) {
-    painted = false;
-    mount(main, [el("div", { class: "page-head" }, [el("h2", { text: "FinOps" })]), el("div", { class: "finops-body" }, [loadingStrip("Loading servers")])]);
-  }
+  const needFetch = lastRows === null || isPoll;
+  if (!needFetch) return;
 
   (async () => {
     const res = await readTool("list_servers", {}, controller.signal);
@@ -184,7 +179,6 @@ export function renderFinops(main, server, tabId, opts) {
     const body = main.querySelector(".finops-body");
     const show = (node) => {
       lastRows = null;
-      painted = false;
       if (body) mount(body, node);
     };
     /* An empty registry answers with prose, which the read classifies as an error; it is the empty case. */
@@ -192,10 +186,10 @@ export function renderFinops(main, server, tabId, opts) {
     if (res.kind === "error") return show(errorStrip(res.message));
     const rows = res.kind === "data" ? serverRows(res.data) : [];
     if (rows.length === 0) return show(emptyStrip("No servers are registered yet."));
-    const unchanged = keepPainted && lastRows !== null && sameServers(lastRows, rows);
+    const unchanged = hadCache && lastRows !== null && sameServers(lastRows, rows);
     lastRows = rows;
     if (!unchanged) {
-      if (keepPainted) {
+      if (hadCache) {
         if (panelAbort) panelAbort.abort();
         controller = panelAbort = new AbortController();
       }

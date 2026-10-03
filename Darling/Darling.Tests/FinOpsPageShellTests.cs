@@ -119,9 +119,16 @@ public sealed class FinOpsPageShellTests
         Assert.Contains("const chosen = resolveRow(rows, wanted).server_name;", body);
         Assert.DoesNotContain("known(", src);
         Assert.Contains("opts.poll === true", body);
-        Assert.Contains("if (lastRows !== null && !isPoll) return paint(lastRows);", body);
-        Assert.True(body.IndexOf("new AbortController()", StringComparison.Ordinal) < body.IndexOf("await ", StringComparison.Ordinal),
-            "the controller must be created before the first await");
+        Assert.DoesNotContain("keepPainted", body);
+        var lines = body.ReplaceLineEndings("\n").Split('\n');
+        var paintIdx = Array.FindIndex(lines, l => l.Trim() == "if (lastRows !== null) paint(lastRows);");
+        var fetchIdx = Array.FindIndex(lines, l => l.Contains("readTool(\"list_servers\""));
+        Assert.True(paintIdx >= 0 && paintIdx < fetchIdx, "the cached paint must run before the list_servers read, on polls too (no !isPoll guard)");
+        Assert.Contains("const needFetch = lastRows === null || isPoll;", body);
+        Assert.Contains("if (!needFetch) return;", body);
+        var ctrlIdx = Array.FindIndex(lines, l => l.Trim() == "let controller = panelAbort = new AbortController();");
+        Assert.True(ctrlIdx >= 0 && ctrlIdx < Array.FindIndex(lines, l => l.Contains("await ")),
+            "the controller must be created unconditionally before the first await");
         Assert.Contains("{ signal: controller.signal }", body);
         Assert.Contains("aria-current", src);
         Assert.DoesNotContain("role: \"tab", src);
