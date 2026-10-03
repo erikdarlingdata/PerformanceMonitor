@@ -44,7 +44,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// whatever the store covers, so the note names that row (<c>effective_start</c> is the answer's
 /// <c>oldest_returned_collection_time</c>, or for the configuration changes the earliest <c>changed_at</c> on the page,
 /// and the text says the grid shows the newest rows back to it). The answer already carries the time, so this asks the
-/// store nothing. The collection log keeps the coverage rule when a duration floor ranks its page slowest first, as it
+/// store nothing. The note shows only when that oldest row is later than the window's start, by any amount: a page
+/// whose oldest row is at the start, or before it, shows the whole range and says nothing. The collection log keeps
+/// the coverage rule when a duration floor ranks its page slowest first, as it
 /// is then a sample of the whole window. The other reads keep the coverage rule: aggregates over the whole window,
 /// whose cap keeps the top rows and hides no time range; <c>get_pg_predicate_stats</c>, a list ranked by something
 /// other than time; and the SQL Server change histories, which carry no cap.</para>
@@ -55,7 +57,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// the note from them in its own clock. The sentence stays for any other reader.</para>
 ///
 /// <para><b>When it says nothing.</b> The window is covered (whether or not it holds rows: a quiet start is not a
-/// cut) and the read did not hit a row cap that cuts by time, nothing in scope holds a row or logged a run in it, the
+/// cut) and the read did not hit a row cap that cuts by time (or hit it, and its oldest row is at or before the
+/// window's start), nothing in scope holds a row or logged a run in it, the
 /// answer is an envelope (empty, unavailable, invalid) or an error rather than rows, the read cannot be resolved, the
 /// window is no longer than the 90-minute slack (a window that short can never be cut by the store's coverage, so the
 /// probe is not asked), or the probe fails. A failed probe costs the grid its notice, never its rows.</para>
@@ -202,10 +205,20 @@ internal static class WebDataStartNote
                 return result;
             }
 
+            /* Only a page that stops short of the window's start is cut by its row cap. One whose oldest row is at the
+               start, or before it, shows the whole range, so it says nothing: strictly later, with no slack (the
+               90-minute slack belongs to the coverage rule below), as Lite's capped grids judge it
+               (ServerTab.ApplyCappedWindowFloorToBanner). */
+            var cappedStart = cappedEnd.AddHours(-hours);
+            if (oldestShown <= cappedStart)
+            {
+                return result;
+            }
+
             payload["window_truncated"] = true;
             payload["effective_start"] = oldestText;
-            payload["truncation_note"] = ComposeStoreAvailability.BuildCappedListNotice(oldestShown, cappedEnd.AddHours(-hours), cappedEnd);
-            AddInstants(payload, OldestShownField, oldestShown, cappedEnd.AddHours(-hours), cappedEnd);
+            payload["truncation_note"] = ComposeStoreAvailability.BuildCappedListNotice(oldestShown, cappedStart, cappedEnd);
+            AddInstants(payload, OldestShownField, oldestShown, cappedStart, cappedEnd);
             return payload.ToJsonString();
         }
 

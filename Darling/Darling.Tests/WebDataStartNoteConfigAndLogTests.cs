@@ -162,6 +162,44 @@ public sealed class WebDataStartNoteConfigAndLogTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => WebDataStartNote.AddAsync(store, "get_pg_server_config_changes", "pg01", 168, null, Rows("get_pg_server_config_changes"), null, Cancelled));
     }
+
+    /* A capped page's note shows only when its oldest row is LATER than the window's start, with no slack: a page whose
+       oldest row is the start (or before it) shows the whole range and says nothing, one a second after it was cut there.
+       The window here is the 48 hours ending at WindowEnd, so it starts at 2026-01-01 00:00:00 UTC. The store never connects
+       and the token is cancelled, so a probe in either case would be seen: a capped list asks the store nothing. */
+    [Theory]
+    [InlineData("get_waiting_tasks", "2026-01-01T00:00:00.0000000", false)]
+    [InlineData("get_waiting_tasks", "2025-12-31T23:59:59.0000000", false)]
+    [InlineData("get_waiting_tasks", "2026-01-01T00:00:01.0000000", true)]
+    [InlineData("get_collection_log", "2026-01-01T00:00:00.0000000", false)]
+    [InlineData("get_collection_log", "2025-12-31T23:59:59.0000000", false)]
+    [InlineData("get_collection_log", "2026-01-01T00:00:01.0000000", true)]
+    [InlineData("get_pg_server_config_changes", "2026-01-01T00:00:00", false)]
+    [InlineData("get_pg_server_config_changes", "2025-12-31T23:59:59", false)]
+    [InlineData("get_pg_server_config_changes", "2026-01-01T00:00:01", true)]
+    public async Task ACappedPage_GetsItsNoteOnlyWhenItsOldestRowIsLaterThanTheWindowsStart_WithNoSlack(string read, string oldest, bool noted)
+    {
+        await using var store = NeverConnects();
+        var page = string.Equals(read, "get_pg_server_config_changes", StringComparison.Ordinal)
+            ? CappedPgChanges.Replace("2026-01-02T08:15:00", oldest, StringComparison.Ordinal)
+            : CappedLog.Replace("2026-01-02T12:30:00.0000000", oldest, StringComparison.Ordinal);
+
+        var answered = await WebDataStartNote.AddAsync(store, read, "sql01", 48, WindowEnd, page, null, Cancelled);
+
+        if (!noted)
+        {
+            Assert.Same(page, answered);
+            return;
+        }
+
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        Assert.True(answer["window_truncated"]?.GetValue<bool>());
+        Assert.Equal(oldest, answer["effective_start"]?.GetValue<string>());
+        Assert.StartsWith("2026-01-01T00:00:01", answer["oldest_shown_utc"]?.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Equal("2026-01-01T00:00:00.0000000Z", answer["window_start_utc"]?.GetValue<string>());
+        Assert.Equal("2026-01-03T00:00:00.0000000Z", answer["window_end_utc"]?.GetValue<string>());
+        Assert.Null(answer["data_start_utc"]);
+    }
 }
 
 /// <summary>
