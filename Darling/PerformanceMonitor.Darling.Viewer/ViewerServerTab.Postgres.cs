@@ -724,6 +724,9 @@ public partial class ViewerServerTab
 
         await Task.WhenAll(sessionsTask, xminTask, autovacuumTask, wraparoundTask, planCaptureTask);
 
+        /* Released before the first banner await: the reads and probes are done or detached by here. */
+        readFanOut.Release();
+
         UpdateTruncationBanner(PgSessionStatesDataStartBanner, await DataStartOrNullAsync(sessionsStartTask, "PostgreSQL Session States"), startUtc);
         UpdateTruncationBanner(PgXminDataStartBanner, await DataStartOrNullAsync(xminStartTask, "PostgreSQL Xmin Horizon"), startUtc);
         UpdateTruncationBanner(PgAutovacuumDataStartBanner, await DataStartOrNullAsync(autovacuumStartTask, "PostgreSQL Autovacuum"), startUtc);
@@ -1040,11 +1043,11 @@ public partial class ViewerServerTab
 
         await Task.WhenAll(bloatTask, indexTask);
 
+        /* Released here, before any banner await. */
+        readFanOut.Release();
+
         UpdateTruncationBanner(PgTableBloatDataStartBanner, await DataStartOrNullAsync(bloatStartTask, "PostgreSQL Table Bloat"), startUtc);
         UpdateTruncationBanner(PgIndexUsageDataStartBanner, await DataStartOrNullAsync(indexStartTask, "PostgreSQL Index Usage"), startUtc);
-
-        /* Released here — the three sub-tab loads at the end of this method do not contend with these two. */
-        readFanOut.Release();
 
         var bloat = bloatTask.Result;
         var indexes = indexTask.Result;
