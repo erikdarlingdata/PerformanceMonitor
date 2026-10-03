@@ -11,6 +11,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Darling.Viewer;
@@ -89,15 +90,22 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
 
     // ── The tab: the probe beside the read, the banner keyed on the baseline window ──
 
+    /* The tab starts the probe beside the read and hands it, with the RANGE's start, to the one banner step; the step derives the
+       baseline window's start and compares the probe's answer with it, and the store-backed tests run that same step. */
     [Fact]
     public void QueryStoreRegressions_AsksAboutTheBaselineWindow_AndComparesWithItsStart()
     {
-        var load = MethodBody(ViewerFile("ViewerServerTab.Queries.cs"), @"private async Task LoadQueryStoreRegressionsAsync\(");
+        var queries = ViewerFile("ViewerServerTab.Queries.cs");
+        var load = MethodBody(queries, @"private async Task LoadQueryStoreRegressionsAsync\(");
 
-        Assert.Equal(1, Matches(load, @"var baselineStartUtc = ViewerDataService\.QueryStoreRegressionsBaselineStart\(startUtc\);"));
         Assert.Equal(1, Matches(load, @"var floorTask = _dataService\.GetQueryStoreRegressionsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
-        Assert.Equal(1, Matches(load,
-            @"UpdateTruncationBanner\(QueryStoreRegressionsTruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""Query Store Regressions""\),\s*baselineStartUtc\);"));
+        Assert.Equal(1, Matches(load, @"await ShowQueryStoreRegressionsDataStartAsync\(QueryStoreRegressionsTruncationBanner,\s*floorTask,\s*startUtc\);"));
+        Assert.DoesNotContain("UpdateTruncationBanner(", load, StringComparison.Ordinal);
+
+        var step = Regex.Match(queries, @"internal static async Task ShowQueryStoreRegressionsDataStartAsync\(.*?;\r?\n", RegexOptions.Singleline).Value;
+        Assert.Matches(
+            @"UpdateTruncationBanner\(\s*banner,\s*await DataStartOrNullAsync\(probe,\s*""Query Store Regressions""\),\s*ViewerDataService\.QueryStoreRegressionsBaselineStart\(startUtc\)\);",
+            step);
     }
 
     [Fact]
@@ -107,7 +115,7 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
 
         Assert.Equal(1, Matches(tabs, @"_dataService\.GetQueryStoreRegressionsAsync\("));
         Assert.Equal(1, Matches(tabs, @"_dataService\.GetQueryStoreRegressionsDataStartAsync\("));
-        Assert.Equal(1, Matches(tabs, @"UpdateTruncationBanner\(QueryStoreRegressionsTruncationBanner,"));
+        Assert.Equal(1, Matches(tabs, @"ShowQueryStoreRegressionsDataStartAsync\(QueryStoreRegressionsTruncationBanner,"));
     }
 
     [Fact]
@@ -124,9 +132,16 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
 
     // ── What the banner shows ──
 
-    /* The banner raised for the probe's answer against a requested start, read off the control; null when it is hidden. Seeded
-       visible, so a no-op cannot pass as a hidden banner. */
-    private static string? BannerFor(DateTime? coverageStartUtc, DateTime requestedStartUtc)
+    /* The banner the tab's own step (ShowQueryStoreRegressionsDataStartAsync) raises for the probe's answer on the range that starts at
+       RangeStart, read off the control; null when it is hidden. Seeded visible, so a no-op cannot pass as a hidden banner. */
+    private static string? BannerFor(DateTime? coverageStartUtc) =>
+        ReadBanner(banner => ViewerServerTab.ShowQueryStoreRegressionsDataStartAsync(banner, Task.FromResult(coverageStartUtc), RangeStart).GetAwaiter().GetResult());
+
+    /* The same answer compared with the RANGE's start, which is the keying the step moves off: the premise of the first case below. */
+    private static string? BannerComparedWithTheRangeStart(DateTime? coverageStartUtc) =>
+        ReadBanner(banner => ViewerServerTab.UpdateTruncationBanner(banner, coverageStartUtc, RangeStart));
+
+    private static string? ReadBanner(Action<TextBlock> raise)
     {
         string? text = null;
         OnStaThread(() =>
@@ -134,14 +149,12 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
             var banner = new TextBlock { Visibility = Visibility.Visible, Text = "stale" };
 
-            ViewerServerTab.UpdateTruncationBanner(banner, coverageStartUtc, requestedStartUtc);
+            raise(banner);
 
             text = banner.Visibility == Visibility.Visible ? banner.Text : null;
         });
         return text;
     }
-
-    private static DateTime Baseline => ViewerDataService.QueryStoreRegressionsBaselineStart(RangeStart);
 
     /* A server added two days before the range starts: the recent window is covered whole, but the baseline holds 5 of its 7
        days. The notice names where the data starts; keyed on the range alone it would say nothing. */
@@ -150,24 +163,34 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
     {
         var coverage = RangeStart.AddDays(-2);
 
-        Assert.Equal("Showing since 2026-09-08 00:00", BannerFor(coverage, Baseline));
-        Assert.Null(BannerFor(coverage, RangeStart));
+        Assert.Equal("Showing since 2026-09-08 00:00:00", BannerFor(coverage));
+        Assert.Null(BannerComparedWithTheRangeStart(coverage));
     }
 
     /* Coverage inside the recent window: the baseline is empty and the grid shows nothing, and the notice says since when. */
     [Fact]
     public void CoverageThatStartsInsideTheRecentWindow_RaisesTheNotice()
     {
-        Assert.Equal("Showing since 2026-09-11 00:00", BannerFor(RangeStart.AddDays(1), Baseline));
+        Assert.Equal("Showing since 2026-09-11 00:00:00", BannerFor(RangeStart.AddDays(1)));
     }
 
     /* A quiet start: the store covered the whole baseline (coverage 20 days before the range). No notice. */
     [Fact]
     public void AQuietStart_RaisesNoNotice()
     {
-        Assert.Null(BannerFor(RangeStart.AddDays(-20), Baseline));
+        Assert.Null(BannerFor(RangeStart.AddDays(-20)));
         /* A probe with no answer names nothing. */
-        Assert.Null(BannerFor(null, Baseline));
+        Assert.Null(BannerFor(null));
+    }
+
+    /* A probe that throws costs this banner and nothing else: the step answers a hidden banner (seeded visible) instead of throwing. */
+    [Fact]
+    public void AProbeThatThrows_HidesTheBanner_InsteadOfThrowing()
+    {
+        var text = ReadBanner(banner => ViewerServerTab.ShowQueryStoreRegressionsDataStartAsync(
+            banner, Task.FromException<DateTime?>(new InvalidOperationException("the store went away")), RangeStart).GetAwaiter().GetResult());
+
+        Assert.Null(text);
     }
 
     /* WPF objects require STA; same shape as ViewerLongQueriesDataStartTests. */

@@ -137,7 +137,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
     [Fact]
     public void AReadThatHitsItsCap_RaisesTheNotice_AtItsOldestRow()
     {
-        Assert.Equal("Showing since 2026-09-04 00:00", CappedBannerFor(RangeStart.AddDays(-20), RangeStart.AddDays(3), shownRows: 3, rowCap: 3));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", CappedBannerFor(RangeStart.AddDays(-20), RangeStart.AddDays(3), shownRows: 3, rowCap: 3));
     }
 
     [Fact]
@@ -169,14 +169,14 @@ public sealed class ViewerEventDataStartTests : IDisposable
     [Fact]
     public void RowsThatStartInsideTheRange_RaiseTheNotice_AtTheCoverageStart()
     {
-        Assert.Equal("Showing since 2026-09-04 00:00", BannerFor(RangeStart.AddDays(3), RangeStart.AddDays(3).AddHours(6)));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(RangeStart.AddDays(3), RangeStart.AddDays(3).AddHours(6)));
     }
 
     /* History that reaches before the coverage start gives a notice at the history's start, not at the later coverage. */
     [Fact]
     public void HistoryThatReachesBeforeTheCoverage_RaisesTheNotice_AtTheHistorysStart()
     {
-        Assert.Equal("Showing since 2026-09-02 00:00", BannerFor(RangeStart.AddDays(3), RangeStart.AddDays(1)));
+        Assert.Equal("Showing since 2026-09-02 00:00:00", BannerFor(RangeStart.AddDays(3), RangeStart.AddDays(1)));
     }
 
     /* History that reaches the range start gives no notice, though the coverage starts days later. */
@@ -202,7 +202,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
         OnStaThread(() =>
         {
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-            var banner = new TextBlock { Visibility = Visibility.Visible, Text = "Showing since 2026-09-04 00:00" };
+            var banner = new TextBlock { Visibility = Visibility.Visible, Text = "Showing since 2026-09-04 00:00:00" };
 
             ViewerServerTab.ShowEventDataStartAsync(
                 banner, Task.FromException<DateTime?>(new InvalidOperationException("the store went away")), "Deadlocks", RangeStart,
