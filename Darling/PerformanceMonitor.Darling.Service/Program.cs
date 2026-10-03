@@ -303,6 +303,18 @@ if (args.Length > 0 && (DarlingCliCommands.IsEnableCollectorVerb(args[0]) || Dar
         enable: DarlingCliCommands.IsEnableCollectorVerb(args[0]), args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --set-collector-run-at <collector> <HH:MM|none|default> [--server <name>] [--config <path>] (#4938) — set,
+   stop or clear the time of day a collector that runs once a day starts, fleet-wide or for one server, and print the
+   rows read back from the store. A heavy daily collector otherwise starts whenever the service happened to start, which
+   is often a busy hour; the time is on the monitored server's own clock. Same shape and the same platform posture as
+   --enable-collector directly above: the verb owns no SQL (it executes the command plane's own plan), NO Windows guard
+   here because Windows is needed only for a MANAGED store credential (DPAPI), which the verb checks itself, and the
+   trailing arguments are parsed STRICTLY inside the verb (never guess — #1581's posture). */
+if (args.Length > 0 && DarlingCliCommands.IsSetCollectorRunAtVerb(args[0]))
+{
+    return await DarlingCliCommands.SetCollectorRunAtAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verb: --drop-xe-sessions <server-name> [--dry-run] [--config <path>] | --print-sql (#4732) — drop the Extended
    Events sessions (the deadlock and blocked-process ring buffers, and the opt-in long-query completions one)
    Darling created on a server this service still monitors (run just before the server is removed; after removal,

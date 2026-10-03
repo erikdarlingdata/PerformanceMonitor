@@ -9,8 +9,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -34,6 +38,12 @@ public partial class CollectorScheduleEditorWindow : Window
     private int? _scopeServerId;           // null = fleet-wide default scope
     private bool _suppressPresetChange;
     private bool _suppressScopeReload;
+
+    /* What the Run at line needs to know about the scope's server (#4938): its clock from the newest
+       server_properties row (null until it has one, which reads the time as UTC) and whether it is an Azure SQL
+       Database, which always reports UTC. Both are read once per scope and stay null/false on the fleet scope. */
+    private ServerClock? _scopeClock;
+    private bool _scopeIsAzureSqlDatabase;
 
     /// <summary>True when the user saved changes (the caller then re-reads if it cares).</summary>
     public bool Saved { get; private set; }
@@ -144,7 +154,84 @@ public partial class CollectorScheduleEditorWindow : Window
             SubHeaderText.Text = "The fleet-wide default schedule. Every server without its own override collects on this schedule.";
         }
 
+        /* The run time is read on the scope's own server clock, so a server scope reads that server's clock and engine
+           (the fleet scope has no one clock: its line shows the spread instead). */
+        _scopeClock = null;
+        _scopeIsAzureSqlDatabase = false;
+
         RebuildEditingForScope();
+
+        if (_scopeServerId is int scopeServer)
+        {
+            _ = LoadScopeContextAsync(scopeServer);
+        }
+    }
+
+    /// <summary>
+    /// Reads the scope server's clock (its newest <c>server_properties</c> row) and whether it is an Azure SQL Database, then
+    /// refreshes the Run at line. Best effort: a read that fails leaves the clock unknown, which the line says (the time reads
+    /// as UTC), and nothing here blocks the grid. A scope the user has moved away from meanwhile is left alone.
+    /// </summary>
+    private async Task LoadScopeContextAsync(int serverId)
+    {
+        ServerClock? clock = null;
+        var azureSqlDatabase = false;
+        try
+        {
+            var clocks = await _dataService.GetServerClocksAsync(serverId, CancellationToken.None);
+            clock = clocks.TryGetValue(serverId, out var found) ? found : null;
+            azureSqlDatabase = await _dataService.GetRecommendationEngineEditionAsync(serverId)
+                == CollectorEngineCapability.AzureSqlDatabaseEngineEdition;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            StatusText.Text += $" Could not read this server's clock: {ex.Message}";
+        }
+
+        if (_scopeServerId != serverId)
+        {
+            return;
+        }
+
+        _scopeClock = clock;
+        _scopeIsAzureSqlDatabase = azureSqlDatabase;
+        RefreshRunAtDetail();
+    }
+
+    private void ScheduleGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) => RefreshRunAtDetail();
+
+    /// <summary>A cell edit is committed after this event, so the line is refreshed once it has been.</summary>
+    private void ScheduleGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e) =>
+        Dispatcher.BeginInvoke(new Action(RefreshRunAtDetail), DispatcherPriority.Background);
+
+    /// <summary>
+    /// The line under the grid for the selected row (#4938): what its Run at time means on the server's clock and in UTC,
+    /// the spread on a fleet row, the next run on a server row, and the refusal text when the cell holds something the save
+    /// would refuse. All of it comes from <see cref="CollectorScheduleRunAtText.Describe"/>, which is built on the shared
+    /// run-time rules.
+    /// </summary>
+    private void RefreshRunAtDetail()
+    {
+        if (ScheduleGrid.SelectedItem is not CollectorScheduleEditItem item)
+        {
+            RunAtDetailText.Text = "Select a collector to see what its Run at time means on its server's clock.";
+            return;
+        }
+
+        var fleetRunAt = _allOverrides
+            .FirstOrDefault(r => r.ServerId is null && string.Equals(r.CollectorName, item.Name, StringComparison.OrdinalIgnoreCase))
+            ?.RunAtMinute;
+
+        try
+        {
+            RunAtDetailText.Text = $"{item.Name}: " + CollectorScheduleRunAtText.Describe(
+                item.Name, item.RunAtText, item.FrequencyMinutes, _scopeServerId, fleetRunAt,
+                _scopeClock, _scopeIsAzureSqlDatabase, DateTime.UtcNow);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or FormatException)
+        {
+            RunAtDetailText.Text = $"{item.Name}: could not work out this run time ({ex.Message}).";
+        }
     }
 
     /// <summary>Rebuilds the editable list for the current scope + use-default state and re-binds the grid.</summary>
@@ -166,6 +253,7 @@ public partial class CollectorScheduleEditorWindow : Window
     {
         ScheduleGrid.ItemsSource = null;
         ScheduleGrid.ItemsSource = _editing;
+        RefreshRunAtDetail();
     }
 
     private void UpdateEditableState(bool editable)
@@ -259,7 +347,7 @@ public partial class CollectorScheduleEditorWindow : Window
     private void ResetDefaults_Click(object sender, RoutedEventArgs e)
     {
         var result = MessageBox.Show(
-            "Replace the current values with the built-in default frequencies and retention?",
+            "Replace the current values with the built-in default frequencies and retention, and clear every run time?",
             "Reset to Defaults", MessageBoxButton.YesNo, MessageBoxImage.Question);
 
         if (result != MessageBoxResult.Yes)

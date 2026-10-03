@@ -387,11 +387,12 @@ public sealed class CollectorRunTimeRungLiveTests
         }
     }
 
-    /// <summary>The viewer's schedule save, with the column present: it still works, and because it deletes the
-    /// scope's rows and inserts them again without naming the column, a run time stored in that scope is cleared.
-    /// This pins today's behavior so the change that makes the editor carry the time has to flip it on purpose.</summary>
+    /// <summary>The viewer's schedule save, with the column present. The save deletes the scope's rows and inserts
+    /// them again, so it now names the column: a row that carries a run time writes it back (an unedited time is
+    /// kept, an edited one is stored) and a row that carries none stores NULL, which clears a stored time. This
+    /// replaces the pin that said a save cleared a stored run time, now that the editor carries the time.</summary>
     [Fact]
-    public async Task TheViewerScheduleSave_StillWorksWithTheColumnPresent_AndClearsAStoredRunTime()
+    public async Task TheViewerScheduleSave_WritesTheEditedRunTime_KeepsAnUneditedOne_AndClearsAClearedOne()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -414,12 +415,31 @@ public sealed class CollectorRunTimeRungLiveTests
 
             await using var viewer = new ViewerDataService(scratch.ConnectionString);
 
+            /* KEEP: rows read back from the store carry their run time, and saving them as they are keeps both times. */
+            var read = await viewer.GetCollectorSchedulesAsync(ct);
+            Assert.Equal(120, read.Single(r => r.ServerId is null).RunAtMinute);
+            Assert.Equal(130, read.Single(r => r.ServerId == 7).RunAtMinute);
+            await viewer.ReplaceFleetSchedulesAsync(read.Where(r => r.ServerId is null).ToList(), ct);
+            Assert.Equal(120, Convert.ToInt32(await ScalarAsync(connection,
+                "SELECT run_at_minute FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = 'index_object_stats'", ct)));
+            Assert.Equal(130, Convert.ToInt32(await ScalarAsync(connection,
+                "SELECT run_at_minute FROM config.config_collector_schedules WHERE server_id = 7 AND collector_name = 'index_object_stats'", ct)));
+
+            /* WRITE: an edited time is stored. */
+            await viewer.ReplaceFleetSchedulesAsync(new[] { new CollectorScheduleRow(null, "index_object_stats", 1440, 30, true, null, 195) }, ct);
+            Assert.Equal(195, Convert.ToInt32(await ScalarAsync(connection,
+                "SELECT run_at_minute FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = 'index_object_stats'", ct)));
+
+            /* CLEAR: a row that carries no run time stores NULL, and -1 on a server row is stored as -1. */
             await viewer.ReplaceFleetSchedulesAsync(new[] { new CollectorScheduleRow(null, "index_object_stats", 1440, 30, true, null) }, ct);
             Assert.True(await ScalarAsync(connection,
                 "SELECT run_at_minute IS NULL FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = 'index_object_stats'", ct) is true);
             Assert.Equal(130, Convert.ToInt32(await ScalarAsync(connection,
                 "SELECT run_at_minute FROM config.config_collector_schedules WHERE server_id = 7 AND collector_name = 'index_object_stats'", ct)));
 
+            await viewer.ReplaceServerSchedulesAsync(7, new[] { new CollectorScheduleRow(7, "index_object_stats", null, null, true, null, -1) }, ct);
+            Assert.Equal(-1, Convert.ToInt32(await ScalarAsync(connection,
+                "SELECT run_at_minute FROM config.config_collector_schedules WHERE server_id = 7 AND collector_name = 'index_object_stats'", ct)));
             await viewer.ReplaceServerSchedulesAsync(7, new[] { new CollectorScheduleRow(7, "index_object_stats", null, null, true, null) }, ct);
             Assert.True(await ScalarAsync(connection,
                 "SELECT run_at_minute IS NULL FROM config.config_collector_schedules WHERE server_id = 7 AND collector_name = 'index_object_stats'", ct) is true);
