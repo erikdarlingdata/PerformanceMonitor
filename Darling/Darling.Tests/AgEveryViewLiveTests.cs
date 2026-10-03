@@ -53,7 +53,7 @@ public sealed class AgEveryViewLiveTests
             var when = DarlingMcpTestData.Naive(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2));
             string[] servers = ["ag-every-view-a", "ag-every-view-b"];
             string[] groups = ["AGONE", "AGTWO"];
-            string[] groupIds = ["aaaaaaaa-0000-0000-0000-000000000001", "aaaaaaaa-0000-0000-0000-000000000002"];
+            string[] groupIds = ["aaaaaaaa-1111-2222-3333-abcdefabcdef", "bbbbbbbb-1111-2222-3333-abcdefabcdef"];
 
             foreach (var serverName in servers)
             {
