@@ -759,13 +759,38 @@ public sealed partial class ViewerDataService
     };
 
     /// <summary>
+    /// The Collection Log grid's row cap: the newest 500 runs by collection time. <see cref="GetRecentCollectionLogAsync"/> binds it to
+    /// <see cref="RecentCollectionLogSql"/>'s <c>LIMIT $4</c> by default, and the tab names the same number to the "Showing since"
+    /// note (#4966), so a read that returned this many runs names its oldest one: the grid reaches back no further.
+    /// </summary>
+    public const int CollectionLogRowCap = 500;
+
+    /// <summary>
+    /// The per-collector drill's window in hours (the trailing 7 days): <see cref="GetCollectionLogByCollectorAsync"/> reads from
+    /// this far back by default, and the drill window asks the "Showing since" probe about the same span (#4966). The read has
+    /// no row cap, so the note follows the coverage rule.
+    /// </summary>
+    public const int CollectionLogDrillHours = 168;
+
+    /// <summary>
+    /// Where this server's collection log starts for the window (#4966), through the shared probe (<see cref="DataWindowFloor"/>)
+    /// over the log's own source (<see cref="DataWindowFloor.Source.ForCollectionLog"/>): the later of the server's first collection
+    /// and the log's own retention edge, or its first run in the window if that is earlier. Both Collection Log surfaces ask it, the
+    /// grid over the toolbar's range and the per-collector drill over its trailing week. Null when the window holds no logged run,
+    /// when it lies wholly before the coverage, and for a window of 90 minutes or less (the probe starts no query for one).
+    /// </summary>
+    public Task<DateTime?> GetCollectionLogDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectionLog(), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>
     /// Collection_log entries for one server between the window's naive-UTC start/end bounds, most recent
-    /// first (500-row cap). Feeds the Collection Log sub-tab grid and the Duration Trends chart. The window
+    /// first (<see cref="CollectionLogRowCap"/>-row cap). Feeds the Collection Log sub-tab grid and the Duration Trends chart. The window
     /// is the per-server toolbar's settable range (<c>GetWindowUtc</c>): a preset ends "now", a custom
     /// From/To bounds EXACTLY — unlike the old hours-back read, a custom range no longer rounds to a
     /// hours-back-from-now span. Mirrors how <see cref="GetDistinctWaitTypesAsync"/> windows its read.
     /// </summary>
-    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, DateTime startUtc, DateTime endUtc, int maxRows = 500, CancellationToken cancellationToken = default)
+    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, DateTime startUtc, DateTime endUtc, int maxRows = CollectionLogRowCap, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(RecentCollectionLogSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -788,7 +813,7 @@ public sealed partial class ViewerDataService
     /// Lite's <c>GetCollectionLogByCollectorAsync</c> (default 168-hour / 7-day window). Feeds the
     /// CollectionLogWindow drill.
     /// </summary>
-    public async Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync(int serverId, string collectorName, int hoursBack = 168, CancellationToken cancellationToken = default)
+    public async Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync(int serverId, string collectorName, int hoursBack = CollectionLogDrillHours, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(CollectionLogByCollectorSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
