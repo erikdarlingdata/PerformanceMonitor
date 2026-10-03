@@ -181,19 +181,24 @@ public sealed class ViewerConfigChangesDataStartTests
     [Fact]
     public void ARangeThatStartsBeforeCoverage_NamesTheCoverageStart()
     {
-        Assert.Equal("Showing since 2026-09-04 00:00", DataStartBannerReadout.For(Task.FromResult<DateTime?>(At(3)), RangeStart, [At(3, 6), At(5)]));
+        Assert.Equal(DataStartBannerReadout.Since(At(3)), DataStartBannerReadout.For(Task.FromResult<DateTime?>(At(3)), RangeStart, [At(3, 6), At(5)]));
     }
 
-    /* The notice is written in the viewer's display zone: server time at +05:30 moves the coverage start's text, and only its text. */
+    /* The notice is written in the viewer's display zone: server time at +05:30 moves the coverage start's text, and only its text.
+       The expected text comes from the product's own banner formatter (DataStartBannerReadout.Since), so the format of the time
+       (to the minute or to the second) is not asserted here; the substring checks name the zone's shift in either. */
     [Fact]
     public void TheNotice_NamesItsTime_InTheDisplayZone()
     {
-        Assert.Equal(
-            "Showing since 2026-09-04 05:30",
-            DataStartBannerReadout.For(Task.FromResult<DateTime?>(At(3)), RangeStart, [At(3, 6)], mode: TimeDisplayMode.ServerTime, serverOffsetMinutes: 330));
-        Assert.Equal(
-            "Showing since 2026-09-04 00:00",
-            DataStartBannerReadout.For(Task.FromResult<DateTime?>(At(3)), RangeStart, [At(3, 6)], mode: TimeDisplayMode.UTC));
+        var inServerTime = DataStartBannerReadout.For(
+            Task.FromResult<DateTime?>(At(3)), RangeStart, [At(3, 6)], mode: TimeDisplayMode.ServerTime, serverOffsetMinutes: 330);
+        var inUtc = DataStartBannerReadout.For(Task.FromResult<DateTime?>(At(3)), RangeStart, [At(3, 6)], mode: TimeDisplayMode.UTC);
+
+        Assert.Equal(DataStartBannerReadout.Since(At(3), TimeDisplayMode.ServerTime, 330), inServerTime);
+        Assert.Contains("2026-09-04 05:30", inServerTime, StringComparison.Ordinal);
+        Assert.Equal(DataStartBannerReadout.Since(At(3)), inUtc);
+        Assert.Contains("2026-09-04 00:00", inUtc, StringComparison.Ordinal);
+        Assert.NotEqual(inUtc, inServerTime);
     }
 
     /* A quiet start: the store covered the whole range (coverage 20 days before it), and the first change came 5 hours in. No notice. */
@@ -211,14 +216,14 @@ public sealed class ViewerConfigChangesDataStartTests
         var changes = Enumerable.Range(0, 1000).Select(i => (DateTime?)At(0, 5).AddMinutes(i)).ToList();
 
         Assert.Null(DataStartBannerReadout.For(Task.FromResult<DateTime?>(At(-20)), RangeStart, changes));
-        Assert.Equal("Showing since 2026-09-01 05:00", DataStartBannerReadout.For(Task.FromResult<DateTime?>(At(-20)), RangeStart, changes, rowCap: 1000));
+        Assert.Equal(DataStartBannerReadout.Since(At(0, 5)), DataStartBannerReadout.For(Task.FromResult<DateTime?>(At(-20)), RangeStart, changes, rowCap: 1000));
     }
 
     /* An empty grid is the probe's to say: a server added 3 days in has no earlier snapshots, whether or not a change was found. */
     [Fact]
     public void AnEmptyGrid_StillNamesTheCoverageStart()
     {
-        Assert.Equal("Showing since 2026-09-04 00:00", DataStartBannerReadout.For(Task.FromResult<DateTime?>(At(3)), RangeStart, []));
+        Assert.Equal(DataStartBannerReadout.Since(At(3)), DataStartBannerReadout.For(Task.FromResult<DateTime?>(At(3)), RangeStart, []));
         Assert.Null(DataStartBannerReadout.For(Task.FromResult<DateTime?>(null), RangeStart, []));
     }
 
@@ -292,6 +297,37 @@ internal static class DataStartBannerReadout
             }
         });
         return text;
+    }
+
+    /// <summary>
+    /// The banner text the product writes for the instant <paramref name="utc"/>: "Showing since " and the time as the tab's own
+    /// formatter (<c>ViewerServerTab.BannerTime</c>, the one formatter every "Showing since" note goes through) prints it under the
+    /// same display mode and server clock <see cref="For"/> sets. An assertion built from this follows the product's time format
+    /// instead of copying it.
+    /// </summary>
+    public static string Since(DateTime utc, TimeDisplayMode mode = TimeDisplayMode.UTC, int? serverOffsetMinutes = null)
+    {
+        var bannerTime = typeof(ViewerServerTab).GetMethod(
+            "BannerTime", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public, [typeof(DateTime)])
+            ?? throw new InvalidOperationException("ViewerServerTab.BannerTime(DateTime) was not found: the banner's formatter moved.");
+
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        var savedClock = ViewerTimeHelper.ActiveServerClock;
+        try
+        {
+            ViewerTimeHelper.CurrentDisplayMode = mode;
+            if (serverOffsetMinutes is int offset)
+            {
+                ViewerTimeHelper.UtcOffsetMinutes = offset;
+            }
+
+            return "Showing since " + (string)bannerTime.Invoke(null, [utc])!;
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
+            ViewerTimeHelper.ActiveServerClock = savedClock;
+        }
     }
 
     /// <summary>Runs <paramref name="body"/> on an STA thread (WPF objects require one) and rethrows what it threw.</summary>
