@@ -11,20 +11,25 @@ using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage.FinOps;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
 /*
- * FinOps tab row models — a COPY of Lite's LocalDataService.FinOps.cs model layer for the copy-parity
- * program (copy-don't-promote: the Darling viewer owns its own copy; Lite/Dashboard are untouched).
+ * FinOps tab row models — the Darling viewer's own copy of Lite's LocalDataService.FinOps.cs model layer.
+ * "Copy, don't promote" is about Lite versus Darling: Lite and the Dashboard keep their own copy of these
+ * models, and inside Darling the pure compute (health score, cost math) is shared with the service through
+ * PerformanceMonitor.Darling.Storage.FinOps.
  * Two deliberate deviations from Lite's models, both because the headless store lacks the source:
- *   (1) The per-server FinOps COST attribution (MonthlyCost / MonthlyCostShare / AnnualCost) is dropped
- *       everywhere — that budget lives in Lite/Dashboard's ServerConnection config, which the Postgres
- *       store has no equivalent of. The health score (pure CPU/memory/storage math) is kept.
+ *   (1) The per-server FinOps COST attribution (MonthlyCost / MonthlyCostShare / AnnualCost) is sourced from
+ *       the registry: the viewer reads servers.monthly_cost_usd (carried on the selected DarlingServer as
+ *       MonthlyCostUsd) and the loaders compute the shares from it; 0 hides the cost affordances. Lite and the
+ *       Dashboard take the budget from ServerConnection config instead.
  *   (2) ServerPropertyRow drops the fields the collected server_properties table doesn't carry
  *       (sqlserver_start_time / host_os_version / ag_replica_role — Lite got them from a LIVE query the
  *       headless viewer can't run). Everything the collector DOES persist is surfaced.
- * The pure scoring helpers (FinOpsHealthCalculator, HighImpactScorer) are copied verbatim.
+ * The health-score helper (FinOpsHealthCalculator) lives in PerformanceMonitor.Darling.Storage.FinOps; the
+ * high-impact scorer (HighImpactScorer) is copied verbatim from Lite and stays here with its row model.
  */
 
 /// <summary>7-day daily provisioning classification trend (Utilization sub-tab).</summary>
@@ -145,7 +150,7 @@ public sealed class UtilizationEfficiencyRow
 
     // FinOps cost — proportional to the server's monthly budget (0 = hidden)
     public decimal MonthlyCost { get; set; }
-    public decimal AnnualCost => MonthlyCost * 12m;
+    public decimal AnnualCost => FinOpsCost.Annual(MonthlyCost);
 
     // Health score
     public decimal FreeSpacePct { get; set; }
@@ -466,7 +471,7 @@ public sealed class ServerPropertyRow
 
     /// <summary>Per-server FinOps budget (servers.monthly_cost_usd from darling.json); 0 hides the cost columns.</summary>
     public decimal MonthlyCost { get; set; }
-    public decimal AnnualCost => MonthlyCost * 12m;
+    public decimal AnnualCost => FinOpsCost.Annual(MonthlyCost);
 
     public string UptimeDisplay
     {
@@ -578,53 +583,6 @@ public sealed class ExpensiveQueryRow
     /// <summary>The stored statement-level plan (query_stats.query_plan_xml, captured by Darling); opens in the Plan Viewer.</summary>
     public string? QueryPlanXml { get; set; }
     public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlanXml);
-}
-
-/// <summary>Pure health-score math (Utilization + Server Inventory). Copied verbatim from Lite.</summary>
-public static class FinOpsHealthCalculator
-{
-    public static int CpuScore(decimal p95Pct)
-    {
-        if (p95Pct <= 70) return (int)(100 - p95Pct * 50 / 70);
-        return (int)Math.Max(0, 50 - (p95Pct - 70) * 50 / 30);
-    }
-
-    public static int MemoryScore(decimal bufferPoolRatio)
-    {
-        if (bufferPoolRatio <= 0.30m) return 60;
-        if (bufferPoolRatio <= 0.85m) return 100;
-        if (bufferPoolRatio <= 0.95m) return (int)(100 - (bufferPoolRatio - 0.85m) * 800);
-        return (int)Math.Max(0, 20 - (bufferPoolRatio - 0.95m) * 400);
-    }
-
-    public static int StorageScore(decimal freeSpacePct)
-    {
-        if (freeSpacePct >= 30) return 100;
-        if (freeSpacePct >= 10) return (int)(50 + (freeSpacePct - 10) * 2.5m);
-        return (int)(freeSpacePct * 5);
-    }
-
-    /// <summary>
-    /// The overall score: CPU 40%, memory 30%, storage 30%. A null <paramref name="cpu"/> means the window held no CPU
-    /// sample: there is nothing to score, and scoring the 0 it reads as would be a full 100 made from nothing. The term is
-    /// then left out, not scored as zero and not scored as a default, and memory and storage keep their weights over their
-    /// own total (30:30 over 60).
-    /// </summary>
-    public static int Overall(int? cpu, int memory, int storage)
-    {
-        if (cpu is int cpuScore)
-            return (int)(cpuScore * 0.40 + memory * 0.30 + storage * 0.30);
-
-        /* integer weights, so no floating-point error can truncate 100 to 99 */
-        return (memory * 30 + storage * 30) / 60;
-    }
-
-    public static string ScoreColor(int score) => score switch
-    {
-        >= 80 => "#27AE60",
-        >= 60 => "#F39C12",
-        _ => "#E74C3C"
-    };
 }
 
 /// <summary>High-impact query row (High Impact sub-tab) — 80/20 impact score across six dimensions.</summary>
