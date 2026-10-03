@@ -333,11 +333,12 @@ public static class ServiceCommandDeadlines
 
     /// <summary>
     /// The store commands awaited INLINE on the serial collection-loop thread: the control-plane reload
-    /// body — <c>StoreConfigProvider.LoadViewAsync</c>'s five config reads,
+    /// body — <c>StoreConfigProvider.LoadViewAsync</c>'s seven config commands (six reads, one of which, the
+    /// schedule read, is two commands: the sparse schedule rows and the run times),
     /// <c>DarlingObservability.SyncServerEnabledStatesAsync</c>'s two registry statements and the
     /// managed-role <c>statement_timeout</c> re-assert — plus the store-size lookup behind the
-    /// disk-pressure check and the daily retention sweep's own run-record. The first eight run ahead of
-    /// the per-server launches; the last two run after them, in the same tick.
+    /// disk-pressure check and the daily retention sweep's own run-record: twelve commands in all. The
+    /// first ten run ahead of the per-server launches; the last two run after them, in the same tick.
     ///
     /// <para><b>The regime, by the token test.</b> Every one of these is awaited directly inside
     /// <c>DarlingWorker</c>'s <c>while (!stoppingToken.IsCancellationRequested)</c> body, on the plain
@@ -347,7 +348,7 @@ public static class ServiceCommandDeadlines
     /// service runs. That combination is what makes it a regime of its own rather than an extension of
     /// either neighbour.</para>
     ///
-    /// <para><b>Seven of the ten ALSO run once on the bootstrap path</b> (<c>DarlingWorker</c> awaits
+    /// <para><b>Nine of the twelve ALSO run once on the bootstrap path</b> (<c>DarlingWorker</c> awaits
     /// <c>LoadViewAsync</c> and then <c>SyncServerEnabledStatesAsync</c> during startup, named rather than
     /// cited by line because those citations had drifted by ~180 lines by the time anyone read them), which is
     /// precisely why they take this constant and not <see cref="BootstrapSeconds"/>: a deadline is a
@@ -356,15 +357,19 @@ public static class ServiceCommandDeadlines
     ///
     /// <para><b>ABOVE the measured cold worst case.</b> Measured against a 4.05 GB store built by the
     /// product's own <c>MigrateAsync</c> and seeded through <c>SeedIfEmptyAsync</c>, shared buffers
-    /// dropped before the first run: <c>LoadViewAsync</c>'s five commands together took <b>16.1 ms</b>
+    /// dropped before the first run: <c>LoadViewAsync</c>'s first five commands (the ones it ran when
+    /// this was measured; it now runs seven) together took <b>16.1 ms</b>
     /// cold (3.4-4.8 ms warm) and <c>SyncServerEnabledStatesAsync</c>'s two <b>3.8 ms</b> — so the worst
     /// SINGLE command on this thread is a single-digit-millisecond read and 5 s is roughly three orders of
     /// magnitude above it. The <c>ALTER ROLE</c> re-assert is one statement out of the 63-statement
     /// provisioning batch that measured 79 ms in total, so it is in the same class.</para>
     ///
     /// <para><b>And every one of them is INDEPENDENT of store size, which the floor above silently
-    /// assumed (#3199).</b> Nine of the ten are keyed single-row reads on <c>config</c> tables, one
-    /// <c>ALTER ROLE</c>, and one single-row <c>INSERT</c>; the tenth — the disk-pressure check's store-size
+    /// assumed (#3199).</b> Eleven of the twelve touch small tables whose size tracks the fleet rather than the
+    /// store: seven reads of <c>config</c> tables (the service row, the alert settings and the notification
+    /// settings, each a keyed single-row read, and the notification routes, the monitored servers, the
+    /// schedule rows and the run times, each a read of the whole table), the two registry statements, one
+    /// <c>ALTER ROLE</c>, and one single-row <c>INSERT</c>; the twelfth — the disk-pressure check's store-size
     /// lookup — is now a newest-row read over <c>collect.store_metrics</c>' <c>(metric_time)</c> index
     /// (<c>StoreSelfMetrics.LatestStoreSizeSql</c>, measured 0.101 ms cold / 0.018 ms warm on a 225 GiB
     /// store). It USED to be <c>pg_database_size</c>, whose 6.2 ms on the 4.05 GB fixture is exactly what
@@ -386,7 +391,7 @@ public static class ServiceCommandDeadlines
     /// no chain bound (#3204).</b> This paragraph used to read <c>10 x 5 s = 50 s stays inside
     /// <c>DarlingWorker.SweepWatchdogSeconds</c> (60 s)</c>, and both operands were wrong. The watchdog is
     /// fed elapsed times stamped when a PER-SERVER BODY launches, and its verdict picks a log level — it
-    /// never observes this thread and it cancels nothing. And the ten are the commands carrying THIS
+    /// never observes this thread and it cancels nothing. And the twelve are this thread's commands carrying THIS
     /// constant, not the chain: the same thread awaits <c>ReadCollectorWatermarksAsync</c> under
     /// <see cref="CollectionSweepSeconds"/> once per server that gains a collector entry, the mute-rule
     /// load and the disk-pressure alert writes under
@@ -402,14 +407,14 @@ public static class ServiceCommandDeadlines
     /// one stalled command more than double the delivered period on its own; 5 s is a third of it.</para>
     ///
     /// <para><b>So what would justify 6?</b> The same three ceilings 5 clears — the tick, Npgsql's
-    /// default, and the bootstrap's number for the seven dual-caller sites — which 6 also clears. Nothing
+    /// default, and the bootstrap's number for the nine dual-caller sites — which 6 also clears. Nothing
     /// in the service forbids 6, and the arithmetic that appeared to was measuring the wrong thing on both
     /// sides. What raising it costs is delivered cadence in proportion, which is a trade to argue with a
     /// measurement rather than an inequality to lose.</para>
     ///
     /// <para><b>Why it is LOOSER than the reload beacon's own bound and must stay so.</b>
     /// <c>ReadConfigVersionAsync</c> runs on EVERY 15 s tick and is a single-row lookup, so it is the
-    /// tightest thing on this thread and is bounded separately. The ten here run only when the beacon
+    /// tightest thing on this thread and is bounded separately. The twelve here run only when the beacon
     /// has already seen a version change, or on the 5-minute disk-check cadence — rare, and each one a
     /// heavier read than the beacon.</para>
     ///

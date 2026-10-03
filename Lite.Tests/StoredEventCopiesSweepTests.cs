@@ -56,6 +56,8 @@ public class StoredEventCopiesSweepTests
            older row. The probe returns no rows, so there is nothing to hide. */
         [("LocalDataService.QueryWindowFloor.cs", "v_system_health_events")] = 1,
         [("LocalDataService.QueryWindowFloor.cs", "v_long_query_completions")] = 1,
+        [("LocalDataService.QueryWindowFloor.cs", "v_blocked_process_reports")] = 1,
+        [("LocalDataService.QueryWindowFloor.cs", "v_deadlocks")] = 1,
     };
 
     [Fact]

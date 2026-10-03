@@ -1512,8 +1512,8 @@ ORDER BY 1";
     internal static DateTime[] HeatmapColumns(DateTime startUtc, DateTime endUtc)
     {
         var width = TimeSpan.FromMinutes(HeatmapBucketMinutes).Ticks;
-        var first = startUtc.Ticks - startUtc.Ticks % width;
-        var last = endUtc.Ticks - endUtc.Ticks % width;
+        var first = HeatmapColumnStart(startUtc).Ticks;
+        var last = HeatmapColumnStart(endUtc).Ticks;
         if (last < first)
         {
             return Array.Empty<DateTime>();
@@ -1529,11 +1529,22 @@ ORDER BY 1";
     }
 
     /// <summary>
-    /// #4991: where the heatmap's columns start: the range's start, or, when the range starts before the data, the time
-    /// the Query Heatmap's "Showing since" notice shows. The notice and these columns are decided the same way, so the
+    /// #4966: the start of the <see cref="HeatmapBucketMinutes"/>-minute column that holds <paramref name="instant"/>:
+    /// where <see cref="HeatmapColumns"/> puts the column of a row stored at it, and the time the Query Heatmap's notice
+    /// names for a data start inside it (<c>ServerTab.FirstColumnDrawn</c>).
+    /// </summary>
+    internal static DateTime HeatmapColumnStart(DateTime instant) =>
+        new(instant.Ticks - instant.Ticks % TimeSpan.FromMinutes(HeatmapBucketMinutes).Ticks, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// #4991: where the heatmap's columns start: the range's start, or, when the range starts before the data, the data
+    /// start, whose column is the first one drawn and the time the Query Heatmap's "Showing since" notice names
+    /// (#4966). The notice and these columns are decided the same way, so the
     /// columns move exactly when the notice shows: the notice's own probe (<see cref="GetQueryWindowFloorAsync"/>, the
     /// <see cref="QueryWindowRelation.QueryStats"/> relation, over the same UTC window the read took) and its own
-    /// verdict (<see cref="Mcp.McpQueryTools.IsWindowTruncated"/>, which gives a start 90 minutes of slack). The span
+    /// verdict (<see cref="Mcp.McpQueryTools.IsWindowTruncated"/>, which gives a start 90 minutes of slack), judged on
+    /// the start of the data start's column (<see cref="HeatmapColumnStart"/>), because that is the time the notice
+    /// names: a data start just past the slack whose column starts inside it shows no notice, so it trims no column. The span
     /// before the data is what the notice already explains, and drawing it made a year-wide range over a few days of
     /// data ~105,000 columns, nearly all of them empty. A gap AFTER the data starts is not this: every bucket from
     /// here to the range end still has a column. The heatmap is not a capped read, so the capped grids' floor
@@ -1559,7 +1570,7 @@ ORDER BY 1";
         try
         {
             var floor = await probe();
-            return floor is DateTime dataStart && Mcp.McpQueryTools.IsWindowTruncated(floor, startUtc) ? dataStart : startUtc;
+            return floor is DateTime dataStart && Mcp.McpQueryTools.IsWindowTruncated(HeatmapColumnStart(dataStart), startUtc) ? dataStart : startUtc;
         }
         catch (Exception ex)
         {

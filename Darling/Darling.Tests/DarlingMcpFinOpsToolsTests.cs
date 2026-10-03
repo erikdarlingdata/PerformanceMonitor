@@ -52,14 +52,14 @@ public sealed class DarlingMcpFinOpsToolsTests
 
         // Each set asserts its own views on its own lines, so two series never edit the same line.
         // FinOps web parity (#4843), set A: list your views below this line only.
-        var setAViews = Array.Empty<string>();
+        var setAViews = new[] { "utilization" };
         // FinOps web parity (#4843), set A ends.
         // Set A and set B are separated on purpose: keep this gap.
         //
         //
         //
         // FinOps web parity (#4843), set B: list your views below this line only.
-        var setBViews = new[] { "high_impact" };
+        var setBViews = new[] { "high_impact", "database_resources" };
         // FinOps web parity (#4843), set B ends.
         var valid = DarlingMcpFinOpsTools.SetAValid + DarlingMcpFinOpsTools.SetBValid;
         foreach (var view in setAViews.Concat(setBViews))

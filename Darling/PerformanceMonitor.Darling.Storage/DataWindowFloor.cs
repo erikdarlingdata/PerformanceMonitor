@@ -92,7 +92,7 @@ public static class DataWindowFloor
     {
         private Source(
             string relation, string timeColumn, bool endExclusive, string? collectorName = null, int? retentionDefaultDays = null,
-            DateTime? lowerBoundUtc = null)
+            DateTime? lowerBoundUtc = null, string? logCollectorName = null, bool pairsCollectionTime = false)
         {
             Relation = relation;
             TimeColumn = timeColumn;
@@ -100,7 +100,27 @@ public static class DataWindowFloor
             CollectorName = collectorName;
             RetentionDefaultDays = retentionDefaultDays;
             LowerBoundUtc = lowerBoundUtc;
+            LogCollectorName = logCollectorName;
+            PairsCollectionTime = pairsCollectionTime;
         }
+
+        /// <summary>
+        /// The one collector whose runs a collection-log source counts (#5022), lower case as the log stores it; null for every
+        /// other source, and for the log read whole (<see cref="ForCollectionLog"/>). The window read and the server count both
+        /// look only at that collector's runs, so a server that logged other collectors' runs but never ran this one does not count,
+        /// and its other runs cannot move the answer earlier. Only <see cref="ForCollectorRuns"/> sets it, from a name the collector
+        /// catalog lists, so it is spliced into the probe's SQL like <see cref="CollectorName"/>.
+        /// </summary>
+        public string? LogCollectorName { get; }
+
+        /// <summary>
+        /// True when the window read pairs the time column with a <c>collection_time</c> floor (#5022): the table is partitioned on
+        /// <c>collection_time</c> but indexed and read on another column (the memory pressure events' <c>sample_time</c>), so a bound
+        /// on that column alone gives the planner nothing to skip a chunk on. The floor is the window's start less
+        /// <see cref="EventWindowFloor.SkewAllowance"/>, the chart's own pairing (<see cref="EventWindowFloor.For"/>), and cannot drop
+        /// a row the window holds: a sample is collected at or after its own stamp, bar the skew the allowance covers.
+        /// </summary>
+        public bool PairsCollectionTime { get; }
 
         /// <summary>
         /// The instant (naive UTC) from which a panel reads this relation, when it reads only from there up: the
@@ -195,6 +215,55 @@ public static class DataWindowFloor
         /// </summary>
         public static Source ForCollectionLog() =>
             new("collection_log", "collection_time", endExclusive: false, retentionDefaultDays: DarlingRetentionHorizons.CollectionLogRetentionDays);
+
+        /// <summary>
+        /// The collection log narrowed to the runs of ONE collector (#5022): <see cref="ForCollectionLog"/> with the collector's name
+        /// on the window read and on the server count, for a panel whose figures come from that collector's runs alone. The unscoped
+        /// log counts any collector's run, so a server that logged other collectors' runs but never ran this one would get a
+        /// "Showing since" note above an empty panel. It keeps the log's own fixed horizon and edge, and the window read rides
+        /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>. The Collection Log grid and drill
+        /// want every collector's runs and keep <see cref="ForCollectionLog"/>.
+        /// </summary>
+        /// <param name="collectorName">A collector the catalog lists, in any case.</param>
+        public static Source ForCollectorRuns(string collectorName)
+        {
+            var schema = CollectorCatalog.All.FirstOrDefault(c => string.Equals(c.Name, collectorName, StringComparison.OrdinalIgnoreCase))
+                ?? throw new ArgumentException($"'{collectorName}' is not a collector the data-start probe can read the runs of.", nameof(collectorName));
+            return new Source(
+                "collection_log", "collection_time", endExclusive: false, retentionDefaultDays: DarlingRetentionHorizons.CollectionLogRetentionDays,
+                logCollectorName: schema.Name.ToLowerInvariant());
+        }
+
+        /// <summary>
+        /// The memory pressure events table, probed on its payload's own <c>sample_time</c> (#4966). <see cref="TryForCollectorTable"/>
+        /// refuses it, and must keep refusing: its index is <c>(server_id, sample_time)</c>, not its prefix time column
+        /// (<c>collection_time</c>, the partition column the purge cuts on), so the generic factory would probe a column the index does
+        /// not lead with. The chart's read windows on <c>sample_time</c> through that index, and so does this probe.
+        ///
+        /// <para><b>Its edge is the purge's cutoff, never its oldest row.</b> The table is SPARSE: a server goes days with no pressure
+        /// event, so a walk to its oldest row would name the first event after a quiet stretch as where the store begins, a false note on
+        /// a range the store covered whole. The table is in neither group the schedule gives no edge to
+        /// (<see cref="TimescaleSupport.RawRelations"/> is the three raw relations of the gated purge,
+        /// <see cref="DarlingRetentionHorizons.BaselineServingRawCollectors"/> the baseline-floored collectors), so the daily sweep
+        /// applies the schedule's horizon as written: the fleet override in <c>config.config_collector_schedules</c>, else
+        /// <see cref="CollectorScheduleDefaults"/> (30 days). The later of that cutoff and the server's first collection is where
+        /// coverage starts, moved earlier by an event stamped in the window (an event can carry a time from before the first
+        /// collection: the first collection stores the ring buffer's history). A server counts by an event in the window or a logged run
+        /// of the collector in it.</para>
+        ///
+        /// <para><b>Its window read pairs <c>sample_time</c> with a <c>collection_time</c> floor</b> (<see cref="PairsCollectionTime"/>, #5022),
+        /// as the chart's own read does (<see cref="EventWindowFloor"/>). The probe asks only for the first event stamped inside the
+        /// window, never for one from before it (the edge above is the schedule's, not a walk), so the floor cannot drop an answer, and it
+        /// lets TimescaleDB skip every chunk collected more than the skew allowance before the window, which a bound on <c>sample_time</c>
+        /// alone does not.</para>
+        /// </summary>
+        public static Source ForMemoryPressureEvents()
+        {
+            var schema = CollectorCatalog.All.Single(c => string.Equals(c.TargetTable, "memory_pressure_events", StringComparison.Ordinal));
+            return new Source(
+                schema.TargetTable, "sample_time", endExclusive: false, schema.Name, CollectorScheduleDefaults.All[schema.Name].RetentionDays,
+                pairsCollectionTime: true);
+        }
 
         /// <summary>
         /// The continuous aggregate <paramref name="view"/>, or false when <see cref="RollupAvailability"/> does not
@@ -317,7 +386,23 @@ public static class DataWindowFloor
             sql.Append("        SELECT f.").Append(time).Append(" AS t\n");
             sql.Append("        FROM ").Append(schema).Append('.').Append(source.Relation).Append(" AS f\n");
             sql.Append("        WHERE f.server_id = s.server_id\n");
+            if (source.LogCollectorName is { } logCollector)
+            {
+                /* #5022: one collector's runs, not every collector's. The name comes from the collector catalog (ForCollectorRuns checks
+                   it), never from a caller, so splicing it is safe. */
+                sql.Append("        AND   f.collector_name = '").Append(logCollector).Append("'\n");
+            }
+
             sql.Append("        AND   f.").Append(time).Append(" >= $2\n");
+            if (source.PairsCollectionTime)
+            {
+                /* #5022: the table is partitioned on collection_time, so the time column's bound alone skips no chunk. The floor is
+                   EventWindowFloor.For($2) in SQL: a row is collected at or after its own stamp, bar the skew the allowance covers. */
+                sql.Append("        AND   f.collection_time >= $2 - make_interval(secs => ")
+                    .Append(((long)EventWindowFloor.SkewAllowance.TotalSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    .Append(")\n");
+            }
+
             if (lowerBound is not null)
             {
                 sql.Append("        AND   f.").Append(time).Append(" >= ").Append(lowerBound).Append('\n');
