@@ -266,7 +266,7 @@ public sealed class SerialLoopStoreSizeSourceTests
            back empty — or short by a member — would make the assertion below pass by scanning less than it
            claims, which is the failure this file exists to make impossible for the deadline census.
            Asserted as the site TOTAL rather than as a member count, and tied back to the census's own
-           independently-asserted number instead of to a literal: nine members hold the ten commands, so a
+           independently-asserted number instead of to a literal: ten members hold the eleven commands, so a
            count of members is arithmetic nobody can check by eye. */
         Assert.Equal(StartupCommandTimeoutTests.ExpectedSerialLoopSites, sites);
         Assert.True(members > 0, "the serial-loop member projection came back empty");
