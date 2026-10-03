@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -418,6 +419,65 @@ public sealed class StoreInstallIdLiveTests : IClassFixture<InstallIdScratchStor
         Assert.Equal(1, await ReplaceAsync("aaaaaaaa"));
         Assert.Equal(0, await ReplaceAsync("bbbbbbbb"));
         Assert.Equal("aaaaaaaa", (await ReadRowAsync(connection, ct)).InstallId);
+    }
+
+    /// <summary>
+    /// The rebind's guard at the statement itself: it matches a row exactly when it would change something in it, so of
+    /// several starts that saw the same row exactly one writes and logs. When the cluster id is not known, a row that has
+    /// one keeps its major, so the statement finds nothing to write although the major differs (0 rows); a row that has
+    /// none takes the major (1 row, then none left), and a row that has none of its table OID takes that and keeps the
+    /// major. When the cluster id is known the row takes it and the major together.
+    /// </summary>
+    [Fact]
+    public async Task TheRebind_MatchesARowExactlyWhenItWouldChangeSomethingInIt_AndKeepsTheMajorOfARowThatHasAClusterIdWhenNoneIsKnown()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await ResetAsync(ct);
+        var id = await StoreInstallId.EnsureAsync(connection, new CapturingTestLogger(), ct);
+        var binding = await RealBindingAsync(connection, ct);
+        var oldCluster = binding.SystemIdentifier + 1;
+        var oldMajor = binding.ServerMajor - 1;
+
+        async Task<int> RebindAsync(long? knownCluster)
+        {
+            await using var command = new NpgsqlCommand(StoreInstallId.RebindSql, connection);
+            command.Parameters.Add(new NpgsqlParameter { Value = binding.TableOid });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)knownCluster ?? DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { Value = binding.ServerMajor });
+            command.Parameters.Add(new NpgsqlParameter { Value = id });
+            return await command.ExecuteNonQueryAsync(ct);
+        }
+
+        /* A row that has a cluster id, with none known: nothing to write, although the major differs. */
+        await ExecAsync(connection, $"UPDATE {Table} SET system_identifier = {oldCluster}, server_major = {oldMajor}", ct);
+        Assert.Equal(0, await RebindAsync(null));
+        var row = await ReadRowAsync(connection, ct);
+        Assert.Equal(oldCluster, row.SystemIdentifier);
+        Assert.Equal(oldMajor, row.ServerMajor);
+
+        /* The same row with the cluster id known: both are written, once. */
+        Assert.Equal(1, await RebindAsync(binding.SystemIdentifier));
+        row = await ReadRowAsync(connection, ct);
+        Assert.Equal(binding.SystemIdentifier, row.SystemIdentifier);
+        Assert.Equal(binding.ServerMajor, row.ServerMajor);
+        Assert.Equal(0, await RebindAsync(binding.SystemIdentifier));
+
+        /* A row with no cluster id takes the major although none is known, once. */
+        await ExecAsync(connection, $"UPDATE {Table} SET system_identifier = NULL, server_major = {oldMajor}", ct);
+        Assert.Equal(1, await RebindAsync(null));
+        row = await ReadRowAsync(connection, ct);
+        Assert.Null(row.SystemIdentifier);
+        Assert.Equal(binding.ServerMajor, row.ServerMajor);
+        Assert.Equal(0, await RebindAsync(null));
+
+        /* A row that has a cluster id and no table OID: the table OID is written, and the major stays. */
+        await ExecAsync(connection, $"UPDATE {Table} SET table_oid = NULL, system_identifier = {oldCluster}, server_major = {oldMajor}", ct);
+        Assert.Equal(1, await RebindAsync(null));
+        row = await ReadRowAsync(connection, ct);
+        Assert.Equal(binding.TableOid, row.TableOid);
+        Assert.Equal(oldCluster, row.SystemIdentifier);
+        Assert.Equal(oldMajor, row.ServerMajor);
+        Assert.Equal(0, await RebindAsync(null));
     }
 
     /// <summary>A major upgrade makes a new cluster id, keeps both OIDs and raises the major (the row here is the one the

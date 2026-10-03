@@ -46,7 +46,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// unknown cluster id on either side is never a changed one, so the two OIDs decide. A row made before the table's
 /// OID was kept (it has none yet) is compared as it was then, by the database's OID and by the cluster id when the row
 /// and the current read both have one, and its table OID is filled in on the next start. So a grant that changes
-/// later, in either direction, never makes a new id on its own.</para>
+/// later, in either direction, never makes a new id on its own, and neither does a major upgrade that a refused start
+/// is the first to see: a start that can't read the cluster id leaves the major of a row that has a cluster id as it
+/// is, because the new major beside the old cluster id would make the upgrade look like a copy to the next start that
+/// can read the cluster id (see <see cref="RebindSql"/>).</para>
 ///
 /// <para><b>Safe to run twice at once.</b> Two starts on one store (a restart overlapping its predecessor, two
 /// containers on one database) insert with <c>ON CONFLICT DO NOTHING</c> and read the row back, so they end on the
@@ -104,15 +107,21 @@ WHERE id = 1 AND install_id = $6";
 
     /// <summary>Writes each binding value of a row that is this store's and is missing or changed, and keeps the id:
     /// the table OID when the row has none (a row made before it was kept), the cluster id when the current one is known
-    /// and differs (a stored NULL included, a refusal that has lifted), and always the current major version. Guarded by
-    /// the id this start read and by a value still being stale, so of several starts that saw the same row exactly one
-    /// writes it and logs.</summary>
+    /// and differs (a stored NULL included, a refusal that has lifted), and the current major version, except when this
+    /// start can't read the cluster id and the row has one. The major then stays as it is, beside the cluster id it was
+    /// kept with: after a major upgrade, the new major beside the old cluster id would make a later start that reads the
+    /// new cluster id see a changed cluster id at an equal major, which is what a copy of the row looks like, and give it
+    /// a new id. Guarded by the id this start read and by a value still being stale (the major counts only where this
+    /// statement would write it, as <c>NeedsRebind</c> counts it, so the statement never matches a row it changes nothing
+    /// in), so of several starts that saw the same row exactly one writes it and logs.</summary>
     public const string RebindSql = @"
 UPDATE config.config_install_id
-SET table_oid = COALESCE(table_oid, $1), system_identifier = COALESCE($2::bigint, system_identifier), server_major = $3
+SET table_oid = COALESCE(table_oid, $1),
+    system_identifier = COALESCE($2::bigint, system_identifier),
+    server_major = CASE WHEN $2::bigint IS NULL AND system_identifier IS NOT NULL THEN server_major ELSE $3 END
 WHERE id = 1 AND install_id = $4
   AND (table_oid IS NULL
-       OR server_major IS DISTINCT FROM $3
+       OR (($2::bigint IS NOT NULL OR system_identifier IS NULL) AND server_major IS DISTINCT FROM $3)
        OR ($2::bigint IS NOT NULL AND system_identifier IS DISTINCT FROM $2::bigint))";
 
     /// <summary>The deadline on every statement here, in seconds. Each touches one row of a table that holds one row, so
@@ -280,13 +289,16 @@ WHERE id = 1 AND install_id = $4
         return !clusterChanged || (storedMajor is { } major && currentMajor > major);
     }
 
-    /// <summary>Whether a row that is this store's still has a binding value to write: its table OID when it has none, its
-    /// major version when it has none or another, or the cluster id when the current one is known and the row's differs
-    /// (or is missing).</summary>
+    /// <summary>Whether a row that is this store's still has a binding value to write, term for term what <see cref="RebindSql"/>
+    /// would write: its table OID when it has none, its major version when it has none or another (unless this start can't
+    /// read the cluster id and the row has one, which keeps its major), or the cluster id when the current one is known
+    /// and the row's differs (or is missing). A true here that the statement does not match would leave the start reading
+    /// the same row until it gave up.</summary>
     private static bool NeedsRebind(Row stored, Binding binding)
     {
+        var majorIsWritten = binding.SystemIdentifier is not null || stored.SystemIdentifier is null;
         return stored.TableOid is null
-            || stored.ServerMajor != binding.ServerMajor
+            || (majorIsWritten && stored.ServerMajor != binding.ServerMajor)
             || (binding.SystemIdentifier is { } current && stored.SystemIdentifier != current);
     }
 
