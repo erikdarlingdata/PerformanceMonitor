@@ -10,10 +10,12 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -168,10 +170,12 @@ FROM generate_series({Literal(firstUtc)}, {Literal(lastUtc)}, INTERVAL {everyMin
         _nextId += await cmd.ExecuteNonQueryAsync() + 1;
     }
 
-    /// <summary>The probe, then the banner step the surface runs on the result: (visible, text).</summary>
-    private async Task<(bool Visible, string Text)> BannerForAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc)
+    /// <summary>The probe, then the banner step the surface runs on the result: (visible, text). The probe reads the Default
+    /// Trace through <paramref name="clock"/>, the monitored server's clock (#4989). A test that names none is a UTC server's,
+    /// whatever clock the process holds as the active one.</summary>
+    private async Task<(bool Visible, string Text)> BannerForAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc, ServerClock? clock = null)
     {
-        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc);
+        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc, clock ?? ServerClock.Utc);
         return OnStaThread(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
@@ -311,6 +315,231 @@ FROM generate_series({Literal(firstUtc)}, {Literal(lastUtc)}, INTERVAL {everyMin
 
         Assert.True(visible);
         Assert.Contains(Naive(firstRun).ToString("yyyy-MM-dd HH:", CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+    }
+
+    private static DateTime NowUtcSeconds()
+    {
+        var now = DateTime.UtcNow;
+        return new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Unspecified);
+    }
+
+    /// <summary>
+    /// One Default Trace row as the collector stores it: <c>event_time</c> is the monitored SERVER's wall clock
+    /// (<paramref name="serverLocal"/>) and <c>collection_time</c> the UTC time of the run that stored it (#4989). The event
+    /// is a 'Server Memory Change', one the grid's significance gate keeps, so a test can hold the probe's answer against the
+    /// rows the grid shows.
+    /// </summary>
+    private async Task SeedDefaultTraceRowAsync(DateTime serverLocal, DateTime collectedAtUtc)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $@"
+INSERT INTO default_trace_events
+    (default_trace_event_id, collection_time, server_id, server_name, event_time, event_name,
+     database_name, duration_us, integer_data, severity, error_number, text_data)
+VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Literal(serverLocal)}, 'Server Memory Change',
+        NULL, NULL, NULL, NULL, NULL, 'x')";
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// A server's first run (T0, <paramref name="firstRunUtc"/>) on a server whose clock is <paramref name="clock"/>: it
+    /// stores the history the server already holds, each row stamped with the run's UTC <c>collection_time</c> and an
+    /// <c>event_time</c> that is the server's WALL CLOCK at the event (<paramref name="historyEventsUtc"/>, run through the
+    /// clock). The collector's runs are then logged hourly to <paramref name="end"/>, and the newest run stores an event as
+    /// it happens.
+    /// </summary>
+    private async Task SeedDefaultTraceFirstRunAsync(ServerClock clock, DateTime firstRunUtc, DateTime end, params DateTime[] historyEventsUtc)
+    {
+        foreach (var eventUtc in historyEventsUtc)
+        {
+            await SeedDefaultTraceRowAsync(clock.ToServerLocal(eventUtc), firstRunUtc);
+        }
+
+        await SeedDefaultTraceRowAsync(clock.ToServerLocal(end.AddHours(-1)), end.AddHours(-1));
+        await SeedLogRunsAsync(LocalDataService.QueryWindowRelationCollector(QueryWindowRelation.DefaultTraceEvents)!, firstRunUtc, end, 60);
+    }
+
+    /// <summary>
+    /// #4989: the Default Trace's <c>event_time</c> is the server's wall clock, so the probe converts it through the server's
+    /// clock as the grid does. On a server 5 hours behind UTC the first run (T0) stores history whose oldest event (H) is
+    /// inside the range (S &lt; H &lt; T0), and the banner names H in UTC: not H less 5 hours, the stored wall clock read as
+    /// if it were UTC, and not T0. RED before the fix: the probe compared the wall clock with the UTC window as it was and
+    /// worded the banner at H shifted by 5 hours.
+    /// </summary>
+    [Fact]
+    public async Task DefaultTrace_ServerBehindUtc_HistoryBeforeTheFirstRun_NamesTheOldestEventInUtc()
+    {
+        await _duckDb.InitializeAsync();
+        var clock = ServerClock.FixedOffset(-300);
+        var end = DateTime.UtcNow;
+        var firstRun = end.AddDays(-2);
+        var oldest = end.AddDays(-4);
+        await SeedDefaultTraceFirstRunAsync(clock, firstRun, end, oldest, end.AddDays(-3));
+
+        var (visible, text) = await BannerForAsync(QueryWindowRelation.DefaultTraceEvents, end.AddDays(-7), end, clock);
+
+        Assert.True(visible);
+        Assert.Contains(Naive(oldest).ToString("yyyy-MM-dd HH:", CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+        Assert.DoesNotContain(Naive(oldest.AddHours(-5)).ToString("yyyy-MM-dd HH:", CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+        Assert.DoesNotContain(Naive(firstRun).ToString("yyyy-MM-dd HH:", CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The oldest event (H) is before the range's start (S) once both are in UTC, so the grid's range holds the history from
+    /// S on and there is no banner. On a server 5 hours AHEAD of UTC its stored wall clock (H plus 5 hours) is after S, so a
+    /// probe that read the wall clock as UTC found no older row and said the data starts late. (A server behind UTC cannot
+    /// show this: its wall clock reads earlier than the instant, never later.) H sits half an hour before S, inside the
+    /// pre-filter's margin the probe converts row by row, and 72 hours before it, below the margin, where one query answers.
+    /// </summary>
+    [Theory]
+    [InlineData(0.5)]
+    [InlineData(72.0)]
+    public async Task DefaultTrace_ServerAheadOfUtc_OldestEventBeforeTheStartInUtc_ShowsNoNotice(double hoursBeforeStart)
+    {
+        await _duckDb.InitializeAsync();
+        var clock = ServerClock.FixedOffset(300);
+        var end = DateTime.UtcNow;
+        var start = end.AddDays(-7);
+        await SeedDefaultTraceFirstRunAsync(clock, end.AddDays(-2), end, start.AddHours(-hoursBeforeStart), end.AddDays(-3));
+
+        var (visible, text) = await BannerForAsync(QueryWindowRelation.DefaultTraceEvents, start, end, clock);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>
+    /// The other direction on a server 5 hours behind UTC: the oldest event (H) is 3 hours after S in UTC, so the data does
+    /// start late and the banner names H, though its stored wall clock reads as 2 hours BEFORE S. A probe that read the wall
+    /// clock as UTC took that for an older row, and hid the banner.
+    /// </summary>
+    [Fact]
+    public async Task DefaultTrace_ServerBehindUtc_OldestEventJustAfterTheStartInUtc_ShowsTheNotice()
+    {
+        await _duckDb.InitializeAsync();
+        var clock = ServerClock.FixedOffset(-300);
+        var end = DateTime.UtcNow;
+        var start = end.AddDays(-7);
+        var oldest = start.AddHours(3);
+        await SeedDefaultTraceFirstRunAsync(clock, end.AddDays(-2), end, oldest);
+
+        var (visible, text) = await BannerForAsync(QueryWindowRelation.DefaultTraceEvents, start, end, clock);
+
+        Assert.True(visible);
+        Assert.Contains(Naive(oldest).ToString("yyyy-MM-dd HH:", CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The collector's runs in <c>v_collection_log</c> are UTC and take no part in the clock: on a server 5 hours behind UTC
+    /// whose first run found no history, the floor is that run as logged, not the run shifted by the clock.
+    /// </summary>
+    [Fact]
+    public async Task DefaultTrace_ServerBehindUtc_NoStoredHistory_NamesTheFirstRunInUtc()
+    {
+        await _duckDb.InitializeAsync();
+        var clock = ServerClock.FixedOffset(-300);
+        var end = DateTime.UtcNow;
+        var firstRun = end.AddDays(-2);
+        await SeedDefaultTraceFirstRunAsync(clock, firstRun, end);
+
+        var (visible, text) = await BannerForAsync(QueryWindowRelation.DefaultTraceEvents, end.AddDays(-7), end, clock);
+
+        Assert.True(visible);
+        Assert.Contains(Naive(firstRun).ToString("yyyy-MM-dd HH:", CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A probe that names no clock reads the one the grid falls back to, <see cref="ServerTimeHelper.ActiveServerClock"/>,
+    /// the Default Trace grid's own default (it passes none), so the banner and the rows it sits over agree.
+    /// </summary>
+    [Fact]
+    public async Task DefaultTrace_WithoutAClock_UsesTheActiveServerClockLikeTheGrid()
+    {
+        await _duckDb.InitializeAsync();
+        var clock = ServerClock.FixedOffset(-300);
+        var end = NowUtcSeconds();
+        var start = end.AddDays(-7);
+        var oldest = end.AddDays(-4);
+        await SeedDefaultTraceFirstRunAsync(clock, end.AddDays(-2), end, oldest);
+
+        var previous = ServerTimeHelper.ActiveServerClock;
+        try
+        {
+            ServerTimeHelper.ActiveServerClock = clock;
+            var service = new LocalDataService(_duckDb);
+            var floor = await service.GetQueryWindowFloorAsync(QueryWindowRelation.DefaultTraceEvents, ServerId, start, end);
+            var gridRows = await service.GetDefaultTraceEventsAsync(ServerId, fromDate: start, toDate: end);
+
+            Assert.Equal(oldest, floor);
+            Assert.Equal(floor, gridRows.Min(r => r.EventTimeUtc));
+        }
+        finally
+        {
+            ServerTimeHelper.ActiveServerClock = previous;
+        }
+    }
+
+    /// <summary>
+    /// Across a daylight-saving change the probe takes each row's offset from the row's OWN date, as the grid does (#4766),
+    /// and the floor is exactly the oldest row the grid shows. US Eastern, 2026: the spring-forward is 8 March (02:00 EST to
+    /// 03:00 EDT, 07:00 UTC) and the fall-back is 1 November (02:00 EDT to 01:00 EST, 06:00 UTC). The range straddles the
+    /// change, and the oldest row is on each side of it in turn, so a probe that applied one offset to the whole range,
+    /// the one at its start or the one at its end, is an hour wrong on one of the four.
+    /// </summary>
+    [Theory]
+    [InlineData("2026-03-07 00:00:00", "2026-03-10 00:00:00", "2026-03-08 01:30:00", "2026-03-08 06:30:00")]
+    [InlineData("2026-03-07 00:00:00", "2026-03-10 00:00:00", "2026-03-08 03:30:00", "2026-03-08 07:30:00")]
+    [InlineData("2026-10-30 00:00:00", "2026-11-03 00:00:00", "2026-11-01 00:30:00", "2026-11-01 04:30:00")]
+    [InlineData("2026-10-30 00:00:00", "2026-11-03 00:00:00", "2026-11-01 02:30:00", "2026-11-01 07:30:00")]
+    public async Task DefaultTrace_RangeAcrossADaylightSavingChange_UsesTheOffsetOfTheRowsOwnDate(
+        string startUtc, string endUtc, string oldestServerLocal, string expectedFloorUtc)
+    {
+        await _duckDb.InitializeAsync();
+        var clock = ServerClock.Resolve("Eastern Standard Time", -300);
+        var start = DateTime.Parse(startUtc, CultureInfo.InvariantCulture);
+        var end = DateTime.Parse(endUtc, CultureInfo.InvariantCulture);
+        var oldest = DateTime.Parse(oldestServerLocal, CultureInfo.InvariantCulture);
+        await SeedDefaultTraceRowAsync(oldest, end.AddHours(-1));
+        await SeedDefaultTraceRowAsync(oldest.AddHours(30), end.AddHours(-1));
+
+        var service = new LocalDataService(_duckDb);
+        var floor = await service.GetQueryWindowFloorAsync(QueryWindowRelation.DefaultTraceEvents, ServerId, start, end, clock);
+        var gridRows = await service.GetDefaultTraceEventsAsync(ServerId, fromDate: start, toDate: end, serverClock: clock);
+
+        Assert.Equal(DateTime.Parse(expectedFloorUtc, CultureInfo.InvariantCulture), floor);
+        Assert.Equal(floor, gridRows.Min(r => r.EventTimeUtc));
+    }
+
+    /// <summary>
+    /// The system_health <c>event_time</c> is the XE <c>@timestamp</c>, UTC, so a server clock never shifts it: the same
+    /// history as the Default Trace case, on a server 5 hours behind UTC, names the oldest event as stored.
+    /// </summary>
+    [Fact]
+    public async Task SystemHealth_UtcEventTime_IsNotShiftedByTheServerClock()
+    {
+        await _duckDb.InitializeAsync();
+        var relation = QueryWindowRelation.SystemHealthEvents;
+        var end = DateTime.UtcNow;
+        var oldest = end.AddDays(-4);
+        await SeedFirstRunAsync(relation, end.AddDays(-2), end, oldest, end.AddDays(-3));
+
+        var (visible, text) = await BannerForAsync(relation, end.AddDays(-7), end, ServerClock.FixedOffset(-300));
+
+        Assert.True(visible);
+        Assert.Contains(Naive(oldest).ToString("yyyy-MM-dd HH:", CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+    }
+
+    /// <summary>Only the Default Trace holds the server's wall clock (#4989); every other relation's time column is UTC.</summary>
+    [Fact]
+    public void OnlyTheDefaultTrace_HoldsServerLocalTime()
+    {
+        foreach (var relation in Enum.GetValues<QueryWindowRelation>())
+        {
+            Assert.Equal(relation == QueryWindowRelation.DefaultTraceEvents, LocalDataService.QueryWindowRelationTimeIsServerLocal(relation));
+        }
     }
 
     /// <summary>

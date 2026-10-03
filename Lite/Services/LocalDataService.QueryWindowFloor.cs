@@ -9,6 +9,8 @@
 using System;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -97,10 +99,13 @@ public partial class LocalDataService
     /// grid filter on the event's own time, not on the time a run stored it. A server's first run stores the history the
     /// server already holds, every row stamped with that run's <c>collection_time</c> while its <c>event_time</c> goes back
     /// days, and the probe reading <c>collection_time</c> there named the run above rows from before it. The archive still
-    /// purges those two tables by <c>collection_time</c>. The Default Trace's <c>event_time</c> is the monitored server's
-    /// wall clock as stored (its grid converts each row through the server's clock), so on a server whose clock is not UTC
-    /// the probe compares that wall time with the UTC window as it is. A closed map, so nothing a caller passes reaches the
-    /// probe's SQL. The collector's own runs in <c>v_collection_log</c> always read <c>collection_time</c>.
+    /// purges those two tables by <c>collection_time</c>. The system_health <c>event_time</c> is the XE <c>@timestamp</c>,
+    /// UTC, like every other column here. The Default Trace's <c>event_time</c> is the exception: it is the monitored server's
+    /// wall clock as stored (its grid converts each row through the server's clock), so the probe does the same
+    /// (<see cref="QueryWindowRelationTimeIsServerLocal"/>, #4989): it reads that relation's rows over the grid's padded
+    /// server-local window, converts each one to UTC through the clock, and compares the converted times with the UTC
+    /// window. A closed map, so nothing a caller passes reaches the probe's SQL. The collector's own runs in
+    /// <c>v_collection_log</c> always read <c>collection_time</c>, which is UTC.
     /// </summary>
     internal static string QueryWindowRelationTimeColumn(QueryWindowRelation relation) => relation switch
     {
@@ -108,6 +113,15 @@ public partial class LocalDataService
         QueryWindowRelation.SystemHealthEvents or QueryWindowRelation.DefaultTraceEvents => "event_time",
         _ => "collection_time"
     };
+
+    /// <summary>
+    /// Whether the relation's time column (<see cref="QueryWindowRelationTimeColumn"/>) holds the monitored server's LOCAL
+    /// wall-clock time instead of UTC (#4989). Only the Default Trace does: <c>ft.StartTime</c> is stored as the trace wrote
+    /// it, and <see cref="GetDefaultTraceEventsAsync"/> converts each row to UTC through the server's clock. Every other
+    /// relation's column is UTC, system_health's included (the XE <c>@timestamp</c>), and keeps the probe's single-query path.
+    /// </summary>
+    internal static bool QueryWindowRelationTimeIsServerLocal(QueryWindowRelation relation) =>
+        relation == QueryWindowRelation.DefaultTraceEvents;
 
     /// <summary>
     /// Where this server's data starts for the requested window, as far as any caller needs to know it. NULL when
@@ -159,8 +173,18 @@ public partial class LocalDataService
     /// an old row or the start, either of which would read as the window having been served) or when its first row
     /// is already at the start. Only when that first row sits after the start does a second query ask whether the
     /// server holds ANY row before the start, <c>LIMIT 1</c>, which stops at the first hit.</para>
+    ///
+    /// <para><b>A time column in the server's wall clock (the Default Trace, #4989).</b> The Default Trace's <c>event_time</c>
+    /// is the monitored server's local time as stored, and its grid (<see cref="GetDefaultTraceEventsAsync"/>) converts each
+    /// row to UTC through the server's clock, so the probe does too, through <paramref name="serverClock"/>: the server's OWN
+    /// clock (#4766), or <see cref="ServerTimeHelper.ActiveServerClock"/> when it is <c>null</c>, which is what that grid
+    /// falls back to. For that relation the two steps above read the candidate rows in the grid's padded server-local window,
+    /// convert each to UTC with the offset at the row's own date (so the answer is exact across a daylight-saving change), and
+    /// take the earlier of the first row and the collector's first run, which is UTC, in C#
+    /// (<c>GetServerLocalQueryWindowFloorAsync</c>). Every UTC relation, system_health's included (the XE <c>@timestamp</c>),
+    /// keeps the single-query path and ignores the clock.</para>
     /// </summary>
-    public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc)
+    public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock = null)
     {
         var view = QueryWindowRelationView(relation);
         using var _q = TimeQuery("GetQueryWindowFloorAsync", $"{view} window floor");
@@ -168,6 +192,15 @@ public partial class LocalDataService
 
         var collector = QueryWindowRelationCollector(relation);
         var timeColumn = QueryWindowRelationTimeColumn(relation);
+
+        /* #4989: a time column that holds the server's wall clock (the Default Trace) goes through the clock, the way the
+           grid reads it. Every UTC relation keeps the single-query path below. */
+        if (QueryWindowRelationTimeIsServerLocal(relation))
+        {
+            return await GetServerLocalQueryWindowFloorAsync(
+                connection, view, timeColumn, collector, serverId, startUtc, endUtc, serverClock ?? ServerTimeHelper.ActiveServerClock);
+        }
+
         DateTime? firstInWindow;
         using (var windowCommand = connection.CreateCommand())
         {
@@ -217,6 +250,13 @@ LIMIT 1";
         }
 
         /* No older row: an older run of the collector still proves the window is covered. */
+        return await HasCollectorRunBeforeAsync(connection, collector, serverId, startUtc) ? startUtc : firstRow;
+    }
+
+    /// <summary>Whether the collector's runs in <c>v_collection_log</c> (<c>collection_time</c>, UTC) include one before
+    /// <paramref name="startUtc"/>.</summary>
+    private static async Task<bool> HasCollectorRunBeforeAsync(LockedConnection connection, string collector, int serverId, DateTime startUtc)
+    {
         using var olderRunCommand = connection.CreateCommand();
         olderRunCommand.CommandText = $@"
 SELECT 1
@@ -227,6 +267,114 @@ AND   collection_time < $2
 LIMIT 1";
         olderRunCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
         olderRunCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
-        return await olderRunCommand.ExecuteScalarAsync() is null ? firstRow : startUtc;
+        return await olderRunCommand.ExecuteScalarAsync() is not null;
+    }
+
+    /// <summary>
+    /// <see cref="GetQueryWindowFloorAsync"/> for a relation whose time column is the monitored server's wall clock (#4989:
+    /// the Default Trace's <c>event_time</c>). It answers what the UTC path answers, from the rows the grid shows
+    /// (<see cref="GetDefaultTraceEventsAsync"/>), so a banner never names a time later than the earliest row its grid shows.
+    /// <list type="number">
+    /// <item>The candidate rows are read over the grid's pre-filter: the server-local bounds of the UTC window, an hour wider
+    /// on each side, which covers a daylight-saving change inside the span. Each row is converted to UTC through
+    /// <paramref name="clock"/>, which takes the offset in force at the row's own date (#4766), and the converted times give
+    /// the earliest row inside [<paramref name="startUtc"/>, <paramref name="endUtc"/>] and whether a row sits before the
+    /// start. The scan reads the one column over a span the grid reads whole.</item>
+    /// <item>The collector's runs in <c>v_collection_log</c> are UTC, so they are not converted: the earlier of the first run
+    /// and the first row is taken here, in C#, not by one SQL <c>LEAST</c> over a wall-clock column and a UTC one.</item>
+    /// <item>When that first time is after the start, the server holds an older row if the scan found one that converts to a
+    /// time before the start, or if any row sits below the pre-filter's lower bound (more than an hour before the start at
+    /// any offset the clock holds, so it needs no conversion). Then an older run of the collector counts, as on the UTC path.</item>
+    /// </list>
+    /// </summary>
+    private static async Task<DateTime?> GetServerLocalQueryWindowFloorAsync(
+        LockedConnection connection, string view, string timeColumn, string? collector, int serverId,
+        DateTime startUtc, DateTime endUtc, ServerClock clock)
+    {
+        /* The grid's pre-filter, bound for bound (GetDefaultTraceEventsAsync). */
+        var padStart = clock.ToServerLocal(startUtc).AddHours(-1);
+        var padEnd = clock.ToServerLocal(endUtc).AddHours(1);
+
+        DateTime? firstRow = null;
+        var olderRowInPad = false;
+        using (var rowsCommand = connection.CreateCommand())
+        {
+            rowsCommand.CommandText = $@"
+SELECT {timeColumn}
+FROM {view}
+WHERE server_id = $1
+AND   {timeColumn} >= $2
+AND   {timeColumn} <= $3";
+            rowsCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+            rowsCommand.Parameters.Add(new DuckDBParameter { Value = padStart });
+            rowsCommand.Parameters.Add(new DuckDBParameter { Value = padEnd });
+            using var reader = await rowsCommand.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                var eventUtc = clock.ToUtc(reader.GetDateTime(0));
+                if (eventUtc < startUtc)
+                {
+                    olderRowInPad = true;
+                }
+                else if (eventUtc <= endUtc && (firstRow is null || eventUtc < firstRow))
+                {
+                    firstRow = eventUtc;
+                }
+            }
+        }
+
+        DateTime? firstRun = null;
+        if (collector is not null)
+        {
+            using var runCommand = connection.CreateCommand();
+            runCommand.CommandText = $@"
+SELECT MIN(collection_time)
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = '{collector}'
+AND   collection_time >= $2
+AND   collection_time <= $3";
+            runCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+            runCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
+            runCommand.Parameters.Add(new DuckDBParameter { Value = endUtc });
+            firstRun = await runCommand.ExecuteScalarAsync() is DateTime run ? run : null;
+        }
+
+        var first = firstRow;
+        if (firstRun is DateTime firstRunUtc && (first is null || firstRunUtc < first))
+        {
+            first = firstRunUtc;
+        }
+
+        /* As the UTC path: nothing in the window answers NULL, and a first time at the start is the answer. */
+        if (first is not DateTime firstInWindow || firstInWindow <= startUtc)
+        {
+            return first;
+        }
+
+        if (olderRowInPad)
+        {
+            return startUtc;
+        }
+
+        using (var olderCommand = connection.CreateCommand())
+        {
+            olderCommand.CommandText = $@"
+SELECT 1
+FROM {view}
+WHERE server_id = $1
+AND   {timeColumn} < $2
+LIMIT 1";
+            olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+            olderCommand.Parameters.Add(new DuckDBParameter { Value = padStart });
+            if (await olderCommand.ExecuteScalarAsync() is not null)
+            {
+                return startUtc;
+            }
+        }
+
+        return collector is not null && await HasCollectorRunBeforeAsync(connection, collector, serverId, startUtc)
+            ? startUtc
+            : firstInWindow;
     }
 }
