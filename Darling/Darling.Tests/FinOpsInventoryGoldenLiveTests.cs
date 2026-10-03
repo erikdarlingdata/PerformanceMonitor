@@ -22,6 +22,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -32,10 +33,15 @@ namespace Darling.Tests;
 /// with a public setter, decimals at their stored scale, times as offsets from the seed anchor) and compared
 /// byte-for-byte to <c>Fixtures/FinOpsInventory/golden.json</c>. Set <c>DARLING_WRITE_GOLDEN=1</c> to regenerate it.
 ///
-/// <para>Three servers are seeded, with letter-suffixed names: A is busy and enabled, with a size snapshot, a recent and
+/// <para>Four servers are seeded, with letter-suffixed names: A is busy and enabled, with a size snapshot, a recent and
 /// an old query, grant pressure and collection-log rows; B is a disabled Azure SQL Database with a vCore count; C has
-/// no CPU samples and no hardware columns. Only these servers are serialized, so other rows in a shared store do not
-/// change the result.</para>
+/// one CPU sample, a NULL current-workers count and no hardware columns; D has a CPU average that does not divide
+/// evenly and a single database that is active, so its idle count is 0 rather than NULL. Only these servers are
+/// serialized, so other rows in a shared store do not change the result.</para>
+///
+/// <para>This covers the RAW metrics path: the rollup probes run against a store with no rollup data, so the idle check
+/// reads <c>ServerMetricsSql</c> unrouted. The routing between raw and rollup is covered by
+/// <see cref="ServerInventoryFleetMetricsLiveTests"/>.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class FinOpsInventoryGoldenLiveTests
@@ -43,10 +49,12 @@ public sealed class FinOpsInventoryGoldenLiveTests
     private const string NameA = "darling-finops-inv-golden-a";
     private const string NameB = "darling-finops-inv-golden-b";
     private const string NameC = "darling-finops-inv-golden-c";
+    private const string NameD = "darling-finops-inv-golden-d";
     private static readonly int IdA = ServerIdHelper.GetDeterministicHashCode(NameA);
     private static readonly int IdB = ServerIdHelper.GetDeterministicHashCode(NameB);
     private static readonly int IdC = ServerIdHelper.GetDeterministicHashCode(NameC);
-    private static readonly int[] Ids = [IdA, IdB, IdC];
+    private static readonly int IdD = ServerIdHelper.GetDeterministicHashCode(NameD);
+    private static readonly int[] Ids = [IdA, IdB, IdC, IdD];
 
     [Fact]
     public Task InventoryReads_MatchGoldenFixture_ThroughTheViewer() =>
@@ -66,11 +74,36 @@ public sealed class FinOpsInventoryGoldenLiveTests
             await using var dataSource = NpgsqlDataSource.Create(connectionString);
             var rollups = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
             var coverage = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, rollups, ct);
-            var dtos = await DarlingFinOpsInventoryReader.GetServerMetricsAsync(dataSource, rollups, coverage, 30, ct);
+            var dtos = await DarlingFinOpsInventoryReader.GetServerMetricsAsync(dataSource, rollups, coverage, 30, cancellationToken: ct);
             var metrics = dtos.Where(kv => Ids.Contains(kv.Key)).OrderBy(kv => NameOf(kv.Key))
                 .Select(kv => new MetricsEntry { Server = NameOf(kv.Key), Metrics = ViewerDataService.ServerMetricsRow.From(kv.Value) }).ToList();
-            var inventory = (await DarlingFinOpsInventoryReader.GetServerInventoryAsync(dataSource, 30, ct))
-                .Where(d => Ids.Contains(d.ServerId)).Select(d => ServerPropertyRow.From(d, PerformanceMonitor.Analysis.Baselines.ServerClock.FixedOffset(0))).ToList();
+            var dtoRows = (await DarlingFinOpsInventoryReader.GetServerInventoryAsync(dataSource, 30, ct))
+                .Where(d => Ids.Contains(d.ServerId)).ToList();
+            var inventory = dtoRows.Select(d => ServerPropertyRow.From(d, PerformanceMonitor.Analysis.Baselines.ServerClock.FixedOffset(0))).ToList();
+
+            /* The display step: a fixed non-zero offset clock in Server mode must shift each stored instant by exactly that
+               offset, whatever this machine's zone is. */
+            var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+            try
+            {
+                ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+                var offset = TimeSpan.FromHours(-5);
+                var clock = PerformanceMonitor.Analysis.Baselines.ServerClock.FixedOffset(-300);
+                var shifted = 0;
+                foreach (var d in dtoRows)
+                {
+                    var row = ServerPropertyRow.From(d, clock);
+                    if (d.InventoryAsOfUtc is DateTime asOf) { Assert.Equal(asOf + offset, row.InventoryAsOf); shifted++; }
+                    else Assert.Null(row.InventoryAsOf);
+                    if (d.LastCollectedUtc is DateTime last) { Assert.Equal(last + offset, row.LastCollected); shifted++; }
+                    else Assert.Null(row.LastCollected);
+                }
+                Assert.True(shifted > 0, "no seeded row carried a time to shift.");
+            }
+            finally
+            {
+                ViewerTimeHelper.CurrentDisplayMode = savedMode;
+            }
             return Serialize(anchor, metrics, inventory);
         });
 
@@ -80,7 +113,7 @@ public sealed class FinOpsInventoryGoldenLiveTests
         public ViewerDataService.ServerMetricsRow Metrics { get; set; }
     }
 
-    private static string NameOf(int id) => id == IdA ? NameA : id == IdB ? NameB : NameC;
+    private static string NameOf(int id) => id == IdA ? NameA : id == IdB ? NameB : id == IdC ? NameC : NameD;
 
     private static async Task RunAsync(Func<string, DateTime, CancellationToken, Task<string>> read)
     {
@@ -116,6 +149,7 @@ public sealed class FinOpsInventoryGoldenLiveTests
         await DarlingMcpTestData.RegisterServerAsync(c, IdA, NameA, ct);
         await DarlingMcpTestData.RegisterServerAsync(c, IdB, NameB, ct);
         await DarlingMcpTestData.RegisterServerAsync(c, IdC, NameC, ct);
+        await DarlingMcpTestData.RegisterServerAsync(c, IdD, NameD, ct);
         await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET monthly_cost_usd = 1234.5 WHERE server_id = $1", IdA);
         await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET is_enabled = FALSE, display_name = 'Golden Disabled B' WHERE server_id = $1", IdB);
 
@@ -150,11 +184,30 @@ public sealed class FinOpsInventoryGoldenLiveTests
         /* B: disabled Azure SQL Database, vCore-named, no samples. */
         await InsertPropertiesAsync(c, IdB, NameB, anchor.AddDays(-2), "SQL Azure", "12.0.2000.8", "RTM", null, 5, 2, 913000L, 0, 32, null, null, null, null, null, 4, ct);
 
-        /* C: a monitored server that has no CPU samples and no hardware columns. */
+        /* C: a monitored server with one CPU sample and a NULL current-workers count (so the verdict sees a missing
+           count), and no hardware columns. */
+        await DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, 7, 1)",
+            CollectionIdGenerator.Next(), now.AddHours(-3), IdC, NameC, now.AddHours(-3));
         await InsertPropertiesAsync(c, IdC, NameC, anchor.AddDays(-4), "Standard Edition", "14.0.1000.169", "SP1", "", 2, null, null, null, null, null, null, null, null, null, null, ct);
         await DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, max_workers_count, current_workers_count) VALUES ($1, $2, $3, $4, 256, NULL)",
             CollectionIdGenerator.Next(), now.AddHours(-4), IdC, NameC);
+
+        /* D: CPU samples 10, 10 and 11 average 10.33 (the stored column is an integer, so the average is what carries
+           the fraction), and its only database was executed recently, so it has no idle database. */
+        var cpuD = new[] { 10, 10, 11 };
+        for (var i = 0; i < cpuD.Length; i++)
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, $6, 1)",
+                CollectionIdGenerator.Next(), now.AddHours(-1 - i), IdD, NameD, now.AddHours(-1 - i), cpuD[i]);
+        await DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, total_size_mb) VALUES ($1, $2, $3, $4, 'UserDbOnly', 512)",
+            CollectionIdGenerator.Next(), now.AddHours(-3), IdD, NameD);
+        await DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds) VALUES ($1, $2, $3, $4, 'UserDbOnly', '0xHASHGOLD2', '0xHANDLEGOLD2', 1000, 1000, 5, 300)",
+            CollectionIdGenerator.Next(), now.AddHours(-6), IdD, NameD);
+        await InsertPropertiesAsync(c, IdD, NameD, anchor.AddDays(-5), "Standard Edition", "15.0.4000.1", "RTM", null, 2, 4, 16384L, 1, 4, false, false, null, null, null, null, ct);
     }
 
     private static Task InsertPropertiesAsync(NpgsqlConnection c, int id, string name, DateTime at, string edition, string version,
@@ -166,14 +219,14 @@ public sealed class FinOpsInventoryGoldenLiveTests
 
     private static Task CleanupAsync(NpgsqlConnection c, CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(c, ct,
-            $"DELETE FROM cpu_utilization_stats WHERE server_id IN ({IdA},{IdB},{IdC}); " +
-            $"DELETE FROM memory_stats WHERE server_id IN ({IdA},{IdB},{IdC}); " +
-            $"DELETE FROM memory_grant_stats WHERE server_id IN ({IdA},{IdB},{IdC}); " +
-            $"DELETE FROM database_size_stats WHERE server_id IN ({IdA},{IdB},{IdC}); " +
-            $"DELETE FROM query_stats WHERE server_id IN ({IdA},{IdB},{IdC}); " +
-            $"DELETE FROM collection_log WHERE server_id IN ({IdA},{IdB},{IdC}); " +
-            $"DELETE FROM server_properties WHERE server_id IN ({IdA},{IdB},{IdC}); " +
-            $"DELETE FROM servers WHERE server_id IN ({IdA},{IdB},{IdC})");
+            $"DELETE FROM cpu_utilization_stats WHERE server_id IN ({IdA},{IdB},{IdC},{IdD}); " +
+            $"DELETE FROM memory_stats WHERE server_id IN ({IdA},{IdB},{IdC},{IdD}); " +
+            $"DELETE FROM memory_grant_stats WHERE server_id IN ({IdA},{IdB},{IdC},{IdD}); " +
+            $"DELETE FROM database_size_stats WHERE server_id IN ({IdA},{IdB},{IdC},{IdD}); " +
+            $"DELETE FROM query_stats WHERE server_id IN ({IdA},{IdB},{IdC},{IdD}); " +
+            $"DELETE FROM collection_log WHERE server_id IN ({IdA},{IdB},{IdC},{IdD}); " +
+            $"DELETE FROM server_properties WHERE server_id IN ({IdA},{IdB},{IdC},{IdD}); " +
+            $"DELETE FROM servers WHERE server_id IN ({IdA},{IdB},{IdC},{IdD})");
 
     /// <summary>Serializes the three results as indented JSON: public settable properties in declaration order,
     /// decimals at their stored scale, and every DateTime as a whole-day offset from <paramref name="anchor"/>.</summary>

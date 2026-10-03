@@ -21,10 +21,19 @@
     {
       "Server": "darling-finops-inv-golden-c",
       "Metrics": {
-        "AvgCpuPct": null,
+        "AvgCpuPct": 7.0000000000000000,
         "StorageTotalGb": null,
         "IdleDbCount": 0,
-        "ProvisioningStatus": null
+        "ProvisioningStatus": "OVER_PROVISIONED"
+      }
+    },
+    {
+      "Server": "darling-finops-inv-golden-d",
+      "Metrics": {
+        "AvgCpuPct": 10.3333333333333333,
+        "StorageTotalGb": 0.50000000000000000000,
+        "IdleDbCount": 0,
+        "ProvisioningStatus": "OVER_PROVISIONED"
       }
     }
   ],
@@ -78,6 +87,32 @@
       "IdleDbCount": null,
       "ProvisioningStatus": null,
       "HardwareUnavailableReason": "Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW SERVER STATE (VIEW DATABASE STATE on Azure SQL DB) on this server.",
+      "MonthlyCost": 0,
+      "HealthScore": 0
+    },
+    {
+      "ServerId": 797379853,
+      "ServerName": "darling-finops-inv-golden-d",
+      "Edition": "Standard Edition",
+      "ProductVersion": "15.0.4000.1 - RTM",
+      "HostOsVersion": "",
+      "EngineEdition": 2,
+      "CpuCount": 4,
+      "PhysicalMemoryMb": 16384,
+      "SocketCount": 1,
+      "CoresPerSocket": 4,
+      "SqlServerStartTime": null,
+      "InventoryAsOfUtc": "anchor-5d",
+      "LastCollectedUtc": null,
+      "IsHadrEnabled": false,
+      "IsClustered": false,
+      "AgReplicaRole": "Standalone",
+      "IsEnabled": true,
+      "AvgCpuPct": null,
+      "StorageTotalGb": null,
+      "IdleDbCount": null,
+      "ProvisioningStatus": null,
+      "HardwareUnavailableReason": null,
       "MonthlyCost": 0,
       "HealthScore": 0
     },

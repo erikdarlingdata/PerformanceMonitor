@@ -268,7 +268,7 @@ WHERE s.server_id <> 0";
             "server inventory idle databases");
     }
 
-
+    /* A twin of the viewer's Workload copy of this helper; collapse the two when the Workload reads move to Storage. */
     private static string RouteOrThrow(string sql, string from, string to, string what)
     {
         var routed = sql.Replace(from, to, StringComparison.Ordinal);
@@ -291,10 +291,11 @@ WHERE s.server_id <> 0";
     /// </summary>
     public static async Task<Dictionary<int, ServerMetricsDto>> GetServerMetricsAsync(
         NpgsqlDataSource dataSource, RollupAvailability rollups, RollupCoverage coverage, int commandTimeoutSeconds,
-        CancellationToken cancellationToken = default)
+        DateTime? nowUtc = null, CancellationToken cancellationToken = default)
     {
-        var cpuCutoff = DateTime.UtcNow.AddHours(-24);
-        var idleCutoff = DateTime.UtcNow.AddDays(-7);
+        var now = nowUtc ?? DateTime.UtcNow;
+        var cpuCutoff = now.AddHours(-24);
+        var idleCutoff = now.AddDays(-7);
 
         DateTime? watermark = null;
         if (rollups.DbGrainHourly)

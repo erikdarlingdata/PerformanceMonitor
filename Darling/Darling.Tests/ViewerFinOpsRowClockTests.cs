@@ -173,11 +173,16 @@ public sealed class ViewerFinOpsRowClockTests : IDisposable
         Assert.DoesNotContain("ForDisplay(", inventory);
 
         /* The display conversion stays in the viewer's row mapper, on the row's own clock. */
-        var mapper = File.ReadAllText(Path.Combine(Path.GetDirectoryName(ThisFile())!, "..", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.cs")).ReplaceLineEndings("\n");
+        var rowsSource = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.ViewerSource("ViewerDataService.FinOps.cs", ThisFile()));
+        var start = rowsSource.IndexOf("public static ServerPropertyRow From", StringComparison.Ordinal);
+        Assert.True(start >= 0, "ServerPropertyRow.From was not found in ViewerDataService.FinOps.cs.");
+        var end = rowsSource.IndexOf("};", start, StringComparison.Ordinal);
+        Assert.True(end > start, "The end of the ServerPropertyRow.From initializer was not found.");
+        var mapper = rowsSource[start..end];
         Assert.Contains("Clock = clock", mapper);
         Assert.Contains("ConvertToDisplay(asOf, ViewerTimeHelper.CurrentDisplayMode, clock)", mapper);
         Assert.Contains("ConvertToDisplay(last, ViewerTimeHelper.CurrentDisplayMode, clock)", mapper);
-        Assert.DoesNotContain("ForDisplay(", mapper.Substring(mapper.IndexOf("public static ServerPropertyRow From", StringComparison.Ordinal), 2500));
+        Assert.DoesNotContain("ForDisplay(", mapper);
     }
 
     private static string ThisFile([CallerFilePath] string thisFile = "") => thisFile;

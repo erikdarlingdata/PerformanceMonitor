@@ -29,6 +29,7 @@ public sealed class ViewerFinOpsInventoryDelegatesTests
     public void TheInventoryPartial_HoldsNoSqlText()
     {
         Assert.DoesNotContain("@\"", ViewerSource(), StringComparison.Ordinal);
+        Assert.DoesNotContain("\"\"\"", ViewerSource(), StringComparison.Ordinal);
     }
 
     [Fact]

@@ -15,7 +15,6 @@ using PerformanceMonitor.Darling.Storage.FinOps;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
-
 /// <summary>
 /// FinOps Server Inventory reads. Lite queries each target LIVE (<c>GetServerPropertiesLiveAsync</c>) — the
 /// headless viewer can't reach targets, so the inventory rows come from the COLLECTED
@@ -45,10 +44,12 @@ public sealed partial class ViewerDataService
     /// <summary>Every server's overlay metrics in one round trip (#4227); the read lives in Storage and the rollup probe stays cached here.</summary>
     public async Task<Dictionary<int, ServerMetricsRow>> GetServerMetricsAsync(CancellationToken cancellationToken = default)
     {
+        /* The cutoffs are taken before the rollup probe, as they always were. */
+        var nowUtc = DateTime.UtcNow;
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
 
         var dtos = await DarlingFinOpsInventoryReader.GetServerMetricsAsync(
-            _dataSource, rollups, coverage, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            _dataSource, rollups, coverage, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, nowUtc, cancellationToken);
 
         var results = new Dictionary<int, ServerMetricsRow>(dtos.Count);
         foreach (var (serverId, dto) in dtos) results[serverId] = ServerMetricsRow.From(dto);
