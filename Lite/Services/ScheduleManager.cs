@@ -549,8 +549,15 @@ public class ScheduleManager
         TimeSpan.FromMinutes(effectiveIntervalMinutes) + TimeSpan.FromDays(1);
 
     /// <summary>The last run when it is inside <see cref="LastRunFloor"/>, else null: never run.</summary>
-    internal static DateTime? LastRunWithinFloor(DateTime? lastRunUtc, DateTime nowUtc, int effectiveIntervalMinutes) =>
-        lastRunUtc is { } ran && ran >= nowUtc - LastRunFloor(effectiveIntervalMinutes) ? ran : null;
+    internal static DateTime? LastRunWithinFloor(DateTime? lastRunUtc, DateTime nowUtc, int effectiveIntervalMinutes)
+    {
+        if (lastRunUtc is null)
+        {
+            return null;
+        }
+
+        return lastRunUtc.Value >= nowUtc - LastRunFloor(effectiveIntervalMinutes) ? lastRunUtc : null;
+    }
 
     /// <summary>
     /// #4938: the enabled collectors whose effective interval is a day or more (the on-load ones recur daily), with
