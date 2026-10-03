@@ -211,12 +211,14 @@ public sealed class UtilizationEfficiencyRow
     /// on every edition. A window with no CPU sample (<see cref="HasCpuSample"/> false) leaves the CPU term out: its p95 is a 0
     /// that came from nothing, and scoring that 0 would hand the server a full 100.
     /// </summary>
+    public UtilizationEfficiencyDto ToDto() => new(
+        AvgCpuPct, MaxCpuPct, P95CpuPct, CpuSamples, TotalMemoryMb, TargetMemoryMb, PhysicalMemoryMb, BufferPoolMb,
+        MemoryRatio, MaxGrantWaiters, GrantTimeouts, ForcedGrants, GrantUtilizationPct, MaxWorkersCount,
+        CurrentWorkersCount, CpuCount, EngineEdition, ProvisioningStatus);
+
     public int ComputeHealthScore()
     {
-        var bpRatio = PhysicalMemoryMb > 0 ? (decimal)BufferPoolMb / PhysicalMemoryMb : 0m;
-        int? cpuScore = HasCpuSample ? FinOpsHealthCalculator.CpuScore(P95CpuPct) : null;
-        return FinOpsHealthCalculator.Overall(
-            cpuScore, FinOpsHealthCalculator.MemoryScore(bpRatio), FinOpsHealthCalculator.StorageScore(FreeSpacePct));
+        return FinOpsUtilizationFigures.HealthScore(HasCpuSample, P95CpuPct, PhysicalMemoryMb, BufferPoolMb, FreeSpacePct);
     }
 }
 
