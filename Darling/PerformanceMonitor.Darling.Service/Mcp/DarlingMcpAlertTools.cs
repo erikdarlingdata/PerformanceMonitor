@@ -190,8 +190,8 @@ public sealed class DarlingMcpAlertTools
                    that shaped the population together with how much it removed. */
                 alerts_returned = page.Count,
                 truncated,
-                oldest_returned_alert_time = page.Min(r => r.AlertTime).ToString("o"),
-                newest_returned_alert_time = page.Max(r => r.AlertTime).ToString("o"),
+                oldest_returned_alert_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.AlertTime)),
+                newest_returned_alert_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.AlertTime)),
                 order = "alert_time_desc",
                 dismissed_excluded = !include_dismissed,
                 dismissed_excluded_count = dismissedExcludedCount,

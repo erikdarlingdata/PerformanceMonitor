@@ -245,15 +245,19 @@ LIMIT $" + limitIndex;
     /// has no BEFORE, so it can never show a regression however badly it regressed. Reads
     /// <c>v_query_store_stats</c>, the same view the read itself uses. Darling twin:
     /// <c>DarlingQueryStoreRegressionReader.RegressionCoverageSql</c>.</para>
+    /// <para>#5015: <paramref name="databaseNames"/> narrows both questions to the same databases the read was
+    /// asked for (null: every database), so a caller that filtered can tell "nothing regressed in that database"
+    /// from "no capture of that database was ever read", which an unfiltered probe cannot.</para>
     /// </summary>
     public async Task<(bool HasBaseline, bool HasRecent)> GetQueryStoreRegressionCoverageAsync(
-        int serverId, int hoursBack = 24, DateTime? asOfUtc = null)
+        int serverId, int hoursBack = 24, DateTime? asOfUtc = null, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
 
         command.CommandText = @"
 SELECT
@@ -262,20 +266,24 @@ SELECT
         FROM v_query_store_stats
         WHERE server_id = $1
         AND   collection_time >= $4
-        AND   collection_time < $2
+        AND   collection_time < $2" + dbClause + @"
     ) AS has_baseline,
     EXISTS (
         SELECT 1
         FROM v_query_store_stats
         WHERE server_id = $1
         AND   collection_time >= $2
-        AND   collection_time <= $3
+        AND   collection_time <= $3" + dbClause + @"
     ) AS has_recent";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = baselineStartTime });
+        foreach (var value in dbValues)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = value });
+        }
 
         using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync())
