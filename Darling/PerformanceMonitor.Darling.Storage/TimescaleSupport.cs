@@ -9975,6 +9975,9 @@ WHERE ca.view_schema = 'collect'
     /// </summary>
     internal const string HourlyDdlLockTimeout = "3s";
 
+    /// <summary>Consecutive busy results per object across hourly passes; process lifetime. Tests reset it.</summary>
+    internal static readonly BoundedDdlBusyStreaks BusyStreaks = new();
+
     /// <summary>What <see cref="TryRunBoundedDdlAsync"/> did.</summary>
     internal enum BoundedDdlOutcome
     {
@@ -9994,7 +9997,10 @@ WHERE ca.view_schema = 'collect'
     /// <c>SET LOCAL lock_timeout</c> (<see cref="HourlyDdlLockTimeout"/>), because <c>SET LOCAL</c> outside a
     /// transaction is a no-op and a waiting AccessExclusiveLock request holds up every collector write to the
     /// table behind it. A busy lock (<c>55P03</c>) costs one Information line and the next hourly pass tries again;
-    /// any other failure rolls back and costs one Warning. Neither throws, so the caller keeps its per-table
+    /// the same <paramref name="what"/> busy <see cref="BoundedDdlBusyStreaks.EscalateAfter"/> passes in a row also
+    /// costs ONE Warning (a store that never converges must not stay at Information), and the Information line
+    /// that follows its eventual success says how long it was busy. Any other failure rolls back and costs one
+    /// Warning and clears the streak. Neither throws, so the caller keeps its per-table
     /// isolation; cancellation still propagates.
     /// </summary>
     internal static async Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
@@ -10015,6 +10021,13 @@ WHERE ca.view_schema = 'collect'
             }
 
             await transaction.CommitAsync(cancellationToken);
+            if (BusyStreaks.Clear(what, out var busyPasses))
+            {
+                logger?.LogInformation(
+                    "TimescaleDB: {What} changed after {Passes} busy passes in a row; the table is no longer held",
+                    what, busyPasses);
+            }
+
             return BoundedDdlOutcome.Applied;
         }
         catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.LockNotAvailable, StringComparison.Ordinal))
@@ -10022,10 +10035,19 @@ WHERE ca.view_schema = 'collect'
             logger?.LogInformation(
                 "TimescaleDB: {What} not changed this pass: another session held the table for {Timeout}, and waiting longer would hold up every collector's writes to it; the next hourly pass tries again",
                 what, HourlyDdlLockTimeout);
+            var now = DateTime.UtcNow;
+            if (BusyStreaks.RecordBusy(what, now, out var passes, out var firstBusyUtc))
+            {
+                logger?.LogWarning(
+                    "TimescaleDB: {What} has been busy for {Passes} passes in a row, since {Since:u} UTC ({Elapsed} ago); its settings stay as they are until another session releases the table",
+                    what, passes, firstBusyUtc, now - firstBusyUtc);
+            }
+
             return BoundedDdlOutcome.LockBusy;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            BusyStreaks.Clear(what, out _);
             logger?.LogWarning(
                 "TimescaleDB: {What} could not be changed, so the change was rolled back and the table keeps its current settings: {Message}",
                 what, ex.Message);

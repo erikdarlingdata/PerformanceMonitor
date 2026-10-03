@@ -130,17 +130,38 @@ public sealed class BoundedCompressionDdlTests
             await ExecAsync(holder, $"SELECT 1 FROM collect.{Table} LIMIT 1", ct);
 
             var clock = Stopwatch.StartNew();
-            await TimescaleSupport.ApplyCompressionPolicyAsync(connection, log, hourly: true, ct);
-            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(60), $"the pass must return in a bounded time, took {clock.Elapsed}");
+            var pass = Task.Run(() => TimescaleSupport.ApplyCompressionPolicyAsync(connection, log, hourly: true, ct), ct);
 
-            Assert.DoesNotContain(Table, await TimescaleSupport.ReadTablesNeedingCompressionEnableAsync(connection, null, ct) ?? throw new InvalidOperationException("read failed"));
-            Assert.Equal(1, log.Lines.Count(l => l.Contains($"collect.{Table}", StringComparison.Ordinal) && l.Contains("not changed this pass", StringComparison.Ordinal)));
+            /* The INSERT is timed while the ALTER is still queued for its lock. */
+            using var observer = new NpgsqlConnection(scratch.ConnectionString);
+            await observer.OpenAsync(ct);
+            var waiting = false;
+            var pollClock = Stopwatch.StartNew();
+            while (!waiting && pollClock.Elapsed < TimeSpan.FromSeconds(5))
+            {
+                using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation JOIN pg_namespace n ON n.oid = c.relnamespace " +
+                    "WHERE l.mode = 'AccessExclusiveLock' AND NOT l.granted AND n.nspname = 'collect' AND c.relname = @t", observer);
+                probe.Parameters.AddWithValue("t", Table);
+                waiting = Convert.ToInt64(await probe.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture) > 0;
+                if (!waiting)
+                {
+                    await Task.Delay(50, ct);
+                }
+            }
 
-            /* Collection writes still flow while the reader is open. */
+            Assert.True(waiting, $"the ALTER on collect.{Table} never showed an ungranted AccessExclusiveLock request within 5 s");
+            var lockTimeout = TimeSpan.FromSeconds(int.Parse(TimescaleSupport.HourlyDdlLockTimeout.TrimEnd('s'), System.Globalization.CultureInfo.InvariantCulture));
             var insertClock = Stopwatch.StartNew();
             await ExecAsync(writer,
                 $"INSERT INTO collect.{Table} (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, sample_interval_seconds) VALUES (1, now(), 1, 's', 'W', 1, 1, 1)", ct);
-            Assert.True(insertClock.Elapsed < TimeSpan.FromSeconds(10), $"the insert must not queue behind the ALTER, took {insertClock.Elapsed}");
+            Assert.True(insertClock.Elapsed < lockTimeout + TimeSpan.FromSeconds(1.5), $"the insert must not queue behind the waiting ALTER, took {insertClock.Elapsed}");
+
+            await pass;
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"the pass must return in a bounded time, took {clock.Elapsed}");
+
+            Assert.DoesNotContain(Table, await TimescaleSupport.ReadTablesNeedingCompressionEnableAsync(connection, null, ct) ?? throw new InvalidOperationException("read failed"));
+            Assert.Equal(1, log.Lines.Count(l => l.Contains($"collect.{Table}", StringComparison.Ordinal) && l.Contains("not changed this pass", StringComparison.Ordinal)));
 
             await ExecAsync(holder, "ROLLBACK", ct);
             holding = false;
