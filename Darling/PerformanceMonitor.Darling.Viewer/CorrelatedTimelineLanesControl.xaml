@@ -43,14 +43,23 @@
                 <ColumnDefinition Width="100"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" VerticalAlignment="Center"
+            <Grid.RowDefinitions>
+                <!-- The "Showing since" note: Auto, so a hidden note gives the whole lane back to the chart. -->
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0" Grid.Column="1" x:Name="BlockingLaneDataStartBanner" Visibility="Collapsed"
+                       Padding="8,1" FontSize="11" FontWeight="Bold"
+                       Foreground="{DynamicResource ForegroundBrush}"
+                       Background="#22FFAA00"/>
+            <TextBlock Grid.Row="0" Grid.RowSpan="2" Grid.Column="0" VerticalAlignment="Center"
                        FontSize="12" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="4,0">
                 <Run Text="Blocking &amp;"/>
                 <LineBreak/>
                 <Run Text="Deadlocking"/>
             </TextBlock>
-            <ScottPlot:WpfPlot Grid.Column="1" x:Name="BlockingChart"/>
+            <ScottPlot:WpfPlot Grid.Row="1" Grid.Column="1" x:Name="BlockingChart"/>
         </Grid>
 
         <!-- Lane 4: Buffer Pool -->
