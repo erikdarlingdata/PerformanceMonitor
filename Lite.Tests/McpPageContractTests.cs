@@ -510,7 +510,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         /* The envelope used to be bare: server and rows. The span requested is now on it. */
         Assert.Equal(1, cut.GetProperty("hours_back").GetInt32());
         Assert.Equal("collection_time_desc", cut.GetProperty("order").GetString());
-        Assert.Equal(Stamp(now.AddMinutes(-3)), cut.GetProperty("oldest_returned_collection_time").GetString());
+        /* #4966: where the page's rows stop describes the window, so it prints as UTC with the Z: the same instant as before. */
+        Assert.Equal(Stamp(now.AddMinutes(-3)) + "Z", cut.GetProperty("oldest_returned_collection_time").GetString());
 
         var whole = Parse(await McpWaitTools.GetWaitingTasks(_dataService, _serverManager, ServerName, 1, 3));
         AssertPage(whole, "tasks", "tasks_returned", returned: 3, truncated: false);

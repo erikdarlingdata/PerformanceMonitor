@@ -17,6 +17,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -401,7 +402,7 @@ public partial class FinOpsTab
             if (totalMb > 0)
             {
                 foreach (var d in data)
-                    d.MonthlyCostShare = ((d.TotalSizeMb ?? 0m) / totalMb) * _server.MonthlyCostUsd;
+                    d.MonthlyCostShare = FinOpsCost.StorageShare(d.TotalSizeMb ?? 0m, totalMb, _server.MonthlyCostUsd);
             }
         }
 
@@ -525,15 +526,15 @@ public partial class FinOpsTab
         var hoursBack = HoursBackFromIndex(FinOpsWaitStatsTimeRangeCombo);
         var data = await _dataService.GetWaitCategorySummaryAsync(_server.ServerId, hoursBack);
 
-        /* Proportional cost share scaled to the window (mirrors Lite: budget * hoursBack/730). */
+        /* Proportional cost share scaled to the window (mirrors Lite: the monthly budget scaled by the window hours). */
         if (_server.MonthlyCostUsd > 0 && data.Count > 0)
         {
-            var windowBudget = _server.MonthlyCostUsd * (hoursBack / 730.0m);
+            var windowBudget = FinOpsCost.WindowBudget(_server.MonthlyCostUsd, hoursBack);
             var totalWait = data.Sum(w => w.TotalWaitTimeMs);
             if (totalWait > 0)
             {
                 foreach (var w in data)
-                    w.MonthlyCostShare = (w.TotalWaitTimeMs / (decimal)totalWait) * windowBudget;
+                    w.MonthlyCostShare = FinOpsCost.Share(w.TotalWaitTimeMs, (decimal)totalWait, windowBudget);
             }
         }
 
@@ -546,15 +547,15 @@ public partial class FinOpsTab
         var hoursBack = HoursBackFromIndex(FinOpsExpensiveQueriesTimeRangeCombo);
         var data = await _dataService.GetExpensiveQueriesAsync(_server.ServerId, hoursBack);
 
-        /* Proportional cost share scaled to the window (mirrors Lite: budget * hoursBack/730). */
+        /* Proportional cost share scaled to the window (mirrors Lite: the monthly budget scaled by the window hours). */
         if (_server.MonthlyCostUsd > 0 && data.Count > 0)
         {
-            var windowBudget = _server.MonthlyCostUsd * (hoursBack / 730.0m);
+            var windowBudget = FinOpsCost.WindowBudget(_server.MonthlyCostUsd, hoursBack);
             var totalCpu = data.Sum(q => q.TotalCpuMs);
             if (totalCpu > 0)
             {
                 foreach (var q in data)
-                    q.MonthlyCostShare = (q.TotalCpuMs / (decimal)totalCpu) * windowBudget;
+                    q.MonthlyCostShare = FinOpsCost.Share(q.TotalCpuMs, (decimal)totalCpu, windowBudget);
             }
         }
 

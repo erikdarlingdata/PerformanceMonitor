@@ -202,7 +202,8 @@ public sealed class WebDataStartNoteTests
         Assert.True(tool > 0);
         var body = tools[tool..];
         Assert.Contains("truncated,", body, StringComparison.Ordinal);
-        Assert.Contains("oldest_returned_collection_time = page.Min(r => r.CollectionTime).ToString(\"o\")", body, StringComparison.Ordinal);
+        /* #4966: the field is written through the shared formatter (UTC, with the Z); the rule reads it as UTC with or without one. */
+        Assert.Contains("oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime))", body, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -375,6 +376,38 @@ public sealed class WebDataStartNoteTests
         Assert.DoesNotContain("UTC", notice, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4966: Darling's capped lists print where their rows stop as UTC with the Z (the shared formatter), where they used
+    /// to print the store's naive form. The web reads either: the field is read as UTC both ways, so the note, the
+    /// instants beside it and the page's composition in the browser's zone are what the naive answer gave, and
+    /// <c>effective_start</c> keeps the tool's own text.
+    /// </summary>
+    [Fact]
+    public async Task ACappedList_WhoseOldestRowIsStampedUtc_ReadsAsTheNaiveOneDid_OnTheServerAndOnThePage()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var stamped = CappedTasks.Replace("2026-01-02T12:30:00.0000000\"", "2026-01-02T12:30:00.0000000Z\"", StringComparison.Ordinal);
+        Assert.NotEqual(CappedTasks, stamped);
+
+        var naiveAnswered = await WebDataStartNote.AddAsync(null!, "get_waiting_tasks", "sql01", 48, WindowEnd, CappedTasks, null, ct);
+        var answered = await WebDataStartNote.AddAsync(null!, "get_waiting_tasks", "sql01", 48, WindowEnd, stamped, null, ct);
+
+        var naive = Assert.IsType<JsonObject>(JsonNode.Parse(naiveAnswered));
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        Assert.Equal("2026-01-02T12:30:00.0000000Z", answer["effective_start"]?.GetValue<string>());
+        foreach (var key in new[] { "truncation_note", "oldest_shown_utc", "window_start_utc", "window_end_utc" })
+        {
+            Assert.Equal(naive[key]?.GetValue<string>(), answer[key]?.GetValue<string>());
+        }
+
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorLocal:" + NewYork, out var r, answered)) return;
+
+        var sentence = answer["truncation_note"]!.GetValue<string>();
+        var notice = Assert.Single(Strings(r, "notices"));
+        Assert.Equal(InTheBrowsersZone(sentence, r.GetProperty("local")), notice);
+        Assert.DoesNotContain("UTC", notice, StringComparison.Ordinal);
+    }
+
     /// <summary>A note whose answer lacks an instant (an older server, another reader), or carries one the page cannot
     /// read, is drawn as the server sent it: the sentence, in UTC. Better a note in UTC than none.</summary>
     [Fact]
@@ -400,14 +433,15 @@ public sealed class WebDataStartNoteTests
     /// The Queries tab's window notes (#4231) get the same clock. Two of the Queries reads word their note with no time in
     /// it; the Query Store note names the instant its history starts when the interval table served it, as the
     /// <c>effective_start</c> the answer carries. The page shows that instant in the browser's zone, on the descriptor grid
-    /// and on the Top Queries composite, and the MCP answer's own text (in UTC) is not touched.
+    /// and on the Top Queries composite, and the MCP answer's own text (in UTC) is not touched. The note is the one the
+    /// tool serves (#4966), so the instant it names is the field's exact text, Z included: that is what the page finds.
     /// </summary>
     [Fact]
     public void TheQueryStoreNote_NamesItsInstantInTheBrowsersZone_OnTheGridAndOnTheTopQueriesComposite()
     {
         var effectiveStart = new DateTime(2026, 1, 2, 0, 0, 0, DateTimeKind.Unspecified);
-        var stamp = effectiveStart.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
-        var note = QueryStoreIntervalWide.HistoryNote(effectiveStart, QueryStoreIntervalWide.WideStartBound.FilledSince, manyServers: false);
+        var stamp = PerformanceMonitor.Common.McpHelpers.FormatEffectiveStart(effectiveStart);
+        var note = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpDataTools.QueryStoreTableNote(effectiveStart, QueryStoreIntervalWide.WideStartBound.FilledSince);
         Assert.Contains(stamp, note, StringComparison.Ordinal);
         var answer = new JsonObject
         {
