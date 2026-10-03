@@ -1537,14 +1537,28 @@ ORDER BY 1";
     /// before the data is what the notice already explains, and drawing it made a year-wide range over a few days of
     /// data ~105,000 columns, nearly all of them empty. A gap AFTER the data starts is not this: every bucket from
     /// here to the range end still has a column. The heatmap is not a capped read, so the capped grids' floor
-    /// (<c>ServerTab.CapAwareWindowFloor</c>) does not apply. A probe that throws costs only the trim: the columns span
+    /// (<c>ServerTab.CapAwareWindowFloor</c>, which gets no slack) does not apply. A range no longer than the slack
+    /// (<see cref="Mcp.McpQueryTools.CanWindowBeTruncated"/>) can never get the notice, so it skips the probe and starts
+    /// at the range start. A probe that throws costs only the trim: the columns span
     /// the range, as they did before, and the chart is still drawn (the notice step's own rule for the same probe).
     /// </summary>
-    private async Task<DateTime> GetHeatmapColumnsStartAsync(int serverId, DateTime startUtc, DateTime endUtc)
+    private Task<DateTime> GetHeatmapColumnsStartAsync(int serverId, DateTime startUtc, DateTime endUtc) =>
+        HeatmapColumnsStartAsync(() => GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, serverId, startUtc, endUtc), startUtc, endUtc);
+
+    /// <summary>
+    /// #4966: the body of <see cref="GetHeatmapColumnsStartAsync"/> with the probe passed in, so the tests count the
+    /// probe's calls (none for a range no longer than the slack) and drive a throwing probe without a store.
+    /// </summary>
+    internal static async Task<DateTime> HeatmapColumnsStartAsync(Func<Task<DateTime?>> probe, DateTime startUtc, DateTime endUtc)
     {
+        if (!Mcp.McpQueryTools.CanWindowBeTruncated(startUtc, endUtc))
+        {
+            return startUtc;
+        }
+
         try
         {
-            var floor = await GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, serverId, startUtc, endUtc);
+            var floor = await probe();
             return floor is DateTime dataStart && Mcp.McpQueryTools.IsWindowTruncated(floor, startUtc) ? dataStart : startUtc;
         }
         catch (Exception ex)

@@ -63,7 +63,9 @@ namespace Darling.Tests;
 /// its throwaway cluster. <c>CrossAppGuardCiGateTests</c> does see the
 /// three <c>Lite.Tests</c> keys below — #3067 widened its anchor past the app directory, since
 /// <c>Lite.Tests</c> is a sibling of <c>Lite</c> rather than a directory inside it — and exempts them on
-/// this same reasoning, under the same bound.</para>
+/// this same reasoning, under the same bound. The fourth, <c>Lite.Tests/DataStartBannerQueriesTabTests.cs</c>
+/// (#4966), is named in the <c>darling</c> filter instead, as the single file it is: that costs a Darling build only
+/// when that one file changes, so it has no exemption.</para>
 /// </summary>
 public sealed class CommentFilterAdoptionTests
 {

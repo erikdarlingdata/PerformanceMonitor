@@ -17,7 +17,8 @@ namespace PerformanceMonitorLite.Controls;
 /// Heatmap on the Queries tab, and Memory Pressure Events on the Memory tab. Each call hands the shared step
 /// (<c>RefreshWindowTruncatedBannerAsync</c> in ServerTab.Refresh.cs, which probes
 /// <see cref="LocalDataService.GetQueryWindowFloorAsync"/> and words the banner through
-/// <see cref="ApplyWindowFloorToBanner"/>) the SAME UTC window the surface's own read takes.
+/// <see cref="ApplyWindowFloorToBanner"/>) the SAME UTC window the surface's own read takes. A window no longer than
+/// the 90-minute slack skips the probe: it can never get a note.
 /// </summary>
 public partial class ServerTab
 {
@@ -29,7 +30,8 @@ public partial class ServerTab
     /// Queries grids, so the banner takes the pair <see cref="LocalDataService.GetQueriesTabWindowUtc"/> hands them.
     /// The grid reads only the newest <see cref="LocalDataService.PlanCorrectionGridCap"/> rows, so the banner goes
     /// through the cap-aware step: a read that hit the cap is worded from the oldest row it returned, even where the
-    /// store covers the range.
+    /// store covers the range, and with no slack (the banner shows whenever that row is later than the range's start,
+    /// on a range of an hour too).
     /// </summary>
     private System.Threading.Tasks.Task RefreshPlanCorrectionsBannerAsync(IReadOnlyCollection<PlanCorrectionRow> planCorrections, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {

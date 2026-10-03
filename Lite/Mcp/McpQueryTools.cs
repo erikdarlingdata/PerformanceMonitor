@@ -972,10 +972,23 @@ public sealed class McpQueryTools
     /// same three tables all compute the same verdict from the same probe instead of drifting apart. A null floor
     /// is never truncated: the probe answers null only when the window holds nothing to report (no row, and for
     /// the Active Queries and Current Waits relations, which the probe reads by coverage, no logged run of the
-    /// collector either), and an empty panel already says so.
+    /// collector either), and an empty panel already says so. The slack belongs to this probe verdict alone (#4966): a
+    /// grid that filled its row cap dropped rows for certain, so its banner is not judged here (it shows whenever the
+    /// oldest row it shows is later than the window's start).
     /// </summary>
     internal static bool IsWindowTruncated(DateTime? floor, DateTime requestedStart) =>
         floor is DateTime f && f > requestedStart + TruncationSlack;
+
+    /// <summary>
+    /// #4966: whether a window can ever get a coverage note from the probe at all. The probe's answer is null, the
+    /// window's start, or a row or run INSIDE the window (<see cref="LocalDataService.GetQueryWindowFloorAsync"/> bounds
+    /// its first read on both sides), so a window no longer than <see cref="TruncationSlack"/> never has a floor later
+    /// than the start by more than the slack: <see cref="IsWindowTruncated"/> answers false for every floor it can
+    /// give. The banner step and the Query Heatmap's column start skip the probe for such a window, which is every
+    /// range of 90 minutes or less and a narrow slicer drag.
+    /// </summary>
+    internal static bool CanWindowBeTruncated(DateTime startUtc, DateTime endUtc) =>
+        endUtc - startUtc > TruncationSlack;
 
     /// <summary>
     /// The instant the served window really starts: the probe's floor, but never earlier than the start that was

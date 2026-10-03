@@ -234,7 +234,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
             var banner = new System.Windows.Controls.TextBlock();
             var probeStepRan = false;
             ServerTab.CappedGridBannerAsync(rows, LocalDataService.PlanCorrectionGridCap, row => row.CollectionTime,
-                oldestRowShown => ServerTab.ApplyWindowFloorToBanner(banner, oldestRowShown, startUtc, TimeZoneInfo.Utc),
+                oldestRowShown => ServerTab.ApplyCappedWindowFloorToBanner(banner, oldestRowShown, startUtc, TimeZoneInfo.Utc),
                 () =>
                 {
                     probeStepRan = true;
@@ -247,21 +247,24 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     }
 
     /// <summary>
-    /// The capped-grid banner step on rows in memory, at a cap of three, over a range that starts 2026-06-01, in UTC.
+    /// The capped-grid banner step on rows in memory, at a cap of three, over a range that starts at
+    /// <paramref name="startUtc"/> (2026-06-01 unless given), in UTC.
     /// The step's two ways out are the banner worded from the oldest row (through the real
-    /// <see cref="ServerTab.ApplyWindowFloorToBanner"/>) and a probing step that records its calls and hands back a task
+    /// <see cref="ServerTab.ApplyCappedWindowFloorToBanner"/>, which the tab's step hands it) and a probing step that
+    /// records its calls and hands back a task
     /// of its own, so they can be told apart: (visible, text, probing-step calls, whether the step returned the probing
     /// step's task).
     /// </summary>
-    private static (bool Visible, string Text, int ProbeCalls, bool ReturnedProbeTask) CappedGridBannerStep(DateTime[] rows)
+    private static (bool Visible, string Text, int ProbeCalls, bool ReturnedProbeTask) CappedGridBannerStep(DateTime[] rows, DateTime? startUtc = null)
     {
+        var rangeStart = startUtc ?? new DateTime(2026, 6, 1);
         return OnStaThread(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             var probeTask = new TaskCompletionSource().Task;
             var probeCalls = 0;
             var step = ServerTab.CappedGridBannerAsync(rows, 3, row => row,
-                oldestRowShown => ServerTab.ApplyWindowFloorToBanner(banner, oldestRowShown, new DateTime(2026, 6, 1), TimeZoneInfo.Utc),
+                oldestRowShown => ServerTab.ApplyCappedWindowFloorToBanner(banner, oldestRowShown, rangeStart, TimeZoneInfo.Utc),
                 () =>
                 {
                     probeCalls++;
@@ -313,7 +316,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     public void RefreshCappedGridBannerAsync_HandsTheDecisionThePickerZone_AndTheSharedProbingStep()
     {
         Assert.Matches(
-            @"private System\.Threading\.Tasks\.Task RefreshCappedGridBannerAsync<T>\(\s*QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc,\s*IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc\) =>\s*CappedGridBannerAsync\(rows, rowCap, rowTimeUtc,\s*oldestRowShown => ApplyWindowFloorToBanner\(banner, oldestRowShown, startUtc, GetPickerZone\(\)\),\s*\(\) => RefreshWindowTruncatedBannerAsync\(relation, banner, startUtc, endUtc\)\);",
+            @"private System\.Threading\.Tasks\.Task RefreshCappedGridBannerAsync<T>\(\s*QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc,\s*IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc\) =>\s*CappedGridBannerAsync\(rows, rowCap, rowTimeUtc,\s*oldestRowShown => ApplyCappedWindowFloorToBanner\(banner, oldestRowShown, startUtc, GetPickerZone\(\)\),\s*\(\) => RefreshWindowTruncatedBannerAsync\(relation, banner, startUtc, endUtc\)\);",
             CodeOf("ServerTab.Refresh.cs"));
     }
 
@@ -414,8 +417,151 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         Assert.Equal(probed, ServerTab.CapAwareWindowFloor(probed, Array.Empty<DateTime>(), 3, row => row));
     }
 
+    /// <summary>
+    /// #4966: the 90-minute slack belongs to the coverage probe, not to a capped read. A grid that filled its row cap
+    /// dropped rows for certain, so on a range of ONE HOUR whose oldest row shown sits 10, 30 or 59 minutes after the
+    /// range's start the banner shows, worded at that row, and the probe is not asked. Under the slack it never showed.
+    /// </summary>
+    [Theory]
+    [InlineData(10)]
+    [InlineData(30)]
+    [InlineData(59)]
+    public void CappedGridBannerStep_AOneHourRange_ShowsItsBanner_WhenTheOldestRowShownIsLaterThanTheStart(int minutesAfterStart)
+    {
+        var start = new DateTime(2026, 6, 1, 10, 0, 0);
+        var oldest = start.AddMinutes(minutesAfterStart);
+
+        var (visible, text, probeCalls, returnedProbeTask) = CappedGridBannerStep(
+            new[] { oldest.AddMinutes(0.5), oldest, oldest.AddMinutes(0.25) }, start);
+
+        Assert.True(visible);
+        Assert.Equal(Since(oldest), text);
+        Assert.Equal(0, probeCalls);
+        Assert.False(returnedProbeTask);
+    }
+
+    /// <summary>
+    /// A capped read whose oldest row shown is at the range's start or before it reached the start, so it shows no
+    /// banner, on a range of an hour as on any other.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-2880)]
+    public void CappedGridBannerStep_AnOldestRowShownAtOrBeforeTheStart_ShowsNoBanner(int minutesAfterStart)
+    {
+        var start = new DateTime(2026, 6, 1, 10, 0, 0);
+        var oldest = start.AddMinutes(minutesAfterStart);
+
+        var (visible, text, probeCalls, returnedProbeTask) = CappedGridBannerStep(
+            new[] { oldest.AddMinutes(0.5), oldest, oldest.AddMinutes(0.25) }, start);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+        Assert.Equal(0, probeCalls);
+        Assert.False(returnedProbeTask);
+    }
+
+    /// <summary>
+    /// #4966: the same on the real read. A server whose plan corrections arrive every 10 seconds fills the grid's
+    /// 200-row cap in about 33 minutes, so the grid of a one-hour range starts about 27 minutes after the range does:
+    /// the banner shows, worded at the oldest row the grid returned, and the probe is not asked.
+    /// </summary>
+    [Fact]
+    public async Task PlanCorrections_AOneHourRange_WhoseGridHitsItsCap_ShowsTheBannerAtItsOldestRow()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedPlanCorrectionEverySecondsAsync(end.AddMinutes(-40), end, 10);
+
+        var (visible, text, oldest, rows, probed) = await CappedPlanCorrectionBannerAsync(end.AddHours(-1), end);
+
+        Assert.Equal(LocalDataService.PlanCorrectionGridCap, rows);
+        Assert.InRange((end - oldest).TotalMinutes, 32, 34);
+        Assert.True(visible);
+        Assert.Equal(Since(oldest), text);
+        Assert.False(probed);
+    }
+
+    /// <summary>
+    /// #4966: a range no longer than the 90-minute slack can never get the Query Heatmap's notice, so the column start
+    /// does not probe for it: the columns start at the range start and the probe is not called.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(60)]
+    [InlineData(90)]
+    public async Task QueryHeatmap_ARangeNoLongerThanTheSlack_MakesNoProbeCall_AndStartsAtTheRangeStart(int rangeMinutes)
+    {
+        var start = new DateTime(2026, 6, 1, 10, 0, 0, DateTimeKind.Unspecified);
+        var probeCalls = 0;
+
+        var columnsStart = await LocalDataService.HeatmapColumnsStartAsync(
+            () =>
+            {
+                probeCalls++;
+                return Task.FromResult<DateTime?>(start.AddMinutes(rangeMinutes));
+            },
+            start, start.AddMinutes(rangeMinutes));
+
+        Assert.Equal(0, probeCalls);
+        Assert.Equal(start, columnsStart);
+    }
+
+    /// <summary>
+    /// A range longer than the slack still asks the probe, once, and trims the columns to the data start only when the
+    /// start is later than the slack: a first row 3 hours in is where the data starts, one 30 minutes in is a quiet
+    /// start, and a range with no row at all keeps the range start.
+    /// </summary>
+    [Fact]
+    public async Task QueryHeatmap_ARangeLongerThanTheSlack_ProbesOnce_AndTrimsOnlyPastTheSlack()
+    {
+        var start = new DateTime(2026, 6, 1, 10, 0, 0, DateTimeKind.Unspecified);
+        var end = start.AddHours(6);
+
+        foreach (var (floor, expected) in new (DateTime?, DateTime)[]
+                 { (start.AddHours(3), start.AddHours(3)), (start.AddMinutes(30), start), (null, start) })
+        {
+            var probeCalls = 0;
+            var columnsStart = await LocalDataService.HeatmapColumnsStartAsync(
+                () =>
+                {
+                    probeCalls++;
+                    return Task.FromResult(floor);
+                },
+                start, end);
+
+            Assert.Equal(1, probeCalls);
+            Assert.Equal(expected, columnsStart);
+        }
+    }
+
+    /// <summary>
+    /// The read of a one-hour range, end to end: the columns run from the range start to its end (13 five-minute
+    /// buckets), however late in the hour the first row comes, with no probe to say otherwise.
+    /// </summary>
+    [Fact]
+    public async Task QueryHeatmap_AOneHourRange_DrawsItsColumnsFromTheRangeStart()
+    {
+        await _duckDb.InitializeAsync();
+        var start = new DateTime(2026, 6, 1, 10, 0, 0, DateTimeKind.Unspecified);
+        var end = start.AddHours(1);
+        await SeedQueryStatsAsync(start.AddMinutes(32));
+
+        var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
+
+        Assert.Equal(13, result.TimeBuckets.Length);
+        Assert.Equal(start, result.TimeBuckets[0]);
+        Assert.Equal(end, result.TimeBuckets[^1]);
+        Assert.Equal(1d, result.Intensities[0, 6]);
+    }
+
     /// <summary>A recommendation re-captured every <paramref name="everyMinutes"/> minutes, from <paramref name="firstUtc"/> to <paramref name="lastUtc"/>.</summary>
-    private async Task SeedPlanCorrectionEveryAsync(DateTime firstUtc, DateTime lastUtc, int everyMinutes)
+    private Task SeedPlanCorrectionEveryAsync(DateTime firstUtc, DateTime lastUtc, int everyMinutes) =>
+        SeedPlanCorrectionEverySecondsAsync(firstUtc, lastUtc, everyMinutes * 60);
+
+    /// <summary>A recommendation re-captured every <paramref name="everySeconds"/> seconds, from <paramref name="firstUtc"/> to <paramref name="lastUtc"/>: enough rows for a one-hour range to fill the grid's cap.</summary>
+    private async Task SeedPlanCorrectionEverySecondsAsync(DateTime firstUtc, DateTime lastUtc, int everySeconds)
     {
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
@@ -424,7 +570,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         cmd.CommandText = $@"
 INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name, recommendation_name, recommendation_state, score)
 SELECT $1 + row_number() OVER (), g.t, $2, $3, 'Db', 'PR_1', 'Active', 50
-FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL {everyMinutes} MINUTE) AS g(t)";
+FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL {everySeconds} SECOND) AS g(t)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
