@@ -329,7 +329,7 @@ public sealed class PgServerConfigPendingRestartLiveTests
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4251 permission round trip.");
         var ct = TestContext.Current.CancellationToken;
-        const string roleName = "pm_4251_monitor_role";
+        var roleName = "pm_4251_monitor_" + Guid.NewGuid().ToString("N")[..8]; // #4981: unique to the run, roles are cluster-wide
         var targetKey = "pg-4251-permissions-" + Guid.NewGuid().ToString("N");
 
         await using var setup = new NpgsqlConnection(cs);

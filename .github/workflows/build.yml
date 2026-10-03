@@ -215,6 +215,8 @@ jobs:
               # version property back to it must run the Darling guard that would catch it. Derived
               # rather than the one path, for the reason the two entries above are derived.
               - 'Lite/**/*.csproj'
+              # #4966: Darling.Tests' CommentFilterAdoptionTests reads this Lite.Tests file, so an edit to it has to reach the Darling suite.
+              - 'Lite.Tests/DataStartBannerQueriesTabTests.cs'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
             # not a "everything that isn't code" subtraction — a new file type defaults
