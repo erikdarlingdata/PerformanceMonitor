@@ -264,3 +264,36 @@ public class CpuSchedulerSnapshot : ICpuSchedulerSnapshot
     public int OfflineCpuCount { get; set; }
     public bool OfflineCpuWarning { get; set; }
 }
+
+/// <summary>
+/// One row of the CPU Scheduler latest-snapshot grid (#4966): the shared metric row plus when the snapshot it reads was
+/// collected. The shared <see cref="PerformanceMonitor.Common.ICpuSchedulerSnapshot"/> leaves the time out on purpose (each app keeps its own
+/// time handling), so Lite adds it here: every row of one snapshot carries that snapshot's collection time, in the display
+/// zone to the second as <see cref="CollectionTimeLocal"/>, and the column sorts by <see cref="CollectionTime"/>.
+/// </summary>
+public sealed class CpuSchedulerGridRow
+{
+    public string Metric { get; set; } = "";
+    public string Value { get; set; } = "";
+    public bool IsWarning { get; set; }
+    public DateTime CollectionTime { get; set; }
+
+    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
+
+    /// <summary>The grid's rows for the snapshot; no rows (and so no time) for a window that holds no snapshot.</summary>
+    public static System.Collections.Generic.List<CpuSchedulerGridRow> Build(CpuSchedulerSnapshot? snapshot)
+    {
+        var rows = new System.Collections.Generic.List<CpuSchedulerGridRow>();
+        if (snapshot is null)
+        {
+            return rows;
+        }
+
+        foreach (var metric in PerformanceMonitor.Common.CpuSchedulerMetrics.BuildMetrics(snapshot))
+        {
+            rows.Add(new CpuSchedulerGridRow { Metric = metric.Metric, Value = metric.Value, IsWarning = metric.IsWarning, CollectionTime = snapshot.CollectionTime });
+        }
+
+        return rows;
+    }
+}

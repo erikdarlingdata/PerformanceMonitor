@@ -26,6 +26,7 @@ public sealed class McpToolGuideHeadsFinOpsTests
     private static readonly (string Tool, string Fact)[] HeadFacts =
     [
         ("get_finops", "Windowed over hours_back, UTC; no as_of."),
+        ("get_finops", "utilization:"),
         ("get_finops", "high_impact:"),
         ("get_finops", "An unknown view is refused with the valid list."),
     ];
@@ -60,5 +61,13 @@ public sealed class McpToolGuideHeadsFinOpsTests
         Assert.Contains("impact_score 0-100", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("rounded to 0.1", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("No cost fields", served.Tail!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UtilizationBandCutPoints_StayInTheTail()
+    {
+        var served = McpToolGuideTests.Served("get_finops");
+        Assert.DoesNotContain("good at 80 and above", served.Served, StringComparison.Ordinal);
+        Assert.Contains("good at 80 and above, fair at 60 and above, else poor", served.Tail!, StringComparison.Ordinal);
     }
 }

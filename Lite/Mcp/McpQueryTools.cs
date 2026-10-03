@@ -462,20 +462,22 @@ public sealed class McpQueryTools
             var windowStart = windowEnd.AddHours(-hours_back);
             var baselineStart = windowStart.AddDays(-LocalDataService.BaselineLookbackDays);
 
-            if (rows.Count == 0)
-                return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd);
-
-            var truncated = rows.Count > limit;
-
             /* #4966: where this server's query_store_stats start, checked against the EARLIER of the two windows this
                tool compares — the baseline's start, not the recent window's: a store that began inside the baseline
                compares against a shorter baseline than baseline_is names, and nothing else on the payload says so.
                The probe reads v_query_store_stats, the view both sides of the comparison read, and is unfiltered by
-               database_name (the floor is a property of the table). */
+               database_name (the floor is a property of the table). Read ahead of the empty answers, which carry it
+               too: "no query regressed" over a baseline the store only partly holds is not a true negative. */
             var notice = await WindowNoticeAsync(
                 () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd),
                 baselineStart, windowEnd, "query_store_stats",
-                "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.");
+                "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.",
+                emptyAnswer: rows.Count == 0);
+
+            if (rows.Count == 0)
+                return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, notice, databases);
+
+            var truncated = rows.Count > limit;
 
             return JsonSerializer.Serialize(new
             {
@@ -574,9 +576,13 @@ public sealed class McpQueryTools
     /// The dangerous one is a server whose entire collected history sits INSIDE the requested window: it has
     /// no BEFORE, so it can never show a regression however badly it regressed, and answering "no
     /// regressions" there is a confident wrong answer rather than a missing one.</para>
+    /// <para>#5015: with a <c>database_name</c> filter, the server passing those questions is not enough. The same two
+    /// questions are then asked of the filtered database alone, so a database with only one side collected gets the
+    /// matching no-baseline or missing-window answer, naming it, and only a database with both sides is the all-clear.</para>
     /// </summary>
     private static async Task<string> EmptyRegressionsAsync(
-        LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd)
+        LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
+        string[]? databases)
     {
         /* The anchor is threaded in rather than resolved again: the coverage probe answers "does a BEFORE
            exist for this window", and a window it computed for itself would be a different one. */
@@ -601,12 +607,49 @@ public sealed class McpQueryTools
         {
             return McpHelpers.Status(
                 "empty",
-                $"{serverName} has Query Store history from before this window but nothing collected IN the last {hours_back} hour(s), so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.");
+                $"{serverName} has Query Store history from before this window but nothing collected IN the last {hours_back} hour(s), so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+                notice.AsHints());
+        }
+
+        /* #5015: the probe above is the SERVER's, so it answers a database_name filter the same whether the database was
+           compared or not, and only a database with BOTH sides collected can be the all-clear. The filter reads the same
+           databases the read was asked for, and the answer is decided from that pair with the server-wide answers' own
+           statuses: neither side means the filter matched nothing, no baseline is the server-wide no-baseline answer and
+           no capture in the window the server-wide missing-window answer, each naming the database. Darling's twin words
+           it the same. */
+        if (databases is not null)
+        {
+            var (filteredBaseline, filteredRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(
+                serverId, hours_back, asOfUtc: windowEnd, databaseNames: databases);
+
+            if (!filteredBaseline && !filteredRecent)
+            {
+                return McpHelpers.Status(
+                    "empty",
+                    $"No Query Store capture on {serverName} in the last {hours_back} hour(s) or in the {LocalDataService.BaselineLookbackDays}-day baseline before it matched database_name '{databases[0]}', so the filter matched nothing and this is NOT the all-clear: no query in that database was compared. Check the database name, or drop the filter to read every database.",
+                    notice.AsHints());
+            }
+
+            if (!filteredBaseline)
+            {
+                return McpHelpers.Status(
+                    "unavailable",
+                    $"{serverName} has no Query Store capture of database_name '{databases[0]}' in the {LocalDataService.BaselineLookbackDays}-day baseline window before this window, so there is no baseline for that database to compare against and no regression of its queries can be detected however badly one regressed. This is NOT a clean bill of health: no query in that database was compared. Either that database's whole collected history falls inside the last {hours_back} hour(s), or it has none older than the baseline lookback yet.");
+            }
+
+            if (!filteredRecent)
+            {
+                return McpHelpers.Status(
+                    "empty",
+                    $"{serverName} has Query Store history of database_name '{databases[0]}' from before this window but nothing of it collected IN the last {hours_back} hour(s), so that database's recent side is missing rather than nothing to report, and this is NOT the all-clear: no query in that database was compared. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+                    notice.AsHints());
+            }
         }
 
         return McpHelpers.Status(
             "empty",
-            $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's average CPU is more than 25% worse than its baseline — this IS the all-clear for this read.");
+            $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's average CPU is more than 25% worse than its baseline — this IS the all-clear for this read.",
+            notice.AsHints());
     }
 
     [McpServerTool(Name = "get_query_heatmap"), Description("Draws the desktop viewer's Query Heatmap as a table: how many distinct queries fell into each (time bin x log-magnitude bucket) cell over a window, plus the most-executed query in each cell. It answers when a server was slow and how slow at the same time - get_top_queries_by_cpu ranks queries over a whole window and cannot show that the window had two very different halves. Bins are 5 minutes wide by default because that is exactly what the desktop viewer uses, so a browser, an agent and a desktop pointed at the same server draw the same picture; raise bucket_minutes for a longer window, which is also the lever that fits more of the window inside the cell cap. Magnitude buckets are the viewer's seven, in the metric's own unit: under 1, 1-10, 10-100, 100-1K, 1K-10K, 10K-100K and over 100K.")]
@@ -662,8 +705,19 @@ public sealed class McpQueryTools
             var rows = await dataService.GetQueryHeatmapCellsAsync(
                 resolved.ServerId, parsedMetric, hours_back, bucket_minutes, limit + 1, databases, asOfUtc: windowEnd, previewLength);
 
+            /* #4966: where this server's query_stats start for the window, beside the cell cap's `truncated` below —
+               that one says the grid held more cells than limit, this one says the store did not hold the window's
+               head, so the grid's empty left edge is a retention cut or a young install rather than a quiet server.
+               The probe reads v_query_stats, the view the cells came from, and is unfiltered by database_name (the
+               floor is a property of the table). Read ahead of the empty answers, which carry it too: an empty grid
+               over a window the store does not reach back to is not a true negative. */
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var notice = await WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "query_stats", emptyAnswer: rows.Count == 0);
+
             if (rows.Count == 0)
-                return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd);
+                return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, notice);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
@@ -693,16 +747,6 @@ public sealed class McpQueryTools
             cells = cells.OrderBy(c => c.TimeBucket).ThenBy(c => c.BucketIndex).ToList();
 
             var labels = LocalDataService.HeatmapBucketLabelsFor(parsedMetric);
-
-            /* #4966: where this server's query_stats start for the window, beside the cell cap's `truncated` below —
-               that one says the grid held more cells than limit, this one says the store did not hold the window's
-               head, so the grid's empty left edge is a retention cut or a young install rather than a quiet server.
-               The probe reads v_query_stats, the view the cells came from, and is unfiltered by database_name (the
-               floor is a property of the table). */
-            var requestedStart = windowEnd.AddHours(-hours_back);
-            var notice = await WindowNoticeAsync(
-                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, resolved.ServerId, requestedStart, windowEnd),
-                requestedStart, windowEnd, "query_stats");
 
             return JsonSerializer.Serialize(new
             {
@@ -790,7 +834,7 @@ public sealed class McpQueryTools
     /// caller to widen the window there would be advice pointed at the wrong problem.</para>
     /// </summary>
     private static async Task<string> EmptyHeatmapAsync(
-        LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd)
+        LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice)
     {
         /* The anchor is threaded in rather than resolved again: the probe answers "was anything collected
            in THIS window", and a window it computed for itself would be a different one. */
@@ -808,12 +852,14 @@ public sealed class McpQueryTools
         {
             return McpHelpers.Status(
                 "empty",
-                $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.");
+                $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+                notice.AsHints());
         }
 
         return McpHelpers.Status(
             "empty",
-            $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.");
+            $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
+            notice.AsHints());
     }
 
     [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of query elapsed_ms_per_second and executions_per_second across all queries, points ending at as_of. A collection whose interval was unknowable is excluded, not counted as 0: unrated_collections counts it, and a point left with nothing else carries null rates (unrated_points), never zero. No points: unavailable means query_stats was never collected here; empty means it was (the message says quiet window or rollup coverage gap). window_truncated is the store's retention floor, not a page cut: effective_start / effective_hours_back say where the answer begins. <<GUIDE>> Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Points are time buckets (bucket, aggregate_note); rates are over each collection's STORED sample interval, and a collection whose interval was unknowable - a restart or counter reset, or the window's first collection when none was stored - is left out rather than counted as 0 (unrated_collections counts them; a point with nothing else carries null rates, unrated_points). Lite has one tier - nothing is rolled up." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
@@ -1048,9 +1094,24 @@ public sealed class McpQueryTools
     /// tool compares (a tool that sets two windows against each other passes the older one's start), and
     /// <paramref name="floor"/> the probe's answer for that start (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>).
     /// <paramref name="tail"/> is one more sentence for a tool whose reading of the window needs it.
+    /// <para><paramref name="emptyAnswer"/> (#5015): the answer this notice rides on holds no rows. A null floor then
+    /// means the store holds no collection for this server in the window at all, and an empty answer over a window
+    /// nothing was read from is not a true negative, so the notice says NOT covered: <c>window_truncated</c> true,
+    /// no <c>effective_start</c> (there is no start to name) and a note that the store holds no collection in the
+    /// window. On an answer WITH rows a null floor keeps its old meaning (covered, at the start that was asked for).</para>
     /// </summary>
-    internal static McpWindowNotice WindowNotice(DateTime? floor, DateTime requestedStart, string table, string? tail = null)
+    internal static McpWindowNotice WindowNotice(
+        DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false)
     {
+        if (floor is null && emptyAnswer)
+        {
+            return new McpWindowNotice(
+                null,
+                true,
+                $"The store holds no collection of {table} for this server in this window, so nothing was read, and this empty answer is not a report that nothing happened. "
+                    + "The window may reach further back than the store retains, this server may have been monitored for less time than that, or collection may have stopped; get_collection_health shows which.");
+        }
+
         var truncated = IsWindowTruncated(floor, requestedStart);
         return new McpWindowNotice(
             McpHelpers.FormatEffectiveStart(EffectiveWindowStart(floor, requestedStart)),
@@ -1068,13 +1129,32 @@ public sealed class McpQueryTools
     /// keys all go through here, so a read of an hour or less makes no probe call, as the Lite tabs' banner step does.
     /// The probe is passed as a delegate and is not started for a short window. A short window's
     /// <c>effective_start</c> is the start that was asked for, because no floor was read.
+    /// <para>#5015: an EMPTY answer (<paramref name="emptyAnswer"/>) is always probed, whatever the window's length. The skip
+    /// answers "covered" without reading anything, which is right beside rows (the page itself shows the data) but is a
+    /// claim an empty answer cannot make: nothing was read, so nothing says the store held the window at all. A probe
+    /// that finds no row and no run in the window then reads as NOT covered (<see cref="WindowNotice"/>).</para>
     /// </summary>
     internal static async Task<McpWindowNotice> WindowNoticeAsync(
-        Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null) =>
-        WindowNotice(CanWindowBeTruncated(requestedStart, windowEnd) ? await probe() : null, requestedStart, table, tail);
+        Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null, bool emptyAnswer = false) =>
+        WindowNotice(
+            emptyAnswer || CanWindowBeTruncated(requestedStart, windowEnd) ? await probe() : null,
+            requestedStart, table, tail, emptyAnswer);
 
-    /// <summary>The three window-floor keys <see cref="WindowNotice"/> answers, as the values a tool writes into its payload.</summary>
-    internal readonly record struct McpWindowNotice(string EffectiveStart, bool WindowTruncated, string? TruncationNote);
+    /// <summary>
+    /// The three window-floor keys <see cref="WindowNotice"/> answers, as the values a tool writes into its payload.
+    /// <see cref="EffectiveStart"/> is null only for an empty answer over a window the store holds nothing in
+    /// (#5015): there is no start to name.
+    /// </summary>
+    internal readonly record struct McpWindowNotice(string? EffectiveStart, bool WindowTruncated, string? TruncationNote)
+    {
+        /// <summary>
+        /// #4966: the same three keys, with the same values and wording, for an <c>empty</c> status, which carries them under
+        /// <c>hints</c> (the shape <c>get_query_store_top</c>'s module miss uses): an empty answer over a window the store does
+        /// not reach back to is not a true negative, and without them it read as one. A status that says the collector never ran
+        /// (<c>not_collected</c>) does not carry them.
+        /// </summary>
+        internal object AsHints() => new { effective_start = EffectiveStart, window_truncated = WindowTruncated, truncation_note = TruncationNote };
+    }
 
     /// <summary>
     /// The disclosure block every Performance-Trends payload carries (#3541 A2), written in the same key order

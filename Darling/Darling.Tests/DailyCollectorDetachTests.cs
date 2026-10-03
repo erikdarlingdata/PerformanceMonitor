@@ -279,7 +279,7 @@ public sealed class DailyCollectorDetachTests
             .Where(e => e.Level == LogLevel.Debug && e.Message.Contains("daily-run permit", StringComparison.Ordinal))
             .ToList();
 
-    /* Shutdown. The service stops with daily runs going, and nothing but the shutdown drain (InFlightDailyRuns) holds
+    /* Shutdown. The service stops with daily runs going, and nothing but the shutdown drain (InFlightDetachedRuns) holds
        a detached run any more. Its budget is 15 s, so a drain that ends inside Patience ended because the runs did. */
 
     [Fact]
@@ -295,7 +295,7 @@ public sealed class DailyCollectorDetachTests
         {
             await worker.RunDueCollectorsAsync(server, null!, stopping.Token);
             Assert.True(await BecomesTrueAsync(() => runs.Started(Daily) == 1, Patience), "the daily run starts");
-            Assert.Single(worker.InFlightDailyRuns);
+            Assert.Single(worker.InFlightDetachedRuns);
 
             /* The service stops with the run still going. */
             stopping.Cancel();
@@ -308,7 +308,7 @@ public sealed class DailyCollectorDetachTests
             runs.ReleaseAll();
             Assert.True(await EndsWithinAsync(drain, Patience), "the stop finishes once the run has");
             Assert.Equal(1, runs.Finished(Daily));
-            Assert.True(await BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 0, Patience), "a run that ended is no longer tracked");
+            Assert.True(await BecomesTrueAsync(() => worker.InFlightDetachedRuns.Count == 0, Patience), "a run that ended is no longer tracked");
         }
         finally
         {
@@ -331,13 +331,13 @@ public sealed class DailyCollectorDetachTests
         {
             Assert.True(await BecomesTrueAsync(() => runs.Started(Daily) == 16, Patience), "16 daily runs start at once");
             Assert.True(await BecomesTrueAsync(() => WaitLines(logger).Count == 1, Patience), "the 17th run is queued for a permit");
-            var tracked = worker.InFlightDailyRuns.ToList();
+            var tracked = worker.InFlightDetachedRuns.ToList();
             Assert.Equal(Servers, tracked.Count);
 
             /* Only the queued run can see the stop: the 16 that started hold on a wait that ignores it. */
             stopping.Cancel();
             Assert.True(
-                await BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 16, Patience),
+                await BecomesTrueAsync(() => worker.InFlightDetachedRuns.Count == 16, Patience),
                 "a run queued for a permit must end at once on the stopping token");
             var ended = tracked.Single(t => t.IsCompleted);
             Assert.True(
@@ -368,7 +368,7 @@ public sealed class DailyCollectorDetachTests
         /* The wait the cases above call is the wait the shutdown makes: ExecuteAsync reaches it once, and it is
            the one place the detached daily runs join the shutdown wait. */
         Assert.Equal(1, CountOf(worker, "await DrainInFlightAsync(inFlightSweeps);"));
-        Assert.Equal(1, CountOf(worker, "inFlight.AddRange(InFlightDailyRuns);"));
+        Assert.Equal(1, CountOf(worker, "inFlight.AddRange(InFlightDetachedRuns);"));
     }
 
     /* The re-read after a long wait. A run queued for a permit can wait for hours behind other daily runs, so what it
@@ -423,11 +423,11 @@ public sealed class DailyCollectorDetachTests
 
             runs.ReleaseOne();
             Assert.True(
-                await BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 15 || runs.HasStarted(queuedId, Daily), Patience),
+                await BecomesTrueAsync(() => worker.InFlightDetachedRuns.Count == 15 || runs.HasStarted(queuedId, Daily), Patience),
                 "the queued run ends once a permit frees");
             Assert.False(runs.HasStarted(queuedId, Daily), "a run that finds its server removed must not run");
             Assert.Equal(16, runs.Started(Daily));
-            Assert.Equal(15, worker.InFlightDailyRuns.Count);
+            Assert.Equal(15, worker.InFlightDetachedRuns.Count);
         }
         finally
         {
@@ -452,11 +452,11 @@ public sealed class DailyCollectorDetachTests
 
             runs.ReleaseOne();
             Assert.True(
-                await BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 15 || runs.HasStarted(queuedId, Daily), Patience),
+                await BecomesTrueAsync(() => worker.InFlightDetachedRuns.Count == 15 || runs.HasStarted(queuedId, Daily), Patience),
                 "the queued run ends once a permit frees");
             Assert.False(runs.HasStarted(queuedId, Daily), "a run that finds its server disconnected must not run");
             Assert.Equal(16, runs.Started(Daily));
-            Assert.Equal(15, worker.InFlightDailyRuns.Count);
+            Assert.Equal(15, worker.InFlightDetachedRuns.Count);
         }
         finally
         {
@@ -514,7 +514,7 @@ public sealed class DailyCollectorDetachTests
     {
         runs.ReleaseOne();
         Assert.True(
-            await BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 15 || runs.HasStarted(queuedId, Daily), Patience),
+            await BecomesTrueAsync(() => worker.InFlightDetachedRuns.Count == 15 || runs.HasStarted(queuedId, Daily), Patience),
             "the queued run ends once a permit frees");
     }
 
@@ -537,7 +537,7 @@ public sealed class DailyCollectorDetachTests
             await WakeTheQueuedRunAsync(worker, runs, queuedId);
             Assert.False(runs.HasStarted(queuedId, Daily), "a run that finds collection paused must not run");
             Assert.Equal(16, runs.Started(Daily));
-            Assert.Equal(15, worker.InFlightDailyRuns.Count);
+            Assert.Equal(15, worker.InFlightDetachedRuns.Count);
 
             /* Nothing else moves a due time on a resume, so a skipped run left a day on would wait until tomorrow:
                it is due again, and the first pass after the resume runs it. */
@@ -572,7 +572,7 @@ public sealed class DailyCollectorDetachTests
             await WakeTheQueuedRunAsync(worker, runs, queuedId);
             Assert.False(runs.HasStarted(queuedId, Daily), "a run whose collector was disabled while it waited must not run");
             Assert.Equal(16, runs.Started(Daily));
-            Assert.Equal(15, worker.InFlightDailyRuns.Count);
+            Assert.Equal(15, worker.InFlightDetachedRuns.Count);
         }
         finally
         {
@@ -604,7 +604,7 @@ public sealed class DailyCollectorDetachTests
             await WakeTheQueuedRunAsync(worker, runs, queuedId);
             Assert.False(runs.HasStarted(queuedId, Daily), "a run whose collector no longer applies to the target must not run");
             Assert.Equal(16, runs.Started(Daily));
-            Assert.Equal(15, worker.InFlightDailyRuns.Count);
+            Assert.Equal(15, worker.InFlightDetachedRuns.Count);
         }
         finally
         {

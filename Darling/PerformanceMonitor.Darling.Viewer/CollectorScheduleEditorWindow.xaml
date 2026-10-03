@@ -30,6 +30,7 @@
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <StackPanel Grid.Row="0" Margin="0,0,0,10">
@@ -65,7 +66,7 @@
                 <ComboBoxItem Content="Low-Impact"/>
             </ComboBox>
             <Button x:Name="ResetDefaultsButton" Content="_Reset to Defaults" Margin="16,0,0,0" Click="ResetDefaults_Click"
-                    ToolTip="Replace the current values with the built-in default frequencies and retention"/>
+                    ToolTip="Replace the current values with the built-in default frequencies and retention, and clear every run time"/>
             <TextBlock Text="Copy from:" VerticalAlignment="Center" Margin="20,0,8,0"/>
             <ComboBox x:Name="CopyFromServerCombo" Width="180" VerticalAlignment="Center"/>
             <Button x:Name="CopyFromServerButton" Content="Cop_y" Margin="8,0,0,0" Click="CopyFromServer_Click"
@@ -77,11 +78,17 @@
 
         <DataGrid Grid.Row="4" x:Name="ScheduleGrid" Style="{StaticResource DarkGrid}"
                   AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
-                  HeadersVisibility="Column" HorizontalScrollBarVisibility="Auto">
+                  HeadersVisibility="Column" HorizontalScrollBarVisibility="Auto"
+                  SelectionChanged="ScheduleGrid_SelectionChanged" CellEditEnding="ScheduleGrid_CellEditEnding">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Collector" Binding="{Binding Name}" Width="180" IsReadOnly="True"/>
                 <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled, UpdateSourceTrigger=PropertyChanged}" Width="70"/>
                 <DataGridTextColumn Header="Every (min)" Binding="{Binding FrequencyMinutes}" Width="90"/>
+                <!-- The #4938 run time of a daily collector: an HH:MM time on the monitored server's own clock, "Use
+                     default" (no value here, so the fleet's time applies, or none), and on a server row "None" (no fixed
+                     time on this server, which stops a fleet-wide time). The line under the grid says what the selected
+                     row's time means in server time and UTC. -->
+                <DataGridTextColumn Header="Run at" Binding="{Binding RunAtText}" Width="90"/>
                 <DataGridTextColumn Header="Keep (days)" Binding="{Binding RetentionDays}" Width="90"/>
                 <!-- The #3477 per-collector database scope: comma-separated names (the excluded-databases
                      entry format), blank = every database. Only the per-database fan-out collectors read
@@ -91,12 +98,18 @@
             </DataGrid.Columns>
         </DataGrid>
 
+        <!-- What the selected row's Run at time means (#4938): the server-clock and UTC times, the spread across a fleet,
+             the next run on a server row. Filled in code from CollectorScheduleRunAtText, which is built on the shared
+             run-time rules, so what is shown is what the service does. -->
+        <TextBlock Grid.Row="5" x:Name="RunAtDetailText" Margin="0,8,0,0" MinHeight="34" FontSize="12" TextWrapping="Wrap"
+                   Foreground="{DynamicResource ForegroundBrush}"/>
+
         <!-- The delta cadence cap sentence is appended in code from the shared gap-policy constants, so the
              shown numbers can't drift from what ValidateSchedule enforces (#3532). -->
-        <TextBlock Grid.Row="5" x:Name="FooterHintText" Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource DimTextBrush}" TextWrapping="Wrap"
-                   Text="Every (min): 0 collects once on server load. Keep (days) must be at least 1. Databases: comma-separated allow-list for per-database collectors — blank collects every database, and a server's excluded databases always stay excluded. Changes apply on the service's next reload."/>
+        <TextBlock Grid.Row="6" x:Name="FooterHintText" Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource DimTextBrush}" TextWrapping="Wrap"
+                   Text="Every (min): 0 collects once on server load. Keep (days) must be at least 1. Run at: a 24-hour time such as 02:00 on the monitored server's own clock, for a collector that runs once a day or less often. Use default takes the fleet-wide time, and on a server None stops a fleet-wide time. Databases: comma-separated allow-list for per-database collectors — blank collects every database, and a server's excluded databases always stay excluded. Changes apply on the service's next reload."/>
 
-        <DockPanel Grid.Row="6" Margin="0,12,0,0" LastChildFill="False">
+        <DockPanel Grid.Row="7" Margin="0,12,0,0" LastChildFill="False">
             <!-- Fleet-scale bulk reset: clears every server's per-server override in one write so they all fall
                  back to the fleet-wide default (the shortcut over reverting servers one at a time). Confirmed +
                  applied immediately, separate from the per-scope Save. -->

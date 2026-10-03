@@ -145,7 +145,9 @@ public partial class MainWindow : Window
         // Coupling stays acyclic: ServerManager → IProfileLookup ← ProfileManager, ProfileManager → ServerManager.
         _profileManager = new ProfileManager(_serverManager, new AppLoggerAdapter<ProfileManager>());
         _serverManager.ProfileLookup = _profileManager;
-        _scheduleManager = new ScheduleManager(App.ConfigDirectory);
+        /* #4938: with the app's logger, a run time that is ignored (a value that is not HH:MM, or a time on an hourly collector)
+           is written to the log as a warning that names the collector, not dropped without a word. */
+        _scheduleManager = new ScheduleManager(App.ConfigDirectory, new AppLoggerAdapter<ScheduleManager>());
         /* #4999: every LocalDataService judges a collector by the interval it is scheduled at on that server, whoever
            builds it (the Collection Health tab builds its own, as do five other places), not only the MCP host's
            instance. Wired once here, beside the managers it answers from, and read by each instance where it is used. */
@@ -377,7 +379,7 @@ public partial class MainWindow : Window
                         s.DisplayNameWithIntent;
                 }
                 return map;
-            });
+            }, OpenTabClocks);
 
             // Availability Groups (#991): self-loading, and its tab stays hidden until a load finds AG rows.
             AvailabilityGroupsContent.Initialize(_dataService);
@@ -1418,6 +1420,25 @@ public partial class MainWindow : Window
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The clock of every open server tab, by server id (#4966): the snapshot the Job History tab hands its read, so a server with
+    /// no collected clock yet is windowed on its open tab's clock before the machine's, as <see cref="OpenTabClockFor"/> gives the
+    /// Alerts History list. Taken on the UI thread (the open tabs are UI objects) and read off it as a plain dictionary.
+    /// </summary>
+    private IReadOnlyDictionary<int, ServerClock> OpenTabClocks()
+    {
+        var clocks = new Dictionary<int, ServerClock>();
+        foreach (var tab in _openServerTabs.Values)
+        {
+            if (tab.Content is ServerTab st)
+            {
+                clocks[st.ServerId] = st.ServerClock;
+            }
+        }
+
+        return clocks;
     }
 
     /// <summary>

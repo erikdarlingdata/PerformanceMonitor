@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer
@@ -18,7 +20,7 @@ namespace PerformanceMonitor.Darling.Viewer
     /// The per-collector collection-history drill window (W1i), copied from Lite's
     /// <c>Windows/CollectionLogWindow.xaml.cs</c>. The Collection Health "Health Summary" grid opens it
     /// on double-click. Purely data-driven; the one change from Lite is the data call — repointed to
-    /// <see cref="ViewerDataService.GetCollectionLogByCollectorAsync"/> (Postgres). Copy/Export use the
+    /// <see cref="ViewerDataService.GetCollectionLogByCollectorAsync(int, string, DateTime, DateTime, CancellationToken)"/> (Postgres). Copy/Export use the
     /// shared PerformanceMonitor.Ui <see cref="DataGridExport"/> with the viewer's comma separator.
     /// </summary>
     public partial class CollectionLogWindow : Window
@@ -45,11 +47,43 @@ namespace PerformanceMonitor.Darling.Viewer
             await LoadCollectionLogAsync();
         }
 
+        /// <summary>
+        /// The drill's read and its "Showing since" note in one call (#4966): one collector's runs over the trailing week
+        /// (<see cref="ViewerDataService.CollectionLogDrillHours"/>), and the note on <paramref name="banner"/> saying where this
+        /// server's collection log starts when that is later than the week's start. The read has no row cap, so the note follows the
+        /// coverage rule: the later of the server's first collection and the log's retention edge, never the collector's first run,
+        /// so a collector that ran late in a covered week says nothing. The probe starts beside the read and asks about the same
+        /// window: one start and one end, worked out once, go to both, so a pinned end bounds the read as it bounds the probe, and a
+        /// run after that end is in neither the rows nor the note. The two run at once, so the call declares its width of two to the
+        /// store's deadline (<see cref="ViewerReadFanOut"/>) as the tabs do, and ends it when the read is in, before the note awaits
+        /// its probe. The note names its times in the viewer's display zone, as the tabs' notes do.
+        /// </summary>
+        /// <param name="asOfUtc">The window's end; null for now. A test names it to pin the window.</param>
+        internal static async Task<List<CollectionLogRow>> ReadDrillAsync(
+            ViewerDataService dataService, int serverId, string collectorName, TextBlock banner, DateTime? asOfUtc = null)
+        {
+            var endUtc = asOfUtc ?? DateTime.UtcNow;
+            var startUtc = endUtc.AddHours(-ViewerDataService.CollectionLogDrillHours);
+            using var readFanOut = ViewerReadFanOut.Of(2);
+            var dataStartTask = dataService.GetCollectionLogDataStartAsync(serverId, startUtc, endUtc);
+            var dataReadTask = dataService.GetCollectionLogByCollectorAsync(serverId, collectorName, startUtc, endUtc);
+            await ViewerProbeWatch.AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Collection Log Drill");
+            var logs = dataReadTask.Result;
+
+            /* The read is in: end the declared width here, before the note awaits its probe, so that await is not priced against
+               contention that has already finished. */
+            readFanOut.Release();
+
+            await ViewerServerTab.ShowEventDataStartAsync(
+                banner, dataStartTask, "Collection Log Drill", startUtc, logs.Select(l => (DateTime?)l.CollectionTime));
+            return logs;
+        }
+
         private async Task LoadCollectionLogAsync()
         {
             try
             {
-                var logs = await _dataService.GetCollectionLogByCollectorAsync(_serverId, _collectorName);
+                var logs = await ReadDrillAsync(_dataService, _serverId, _collectorName, CollectionLogTruncationBanner);
                 LogDataGrid.ItemsSource = logs;
 
                 if (logs.Count > 0)

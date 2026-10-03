@@ -363,15 +363,31 @@ WITH NO DATA", ct);
                asserts the outcome (the sweep removes the legacy), not that the first call does. */
             var sweepLog = new CapturingTestLogger();
             var sweepDropped = 0;
-            for (var attempt = 0;
-                 attempt < 5 && await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct);
-                 attempt++)
+            /* DropRetiredBaselineAggregatesAsync catches every non-cancel exception into its logger, so a drop
+               that broke the connection surfaced here as "Connection is not open" from the loop's next
+               statement while the real error sat in sweepLog, which only the assert below prints and a thrown
+               loop never reaches. Any failure in the loop, and a connection no longer open after a drop, now
+               fails with the sweep's log in the message. */
+            try
             {
-                if (attempt > 0)
+                for (var attempt = 0;
+                     attempt < 5 && await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct);
+                     attempt++)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                    if (attempt > 0)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                    }
+                    sweepDropped += await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, sweepLog, dayForty, ct);
+                    if (connection.State != System.Data.ConnectionState.Open)
+                    {
+                        throw new InvalidOperationException($"the connection is {connection.State} after sweep attempt {attempt + 1}");
+                    }
                 }
-                sweepDropped += await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, sweepLog, dayForty, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new Xunit.Sdk.XunitException($"the sweep loop failed with {ex.GetType().Name}: {ex.Message} -- the sweep's log: {sweepLog.Joined}", ex);
             }
             Assert.True(sweepDropped >= 1, $"the sweep never dropped the legacy aggregate: {sweepLog.Joined}");
             Assert.False(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct), "the legacy aggregate must be gone");

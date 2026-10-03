@@ -74,7 +74,9 @@ public partial class ViewerServerTab
         {
             _pendingActiveQueriesWindow = null;
             var pendingDataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, pending.FromUtc, pending.ToUtc);
-            var (pendingTotalCount, pendingSnapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, pending.FromUtc, pending.ToUtc, databaseNames: SelectedDatabaseFilter);
+            var pendingReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, pending.FromUtc, pending.ToUtc, databaseNames: SelectedDatabaseFilter);
+            await AwaitReadWatchingProbeAsync(pendingReadTask, pendingDataStartTask, "Active Queries");
+            var (pendingTotalCount, pendingSnapshots) = pendingReadTask.Result;
             _querySnapshotsFilterMgr!.UpdateData(pendingSnapshots);
             LatestSnapshotIndicator.Text = pendingSnapshots.Count < pendingTotalCount
                 ? $"{pending.Indicator} — Showing the newest 1,000 of {pendingTotalCount:N0}"
@@ -88,7 +90,9 @@ public partial class ViewerServerTab
            since: say where coverage starts (the Queries tab's "Showing since" banner) rather than draw a shorter
            range as if it were the whole. */
         var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
+        var (totalCount, snapshots) = dataReadTask.Result;
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
         UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), startUtc);
@@ -109,7 +113,9 @@ public partial class ViewerServerTab
         try
         {
             var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
+            var (totalCount, snapshots) = dataReadTask.Result;
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
             LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
             UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), e.StartUtc);
@@ -368,7 +374,9 @@ public partial class ViewerServerTab
            rows read, and set the banner once they are bound, as the deep-link branch of LoadActiveQueriesAsync does for
            the same window (a deep link reaches both, and the two writes agree). */
         var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, fromUtc, toUtc);
-        var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
+        var (totalCount, snapshots) = dataReadTask.Result;
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LatestSnapshotIndicator.Text = snapshots.Count < totalCount
             ? $"{indicator} — Showing the newest 1,000 of {totalCount:N0}"
