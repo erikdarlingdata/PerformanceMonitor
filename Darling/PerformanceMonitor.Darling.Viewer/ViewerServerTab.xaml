@@ -2153,6 +2153,7 @@
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Metric" Binding="{Binding Metric}" Width="2*"/>
                                 <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*"/>
+                                <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime"/>
                             </DataGrid.Columns>
                         </DataGrid>
                         <!-- Shown only where the cpu_scheduler_stats collector does not run (Azure SQL Database). -->
@@ -2924,6 +2925,7 @@
                         <DataGridTextColumn Binding="{Binding SuccessfulRunCount}" ElementStyle="{StaticResource NumericCell}" Width="140">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SuccessfulRunCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Successful Runs (30d)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime"/>
                     </DataGrid.Columns>
                 </DataGrid>
                 <!-- Shown only where the running_jobs collector does not run (Azure SQL Database has no SQL Server Agent) or has never run for this server (AWS RDS). -->
@@ -3703,15 +3705,22 @@
         <TabItem Header="Latches &amp; Spinlocks">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
                 <!-- Latch wait-time trend (top 5 classes by delta wait) + per-class latest-snapshot grid. -->
-                <scottplot:WpfPlot Grid.Row="0" x:Name="LatchStatsChart"/>
-                <Expander Grid.Row="1" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
+                <!-- "Showing since <start>" when this server's latch_stats rows start after the range does: the trend draws a flat zero over an empty stretch (#4966). -->
+                <TextBlock Grid.Row="0" x:Name="LatchStatsTruncationBanner" Visibility="Collapsed"
+                           Padding="8,4" FontWeight="Bold"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Background="#22FFAA00"/>
+                <scottplot:WpfPlot Grid.Row="1" x:Name="LatchStatsChart"/>
+                <Expander Grid.Row="2" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                     <DataGrid x:Name="LatchStatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220" Margin="0,4,0,0">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Latch Class" Binding="{Binding LatchClass}" Width="*"/>
@@ -3724,13 +3733,19 @@
                             <DataGridTextColumn Header="Wait Time (ms)" Binding="{Binding WaitTimeMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                             <DataGridTextColumn Header="Max Wait (ms)" Binding="{Binding MaxWaitTimeMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                             <DataGridTextColumn Header="Waiting Reqs (total)" Binding="{Binding WaitingRequestsCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                            <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </Expander>
 
                 <!-- Spinlock collisions trend (top 5 spinlocks by delta collisions) + per-spinlock snapshot grid. -->
-                <scottplot:WpfPlot Grid.Row="2" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
-                <Expander Grid.Row="3" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
+                <!-- "Showing since <start>" when this server's spinlock_stats rows start after the range does: the trend draws a flat zero over an empty stretch (#4966). -->
+                <TextBlock Grid.Row="3" x:Name="SpinlockStatsTruncationBanner" Visibility="Collapsed"
+                           Padding="8,4" FontWeight="Bold"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Background="#22FFAA00"/>
+                <scottplot:WpfPlot Grid.Row="4" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
+                <Expander Grid.Row="5" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                     <DataGrid x:Name="SpinlockStatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220" Margin="0,4,0,0">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Spinlock" Binding="{Binding SpinlockName}" Width="*"/>
@@ -3743,6 +3758,7 @@
                             <DataGridTextColumn Header="Spins (total)" Binding="{Binding Spins, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                             <DataGridTextColumn Header="Sleep Time" Binding="{Binding SleepTime, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                             <DataGridTextColumn Header="Backoffs" Binding="{Binding Backoffs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                            <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </Expander>
