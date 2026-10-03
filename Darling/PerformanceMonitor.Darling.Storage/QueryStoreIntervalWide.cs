@@ -489,9 +489,11 @@ WHERE t.server_id = $1;";
     /// field store carries zero such rows once raw retention (days) has aged the post-upgrade window out, so
     /// the answer is "none" on the common path, and it is what lets clause 6 answer TRUE only on the rare
     /// upgraded-recently store this table cannot yet serve correctly. <b>The cost (#4952):</b> with only the
-    /// (<c>server_id</c>, <c>collection_time</c>) index this EXISTS finds nothing, so it has to fetch every heap page
-    /// the server's window touches (855 k raw rows and 56 k blocks at 24 h on a large store) to say no. It is an
-    /// exact read, not a cached answer, because the collector can still store a NULL start on a catalog join miss.
+    /// (<c>server_id</c>, <c>collection_time</c>) index this EXISTS finds nothing, so it would have to fetch every
+    /// heap tuple the server's window touches to say no. The partial index
+    /// <see cref="PgTableTuning.LegacyRowIndexName"/> (built on the start path) holds only the rows with no interval
+    /// start, so the "no" is an index-only read. It stays an exact read, not a cached answer, because the collector
+    /// can still store a NULL start on a catalog join miss.
     /// Bounded to the SAME range the table read would use
     /// (<see cref="ClampedStart"/> through <paramref name="windowEnd"/> in <see cref="ReadsTableAsync"/>), not
     /// the caller's raw windowStart, so a legacy row outside the served range cannot force a needless refusal.

@@ -45,7 +45,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// (<c>WITH (timescaledb.transaction_per_chunk)</c>) is deliberately not offered: it takes a ShareLock on each chunk
 /// it builds, for that chunk's scan, and the collector's COPY into a chunk waits behind it under a 10 s deadline.
 /// The Query Store backfill writes backdated rows into older chunks as well as the newest, so no chunk of
-/// <c>collect.query_store_stats</c>, a hypertable, is safe to lock while the service runs, and no spec targets it.</para>
+/// <c>collect.query_store_stats</c>, a hypertable, is safe to lock while the service runs, and no spec targets it. The partial index that serves the legacy-row check is
+/// built on the start path instead (<c>PgTableTuning</c>), before collectors start.</para>
 /// </summary>
 public static class QueryStoreBackgroundIndexes
 {
