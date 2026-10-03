@@ -91,6 +91,11 @@ public static class RawWindowFloor
     /// <paramref name="endUtc"/>, so it can sit before <paramref name="startUtc"/> when the rows reach back past the
     /// window. Null when the window [<paramref name="startUtc"/>, <paramref name="endUtc"/>] holds nothing at all,
     /// which the caller reports as "nothing was read" rather than as an absence of activity.
+    ///
+    /// <para>There is deliberately no short-window skip in here (#4966). The desktop viewer's three floor probes return null at once
+    /// for a window no longer than <see cref="DurationTrendRouting.TruncationSlack"/>, because no coverage note can show for one.
+    /// Darling's MCP tools call this method too and read its null as "nothing was read", so a skip here would make a short MCP
+    /// window report that nothing was read. The skip lives in the viewer's methods, ahead of this call.</para>
     /// </summary>
     /// <param name="commandTimeoutSeconds">The caller's deadline class — the MCP read deadline by default; the
     /// viewer passes its interactive one.</param>
