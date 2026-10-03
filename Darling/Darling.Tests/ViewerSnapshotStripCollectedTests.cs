@@ -122,6 +122,9 @@ public sealed class ViewerSnapshotStripCollectedLiveTests
 
         var t1 = QueryGridSeed.NowToTheMinute().AddMinutes(-30);
         var t2 = t1.AddMinutes(10);
+        /* Both session collections sit inside ONE 1-minute bucket (the 20-minute window below picks 1-minute buckets), at off-minute seconds. */
+        var s1 = t2.AddSeconds(10);
+        var s2 = t2.AddSeconds(50);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
@@ -145,7 +148,7 @@ INSERT INTO session_summary_stats
      top_application_name, top_application_connections, top_host_name, top_host_connections)
 VALUES ($1, $2, $3, 'strip-session', 10, 1, 8, 1, 0, 0, 0, 3, 'App', 5, 'Host', 4)", connection);
             session.Parameters.AddWithValue(t == t1 ? 1L : 2L);
-            session.Parameters.AddWithValue(t);
+            session.Parameters.AddWithValue(t == t1 ? s1 : s2);
             session.Parameters.AddWithValue(SessionServerId);
             await session.ExecuteNonQueryAsync(ct);
         }
@@ -155,9 +158,10 @@ VALUES ($1, $2, $3, 'strip-session', 10, 1, 8, 1, 0, 0, 0, 3, 'App', 5, 'Host', 
         var summary = await viewer.GetPlanCacheSummaryAsync(PlanServerId, t1.AddHours(-1), t2.AddHours(1), ct);
         Assert.Equal(t2, summary.CollectionTime);
 
-        /* A window over one coarse bucket holding both collections: the strip's time is the newest collection, not the bucket's grid time. */
+        /* One 1-minute bucket holds both collections: the strip's time is the newest collection (s2), not the bucket's grid time or its first collection. */
         var points = await viewer.GetSessionStatsAsync(SessionServerId, t1.AddMinutes(-5), t2.AddMinutes(5), ct);
-        Assert.Equal(t2, points[^1].LatestCollectionTime);
+        Assert.Equal(s2, points[^1].LatestCollectionTime);
+        Assert.NotEqual(points[^1].CollectionTime, points[^1].LatestCollectionTime);
 
         var empty = await viewer.GetPlanCacheSummaryAsync(PlanServerId, t2.AddDays(1), t2.AddDays(2), ct);
         Assert.Null(empty.CollectionTime);
