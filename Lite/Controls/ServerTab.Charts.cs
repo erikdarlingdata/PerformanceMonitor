@@ -1601,16 +1601,11 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// The hover line of one Duration Trends point (#4989): the point draws its bucket's slowest run, so the line says how
-    /// many runs it is the slowest of and what the average run took.
+    /// many runs it is the slowest of and what the average run took. The words are the shared
+    /// <see cref="CollectorDurationHoverText"/>'s, which the Darling viewer's chart uses too.
     /// </summary>
-    internal static string CollectorDurationDetail(CollectorDurationBucket bucket)
-    {
-        static string Ms(double value) => value == Math.Floor(value)
-            ? value.ToString("N0", System.Globalization.CultureInfo.CurrentCulture)
-            : value.ToString("N1", System.Globalization.CultureInfo.CurrentCulture);
-
-        return $"Slowest of {bucket.RunCount.ToString("N0", System.Globalization.CultureInfo.CurrentCulture)} {(bucket.RunCount == 1 ? "run" : "runs")}; average {Ms(bucket.AverageDurationMs)} ms";
-    }
+    internal static string CollectorDurationDetail(CollectorDurationBucket bucket) =>
+        CollectorDurationHoverText.Detail(bucket.RunCount, bucket.AverageDurationMs);
 
     /// <summary>
     /// What the Duration Trends chart draws from its own read (<see cref="LocalDataService.GetCollectorDurationTrendAsync"/>,

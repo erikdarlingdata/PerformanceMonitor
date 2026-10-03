@@ -151,7 +151,7 @@ public class ComposeClientTimeoutAttributionTests
     {
         var call = CallArguments(WebCode(), "await RunComposedPanelAsync(postgres, body, context.RequestAborted");
 
-        Assert.Equal("await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true", call);
+        Assert.Equal("await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true", call);
     }
 
     [Fact]
