@@ -132,6 +132,12 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "ViewerServerTab.xaml", "ProcedureStatsGrid", "LastExecutionTimeLocal", Name(typeof(ViewerProcedureStatsRow)), "LastExecutionTime" },
         { "ViewerServerTab.xaml", "ProcedureStatsGrid", "CachedTimeFormatted", Name(typeof(ViewerProcedureStatsRow)), "CachedTime" },
         { "ViewerServerTab.xaml", "RunningJobsGrid", "StartTimeLocal", Name(typeof(RunningJobRow)), "StartTime" },
+
+        /* The last "Collected" column of the four newest-snapshot grids (#4966): naive-UTC CollectionTime, shown in the display zone. */
+        { "ViewerServerTab.xaml", "RunningJobsGrid", "CollectionTimeLocal", Name(typeof(RunningJobRow)), "CollectionTime" },
+        { "ViewerServerTab.xaml", "CpuSchedulerGrid", "CollectionTimeLocal", Name(typeof(CpuSchedulerGridRow)), "CollectionTime" },
+        { "ViewerServerTab.xaml", "LatchStatsGrid", "CollectionTimeLocal", Name(typeof(LatchStatsSnapshotRow)), "CollectionTime" },
+        { "ViewerServerTab.xaml", "SpinlockStatsGrid", "CollectionTimeLocal", Name(typeof(SpinlockStatsSnapshotRow)), "CollectionTime" },
         { "ProcedureHistoryWindow.xaml", "HistoryDataGrid", "LastExecutionTimeLocal", Name(typeof(ViewerProcedureStatsHistoryRow)), "LastExecutionTime" },
         { "ProcedureHistoryWindow.xaml", "HistoryDataGrid", "CachedTimeLocal", Name(typeof(ViewerProcedureStatsHistoryRow)), "CachedTime" },
         { "QueryStatsHistoryWindow.xaml", "HistoryDataGrid", "LastExecutionTimeLocal", Name(typeof(ViewerQueryStatsHistoryRow)), "LastExecutionTime" },

@@ -62,6 +62,7 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        /* Four reads in flight for the join below; the two data-start probes run after it under their own scope (#4966). */
         using var readFanOut = ViewerReadFanOut.Of(4);
 
         var latchTrendTask = _dataService.GetLatchStatsTrendAsync(_server.ServerId, startUtc, endUtc);
@@ -71,10 +72,23 @@ public partial class ViewerServerTab
 
         await Task.WhenAll(latchTrendTask, latchSnapshotTask, spinlockTrendTask, spinlockSnapshotTask);
 
+        /* The join is over: free its width before the probes read again, so they are priced against two reads, not four finished ones. */
+        readFanOut.Release();
+
         RenderLatchStatsChart(latchTrendTask.Result);
         LatchStatsGrid.ItemsSource = latchSnapshotTask.Result;
         RenderSpinlockStatsChart(spinlockTrendTask.Result);
         SpinlockStatsGrid.ItemsSource = spinlockSnapshotTask.Result;
+
+        /* #4966: each chart draws a flat zero over an empty stretch, so each says where its collector's coverage starts. The probes stay OUT
+           of the join above: a probe that throws costs the chart's note (DataStartOrNullAsync catches it), never the rows. */
+        using var probeFanOut = ViewerReadFanOut.Of(2);
+        var latchDataStartTask = _dataService.GetLatchStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var spinlockDataStartTask = _dataService.GetSpinlockStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        /* Both probes are awaited on one line, each through the catching helper: neither is left unobserved while the other is awaited. */
+        var (latchDataStart, spinlockDataStart) = (await DataStartOrNullAsync(latchDataStartTask, "Latch Stats"), await DataStartOrNullAsync(spinlockDataStartTask, "Spinlock Stats"));
+        UpdateTruncationBanner(LatchStatsTruncationBanner, latchDataStart, startUtc);
+        UpdateTruncationBanner(SpinlockStatsTruncationBanner, spinlockDataStart, startUtc);
     }
 
     private void RenderLatchStatsChart(List<LatchStatsTrendPoint> data)
