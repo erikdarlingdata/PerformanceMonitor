@@ -86,6 +86,36 @@ public sealed class WebExceptionTextCensusTests
             "— #4283 does not touch what an MCP client sees."
         ),
         (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "ex.InnerException is TimeoutException",
+            "The two statement catch filters (#4605): they only decide whether the runner throws the statement-timeout marker; the exception's text is never read or returned."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "base(inner.Message, inner)",
+            "Both compose markers (#4605) carry the original message for the log. The web route answers the fixed StatementTimeoutText at 400 for the statement marker and never logs or returns its message; the open marker's message reaches the server-error sentence, which ServerErrorResult reclassifies before a browser sees it."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "open.InnerException!.InnerException is TimeoutException",
+            "FromRunException's type-pattern check (#4605): it only decides WHICH fixed sentence an open failure answers with; the exception's text is not read here."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "{marker.InnerException!.Message}",
+            "FromRunException with the remap flag false (#4605): the same ServerError sentence shape as above, built from the original timeout message; no production caller passes false."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "could not get a store connection in time: {open.InnerException.Message}",
+            "FromRunException's open-timeout sentence (#4605): a ServerError that names the cause and is logged at Error; ServerErrorResult reclassifies it before a browser sees it."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "could not open a store connection: {open.InnerException!.Message}",
+            "FromRunException's open-failure sentence (#4605): a ServerError carrying the original message for the log; ServerErrorResult reclassifies it before a browser sees it."
+        ),
+        (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingWebOidc.cs"),
             "return new ExchangeResult(null, ex.Message);",
             "Traced (#4283): ExchangeResult.Error's only reader is DarlingWebHostService's sign-in callback, " +
