@@ -11190,10 +11190,7 @@ AND   j.hypertable_name = '{relation}'", connection))
 
                 if (effective.FrequencyMinutes == 0)
                 {
-                    /* null, not the live mark: the on-load dispatch is not a scheduled sweep body and
-                       never resets it, so folding it in would mix a previous body's bookkeeping
-                       into these rows - the cross-body contamination the reset exists to prevent. */
-                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
+                    await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken);
 
                     /* #3929/#3930: ALSO becomes due again on CollectorScheduleDefaults.OnLoadRecaptureMinutes,
                        seeded from the SAME pre-dispatch watermark used below - the run just above updates it
@@ -11284,6 +11281,21 @@ AND   j.hypertable_name = '{relation}'", connection))
                 server.Config.ServerId,
                 server.Config.DisplayName, online: false, error: ex.Message, cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// #4999: the at-connect run of ONE on-load collector (effective frequency 0), inline in
+    /// <see cref="TryConnectAsync"/>. Internal so a test can drive it with <see cref="RunOneBodyOverride"/> standing
+    /// in for the collector run: the connect path itself needs a store.
+    /// </summary>
+    internal async Task RunOnLoadAsync(
+        ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int serverId, EffectiveSchedule effective,
+        CancellationToken cancellationToken)
+    {
+        /* null, not the live mark: the on-load dispatch is not a scheduled sweep body and
+           never resets it, so folding it in would mix a previous body's bookkeeping
+           into these rows - the cross-body contamination the reset exists to prevent. */
+        await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs: null, cancellationToken);
     }
 
     /// <summary>
