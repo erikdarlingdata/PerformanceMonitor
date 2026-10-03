@@ -33,13 +33,15 @@ public sealed class ViewerSnapshotTimePinTests
     }
 
     [Fact]
-    public void TheLatchLoad_ProbesBothCollectors_OutsideTheJoin_AndCountsThemInTheFanOut()
+    public void TheLatchLoad_ProbesBothCollectors_OutsideTheJoin_AfterItsScopeIsReleased_UnderTheirOwnScope()
     {
         var source = ViewerFile("ViewerServerTab.LatchSpinlock.cs");
-        Assert.Contains("ViewerReadFanOut.Of(6)", source, StringComparison.Ordinal);
+        Assert.Contains("ViewerReadFanOut.Of(4)", source, StringComparison.Ordinal);
+        Assert.Contains("ViewerReadFanOut.Of(2)", source, StringComparison.Ordinal);
         var join = Regex.Match(source, @"await Task\.WhenAll\(([^;]*)\);").Groups[1].Value;
         Assert.DoesNotContain("DataStartTask", join, StringComparison.Ordinal);
-        Assert.True(source.IndexOf("GetLatchStatsDataStartAsync", StringComparison.Ordinal) < source.IndexOf("await Task.WhenAll", StringComparison.Ordinal));
+        Assert.True(source.IndexOf("GetLatchStatsDataStartAsync", StringComparison.Ordinal) > source.IndexOf("readFanOut.Release()", StringComparison.Ordinal));
+        Assert.True(source.IndexOf("readFanOut.Release()", StringComparison.Ordinal) > source.IndexOf("await Task.WhenAll", StringComparison.Ordinal));
         Assert.Contains("DataStartOrNullAsync(latchDataStartTask", source, StringComparison.Ordinal);
         Assert.Contains("DataStartOrNullAsync(spinlockDataStartTask", source, StringComparison.Ordinal);
         var data = ViewerFile("ViewerDataService.LatchSpinlock.cs");

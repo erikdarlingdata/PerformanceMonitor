@@ -62,28 +62,32 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        /* Six reads in flight: the four feeds below and the two charts' data-start probes (#4966). */
-        using var readFanOut = ViewerReadFanOut.Of(6);
+        /* Four reads in flight for the join below; the two data-start probes run after it under their own scope (#4966). */
+        using var readFanOut = ViewerReadFanOut.Of(4);
 
         var latchTrendTask = _dataService.GetLatchStatsTrendAsync(_server.ServerId, startUtc, endUtc);
         var latchSnapshotTask = _dataService.GetLatchStatsSnapshotAsync(_server.ServerId, startUtc, endUtc);
         var spinlockTrendTask = _dataService.GetSpinlockStatsTrendAsync(_server.ServerId, startUtc, endUtc);
         var spinlockSnapshotTask = _dataService.GetSpinlockStatsSnapshotAsync(_server.ServerId, startUtc, endUtc);
 
-        /* #4966: each chart draws a flat zero over an empty stretch, so each says where its collector's coverage starts. The probes stay OUT
-           of the join below: a probe that throws costs the chart's note (DataStartOrNullAsync catches it), never the rows. */
-        var latchDataStartTask = _dataService.GetLatchStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var spinlockDataStartTask = _dataService.GetSpinlockStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
-
         await Task.WhenAll(latchTrendTask, latchSnapshotTask, spinlockTrendTask, spinlockSnapshotTask);
+
+        /* The join is over: free its width before the probes read again, so they are priced against two lanes, not four finished ones. */
+        readFanOut.Release();
 
         RenderLatchStatsChart(latchTrendTask.Result);
         LatchStatsGrid.ItemsSource = latchSnapshotTask.Result;
         ShowSnapshotTime(LatchStatsSnapshotTime, latchSnapshotTask.Result.Count == 0 ? null : latchSnapshotTask.Result[0].CollectionTime);
-        UpdateTruncationBanner(LatchStatsTruncationBanner, await DataStartOrNullAsync(latchDataStartTask, "Latch Stats"), startUtc);
         RenderSpinlockStatsChart(spinlockTrendTask.Result);
         SpinlockStatsGrid.ItemsSource = spinlockSnapshotTask.Result;
         ShowSnapshotTime(SpinlockStatsSnapshotTime, spinlockSnapshotTask.Result.Count == 0 ? null : spinlockSnapshotTask.Result[0].CollectionTime);
+
+        /* #4966: each chart draws a flat zero over an empty stretch, so each says where its collector's coverage starts. The probes stay OUT
+           of the join above: a probe that throws costs the chart's note (DataStartOrNullAsync catches it), never the rows. */
+        using var probeFanOut = ViewerReadFanOut.Of(2);
+        var latchDataStartTask = _dataService.GetLatchStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var spinlockDataStartTask = _dataService.GetSpinlockStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        UpdateTruncationBanner(LatchStatsTruncationBanner, await DataStartOrNullAsync(latchDataStartTask, "Latch Stats"), startUtc);
         UpdateTruncationBanner(SpinlockStatsTruncationBanner, await DataStartOrNullAsync(spinlockDataStartTask, "Spinlock Stats"), startUtc);
     }
 
