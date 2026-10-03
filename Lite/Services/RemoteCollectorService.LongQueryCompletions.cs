@@ -184,7 +184,10 @@ public partial class RemoteCollectorService
                    no session of this install's to drop. */
                 if (enabled)
                 {
-                    var noId = new InvalidOperationException("The long-query trace was not created: this install has no id to name its Extended Events session.");
+                    /* A store that could not read or save the id says so, and that the next cycle tries again; a host with no store has nothing to retry. */
+                    var noId = new InvalidOperationException(InstallIdFailure() is { } idFailure
+                        ? $"The long-query trace was not created: this install has no id for now, because {idFailure}. The next cycle tries again."
+                        : "The long-query trace was not created: this install has no id to name its Extended Events session.");
                     var noIdLine = $"[{server.DisplayName}] {noId.Message}";
                     if (createRepeats)
                     {

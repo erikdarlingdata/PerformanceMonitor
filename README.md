@@ -175,6 +175,8 @@ Darling runs this same shared collector set across a fleet of servers (latch sta
 
 Each Lite install has an eight-character id. Lite makes it at the first start and keeps it in `install-id.json`, in the data folder `%LOCALAPPDATA%\PerformanceMonitorLite-Data\`. The id appears in the name of each session that belongs to this install alone. Two installs that monitor one server never share such a session, so one install cannot drop or stop the other's.
 
+If Lite cannot read `install-id.json` (another program holds it open, or the read fails), it leaves the file as it is and uses no id until it can read it. If it cannot save a new id, it does not use that id either. With no id, Lite creates, starts and drops no session of its own, and the long-query trace records why as a fault. The next collection cycle tries again, at most once a minute. The log says it once as a Warning with the error, then at Debug until the id is read. A file that holds something other than an id record still gets a new id.
+
 #### The sessions
 
 - `PerformanceMonitor_Lite_<id>_LongQueryCompletions` is this install's long-query trace. Lite creates it while the opt-in `long_query_completions` collector is on. It is created with `STARTUP_STATE = OFF`, so it stays stopped after a server restart. Each check starts it again when it finds it stopped.
