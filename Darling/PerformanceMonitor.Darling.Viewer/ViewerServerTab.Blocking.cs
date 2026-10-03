@@ -208,8 +208,13 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadBlockedProcessReportsAsync(DateTime startUtc, DateTime endUtc)
     {
-        var rows = await _dataService.GetRecentBlockedProcessReportsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        /* #4966: say where the reports start (the Queries tab's "Showing since" banner), the earlier of the collector's
+           coverage and the earliest report shown (an event time can reach before the server was added). */
+        var dataStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var read = await _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var rows = read.Rows;
         _blockedProcessFilterMgr!.UpdateData(rows);
+        await ShowEventDataStartAsync(BlockedProcessReportsTruncationBanner, dataStartTask, "Blocked Process Reports", startUtc, rows.Select(r => r.EventTime), ViewerDataService.BlockedProcessReportsRowCap, read.CappedSourceStartUtc);
         await ShowSeparatelyMonitoredNotesAsync();
         await LoadBlockingSlicerAsync(startUtc, endUtc);
     }
@@ -235,9 +240,12 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadDeadlocksAsync(DateTime startUtc, DateTime endUtc)
     {
+        /* #4966: the same banner as Blocked Process Reports, over the deadlocks' own time. */
+        var dataStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, startUtc, endUtc);
         var rows = await _dataService.GetRecentDeadlocksAsync(_server.ServerId, startUtc, endUtc);
         var details = await ParseDeadlocksOffUiThreadAsync(rows);
         _deadlockFilterMgr!.UpdateData(details);
+        await ShowEventDataStartAsync(DeadlocksTruncationBanner, dataStartTask, "Deadlocks", startUtc, rows.Select(r => r.DeadlockTime), ViewerDataService.DeadlocksRowCap);
         await ShowSeparatelyMonitoredNotesAsync();
         await LoadDeadlockSlicerAsync(startUtc, endUtc);
     }
@@ -270,8 +278,11 @@ public partial class ViewerServerTab
     {
         try
         {
-            var rows = await _dataService.GetRecentBlockedProcessReportsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
+            var read = await _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var rows = read.Rows;
             _blockedProcessFilterMgr!.UpdateData(rows);
+            await ShowEventDataStartAsync(BlockedProcessReportsTruncationBanner, dataStartTask, "Blocked Process Reports", e.StartUtc, rows.Select(r => r.EventTime), ViewerDataService.BlockedProcessReportsRowCap, read.CappedSourceStartUtc);
         }
         catch (Exception ex)
         {
@@ -283,8 +294,10 @@ public partial class ViewerServerTab
     {
         try
         {
+            var dataStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             var rows = await _dataService.GetRecentDeadlocksAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             _deadlockFilterMgr!.UpdateData(await ParseDeadlocksOffUiThreadAsync(rows));
+            await ShowEventDataStartAsync(DeadlocksTruncationBanner, dataStartTask, "Deadlocks", e.StartUtc, rows.Select(r => r.DeadlockTime), ViewerDataService.DeadlocksRowCap);
         }
         catch (Exception ex)
         {
