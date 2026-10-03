@@ -562,14 +562,14 @@ public sealed class CollectorHealthClassifierTests
     }
 
     /// <summary>Every read that builds a banding row selects the newest run's note, at the ordinal its mapper
-    /// reads; the viewer's fleet read gets it from plain aggregates (no window function), and the sentence its
+    /// reads (the per-server reads from the newest-run lookup, #4955, the status gate on the row it returns);
+    /// the viewer's fleet read gets it from plain aggregates (no window function), and the sentence its
     /// LIKE looks for is the one the writer writes.</summary>
     [Fact]
     public void EveryDarlingHealthRead_ProjectsTheNewestRunsNote()
     {
-        Assert.Contains("recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note", DarlingDataReader.CollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains("AS latest_run_note", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains("AS recency_rank", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note", DarlingDataReader.CollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
         Assert.Contains("AS latest_run_note", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
         Assert.DoesNotContain("ROW_NUMBER()", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
         Assert.Contains(CollectionHealthRollupSupport.LatestRunNoteRawSql, ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);

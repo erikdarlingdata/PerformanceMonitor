@@ -292,7 +292,8 @@ public sealed class DarlingWorker : BackgroundService
         string Name,
         StoreObjectConvergenceStage Stage,
         StoreObjectChangeSignal Signal,
-        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> EnsureAsync);
+        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> EnsureAsync,
+        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>>? HourlyEnsureAsync = null);
 
     /// <summary>
     /// THE list: every idempotent store-object ensure, in the one order both the start path and the hourly
@@ -334,7 +335,7 @@ public sealed class DarlingWorker : BackgroundService
     /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/>) take an ACCESS EXCLUSIVE lock even
     /// when they change nothing, so since #3817 each is issued only for a table whose compression settings
     /// differ from what the product wants, and a converged store's pass issues none. collection_log's waits at
-    /// most <see cref="TimescaleSupport.CollectionLogSettingsLockTimeout"/> for its lock (#4951). The summary
+    /// most <see cref="TimescaleSupport.HourlyDdlLockTimeout"/> for its lock (#4951). The summary
     /// line carries an elapsed so a slow pass shows.</para>
     /// </summary>
     private static readonly StoreObjectConvergenceStep[] s_storeObjectConvergence =
@@ -347,7 +348,8 @@ public sealed class DarlingWorker : BackgroundService
         /* The compression ENABLE runs only for a table whose settings differ (#3817, see the class remark);
            add_compression_policy's if_not_exists returns -1 for a policy that exists. */
         new("compression policies", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
-            (connection, logger, ct) => TimescaleSupport.ApplyCompressionPolicyAsync(connection, logger, ct)),
+            (connection, logger, ct) => TimescaleSupport.ApplyCompressionPolicyAsync(connection, logger, ct),
+            (connection, logger, ct) => TimescaleSupport.ApplyCompressionPolicyAsync(connection, logger, hourly: true, ct)),
 
         /* collection_log is outside the collector catalog, so the two steps above never reach it; the same three
            idempotent statements, with its own segmentby and a bounded lock wait on its ALTER (#4951). */
@@ -430,7 +432,8 @@ public sealed class DarlingWorker : BackgroundService
            at its own call site today, which the issue names: one failure costs every index in the pass — so
            on this cadence the next hour retries it, which is the change. */
         new("composer performance tuning", StoreObjectConvergenceStage.Tuning, StoreObjectChangeSignal.InPlace,
-            (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, ct)),
+            (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, ct),
+            (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, hourly: true, ct)),
     };
 
     /// <summary>What one convergence pass did, accumulated across its segments so the start path's three
@@ -773,7 +776,7 @@ public sealed class DarlingWorker : BackgroundService
        shutdown drain that awaits the start-path launch (holeRepair, above) also awaits this one — before
        this field existed the Periodic launch was fired with a bare "_ = ", neither drained on shutdown nor
        observed for a fault, so an exception it threw after the calling tick returned would go unlogged. */
-    private Task? _periodicHoleRepair;
+    private volatile Task? _periodicHoleRepair;
 
     /* #2138 phase 1: the auto force-plan bot, constructed by RunCollectionLoopAsync alongside the
        analysis pieces. Null until then. It holds no executor and this build ships none, so its whole
@@ -933,6 +936,12 @@ public sealed class DarlingWorker : BackgroundService
        failure-isolated tenants. */
     private DateTime _nextCompressionCheckUtc = DateTime.MinValue;
 
+    /* #4970: the in-flight hourly store-maintenance tick. Only the launch loop writes it. */
+    private Task? _storeMaintenanceTick;
+
+    /* #4970: the in-flight hourly store self-metrics tick. Only the launch loop writes it. */
+    private Task? _storeMetricsTick;
+
     /* MinValue = the first loop pass after startup runs the fleet sweep (#3466 lane 2), then on the
        operator-configured cadence (fleet_sweep_interval_minutes, default hourly, clamped by
        FleetSweepEngine.ClampIntervalMinutes). Fleet-level by definition — a sweep is one statement about
@@ -981,7 +990,7 @@ public sealed class DarlingWorker : BackgroundService
        re-decided hourly rather than at startup only. Every consumer reads it at call time — the retention
        purge's drop_chunks branch, the self-metrics sweep's hypertable arm, the two provider delegates — so a
        flip mid-run is picked up by each of them on its next pass with no further wiring. */
-    private bool _timescaleAvailable;
+    private volatile bool _timescaleAvailable;
 
     /* #4659: the one fence the collector runner's Query Store COPY and the alert read adapter's saved
        forced-plan failure answer share. */
@@ -3479,91 +3488,7 @@ LIMIT 1";
             if (StampIsDue(_nextCompressionCheckUtc, CompressionCheckSpan, DateTime.UtcNow))
             {
                 _nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);
-
-                /* #3815: the availability re-probe, and the one tenant of this tick that runs OUTSIDE the
-                   _timescaleAvailable gate below — because it is the tenant that CORRECTS that flag. Behind
-                   the gate it would be unreachable in exactly the state it exists for: a latch reading false
-                   cannot be re-opened from inside the block the latch closes. That is why this tick's guard
-                   is the due time alone and the flag moved down one level, and why the stamp is taken above
-                   the probe rather than behind the flag — on a store whose latch reads false the due time
-                   has to advance anyway, or the probe would fire on every 15-second sweep pass instead of
-                   hourly.
-
-                   The cost on a store that is genuinely plain PostgreSQL, a fully supported configuration
-                   that must not be punished for it: one CREATE EXTENSION IF NOT EXISTS that fails, once an
-                   hour, on a pooled connection, saying nothing above Debug. The only other thing this tick
-                   runs for such a store is the store-object convergence pass's non-TimescaleDB steps (#3913,
-                   the else branch below). */
-                if (!_timescaleAvailable)
-                {
-                    await ReprobeTimescaleAvailabilityAsync(stoppingToken);
-                }
-
-                if (_timescaleAvailable)
-                {
-                    await EvaluateCompressionJobHealthAsync(stoppingToken);
-
-                    /* #3812: the retention coverage gate, re-judged on the RUNNING service. Until this line
-                       the only thing that armed a held retention policy was the start-path ensure above, so
-                       "the gate releases the hold by itself once the backfill covers raw" was true only after
-                       a restart — a store on a stable build sat held indefinitely after a backfill that had
-                       worked, with the Retention Held alert still firing and reading like the backfill had
-                       failed. Same tick as the compression check (the constant's comment says why this cadence
-                       and why this order), each half failure-isolated inside its own method with its own
-                       catch, so a retention pass that throws or runs out its budget cannot skip the
-                       compression read and a compression fault cannot skip the retention pass. The Retention
-                       Held self-alert rides INSIDE the compression method and therefore reads the flags as
-                       they stood before this pass: a policy armed here shows as held on this tick's alert read
-                       and resolves on the next hour's, one tick of lag on the resolution edge that is stated
-                       rather than traded for #3575's phase. The first pass after startup fires within seconds
-                       of the start-path ensure (this stamp seeds at MinValue); that pass is deliberately not
-                       skipped — its "Retention re-evaluation:" line is the proof the hourly path is wired on
-                       this store, visible in the same log window an operator reads after a restart, and it
-                       costs twenty catalog rows and twenty chunk-pruned min() reads.
-
-                       THE HOURLY STORE-MAINTENANCE TICK, named. It is the home for every "we decided this at
-                       startup and never re-decided it" defect on the store side: #3812 and #3815 are its
-                       tenants, and #3816 (job self-heal covers compression only) and #3817 (store-object
-                       convergence only at startup) are queued as further ones — not built here. The contract
-                       a tenant signs: its own method, its own catch-all, awaited as its own statement in the
-                       gated block AFTER the compression read (the #3575 phase argument on
-                       s_compressionCheckInterval), in the order it appears; a new tenant is one more await
-                       line below this one. A tenant that CORRECTS the gate is the single exception and signs a
-                       different contract — it goes above the gate, not below the compression read, because
-                       inside it a false flag would block its own correction. #3815 is that case, and the gate
-                       has exactly one input, so there is no second one to write. No delegate list yet,
-                       deliberately — three tenants do not justify the indirection, and a list would hide the
-                       order the phase argument depends on. */
-                    await ReevaluateRetentionPoliciesAsync(stoppingToken);
-
-                    /* #3817: the FOURTH tenant, and the one that signs the contract the comment above spells
-                       out — its own method, its own catch-all, one awaited statement, LAST. The store-object
-                       convergence pass: every idempotent ensure the start path runs, re-run here, so one
-                       failed item heals within the hour instead of at the next restart. It is last for the
-                       same #3575 reason the retention pass is third: the compression read must sample the job
-                       catalog at :30 past the minute, and this pass — the heaviest of the four on a store
-                       that is NOT converged — must not be ahead of it pushing that sample toward the :MM:00
-                       instant the policies fire on. The ordering is pinned in RetentionReevaluationTests and
-                       TimescaleAvailabilityReprobeTests, both of which now name four tenants.
-
-                       Its first pass fires within seconds of the start-path pass (the tick's stamp seeds at
-                       MinValue), and that is deliberate for the reason #3812 gives about its own: the
-                       "Store object convergence:" line without the "at startup" prefix is the proof the
-                       hourly path is wired on THIS store, in the same log window an operator reads after a
-                       restart. On a converged store that pass costs catalog reads and two metadata ALTERs. */
-                    await ConvergeStoreObjectsAsync(stoppingToken);
-                }
-                else
-                {
-                    /* #3913: the same convergence pass on a store WITHOUT TimescaleDB, walking only the steps
-                       that run on every store shape (the Ungated and Tuning stages the start path already
-                       runs there): the baseline relations, the store's statement statistics, the composer's
-                       covering indexes. Before this, nothing re-ran on such a store between restarts, so a
-                       dropped fallback view, or an extension a DBA created by hand, waited for the next
-                       start. None of the compression-phase reasoning above applies, since a store without
-                       TimescaleDB has no policy jobs to sample. */
-                    await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
-                }
+                TryStartStoreMaintenanceTick(token => RunStoreMaintenanceTickAsync(token), stoppingToken);
             }
 
             /* #2068: the store self-metrics sweep. Capacity forecasting previously required ad-hoc
@@ -3646,81 +3571,10 @@ LIMIT 1";
             /* #4732: NextGridStamp writes at most one interval ahead, and s_storeMetricsInterval is the one it uses. */
             if (StampIsDue(_nextStoreMetricsUtc, s_storeMetricsInterval, DateTime.UtcNow))
             {
-                _nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, DateTime.UtcNow, s_storeMetricsInterval);
-
-                /* #4834: the longest single checkpoint sync the minute samples saw since the last tick, taken ONCE and
-                   here, so the window closes on the hour whatever the sweep below goes on to do. The sweep stores it on
-                   the hour's checkpointer row; the checkpointer evaluation and get_store_metrics both read it back from
-                   that row, so neither is handed a window. */
-                var checkpointWindow = _checkpointSyncSampler.TakeWindowMax();
-
                 /* #4012's review: the deadlock re-mask inside the sweep keys an alert whose report is gone under the
                    same log-hash key the runner's log-event runs share. */
                 _pgDeadlockRemaskKey = runner.LogHashKey;
-                await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);
-
-                /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
-                   regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
-                if (_selfAlerts is not null)
-                {
-                    try
-                    {
-                        await _selfAlerts.EvaluateCollectorCostAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "collector-cost self-alert evaluation failed");
-                    }
-
-                    /* #3783: the two store physical-health conditions the sweep just wrote the evidence for —
-                       the dimensions' TOAST utilisation (dormant until the store carries pg_freespacemap; the
-                       evaluator says why) and the checkpointer's last interval, differenced from the newest
-                       two checkpointer rows. Same tick as the sweep on purpose: the rows are seconds old, so
-                       the alert judges the hour the sweep measured rather than the one before it. Both
-                       master-gated inside and failure-isolated inside; the outer catch is the belt.
-                       #4834: the checkpointer check reads the hour's longest single sync from the row the
-                       sweep just wrote, the same value get_store_metrics publishes. */
-                    try
-                    {
-                        await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
-                        await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "store TOAST slack / checkpointer pressure self-alert evaluation failed");
-                    }
-
-                    /* #3466 (lane 4): the fleet sweep's DAILY channel rollup — the delivery half the sweep
-                       engine deliberately does not have. Attempted on this same hourly tick because the
-                       ceiling is enforced inside (one post per trailing day, and only on a day with
-                       something to say — 23 of every 24 ticks cost one dictionary lookup); master-gated
-                       inside like every self-alert, so master-off delivers nothing while the sweeps keep
-                       publishing to the web feed. Deliberately NOT gated on FleetSweepEnabled: sweeps
-                       recorded before the switch went off are still the trailing day's record, and with the
-                       sweep off the store simply serves an empty day, which posts nothing. Failure-isolated
-                       like its sibling above. */
-                    try
-                    {
-                        await _selfAlerts.EvaluateFleetSweepRollupAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "fleet-sweep rollup evaluation failed");
-                    }
-
-                    /* #3712: the third daily document — the analysis singles digest, the once-a-day channel copy
-                       of the findings the corroboration gate routed away from the paging channels. Same hourly
-                       tick, same one-post-per-trailing-day ceiling enforced inside, same master gate inside,
-                       same failure isolation as the two siblings above. */
-                    try
-                    {
-                        await _selfAlerts.EvaluateAnalysisSinglesDigestAsync(_postgres!, stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogDebug(ex, "analysis singles digest evaluation failed");
-                    }
-                }
+                TryStartStoreMetricsTick(DateTime.UtcNow, _checkpointSyncSampler.TakeWindowMax, (window, token) => RunStoreMetricsTickAsync(window, token), stoppingToken);
             }
 
             try
@@ -3749,6 +3603,16 @@ LIMIT 1";
                 .Where(t => t is not null)
                 .Select(t => t!)
                 .ToList();
+        }
+
+        if (_storeMaintenanceTick is { IsCompleted: false })
+        {
+            inFlightSweeps.Add(_storeMaintenanceTick);
+        }
+
+        if (_storeMetricsTick is { IsCompleted: false })
+        {
+            inFlightSweeps.Add(_storeMetricsTick);
         }
 
         if (inFlightSweeps.Count > 0)
@@ -9039,7 +8903,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                     continue;
                 }
 
-                await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token);
+                await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token, hourly: true);
             }
 
             LogStoreObjectConvergence(tally, passClock.ElapsedMilliseconds, startup: false);
@@ -9123,11 +8987,13 @@ AND   j.hypertable_name = '{relation}'", connection))
         StoreObjectConvergenceStep step,
         StoreObjectConvergenceTally tally,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool hourly = false)
     {
         try
         {
-            var count = await step.EnsureAsync(connection, logger, cancellationToken);
+            var ensure = hourly && step.HourlyEnsureAsync is not null ? step.HourlyEnsureAsync : step.EnsureAsync;
+            var count = await ensure(connection, logger, cancellationToken);
             tally.Steps++;
             if (step.Signal == StoreObjectChangeSignal.Delta && count > 0)
             {
@@ -10085,6 +9951,252 @@ AND   j.hypertable_name = '{relation}'", connection))
                 customRetentionDays,
                 startedAtUtc = startedAtUtc.ToString("o", CultureInfo.InvariantCulture),
             }));
+    }
+
+    /// <summary>
+    /// The hourly store-maintenance tick's launcher (#4970). The tick used to be awaited inline in the collection
+    /// launch loop, so a slow pass delayed every sweep launch; it now runs as a tracked background task, one at a
+    /// time. When the previous tick is still running at the next due time this hour is skipped: the caller has
+    /// already advanced the due stamp, which keeps the :30 phase the compression read depends on (#3575). That
+    /// differs on purpose from the daily purge, which retries on the next pass, because a skipped hour costs one
+    /// hour and a retry would sample the job catalog off phase.
+    /// </summary>
+    internal bool TryStartStoreMaintenanceTick(Func<CancellationToken, Task> runTick, CancellationToken stoppingToken)
+    {
+        if (_storeMaintenanceTick is { IsCompleted: false })
+        {
+            _logger.LogWarning(
+                "the previous hourly store-maintenance tick was still running at this tick's due time — skipping this hour; the next due time keeps its :30 phase");
+            return false;
+        }
+
+        _storeMaintenanceTick = RunTrackedTickAsync("hourly store-maintenance tick", runTick, stoppingToken);
+        return true;
+    }
+
+    /// <summary>
+    /// The hourly store self-metrics tick's launcher (#4970). The sweep and the self-alert evaluators that judge
+    /// its rows used to be awaited inline in the collection launch loop; they now run as one tracked background
+    /// task, one at a time. While the store-maintenance tick still runs this returns false WITHOUT advancing the
+    /// due stamp or taking the checkpoint window, so the next 15-second pass retries and maintenance keeps
+    /// running first. Once it launches (or skips), the stamp advances on the grid. If the previous metrics tick
+    /// is still running at this due time the hour is skipped with a Warning, so a late tick never doubles up.
+    /// </summary>
+    internal bool TryStartStoreMetricsTick(
+        DateTime nowUtc,
+        Func<CheckpointSyncMax?> takeWindow,
+        Func<CheckpointSyncMax?, CancellationToken, Task> runTick,
+        CancellationToken stoppingToken)
+    {
+        if (_storeMaintenanceTick is { IsCompleted: false })
+        {
+            return false;
+        }
+
+        _nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, nowUtc, s_storeMetricsInterval);
+
+        if (_storeMetricsTick is { IsCompleted: false })
+        {
+            _logger.LogWarning(
+                "the previous hourly store self-metrics tick was still running at this tick's due time — skipping this hour");
+            return false;
+        }
+
+        /* #4834: the longest single checkpoint sync the minute samples saw since the last tick, taken ONCE and
+           here, so the window closes when the tick LAUNCHES, whatever the sweep goes on to do. A deferral behind
+           maintenance moves that close to the first pass after maintenance ends. A skip (above) returns before
+           this call, so the window is not taken and carries into the next tick: that tick's window covers both
+           hours and its checkpointer row keeps the longest sync of the two, which is the safe direction since
+           dropping the window would lose a real long sync. The sweep stores it on the hour's checkpointer row;
+           the checkpointer evaluation and get_store_metrics both read it back from that row, so neither is
+           handed a window. */
+        var checkpointWindow = takeWindow();
+        _storeMetricsTick = RunTrackedTickAsync("hourly store self-metrics tick", token => runTick(checkpointWindow, token), stoppingToken);
+        return true;
+    }
+
+    /// <summary>
+    /// The hourly store self-metrics tick's body: the store self-metrics sweep, then the self-alerts that judge
+    /// the rows it just wrote, moved out of the launch loop (#4970) unchanged.
+    /// </summary>
+    private async Task RunStoreMetricsTickAsync(CheckpointSyncMax? checkpointWindow, CancellationToken stoppingToken)
+    {
+            await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);
+
+            /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
+               regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
+            if (_selfAlerts is not null)
+            {
+                try
+                {
+                    await _selfAlerts.EvaluateCollectorCostAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "collector-cost self-alert evaluation failed");
+                }
+
+                /* #3783: the two store physical-health conditions the sweep just wrote the evidence for —
+                   the dimensions' TOAST utilisation (dormant until the store carries pg_freespacemap; the
+                   evaluator says why) and the checkpointer's last interval, differenced from the newest
+                   two checkpointer rows. Same tick as the sweep on purpose: the rows are seconds old, so
+                   the alert judges the hour the sweep measured rather than the one before it. Both
+                   master-gated inside and failure-isolated inside; the outer catch is the belt.
+                   #4834: the checkpointer check reads the hour's longest single sync from the row the
+                   sweep just wrote, the same value get_store_metrics publishes. */
+                try
+                {
+                    await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
+                    await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "store TOAST slack / checkpointer pressure self-alert evaluation failed");
+                }
+
+                /* #3466 (lane 4): the fleet sweep's DAILY channel rollup — the delivery half the sweep
+                   engine deliberately does not have. Attempted on this same hourly tick because the
+                   ceiling is enforced inside (one post per trailing day, and only on a day with
+                   something to say — 23 of every 24 ticks cost one dictionary lookup); master-gated
+                   inside like every self-alert, so master-off delivers nothing while the sweeps keep
+                   publishing to the web feed. Deliberately NOT gated on FleetSweepEnabled: sweeps
+                   recorded before the switch went off are still the trailing day's record, and with the
+                   sweep off the store simply serves an empty day, which posts nothing. Failure-isolated
+                   like its sibling above. */
+                try
+                {
+                    await _selfAlerts.EvaluateFleetSweepRollupAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "fleet-sweep rollup evaluation failed");
+                }
+
+                /* #3712: the third daily document — the analysis singles digest, the once-a-day channel copy
+                   of the findings the corroboration gate routed away from the paging channels. Same hourly
+                   tick, same one-post-per-trailing-day ceiling enforced inside, same master gate inside,
+                   same failure isolation as the two siblings above. */
+                try
+                {
+                    await _selfAlerts.EvaluateAnalysisSinglesDigestAsync(_postgres!, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "analysis singles digest evaluation failed");
+                }
+            }
+    }
+
+    /// <summary>
+    /// Wraps a tick delegate so the tracked task can never fault unobserved: nothing awaits it while it runs.
+    /// <see cref="OperationCanceledException"/> is the normal shutdown outcome and is swallowed.
+    /// </summary>
+    private async Task RunTrackedTickAsync(string name, Func<CancellationToken, Task> run, CancellationToken ct)
+    {
+        try
+        {
+            await run(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown drain. */
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "{Tick} failed", name);
+        }
+    }
+
+    /// <summary>
+    /// The hourly store-maintenance tick's body: the availability re-probe, then compression job health,
+    /// retention re-evaluation and store-object convergence, moved out of the launch loop (#4970) unchanged.
+    /// </summary>
+    private async Task RunStoreMaintenanceTickAsync(CancellationToken stoppingToken)
+    {
+        /* #3815: the availability re-probe, and the one tenant of this tick that runs OUTSIDE the
+           _timescaleAvailable gate below — because it is the tenant that CORRECTS that flag. Behind
+           the gate it would be unreachable in exactly the state it exists for: a latch reading false
+           cannot be re-opened from inside the block the latch closes. That is why this tick's guard
+           is the due time alone and the flag moved down one level, and why the stamp is taken above
+           the probe rather than behind the flag — on a store whose latch reads false the due time
+           has to advance anyway, or the probe would fire on every 15-second sweep pass instead of
+           hourly.
+
+           The cost on a store that is genuinely plain PostgreSQL, a fully supported configuration
+           that must not be punished for it: one CREATE EXTENSION IF NOT EXISTS that fails, once an
+           hour, on a pooled connection, saying nothing above Debug. The only other thing this tick
+           runs for such a store is the store-object convergence pass's non-TimescaleDB steps (#3913,
+           the else branch below). */
+        if (!_timescaleAvailable)
+        {
+            await ReprobeTimescaleAvailabilityAsync(stoppingToken);
+        }
+
+        if (_timescaleAvailable)
+        {
+            await EvaluateCompressionJobHealthAsync(stoppingToken);
+
+            /* #3812: the retention coverage gate, re-judged on the RUNNING service. Until this line
+               the only thing that armed a held retention policy was the start-path ensure above, so
+               "the gate releases the hold by itself once the backfill covers raw" was true only after
+               a restart — a store on a stable build sat held indefinitely after a backfill that had
+               worked, with the Retention Held alert still firing and reading like the backfill had
+               failed. Same tick as the compression check (the constant's comment says why this cadence
+               and why this order), each half failure-isolated inside its own method with its own
+               catch, so a retention pass that throws or runs out its budget cannot skip the
+               compression read and a compression fault cannot skip the retention pass. The Retention
+               Held self-alert rides INSIDE the compression method and therefore reads the flags as
+               they stood before this pass: a policy armed here shows as held on this tick's alert read
+               and resolves on the next hour's, one tick of lag on the resolution edge that is stated
+               rather than traded for #3575's phase. The first pass after startup fires within seconds
+               of the start-path ensure (this stamp seeds at MinValue); that pass is deliberately not
+               skipped — its "Retention re-evaluation:" line is the proof the hourly path is wired on
+               this store, visible in the same log window an operator reads after a restart, and it
+               costs twenty catalog rows and twenty chunk-pruned min() reads.
+
+               THE HOURLY STORE-MAINTENANCE TICK, named. It is the home for every "we decided this at
+               startup and never re-decided it" defect on the store side: #3812 and #3815 are its
+               tenants, and #3816 (job self-heal covers compression only) and #3817 (store-object
+               convergence only at startup) are queued as further ones — not built here. The contract
+               a tenant signs: its own method, its own catch-all, awaited as its own statement in the
+               gated block AFTER the compression read (the #3575 phase argument on
+               s_compressionCheckInterval), in the order it appears; a new tenant is one more await
+               line below this one. A tenant that CORRECTS the gate is the single exception and signs a
+               different contract — it goes above the gate, not below the compression read, because
+               inside it a false flag would block its own correction. #3815 is that case, and the gate
+               has exactly one input, so there is no second one to write. No delegate list yet,
+               deliberately — three tenants do not justify the indirection, and a list would hide the
+               order the phase argument depends on. */
+            await ReevaluateRetentionPoliciesAsync(stoppingToken);
+
+            /* #3817: the FOURTH tenant, and the one that signs the contract the comment above spells
+               out — its own method, its own catch-all, one awaited statement, LAST. The store-object
+               convergence pass: every idempotent ensure the start path runs, re-run here, so one
+               failed item heals within the hour instead of at the next restart. It is last for the
+               same #3575 reason the retention pass is third: the compression read must sample the job
+               catalog at :30 past the minute, and this pass — the heaviest of the four on a store
+               that is NOT converged — must not be ahead of it pushing that sample toward the :MM:00
+               instant the policies fire on. The ordering is pinned in RetentionReevaluationTests and
+               TimescaleAvailabilityReprobeTests, both of which now name four tenants.
+
+               Its first pass fires within seconds of the start-path pass (the tick's stamp seeds at
+               MinValue), and that is deliberate for the reason #3812 gives about its own: the
+               "Store object convergence:" line without the "at startup" prefix is the proof the
+               hourly path is wired on THIS store, in the same log window an operator reads after a
+               restart. On a converged store that pass costs catalog reads and two metadata ALTERs. */
+            await ConvergeStoreObjectsAsync(stoppingToken);
+        }
+        else
+        {
+            /* #3913: the same convergence pass on a store WITHOUT TimescaleDB, walking only the steps
+               that run on every store shape (the Ungated and Tuning stages the start path already
+               runs there): the baseline relations, the store's statement statistics, the composer's
+               covering indexes. Before this, nothing re-ran on such a store between restarts, so a
+               dropped fallback view, or an extension a DBA created by hand, waited for the next
+               start. None of the compression-phase reasoning above applies, since a store without
+               TimescaleDB has no policy jobs to sample. */
+            await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
+        }
     }
 
     /// <summary>
