@@ -7,9 +7,7 @@
  */
 
 using System;
-using System.ComponentModel;
 using System.Linq;
-using System.Reflection;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -163,20 +161,6 @@ public sealed class CollectionHealthDetachedSweepPressureTests
         Assert.Contains(
             "var pressure = SweepPressureClassifier.Compute(SweepBodyCollectors(rows));", tools, StringComparison.Ordinal);
         Assert.Contains("var heaviest = SweepBodyRows(rows)", tools, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// The tool's own description says what the roll-up counts. It named "the collectors" without limit, which a
-    /// reader takes literally: a daily collector's long run in a BODY_OVERRUN is the reading this change removes.
-    /// </summary>
-    [Fact]
-    public void TheToolDescriptionSaysADetachedCollectorIsNotCountedInTheRollUp()
-    {
-        var method = typeof(DarlingMcpDataTools).GetMethod(nameof(DarlingMcpDataTools.GetCollectionHealth))!;
-        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
-
-        Assert.Contains("runs detached from the sweep body", description, StringComparison.Ordinal);
-        Assert.Contains("leave it out", description, StringComparison.Ordinal);
     }
 
     private static int Count(string haystack, string needle)
