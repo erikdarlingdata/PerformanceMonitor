@@ -27,7 +27,7 @@ namespace Darling.Tests;
 /* #1776 own-store: each fact seeds its own scratch database, so nothing here shares rows with another test. */
 public sealed class FinOpsWebReadParityLiveTests
 {
-    private static async Task<(int Status, string Body)> GetAsync(NpgsqlDataSource postgres, string pathAndQuery, System.Threading.CancellationToken ct)
+    internal static async Task<(int Status, string Body)> GetAsync(NpgsqlDataSource postgres, string pathAndQuery, System.Threading.CancellationToken ct)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
