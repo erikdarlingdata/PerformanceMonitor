@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -73,7 +74,22 @@ public sealed class ViewerEventDataStartTests : IDisposable
     [Fact]
     public void ADeadProbe_NamesNothing_WhenTheReadStayedUnderItsCap()
     {
-        Assert.Null(ViewerEventDataStart.Of(null, RangeStart.AddDays(2)));
+        Assert.Null(ViewerEventDataStart.Of(null, RangeStart.AddDays(2), probeFailed: true));
+        Assert.Null(ViewerEventDataStart.Of(null, null, probeFailed: true));
+        /* Whatever coverage the dead probe seems to hold, a failure names nothing. */
+        Assert.Null(ViewerEventDataStart.Of(RangeStart.AddDays(3), RangeStart.AddDays(2), probeFailed: true));
+    }
+
+    /* The range ends before the server's first collection: the probe found no coverage in it, yet the grid lists the history
+       that collection stored. Without coverage to compare, the notice names the earliest event shown. */
+    [Fact]
+    public void AProbeWithNoCoverage_NamesTheEarliestEventShown()
+    {
+        var earliest = RangeStart.AddDays(1);
+
+        Assert.Equal(earliest, ViewerEventDataStart.Of(null, earliest));
+        Assert.Equal(earliest, ViewerEventDataStart.Of(null, earliest, readHitCap: false, probeFailed: false));
+        /* Nothing in the range and nothing shown: an empty grid already says so. */
         Assert.Null(ViewerEventDataStart.Of(null, null));
     }
 
@@ -108,7 +124,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
 
         Assert.Equal(coverage, ViewerEventDataStart.Of(coverage, coverage.AddHours(2), readHitCap: false));
         Assert.Equal(RangeStart.AddDays(1), ViewerEventDataStart.Of(coverage, RangeStart.AddDays(1), readHitCap: false));
-        Assert.Null(ViewerEventDataStart.Of(null, RangeStart.AddDays(2), readHitCap: false));
+        Assert.Null(ViewerEventDataStart.Of(null, RangeStart.AddDays(2), readHitCap: false, probeFailed: true));
         /* A full page with no dated row has nothing to name, so it falls back to the coverage. */
         Assert.Equal(coverage, ViewerEventDataStart.Of(coverage, null, readHitCap: true));
     }
@@ -212,6 +228,122 @@ public sealed class ViewerEventDataStartTests : IDisposable
         });
     }
 
+    /* A server first collected on the range's last day, with events back to a day into the range: the range ends before the
+       first collection, so the probe finds no coverage in it, and the grid still lists the history that collection stored.
+       The grid starts a day late, and the notice says where. */
+    [Fact]
+    public void ARangeThatEndsBeforeTheFirstCollection_RaisesTheNotice_AtTheEarliestEventShown()
+    {
+        Assert.Equal(
+            "Showing since 2026-09-02 00:00",
+            BannerOf(Task.FromResult<DateTime?>(null), RangeStart, [RangeStart.AddDays(2), RangeStart.AddDays(1)]));
+    }
+
+    [Fact]
+    public void ARangeThatEndsBeforeTheFirstCollection_RaisesNoNotice_WhenTheHistoryReachesTheRangeStart()
+    {
+        Assert.Null(BannerOf(Task.FromResult<DateTime?>(null), RangeStart, [RangeStart.AddMinutes(30), RangeStart.AddDays(2)]));
+        Assert.Null(BannerOf(Task.FromResult<DateTime?>(null), RangeStart, [RangeStart]));
+        /* Nothing in the range and nothing shown: an empty grid already says so. */
+        Assert.Null(BannerOf(Task.FromResult<DateTime?>(null), RangeStart, []));
+    }
+
+    /* No coverage and a failed probe are different answers: the first names the history, the second names nothing. */
+    [Fact]
+    public void AProbeThatFoundNoCoverage_RaisesTheNotice_WhereAProbeThatThrowsStaysHidden()
+    {
+        DateTime?[] shown = [RangeStart.AddDays(1)];
+
+        Assert.Equal("Showing since 2026-09-02 00:00", BannerOf(Task.FromResult<DateTime?>(null), RangeStart, shown));
+        Assert.Null(BannerOf(Task.FromException<DateTime?>(new InvalidOperationException("the store went away")), RangeStart, shown));
+    }
+
+    // ── A grid merged from several reads: one of them filled its own cap ──
+
+    /* The merge drops the rows another read already holds and the rows that repeat a pair within a minute, so a read that
+       stopped at its LIMIT can leave the merged list under the grid's cap. */
+    [Fact]
+    public void ACappedSource_NamesItsOldestRow_WhenTheMergedListStaysUnderTheCap()
+    {
+        var oldest = RangeStart.AddDays(3);
+        DateTime?[] capped = [oldest.AddHours(2), oldest.AddHours(1), oldest];
+        DateTime?[] under = [RangeStart.AddDays(1)];
+
+        Assert.Equal(oldest, ViewerEventDataStart.CappedSourceStart(3, under, capped));
+        Assert.Equal(oldest, ViewerEventDataStart.CappedSourceStart(3, capped, under));
+        Assert.Null(ViewerEventDataStart.CappedSourceStart(4, under, capped));
+        Assert.Null(ViewerEventDataStart.CappedSourceStart(3, under, Array.Empty<DateTime?>()));
+    }
+
+    [Fact]
+    public void WhenBothSourcesFillTheirCap_TheLaterOldestRowBoundsTheGrid()
+    {
+        DateTime?[] xe = [RangeStart.AddDays(6), RangeStart.AddDays(5)];
+        DateTime?[] dmv = [RangeStart.AddDays(4), RangeStart.AddDays(2)];
+
+        Assert.Equal(RangeStart.AddDays(5), ViewerEventDataStart.CappedSourceStart(2, xe, dmv));
+        /* A row with no event time names nothing, and does not count as the oldest. */
+        Assert.Equal(RangeStart.AddDays(2), ViewerEventDataStart.CappedSourceStart(2, new DateTime?[] { null, RangeStart.AddDays(2) }));
+        Assert.Null(ViewerEventDataStart.CappedSourceStart(2, new DateTime?[] { null, null }));
+    }
+
+    [Fact]
+    public void ACappedSource_BoundsTheNotice_WhateverTheStoreCovers()
+    {
+        var oldest = RangeStart.AddDays(3);
+
+        Assert.Equal(oldest, ViewerEventDataStart.Of(RangeStart.AddDays(-20), RangeStart.AddDays(1), cappedSourceOldestUtc: oldest));
+        /* It comes from the rows, so a probe with no answer, or a dead one, does not hide it. */
+        Assert.Equal(oldest, ViewerEventDataStart.Of(null, RangeStart.AddDays(1), cappedSourceOldestUtc: oldest));
+        Assert.Equal(oldest, ViewerEventDataStart.Of(null, RangeStart.AddDays(1), probeFailed: true, cappedSourceOldestUtc: oldest));
+        /* Beside a merged list that also filled its cap, the later of the two oldest rows is where the grid is complete from. */
+        Assert.Equal(oldest, ViewerEventDataStart.Of(null, RangeStart.AddDays(2), readHitCap: true, cappedSourceOldestUtc: oldest));
+        Assert.Equal(oldest.AddDays(1), ViewerEventDataStart.Of(null, oldest.AddDays(1), readHitCap: true, cappedSourceOldestUtc: oldest));
+        /* No capped source: the rule it had. */
+        Assert.Equal(RangeStart.AddDays(-20), ViewerEventDataStart.Of(RangeStart.AddDays(-20), RangeStart.AddDays(1), cappedSourceOldestUtc: null));
+    }
+
+    /* Two rows are under the cap of 3, so the merged list names nothing; the DMV read behind it filled its cap 3 days in. */
+    [Fact]
+    public void ACappedSource_RaisesTheNotice_AtItsOldestRow_WhereTheMergedListStaysUnderTheCap()
+    {
+        var oldest = RangeStart.AddDays(3);
+        var covered = Task.FromResult<DateTime?>(RangeStart.AddDays(-20));
+        DateTime?[] shown = [RangeStart.AddDays(1), oldest];
+
+        Assert.Null(BannerOf(covered, RangeStart, shown, rowCap: 3));
+        Assert.Equal("Showing since 2026-09-04 00:00", BannerOf(covered, RangeStart, shown, rowCap: 3, cappedSourceOldestUtc: oldest));
+    }
+
+    /* A capped read dropped rows for certain, so its verdict has no slack, as the merged list's own cap has none. */
+    [Fact]
+    public void ACappedSource_GetsNoSlack_OnARangeOfAnHourOrLess()
+    {
+        var oldest = RangeStart.AddMinutes(30);
+
+        Assert.Equal(
+            "Showing since 2026-09-01 00:30",
+            BannerOf(Task.FromResult<DateTime?>(null), RangeStart, [oldest], rowCap: 3, cappedSourceOldestUtc: oldest));
+    }
+
+    /* The banner raised for any probe answer, through the shared function; null when it is hidden. */
+    private static string? BannerOf(
+        Task<DateTime?> probe, DateTime startUtc, IEnumerable<DateTime?> shownUtc, int? rowCap = null, DateTime? cappedSourceOldestUtc = null)
+    {
+        string? text = null;
+        OnStaThread(() =>
+        {
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+            /* Seeded visible, so a no-op cannot pass as a hidden banner. */
+            var banner = new TextBlock { Visibility = Visibility.Visible, Text = "stale" };
+
+            ViewerServerTab.ShowEventDataStartAsync(banner, probe, "Deadlocks", startUtc, shownUtc, rowCap, cappedSourceOldestUtc).GetAwaiter().GetResult();
+
+            text = banner.Visibility == Visibility.Visible ? banner.Text : null;
+        });
+        return text;
+    }
+
     /* The banner raised for the probe's answer and the grid's earliest row, read off the control; null when it is hidden. */
     private static string? BannerFor(DateTime coverageStartUtc, DateTime earliestShownUtc)
     {
@@ -244,12 +376,12 @@ public sealed class ViewerEventDataStartTests : IDisposable
         var load = MethodBody(tab, @"private async Task LoadBlockedProcessReportsAsync\(");
         Assert.Equal(1, Matches(load, @"var dataStartTask = _dataService\.GetBlockedProcessReportsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
         Assert.Equal(1, Matches(load,
-            @"await ShowEventDataStartAsync\(BlockedProcessReportsTruncationBanner,\s*dataStartTask,\s*""Blocked Process Reports"",\s*startUtc,\s*rows\.Select\(r => r\.EventTime\),\s*ViewerDataService\.BlockedProcessReportsRowCap\);"));
+            @"await ShowEventDataStartAsync\(BlockedProcessReportsTruncationBanner,\s*dataStartTask,\s*""Blocked Process Reports"",\s*startUtc,\s*rows\.Select\(r => r\.EventTime\),\s*ViewerDataService\.BlockedProcessReportsRowCap,\s*read\.CappedSourceStartUtc\);"));
 
         var drag = MethodBody(tab, @"private async void OnBlockingSlicerChanged\(");
         Assert.Equal(1, Matches(drag, @"var dataStartTask = _dataService\.GetBlockedProcessReportsDataStartAsync\(_server\.ServerId,\s*e\.StartUtc,\s*e\.EndUtc\);"));
         Assert.Equal(1, Matches(drag,
-            @"await ShowEventDataStartAsync\(BlockedProcessReportsTruncationBanner,\s*dataStartTask,\s*""Blocked Process Reports"",\s*e\.StartUtc,\s*rows\.Select\(r => r\.EventTime\),\s*ViewerDataService\.BlockedProcessReportsRowCap\);"));
+            @"await ShowEventDataStartAsync\(BlockedProcessReportsTruncationBanner,\s*dataStartTask,\s*""Blocked Process Reports"",\s*e\.StartUtc,\s*rows\.Select\(r => r\.EventTime\),\s*ViewerDataService\.BlockedProcessReportsRowCap,\s*read\.CappedSourceStartUtc\);"));
     }
 
     [Fact]
@@ -275,7 +407,9 @@ public sealed class ViewerEventDataStartTests : IDisposable
     {
         var tabs = TabSources();
 
-        Assert.Equal(2, Matches(tabs, @"_dataService\.GetRecentBlockedProcessReportsAsync\("));
+        /* The blocked process reports read goes through the call that also reports a source read that filled its cap. */
+        Assert.Equal(2, Matches(tabs, @"_dataService\.ReadRecentBlockedProcessReportsAsync\("));
+        Assert.Equal(0, Matches(tabs, @"_dataService\.GetRecentBlockedProcessReportsAsync\("));
         Assert.Equal(2, Matches(tabs, @"_dataService\.GetBlockedProcessReportsDataStartAsync\("));
         Assert.Equal(2, Matches(tabs, @"_dataService\.GetRecentDeadlocksAsync\("));
         Assert.Equal(2, Matches(tabs, @"_dataService\.GetDeadlocksDataStartAsync\("));
@@ -303,6 +437,8 @@ public sealed class ViewerEventDataStartTests : IDisposable
     {
         var blocking = ViewerFile("ViewerDataService.Blocking.cs");
         Assert.Contains("DataWindowFloor.Source.ForCollectorTable(\"blocked_process_reports\")", blocking, StringComparison.Ordinal);
+        /* The always-on DMV snapshots stand in for the XE collector, so the coverage is read from both. */
+        Assert.Contains("DataWindowFloor.Source.ForCollectorTable(\"dmv_blocking_snapshots\")", blocking, StringComparison.Ordinal);
         Assert.Contains("DataWindowFloor.GetForServerAsync(", blocking, StringComparison.Ordinal);
 
         var deadlock = ViewerFile("ViewerDataService.Deadlock.cs");

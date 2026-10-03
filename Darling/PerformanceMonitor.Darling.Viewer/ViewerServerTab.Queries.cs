@@ -299,18 +299,27 @@ public partial class ViewerServerTab
     /// logged (<paramref name="warn"/> takes the log source and the message, <see cref="ViewerLogger.Warn"/> by
     /// default), and the refresh goes on.
     /// </summary>
-    internal static async Task<DateTime?> DataStartOrNullAsync(Task<DateTime?> probe, string surface, Action<string, string>? warn = null)
+    internal static async Task<DateTime?> DataStartOrNullAsync(Task<DateTime?> probe, string surface, Action<string, string>? warn = null) =>
+        (await DataStartAnswerAsync(probe, surface, warn)).Start;
+
+    /// <summary>
+    /// <see cref="DataStartOrNullAsync"/> with the two kinds of nothing kept apart (#4966): a probe that found no coverage in
+    /// the window answers null with <c>Failed</c> false, and a probe that threw answers null with <c>Failed</c> true (logged
+    /// the same way). An event surface needs the difference: with no coverage it still names the earliest event it lists, and
+    /// after a failure it names nothing (<see cref="ViewerEventDataStart.Of"/>).
+    /// </summary>
+    internal static async Task<(bool Failed, DateTime? Start)> DataStartAnswerAsync(Task<DateTime?> probe, string surface, Action<string, string>? warn = null)
     {
         try
         {
-            return await probe;
+            return (false, await probe);
         }
         catch (Exception ex)
         {
             (warn ?? ViewerLogger.Warn)(
                 "ViewerServerTab",
                 $"{surface}: the data-start probe failed, so no \"Showing since\" banner is shown | {ex.GetType().Name}: {ex.Message}");
-            return null;
+            return (true, null);
         }
     }
 
