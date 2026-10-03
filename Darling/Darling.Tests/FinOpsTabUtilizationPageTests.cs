@@ -27,7 +27,7 @@ public sealed class FinOpsTabUtilizationPageTests
 
     private static string DatabaseResourcesSource() => Mcp("DarlingMcpFinOpsTools.DatabaseResources.cs");
 
-    private static string Between(string s, string from, string to)
+    private static string Between(string s, string from, string? to)
     {
         var a = s.IndexOf(from, System.StringComparison.Ordinal);
         Assert.True(a >= 0, from);
