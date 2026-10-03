@@ -65,6 +65,10 @@ public static class FinOpsHealthCalculator
 /// </summary>
 public static class HighImpactScorer
 {
+    /// <summary>The band for an impact score: high at 80 or more, medium at 60 or more, else low. These are the
+    /// cut points the desktop viewer colors the score by.</summary>
+    public static string HighImpactBand(int score) => score >= 80 ? "high" : score >= 60 ? "medium" : "low";
+
     public static List<HighImpactQuery> Score(List<HighImpactQuery> allRows, int topN = 10)
     {
         if (allRows.Count == 0) return allRows;

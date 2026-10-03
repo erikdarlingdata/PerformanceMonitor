@@ -28,8 +28,8 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class FinOpsHighImpactReaderLiveTests
 {
-    private const string ServerName = "darling-finops-high-impact-e2e";
-    private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
+    internal const string ServerName = "darling-finops-high-impact-e2e";
+    internal static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
 
     /* Captured from the pre-move viewer read: hash, database, executions, cpu ms, duration ms, reads, writes,
        memory MB, shares (cpu, duration, reads, writes, memory, executions), impact score. */
@@ -49,7 +49,7 @@ public sealed class FinOpsHighImpactReaderLiveTests
         ("0xHI07", "Db1", 4L, 1100m, 600m, 1000L, 250L, 4m, new[] { 11.9m, 4.7m, 2m, 10.4m, 3m, 2.8m }, 27),
     ];
 
-    private static async Task<ScratchPostgres> SeedAsync(string cs, System.Threading.CancellationToken ct)
+    internal static async Task<ScratchPostgres> SeedAsync(string cs, System.Threading.CancellationToken ct)
     {
         var scratch = await ScratchPostgres.CreateAsync(cs, ct);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);

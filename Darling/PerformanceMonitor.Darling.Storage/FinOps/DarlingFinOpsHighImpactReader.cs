@@ -97,7 +97,7 @@ ORDER BY SUM(delta_worker_time) DESC";
 
     /// <summary>Reads the window's query_hash aggregates for one server and returns the scored high-impact set.</summary>
     public static async Task<List<HighImpactQuery>> ReadAsync(
-        NpgsqlDataSource dataSource, int serverId, int hoursBack, int commandTimeoutSeconds, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, int serverId, int hoursBack, int commandTimeoutSeconds, CancellationToken cancellationToken, int topN = 10)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
@@ -131,6 +131,6 @@ ORDER BY SUM(delta_worker_time) DESC";
             });
         }
 
-        return HighImpactScorer.Score(rows);
+        return HighImpactScorer.Score(rows, topN);
     }
 }
