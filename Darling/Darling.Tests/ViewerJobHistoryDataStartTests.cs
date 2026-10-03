@@ -134,7 +134,8 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
         var load = MethodBody(ViewerFile("JobHistoryTab.xaml.cs"), @"private async Task LoadJobsAsync\(");
 
         var bind = load.IndexOf("_filterManager.UpdateData(filtered)", StringComparison.Ordinal);
-        var settle = load.IndexOf("await Task.WhenAny(dataStartTask);", StringComparison.Ordinal);
+        var settle = load.IndexOf("await ((Task)dataStartTask).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);", StringComparison.Ordinal);
+        Assert.DoesNotContain("Task.WhenAny", load, StringComparison.Ordinal);
         var loadingDown = load.LastIndexOf("LoadingMessage.Visibility = Visibility.Collapsed;", settle, StringComparison.Ordinal);
         var note = load.IndexOf("await ShowJobHistoryDataStartAsync(", StringComparison.Ordinal);
         Assert.True(bind >= 0 && loadingDown > bind && settle > loadingDown && note > settle, "the note must come after the rows, the loading note and the settled probe");

@@ -154,10 +154,10 @@ public partial class JobHistoryTab : UserControl
 
             LoadingMessage.Visibility = Visibility.Collapsed;
 
-            /* #4966: the rows are bound and the loading note is down; the probe is awaited last. WhenAny settles it whether it
-               succeeded or faulted, so the supersede check lands before the note is written and the step below awaits a finished
+            /* #4966: the rows are bound and the loading note is down; the probe is awaited last. this await settles it whether it
+               succeeded or faulted, without throwing, so the supersede check lands before the note is written and the step below awaits a finished
                task. A probe that threw is logged by the step and hides the note. */
-            await Task.WhenAny(dataStartTask);
+            await ((Task)dataStartTask).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             await ShowJobHistoryDataStartAsync(JobHistoryTruncationBanner, dataStartTask, sinceUtc, all);
