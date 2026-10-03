@@ -41,6 +41,22 @@ public sealed class ViewerFinOpsInventoryDelegatesTests
     }
 
     [Fact]
+    public void TheViewerCallsTheStorageInventoryFigures()
+    {
+        var dir = Path.Combine(Path.GetDirectoryName(ThisFile())!, "..", "PerformanceMonitor.Darling.Viewer");
+        var row = File.ReadAllText(Path.Combine(dir, "ViewerDataService.FinOps.cs")).ReplaceLineEndings("\n");
+        var loader = File.ReadAllText(Path.Combine(dir, "FinOpsTab.Loaders.cs")).ReplaceLineEndings("\n");
+        Assert.Contains("FinOpsInventoryFigures.LicenseWarning(", row, StringComparison.Ordinal);
+        Assert.Contains("FinOpsInventoryFigures.HardwareNote(", row, StringComparison.Ordinal);
+        Assert.Contains("FinOpsInventoryFigures.PhysicalMemoryMb(", row, StringComparison.Ordinal);
+        Assert.Contains("FinOpsInventoryFigures.HealthScore(", loader, StringComparison.Ordinal);
+        Assert.DoesNotContain("FinOpsHealthCalculator.Overall(", loader, StringComparison.Ordinal);
+        Assert.DoesNotContain("Standard limited to", row, StringComparison.Ordinal);
+    }
+
+    private static string ThisFile([System.Runtime.CompilerServices.CallerFilePath] string f = "") => f;
+
+    [Fact]
     public void EachViewerSqlConstant_EqualsTheStorageConstant()
     {
         Assert.Equal(DarlingFinOpsInventoryReader.ServerMetricsSql, ViewerDataService.ServerMetricsSql);

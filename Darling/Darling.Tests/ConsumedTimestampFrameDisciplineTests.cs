@@ -861,6 +861,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "StoredWallClock", "ForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs", "CollectionLocal", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "Timestamp", "FormatForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "SnapshotTime", "FormatForDisplay"),
         ("Lite/Services/LocalDataService.ConfigChanges.cs", "Local", "FormatServerTime"),
         ("Lite/Services/LocalDataService.SystemEvents.cs", "Local", "FormatServerTime"),
     ];

@@ -479,7 +479,7 @@ internal static class PgDisplay
         Plugin = row.Plugin ?? "",
         InvalidationReason = row.InvalidationReason ?? "",
         Conflicting = row.Conflicting ? "CONFLICTING" : "",
-        MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAt = SnapshotTime(row.MeasuredAt),
         MeasuredAtUtc = row.MeasuredAt,
         /* An invalidated slot has already lost its WAL: the replica behind it needs rebuilding, and that
            is a different day from an inactive slot that is merely accumulating. A CONFLICTING slot is in
@@ -1450,9 +1450,148 @@ internal static class PgDisplay
         EmptyPages = row.EmptyPages,
         ExactMeasurementCommand = row.ExactMeasurementCommand,
         SkippedReason = row.SkippedReason,
-        MeasuredAt = Timestamp(row.MeasuredAt),
+        MeasuredAt = SnapshotTime(row.MeasuredAt),
         MeasuredAtUtc = row.MeasuredAt,
-        EstimatedAt = Timestamp(row.EstimatedAt),
+        EstimatedAt = SnapshotTime(row.EstimatedAt),
         EstimatedAtUtc = row.EstimatedAt,
+    };
+
+    /* #4966: the four latest-state grids whose reader rows carry the snapshot's own time. Each grid shows the newest
+       row per key, so the rows' times can differ and the time is a column of its own. The reader row's time is naive
+       UTC; the text is the display zone to the second, and the UTC instant beside it is what the column sorts by. */
+
+    /// <summary>The snapshot time text every grid below shows: the display zone, to the second.</summary>
+    internal static string SnapshotTime(DateTime? utc)
+    {
+        if (!utc.HasValue)
+        {
+            return string.Empty;
+        }
+
+        return ViewerTimeHelper.FormatForDisplay(utc.Value, "yyyy-MM-dd HH:mm:ss");
+    }
+
+    /// <summary>One extension of the Extensions grid, with the time of the snapshot that row came from.</summary>
+    internal sealed class ExtensionRow
+    {
+        public string? DatabaseName { get; init; }
+        public string ExtensionName { get; init; } = "";
+        public string State { get; init; } = "";
+        public string? InstalledVersion { get; init; }
+        public string? DefaultVersion { get; init; }
+        public string? Comment { get; init; }
+        public string CaptureTime { get; init; } = "";
+        /// <summary>The UTC instant <see cref="CaptureTime"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime CaptureTimeUtc { get; init; }
+    }
+
+    internal static ExtensionRow Extension(DarlingPgExtensionAvailabilityReader.PgExtensionRow row) => new()
+    {
+        DatabaseName = row.DatabaseName,
+        ExtensionName = row.ExtensionName,
+        State = row.State,
+        InstalledVersion = row.InstalledVersion,
+        DefaultVersion = row.DefaultVersion,
+        Comment = row.Comment,
+        CaptureTime = SnapshotTime(row.CaptureTime),
+        CaptureTimeUtc = row.CaptureTime,
+    };
+
+    /// <summary>One setting of the Server Config grid. Every row of one read carries the same snapshot time.</summary>
+    internal sealed class ServerConfigRow
+    {
+        public string Name { get; init; } = "";
+        public string? Setting { get; init; }
+        public string? Unit { get; init; }
+        public string? BootValue { get; init; }
+        public string? Source { get; init; }
+        public string? Context { get; init; }
+        public bool PendingRestart { get; init; }
+        public string? ShortDescription { get; init; }
+        public string CollectionTime { get; init; } = "";
+        /// <summary>The UTC instant <see cref="CollectionTime"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime CollectionTimeUtc { get; init; }
+    }
+
+    internal static ServerConfigRow ServerConfig(DarlingPgServerConfigReader.PgConfigRow row) => new()
+    {
+        Name = row.Name,
+        Setting = row.Setting,
+        Unit = row.Unit,
+        BootValue = row.BootValue,
+        Source = row.Source,
+        Context = row.Context,
+        PendingRestart = row.PendingRestart,
+        ShortDescription = row.ShortDescription,
+        CollectionTime = SnapshotTime(row.CollectionTimeUtc),
+        CollectionTimeUtc = row.CollectionTimeUtc,
+    };
+
+    /// <summary>One relation of the Buffer Usage grid. All rows are one collection, so the time is the same on each.</summary>
+    internal sealed class BufferUsageRow
+    {
+        public string? DatabaseName { get; init; }
+        public string? RelationName { get; init; }
+        public long Buffers { get; init; }
+        public double PctOfPool { get; init; }
+        public long DirtyBuffers { get; init; }
+        public double PctDirty { get; init; }
+        public double? AvgUsageCount { get; init; }
+        public long PoolBuffersUsed { get; init; }
+        public long PoolBuffersTotal { get; init; }
+        public string CaptureTime { get; init; } = "";
+        /// <summary>The UTC instant <see cref="CaptureTime"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime CaptureTimeUtc { get; init; }
+    }
+
+    internal static BufferUsageRow BufferUsage(DarlingPgBufferUsageReader.PgBufferUsageRow row) => new()
+    {
+        DatabaseName = row.DatabaseName,
+        RelationName = row.RelationName,
+        Buffers = row.Buffers,
+        PctOfPool = row.PctOfPool,
+        DirtyBuffers = row.DirtyBuffers,
+        PctDirty = row.PctDirty,
+        AvgUsageCount = row.AvgUsageCount,
+        PoolBuffersUsed = row.PoolBuffersUsed,
+        PoolBuffersTotal = row.PoolBuffersTotal,
+        CaptureTime = SnapshotTime(row.CaptureTime),
+        CaptureTimeUtc = row.CaptureTime,
+    };
+
+    /// <summary>One predicate of the Predicate Stats grid. <see cref="Source"/> is the reader row the context menu acts on.</summary>
+    internal sealed class PredicateStatRow
+    {
+        public string? DatabaseName { get; init; }
+        public string? SchemaName { get; init; }
+        public string? TableName { get; init; }
+        public string? ColumnName { get; init; }
+        public string? Operator { get; init; }
+        public double? FilteredPct { get; init; }
+        public long RowsEvaluated { get; init; }
+        public double WorstEstimateErrorRatio { get; init; }
+        public double SampleRate { get; init; }
+        public long QueryId { get; init; }
+        public string CaptureTime { get; init; } = "";
+        /// <summary>The UTC instant <see cref="CaptureTime"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime CaptureTimeUtc { get; init; }
+        public required DarlingPgPredicateStatsReader.PgPredicateStatRow Source { get; init; }
+    }
+
+    internal static PredicateStatRow PredicateStat(DarlingPgPredicateStatsReader.PgPredicateStatRow row) => new()
+    {
+        DatabaseName = row.DatabaseName,
+        SchemaName = row.SchemaName,
+        TableName = row.TableName,
+        ColumnName = row.ColumnName,
+        Operator = row.Operator,
+        FilteredPct = row.FilteredPct,
+        RowsEvaluated = row.RowsEvaluated,
+        WorstEstimateErrorRatio = row.WorstEstimateErrorRatio,
+        SampleRate = row.SampleRate,
+        QueryId = row.QueryId,
+        CaptureTime = SnapshotTime(row.CaptureTime),
+        CaptureTimeUtc = row.CaptureTime,
+        Source = row,
     };
 }
