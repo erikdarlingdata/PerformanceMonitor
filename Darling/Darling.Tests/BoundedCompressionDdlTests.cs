@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// behind them (#4970). Source pins for the wiring, a live lock-holder pin for the behaviour, and the rule for a
 /// failed settings read.
 /// </summary>
+/* #1776 own-store: each live fact mints its own scratch database through ScratchPostgres. */
 public sealed class BoundedCompressionDdlTests
 {
     private static string Storage() =>
