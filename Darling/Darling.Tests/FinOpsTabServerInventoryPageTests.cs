@@ -122,6 +122,20 @@ public sealed class FinOpsTabServerInventoryPageTests
     }
 
     [Fact]
+    public void TheStartTimeShowsMinutesAndAnUnknownStatusDropsUnderscores()
+    {
+        var tab = Tab();
+        Assert.Contains("r.sqlserver_start_time_local.slice(0, 16).replace(\"T\", \" \")", tab);
+        Assert.Contains("r.provisioning_status.replace(/_/g, \" \")", tab);
+    }
+
+    [Fact]
+    public void TheBandColumnIsColouredByTheHealthSeverity()
+    {
+        Assert.Contains("{ key: \"health_band\", label: \"Band\", sevKey: \"health_sev\" }", Tab());
+    }
+
+    [Fact]
     public void TheStatusLabelsAreTheProvisioningVerdictTokens()
     {
         var tab = Tab();

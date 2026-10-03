@@ -43,7 +43,7 @@ const COLUMNS = [
   { key: "monthly_cost_usd", label: "Monthly ($)", format: "int" },
   { key: "annual_cost_usd", label: "Annual ($)", format: "int" },
   { key: "health_score", label: "Health", format: "int", sevKey: "health_sev" },
-  { key: "health_band", label: "Band" },
+  { key: "health_band", label: "Band", sevKey: "health_sev" },
   { key: "license_warning", label: "License warning", wrap: true, sevKey: "license_sev" },
   { key: "is_hadr_enabled", label: "HADR", format: "bool" },
   { key: "ag_replica_role", label: "AG role" },
@@ -56,11 +56,11 @@ function displayRow(r, legend) {
   return {
     ...r,
     hardware_note: r.hardware_note == null ? null : (legend[r.hardware_note] ?? r.hardware_note),
-    provisioning_status: r.provisioning_status == null ? null : (PROVISIONING[r.provisioning_status]?.[0] ?? r.provisioning_status),
+    provisioning_status: r.provisioning_status == null ? null : (PROVISIONING[r.provisioning_status]?.[0] ?? r.provisioning_status.replace(/_/g, " ")),
     provisioning_sev: PROVISIONING[r.provisioning_status]?.[1] ?? null,
     health_sev: BAND_SEV[r.health_band] ?? null,
     license_sev: r.license_warning ? "Critical" : null,
-    sqlserver_start_time_local: r.sqlserver_start_time_local ? r.sqlserver_start_time_local.replace("T", " ") : null,
+    sqlserver_start_time_local: r.sqlserver_start_time_local ? r.sqlserver_start_time_local.slice(0, 16).replace("T", " ") : null,
     monitoring: r.monitoring === "active" ? "Active" : r.monitoring === "stopped" ? "Stopped" : r.monitoring ?? null,
     ag_replica_role: String(r.ag_replica_role ?? "").toLowerCase() === "standalone" ? null : r.ag_replica_role ?? null,
   };
