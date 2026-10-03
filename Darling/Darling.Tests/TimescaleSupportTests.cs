@@ -172,7 +172,7 @@ public sealed class TimescaleSupportTests
             "ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id, collector_name')",
             TimescaleSupport.EnableCompressionSql("collect." + TimescaleSupport.CollectionLogTable));
         Assert.All(CollectorCatalog.All, schema => Assert.Equal("server_id", TimescaleSupport.CompressionSegmentByFor("collect." + schema.TargetTable)));
-        Assert.Equal("3s", TimescaleSupport.CollectionLogSettingsLockTimeout);
+        Assert.Equal("3s", TimescaleSupport.HourlyDdlLockTimeout);
         Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(TimescaleSupport.CollectionLogTable, out var logPhase));
         Assert.Equal(
             "SELECT add_compression_policy('collection_log', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true, "
