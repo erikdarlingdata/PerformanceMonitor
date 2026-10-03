@@ -3325,9 +3325,11 @@ LIMIT 1";
             }
 
             /* #4999: the hang watchdog above reads only the per-server bodies, and a daily run no longer runs in
-               one: it is detached and can go for hours, so a stuck one showed up only as stale data. Same tick,
-               same threshold, same Warning, one per run, naming the server and collector. After the launch loop
-               and outside it, because a daily run belongs to no single body and the loop may leave early. */
+               one: it is detached and can go for hours, so a stuck one showed up only as stale data. The same goes
+               for the three runs detached by name (query_store, plan_correction, pg_wait_sampling). Same tick, the
+               same kind of Warning, one per run, naming the server and collector; the threshold is its own, 15
+               minutes (DailyRunWatchdogSeconds), where the bodies' is 60 seconds. After the launch loop and outside
+               it, because a detached run belongs to no single body and the loop may leave early. */
             WatchDailyRuns(DateTime.UtcNow);
 
             /* #4130: fire-and-track, exactly like the per-server sweeps just above and the oversized-plan
@@ -5155,58 +5157,81 @@ LIMIT 1";
     internal IReadOnlyCollection<Task> InFlightDailyRuns => _dailyRuns.Keys.ToArray();
 
     /// <summary>
-    /// #4999: the daily runs that are executing right now, one per (server, collector), which the hang watchdog
-    /// (<see cref="WatchDailyRuns"/>) reads each sweep tick. A run is added once it holds its permit, so a run that
+    /// #4999: the detached runs that are executing right now, one per (server, collector), which the hang watchdog
+    /// (<see cref="WatchDailyRuns"/>) reads each sweep tick: the daily runs, and the three runs detached by name
+    /// (query_store, plan_correction, pg_wait_sampling). A daily run is added once it holds its permit, so a run that
     /// is only waiting for one is never in it: queue time is capacity pressure, not a hang, the same split the
-    /// sweep watchdog makes (<see cref="ClassifySweepEpisode"/>). The single-flight slot keeps it to one run per key.
+    /// sweep watchdog makes (<see cref="ClassifySweepEpisode"/>). A run detached by name takes no permit and is added
+    /// as it starts executing. One run per key holds because every run is added AFTER the single-flight gate that
+    /// keeps its collector to one run per server, and is removed BEFORE that gate is released: query_store's
+    /// per-server <see cref="QueryStoreServerGate"/>, the <see cref="DetachedCollectorGate"/> of plan_correction,
+    /// pg_wait_sampling and every daily run. A second run that comes due while the first is going is skipped at
+    /// the gate, before it is watched.
     /// </summary>
     private readonly ConcurrentDictionary<(int ServerId, string CollectorName), DailyRunWatch> _dailyRunWatches = new();
 
     /// <summary>
-    /// #4999: starts watching one daily run that has just taken its permit. Dispose the result when the run ends
-    /// and the run is no longer watched.
+    /// #4999: starts watching one detached run that is now executing: a daily run that has just taken its permit
+    /// (<paramref name="holdsPermit"/>), or a run detached by name, which takes none. Dispose the result when the
+    /// run ends and the run is no longer watched.
     /// </summary>
-    private DailyRunWatch BeginDailyRunWatch(string serverName, int serverId, string collectorName)
+    private DailyRunWatch BeginDailyRunWatch(string serverName, int serverId, string collectorName, bool holdsPermit)
     {
-        var watch = new DailyRunWatch(serverId, serverName, collectorName, DateTime.UtcNow, EndDailyRunWatch);
+        var watch = new DailyRunWatch(serverId, serverName, collectorName, holdsPermit, DateTime.UtcNow, EndDailyRunWatch);
         _dailyRunWatches[(serverId, collectorName)] = watch;
         return watch;
     }
 
     /// <summary>
-    /// #4999: stops watching a daily run that ended, removing only that run's own entry, and says so when the
+    /// #4999: stops watching a detached run that ended, removing only that run's own entry, and says so when the
     /// watchdog had already warned about it, the way a sweep body's resolution is logged.
     /// </summary>
     private void EndDailyRunWatch(DailyRunWatch watch)
     {
         _dailyRunWatches.TryRemove(new KeyValuePair<(int ServerId, string CollectorName), DailyRunWatch>(
             (watch.ServerId, watch.CollectorName), watch));
-        if (watch.Warned)
+        if (!watch.Warned)
+        {
+            return;
+        }
+
+        var elapsedSeconds = (DateTime.UtcNow - watch.StartedUtc).TotalSeconds;
+        if (watch.HoldsPermit)
         {
             _logger.LogInformation(
                 "[{Server}] {Collector} daily run completed after {Elapsed:F0}s of execution",
-                watch.ServerName, watch.CollectorName, (DateTime.UtcNow - watch.StartedUtc).TotalSeconds);
+                watch.ServerName, watch.CollectorName, elapsedSeconds);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "[{Server}] {Collector} run completed after {Elapsed:F0}s of execution",
+                watch.ServerName, watch.CollectorName, elapsedSeconds);
         }
     }
 
     /// <summary>
-    /// #4999: seconds a detached daily run may execute before the hang watchdog (<see cref="WatchDailyRuns"/>)
-    /// reports it: 15 minutes. It is its own number and not <see cref="SweepWatchdogSeconds"/>'s 60 s, because a daily
-    /// run is the slow end of the catalog and a minute is not a stall there. database_config reads every database on
-    /// its server, so on a server with many databases a healthy run takes minutes, and a 60 s line warned once a
-    /// day, on every such server, for no fault. A command deadline cannot be the measure either: a run issues many
-    /// commands (database_config issues a set per database), each bounded by its own deadline, so no single
-    /// deadline bounds a whole run. A run still going after 15 minutes is long enough past a healthy one to be
-    /// worth saying so, and while it goes it keeps one of the daily-run permits and its server's next run is
-    /// skipped. The sweep keeps its own 60 s for its own work.
+    /// #4999: seconds a detached run may execute before the hang watchdog (<see cref="WatchDailyRuns"/>) reports
+    /// it: 15 minutes, for a daily run and for each of the three runs detached by name alike. It is its own number
+    /// and not <see cref="SweepWatchdogSeconds"/>'s 60 s, because a detached run is the slow end of the catalog and a
+    /// minute is not a stall there. database_config reads every database on its server, so on a server with many
+    /// databases a healthy daily run takes minutes, and a 60 s line warned once a day, on every such server, for no
+    /// fault; query_store takes 100 to 230 s on a healthy server, so at 60 s it would have warned on every run, which
+    /// is why the three detached by name were first left out and are watched now that the line is 15 minutes. A
+    /// command deadline cannot be the measure either: a run issues many commands (database_config issues a set per
+    /// database), each bounded by its own deadline, so no single deadline bounds a whole run. A run still going after
+    /// 15 minutes is long enough past a healthy one to be worth saying so, and while it goes its server's next run
+    /// of that collector is skipped, and a daily run also keeps one of the daily-run permits. The sweep keeps its own
+    /// 60 s for its own work.
     /// </summary>
     internal const int DailyRunWatchdogSeconds = 15 * 60;
 
     /// <summary>
-    /// #4999: the hang watchdog for detached daily runs, called once per sweep tick with the current time. A run
-    /// that has been executing for <see cref="DailyRunWatchdogSeconds"/> or more gets ONE Warning that names its
-    /// server and collector, the same action the sweep watchdog takes for a body that has not finished
-    /// (<see cref="ClassifySweepEpisode"/>), on a threshold of its own. Before this a stuck daily run showed only
+    /// #4999: the hang watchdog for detached runs, called once per sweep tick with the current time: the daily
+    /// runs and the three runs detached by name (query_store, plan_correction, pg_wait_sampling). A run that has
+    /// been executing for <see cref="DailyRunWatchdogSeconds"/> or more gets ONE Warning that names its server and
+    /// collector, the same action the sweep watchdog takes for a body that has not finished
+    /// (<see cref="ClassifySweepEpisode"/>), on a threshold of its own. Before this a stuck detached run showed only
     /// as stale data, hours later. A run waiting for a permit is not executing and is not reported here, and its
     /// wait is not counted toward the threshold. Returns how many runs it warned about, for the test.
     /// </summary>
@@ -5223,9 +5248,19 @@ LIMIT 1";
 
             watch.MarkWarned();
             warned++;
-            _logger.LogWarning(
-                "[{Server}] {Collector} daily run has not completed after {Elapsed:F0}s of execution - it keeps one of the {Cap} daily-run permits and its next run is skipped until it ends (#4999)",
-                watch.ServerName, watch.CollectorName, runningSeconds, _dailyRunPermits.Cap);
+            if (watch.HoldsPermit)
+            {
+                _logger.LogWarning(
+                    "[{Server}] {Collector} daily run has not completed after {Elapsed:F0}s of execution - it keeps one of the {Cap} daily-run permits and its next run is skipped until it ends (#4999)",
+                    watch.ServerName, watch.CollectorName, runningSeconds, _dailyRunPermits.Cap);
+            }
+            else
+            {
+                /* A run detached by name takes no daily-run permit, so the line does not say it keeps one. */
+                _logger.LogWarning(
+                    "[{Server}] {Collector} run has not completed after {Elapsed:F0}s of execution - its next run is skipped until it ends (#4999)",
+                    watch.ServerName, watch.CollectorName, runningSeconds);
+            }
         }
 
         return warned;
@@ -13155,13 +13190,18 @@ LIMIT 1";
             runtime = currentRuntime;
         }
 
-        /* #4999: from here a daily run is executing, so the hang watchdog watches it (WatchDailyRuns), from the
-           moment it holds its permit and re-read its runtime until it ends: the watch is disposed with this scope.
-           It starts after the wait for a permit on purpose, because a run that is queued behind the cap is
-           capacity pressure and is not stuck. It sits before the test seam below so a run a test holds open is
-           watched the way a real one is. */
-        using var dailyRunWatch = detachedDaily
-            ? BeginDailyRunWatch(server.Config.DisplayName, runtime.ServerId, collectorName)
+        /* #4999: from here a detached run is executing, so the hang watchdog watches it (WatchDailyRuns), until it
+           ends: the watch is disposed with this scope. A daily run is watched from the moment it holds its permit
+           and has re-read its runtime, and starts after the wait for a permit on purpose, because a run that is
+           queued behind the cap is capacity pressure and is not stuck. A run detached by name (query_store,
+           plan_correction, pg_wait_sampling) takes no permit, so its watch starts as it starts executing, here, past
+           the single-flight gates above. Both are RanDetached; an inline run (the at-connect run of an on-load
+           collector, a collector run by snapshot_now) is not watched, unless it is one of the three by name. The
+           gates are what keep the watch's (server, collector) key to one run: a second run of the collector is
+           skipped above, before it is watched, and this watch ends before those gates are released. It sits before
+           the test seam below so a run a test holds open is watched the way a real one is. */
+        using var dailyRunWatch = RanDetached(collectorName, detachedDaily)
+            ? BeginDailyRunWatch(server.Config.DisplayName, runtime.ServerId, collectorName, holdsPermit: detachedDaily)
             : null;
 
         if (RunOneBodyOverride is { } bodyOverride)

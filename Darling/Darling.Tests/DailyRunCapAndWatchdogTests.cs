@@ -93,22 +93,22 @@ internal static class DailyRunKit
     }
 }
 
-/// <summary>The stand-in for a collector run: the named collector holds open until a test releases it, one release per run.</summary>
+/// <summary>The stand-in for a collector run: each named collector holds open until a test releases it, one release per run.</summary>
 internal sealed class HeldRuns
 {
     private readonly object _lock = new();
     private readonly SemaphoreSlim _release = new(0);
-    private readonly string _held;
+    private readonly HashSet<string> _held;
     private int _started;
 
     /// <param name="worker">The worker whose collector runs this stands in for.</param>
-    /// <param name="held">The collector whose run holds open. Every other collector returns at once.</param>
-    public HeldRuns(DarlingWorker worker, string held)
+    /// <param name="held">The collectors whose runs hold open. Every other collector returns at once.</param>
+    public HeldRuns(DarlingWorker worker, params string[] held)
     {
-        _held = held;
+        _held = [.. held];
         worker.RunOneBodyOverride = async (_, _, collector, _) =>
         {
-            if (collector == _held)
+            if (_held.Contains(collector))
             {
                 lock (_lock)
                 {
@@ -442,7 +442,9 @@ public sealed class DailyRunCapTests
 /// <summary>
 /// #4999: the hang watchdog covered only the per-server bodies, and a daily run is detached from them, so a daily run
 /// that stopped making progress showed up only as stale data at 36 hours. It now watches the daily runs that are
-/// executing, with the sweep watchdog's threshold and the same one Warning, naming the server and the collector.
+/// executing, on a threshold of their own (15 minutes, not the sweep's 60 seconds) and with the same one Warning,
+/// naming the server and the collector. The three runs detached by name are watched the same way
+/// (<see cref="DetachedByNameWatchdogTests"/>).
 /// </summary>
 public sealed class DailyRunWatchdogTests
 {
@@ -617,6 +619,197 @@ public sealed class DailyRunWatchdogTests
 }
 
 /// <summary>
+/// #4999: the hang watchdog watches the three collectors detached by name (query_store, plan_correction,
+/// pg_wait_sampling) as it watches a daily run: one that has been executing for 15 minutes gets ONE Warning naming
+/// its server and collector. They were left out at first, on the reasoning that query_store runs 100 to 230 seconds
+/// on a healthy server and would warn on every run, which held only for the sweep's 60-second line; a healthy run is
+/// far inside 15 minutes. A run detached by name takes no daily-run permit, so its watch starts when it starts
+/// executing, and it is watched whatever the daily runs are doing.
+/// </summary>
+public sealed class DetachedByNameWatchdogTests
+{
+    private static readonly TimeSpan Patience = DailyRunKit.Patience;
+
+    private static List<string> Warnings(DailyRunLogger logger) =>
+        logger.Snapshot().Where(e => e.Level == LogLevel.Warning).Select(e => e.Message).ToList();
+
+    /// <summary>pg_wait_sampling is a PostgreSQL collector, so a server that is due for it has to be a PostgreSQL target.</summary>
+    private static CollectorTargetInfo TargetFor(string collector) =>
+        collector == "pg_wait_sampling"
+            ? new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql }
+            : new CollectorTargetInfo();
+
+    [Theory]
+    [InlineData("query_store")]
+    [InlineData("plan_correction")]
+    [InlineData("pg_wait_sampling")]
+    public async Task ARunDetachedByName_ExecutingPastTheThreshold_IsReportedOnce_NamingTheServerAndTheCollector(string collector)
+    {
+        Assert.True(DarlingWorker.IsDetachedByName(collector), "the collector under test is one of the three detached by name");
+        var logger = new DailyRunLogger();
+        var worker = DailyRunKit.MakeWorker(logger);
+        var runs = new HeldRuns(worker, collector);
+        var server = DailyRunKit.MakeServer(7410, collector, TargetFor(collector));
+        var ct = TestContext.Current.CancellationToken;
+
+        try
+        {
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1, Patience), "the run starts");
+            var startedBy = DateTime.UtcNow;
+
+            Assert.Equal(1, worker.WatchDailyRuns(startedBy.AddSeconds(DarlingWorker.DailyRunWatchdogSeconds + 1)));
+
+            var warning = Assert.Single(Warnings(logger));
+            Assert.Contains(server.Config.DisplayName, warning, StringComparison.Ordinal);
+            Assert.Contains(collector, warning, StringComparison.Ordinal);
+
+            /* The run holds no daily-run permit, so the Warning does not say that it does. */
+            Assert.DoesNotContain("permit", warning, StringComparison.Ordinal);
+            Assert.DoesNotContain("daily", warning, StringComparison.Ordinal);
+
+            /* One Warning per run: a later tick finds the run still going and says nothing more. */
+            Assert.Equal(0, worker.WatchDailyRuns(startedBy.AddSeconds(DarlingWorker.DailyRunWatchdogSeconds + 600)));
+            Assert.Single(Warnings(logger));
+
+            /* The end of a run the watchdog warned about is logged, and the run is no longer watched. */
+            runs.ReleaseAll();
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 0, Patience), "the run ends");
+            Assert.Contains(
+                logger.Snapshot(),
+                e => e.Level == LogLevel.Information
+                    && e.Message.Contains("run completed", StringComparison.Ordinal)
+                    && e.Message.Contains(collector, StringComparison.Ordinal));
+            Assert.Equal(0, worker.WatchDailyRuns(startedBy.AddSeconds(DarlingWorker.DailyRunWatchdogSeconds + 3600)));
+        }
+        finally
+        {
+            runs.ReleaseAll();
+        }
+    }
+
+    /// <summary>
+    /// A healthy query_store run takes 100 to 230 seconds and a healthy plan_correction or pg_wait_sampling run far
+    /// less, so none of them is reported for running a few minutes: only a run well past a healthy one is.
+    /// </summary>
+    [Theory]
+    [InlineData("query_store")]
+    [InlineData("plan_correction")]
+    [InlineData("pg_wait_sampling")]
+    public async Task ARunDetachedByName_UnderTheThreshold_IsNotReported(string collector)
+    {
+        var logger = new DailyRunLogger();
+        var worker = DailyRunKit.MakeWorker(logger);
+        var runs = new HeldRuns(worker, collector);
+        var server = DailyRunKit.MakeServer(7411, collector, TargetFor(collector));
+        var ct = TestContext.Current.CancellationToken;
+        var before = DateTime.UtcNow;
+
+        try
+        {
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1, Patience), "the run starts");
+
+            /* Four minutes on is past a healthy query_store run's 230 seconds, and 20 seconds short of the line. */
+            Assert.Equal(0, worker.WatchDailyRuns(before.AddMinutes(4)));
+            Assert.Equal(0, worker.WatchDailyRuns(before.AddSeconds(DarlingWorker.DailyRunWatchdogSeconds - 20)));
+            Assert.Empty(Warnings(logger));
+        }
+        finally
+        {
+            runs.ReleaseAll();
+        }
+    }
+
+    /// <summary>
+    /// A run detached by name never waits for a daily-run permit, so with every permit in use it still starts at once,
+    /// and its watch starts with it. The daily run that holds the only permit and the run detached by name are each
+    /// reported, once, by their own server and collector.
+    /// </summary>
+    [Fact]
+    public async Task ARunDetachedByName_TakesNoPermit_AndIsWatchedFromTheMomentItStarts()
+    {
+        var logger = new DailyRunLogger();
+        var worker = DailyRunKit.MakeWorker(logger);
+        var runs = new HeldRuns(worker, DailyRunKit.Daily, "query_store");
+        var daily = DailyRunKit.MakeServer(7412, DailyRunKit.Daily);
+        var byName = DailyRunKit.MakeServer(7413, "query_store");
+        var ct = TestContext.Current.CancellationToken;
+
+        /* A pool this small leaves room for one daily run, and the daily run below takes it. */
+        worker.ApplyDailyRunCap(1, 4);
+
+        try
+        {
+            await worker.RunDueCollectorsAsync(daily, null!, ct);
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1, Patience), "the daily run takes the only permit");
+            await worker.RunDueCollectorsAsync(byName, null!, ct);
+            Assert.True(
+                await DailyRunKit.BecomesTrueAsync(() => runs.Started == 2, Patience),
+                "the run detached by name starts beside the daily run and does not queue for a permit");
+
+            Assert.Equal(2, worker.WatchDailyRuns(DateTime.UtcNow.AddHours(1)));
+            var warnings = Warnings(logger);
+            Assert.Equal(2, warnings.Count);
+            Assert.Single(
+                warnings,
+                w => w.Contains(daily.Config.DisplayName, StringComparison.Ordinal)
+                    && w.Contains(DailyRunKit.Daily, StringComparison.Ordinal));
+            Assert.Single(
+                warnings,
+                w => w.Contains(byName.Config.DisplayName, StringComparison.Ordinal)
+                    && w.Contains("query_store", StringComparison.Ordinal));
+        }
+        finally
+        {
+            runs.ReleaseAll();
+        }
+    }
+
+    /// <summary>
+    /// The watches are keyed by (server, collector), which holds only if two runs of one collector never execute on one
+    /// server at once. A run detached by name is held to one at a time by a single-flight gate it takes before its
+    /// watch begins (query_store's per-server gate, and the per-(server, collector) gate of the other two), so a
+    /// second run that comes due while the first is still going is skipped before it is watched, and cannot replace
+    /// or remove the first run's watch.
+    /// </summary>
+    [Theory]
+    [InlineData("query_store")]
+    [InlineData("plan_correction")]
+    [InlineData("pg_wait_sampling")]
+    public async Task ASecondRunOfTheSameCollectorOnTheServer_IsSkippedBeforeItIsWatched_SoTheFirstRunsWatchStands(string collector)
+    {
+        var logger = new DailyRunLogger();
+        var worker = DailyRunKit.MakeWorker(logger);
+        var runs = new HeldRuns(worker, collector);
+        var server = DailyRunKit.MakeServer(7414, collector, TargetFor(collector));
+        var ct = TestContext.Current.CancellationToken;
+
+        try
+        {
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1, Patience), "the first run starts");
+
+            /* It comes due again while the first run is still going. */
+            server.NextDue[collector] = DateTime.UtcNow.AddMinutes(-5);
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(
+                await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 1, Patience),
+                "the second run ends at once, skipped, and only the first is still in flight");
+            Assert.Equal(1, runs.Started);
+
+            /* The first run is still watched, once. */
+            Assert.Equal(1, worker.WatchDailyRuns(DateTime.UtcNow.AddHours(1)));
+            Assert.Single(Warnings(logger));
+        }
+        finally
+        {
+            runs.ReleaseAll();
+        }
+    }
+}
+
+/// <summary>
 /// #4999: the three collectors detached by name (query_store, plan_correction, pg_wait_sampling) used to run
 /// untracked, so the shutdown drain that waits for the other detached runs did not wait for them. They are tracked the
 /// same way now, and a shutdown waits for one that is still going.
@@ -653,29 +846,6 @@ public sealed class DetachedByNameShutdownDrainTests
             runs.ReleaseAll();
             Assert.True(await DailyRunKit.EndsWithinAsync(drain, Patience), "the stop finishes once the run has");
             Assert.True(await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 0, Patience), "a run that ended is no longer tracked");
-        }
-        finally
-        {
-            runs.ReleaseAll();
-        }
-    }
-
-    [Fact]
-    public async Task ARunDetachedByName_IsNotWatchedByTheDailyWatchdog()
-    {
-        var logger = new DailyRunLogger();
-        var worker = DailyRunKit.MakeWorker(logger);
-        var runs = new HeldRuns(worker, "plan_correction");
-        var server = DailyRunKit.MakeServer(7402, "plan_correction");
-        var ct = TestContext.Current.CancellationToken;
-
-        try
-        {
-            await worker.RunDueCollectorsAsync(server, null!, ct);
-            Assert.True(await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1, Patience), "the run starts");
-
-            /* query_store runs 100 to 230 seconds on a healthy server and would warn on every run. */
-            Assert.Equal(0, worker.WatchDailyRuns(DateTime.UtcNow.AddHours(1)));
         }
         finally
         {

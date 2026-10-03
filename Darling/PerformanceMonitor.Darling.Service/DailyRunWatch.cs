@@ -12,10 +12,11 @@ using System.Threading;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// #4999: one detached daily run as the hang watchdog sees it (<see cref="DarlingWorker.WatchDailyRuns"/>): which
-/// server and collector it is, when it began executing, and whether the watchdog has warned about it yet. It is
-/// created once the run holds its permit, so the clock it carries is the run's own execution time and never the
-/// time it spent waiting for a permit, and it ends when the run does.
+/// #4999: one detached run as the hang watchdog sees it (<see cref="DarlingWorker.WatchDailyRuns"/>), a daily
+/// collector's run or one of the three that are detached by name: which server and collector it is, when it began
+/// executing, and whether the watchdog has warned about it yet. It is created once the run is executing (for a daily
+/// run, once it holds its permit), so the clock it carries is the run's own execution time and never the time it
+/// spent waiting for a permit, and it ends when the run does.
 /// </summary>
 internal sealed class DailyRunWatch : IDisposable
 {
@@ -27,19 +28,28 @@ internal sealed class DailyRunWatch : IDisposable
     /// <param name="serverId">The store's id for the server, which keys the run's single-flight slot.</param>
     /// <param name="serverName">The server's display name, which is what the warning names.</param>
     /// <param name="collectorName">The collector the run is for.</param>
+    /// <param name="holdsPermit">
+    /// Whether the run holds one of the fleet's daily-run permits while it executes: true for a daily run, false for a
+    /// run detached by name, which takes none. The warning says which, so it never claims a permit the run does not hold.
+    /// </param>
     /// <param name="startedUtc">When the run began executing.</param>
     /// <param name="onEnded">Called once, when the run ends and the watch is disposed.</param>
-    internal DailyRunWatch(int serverId, string serverName, string collectorName, DateTime startedUtc, Action<DailyRunWatch> onEnded)
+    internal DailyRunWatch(
+        int serverId, string serverName, string collectorName, bool holdsPermit, DateTime startedUtc, Action<DailyRunWatch> onEnded)
     {
         ServerId = serverId;
         ServerName = serverName;
         CollectorName = collectorName;
+        HoldsPermit = holdsPermit;
         StartedUtc = startedUtc;
         _onEnded = onEnded;
     }
 
     /// <summary>The store's id for the server the run is for.</summary>
     internal int ServerId { get; }
+
+    /// <summary>Whether the run holds a daily-run permit while it executes: a daily run does, a run detached by name does not.</summary>
+    internal bool HoldsPermit { get; }
 
     /// <summary>The display name of the server the run is for.</summary>
     internal string ServerName { get; }
