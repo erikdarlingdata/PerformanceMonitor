@@ -495,6 +495,7 @@ public sealed class PostgresEngineGateBehaviorTests
         SetField(worker, "_serversLock", new object());
         SetField(worker, "_logger", NullLogger<DarlingWorker>.Instance);
         SetField(worker, "_postgres", postgres);
+        SetField(worker, "_collectorFaultStacks", new CollectorFaultStackLog());
         /* The analysis pass reads the published registry for an Azure master target's separately monitored
            databases. Unpublished, it reads as none, as it does before the worker first publishes. */
         SetField(worker, "_registryState", new PerformanceMonitor.Darling.Service.Mcp.MonitoredServerRegistryState());
@@ -669,6 +670,9 @@ VALUES ($1, $2, $3, $4, 'appdb', 1000, 10, 100, 9000, 0, 0, 0, NULL)");
         SetField(worker, "_logger", NullLogger<DarlingWorker>.Instance);
         SetField(worker, "_postgres", postgres);
         SetField(worker, "_scheduleOverrides", SingleEnabledCollectorOverrides(serverId));
+        /* A collector that fails here lands in RunOneAsync's general arm, which records the first failure of each
+           kind in this log. An uninitialized worker skips the field initializer, so the log is set here. */
+        SetField(worker, "_collectorFaultStacks", new CollectorFaultStackLog());
 
         var runner = new DarlingCollectorRunner(
             postgres, new CollectorDeltaCalculator(), NullLogger<DarlingCollectorRunner>.Instance);

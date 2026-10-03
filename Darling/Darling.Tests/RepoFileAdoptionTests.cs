@@ -127,6 +127,9 @@ public sealed class RepoFileAdoptionTests
            chart counts are told apart from the constant's prose and the function from its callers. */
         "ChartIntegerTicksPinTests.cs",
         "ChartWindowDomainTests.cs",
+        /* #4605: its wiring pins read the endpoint source with comments stripped and whitespace collapsed, so a call 
+           that wraps across lines compares as one spelling. */
+        "ComposeClientTimeoutAttributionTests.cs",
         /* #4887: its StoredEventCopies census takes each helper's table from that class's own source, on an anchor
            that runs from the helper's `=>` across the line break to the `Read("v_` on the next line. */
         "ConsumedTimestampFrameDisciplineTests.cs",
@@ -135,6 +138,9 @@ public sealed class RepoFileAdoptionTests
            that follows it, so the CODE spelling is told apart from the same words inside the arms' own
            comments, which continue on the same line. */
         "DarlingPgOperationalAlertTests.cs",
+        "FinOpsPageShellTests.cs",
+        "FinOpsTabLockingPageTests.cs",
+        "FinOpsTabUtilizationRawPageTests.cs",
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         /* #3735: its source pin anchors the collection-health statement's tail across three line breaks
            (`FROM v_collection_log` / `WHERE` / `AND` / `GROUP BY`) and the CreateCommand line on the
@@ -220,6 +226,7 @@ public sealed class RepoFileAdoptionTests
            and the pre-dispatch `if (…LongQueryTraceFault is { } traceFault) { throw … }` in RunOneAsync - so
            the CODE shape is told apart from the same words inside the comments beside it. */
         "SwallowedItemFailureTests.cs",
+        "TuningHourlyCreateLiveTests.cs",
         "ViewTemplatesTests.cs",
         "ViewerFinOpsPickerRefreshPinTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",

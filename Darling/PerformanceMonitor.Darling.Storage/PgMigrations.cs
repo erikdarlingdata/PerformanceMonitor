@@ -354,6 +354,79 @@ CREATE TABLE IF NOT EXISTS config.config_install_id (
     created_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC')
 );";
 
+    /// <summary>
+    /// V159 — <c>config.config_install_id.table_oid</c> and <c>server_major</c>: the OID of the install id table and the
+    /// server's major version, two more bindings for the id (#4961).
+    ///
+    /// <para>V158 bound the id to the cluster's <c>system_identifier</c> and the database's OID, and a different cluster
+    /// id made a new id. A managed major upgrade runs <c>pg_upgrade</c>, which makes a new <c>system_identifier</c>, so each
+    /// upgrade made a new id and left the old id's sessions on every monitored server. <c>pg_upgrade</c> keeps the
+    /// database's OID and the OID of each table (<see cref="StoreInstallId.IsSameStore"/> cites the PostgreSQL sources
+    /// for both) and raises the major, and a store made again by dump and restore gets new OIDs, so the two OIDs say
+    /// whether this is the same store where the cluster id cannot. OIDs restart at the same number after every
+    /// <c>initdb</c>, so a copy of the row into a fresh install of the same version can match both; the major tells that
+    /// copy from an upgrade, because an upgrade always raises it. The service keeps the id through a changed cluster id
+    /// only when both OIDs match and the major rose, and rebinds the row to the new cluster id and major.</para>
+    ///
+    /// <para><b>Nullable, DDL only, one statement.</b> A row made by V158's service has neither value. They are not
+    /// backfilled here, because both are facts of the cluster the service reads at start, not something a migration
+    /// should guess: the service writes them on its first start after this rung, and until then a row without a table OID
+    /// is compared by the old rule, which is the rule that made the row. One catalog-only <c>ADD COLUMN</c> for each, in
+    /// one statement, so the two arrive together or not at all, and a second run changes nothing. Needs no GRANT (the
+    /// roles' table-level grants cover a new column) and no trigger (nothing reloads when the id's binding changes).</para>
+    /// </summary>
+    private const string V159Sql = @"
+ALTER TABLE config.config_install_id
+    ADD COLUMN IF NOT EXISTS table_oid bigint,
+    ADD COLUMN IF NOT EXISTS server_major integer;";
+
+    /// <summary>
+    /// V160 (#4938) — <c>config.config_collector_run_times</c>: an optional run time for a collector that runs once a day
+    /// or less often, so a heavy daily collector can run in a quiet hour instead of whenever the service happened to
+    /// start.
+    ///
+    /// <para><b>Its own table, because released viewers rewrite the schedules table.</b> The viewer's schedule Save
+    /// deletes a scope's rows in <c>config_collector_schedules</c> and inserts them again with a fixed column list, and
+    /// every released viewer connects to a store that is newer than it is (the connect check refuses only an older one).
+    /// A run time kept as a column on that table would be set back to NULL by each Save. A table those Saves never write
+    /// keeps it. No row means no run time, so a store that never sets one reads exactly as it did before.</para>
+    ///
+    /// <para>The value is minutes after midnight on the monitored server's own clock, from 0 to 1439. The table mirrors the
+    /// schedules table: <c>server_id</c> NULL is fleet-wide, there is one fleet row and one server row per collector (two
+    /// partial unique indexes, because a primary key cannot span a nullable column), and the layering is the same (the
+    /// server row, else the fleet row, else no fixed time). <b>-1 is allowed on a server row only.</b> It means "no fixed
+    /// time on this server" and stops a fleet-wide time, the way an empty array stops a fleet-wide database scope; a fleet
+    /// row has no level above it to stop, so the CHECK refuses -1 there. Whether a run time applies at all depends on the
+    /// collector's effective interval (a whole number of days), which is not a property of the row, so the service judges
+    /// that when it resolves the schedule, not the CHECK.</para>
+    ///
+    /// <para><b>DDL only, and a second run changes nothing.</b> Every statement is <c>IF NOT EXISTS</c> or a drop and
+    /// create, so running the rung again keeps the table, its indexes and its rows. Needs no GRANT: provisioning's blanket
+    /// grants on the config schema re-run on every service start and cover a table a migration introduces. It does carry
+    /// the one trigger the schedules table has, V17's reload beacon, so a write here bumps
+    /// <c>config_service.config_version</c> and a running service reloads the run times. No foreign key to the server
+    /// registry, as the schedules table has none: removing a server deletes its definition only and leaves its schedule
+    /// rows, so a removed server's run time stays as well, harmlessly. No Lite twin: Lite keeps its schedules in a JSON
+    /// file.</para>
+    /// </summary>
+    private const string V160Sql = @"
+/* V160 (#4938): a collector's optional run time, in its own table. Schema-qualified config.* like every rung. */
+CREATE TABLE IF NOT EXISTS config.config_collector_run_times (
+    server_id integer,
+    collector_name text NOT NULL,
+    run_at_minute smallint NOT NULL,
+    CONSTRAINT ck_config_collector_run_times_range CHECK (run_at_minute BETWEEN 0 AND 1439 OR (run_at_minute = -1 AND server_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_config_collector_run_times_fleet
+    ON config.config_collector_run_times (collector_name) WHERE server_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_config_collector_run_times_server
+    ON config.config_collector_run_times (server_id, collector_name) WHERE server_id IS NOT NULL;
+
+DROP TRIGGER IF EXISTS trg_bump_collector_run_times ON config.config_collector_run_times;
+CREATE TRIGGER trg_bump_collector_run_times
+    AFTER INSERT OR UPDATE OR DELETE ON config.config_collector_run_times
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -550,6 +623,8 @@ CREATE TABLE IF NOT EXISTS config.config_install_id (
         new Migration(156, "checkpoint-longest-sync", V156Sql),
         new Migration(157, "mute-rule-server-id", V157Sql),
         new Migration(158, "install-id", V158Sql),
+        new Migration(159, "install-id-table-oid", V159Sql),
+        new Migration(160, "collector-run-time", V160Sql),
     };
 
     /// <summary>
@@ -2292,7 +2367,7 @@ CREATE INDEX IF NOT EXISTS idx_index_object_stats_server_time ON collect.index_o
     /// <c>ORDER BY collection_time DESC, execution_count DESC</c> would keep. Its columns are exactly what the two reads
     /// consume, and their types and nullability mirror raw's, so the table can never refuse a row raw accepted. One
     /// unique index, <c>NULLS NOT DISTINCT</c> because <c>replica_role</c> is NULL off an availability group and must
-    /// still collapse (PostgreSQL 15+; the product minimum is 17). The column order is the writer's: a batch is one
+    /// still collapse (PostgreSQL 15+; the product minimum is 16). The column order is the writer's: a batch is one
     /// database's rows for one or two interval ids, so each batch's entries form one contiguous run.
     /// <c>fillfactor = 50</c> was measured (99% HOT against 56-59% at 70). The hypertable conversion, compression and
     /// retention are runtime work in <c>collection_log</c>'s shape, not this rung's.</para>

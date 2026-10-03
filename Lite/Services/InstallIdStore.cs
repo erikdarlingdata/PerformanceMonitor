@@ -23,19 +23,22 @@ namespace PerformanceMonitorLite.Services;
 /// <c>install-id.json</c>, beside the machine name and Windows user SID it was made for.
 ///
 /// <para><b>Made once.</b> A process-wide lock and a cache make the first resolve happen once however many
-/// collectors ask at the same moment. Across processes the file is created with
-/// <see cref="FileMode.CreateNew"/>, which only one creator can win; a loser re-reads the winner's file and uses
-/// its id. The creator holds the file exclusively while it writes, so a reader that finds it locked waits
-/// for the writer instead of treating the lock as a damaged file.</para>
+/// collectors ask at the same moment. Across processes a new id is written to a temp file in the same folder and
+/// moved to its place without replacing anything, which only one creator can win and which a crash cannot leave
+/// half done: the final path never holds a partial file. A loser re-reads the winner's file and uses its id. A reader
+/// that finds the file locked waits for the holder instead of treating the lock as a damaged file.</para>
 ///
-/// <para><b>Rebuilt when it does not fit.</b> A value that is not eight lowercase hex digits, a file that cannot be
-/// read, and a file made for a different machine or Windows user (a data folder copied to another machine or
-/// opened by another user) each make a new id, and one Warning that names the old id (or "invalid") and the new
-/// one. The rewrite goes through a temp file and a replace, so a reader never sees half a file. Sessions made
-/// under the old id are left alone: the install it belonged to may still be running.</para>
+/// <para><b>Rebuilt when its content does not fit.</b> A value that is not eight lowercase hex digits, a file that is
+/// not the id record (not JSON, or no record), and a file made for a different machine or Windows user (a data folder
+/// copied to another machine or opened by another user) each make a new id, and one Warning that names the old id (or
+/// "invalid") and the new one. The bad file is renamed aside and the new id is then created the way a first one is, so processes that replace the same file end on one id and a reader never sees half a file.
+/// Sessions made under the old id are left alone: the install it belonged to may still be running.</para>
 ///
-/// <para><b>Never lost to a bad folder.</b> If the new id cannot be saved the store still answers, with the same id
-/// for the rest of the run, and says so in its Warning; the next start makes another.</para>
+/// <para><b>Never replaced unread, never used unsaved.</b> A file that exists but cannot be read (an I/O error, or a lock
+/// held past the wait) says nothing about the id in it, so it is left alone and the store has no id: the callers create,
+/// start and drop no session, and ask again on a later cycle, no sooner than a minute after the last try. A new id that
+/// cannot be saved is not used either, because sessions made under it could not be found again after a restart. The first
+/// failure is one Warning with the error; the repeats are Debug until an id is read.</para>
 ///
 /// <para>Import Settings never carries this file (<see cref="SettingsImport"/>): two installs that shared an id
 /// would drop each other's sessions.</para>
@@ -47,6 +50,10 @@ public sealed class InstallIdStore
 
     private const string LogSource = "InstallId";
 
+    /// <summary>How many times a resolve reads the file again after finding another process's work in the way, before it
+    /// gives up until the next cycle.</summary>
+    private const int MaxResolveAttempts = 4;
+
     /// <summary>
     /// How long a read waits for another process that still holds the file open: the creator's few
     /// milliseconds of writing, with room for a scanner that opens a new file for a moment. Past this the file is
@@ -55,6 +62,9 @@ public sealed class InstallIdStore
     private static readonly TimeSpan s_lockedReadBudget = TimeSpan.FromSeconds(2);
 
     private static readonly TimeSpan s_lockedReadPause = TimeSpan.FromMilliseconds(20);
+
+    /// <summary>How long a resolve that ended with no id waits before the next call goes back to the disk.</summary>
+    private static readonly TimeSpan s_retryInterval = TimeSpan.FromSeconds(60);
 
     /// <summary>The process-wide lock the first resolve runs under, whichever store object asks.</summary>
     private static readonly object s_resolveLock = new();
@@ -65,6 +75,9 @@ public sealed class InstallIdStore
     private readonly string _machineName;
     private readonly string _userSid;
     private string? _id;
+    private string? _failure;
+    private DateTime _retryAt = DateTime.MinValue;
+    private bool _failureWarned;
     private int _resolveCount;
 
     /// <summary>
@@ -92,6 +105,30 @@ public sealed class InstallIdStore
     internal Action? BeforeCreate { get; set; }
 
     /// <summary>
+    /// Runs between a new id's temp file being written and its move into place, so a test can stop the create at the
+    /// point a crash would. Nothing in the app sets it.
+    /// </summary>
+    internal Action? BeforeMove { get; set; }
+
+    /// <summary>
+    /// Runs in the moment between this store judging the file bad and starting to replace it, so a test can make another
+    /// process replace the file at the exact point it matters. Nothing in the app sets it.
+    /// </summary>
+    internal Action? BeforeReplace { get; set; }
+
+    /// <summary>How long a read waits for a locked file. A test shortens it; the app keeps the default.</summary>
+    internal TimeSpan LockedReadBudget { get; set; } = s_lockedReadBudget;
+
+    /// <summary>The clock the retry interval runs on. A test sets it; the app keeps the real one.</summary>
+    internal Func<DateTime> UtcNowForTests { get; set; } = () => DateTime.UtcNow;
+
+    /// <summary>
+    /// Why this store has no id right now (the file could not be read, or a new id could not be saved), or null while it
+    /// has one or has not tried. The collection service puts it in the fault that says why no session was made.
+    /// </summary>
+    internal string? Failure => Volatile.Read(ref _failure);
+
+    /// <summary>
     /// A store for the running user on this machine: the real machine name and the current Windows user's SID.
     /// </summary>
     public static InstallIdStore ForCurrentUser(string directory)
@@ -113,11 +150,13 @@ public sealed class InstallIdStore
     }
 
     /// <summary>
-    /// This install's id. The first call resolves it (reads the file, or makes it) under the process-wide lock, so
-    /// parallel first sweeps share one resolve; every later call returns the cached value without touching the
-    /// disk.
+    /// This install's id, or null while it cannot be had. The first call resolves it (reads the file, or makes it) under
+    /// the process-wide lock, so parallel first sweeps share one resolve; every later call returns the cached value
+    /// without touching the disk. A resolve that ends with no id (the file exists and cannot be read, or a new id cannot
+    /// be saved) is not cached: calls within a minute answer null without touching the file, and the first call after it
+    /// tries again.
     /// </summary>
-    public string GetId()
+    public string? GetId()
     {
         var cached = Volatile.Read(ref _id);
         if (cached is not null)
@@ -127,83 +166,213 @@ public sealed class InstallIdStore
 
         lock (s_resolveLock)
         {
-            if (_id is null)
+            if (_id is not null)
             {
-                Interlocked.Increment(ref _resolveCount);
-                _id = Resolve();
-                AppLogger.Info(LogSource, $"This install's id is {_id}.");
+                return _id;
             }
 
-            return _id;
+            if (UtcNowForTests() < _retryAt)
+            {
+                return null;
+            }
+
+            Interlocked.Increment(ref _resolveCount);
+            var id = Resolve(out var failure);
+            if (id is null)
+            {
+                _retryAt = UtcNowForTests().Add(s_retryInterval);
+                Volatile.Write(ref _failure, failure);
+
+                var line = $"This install has no id for now: {failure}. No Extended Events session is created, started or dropped without one. The next cycle tries again.";
+                if (_failureWarned)
+                {
+                    AppLogger.Debug(LogSource, line);
+                }
+                else
+                {
+                    _failureWarned = true;
+                    AppLogger.Warn(LogSource, line);
+                }
+
+                return null;
+            }
+
+            Volatile.Write(ref _failure, null);
+            Volatile.Write(ref _id, id);
+            AppLogger.Info(LogSource, $"This install's id is {id}.");
+            return id;
         }
     }
 
-    private string Resolve()
+    /// <summary>
+    /// Reads the file, or makes it. Null (with <paramref name="failure"/> saying why) when the file exists and cannot be
+    /// read, or when a new id cannot be saved.
+    /// </summary>
+    private string? Resolve(out string? failure)
     {
-        var read = ReadFile();
-
-        if (read.Kind == ReadKind.Missing)
+        failure = null;
+        for (var attempt = 0; attempt < MaxResolveAttempts; attempt++)
         {
-            BeforeCreate?.Invoke();
+            var read = ReadFile(FilePath);
 
-            var candidate = InstallId.NewId();
-            var created = TryCreate(candidate, out var saveFailure);
-            if (created == CreateOutcome.Created)
+            if (read.Kind == ReadKind.Missing)
             {
-                return candidate;
+                BeforeCreate?.Invoke();
+
+                var candidate = InstallId.NewId();
+                var created = TryCreate(candidate, out var saveFailure);
+                if (created == CreateOutcome.Created)
+                {
+                    return candidate;
+                }
+
+                if (created == CreateOutcome.NotSaved)
+                {
+                    failure = $"a new id could not be saved to {FilePath} ({saveFailure})";
+                    return null;
+                }
+
+                /* Another process made the file first. Its id is the install's id: read it back. */
+                read = ReadFile(FilePath);
             }
 
-            if (created == CreateOutcome.NotSaved)
+            if (read.Kind == ReadKind.Unreadable)
             {
-                AppLogger.Warn(LogSource,
-                    $"A new install id {candidate} was made but could not be saved to {FilePath} ({saveFailure}), " +
-                    "so it holds for this run only and the next start makes another.");
-                return candidate;
+                /* The file is there and cannot be read right now: nothing is known about the id in it, so it is not replaced. */
+                failure = $"the id file {FilePath} could not be read ({read.Detail})";
+                return null;
             }
 
-            /* Another process made the file first. Its id is the install's id: read it back. */
-            read = ReadFile();
+            if (read.File is { } file && Matches(file))
+            {
+                return file.Id;
+            }
+
+            var outcome = Replace(read, out var replacement, out failure);
+            if (outcome != ReplaceOutcome.Again)
+            {
+                return replacement;
+            }
         }
 
-        if (read.File is { } file && Matches(file))
-        {
-            return file.Id!;
-        }
-
-        return Replace(read);
+        failure = $"the id file {FilePath} kept changing while it was being settled";
+        return null;
     }
 
-    /// <summary>Makes a new id, writes it over the file, and says so in one Warning that names both ids.</summary>
-    private string Replace(ReadResult read)
+    /// <summary>
+    /// Replaces a file whose content does not fit, and says so in one Warning that names both ids. The bad file is renamed
+    /// aside first and the new id is then created the way a first id is, without replacing anything, so of several processes
+    /// that found the same bad file one wins each step and every other ends on the winner's id: a loser of the rename finds
+    /// the file gone, and a loser of the create finds the winner's file and reads it back (<see cref="ReplaceOutcome.Again"/>).
+    /// A replacer that was slow can move aside a file that is no longer the one it judged, a good one another process has
+    /// just made; it puts that file back and reads again. Null (with <paramref name="failure"/>) when the new id cannot be
+    /// saved: it is not used, and the file is put back as it was.
+    /// </summary>
+    private ReplaceOutcome Replace(ReadResult read, out string? id, out string? failure)
     {
+        id = null;
+        failure = null;
         var oldId = read.File is { } old && InstallId.IsValid(old.Id) ? old.Id! : null;
-        var newId = InstallId.NewId();
 
         var why = read.Kind switch
         {
-            ReadKind.Unreadable => $"The file could not be read ({read.Detail}).",
+            ReadKind.Invalid => $"The file does not hold an id record ({read.Detail}).",
             ReadKind.Missing => "The file went missing while it was being made.",
             _ when oldId is null => "The id in the file is not eight lowercase hex digits.",
             _ => "The file was made for a different machine or Windows user.",
         };
 
-        string? saveFailure = null;
+        BeforeReplace?.Invoke();
+
+        string? aside;
         try
         {
-            WriteReplacing(newId);
+            aside = MoveAside();
         }
         catch (Exception ex)
         {
-            saveFailure = $"{ex.GetType().Name}: {ex.Message}";
+            failure = $"the id file {FilePath} could not be replaced ({ex.GetType().Name}: {ex.Message})";
+            return ReplaceOutcome.Failed;
         }
 
-        var tail = saveFailure is null
-            ? (oldId is null ? "" : " Sessions made under the old id are left alone.")
-            : $" The new id could not be saved ({saveFailure}), so it holds for this run only and the next start makes another.";
+        if (aside is not null && ReadFile(aside) is { Kind: ReadKind.Read, File: { } moved } && Matches(moved))
+        {
+            PutBack(aside);
+            return ReplaceOutcome.Again;
+        }
+
+        var newId = InstallId.NewId();
+        var created = TryCreate(newId, out var saveFailure);
+        if (created == CreateOutcome.NotSaved)
+        {
+            PutBack(aside);
+            failure = $"a replacement id could not be saved to {FilePath} ({saveFailure})";
+            return ReplaceOutcome.Failed;
+        }
+
+        DeleteQuietly(aside);
+        if (created == CreateOutcome.Conflict)
+        {
+            return ReplaceOutcome.Again;
+        }
+
+        var tail = oldId is null ? "" : " Sessions made under the old id are left alone.";
         AppLogger.Warn(LogSource,
             $"Install id replaced in {FilePath}: old id {oldId ?? "invalid"}, new id {newId}. {why}{tail}");
 
-        return newId;
+        id = newId;
+        return ReplaceOutcome.Done;
+    }
+
+    /// <summary>
+    /// Renames the id file to a name of its own beside it and returns that name, or null when the file is already gone
+    /// (another process moved it). A rename takes the file from one process only.
+    /// </summary>
+    private string? MoveAside()
+    {
+        var aside = Path.Combine(_directory, $"{FileName}.{Guid.NewGuid():N}.replaced");
+        try
+        {
+            File.Move(FilePath, aside, overwrite: false);
+            return aside;
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Puts a file moved aside back at the id file's path, unless a file is there by now (it stands, and the one
+    /// moved aside goes).</summary>
+    private void PutBack(string? aside)
+    {
+        if (aside is null)
+        {
+            return;
+        }
+
+        try
+        {
+            File.Move(aside, FilePath, overwrite: false);
+        }
+        catch (IOException) when (File.Exists(FilePath))
+        {
+            DeleteQuietly(aside);
+        }
+        catch
+        {
+            /* Best effort: the next resolve reads whatever is at the path. */
+        }
+    }
+
+    private static void DeleteQuietly(string? path)
+    {
+        if (path is null)
+        {
+            return;
+        }
+
+        try { File.Delete(path); } catch { /* best effort: a leftover file is never read as the id file */ }
     }
 
     private bool Matches(IdFile file) =>
@@ -215,18 +384,21 @@ public sealed class InstallIdStore
         JsonSerializer.SerializeToUtf8Bytes(new IdFile { Id = id, Machine = _machineName, UserSid = _userSid }, s_writeOptions);
 
     /// <summary>
-    /// Creates the file with <see cref="FileMode.CreateNew"/> and writes the id while holding it exclusively.
-    /// "Conflict" means the file already exists, which is the other process winning; anything else that goes
-    /// wrong is "not saved".
+    /// Writes the id to a temp file beside the id file and moves it into place without replacing anything, so the final
+    /// path never holds a partial file, whatever stops the write. "Conflict" means the final path already exists, which
+    /// is the other process winning (its file is left as it is); anything else that goes wrong is "not saved".
     /// </summary>
     private CreateOutcome TryCreate(string id, out string? failure)
     {
         failure = null;
-        FileStream stream;
+        string? temp = null;
         try
         {
-            Directory.CreateDirectory(_directory);
-            stream = new FileStream(FilePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            temp = WriteTemp(id);
+            BeforeMove?.Invoke();
+            File.Move(temp, FilePath, overwrite: false);
+            temp = null;
+            return CreateOutcome.Created;
         }
         catch (IOException) when (File.Exists(FilePath))
         {
@@ -237,34 +409,34 @@ public sealed class InstallIdStore
             failure = $"{ex.GetType().Name}: {ex.Message}";
             return CreateOutcome.NotSaved;
         }
-
-        try
+        finally
         {
-            using (stream)
+            if (temp is not null)
             {
-                stream.Write(Serialize(id));
+                try { File.Delete(temp); } catch { /* best effort: a leftover temp is never read as the id file */ }
             }
-
-            return CreateOutcome.Created;
-        }
-        catch (Exception ex)
-        {
-            /* Do not leave a half-written file for the next start to trip over. */
-            try { File.Delete(FilePath); } catch { /* best effort: the next start replaces a damaged file */ }
-            failure = $"{ex.GetType().Name}: {ex.Message}";
-            return CreateOutcome.NotSaved;
         }
     }
 
-    /// <summary>Writes a temp file beside the id file and moves it over, so a reader never sees half a file.</summary>
-    private void WriteReplacing(string id)
+    /// <summary>
+    /// Writes the id to a new temp file beside the id file, flushes it through to the disk, and returns its path. The flush
+    /// comes before any move: a move is a rename, so without it a power loss shortly after the move could leave the final
+    /// path holding a file whose content never reached the disk.
+    /// </summary>
+    private string WriteTemp(string id)
     {
         Directory.CreateDirectory(_directory);
         var temp = Path.Combine(_directory, $"{FileName}.{Guid.NewGuid():N}.tmp");
         try
         {
-            File.WriteAllBytes(temp, Serialize(id));
-            File.Move(temp, FilePath, overwrite: true);
+            var bytes = Serialize(id);
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                stream.Write(bytes, 0, bytes.Length);
+                stream.Flush(flushToDisk: true);
+            }
+
+            return temp;
         }
         catch
         {
@@ -274,47 +446,58 @@ public sealed class InstallIdStore
     }
 
     /// <summary>
-    /// Reads the file. A file that is locked (the other process is still writing it) is waited for, up to a
-    /// couple of seconds, rather than read as damaged; a missing file is a first start; anything else that cannot
-    /// be read as the id record is unreadable.
+    /// Reads the file. A file that is locked (the other process is still writing it) is waited for, up to a couple of
+    /// seconds, rather than read as damaged; a missing file is a first start. A file that is there and still cannot be
+    /// read after the wait (an I/O error, a lock held past it, access refused) is unreadable, which is never a reason to
+    /// replace it. A file that is read but is not the id record is invalid, which is.
     /// </summary>
-    private ReadResult ReadFile()
+    private ReadResult ReadFile(string path)
     {
         var waited = Stopwatch.StartNew();
+        string text;
         while (true)
         {
             try
             {
-                string text;
-                using (var stream = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                using (var reader = new StreamReader(stream))
-                {
-                    text = reader.ReadToEnd();
-                }
-
-                var file = JsonSerializer.Deserialize<IdFile>(text);
-                return file is null
-                    ? new ReadResult(ReadKind.Unreadable, null, "the file holds no record")
-                    : new ReadResult(ReadKind.Read, file, "");
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                text = reader.ReadToEnd();
+                break;
             }
             catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
             {
                 return new ReadResult(ReadKind.Missing, null, "");
             }
-            catch (IOException) when (waited.Elapsed < s_lockedReadBudget)
+            catch (IOException) when (waited.Elapsed < LockedReadBudget)
             {
                 Thread.Sleep(s_lockedReadPause);
             }
             catch (Exception ex)
             {
-                return new ReadResult(ReadKind.Unreadable, null, ex.GetType().Name);
+                return new ReadResult(ReadKind.Unreadable, null, $"{ex.GetType().Name}: {ex.Message}");
             }
+        }
+
+        try
+        {
+            var file = JsonSerializer.Deserialize<IdFile>(text);
+            return file is null
+                ? new ReadResult(ReadKind.Invalid, null, "the file holds no record")
+                : new ReadResult(ReadKind.Read, file, "");
+        }
+        catch (JsonException ex)
+        {
+            return new ReadResult(ReadKind.Invalid, null, ex.GetType().Name);
         }
     }
 
-    private enum ReadKind { Missing, Unreadable, Read }
+    private enum ReadKind { Missing, Unreadable, Invalid, Read }
 
     private enum CreateOutcome { Created, Conflict, NotSaved }
+
+    /// <summary>How a replacement ended: this process made the new id (Done), the file now holds another process's and has to
+    /// be read again (Again), or nothing could be saved (Failed).</summary>
+    private enum ReplaceOutcome { Done, Again, Failed }
 
     private readonly record struct ReadResult(ReadKind Kind, IdFile? File, string Detail);
 

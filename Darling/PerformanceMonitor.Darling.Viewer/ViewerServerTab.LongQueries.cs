@@ -7,6 +7,7 @@
  */
 
 using System.ComponentModel;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using PerformanceMonitor.Collectors;
@@ -42,8 +43,13 @@ public partial class ViewerServerTab
             : Visibility.Visible;
 
         var (startUtc, endUtc) = GetWindowUtc();
+        var dataStartTask = _dataService.GetLongQueriesDataStartAsync(_server.ServerId, startUtc, endUtc);
         var rows = await _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _longQueryFilterMgr!.UpdateData(rows);
+        /* #4966: the read windows on collection_time but the grid shows event_time, and a first collection stores the events
+           the session still held, so the notice names the earlier of the coverage start and the earliest event shown; a full
+           page (the read keeps the newest 200) names its oldest event. */
+        await ShowEventDataStartAsync(LongQueriesTruncationBanner, dataStartTask, "Long Queries", startUtc, rows.Select(r => r.EventTime), ViewerDataService.LongQueriesRowCap);
 
         SetDefaultSortIfNone(LongQueryCompletionsGrid, "DurationMicroseconds", ListSortDirection.Descending);
     }
