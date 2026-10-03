@@ -69,13 +69,25 @@ public sealed class WebCollectionHealthRunAtColumnTests
     }
 
     [Fact]
-    public void TheToolsFullAndPartialRows_CarryTheRunTimeNextRunAndNote()
+    public void TheToolsFullRow_AlwaysCarriesTheRunTime_AndThePartialAndCompactRowsCarryItOnlyForACollectorThatHasOne()
     {
         var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
-        foreach (var field in new[] { "run_at = runTime?.RunAt,", "next_run_utc = runTime?.NextRunUtcText", "run_time_note = runTime?.SkippedDayNote" })
+
+        /* The full row ends with the three fields, null for a collector with no run time. */
+        foreach (var field in new[] { "run_at = runTime?.RunAt,", "next_run_utc = runTime?.NextRunUtcText,", "run_time_note = runTime?.SkippedDayNote" })
+        {
+            Assert.Equal(1, tools.Split(field, StringSplitOptions.None).Length - 1);
+        }
+
+        /* The compact and the partial row each have a second shape for a collector that has a run time, and that is the
+           only place their run_at and next_run_utc are written, so a collector with none adds no bytes to either row (Lite
+           carries the same two fields under the same rule). The note is the partial row's own: it rides in that shape too. */
+        foreach (var field in new[] { "run_at = (string?)runTime.RunAt,", "next_run_utc = runTime.NextRunUtcText," })
         {
             Assert.Equal(2, tools.Split(field, StringSplitOptions.None).Length - 1);
         }
+
+        Assert.Equal(1, tools.Split("run_time_note = runTime.SkippedDayNote,", StringSplitOptions.None).Length - 1);
     }
 
     [Fact]

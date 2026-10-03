@@ -25,7 +25,8 @@ namespace Darling.Tests;
 /// <summary>
 /// #4938: <c>get_collection_health</c> shows a collector's run time. A collector with a run time carries
 /// <c>run_at</c> (24-hour <c>HH:MM</c> on the monitored server's clock) and <c>next_run_utc</c> (the next time it is
-/// due, UTC). A collector without one carries null for both. The server's row wins over the fleet row, a run time of
+/// due, UTC). A collector without one carries null for both on a full row, and nothing for either on a partial or a
+/// compact row. The server's row wins over the fleet row, a run time of
 /// -1 on the server's row stops the fleet's, and a collector whose interval is not a whole number of days has none.
 /// The health band is read from the shipped cadence and a run time does not move it. A server with no clock yet reads
 /// the run time as UTC. A day the collector skipped crosses the stale line before the next slot, and the row carries
@@ -84,6 +85,23 @@ public sealed class CollectionHealthRunTimeFieldsLiveTests
             """
             INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected)
             VALUES ($1, $2, $3, $4, $5, 'SUCCESS', 120, 10)
+            """, connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(whenUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(collector);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One failed run of a collector: an ERROR row in the window, which keeps the collector off the compact shape
+    /// and gives it the partial one.</summary>
+    private static async Task LogFailureAsync(NpgsqlConnection connection, int serverId, string serverName, string collector, DateTime whenUtc, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            """
+            INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected, error_message)
+            VALUES ($1, $2, $3, $4, $5, 'ERROR', 120, 0, 'a failed run')
             """, connection);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(DateTime.SpecifyKind(whenUtc, DateTimeKind.Unspecified));
@@ -364,6 +382,59 @@ public sealed class CollectionHealthRunTimeFieldsLiveTests
             Assert.False(minute.TryGetProperty("run_at", out _));
             Assert.False(minute.TryGetProperty("next_run_utc", out _));
             Assert.False(minute.TryGetProperty("run_time_note", out _));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    [Fact]
+    public async Task APartialRowCarriesTheRunTimeOnlyWhenTheCollectorHasOne()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = await MigratedAsync(scratch, ct);
+        var bodySucceeded = false;
+        try
+        {
+            const int serverId = 480_061;
+            const string server = "runtime-health-partial";
+            await RegisterServerAsync(connection, serverId, server, ct);
+            var now = DateTime.UtcNow;
+
+            /* A success and then a failure for each collector: an error in the window fails the compact test, so both
+               take the partial shape. */
+            foreach (var collector in new[] { DailyCollector, MinuteCollector })
+            {
+                await LogRunAsync(connection, serverId, server, collector, now.AddMinutes(-2), ct);
+                await LogFailureAsync(connection, serverId, server, collector, now.AddMinutes(-1), ct);
+            }
+
+            var runAt = RunTimeHalfADayAway(now);
+            await SetFleetRunTimeAsync(connection, DailyCollector, runAt, ct);
+
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var rows = await ReadRowsAsync(postgres, server, ct, fullDetail: false);
+
+            /* Lite's partial row carries the run time only for a collector that has one, so a partial row stays as
+               small as the rest of its keys and the two apps give a caller the same shape. The note keeps its rule:
+               every partial row carries it, and it is null unless a day was skipped. */
+            var daily = rows[DailyCollector];
+            Assert.True(daily.GetProperty("partial_detail").GetBoolean());
+            Assert.Equal(CollectorRunTime.Format(runAt), daily.GetProperty("run_at").GetString());
+            Assert.Equal(JsonValueKind.String, daily.GetProperty("next_run_utc").ValueKind);
+            Assert.Equal(JsonValueKind.Null, daily.GetProperty("run_time_note").ValueKind);
+
+            var minute = rows[MinuteCollector];
+            Assert.True(minute.GetProperty("partial_detail").GetBoolean());
+            Assert.False(minute.TryGetProperty("run_at", out _));
+            Assert.False(minute.TryGetProperty("next_run_utc", out _));
+            Assert.Equal(JsonValueKind.Null, minute.GetProperty("run_time_note").ValueKind);
 
             bodySucceeded = true;
         }

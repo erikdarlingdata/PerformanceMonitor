@@ -148,7 +148,7 @@ Each server has its own slot: the run time plus a fixed spread of under 60 minut
 
 In Darling, every daily collector runs detached from its server's pass, so a long daily run does not hold the server's place in the sweep and the server's one-minute collectors keep their cadence. Up to 16 detached daily runs go at once across the fleet. A run past that waits for a free place and is never dropped. Lite runs a daily collector only while it is open, one collector at a time per server, and it does not catch up for a day it was closed.
 
-`get_collection_health` shows each collector's run time (`run_at`) and when it is next due (`next_run_utc`). The health bands stay on the collector's shipped cadence, and a run time does not change them. A skipped day crosses the 36-hour stale line before the next slot, and the row says so.
+`get_collection_health` shows each collector's run time (`run_at`) and when it is next due (`next_run_utc`). A full row always carries both, empty for a collector with no run time. A partial row (a collector that needs a look) and a compact row (a healthy collector with nothing to report) carry them only for a collector that has a run time, in both apps. The health bands stay on the collector's shipped cadence, and a run time does not change them. A skipped day crosses the 36-hour stale line before the next slot, and in Darling the row says so in `run_time_note`. Lite has no such note.
 
 ### Retention
 
