@@ -146,13 +146,27 @@ public partial class ViewerServerTab
                 var lockWaitStartTask = _dataService.GetLockWaitTrendDataStartAsync(_server.ServerId, startUtc, endUtc);
                 var blockingStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, startUtc, endUtc);
                 var deadlockStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, startUtc, endUtc);
-                var lockWaits = await lockWaitTask;
-                var blocking = await blockingTask;
-                var deadlocks = await deadlockTask;
+
+                /* #5022: a join that throws skips the banner steps below, so the probes would go unawaited. Each call watches one probe and
+                   passes the join on, so all three are watched, and a probe that fails later is a warning and not an unobserved Error. */
+                await AwaitReadWatchingProbeAsync(
+                    AwaitReadWatchingProbeAsync(
+                        AwaitReadWatchingProbeAsync(Task.WhenAll(lockWaitTask, blockingTask, deadlockTask), lockWaitStartTask, "Lock Wait Trend"),
+                        blockingStartTask, "Blocking Trend"),
+                    deadlockStartTask, "Deadlock Trend");
+
+                /* The six are done: the banner steps below only await probes already running. */
+                readFanOut.Release();
+
+                var lockWaits = lockWaitTask.Result;
+                var blocking = blockingTask.Result;
+                var deadlocks = deadlockTask.Result;
                 RenderLockWaitTrendChart(lockWaits);
                 RenderBlockingTrendChart(blocking);
                 RenderDeadlockTrendChart(deadlocks);
-                await ShowEventDataStartAsync(LockWaitTrendTruncationBanner, lockWaitStartTask, "Lock Wait Trend", startUtc, ViewerBlockingChartsDataStart.LockWaitTimesDrawn(lockWaits));
+                /* Lock Wait is a rate series: its points are date_bin bucket starts clamped to the window start, not events, so a point
+                   can sit before the real first collection. Its note names the coverage start alone (the Current Waits pattern). */
+                UpdateTruncationBanner(LockWaitTrendTruncationBanner, await DataStartOrNullAsync(lockWaitStartTask, "Lock Wait Trend"), startUtc);
                 await ShowEventDataStartAsync(BlockingTrendTruncationBanner, blockingStartTask, "Blocking Trend", startUtc, ViewerBlockingChartsDataStart.BlockingTrendTimesDrawn(blocking));
                 await ShowEventDataStartAsync(DeadlockTrendTruncationBanner, deadlockStartTask, "Deadlock Trend", startUtc, ViewerBlockingChartsDataStart.BlockingTrendTimesDrawn(deadlocks));
                 break;
@@ -175,9 +189,18 @@ public partial class ViewerServerTab
                    own probe and banner. The probes stay OUT of any join: one that throws costs only its pair's note. */
                 var blockingStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, startUtc, endUtc);
                 var deadlockStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, startUtc, endUtc);
-                var durationStats = await durationStatsTask;
-                var deadlockCounts = await deadlockCountTask;
-                var deadlockSeverity = await deadlockSeverityTask;
+
+                /* #5022: as in Trends, each call watches one probe and passes the join on. */
+                await AwaitReadWatchingProbeAsync(
+                    AwaitReadWatchingProbeAsync(Task.WhenAll(durationStatsTask, deadlockCountTask, deadlockSeverityTask), blockingStartTask, "Blocking Stats (blocking)"),
+                    deadlockStartTask, "Blocking Stats (deadlocks)");
+
+                /* The five are done: the banner steps below only await probes already running. */
+                readFanOut.Release();
+
+                var durationStats = durationStatsTask.Result;
+                var deadlockCounts = deadlockCountTask.Result;
+                var deadlockSeverity = deadlockSeverityTask.Result;
                 RenderBlockingDurationChart(durationStats);
                 RenderBlockingTotalDurationChart(durationStats);
                 RenderDeadlockWaitChart(deadlockSeverity);

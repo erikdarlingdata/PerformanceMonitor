@@ -38,14 +38,23 @@ public sealed class ViewerBlockingChartsDataStartPinTests
         var trends = Case("BlockingTrendsSubTabIndex");
 
         Assert.Contains("ViewerReadFanOut.Of(6)", trends, StringComparison.Ordinal);
-        Assert.DoesNotContain("WhenAll", trends, StringComparison.Ordinal);
-        Assert.Matches(@"ShowEventDataStartAsync\(LockWaitTrendTruncationBanner, lockWaitStartTask,", trends);
+        /* Every probe is watched by the helper, and none is inside the join. */
+        Assert.Matches(@"Task\.WhenAll\(lockWaitTask,\s*blockingTask,\s*deadlockTask\),\s*lockWaitStartTask,\s*""Lock Wait Trend""\)", trends);
+        Assert.Contains("blockingStartTask, \"Blocking Trend\")", trends, StringComparison.Ordinal);
+        Assert.Contains("deadlockStartTask, \"Deadlock Trend\")", trends, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"WhenAll\([^)]*StartTask", trends);
+        /* Lock Wait is a rate series: its note names the coverage alone, never the drawn points. */
+        Assert.Contains("UpdateTruncationBanner(LockWaitTrendTruncationBanner, await DataStartOrNullAsync(lockWaitStartTask, \"Lock Wait Trend\"), startUtc)", trends, StringComparison.Ordinal);
+        Assert.DoesNotContain("LockWaitTimesDrawn", trends, StringComparison.Ordinal);
+        /* Released at the join, before any banner await. */
+        Assert.True(trends.IndexOf("readFanOut.Release()", StringComparison.Ordinal) is var rel && rel > trends.IndexOf("AwaitReadWatchingProbeAsync(", StringComparison.Ordinal)
+            && rel < trends.IndexOf("await DataStartOrNullAsync", StringComparison.Ordinal));
         Assert.Matches(@"ShowEventDataStartAsync\(BlockingTrendTruncationBanner, blockingStartTask,", trends);
         Assert.Matches(@"ShowEventDataStartAsync\(DeadlockTrendTruncationBanner, deadlockStartTask,", trends);
         Assert.Contains("lockWaitStartTask = _dataService.GetLockWaitTrendDataStartAsync(", trends, StringComparison.Ordinal);
         Assert.Contains("blockingStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(", trends, StringComparison.Ordinal);
         Assert.Contains("deadlockStartTask = _dataService.GetDeadlocksDataStartAsync(", trends, StringComparison.Ordinal);
-        Assert.True(trends.IndexOf("GetLockWaitTrendDataStartAsync", StringComparison.Ordinal) < trends.IndexOf("await lockWaitTask", StringComparison.Ordinal),
+        Assert.True(trends.IndexOf("GetLockWaitTrendDataStartAsync", StringComparison.Ordinal) < trends.IndexOf("await AwaitReadWatchingProbeAsync", StringComparison.Ordinal),
             "the probes start before the reads are awaited");
     }
 
@@ -55,7 +64,11 @@ public sealed class ViewerBlockingChartsDataStartPinTests
         var stats = Case("BlockingStatsSubTabIndex");
 
         Assert.Contains("ViewerReadFanOut.Of(5)", stats, StringComparison.Ordinal);
-        Assert.DoesNotContain("WhenAll", stats, StringComparison.Ordinal);
+        Assert.Matches(@"Task\.WhenAll\(durationStatsTask,\s*deadlockCountTask,\s*deadlockSeverityTask\),\s*blockingStartTask,\s*""Blocking Stats \(blocking\)""\)", stats);
+        Assert.Contains("deadlockStartTask, \"Blocking Stats (deadlocks)\")", stats, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"WhenAll\([^)]*StartTask", stats);
+        Assert.True(stats.IndexOf("readFanOut.Release()", StringComparison.Ordinal) is var rel && rel > stats.IndexOf("AwaitReadWatchingProbeAsync(", StringComparison.Ordinal)
+            && rel < stats.IndexOf("ShowEventDataStartAsync", StringComparison.Ordinal));
         Assert.Matches(@"BlockingStatsBlockingTruncationBanner, blockingStartTask,", stats);
         Assert.Matches(@"BlockingStatsDeadlockTruncationBanner, deadlockStartTask,", stats);
         Assert.Contains("blockingStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(", stats, StringComparison.Ordinal);

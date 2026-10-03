@@ -34,15 +34,6 @@ public sealed class ViewerBlockingChartsDataStartTests
         Assert.Empty(ViewerBlockingChartsDataStart.BlockingTrendTimesDrawn(Array.Empty<BlockingTrendPoint>()));
     }
 
-    [Fact]
-    public void TheLockWaitChart_DrawsEveryPointItHolds_AndNothingWhenEmpty()
-    {
-        var data = new[] { new LockWaitTrendPoint(At(2), "LCK_M_X", 1.5), new LockWaitTrendPoint(At(3), "LCK_M_S", 0.2) };
-
-        Assert.Equal(new DateTime?[] { At(2), At(3) }, ViewerBlockingChartsDataStart.LockWaitTimesDrawn(data).ToArray());
-        Assert.Empty(ViewerBlockingChartsDataStart.LockWaitTimesDrawn(Array.Empty<LockWaitTrendPoint>()));
-    }
-
     /* The first non-zero bucket is later than the coverage: the note names the coverage. An event earlier than the coverage (a first
        collection's history) wins. A chart with only zero buckets still names the coverage. */
     [Fact]

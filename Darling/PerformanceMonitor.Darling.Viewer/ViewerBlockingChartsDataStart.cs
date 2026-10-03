@@ -18,10 +18,6 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 internal static class ViewerBlockingChartsDataStart
 {
-    /// <summary>The time of each point the Lock Wait Trend draws as data (a rate line; an empty read draws only a flat zero, which is no event).</summary>
-    internal static IEnumerable<DateTime?> LockWaitTimesDrawn(IEnumerable<LockWaitTrendPoint> data) =>
-        data.Select(p => (DateTime?)p.CollectionTime);
-
     /// <summary>The time of each bucket a count chart draws as an event: only buckets with a non-zero count (a zero bucket is the chart's baseline).</summary>
     internal static IEnumerable<DateTime?> BlockingTrendTimesDrawn(IEnumerable<BlockingTrendPoint> data) =>
         data.Where(p => p.Count > 0).Select(p => (DateTime?)p.Time);
