@@ -214,7 +214,6 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
             foreach (var change in changes)
             {
                 await using var command = BuildRunTimeCommand(change, connection, transaction);
-                command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -239,7 +238,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
             change.RunAtMinute is null
                 ? (fleet ? CollectorRunTimeFleetDeleteSql : CollectorRunTimeServerDeleteSql)
                 : (fleet ? CollectorRunTimeFleetUpsertSql : CollectorRunTimeServerUpsertSql),
-            connection, transaction);
+            connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
 
         if (change.ServerId is int serverId)
         {
