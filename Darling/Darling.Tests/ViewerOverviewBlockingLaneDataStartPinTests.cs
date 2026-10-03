@@ -45,7 +45,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartPinTests
         var drawn = refresh.IndexOf("UpdateBlockingLane(blockingData", StringComparison.Ordinal);
         var note = refresh.IndexOf("await ShowBlockingLaneDataStartAsync(", StringComparison.Ordinal);
         var axes = refresh.IndexOf("SyncXAxes(hoursBack", StringComparison.Ordinal);
-        Assert.True(drawn > 0 && drawn < note && note < axes, "the bars are drawn before the note's probes start");
+        Assert.True(drawn > 0 && axes > drawn && axes < note, "the charts are drawn and synced before the note's probes start");
         Assert.DoesNotContain("DataStartAsync(_serverId", refresh, StringComparison.Ordinal);
     }
 

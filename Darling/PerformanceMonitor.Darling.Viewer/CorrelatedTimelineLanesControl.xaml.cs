@@ -254,19 +254,19 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             else
                 ShowEmpty(FileIoChart, "I/O ms");
 
+            /* VLines must be re-attached before SyncXAxes so they're part of
+               the render set when the chart refreshes. */
+            _crosshairManager?.ReattachVLines();
+            SyncXAxes(hoursBack, fromDate, toDate);
+
             /* #4966: the blocking chart draws event counts, so an empty stretch reads as "nothing happened" and the chart says where
-               its data starts. The note is last and on its own: the two coverage probes start only after the ten reads above have
+               its data starts. The note comes last, after the charts are drawn and synced, and on its own: the two coverage probes start only after the ten reads above have
                finished (they are not part of that WhenAll, whose ten-wide declaration still covers them), so they add no
                read to that batch, and a probe that fails costs the note and never the bars drawn above. */
             await ShowBlockingLaneDataStartAsync(
                 startUtc, endUtc,
                 blockingTask.IsCompletedSuccessfully ? blockingTask.Result.Select(d => d.Time) : [],
                 deadlockTask.IsCompletedSuccessfully ? deadlockTask.Result.Select(d => d.Time) : []);
-
-            /* VLines must be re-attached before SyncXAxes so they're part of
-               the render set when the chart refreshes. */
-            _crosshairManager?.ReattachVLines();
-            SyncXAxes(hoursBack, fromDate, toDate);
         }
         finally
         {

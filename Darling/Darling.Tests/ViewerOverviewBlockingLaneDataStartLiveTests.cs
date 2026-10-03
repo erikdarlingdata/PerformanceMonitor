@@ -22,6 +22,8 @@ namespace Darling.Tests;
 /// control runs them, then the chart's own choice (<c>ViewerBlockingLaneDataStart.ChooseAsync</c>). Own-store: this reaches
 /// DARLING_TEST_PG only to create and drop its own database.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to CREATE
+   and DROP its own scratch database. */
 public sealed class ViewerOverviewBlockingLaneDataStartLiveTests
 {
     private const int LaterDeadlocksServerId = -496701;
