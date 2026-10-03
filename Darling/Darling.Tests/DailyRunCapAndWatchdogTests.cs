@@ -390,7 +390,7 @@ public sealed class DailyRunCapTests
         finally
         {
             runs.ReleaseAll();
-            await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 0, Patience);
+            await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDetachedRuns.Count == 0, Patience);
         }
     }
 
@@ -480,7 +480,7 @@ public sealed class DailyRunWatchdogTests
 
             /* The end of a run the watchdog warned about is logged, and the run is no longer watched. */
             runs.ReleaseAll();
-            Assert.True(await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 0, Patience), "the run ends");
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDetachedRuns.Count == 0, Patience), "the run ends");
             Assert.Contains(
                 logger.Snapshot(),
                 e => e.Level == LogLevel.Information
@@ -589,7 +589,7 @@ public sealed class DailyRunWatchdogTests
             Assert.True(await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1, Patience), "one daily run starts");
             await Task.Delay(200, ct);
             Assert.Equal(1, runs.Started);
-            Assert.Equal(2, worker.InFlightDailyRuns.Count);
+            Assert.Equal(2, worker.InFlightDetachedRuns.Count);
 
             /* An hour on, the run that is going is reported and the one that is queued is not: waiting for a permit is
                capacity, and only a run that is executing can be stuck. */
@@ -674,7 +674,7 @@ public sealed class DetachedByNameWatchdogTests
 
             /* The end of a run the watchdog warned about is logged, and the run is no longer watched. */
             runs.ReleaseAll();
-            Assert.True(await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 0, Patience), "the run ends");
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDetachedRuns.Count == 0, Patience), "the run ends");
             Assert.Contains(
                 logger.Snapshot(),
                 e => e.Level == LogLevel.Information
@@ -794,7 +794,7 @@ public sealed class DetachedByNameWatchdogTests
             server.NextDue[collector] = DateTime.UtcNow.AddMinutes(-5);
             await worker.RunDueCollectorsAsync(server, null!, ct);
             Assert.True(
-                await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 1, Patience),
+                await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDetachedRuns.Count == 1, Patience),
                 "the second run ends at once, skipped, and only the first is still in flight");
             Assert.Equal(1, runs.Started);
 
@@ -841,11 +841,11 @@ public sealed class DetachedByNameShutdownDrainTests
             Assert.False(
                 await DailyRunKit.EndsWithinAsync(drain, TimeSpan.FromMilliseconds(500)),
                 "the stop must wait for a run detached by name that is still going, not finish beside it");
-            Assert.Single(worker.InFlightDailyRuns);
+            Assert.Single(worker.InFlightDetachedRuns);
 
             runs.ReleaseAll();
             Assert.True(await DailyRunKit.EndsWithinAsync(drain, Patience), "the stop finishes once the run has");
-            Assert.True(await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 0, Patience), "a run that ended is no longer tracked");
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => worker.InFlightDetachedRuns.Count == 0, Patience), "a run that ended is no longer tracked");
         }
         finally
         {
@@ -861,6 +861,6 @@ public sealed class DetachedByNameShutdownDrainTests
         /* The behavioral cases above cover two of the three by name; this covers the call itself, which is one line
            for all three. A discarded RunDetachedAsync is what left them out of the shutdown wait. */
         Assert.Equal(0, DailyRunKit.Count(source, "_ = RunDetachedAsync("));
-        Assert.Equal(2, DailyRunKit.Count(source, "TrackDailyRun(RunDetachedAsync("));
+        Assert.Equal(2, DailyRunKit.Count(source, "TrackDetachedRun(RunDetachedAsync("));
     }
 }

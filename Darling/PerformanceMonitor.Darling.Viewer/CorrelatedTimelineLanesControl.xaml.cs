@@ -41,6 +41,7 @@ using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Ui;
 
@@ -257,6 +258,15 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                the render set when the chart refreshes. */
             _crosshairManager?.ReattachVLines();
             SyncXAxes(hoursBack, fromDate, toDate);
+
+            /* #4966: the blocking chart draws event counts, so an empty stretch reads as "nothing happened" and the chart says where
+               its data starts. The note comes last, after the charts are drawn and synced, and on its own: the two coverage probes start only after the ten reads above have
+               finished (they are not part of that WhenAll, whose ten-wide declaration still covers them), so they add no
+               read to that batch, and a probe that fails costs the note and never the bars drawn above. */
+            await ShowBlockingLaneDataStartAsync(
+                startUtc, endUtc,
+                blockingTask.IsCompletedSuccessfully ? blockingTask.Result.Select(d => d.Time) : [],
+                deadlockTask.IsCompletedSuccessfully ? deadlockTask.Result.Select(d => d.Time) : []);
         }
         finally
         {
@@ -266,6 +276,27 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             _crosshairManager?.EnsureVLinesAttached();
             _isRefreshing = false;
         }
+    }
+
+    /// <summary>
+    /// Raises or hides the blocking chart's "Showing since" note (#4966). The chart's two series, blocking reports and
+    /// deadlocks, are event counts: an empty stretch before a series starts reads as "nothing happened". A window of 90
+    /// minutes or less, which can never earn a note, starts no probe. The note goes through the server tab's shared step
+    /// (<see cref="ViewerServerTab.UpdateTruncationBanner"/>), so it uses the charts' own clock, to the second.
+    /// </summary>
+    private async Task ShowBlockingLaneDataStartAsync(
+        DateTime startUtc, DateTime endUtc, IEnumerable<DateTime> blockingBars, IEnumerable<DateTime> deadlockBars)
+    {
+        var probed = endUtc - startUtc > DurationTrendRouting.TruncationSlack;
+        var blockingProbe = probed
+            ? _dataService!.GetBlockedProcessReportsDataStartAsync(_serverId, startUtc, endUtc)
+            : Task.FromResult<DateTime?>(null);
+        var deadlockProbe = probed
+            ? _dataService!.GetDeadlocksDataStartAsync(_serverId, startUtc, endUtc)
+            : Task.FromResult<DateTime?>(null);
+
+        var start = await ViewerBlockingLaneDataStart.ChooseAsync(blockingProbe, deadlockProbe, blockingBars, deadlockBars);
+        ViewerServerTab.UpdateTruncationBanner(BlockingLaneDataStartBanner, start, startUtc);
     }
 
     private void UpdateBlockingLane(List<(double Time, double Value)> blockingData,

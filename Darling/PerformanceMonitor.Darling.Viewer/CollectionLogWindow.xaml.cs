@@ -66,7 +66,9 @@ namespace PerformanceMonitor.Darling.Viewer
             var startUtc = endUtc.AddHours(-ViewerDataService.CollectionLogDrillHours);
             using var readFanOut = ViewerReadFanOut.Of(2);
             var dataStartTask = dataService.GetCollectionLogDataStartAsync(serverId, startUtc, endUtc);
-            var logs = await dataService.GetCollectionLogByCollectorAsync(serverId, collectorName, startUtc, endUtc);
+            var dataReadTask = dataService.GetCollectionLogByCollectorAsync(serverId, collectorName, startUtc, endUtc);
+            await ViewerProbeWatch.AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Collection Log Drill");
+            var logs = dataReadTask.Result;
 
             /* The read is in: end the declared width here, before the note awaits its probe, so that await is not priced against
                contention that has already finished. */

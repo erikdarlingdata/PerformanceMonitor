@@ -37,6 +37,9 @@ public partial class ServerTab : UserControl
         PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(_engineEdition);
         AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(_engineEdition);
 
+        /* #4966: the strip draws the newest snapshot of the whole store, so it says when that snapshot was collected. */
+        MemoryCollectedText.Text = SnapshotCollectedText(stats?.CollectionTime, GetPickerZone(), "--");
+
         if (stats == null)
         {
             PhysicalMemoryText.Text = "--";
@@ -68,6 +71,14 @@ public partial class ServerTab : UserControl
     {
         return mb >= 1024 ? $"{mb / 1024:F1} GB" : $"{mb:F0} MB";
     }
+
+    /// <summary>
+    /// #4966: the figure at the end of a summary strip that draws the newest snapshot: when that snapshot was collected, in the
+    /// tab's display zone <paramref name="zone"/>, to the second (the way the Automatic Tuning grid words its Collected column).
+    /// <paramref name="emptyText"/> (the strip's own no-value marker) when there is no snapshot, so an empty strip shows no time.
+    /// </summary>
+    internal static string SnapshotCollectedText(DateTime? collectionTimeUtc, TimeZoneInfo zone, string emptyText) =>
+        collectionTimeUtc.HasValue ? DisplayZone.Format(collectionTimeUtc.Value, zone, "yyyy-MM-dd HH:mm:ss") : emptyText;
 
     /// <summary>
     /// A Memory Overview page-file figure. On an Azure SQL Database the memory collector has no page-file source and
