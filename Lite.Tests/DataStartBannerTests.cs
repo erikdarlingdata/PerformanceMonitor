@@ -310,6 +310,44 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     }
 
     /// <summary>
+    /// The two drill-downs that open Active Queries on a narrow window (the chart and Overview "Show Active Queries at
+    /// This Time" drill, and the heatmap drill) load the grid for that window, so they refresh the "Showing since" banner for
+    /// it too: left alone it keeps describing the last range read, and can claim a cut the drill window does not have or
+    /// miss one it does. The banner takes the SAME pair the grid read takes. That pair is naive UTC end to end:
+    /// <c>GetDrillWindow</c> builds it from the clicked UTC instant (#4766), and <c>GetLatestQuerySnapshotsAsync</c> hands a
+    /// custom range straight through <c>GetTimeRange</c> to UTC <c>collection_time</c>, as the slicer handler does with
+    /// <c>e.StartUtc</c>/<c>e.EndUtc</c>, so nothing between them converts through the server's clock. The refresh follows
+    /// the bind, as the range read's does. Comments are stripped first, so a sentence that names the call cannot satisfy
+    /// the pin.
+    /// </summary>
+    [Theory]
+    [InlineData("private async void OnActiveQueriesDrillDown(")]
+    [InlineData("private async void OnHeatmapDrillDown(")]
+    public void ActiveQueriesDrillDowns_RefreshTheBannerForTheDrillWindow_AfterTheRowsAreBound(string signature)
+    {
+        var lf = File.ReadAllText(ControlsFile("ServerTab.DrillDown.cs")).Replace("\r\n", "\n");
+        var code = Regex.Replace(Regex.Replace(lf, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline), @"//[^\n]*", string.Empty);
+        var start = code.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"'{signature}' is no longer in ServerTab.DrillDown.cs; update this pin.");
+        var end = code.IndexOf("\n    }\n", start, StringComparison.Ordinal);
+        Assert.True(end > start, $"the end of '{signature}' was not found.");
+        var body = code[start..end];
+
+        var read = Regex.Match(body, @"GetLatestQuerySnapshotsAsync\(_serverId,\s*0,\s*(?<from>\w+),\s*(?<to>\w+)\)");
+        Assert.True(read.Success, $"'{signature}' no longer reads the grid through GetLatestQuerySnapshotsAsync(_serverId, 0, from, to); update this pin.");
+        var bound = body.IndexOf("_querySnapshotsFilterMgr!.UpdateData(snapshots);", StringComparison.Ordinal);
+        Assert.True(bound > read.Index, $"'{signature}' no longer binds the rows it read; update this pin.");
+
+        var banner = Regex.Matches(body,
+            @"await RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\.QuerySnapshots,\s*ActiveQueriesWindowTruncatedBanner,\s*"
+            + Regex.Escape(read.Groups["from"].Value) + @",\s*" + Regex.Escape(read.Groups["to"].Value) + @"\);");
+        Assert.True(banner.Count == 1,
+            $"'{signature}' must refresh the Active Queries banner exactly once over the pair its grid read takes ("
+            + read.Groups["from"].Value + ", " + read.Groups["to"].Value + "); found " + banner.Count);
+        Assert.True(banner[0].Index > bound, $"'{signature}' must refresh the banner after the rows are bound, as the range read does");
+    }
+
+    /// <summary>
     /// The Live Snapshot button swaps the Active Queries grid for the rows the server returns now, so the "Showing since"
     /// banner the last range read raised no longer describes the grid. The handler collapses it and clears its text through
     /// the shared step (<see cref="ServerTab.SetWindowTruncatedBanner"/>, whose not-truncated state

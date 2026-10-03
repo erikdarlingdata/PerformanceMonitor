@@ -51,9 +51,11 @@ public sealed class ViewerDataStartBannerTests : IDisposable
     {
         var tab = ViewerFile("ViewerServerTab.ActiveQueries.cs");
 
-        /* The range load, the deep-link load, and the slicer re-read each draw the grid, so each sets the banner. */
-        Assert.Equal(3, Count(tab, "_dataService.GetQuerySnapshotsDataStartAsync("));
-        Assert.Equal(3, Count(tab, "UpdateTruncationBanner(QuerySnapshotsTruncationBanner, "));
+        /* The range load, the deep-link load, the slicer re-read and the window drill (the heatmap, the charts and the
+           Overview drills) each draw the grid, so each sets the banner. The window drill is the fourth (3 -> 4, #4953): it
+           loads its own narrow window and used to leave the banner of the last range read standing. */
+        Assert.Equal(4, Count(tab, "_dataService.GetQuerySnapshotsDataStartAsync("));
+        Assert.Equal(4, Count(tab, "UpdateTruncationBanner(QuerySnapshotsTruncationBanner, "));
         Assert.Contains("x:Name=\"QuerySnapshotsTruncationBanner\"", ViewerFile("ViewerServerTab.xaml"), StringComparison.Ordinal);
     }
 
@@ -114,12 +116,31 @@ public sealed class ViewerDataStartBannerTests : IDisposable
             @"UpdateTruncationBanner\(QuerySnapshotsTruncationBanner,\s*await DataStartOrNullAsync\(dataStartTask,\s*""Active Queries""\),\s*e\.StartUtc\);"));
     }
 
+    /* A window drill (the heatmap, a resource or trend chart, an Overview drill, or the deep link that reuses it) loads the
+       grid for its own narrow window, so it asks the probe about THAT window (fromUtc/toUtc, not the toolbar's range) and
+       compares the answer with its start, after the rows are bound and before the slicer loads, as the deep-link branch
+       of the range load does. Without it the banner of the last range read stays up: it can name a cut the drill window
+       does not have, or miss one it does. */
+    [Fact]
+    public void ActiveQueries_WindowDrill_AsksAboutTheDrillWindow_AndComparesWithItsStart()
+    {
+        var tab = ViewerFile("ViewerServerTab.ActiveQueries.cs");
+        var drill = Regex.Match(tab, @"private async Task NavigateToActiveQueriesForWindowAsync\(.*?\r?\n    \}\r?\n", RegexOptions.Singleline);
+        Assert.True(drill.Success, "NavigateToActiveQueriesForWindowAsync was not found in ViewerServerTab.ActiveQueries.cs");
+        var body = drill.Value;
+
+        Assert.Equal(1, Matches(body,
+            @"var dataStartTask = _dataService\.GetQuerySnapshotsDataStartAsync\(_server\.ServerId,\s*fromUtc,\s*toUtc\);\s*var \(totalCount, snapshots\) = await _dataService\.GetLatestQuerySnapshotsAsync\(_server\.ServerId,\s*fromUtc,\s*toUtc,"));
+        Assert.Equal(1, Matches(body,
+            @"_querySnapshotsFilterMgr!\.UpdateData\(snapshots\);[\s\S]*?UpdateTruncationBanner\(QuerySnapshotsTruncationBanner,\s*await DataStartOrNullAsync\(dataStartTask,\s*""Active Queries""\),\s*fromUtc\);\s*await LoadActiveQueriesSlicerAsync\(fromUtc\.AddHours\(-1\),\s*toUtc\.AddHours\(1\)\);"));
+    }
+
     /* "Latest Snapshot" swaps the grid for the newest stored batch, so the "Showing since" banner the last range read
        raised no longer describes it. The handler collapses the banner and clears its text as the batch is bound, and not
        before, so a read that fails, which leaves the range rows in the grid, keeps the banner that still describes them.
-       It is a direct hide and not a fourth UpdateTruncationBanner call: that call asks a probe about a range, and this
-       read has none (the count pin above stays at three). The next range read raises the banner again through those
-       three calls. */
+       It is a direct hide and not a fifth UpdateTruncationBanner call: that call asks a probe about a range, and this
+       read has none (the count pin above stays at four). The next range read raises the banner again through those
+       four calls. */
     [Fact]
     public void LatestSnapshot_HidesTheActiveQueriesBanner_AsTheBatchIsBound_AndNotWhenTheReadFails()
     {
