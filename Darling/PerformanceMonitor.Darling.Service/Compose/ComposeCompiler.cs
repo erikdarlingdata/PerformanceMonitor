@@ -238,10 +238,13 @@ public static class ComposeCompiler
     /// survivor. Moving the predicate itself inside the dedupe would NOT be exact: a module renamed mid-window
     /// leaves one partition with rows under two names, and the filter would change which row survives.
     ///
-    /// <para>The row-value <c>IN</c> is a hashed semi-join but treats a NULL key as no match, while
-    /// <c>PARTITION BY</c> groups NULLs together. A row with a NULL in any of the nullable key columns is
-    /// therefore decided by a correlated <c>EXISTS</c> with <c>IS NOT DISTINCT FROM</c> instead; only those rows
-    /// pay for it.</para>
+    /// <para>The restriction is a hashable NULL-safe semi-join: <c>EXISTS</c> over a <c>DISTINCT</c> key subquery,
+    /// joined on <c>coalesce(col, sentinel)</c> equality for every key column (the hash keys) plus an
+    /// <c>IS NOT DISTINCT FROM</c> residual. <c>PARTITION BY</c> groups NULLs together and a plain <c>IN</c> does
+    /// not match them, but <c>IS NOT DISTINCT FROM</c> alone cannot be hashed. <c>replica_role</c> is NULL on every
+    /// standalone server, so on such a store the NULL-safe comparison covers every row and must stay hashable (a
+    /// first shape, <c>IN … OR (null AND correlated EXISTS)</c>, timed out there). The residual keeps the result
+    /// exact even when a real value equals a sentinel (<c>''</c>, <c>-1</c>, <c>-infinity</c>).</para>
     ///
     /// <para>Only filters on the fact's own columns reach here; a module-joined dimension is not a column of this
     /// table. With no such filter the text is empty and the dedupe is unchanged.</para>
@@ -258,13 +261,20 @@ public static class ComposeCompiler
         var window = $"{FactAlias}.{timeColumn} >= {startParam} AND {FactAlias}.{timeColumn} <= {endParam}"
             + (serverScopeSql is null ? string.Empty : " AND " + serverScopeSql)
             + string.Concat(dimensionFilters.Select(c => " AND " + c));
-        var anyNull = string.Join(" OR ", s_queryStoreNullablePartitionColumns.Select(c => c + " IS NULL"));
-        var sameKey = "f.server_id = " + QueryStoreTable + ".server_id AND f.server_name = " + QueryStoreTable + ".server_name"
-            + string.Concat(s_queryStoreNullablePartitionColumns.Select(c => $" AND f.{c} IS NOT DISTINCT FROM {QueryStoreTable}.{c}"));
-        return $" AND ((({QueryStorePartitionColumns}) IN (SELECT {FactAlias}.server_id, {FactAlias}.server_name, "
-            + string.Join(", ", s_queryStoreNullablePartitionColumns.Select(c => FactAlias + "." + c))
-            + $" FROM {table} AS {FactAlias} WHERE {window}))"
-            + $" OR (({anyNull}) AND EXISTS (SELECT 1 FROM {table} AS {FactAlias} WHERE {window} AND {sameKey})))";
+        var keys = new[] { "server_id" }.Concat(new[] { "server_name" }).Concat(s_queryStoreNullablePartitionColumns).ToArray();
+        string Sentinel(string c) => c switch
+        {
+            "server_id" => null!,
+            "query_id" or "plan_id" or "runtime_stats_interval_id" => "-1",
+            "first_execution_time" => "'-infinity'::timestamp",
+            _ => "''",
+        };
+        var hashKey = string.Concat(keys.Select(c => c == "server_id"
+            ? $" AND k.server_id = {QueryStoreTable}.server_id"
+            : $" AND coalesce(k.{c}, {Sentinel(c)}) = coalesce({QueryStoreTable}.{c}, {Sentinel(c)})"));
+        var residual = string.Concat(keys.Where(c => c != "server_id").Select(c => $" AND k.{c} IS NOT DISTINCT FROM {QueryStoreTable}.{c}"));
+        return $" AND EXISTS (SELECT 1 FROM (SELECT DISTINCT {string.Join(", ", keys.Select(c => FactAlias + "." + c))}"
+            + $" FROM {table} AS {FactAlias} WHERE {window}) AS k WHERE true{hashKey}{residual})";
     }
 
     /// <summary>

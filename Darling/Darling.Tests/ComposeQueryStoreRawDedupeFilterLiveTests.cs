@@ -26,7 +26,7 @@ public sealed class ComposeQueryStoreRawDedupeFilterLiveTests
     private static readonly DateTime WindowStart = new(2026, 8, 1, 0, 0, 0, DateTimeKind.Unspecified);
     private static readonly DateTime WindowEnd = WindowStart.AddHours(6);
 
-    private const string Marker = " AND (((server_id, server_name,";
+    private const string Marker = " AND EXISTS (SELECT 1 FROM (SELECT DISTINCT";
 
     [Fact]
     public void FilteredRawPanel_CarriesThePartitionRestriction_AndAnUnfilteredPanelIsUnchanged()
@@ -46,6 +46,22 @@ public sealed class ComposeQueryStoreRawDedupeFilterLiveTests
             + "FROM collect.query_store_stats WHERE collection_time >= $1 AND collection_time <= $2) AS qs_ranked WHERE qs_rn = 1)",
             unfiltered, StringComparison.Ordinal);
         Assert.DoesNotContain("IS NOT DISTINCT FROM", unfiltered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Restriction_IsAHashableSemiJoin_NotAnInOrExists()
+    {
+        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.None, WindowEnd, RollupCoverage.Unknown, QueryStoreWideEligible: false);
+        var sql = CompileSql(Plan("[{\"dimension\":\"module_name\",\"op\":\"eq\",\"value\":\"usp_A\"}]"), context);
+        var start = sql.IndexOf(Marker, StringComparison.Ordinal);
+        var end = sql.IndexOf(") AS qs_ranked", StringComparison.Ordinal);
+        Assert.True(start > 0 && end > start, "the compiled SQL must carry the restriction");
+        var restriction = sql.Substring(start, end - start);
+
+        Assert.DoesNotContain(" IN (SELECT", restriction, StringComparison.Ordinal);
+        Assert.DoesNotContain(" OR ", restriction, StringComparison.Ordinal);
+        Assert.Contains("coalesce(k.replica_role, '') = coalesce(query_store_stats.replica_role, '')", restriction, StringComparison.Ordinal);
+        Assert.Contains("k.replica_role IS NOT DISTINCT FROM query_store_stats.replica_role", restriction, StringComparison.Ordinal);
     }
 
     [Fact]
