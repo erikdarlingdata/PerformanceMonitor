@@ -67,6 +67,31 @@ public sealed class FinOpsOptimizationGoldenLiveTests
             return Serialize(anchor, map);
         });
 
+    [Fact]
+    public Task OptimizationReads_MatchGoldenFixture_ThroughTheStorageReaderAndRowMappers() =>
+        RunAsync(async (connectionString, anchor, ct) =>
+        {
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            var map = new Dictionary<string, object?>();
+            foreach (var (key, id) in new[] { ("a", ServerIdA), ("b", ServerIdB) })
+            {
+                var now = DateTime.UtcNow;
+                var (textCutoff, _) = RetentionTierRouter.ClampToTextHorizon(now, now.AddHours(-24));
+                map[key] = new Dictionary<string, object?>
+                {
+                    ["idleDatabases"] = (await DarlingFinOpsOptimizationReader.GetIdleDatabasesAsync(
+                        dataSource, id, DateTime.UtcNow.AddDays(-7), 30, ct)).ConvertAll(IdleDatabaseRow.From),
+                    ["tempdbSummary"] = (await DarlingFinOpsOptimizationReader.GetTempdbSummaryAsync(
+                        dataSource, id, DateTime.UtcNow.AddHours(-24), 30, ct)).ConvertAll(TempdbSummaryRow.From),
+                    ["waitCategories"] = (await DarlingFinOpsOptimizationReader.GetWaitCategorySummaryAsync(
+                        dataSource, id, DateTime.UtcNow.AddHours(-24), 30, ct)).ConvertAll(WaitCategorySummaryRow.From),
+                    ["expensiveQueries"] = (await DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(
+                        dataSource, id, textCutoff, 3, 30, ct)).ConvertAll(ExpensiveQueryRow.From),
+                };
+            }
+            return Serialize(anchor, map);
+        });
+
     internal static async Task RunAsync(Func<string, DateTime, CancellationToken, Task<string>> read)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");

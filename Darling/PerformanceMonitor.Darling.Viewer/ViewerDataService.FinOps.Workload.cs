@@ -161,130 +161,20 @@ ORDER BY max_connections DESC";
         return (byTotal.Select(TopResourceConsumerRow.From).ToList(), byAvg.Select(TopResourceConsumerRow.From).ToList());
     }
 
-    /// <summary>Wait stats grouped by cost category over the window. A wait stored with and without the trailing
-    /// space the collector trimmed from #4884 on is one wait, with its summed time, when the category's top wait is
-    /// picked: <c>per_spelling</c> sums per stored name, <c>per_wait</c> merges the spellings on
-    /// <c>rtrim(wait_type)</c> (once per group, not per row), and the category is read from the clean name, so both
-    /// spellings always land in the same category. $1 server_id, $2 cutoff.</summary>
-    public const string WaitCategorySummarySql = @"
-WITH per_spelling AS (
-    SELECT
-        wait_type,
-        SUM(delta_wait_time_ms) AS wait_time_ms,
-        SUM(delta_waiting_tasks) AS waiting_tasks
-    FROM v_wait_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   delta_wait_time_ms IS NOT NULL
-    AND   delta_wait_time_ms > 0
-    GROUP BY wait_type
-),
-per_wait AS (
-    SELECT
-        rtrim(wait_type) AS wait_type,
-        SUM(wait_time_ms) AS wait_time_ms,
-        SUM(waiting_tasks) AS waiting_tasks
-    FROM per_spelling
-    GROUP BY rtrim(wait_type)
-),
-categorized AS (
-    SELECT
-        CASE
-            WHEN wait_type IN ('SOS_SCHEDULER_YIELD', 'CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER') THEN 'CPU'
-            WHEN wait_type ILIKE 'PAGEIOLATCH%'
-            OR   wait_type IN ('WRITELOG', 'IO_COMPLETION', 'ASYNC_IO_COMPLETION') THEN 'Storage'
-            WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
-            WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
-            WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
-            ELSE 'Other'
-        END AS category,
-        wait_type,
-        wait_time_ms,
-        waiting_tasks
-    FROM per_wait
-),
-ranked AS (
-    SELECT
-        *,
-        ROW_NUMBER() OVER (PARTITION BY category ORDER BY wait_time_ms DESC) AS rn
-    FROM categorized
-),
-by_category AS (
-    SELECT
-        category,
-        SUM(wait_time_ms) AS total_wait_time_ms,
-        SUM(waiting_tasks) AS total_waiting_tasks,
-        MAX(CASE WHEN rn = 1 THEN wait_type END) AS top_wait_type,
-        MAX(CASE WHEN rn = 1 THEN wait_time_ms END) AS top_wait_time_ms
-    FROM ranked
-    GROUP BY category
-),
-grand_total AS (
-    SELECT NULLIF(SUM(total_wait_time_ms), 0) AS total
-    FROM by_category
-)
-SELECT
-    bc.category,
-    bc.total_wait_time_ms,
-    bc.total_waiting_tasks,
-    CAST(bc.total_wait_time_ms * 100.0 / gt.total AS DECIMAL(5,1)),
-    bc.top_wait_type,
-    bc.top_wait_time_ms
-FROM by_category bc
-CROSS JOIN grand_total gt
-ORDER BY bc.total_wait_time_ms DESC";
+    /// <summary>The wait-category summary's SQL; lives in <see cref="DarlingFinOpsOptimizationReader"/>.</summary>
+    public const string WaitCategorySummarySql = DarlingFinOpsOptimizationReader.WaitCategorySummarySql;
 
     public async Task<List<WaitCategorySummaryRow>> GetWaitCategorySummaryAsync(int serverId, int hoursBack = 24, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
-        await using var command = _dataSource.CreateCommand(WaitCategorySummarySql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-
-        var items = new List<WaitCategorySummaryRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(new WaitCategorySummaryRow
-            {
-                Category = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                TotalWaitTimeMs = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
-                WaitingTasks = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
-                PctOfTotal = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
-                TopWaitType = reader.IsDBNull(4) ? "" : reader.GetString(4),
-                TopWaitTimeMs = reader.IsDBNull(5) ? 0 : Convert.ToInt64(reader.GetValue(5))
-            });
-        }
-        return items;
+        var rows = await DarlingFinOpsOptimizationReader.GetWaitCategorySummaryAsync(
+            _dataSource, serverId, cutoff, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return rows.Select(WaitCategorySummaryRow.From).ToList();
     }
 
-    /// <summary>Top-N most expensive queries by total CPU over the window. $1 server_id, $2 cutoff, $3 topN.</summary>
-    public const string ExpensiveQueriesSql = $@"
-SELECT
-    database_name,
-    SUM(delta_worker_time) / 1000.0 AS total_cpu_ms,
-    CAST(SUM(delta_worker_time) / 1000.0 / NULLIF(SUM(delta_execution_count), 0) AS DECIMAL(19,2)) AS avg_cpu_ms,
-    SUM(delta_logical_reads) AS total_reads,
-    CAST(SUM(delta_logical_reads) * 1.0 / NULLIF(SUM(delta_execution_count), 0) AS DECIMAL(19,0)) AS avg_reads,
-    SUM(delta_execution_count) AS executions,
-    LEFT(query_text, 200) AS query_preview,
-    query_text AS full_query_text,
-    MAX(query_plan_xml) AS query_plan_xml,
-    MAX(query_plan_gz) AS query_plan_gz
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   delta_worker_time IS NOT NULL
-AND   delta_worker_time > 0
-AND   {TimescaleSupport.IntervalHonestSourceFilter}
-GROUP BY
-    database_name,
-    sql_handle,
-    query_text
-ORDER BY SUM(delta_worker_time) DESC
-LIMIT $3";
+    /// <summary>The expensive-queries read's SQL; lives in <see cref="DarlingFinOpsOptimizationReader"/>.</summary>
+    public const string ExpensiveQueriesSql = DarlingFinOpsOptimizationReader.ExpensiveQueriesSql;
 
     public async Task<List<ExpensiveQueryRow>> GetExpensiveQueriesAsync(int serverId, int hoursBack = 24, int topN = 20, CancellationToken cancellationToken = default)
     {
@@ -296,34 +186,9 @@ LIMIT $3";
         var now = DateTime.UtcNow;
         var (cutoff, _) = RetentionTierRouter.ClampToTextHorizon(now, now.AddHours(-hoursBack));
 
-        await using var command = _dataSource.CreateCommand(ExpensiveQueriesSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
-
-        var items = new List<ExpensiveQueryRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(new ExpensiveQueryRow
-            {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                TotalCpuMs = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
-                AvgCpuMsPerExec = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2)),
-                TotalReads = reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
-                AvgReadsPerExec = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
-                Executions = reader.IsDBNull(5) ? 0 : Convert.ToInt64(reader.GetValue(5)),
-                QueryPreview = reader.IsDBNull(6) ? "" : reader.GetString(6),
-                FullQueryText = reader.IsDBNull(7) ? "" : reader.GetString(7),
-                /* #2069: plans written since V54 ride as gzip bytes with the text column NULL —
-                   text-else-gz, same rule as every plan reader. */
-                QueryPlanXml = PayloadDimensions.ResolveContent(
-                    reader.IsDBNull(8) ? null : reader.GetString(8),
-                    reader.IsDBNull(9) ? null : reader.GetFieldValue<byte[]>(9))
-            });
-        }
-        return items;
+        var rows = await DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(
+            _dataSource, serverId, cutoff, topN, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return rows.Select(ExpensiveQueryRow.From).ToList();
     }
 
     /// <summary>The high-impact read's SQL; lives in <see cref="DarlingFinOpsHighImpactReader"/>.</summary>
