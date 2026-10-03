@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, windowFromHours, daysText } from "../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, windowFromHours, daysText } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
 import { READ_FIELDS } from "../read-fields.js";
@@ -154,7 +154,7 @@ function fanout(read, params, specs) {
         const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
         const rendered = VIZ[spec.viz](res.data, { ...spec, windowHours: res.keptHours || (params && params.hours) });
 
-        mount(body, [keptWindowStrip(res), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
+        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -180,7 +180,8 @@ export function waitsPanel(server, ctx) {
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
     const waits = res.data.waits || [];
-    const parts = [keptWindowStrip(res), VIZ.table(res.data, { rowsKey: "waits", columns: WAIT_COLUMNS })];
+    /* #4966: the Wait Stats grid says where its table's data starts when that is after the window's start. */
+    const parts = [keptWindowStrip(res), windowFloorStrip(res.data, { viz: "table" }), VIZ.table(res.data, { rowsKey: "waits", columns: WAIT_COLUMNS })];
 
     if (waits.length) {
       const chartSlot = el("div", {}, [loadingStrip()]);

@@ -266,7 +266,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
                 {
                     start = Stamp(requestedStart),
                     end = Stamp(now),
-                    effective_start = Stamp(effectiveStart),
+                    effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                     effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                     window_truncated = windowTruncated,
                     truncation_note = windowTruncated

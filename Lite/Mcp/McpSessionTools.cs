@@ -65,6 +65,17 @@ public sealed class McpSessionTools
             var truncated = rows.Count > limit;
             var shown = truncated ? rows.GetRange(0, limit) : rows;
 
+            /* #4966: where this server's query_snapshots start for the window, beside the page cut above — the two
+               are different facts: truncated says the window held more than limit, this says the store did not hold
+               the window's head. The probe reads coverage (the collector's logged runs count as well as rows: a
+               server idle overnight has no snapshot near the start though the store covered it), from the same
+               view the page was read from, and is deliberately unfiltered by database_name / blocking_only: the
+               floor is a property of the table. */
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var notice = await McpQueryTools.WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QuerySnapshots, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "query_snapshots");
+
             /* The page's own (capture, session) pairs, so a victim can say whether its blocker made the page. */
             var onPage = new HashSet<(DateTime, int)>(shown.Select(r => (r.CollectionTime, r.SessionId)));
 
@@ -102,6 +113,12 @@ public sealed class McpSessionTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: the window floor, always present (false and null when the store covered the window). No
+                   effective_hours_back: this payload carries a page `truncated`, and the census holds that key
+                   apart for the window floor (McpPayloadContractCensusTests), so the reach is the instant. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 filters_applied = new
                 {
                     database_name = filter,
@@ -112,7 +129,9 @@ public sealed class McpSessionTools
                 snapshots_returned = result.Count,
                 truncated,
                 order = "collection_time_desc",
-                oldest_returned_collection_time = shown[^1].CollectionTime.ToString("o"),
+                /* #4966: where the page's rows stop describes the window the page covers, so it prints like
+                   effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(shown[^1].CollectionTime),
                 newest_returned_collection_time = shown[0].CollectionTime.ToString("o"),
                 queries = result
             }, McpHelpers.JsonOptions);

@@ -169,14 +169,74 @@ public sealed class DataWindowFloorTests
     [InlineData("waiting_tasks", true)]
     [InlineData("query_snapshots", true)]
     [InlineData("wait_stats", true)]
+    [InlineData("plan_correction", true)]
     [InlineData("index_object_stats", false)]
-    [InlineData("server_config", false)]
-    [InlineData("database_config", false)]
+    [InlineData("server_config", true)]
+    [InlineData("database_config", true)]
+    [InlineData("collection_log", false)]
     [InlineData("query_stats; DROP TABLE x", false)]
     [InlineData("not_a_table", false)]
-    public void CollectorTables_AreProbedOnlyWhenTheirIndexLeadsWithServerAndTime(string table, bool accepted)
+    public void CollectorTables_AreProbedOnlyWhenTheProbeCanReadThemBoundedByTheWindow(string table, bool accepted)
     {
         Assert.Equal(accepted, DataWindowFloor.Source.TryForCollectorTable(table, out _));
+    }
+
+    /// <summary>
+    /// The two config snapshot tables have no index, so the probe never walks them: it reads only the window's rows
+    /// (the window's lower bound lets TimescaleDB leave every other chunk alone). The edge is the schedule's, 30 days
+    /// with a fleet override winning, like any collector the schedule governs; a row older than the edge moves the
+    /// answer earlier (<c>LEAST(coverage, w.t)</c>), so the answer is never later than a row the config grids show;
+    /// and a logged run of the config collector counts the server, since a snapshot is written once a day.
+    /// </summary>
+    [Theory]
+    [InlineData("server_config", "capture_time")]
+    [InlineData("database_config", "capture_time")]
+    public void AConfigSnapshotTable_TakesItsEdgeFromTheSchedule_AndReadsOnlyTheWindow(string table, string timeColumn)
+    {
+        var source = DataWindowFloor.Source.ForCollectorTable(table);
+        Assert.Equal(30, source.RetentionDefaultDays);
+        Assert.Equal(table, source.CollectorName);
+
+        var sql = DataWindowFloor.FloorSql([source], DataWindowFloor.Scope.ServerId);
+
+        Assert.Contains(
+            $"GREATEST($3 - make_interval(days => COALESCE((SELECT o.retention_days FROM config.config_collector_schedules AS o WHERE o.server_id IS NULL AND lower(o.collector_name) = '{table}' AND o.retention_days >= 1 LIMIT 1), 30)), s.created_date)",
+            sql, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{table} AS f", sql, StringComparison.Ordinal);
+        Assert.Contains($"AND   f.{timeColumn} >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains($"AND   f.{timeColumn} <= $1", sql, StringComparison.Ordinal);
+        Assert.Contains(", w.t) AS t", sql, StringComparison.Ordinal);
+        Assert.Contains($"c.collector_name = '{table}' AND c.collection_time >= $2 AND c.collection_time <= $1", sql, StringComparison.Ordinal);
+
+        /* No walk to the table's oldest chunk: every read of the table carries the window's bounds. */
+        Assert.DoesNotContain(" AS h", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The run log keeps its own horizon, a fixed 60 days no schedule row moves, so its edge is that constant and not
+    /// a schedule lookup. It has no collector whose runs it could log, so a server counts by its own rows in the
+    /// window, and the window read rides the log's <c>(server_id, collection_time)</c> index.
+    /// </summary>
+    [Fact]
+    public void TheCollectionLog_TakesItsEdgeFromItsOwnHorizon_AndCountsAServerByItsRows()
+    {
+        var source = DataWindowFloor.Source.ForCollectionLog();
+        Assert.Null(source.CollectorName);
+        Assert.Equal(DarlingRetentionHorizons.CollectionLogRetentionDays, source.RetentionDefaultDays);
+
+        var sql = DataWindowFloor.FloorSql([source], DataWindowFloor.Scope.ServerId);
+
+        Assert.Contains(
+            $"GREATEST($3 - make_interval(days => {DarlingRetentionHorizons.CollectionLogRetentionDays}), s.created_date)",
+            sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("config_collector_schedules", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.collection_log AS f", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   f.collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   f.collection_time <= $1", sql, StringComparison.Ordinal);
+        Assert.Contains(", w.t) AS t", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE (w.t IS NOT NULL)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("OR EXISTS", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(" AS h", sql, StringComparison.Ordinal);
     }
 
     [Theory]

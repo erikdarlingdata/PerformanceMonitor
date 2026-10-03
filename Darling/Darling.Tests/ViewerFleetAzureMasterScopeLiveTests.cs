@@ -115,7 +115,7 @@ public sealed class ViewerFleetAzureMasterScopeLiveTests
     private static async Task RegisterAsync(NpgsqlConnection connection, int id, string host, string? database, int edition, System.Threading.CancellationToken ct)
     {
         await DarlingMcpTestData.ExecAsync(connection, ct,
-            "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date) VALUES ($1, $2, $2, TRUE, $3, 16, now()::timestamp, now()::timestamp)",
+            "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date) VALUES ($1, $2, $2, TRUE, $3, 16, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC')",
             id, host + "/" + (database ?? "-"), edition);
         await PropertiesAsync(connection, id, edition, ct);
         await DarlingMcpTestData.ExecAsync(connection, ct,
@@ -126,7 +126,7 @@ public sealed class ViewerFleetAzureMasterScopeLiveTests
     /* The newest stored engine edition, the second half of the service's master rule. */
     private static Task PropertiesAsync(NpgsqlConnection connection, int id, int edition, System.Threading.CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
-            "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES ($1, now()::timestamp, $2, 's', $3)",
+            "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES ($1, now() AT TIME ZONE 'UTC', $2, 's', $3)",
             CollectionIdGenerator.Next(), id, edition);
 
     /* The master, its two own-target databases and a plain server, with the same events as above. */
@@ -298,7 +298,7 @@ public sealed class ViewerFleetAzureMasterScopeLiveTests
 
             /* A newer properties row for the master: the newest one decides. */
             await DarlingMcpTestData.ExecAsync(connection, ct,
-                "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES ($1, now()::timestamp + interval '1 minute', $2, 's', $3)",
+                "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES ($1, (now() AT TIME ZONE 'UTC') + interval '1 minute', $2, 's', $3)",
                 CollectionIdGenerator.Next(), MasterId, newestStoredEdition);
 
             await using var viewer = new ViewerDataService(scratch.ConnectionString);

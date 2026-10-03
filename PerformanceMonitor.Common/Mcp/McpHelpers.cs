@@ -424,6 +424,19 @@ internal static class McpHelpers
         "changes it. WIRE CHANGE: formerly named truncated.";
 
     /// <summary>
+    /// #4966: <c>effective_start</c> as every window-floor payload prints it, always as UTC with the trailing Z, on
+    /// both SKUs. The served start is either the start that was asked for (already UTC, so a plain "o" printed the Z)
+    /// or the floor read off the store (a naive instant, so a plain "o" printed none), and the zone marker used to
+    /// come and go with <c>window_truncated</c>, on the one value a reader most needs to read right. Only the kind is
+    /// set: the instant is the value's own and is never shifted (no <c>ToUniversalTime</c>, which would take a naive
+    /// floor for local time). A payload that keeps the store's naive form on every path, so that
+    /// <c>effective_start</c> prints like its first point's <c>time</c> beside it (the Performance-Trends
+    /// disclosure), does not call this.
+    /// </summary>
+    public static string FormatEffectiveStart(DateTime effectiveStart) =>
+        DateTime.SpecifyKind(effectiveStart, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
+
+    /// <summary>
     /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.
     ///
     /// <para>Not a grace period for asking about the future — it is the client-clock allowance. An agent that

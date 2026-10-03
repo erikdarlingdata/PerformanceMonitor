@@ -36,10 +36,18 @@ public sealed class WebRangeKeptHistoryBehaviourTests
     /// it, so the guard cannot drift from the text the page shows.</summary>
     private const string PickShorter = "Pick a shorter range.";
 
-    internal static bool TryRun(string scenario, out JsonElement result)
+    /// <param name="scenario">The harness scenario; one that ends in "Local" takes the browser's zone after a colon.</param>
+    /// <param name="result">What the harness printed.</param>
+    /// <param name="input">The JSON answer the page reads, for a scenario that draws a server note (HARNESS_INPUT).</param>
+    internal static bool TryRun(string scenario, out JsonElement result, string? input = null)
     {
         result = default;
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        if (input is not null)
+        {
+            psi.Environment["HARNESS_INPUT"] = input;
+        }
+
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-kept-history-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
         psi.ArgumentList.Add(scenario);
