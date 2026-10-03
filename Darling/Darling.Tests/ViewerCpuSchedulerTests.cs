@@ -119,6 +119,17 @@ public sealed class ViewerCpuSchedulerSqlTests
 /// </summary>
 public sealed class ViewerCpuSchedulerProjectionTests
 {
+    [Fact]
+    public void TheGridRows_AllCarryTheSnapshotsCollectionTime_AndANullSnapshotHasNone()
+    {
+        var snapshot = Snapshot();
+        var rows = CpuSchedulerGridRow.Build(snapshot);
+        Assert.NotEmpty(rows);
+        Assert.All(rows, r => Assert.Equal(snapshot.CollectionTime, r.CollectionTime));
+        Assert.Equal(CpuSchedulerMetrics.BuildMetrics(snapshot).Select(m => m.Metric), rows.Select(r => r.Metric));
+        Assert.Empty(CpuSchedulerGridRow.Build(null));
+    }
+
     private static CpuSchedulerSnapshot Snapshot(
         bool workerExhaustion = false, bool runnableWarn = false, bool blockedWarn = false,
         bool queuedWarn = false, bool memPressure = false, bool offlineWarn = false,

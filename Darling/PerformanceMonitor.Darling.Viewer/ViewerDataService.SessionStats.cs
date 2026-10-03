@@ -44,7 +44,8 @@ public sealed record SessionStatsPoint(
     string? TopApplicationName,
     int? TopApplicationConnections,
     string? TopHostName,
-    int? TopHostConnections) : ISessionStatsPoint;
+    int? TopHostConnections,
+    DateTime? LatestCollectionTime = null) : ISessionStatsPoint;
 
 public sealed partial class ViewerDataService
 {
@@ -112,7 +113,8 @@ public sealed partial class ViewerDataService
                 top_application_name,
                 top_application_connections,
                 top_host_name,
-                top_host_connections
+                top_host_connections,
+                collection_time AS latest_collection_time
             FROM raw
             ORDER BY bucket_start, collection_time DESC
         )
@@ -131,7 +133,8 @@ public sealed partial class ViewerDataService
             latest.top_host_name,
             latest.top_host_connections,
             agg.first_collection_time,
-            agg.collection_count
+            agg.collection_count,
+            latest.latest_collection_time
         FROM agg
         JOIN latest ON latest.bucket_start = agg.bucket_start
         ORDER BY agg.bucket_start
@@ -156,7 +159,7 @@ public sealed partial class ViewerDataService
 
         var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, int Total, int Running, int Sleeping,
             int Background, int Dormant, int Idle, int WaitingForMemory, int DatabasesWithConnections,
-            string? TopAppName, int? TopAppConnections, string? TopHostName, int? TopHostConnections)>();
+            string? TopAppName, int? TopAppConnections, string? TopHostName, int? TopHostConnections, DateTime LatestCollectionTime)>();
         var everyBucketSingleton = true;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -181,7 +184,8 @@ public sealed partial class ViewerDataService
                 reader.IsDBNull(9) ? null : reader.GetString(9),
                 reader.IsDBNull(10) ? null : reader.GetInt32(10),
                 reader.IsDBNull(11) ? null : reader.GetString(11),
-                reader.IsDBNull(12) ? null : reader.GetInt32(12)));
+                reader.IsDBNull(12) ? null : reader.GetInt32(12),
+                reader.GetDateTime(15)));
         }
 
         var result = new List<SessionStatsPoint>(rows.Count);
@@ -200,7 +204,8 @@ public sealed partial class ViewerDataService
                 row.TopAppName,
                 row.TopAppConnections,
                 row.TopHostName,
-                row.TopHostConnections));
+                row.TopHostConnections,
+                row.LatestCollectionTime));
         }
 
         return result;

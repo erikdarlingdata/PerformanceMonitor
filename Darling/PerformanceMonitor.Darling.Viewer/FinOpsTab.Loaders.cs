@@ -590,12 +590,7 @@ public partial class FinOpsTab
                 if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
             }
 
-            /* A server with no CPU sample in the window has a null average: its CPU term is left out, because scoring it
-               as 0% CPU would hand it a full 100 made from nothing. */
-            int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;
-            var memScore = 80;
-            var storScore = FinOpsHealthCalculator.StorageScore(50);
-            item.HealthScore = FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);
+            item.HealthScore = FinOpsInventoryFigures.HealthScore(item.AvgCpuPct);
         }
 
         _finopsServerInventoryFilterMgr!.UpdateData(servers);

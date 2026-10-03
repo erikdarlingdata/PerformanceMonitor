@@ -78,7 +78,7 @@ internal static class DarlingCollectorRunTimeReader
     /// </summary>
     public static async Task<IReadOnlyDictionary<string, CollectorRunTimeReading>> ReadAsync(
         NpgsqlDataSource postgres, int serverId, IReadOnlyCollection<CollectorHealth> rows, DateTime nowUtc,
-        CancellationToken cancellationToken = default, Microsoft.Extensions.Logging.ILogger? logger = null)
+        Microsoft.Extensions.Logging.ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var overrides = new List<ScheduleOverride>();
         await using (var command = postgres.CreateCommand(ScheduleSql))

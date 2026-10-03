@@ -113,6 +113,7 @@ public partial class ViewerServerTab
             PlanCacheBloatLevelText.Text = "--";
             PlanCacheBloatLevelText.Foreground = System.Windows.Media.Brushes.Gray;
             PlanCacheRecommendationText.Text = "";
+            PlanCacheCollectedText.Text = HistoryTime.SnapshotCollected(null, "--");
             return;
         }
 
@@ -124,6 +125,8 @@ public partial class ViewerServerTab
         PlanCacheRecommendationText.Text = bloat.Recommendation;
 
         PlanCacheTotalPlansText.Text = summary.TotalPlans.ToString("N0", CultureInfo.CurrentCulture);
+        /* #4966: the totals are one snapshot (the newest in the window); say when it was collected. */
+        PlanCacheCollectedText.Text = HistoryTime.SnapshotCollected(summary.CollectionTime, "--");
 
         /* oldest_plan_create_time comes from a DMV (sys.dm_exec_query_stats.creation_time) in the monitored
            server's local clock, which the viewer — having no per-server offset — measures against UtcNow:
