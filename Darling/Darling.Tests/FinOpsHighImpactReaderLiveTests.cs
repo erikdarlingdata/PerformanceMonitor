@@ -25,7 +25,6 @@ namespace Darling.Tests;
 /// captured from the viewer's own read BEFORE the move, on this same seed, so the storage read and the
 /// viewer delegate must both reproduce them value for value and in order.
 /// </summary>
-[Collection("live-postgres")]
 public sealed class FinOpsHighImpactReaderLiveTests
 {
     internal const string ServerName = "darling-finops-high-impact-e2e";

@@ -26,7 +26,7 @@ namespace Darling.Tests;
 /// Pins for <c>get_finops</c>: the tool surface, the closed view set, the refusals, the empty answer, the
 /// impact band's cut points, and (live) that every row equals the storage read's on the same seed.
 /// </summary>
-/* #1776 own-store: the only live fact (LiveParity) mints its own scratch database through ScratchPostgres; the other facts touch no store. */
+/* #1776 own-store: both live facts (the refusal fact and LiveParity) mint their own scratch database through ScratchPostgres; the rest touch no store. */
 public sealed class DarlingMcpFinOpsToolsTests
 {
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpFinOpsTools)
@@ -49,7 +49,26 @@ public sealed class DarlingMcpFinOpsToolsTests
         Assert.False(described.Single(p => p.Name == "view").HasDefaultValue, "view is required");
         Assert.Equal(24, described.Single(p => p.Name == "hours_back").DefaultValue);
         Assert.Equal(10, described.Single(p => p.Name == "limit").DefaultValue);
-        Assert.Equal(new[] { "high_impact" }, DarlingMcpFinOpsTools.Views);
+
+        // Each set asserts its own views on its own lines, so two series never edit the same line.
+        // FinOps web parity (#4843), set A: list your views below this line only.
+        var setAViews = Array.Empty<string>();
+        // FinOps web parity (#4843), set A ends.
+        // Set A and set B are separated on purpose: keep this gap.
+        //
+        //
+        //
+        // FinOps web parity (#4843), set B: list your views below this line only.
+        var setBViews = new[] { "high_impact" };
+        // FinOps web parity (#4843), set B ends.
+        var valid = DarlingMcpFinOpsTools.SetAValid + DarlingMcpFinOpsTools.SetBValid;
+        foreach (var view in setAViews.Concat(setBViews))
+        {
+            Assert.Contains(view, DarlingMcpFinOpsTools.Views);
+            Assert.Contains(view, valid, StringComparison.Ordinal);
+        }
+        Assert.Equal(setAViews.Length + setBViews.Length, DarlingMcpFinOpsTools.Views.Length);
+        Assert.Equal(DarlingMcpFinOpsTools.Views.Length, DarlingMcpFinOpsTools.Views.Distinct().Count());
     }
 
     [Theory]
@@ -88,10 +107,11 @@ public sealed class DarlingMcpFinOpsToolsTests
         Assert.Contains("high_impact", message, StringComparison.Ordinal);
         Assert.Equal("view", JsonDocument.Parse(unknownView).RootElement.GetProperty("hints").GetProperty("parameter").GetString());
 
-        foreach (var badHours in new[] { 0, -1 })
+        foreach (var badHours in new[] { 0, -1, 169 })
         {
             var refused = await DarlingMcpFinOpsTools.GetFinOps(postgres, "high_impact", name, hours_back: badHours, cancellationToken: ct);
-            Assert.True(McpHelpers.IsErrorEnvelope(refused) || McpHelpers.IsRefusalEnvelope(refused), $"hours_back {badHours}: {refused}");
+            Assert.True(McpHelpers.IsRefusalEnvelope(refused), $"hours_back {badHours}: {refused}");
+            Assert.Equal("hours_back", JsonDocument.Parse(refused).RootElement.GetProperty("hints").GetProperty("parameter").GetString());
         }
 
         foreach (var badLimit in new[] { 0, -1, 51 })
@@ -111,7 +131,6 @@ public sealed class DarlingMcpFinOpsToolsTests
     }
 
     /* #1776 own-store: the fact seeds its own scratch database, so nothing here shares rows with another test. */
-    [Collection("live-postgres")]
     public sealed class LiveParity
     {
         [Fact]
@@ -159,6 +178,15 @@ public sealed class DarlingMcpFinOpsToolsTests
                 Assert.False(r.TryGetProperty("full_query_text", out _));
                 Assert.False(r.TryGetProperty("query_plan_xml", out _));
             }
+
+            // limit reaches the reader's topN: two kept per measure is a strict subset, in the reader's order.
+            var narrow = await DarlingFinOpsHighImpactReader.ReadAsync(postgres, FinOpsHighImpactReaderLiveTests.ServerId, 24, 60, ct, topN: 2);
+            var narrowJson = await DarlingMcpFinOpsTools.GetFinOps(postgres, "high_impact", FinOpsHighImpactReaderLiveTests.ServerName, limit: 2, cancellationToken: ct);
+            Assert.False(McpHelpers.IsErrorEnvelope(narrowJson), narrowJson);
+            var narrowRows = JsonDocument.Parse(narrowJson).RootElement.GetProperty("rows").EnumerateArray().ToArray();
+            Assert.Equal(narrow.Select(q => q.QueryHash).ToArray(), narrowRows.Select(r => r.GetProperty("query_hash").GetString()).ToArray());
+            Assert.NotEmpty(narrowRows);
+            Assert.True(narrowRows.Length < rows.Length, $"limit 2 returned {narrowRows.Length} rows, the default {rows.Length}");
         }
     }
 }

@@ -25,7 +25,6 @@ using Xunit;
 namespace Darling.Tests;
 
 /* #1776 own-store: each fact seeds its own scratch database, so nothing here shares rows with another test. */
-[Collection("live-postgres")]
 public sealed class FinOpsWebReadParityLiveTests
 {
     private static async Task<(int Status, string Body)> GetAsync(NpgsqlDataSource postgres, string pathAndQuery, System.Threading.CancellationToken ct)
@@ -74,6 +73,27 @@ public sealed class FinOpsWebReadParityLiveTests
         using var actual = JsonDocument.Parse(body);
         Assert.True(JsonElement.DeepEquals(expected.RootElement, actual.RootElement), body);
         Assert.Contains("0xHIOLD", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task HoursAlias_BindsTheSameWindowAsHoursBack()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the live get_finops route test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await FinOpsHighImpactReaderLiveTests.SeedAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var name = FinOpsHighImpactReaderLiveTests.ServerName;
+        var (_, viaHoursBack) = await GetAsync(postgres, $"/api/read/get_finops?server={name}&view=high_impact&hours_back=96", ct);
+        var (status, viaHours) = await GetAsync(postgres, $"/api/read/get_finops?server={name}&view=high_impact&hours=96", ct);
+
+        Assert.Equal(StatusCodes.Status200OK, status);
+        using var expected = JsonDocument.Parse(viaHoursBack);
+        using var actual = JsonDocument.Parse(viaHours);
+        Assert.True(JsonElement.DeepEquals(expected.RootElement, actual.RootElement), viaHours);
+        Assert.Equal(96, actual.RootElement.GetProperty("hours_back").GetInt32());
+        Assert.Contains("0xHIOLD", viaHours, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -42,14 +42,33 @@ public sealed partial class DarlingMcpFinOpsTools
         // FinOps web parity (#4843), set B ends.
     ];
 
+    // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+    internal const string SetAViewLines = "";
+    internal const string SetAValid = "";
+    internal const string SetAGuides = "";
+    // FinOps web parity (#4843), set A ends.
+    // Each set belongs to one series of changes. Append to your own set only,
+    // so the two series never edit the same lines of these fragments.
+    // View lines and guide tails each start with a space; Valid entries in set A each end with ", ",
+    // and set B's entries are joined with ", " after the first.
+    // Set A and set B are separated on purpose: keep this gap.
+    //
+    //
+    //
+    // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+    internal const string SetBViewLines = " " + HighImpactViewLine;
+    internal const string SetBValid = HighImpactView;
+    internal const string SetBGuides = " " + HighImpactViewGuide;
+    // FinOps web parity (#4843), set B ends.
+
     private const int DefaultLimit = 10;
     private const int MaxLimit = 50;
 
     [McpServerTool(Name = "get_finops"), Description(
-        "FinOps views for one server, picked by view. Windowed over hours_back, UTC; no as_of. " + HighImpactViewLine + " An unknown view is refused with the valid list. <<GUIDE>> " + HighImpactViewGuide)]
+        "FinOps views for one server, picked by view. Windowed over hours_back, UTC; no as_of." + SetAViewLines + SetBViewLines + " An unknown view is refused with the valid list. <<GUIDE>>" + SetAGuides + SetBGuides)]
     public static async Task<string> GetFinOps(
         NpgsqlDataSource postgres,
-        [Description("Which view to read. Valid: high_impact.")] string view,
+        [Description("Which view to read. Valid: " + SetAValid + SetBValid + ".")] string view,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to read, ending now (default 24).")] int hours_back = 24,
         [Description("Most rows per top-N list the view keeps (1-50, default 10).")] int limit = DefaultLimit,

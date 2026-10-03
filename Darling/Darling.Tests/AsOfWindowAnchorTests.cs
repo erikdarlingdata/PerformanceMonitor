@@ -281,10 +281,12 @@ public sealed class AsOfWindowAnchorTests
            result whose two halves describe different instants, which is worse than not offering it.
            get_store_metrics windows in days over the store's own growth series. get_read_latency windows
            in hours over the service's own read-duration telemetry, like get_store_metrics over the store's
-           own growth series. */
+           own growth series. get_finops windows over the query-stats rows ending now and takes no anchor
+           (its description says so); the FinOps views are cost-oriented live reads. */
         var excluded = new[]
         {
             "get_pvs_stats", "get_fleet_overview", "get_store_metrics", "get_read_latency",
+            "get_finops",
         };
 
         var unanchored = DarlingWebEndpoints.BuildReadDispatch().Keys

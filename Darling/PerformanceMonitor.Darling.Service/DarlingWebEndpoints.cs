@@ -2807,7 +2807,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             //
             //
             // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
-            ["get_finops"] = R(CatFinOps, "FinOps views for one server, picked by view. view is one of a closed set (today: high_impact); an unknown view is refused with the valid list. Windowed over hours_back; limit caps rows per list.", PServer(), PText("view"), PInt("hours_back", 24), PInt("limit", 10)),
+            ["get_finops"] = R(CatFinOps, "FinOps views for one server, picked by view. view is one of a closed set (today: high_impact); an unknown view is refused with the valid list. Windowed over hours_back; limit caps rows per list.", PServer(), PText("view"), PHours(24), PInt("limit", 10)),
             // FinOps web parity (#4843), set B ends.
         };
 
@@ -3749,7 +3749,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             //
             //
             // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
-            ["get_finops"] = (c, pg, an) => DarlingMcpFinOpsTools.GetFinOps(pg, First(c, "view") ?? "", Server(c), QueryInt(c, "hours_back", null, 24), QueryInt(c, "limit", null, 10), c.RequestAborted),
+            ["get_finops"] = (c, pg, an) => DarlingMcpFinOpsTools.GetFinOps(pg, First(c, "view") ?? "", Server(c), Hours(c, 24), QueryInt(c, "limit", null, 10), c.RequestAborted),
             // FinOps web parity (#4843), set B ends.
         };
 

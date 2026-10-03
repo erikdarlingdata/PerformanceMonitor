@@ -272,13 +272,38 @@ public sealed class StorageCommandTimeoutTests
 
         Assert.True(Directory.Exists(dir), $"storage project directory not found: {dir}");
 
-        var paths = Directory.EnumerateFiles(dir, "*.cs", SearchOption.TopDirectoryOnly)
+        var paths = Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories)
+            .Where(p => !IsBuildOutput(dir, p))
             .OrderBy(p => p, System.StringComparer.Ordinal)
             .ToArray();
 
         Assert.True(paths.Length >= 30, $"the storage sweep found only {paths.Length} files — the project has moved");
 
         return paths;
+    }
+
+    /// <summary>
+    /// True when a path sits under the project's <c>bin</c> or <c>obj</c> tree. Compared as PATH
+    /// SEGMENTS, so a source file that merely has "obj" in its name is not excluded.
+    /// </summary>
+    private static bool IsBuildOutput(string projectDir, string path)
+    {
+        var relative = Path.GetRelativePath(projectDir, path);
+        var segments = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        return segments.Any(s =>
+            string.Equals(s, "bin", System.StringComparison.OrdinalIgnoreCase)
+            || string.Equals(s, "obj", System.StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>The sweep descends into Storage subfolders, so the FinOps readers' commands are covered.</summary>
+    [Fact]
+    public void TheStorageSweep_IncludesTheSubfolders_AndTheFinOpsReader()
+    {
+        var swept = StorageSources().Select(p => p.Replace('\\', '/')).ToArray();
+
+        Assert.Contains(swept, p => p.EndsWith("/FinOps/DarlingFinOpsHighImpactReader.cs", System.StringComparison.Ordinal));
+        Assert.DoesNotContain(swept, p => p.Contains("/obj/", System.StringComparison.Ordinal) || p.Contains("/bin/", System.StringComparison.Ordinal));
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
