@@ -28,19 +28,6 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /* Kept for the server inventory read in ViewerDataService.FinOps.Inventory.cs, which still routes through it. */
-    private static string RouteOrThrow(string sql, string from, string to, string what)
-    {
-        var routed = sql.Replace(from, to, StringComparison.Ordinal);
-        if (string.Equals(routed, sql, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                $"FinOps {what} CAGG routing found nothing to replace — its raw fragment has drifted from the SQL (#1661).");
-        }
-
-        return routed;
-    }
-
     /// <summary>Per-database resource usage from query_stats + file_io_stats deltas. $1 server_id, $2 cutoff. The SQL and the
     /// retention-tier routing live in <see cref="DarlingFinOpsDatabaseResourcesReader"/>.</summary>
     public const string DatabaseResourceUsageSql = DarlingFinOpsDatabaseResourcesReader.DatabaseResourceUsageSql;

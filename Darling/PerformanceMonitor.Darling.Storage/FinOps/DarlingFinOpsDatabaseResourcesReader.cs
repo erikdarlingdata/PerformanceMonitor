@@ -104,18 +104,6 @@ public static class DarlingFinOpsDatabaseResourcesReader
     GROUP BY database_name
 """;
 
-    internal static string RouteOrThrow(string sql, string from, string to, string what)
-    {
-        var routed = sql.Replace(from, to, StringComparison.Ordinal);
-        if (string.Equals(routed, sql, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                $"FinOps {what} CAGG routing found nothing to replace — its raw fragment has drifted from the SQL (#1661).");
-        }
-
-        return routed;
-    }
-
     /// <summary>Database resource usage for <paramref name="tier"/>. Raw returns the constant untouched. The
     /// one-argument form reads the legacy relation for that tier, unstitched (<see cref="RollupCoverage.Unknown"/>
     /// carries <see cref="RollupAvailability.None"/>, so <see cref="RollupCoverage.StitchedRelationSql"/> names
@@ -136,7 +124,7 @@ public static class DarlingFinOpsDatabaseResourcesReader
     public static string DatabaseResourceUsageSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         tier == RetentionTier.Raw
             ? DatabaseResourceUsageSql
-            : RouteOrThrow(
+            : FinOpsRollupRouting.RouteOrThrow(
                 DatabaseResourceUsageSql,
                 WorkloadCteRaw,
                 WorkloadCteForCagg(tier == RetentionTier.Hourly
@@ -157,7 +145,7 @@ public static class DarlingFinOpsDatabaseResourcesReader
     public static string TopResourceConsumersSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         tier == RetentionTier.Raw
             ? TopResourceConsumersSql
-            : RouteOrThrow(
+            : FinOpsRollupRouting.RouteOrThrow(
                 TopResourceConsumersSql,
                 ConsumerCteRaw,
                 ConsumerCteForCagg(tier == RetentionTier.Hourly
