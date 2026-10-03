@@ -303,10 +303,11 @@ public partial class MainWindow
     /// <c>UpdateCollectorHealth</c>: a per-server tab shows THAT server's collectors; an aggregate tab
     /// (Overview / Alert History / FinOps / Recommendations) shows the FLEET-CUMULATIVE total across all
     /// enabled servers (Lite's <c>GetHealthSummary(null)</c> on a non-server view). "Collectors: N OK" when
-    /// all healthy, or "Collectors: N erroring" (with the failing names) when any collector is FAILING. Reuses
-    /// the Collection Health tab's <see cref="ViewerDataService.GetCollectionHealthAsync"/> /
-    /// <see cref="ViewerDataService.GetFleetCollectionHealthAsync"/> aggregates and the
-    /// <see cref="CollectorHealthRow.HealthStatus"/> banding, so the status bar and that tab always agree.
+    /// all healthy, or "Collectors: N erroring" (with the failing names) when any collector is FAILING. Reads
+    /// <see cref="ViewerDataService.GetFleetCollectionHealthByServerAsync"/> (#4226), whose rows carry the interval
+    /// each collector is scheduled at on its server (#4999), and the
+    /// <see cref="CollectorHealthRow.HealthStatus"/> banding the Collection Health tab's
+    /// <see cref="ViewerDataService.GetCollectionHealthAsync"/> uses, so the status bar and that tab always agree.
     /// FAILING is the only "erroring" band — NO_PERMISSIONS (e.g. an RDS login lacking msdb rights) and
     /// SKIPPED-as-healthy (e.g. running_jobs on Azure SQL DB) surface in the Collection Health tab, not here,
     /// exactly like Lite. The server COUNT is a separate field (ServerCountText); this one is collectors,

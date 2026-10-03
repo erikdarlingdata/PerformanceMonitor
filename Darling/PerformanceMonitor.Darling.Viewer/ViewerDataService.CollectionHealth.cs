@@ -364,9 +364,15 @@ public sealed partial class ViewerDataService
     /// GetHealthSummary(null)). Scoped to enabled servers so a removed server's aged-out rows don't read as
     /// erroring. $1 window start (naive UTC).
     /// <para>
+    /// #4999: no production read runs this statement now. The status bar and the Overview cards take their counts
+    /// from <see cref="FleetCollectionHealthByServerSql"/>, whose rows are stamped with the interval each collector
+    /// is scheduled at on its server; the unstamped viewer read that ran this one was removed. The text stays as the
+    /// pinned shape of the fleet-cumulative aggregate.
+    /// </para>
+    /// <para>
     /// The two exemplar MESSAGE columns are deliberately NULL here rather than ranked as the per-server
-    /// read ranks them (#1855). This query's only caller is <c>UpdateCollectorHealthTextAsync</c>, which
-    /// reads <see cref="CollectorHealthRow.HealthStatus"/> and the collector NAME — no surface renders a
+    /// read ranks them (#1855). This query's one caller, the status bar's <c>UpdateCollectorHealthTextAsync</c>,
+    /// read <see cref="CollectorHealthRow.HealthStatus"/> and the collector NAME — no surface renders a
     /// fleet row's message, and the per-server read behind the Collection Health grid is where the note
     /// and the last error are actually shown. Ranking them costs more than the whole rest of the query:
     /// PostgreSQL cannot parallelize above a WindowAgg, so adding the ranks turned this from a parallel
@@ -571,33 +577,6 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// Fleet-cumulative per-collector health across ALL enabled monitored servers over the trailing 7 days —
-    /// the status bar's aggregate-view total (Overview / Alert History / FinOps / Recommendations), where Lite
-    /// shows a cumulative count rather than one server's. ONE query (<see cref="FleetCollectionHealthSql"/>)
-    /// regardless of fleet size; each row is a (server, collector) pair carrying its own
-    /// <see cref="CollectorHealthRow.HealthStatus"/>, so the caller counts total + FAILING exactly as per-server.
-    /// </summary>
-    public async Task<List<CollectorHealthRow>> GetFleetCollectionHealthAsync(CancellationToken cancellationToken = default)
-    {
-        var items = new List<CollectorHealthRow>();
-
-        await using var command = _dataSource.CreateCommand(FleetCollectionHealthSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<DateTime>
-        {
-            TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
-        });
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(MapHealthRow(reader));
-        }
-
-        return items;
-    }
-
-    /// <summary>
     /// The per-(server, collector) breakdown <see cref="FleetCollectionHealthSql"/> groups by but does not
     /// project (#4226): identical eleven aggregates, with <c>server_id</c> added as column 0 so the Overview
     /// cards, the status bar and the server-tab badge can take their per-server counts from ONE fleet-wide
@@ -770,7 +749,8 @@ public sealed partial class ViewerDataService
         LatestRunNote = reader.IsDBNull(13) ? null : reader.GetString(13),
     };
 
-    /// <summary>Maps one row of the shared 19-column health projection (per-server or fleet, ordinals 0-18) to a
+    /// <summary>Maps one row of the shared 19-column health projection (per-server, and the fleet-cumulative
+    /// <see cref="FleetCollectionHealthSql"/>, which no production read runs now, ordinals 0-18) to a
     /// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY
     /// through this one mapper, so it must match them exactly (19 since #4748 appended latest_run_note at
     /// ordinal 18; #3819's last_non_skip_time and last_productive_time sit at ordinals 16-17,
