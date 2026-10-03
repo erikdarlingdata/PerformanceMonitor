@@ -571,4 +571,107 @@ public sealed class DarlingRunTimeSchedulingTests
         Assert.Equal(newRunAt, server.RunTimeSlots[Collector].RunAtMinute);
         Assert.NotNull(server.RunTimeSlots[Collector].LastRunUtc);
     }
+
+    [Fact]
+    public void Record_WhenAReloadClearedTheRunTime_LeavesNoSlotBehind_AndWhenItDisabledTheCollector_NoStamp()
+    {
+        var runAt = RunTimeTwelveHoursAway();
+        var worker = MakeWorker();
+        var handOff = new DarlingWorker.RunTimeHandOff(
+            new DarlingWorker.RunTimeSlot(runAt, Daily, "utc", null), DateTime.UtcNow.AddDays(1));
+
+        var cleared = MakeServer(0);
+        cleared.NextDue[Collector] = DateTime.UtcNow.AddHours(5);
+        worker.RecordRunTimeHandOff(cleared, 0, Collector, handOff);
+        Assert.False(cleared.RunTimeSlots.ContainsKey(Collector));
+        Assert.True(cleared.NextDue[Collector] > DateTime.UtcNow.AddHours(23), "one interval out from the run just recorded");
+
+        var disabled = MakeServer(0);
+        worker.RecordRunTimeHandOff(disabled, 0, Collector, handOff);
+        Assert.False(disabled.RunTimeSlots.ContainsKey(Collector));
+        Assert.False(disabled.NextDue.ContainsKey(Collector));
+    }
+
+    [Fact]
+    public void EveryRunTimeSlotAccess_IsUnderTheScheduleLock_AndNoLockBodyAwaits()
+    {
+        var raw = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs").ReplaceLineEndings("\n");
+        var text = CSharpSourceWalker.StripCommentsAndStrings(raw);
+        var lines = text.Split('\n');
+
+        Assert.Contains("RecordRunTimeHandOff(server, runtime.ServerId, collectorName, runTimeHandOff);", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("server.RunTimeSlots[collectorName] = runTimeHandOff.Slot with", raw, StringComparison.Ordinal);
+
+        var access = new System.Text.RegularExpressions.Regex(@"RunTimeSlots(\[|\.TryRemove\(|\.TryGetValue\()");
+        var offenders = new List<string>();
+        var checkedCount = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!access.IsMatch(lines[i]))
+            {
+                continue;
+            }
+
+            checkedCount++;
+            if (!IsInsideScheduleLock(lines, i))
+            {
+                offenders.Add($"line {i + 1}: {lines[i].Trim()}");
+            }
+        }
+
+        Assert.True(checkedCount >= 15, $"expected to find the worker's RunTimeSlots accesses, found {checkedCount}");
+        Assert.True(offenders.Count == 0, "RunTimeSlots touched outside lock (server.ScheduleLock): " + string.Join("; ", offenders));
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].Contains("lock (server.ScheduleLock)", StringComparison.Ordinal))
+            {
+                var depth = 0;
+                for (var j = i + 1; j < lines.Length; j++)
+                {
+                    depth += System.Linq.Enumerable.Count(lines[j], static c => c == '{') - System.Linq.Enumerable.Count(lines[j], static c => c == '}');
+                    Assert.DoesNotContain("await ", lines[j], StringComparison.Ordinal);
+                    if (depth <= 0)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Walks outward from a line, tracking braces, and reports whether any block that encloses it opens on a
+       `lock (server.ScheduleLock)` line. */
+    private static bool IsInsideScheduleLock(string[] lines, int index)
+    {
+        var depth = 0;
+        for (var i = index - 1; i >= 0; i--)
+        {
+            var line = lines[i];
+            for (var c = line.Length - 1; c >= 0; c--)
+            {
+                if (line[c] == '}')
+                {
+                    depth++;
+                }
+                else if (line[c] == '{')
+                {
+                    if (depth == 0)
+                    {
+                        var header = i > 0 && line.Trim() == "{" ? lines[i - 1] : line;
+                        if (header.Contains("lock (server.ScheduleLock)", StringComparison.Ordinal))
+                        {
+                            return true;
+                        }
+                    }
+                    else
+                    {
+                        depth--;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
 }

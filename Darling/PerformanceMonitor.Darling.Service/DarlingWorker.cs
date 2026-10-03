@@ -1405,6 +1405,11 @@ LIMIT 1";
            immutable) so a reader never sees half of an update. Indexed by collector name only, like NextDue. */
         public ConcurrentDictionary<string, RunTimeSlot> RunTimeSlots { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+        /* #5033: held only around an in-memory read-modify-write of NextDue and RunTimeSlots together, so the run's
+           record, a reload's recompute and the pass's seeds never leave the two maps describing different slots.
+           Never held across an await (the C# compiler refuses an await inside a lock block). */
+        public object ScheduleLock { get; } = new();
+
         private ServerClockStamp _clock = ServerClockStamp.Utc;
 
         /// <summary>#4938: this server's wall clock as last read from the store: UTC until a clock is read. Held per
@@ -6124,8 +6129,12 @@ LIMIT 1";
                 if (!effective.Enabled)
                 {
                     /* ConcurrentDictionary has no Remove(key) — TryRemove is the drop-in for the old Remove. */
-                    server.NextDue.TryRemove(name, out _);
-                    server.RunTimeSlots.TryRemove(name, out _);
+                    lock (server.ScheduleLock)
+                    {
+                        server.NextDue.TryRemove(name, out _);
+                        server.RunTimeSlots.TryRemove(name, out _);
+                    }
+
                     continue;
                 }
 
@@ -6134,7 +6143,7 @@ LIMIT 1";
                    due-collector sweep below. */
                 var interval = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes);
                 RunTimeRule? rule = effective.RunAtMinute is int runAt ? new RunTimeRule(runAt, runtime.ServerId, clock.ToUtc) : null;
-                server.RunTimeSlots.TryGetValue(name, out var slot);
+                var slot = ReadRunTimeSlot(server, name);
 
                 if (server.NextDue.TryGetValue(name, out var existing))
                 {
@@ -6159,10 +6168,20 @@ LIMIT 1";
                         {
                             await afterRead(server, name);
                         }
-                        var changedLastRun = slot?.LastRunUtc ?? (watermarks.TryGetValue(name, out var cw) ? cw : (DateTime?)null);
-                        server.NextDue[name] = ComputeSeededNextDue(
-                            changedLastRun, interval, now, SeedJitter(runtime.ServerId, interval * 60), changed);
-                        server.RunTimeSlots[name] = new RunTimeSlot(changed.RunAtMinute, interval, clock.Id, changedLastRun);
+                        /* #5033: a run recorded while the watermarks were being read is in the slot now, not in the one read
+                           above, so the slot is read again under the lock and the later last run wins. `now` is stale after
+                           the await, so the time is taken again inside the lock. */
+                        lock (server.ScheduleLock)
+                        {
+                            var nowLocked = DateTime.UtcNow;
+                            server.RunTimeSlots.TryGetValue(name, out var currentSlot);
+                            var changedLastRun = Newer(currentSlot?.LastRunUtc, slot?.LastRunUtc)
+                                ?? (watermarks.TryGetValue(name, out var cw) ? cw : (DateTime?)null);
+                            server.NextDue[name] = ComputeSeededNextDue(
+                                changedLastRun, interval, nowLocked, SeedJitter(runtime.ServerId, interval * 60), changed);
+                            server.RunTimeSlots[name] = new RunTimeSlot(changed.RunAtMinute, interval, clock.Id, changedLastRun);
+                        }
+
                         continue;
                     }
 
@@ -6175,9 +6194,17 @@ LIMIT 1";
                         {
                             await afterRead(server, name);
                         }
-                        var clearedLastRun = slot.LastRunUtc ?? (watermarks.TryGetValue(name, out var xw) ? xw : (DateTime?)null);
-                        server.RunTimeSlots.TryRemove(name, out _);
-                        server.NextDue[name] = ComputeSeededNextDue(clearedLastRun, interval, now, SeedJitter(runtime.ServerId, interval * 60));
+                        lock (server.ScheduleLock)
+                        {
+                            var nowLocked = DateTime.UtcNow;
+                            server.RunTimeSlots.TryGetValue(name, out var currentSlot);
+                            var clearedLastRun = Newer(currentSlot?.LastRunUtc, slot.LastRunUtc)
+                                ?? (watermarks.TryGetValue(name, out var xw) ? xw : (DateTime?)null);
+                            server.RunTimeSlots.TryRemove(name, out _);
+                            server.NextDue[name] = ComputeSeededNextDue(
+                                clearedLastRun, interval, nowLocked, SeedJitter(runtime.ServerId, interval * 60));
+                        }
+
                         continue;
                     }
 
@@ -6199,16 +6226,22 @@ LIMIT 1";
                     {
                         await afterRead(server, name);
                     }
-                    var lastRun = watermarks.TryGetValue(name, out var w) ? w : (DateTime?)null;
+                    var watermark = watermarks.TryGetValue(name, out var w) ? w : (DateTime?)null;
                     var jitter = SeedJitter(runtime.ServerId, interval * 60);
-                    server.NextDue[name] = ComputeSeededNextDue(lastRun, interval, now, jitter, rule);
-                    if (rule is { } seeded)
+                    lock (server.ScheduleLock)
                     {
-                        server.RunTimeSlots[name] = new RunTimeSlot(seeded.RunAtMinute, interval, clock.Id, lastRun);
-                    }
-                    else
-                    {
-                        server.RunTimeSlots.TryRemove(name, out _);
+                        var nowLocked = DateTime.UtcNow;
+                        server.RunTimeSlots.TryGetValue(name, out var currentSlot);
+                        var lastRun = Newer(currentSlot?.LastRunUtc, watermark);
+                        server.NextDue[name] = ComputeSeededNextDue(lastRun, interval, nowLocked, jitter, rule);
+                        if (rule is { } seeded)
+                        {
+                            server.RunTimeSlots[name] = new RunTimeSlot(seeded.RunAtMinute, interval, clock.Id, lastRun);
+                        }
+                        else
+                        {
+                            server.RunTimeSlots.TryRemove(name, out _);
+                        }
                     }
                 }
             }
@@ -11834,8 +11867,11 @@ AND   j.hypertable_name = '{relation}'", connection))
                     }
                     else
                     {
-                        server.RunTimeSlots.TryRemove(name, out _);
-                        server.NextDue[name] = ComputeSeededNextDue(onLoadLastRun, onLoadInterval, now, onLoadJitter);
+                        lock (server.ScheduleLock)
+                        {
+                            server.RunTimeSlots.TryRemove(name, out _);
+                            server.NextDue[name] = ComputeSeededNextDue(onLoadLastRun, onLoadInterval, now, onLoadJitter);
+                        }
                     }
                 }
                 else
@@ -11849,14 +11885,23 @@ AND   j.hypertable_name = '{relation}'", connection))
                     if (effective.RunAtMinute is int runAt)
                     {
                         var clock = server.Clock;
-                        server.NextDue[name] = ComputeSeededNextDue(
-                            lastRun, effective.FrequencyMinutes, now, jitter, new RunTimeRule(runAt, serverId, clock.ToUtc));
-                        server.RunTimeSlots[name] = new RunTimeSlot(runAt, effective.FrequencyMinutes, clock.Id, lastRun);
+                        lock (server.ScheduleLock)
+                        {
+                            /* #5033: a daily run of the previous connection can still be recording, so its last run counts. */
+                            server.RunTimeSlots.TryGetValue(name, out var heldSlot);
+                            var seedLastRun = Newer(heldSlot?.LastRunUtc, lastRun);
+                            server.NextDue[name] = ComputeSeededNextDue(
+                                seedLastRun, effective.FrequencyMinutes, now, jitter, new RunTimeRule(runAt, serverId, clock.ToUtc));
+                            server.RunTimeSlots[name] = new RunTimeSlot(runAt, effective.FrequencyMinutes, clock.Id, seedLastRun);
+                        }
                     }
                     else
                     {
-                        server.RunTimeSlots.TryRemove(name, out _);
-                        server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);
+                        lock (server.ScheduleLock)
+                        {
+                            server.RunTimeSlots.TryRemove(name, out _);
+                            server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);
+                        }
                     }
                 }
             }
@@ -11981,18 +12026,21 @@ AND   j.hypertable_name = '{relation}'", connection))
         var clock = server.Clock;
         var rule = new RunTimeRule(runAtMinute, serverId, clock.ToUtc);
         var now = DateTime.UtcNow;
-        var lastRun = watermark;
-        if (ranAtConnect)
+        lock (server.ScheduleLock)
         {
-            lastRun = now;
-        }
-        else if (server.RunTimeSlots.TryGetValue(name, out var held) && held.LastRunUtc is { } heldRun && (lastRun is null || heldRun > lastRun))
-        {
-            lastRun = heldRun;
-        }
+            var lastRun = watermark;
+            if (ranAtConnect)
+            {
+                lastRun = now;
+            }
+            else if (server.RunTimeSlots.TryGetValue(name, out var held) && held.LastRunUtc is { } heldRun && (lastRun is null || heldRun > lastRun))
+            {
+                lastRun = heldRun;
+            }
 
-        server.NextDue[name] = ComputeSeededNextDue(lastRun, intervalMinutes, now, jitter, rule);
-        server.RunTimeSlots[name] = new RunTimeSlot(runAtMinute, intervalMinutes, clock.Id, lastRun);
+            server.NextDue[name] = ComputeSeededNextDue(lastRun, intervalMinutes, now, jitter, rule);
+            server.RunTimeSlots[name] = new RunTimeSlot(runAtMinute, intervalMinutes, clock.Id, lastRun);
+        }
     }
 
     /// <summary>
@@ -12103,28 +12151,48 @@ AND   j.hypertable_name = '{relation}'", connection))
                     var clock = server.Clock;
                     var rule = new RunTimeRule(runAtMinute, runtime.ServerId, clock.ToUtc);
                     var jitter = SeedJitter(runtime.ServerId, interval * 60);
-                    if (!server.RunTimeSlots.TryGetValue(name, out var slot))
+                    /* #5033: the slot is read, seeded or re-seeded and stepped under the server's schedule lock, so a
+                       reload's recompute or a run's record never lands between the read and the write. The lock covers only
+                       these in-memory steps; the log lines and the gate-stat count follow it. */
+                    RunTimeSlot slot = null!;
+                    RunTimeStep step = default;
+                    var stampGone = false;
+                    lock (server.ScheduleLock)
                     {
-                        slot = new RunTimeSlot(runAtMinute, interval, clock.Id, null);
-                        server.RunTimeSlots[name] = slot;
-                    }
-                    else if (!string.Equals(slot.ClockId, clock.Id, StringComparison.Ordinal))
-                    {
-                        due = ComputeSeededNextDue(slot.LastRunUtc, interval, now, jitter, rule);
-                        server.NextDue[name] = due;
-                        slot = slot with { ClockId = clock.Id };
-                        server.RunTimeSlots[name] = slot;
+                        if (!server.NextDue.TryGetValue(name, out due))
+                        {
+                            stampGone = true;
+                        }
+                        else
+                        {
+                            if (!server.RunTimeSlots.TryGetValue(name, out slot!))
+                            {
+                                slot = new RunTimeSlot(runAtMinute, interval, clock.Id, null);
+                                server.RunTimeSlots[name] = slot;
+                            }
+                            else if (!string.Equals(slot.ClockId, clock.Id, StringComparison.Ordinal))
+                            {
+                                due = ComputeSeededNextDue(slot.LastRunUtc, interval, now, jitter, rule);
+                                server.NextDue[name] = due;
+                                slot = slot with { ClockId = clock.Id };
+                                server.RunTimeSlots[name] = slot;
+                            }
+
+                            step = StepRunTimeCollector(due, now, _skipCreditFloor.Floor, interval, rule, jitter);
+                            if (step.Action == RunTimeAction.SkipDay)
+                            {
+                                server.NextDue[name] = step.NextDue;
+                            }
+                        }
                     }
 
-                    var step = StepRunTimeCollector(due, now, _skipCreditFloor.Floor, interval, rule, jitter);
-                    if (step.Action == RunTimeAction.NotDue)
+                    if (stampGone || step.Action == RunTimeAction.NotDue)
                     {
                         continue;
                     }
 
                     if (step.Action == RunTimeAction.SkipDay)
                     {
-                        server.NextDue[name] = step.NextDue;
                         _fleetGateStats?.RecordSkippedSlots(step.Skipped);
                         _logger.LogInformation(
                             "  [{Server}] {Collector} skipped today's run: the pass could not hand it off within {Grace} minutes of its run time, so it waits for its next run time, {Next:u} (#4938)",
@@ -13521,13 +13589,56 @@ LIMIT 1";
 
     /// <summary>
     /// Records a run that took its slot: the stamp moves to the next slot and the slot's last run is now (#5033).
+    /// Done under the server's schedule lock against the slot as it is now: a reload that changed the run time after
+    /// the hand-off was built keeps its new run time, and gets the next slot computed from it; a reload that cleared
+    /// the run time leaves no slot behind, only a stamp one interval out; a reload that disabled the collector leaves
+    /// nothing at all.
     /// </summary>
     internal void RecordRunTimeHandOff(ServerLoopState server, int serverId, string name, RunTimeHandOff handOff)
     {
-        _ = serverId;
-        server.NextDue[name] = handOff.NextDue;
-        server.RunTimeSlots[name] = handOff.Slot with { LastRunUtc = DateTime.UtcNow };
+        var now = DateTime.UtcNow;
+        lock (server.ScheduleLock)
+        {
+            if (!server.RunTimeSlots.TryGetValue(name, out var current))
+            {
+                if (server.NextDue.ContainsKey(name))
+                {
+                    var interval = handOff.Slot.IntervalMinutes;
+                    server.NextDue[name] = ComputeSeededNextDue(now, interval, now, SeedJitter(serverId, interval * 60));
+                }
+
+                return;
+            }
+
+            if (current.RunAtMinute == handOff.Slot.RunAtMinute
+                && current.IntervalMinutes == handOff.Slot.IntervalMinutes
+                && string.Equals(current.ClockId, handOff.Slot.ClockId, StringComparison.Ordinal))
+            {
+                server.NextDue[name] = handOff.NextDue;
+                server.RunTimeSlots[name] = handOff.Slot with { LastRunUtc = now };
+                return;
+            }
+
+            server.RunTimeSlots[name] = current with { LastRunUtc = now };
+            server.NextDue[name] = ComputeSeededNextDue(
+                now, current.IntervalMinutes, now, SeedJitter(serverId, current.IntervalMinutes * 60),
+                new RunTimeRule(current.RunAtMinute, serverId, server.Clock.ToUtc));
+        }
     }
+
+    /// <summary>The later of two optional last-run times; null only when both are.</summary>
+    internal static DateTime? Newer(DateTime? a, DateTime? b) => a is null ? b : b is null ? a : (a > b ? a : b);
+
+    /// <summary>The run-time slot held for a collector, read under the server's schedule lock (#5033).</summary>
+    private static RunTimeSlot? ReadRunTimeSlot(ServerLoopState server, string name)
+    {
+        lock (server.ScheduleLock)
+        {
+            server.RunTimeSlots.TryGetValue(name, out var slot);
+            return slot;
+        }
+    }
+
 
 
     /// <summary>
