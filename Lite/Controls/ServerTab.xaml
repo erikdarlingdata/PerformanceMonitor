@@ -1437,7 +1437,7 @@
                                         <ComboBoxItem Content="Execution Count"/>
                                     </ComboBox>
                                 </StackPanel>
-                                <!-- #4966: the heatmap has one column per 5-minute bucket that holds data, so a range that starts before the stored rows draws no empty span; this says where the rows start. -->
+                                <!-- #4966: the heatmap draws one column per 5-minute bucket across the asked range, so a gap shows as empty columns; this says where the stored rows start, which an empty column cannot (a server that did not exist yet looks like one that ran nothing). -->
                                 <TextBlock Grid.Row="1" x:Name="QueryHeatmapWindowTruncatedBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
                                            Foreground="{DynamicResource ForegroundBrush}"
@@ -1631,9 +1631,18 @@
                     <!-- Memory Pressure Events Sub-Tab -->
                     <TabItem Header="Memory Pressure Events">
                         <Grid Margin="8">
-                            <ScottPlot:WpfPlot x:Name="MemoryPressureEventsChart"/>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <!-- #4966: "Showing since <time>" when the stored events start after the range's start; the chart draws bars only where pressure was recorded, so an empty span reads as no pressure. -->
+                            <TextBlock Grid.Row="0" x:Name="MemoryPressureEventsWindowTruncatedBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryPressureEventsChart"/>
                             <!-- Shown only where the memory_pressure_events collector does not collect for this server and the chart has no points. -->
-                            <TextBlock x:Name="MemoryPressureEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                            <TextBlock Grid.Row="1" x:Name="MemoryPressureEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                         </Grid>
                     </TabItem>
 

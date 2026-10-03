@@ -396,7 +396,7 @@ public partial class ServerTab : UserControl
                         _planCorrectionFilterMgr!.UpdateData(planCorrections);
                         SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
                         /* #4966: where the stored plan corrections start, over the SAME UTC window the grid read. */
-                        await RefreshPlanCorrectionsBannerAsync(hoursBack, fromDate, toDate);
+                        await RefreshPlanCorrectionsBannerAsync(planCorrections, hoursBack, fromDate, toDate);
                         break;
                     case 6: // Query Heatmap
                         var hmMetric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
@@ -477,7 +477,7 @@ public partial class ServerTab : UserControl
             _planCorrectionFilterMgr!.UpdateData(planCorrectionTask.Result);
             SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
             /* #4966: see the Plan Corrections case of the sub-tab switch above. */
-            await RefreshPlanCorrectionsBannerAsync(hoursBack, fromDate, toDate);
+            await RefreshPlanCorrectionsBannerAsync(planCorrectionTask.Result, hoursBack, fromDate, toDate);
 
             UpdateQueryDurationTrendChart(queryDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
             UpdateProcDurationTrendChart(procDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
@@ -544,13 +544,50 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
+    /// #4966: the floor a CAPPED grid's "Showing since" banner is worded from. A read that returned as many rows as
+    /// its cap (<paramref name="rowCap"/>, newest first) is cut short, so its reach is its oldest row,
+    /// by time, not by position, whatever the store holds: that is where the grid starts, even when the store covers
+    /// the whole range. Below its cap a read holds everything the store has in the range, and the probed floor
+    /// (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>, null included) stands. A <paramref name="rowCap"/> of
+    /// zero or less means the read has no cap. The verdict on the result is still <see cref="ApplyWindowFloorToBanner"/>'s
+    /// (the same 90-minute slack: a cap whose oldest row sits within it of the start served the window). The ONE
+    /// decision for every capped grid: <see cref="RefreshCappedGridBannerAsync{T}"/> calls it, and the grids that read
+    /// the newest N rows (Plan Corrections now; Long Queries, Blocked Process Reports and Deadlocks as they adopt it)
+    /// pass their rows, their cap and the column their rows are windowed on.
+    /// </summary>
+    internal static DateTime? CapAwareWindowFloor<T>(DateTime? probedFloor, IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc) =>
+        rowCap > 0 && rows.Count >= rowCap ? rows.Min(rowTimeUtc) : probedFloor;
+
+    /// <summary>
+    /// #4966: the banner step for a grid whose read is capped at its newest <paramref name="rowCap"/> rows. A read that
+    /// reached its cap (<see cref="CapAwareWindowFloor{T}"/> answers its oldest row) is worded from that row and needs
+    /// no probe: its reach is what the grid shows, whatever the store holds. Below its cap it is the shared step,
+    /// <see cref="RefreshWindowTruncatedBannerAsync"/>, with its probe, as for every other grid.
+    /// </summary>
+    private System.Threading.Tasks.Task RefreshCappedGridBannerAsync<T>(
+        QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc,
+        IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc)
+    {
+        if (CapAwareWindowFloor(null, rows, rowCap, rowTimeUtc) is DateTime oldestRowShown)
+        {
+            ApplyWindowFloorToBanner(banner, oldestRowShown, startUtc, GetPickerZone());
+            return System.Threading.Tasks.Task.CompletedTask;
+        }
+
+        return RefreshWindowTruncatedBannerAsync(relation, banner, startUtc, endUtc);
+    }
+
+    /// <summary>
     /// The verdict and the banner for one probe result: the SAME 90-minute slack
     /// (<see cref="McpQueryTools.IsWindowTruncated"/>) the MCP tools use, then the "Showing since" text. A floor at or
     /// before the window's start (the store reaches back to it, however quiet the window's own start was) and a null
-    /// floor both hide the banner. Null means the window holds nothing to report: no row for the three Queries grids,
-    /// and for Active Queries and Current Waits no row and no logged run of the collector either (a covered window
+    /// floor both hide the banner. Null means the window holds nothing to report: no row for the three Queries grids
+    /// and the Query Heatmap, and for Active Queries, Current Waits, Plan Corrections and Memory Pressure Events no row
+    /// and no logged run of the collector either (a covered window
     /// in which nothing ran or waited answers the start, not null, so it too shows no banner). The same step serves
-    /// every surface that carries the banner (the three Queries grids, Active Queries, Current Waits), and
+    /// every surface that carries the banner (the three Queries grids, Plan Corrections, the Query Heatmap, Active
+    /// Queries, Current Waits and Memory Pressure Events; a capped grid's floor first goes through
+    /// <see cref="CapAwareWindowFloor{T}"/>), and
     /// <c>internal static</c> so the tests drive it, with a real probe result, without building the UserControl.
     /// </summary>
     internal static bool ApplyWindowFloorToBanner(TextBlock banner, DateTime? floor, DateTime startUtc, TimeZoneInfo zone)
@@ -646,6 +683,8 @@ public partial class ServerTab : UserControl
                     case 3: // Memory Pressure Events
                         var pressureEvents = await Task.Run(() => _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate));
                         UpdateMemoryPressureEventsChart(pressureEvents, hoursBack, fromDate, toDate);
+                        /* #4966: where the stored events start, over the SAME UTC window the chart read. */
+                        await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
                         break;
                 }
                 return;
@@ -665,6 +704,8 @@ public partial class ServerTab : UserControl
             UpdateMemoryChart(memoryTrendTask.Result, memoryGrantTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateMemoryGrantCharts(memoryGrantChartTask.Result, hoursBack, fromDate, toDate);
             UpdateMemoryPressureEventsChart(memoryPressureEventsTask.Result, hoursBack, fromDate, toDate);
+            /* #4966: see the Memory Pressure Events case of the timer's sub-tab refresh above. */
+            await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
             PopulateMemoryClerkPicker(memoryClerkTypesTask.Result);
             await UpdateMemoryClerksChartFromPickerAsync();
         }

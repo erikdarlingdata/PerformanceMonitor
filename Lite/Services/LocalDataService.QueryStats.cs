@@ -1493,6 +1493,40 @@ ORDER BY 1";
         _ => "(delta_elapsed_time / 1000.0) / NULLIF(delta_execution_count, 0)"
     };
 
+    /// <summary>
+    /// The heatmap's column width. Must equal the <c>INTERVAL '5 minutes'</c> the read's <c>time_bucket</c> uses:
+    /// <see cref="HeatmapColumns"/> lays the columns out at this width, and a stored row lands in the column whose
+    /// start is its own bucket.
+    /// </summary>
+    internal const int HeatmapBucketMinutes = 5;
+
+    /// <summary>
+    /// #4966: one column per <see cref="HeatmapBucketMinutes"/>-minute bucket across the ASKED range, from the bucket
+    /// that holds <paramref name="startUtc"/> through the one that holds <paramref name="endUtc"/>, empty ones
+    /// included, so a gap in the data draws as a gap (the columns used to be only the buckets that hold a row, and
+    /// the chart's X axis counts columns: rows at the start and the end of a 7-day range drew two adjacent columns).
+    /// Buckets are aligned to the epoch, which is where DuckDB's <c>time_bucket</c> puts a sub-day bucket too (its
+    /// origin is a whole number of days from tick 0), so every bucket the read returns has a column.
+    /// </summary>
+    internal static DateTime[] HeatmapColumns(DateTime startUtc, DateTime endUtc)
+    {
+        var width = TimeSpan.FromMinutes(HeatmapBucketMinutes).Ticks;
+        var first = startUtc.Ticks - startUtc.Ticks % width;
+        var last = endUtc.Ticks - endUtc.Ticks % width;
+        if (last < first)
+        {
+            return Array.Empty<DateTime>();
+        }
+
+        var columns = new DateTime[(int)((last - first) / width) + 1];
+        for (var i = 0; i < columns.Length; i++)
+        {
+            columns[i] = new DateTime(first + i * width, DateTimeKind.Unspecified);
+        }
+
+        return columns;
+    }
+
     public async Task<HeatmapResult> GetQueryHeatmapAsync(int serverId, HeatmapMetric metric, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
@@ -1560,7 +1594,9 @@ ORDER BY time_bin, bucket_index";
         if (rawCells.Count == 0)
             return new HeatmapResult();
 
-        var times = rawCells.Select(c => c.TimeBucket).Distinct().OrderBy(t => t).ToArray();
+        /* #4966: a column for every bucket of the asked range, not just the buckets that hold a row. A range that holds
+           no row at all still answers the empty result above, so the chart says it has no data. */
+        var times = HeatmapColumns(startTime, endTime);
         var timeIndex = new Dictionary<DateTime, int>();
         for (int i = 0; i < times.Length; i++) timeIndex[times[i]] = i;
 
