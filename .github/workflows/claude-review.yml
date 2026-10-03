@@ -42,8 +42,10 @@ name: Claude Auto Review
 # before the marker named a head has none, and its commit_id stands in. A marker's head is used
 # only when the verdict's commit_id is that head or comes after it (a compare says identical or
 # ahead). A head that is later than, diverged from or unknown beside the verdict's commit, or
-# one that cannot be compared, is not used: the verdict's commit_id is the reviewed commit and
-# the verdict counts as a full review, whatever kind the marker says.
+# one that cannot be compared, does not fit it: the commit_id is stamped when the review is
+# submitted, so it can name content that no review read (a force-push during the review, for
+# one), and no commit is known to be reviewed. That push gets a FULL review, whatever kind the
+# marker says.
 #
 # The review posts
 # comments for its findings and ends every run with ONE formal verdict review (the VERDICT
@@ -224,9 +226,12 @@ jobs:
                   # commit is the head or a descendant of it (compare says identical or ahead). A head
                   # later than the verdict's commit (behind) would leave the commits between the two out
                   # of every follow-up range, and one that diverged, is unknown to the repository, or
-                  # cannot be compared (the read failed) names no commit this verdict can vouch for. For
-                  # each of those the verdict's commit_id is the reviewed commit and the verdict counts
-                  # as a full review, whatever kind the marker says. A head equal to the commit_id needs
+                  # cannot be compared (the read failed) names no commit this verdict can vouch for. The
+                  # verdict's commit_id does not stand in for it either: it is stamped when the review is
+                  # submitted, so it can name content that no review read (after a force-push during the
+                  # review, for one), and a read that fails is a full review. For each of those the
+                  # reviewed commit is cleared, so the check below gives a full review whatever kind the
+                  # marker says, and its reason is the marker note. A head equal to the commit_id needs
                   # no read, and a marker with no head keeps the handling above.
                   marker=$(printf '%s\n' "$LOOKUP_OUT" | tr -d '\r' \
                     | grep -E '^<!-- review-pass: (full|follow-up)( head=[0-9a-f]{40})? -->[[:space:]]*$' | tail -n 1 || true)
@@ -244,19 +249,25 @@ jobs:
                       # check below answers with a full review.
                       kind=full
                     elif ! lookup "repos/$R/compare/$marker_head...$last_commit?per_page=1" --jq '.status'; then
-                      kind=full
-                      marker_note="the marker's head ${marker_head:0:12} cannot be compared with the verdict's commit ${last_commit:0:12} ($LOOKUP_ERR), so the verdict is counted as a full review"
+                      # The head cannot be held against the commit, so no commit is known to be reviewed.
+                      # The check below answers with a full review, and the note is its reason.
+                      kind=full; reviewed=''
+                      marker_note="the marker's head ${marker_head:0:12} cannot be compared with the verdict's commit ${last_commit:0:12} ($LOOKUP_ERR), so no reviewed commit is known and this push gets a full review"
                     elif [ "$LOOKUP_OUT" = identical ] || [ "$LOOKUP_OUT" = ahead ]; then
                       reviewed=$marker_head
                     else
-                      kind=full
-                      marker_note="the marker's head ${marker_head:0:12} is not an ancestor of the verdict's commit ${last_commit:0:12} (compare says $LOOKUP_OUT), so the verdict is counted as a full review"
+                      # Later than the verdict's commit, or diverged from it: the same answer.
+                      kind=full; reviewed=''
+                      marker_note="the marker's head ${marker_head:0:12} is not an ancestor of the verdict's commit ${last_commit:0:12} (compare says $LOOKUP_OUT), so no reviewed commit is known and this push gets a full review"
                     fi
                   fi
                   # The reviewed commit is compared with this head BEFORE the kind is looked at, so only a
                   # head that is ahead of it is ever skipped or given a follow-up.
                   if [ -z "$reviewed" ]; then
-                    pass=full; reason="the newest verdict names no commit"
+                    # The verdict names no commit, or its marker's head does not fit the commit it names
+                    # (the marker note says so and is the reason). Either way no commit is known to be
+                    # reviewed, so there is nothing for a follow-up to start from.
+                    pass=full; reason="${marker_note:-the newest verdict names no commit}"
                   elif ! lookup "repos/$R/compare/$reviewed...$HEAD_SHA?per_page=1" --jq '.status'; then
                     # Unknown to the repository: a force-push dropped it.
                     pass=full; reason="the last-reviewed commit ${reviewed:0:12} cannot be compared with this head ($LOOKUP_ERR)"
@@ -300,10 +311,6 @@ jobs:
               fi
             fi
           fi
-
-          # A marker head that was not used is named in the reason, so the log says why the verdict
-          # counted as a full review.
-          if [ -n "$marker_note" ]; then reason="$reason; $marker_note"; fi
 
           # A push that a newer push has already replaced decides nothing. The newer push has a run of
           # its own, and that run decides; a review job from this run could join the concurrency group
