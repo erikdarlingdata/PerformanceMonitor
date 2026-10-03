@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Controls;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -36,7 +37,15 @@ public partial class ViewerServerTab
     {
         var coverageStart = await DataStartOrNullAsync(probe, surface);
         var shown = shownEventTimesUtc.ToList();
-        UpdateTruncationBanner(banner,
-            ViewerEventDataStart.Of(coverageStart, ViewerEventDataStart.EarliestOf(shown), ViewerEventDataStart.ReadHitCap(shown.Count, rowCap)), startUtc);
+        var earliestShown = ViewerEventDataStart.EarliestOf(shown);
+        var readHitCap = ViewerEventDataStart.ReadHitCap(shown.Count, rowCap);
+
+        /* The slack (RawWindowFloor.IsTruncated, 90 minutes) belongs to the coverage probe alone: it absorbs a first collection that
+           lands a little after the window starts. A read that filled its cap dropped rows for certain, so its verdict has no slack:
+           the banner shows whenever the oldest row shown is later than the window's start, which on a range of an hour or less is
+           the only way it can show at all. The compared start moves back by the slack so the shared check lands on that bare
+           comparison, and the banner still names the oldest row. */
+        var comparedStartUtc = readHitCap && earliestShown is not null ? startUtc - DurationTrendRouting.TruncationSlack : startUtc;
+        UpdateTruncationBanner(banner, ViewerEventDataStart.Of(coverageStart, earliestShown, readHitCap), comparedStartUtc);
     }
 }

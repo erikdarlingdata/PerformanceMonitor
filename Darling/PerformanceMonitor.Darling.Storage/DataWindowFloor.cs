@@ -364,6 +364,14 @@ public static class DataWindowFloor
         ArgumentNullException.ThrowIfNull(postgres);
         ArgumentNullException.ThrowIfNull(source);
 
+        /* #4966: a window no longer than the truncation slack can never get a coverage note. The answer is at or before the window's
+           end, and RawWindowFloor.IsTruncated needs it MORE than the slack after the window's start, so the tab's banner could not
+           show it. The probe would read the store for nothing: it starts no query. */
+        if (endUtc - startUtc <= DurationTrendRouting.TruncationSlack)
+        {
+            return null;
+        }
+
         await using var command = postgres.CreateCommand(FloorSql([source], Scope.ServerId));
         command.CommandTimeout = commandTimeoutSeconds;
         AddWindow(command, startUtc, endUtc);
