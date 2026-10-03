@@ -291,6 +291,20 @@ public sealed class ApplicationConnectionRow
     /// </summary>
     public ServerClock? Clock { get; set; }
 
+    /// <summary>Maps the Storage reader's naive-UTC record: the display times convert in the current display mode on <paramref name="clock"/>, and the UTC instants and the clock are kept.</summary>
+    public static ApplicationConnectionRow From(PerformanceMonitor.Darling.Storage.FinOps.ApplicationConnectionUsage d, ServerClock clock) => new()
+    {
+        ApplicationName = d.ApplicationName, AvgConnections = d.AvgConnections, MaxConnections = d.MaxConnections,
+        AvgRunning = d.AvgRunning, MaxRunning = d.MaxRunning, AvgSleeping = d.AvgSleeping, MaxSleeping = d.MaxSleeping,
+        AvgDormant = d.AvgDormant, MaxDormant = d.MaxDormant, AvgCpuTimeMs = d.AvgCpuTimeMs, MaxCpuTimeMs = d.MaxCpuTimeMs,
+        AvgReads = d.AvgReads, MaxReads = d.MaxReads, AvgWrites = d.AvgWrites, MaxWrites = d.MaxWrites,
+        AvgLogicalReads = d.AvgLogicalReads, MaxLogicalReads = d.MaxLogicalReads, SampleCount = d.SampleCount,
+        FirstSeenLocal = ViewerTimeHelper.ConvertToDisplay(d.FirstSeenUtc, ViewerTimeHelper.CurrentDisplayMode, clock),
+        LastSeenLocal = ViewerTimeHelper.ConvertToDisplay(d.LastSeenUtc, ViewerTimeHelper.CurrentDisplayMode, clock),
+        /* #4766: the UTC instants too, so the columns' text can name the offset in the repeated autumn hour. */
+        FirstSeenUtc = d.FirstSeenUtc, LastSeenUtc = d.LastSeenUtc, Clock = clock
+    };
+
     /// <summary>
     /// What the First Seen and Last Seen columns show (#4766): the instant in the display mode on the row's server's clock,
     /// with its UTC offset added in the repeated autumn hour

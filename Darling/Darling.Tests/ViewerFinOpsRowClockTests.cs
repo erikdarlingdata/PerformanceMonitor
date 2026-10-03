@@ -195,10 +195,20 @@ public sealed class ViewerFinOpsRowClockTests : IDisposable
         var connections = ViewerTypedRangeTests.MemberText(workload, "GetApplicationConnectionsAsync");
         Assert.Contains("GetServerClocksAsync(serverId, cancellationToken)", connections);
         Assert.Contains("ClockForServerOrMachine(", connections);
-        Assert.Contains("Clock = clock", connections);
-        Assert.Contains("ConvertToDisplay(reader.GetDateTime(18), ViewerTimeHelper.CurrentDisplayMode, clock)", connections);
-        Assert.Contains("ConvertToDisplay(reader.GetDateTime(19), ViewerTimeHelper.CurrentDisplayMode, clock)", connections);
+        Assert.Contains("ApplicationConnectionRow.From(d, clock)", connections);
         Assert.DoesNotContain("ForDisplay(", connections);
+
+        /* The display conversion stays in the viewer's row mapper, on the row's own clock. */
+        var connRowsSource = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.ViewerSource("ViewerDataService.FinOps.cs", ThisFile()));
+        var connStart = connRowsSource.IndexOf("public static ApplicationConnectionRow From", StringComparison.Ordinal);
+        Assert.True(connStart >= 0, "ApplicationConnectionRow.From was not found in ViewerDataService.FinOps.cs.");
+        var connEnd = connRowsSource.IndexOf("};", connStart, StringComparison.Ordinal);
+        Assert.True(connEnd > connStart, "The end of the ApplicationConnectionRow.From initializer was not found.");
+        var connMapper = connRowsSource[connStart..connEnd];
+        Assert.Contains("Clock = clock", connMapper);
+        Assert.Contains("ConvertToDisplay(d.FirstSeenUtc, ViewerTimeHelper.CurrentDisplayMode, clock)", connMapper);
+        Assert.Contains("ConvertToDisplay(d.LastSeenUtc, ViewerTimeHelper.CurrentDisplayMode, clock)", connMapper);
+        Assert.DoesNotContain("ForDisplay(", connMapper);
 
         var inventorySource = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.ViewerSource("ViewerDataService.FinOps.Inventory.cs", ThisFile()));
         var inventory = ViewerTypedRangeTests.MemberText(inventorySource, "GetServerInventoryAsync");
