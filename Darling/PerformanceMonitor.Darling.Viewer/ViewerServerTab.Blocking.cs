@@ -183,6 +183,10 @@ public partial class ViewerServerTab
                 var durationTask = _dataService.GetWaitingTaskTrendAsync(_server.ServerId, startUtc, endUtc);
                 var blockedTask = _dataService.GetBlockedSessionTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
                 await AwaitReadWatchingProbeAsync(Task.WhenAll(durationTask, blockedTask), dataStartTask, "Current Waits");
+
+                /* The three are done; the banner step below awaits the probe alone, so it is not priced against the width of reads that finished. */
+                readFanOut.Release();
+
                 var duration = await durationTask;
                 var blocked = await blockedTask;
                 RenderCurrentWaitsDurationChart(duration);

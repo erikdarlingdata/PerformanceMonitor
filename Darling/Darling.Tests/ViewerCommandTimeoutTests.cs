@@ -125,7 +125,7 @@ public sealed class ViewerCommandTimeoutTests
     /// today. Pinned by <see cref="TheDiscardAndDeferredShapes_StayDisjoint"/>. Found in review.</para>
     /// </summary>
     private static readonly Regex s_deferredRead = new(
-        @"(^|[^A-Za-z0-9_])(?:var|Task(?:\s*<[^;={}]*>)?)\s+(?!_\s*=)[A-Za-z_][A-Za-z0-9_]*\s*=\s*[A-Za-z_][A-Za-z0-9_\.]*Async\s*\(",
+        @"(^|[^A-Za-z0-9_])(?:var|Task(?:\s*<[^;={}]*>)?)\s+(?!_\s*=)(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*[A-Za-z_][A-Za-z0-9_\.]*Async\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>An <c>await</c> as a keyword, not as part of a longer identifier.</summary>
@@ -958,7 +958,14 @@ public sealed class ViewerCommandTimeoutTests
     /// </summary>
     private static (int Index, int End)[] DeferredReads(string code)
     {
+        /* A task handed as the FIRST argument of AwaitReadWatchingProbeAsync(read, probe, surface) is the awaited read of a probe-beside-read
+           load: the routed spelling of `await read`, with the probe the one task beside it. That is the same concurrency the unrouted
+           `var probe = ...; var x = await read;` had, and which this census never counted as a deferred pair, so the routed form is not
+           counted as one either. A Task.WhenAll(...) first argument is still a join and is still matched by s_joinedFanOut. */
         return s_deferredRead.Matches(code)
+            .Where(match => !Regex.IsMatch(
+                code[match.Index..],
+                @"await\s+AwaitReadWatchingProbeAsync\(\s*" + Regex.Escape(match.Groups["name"].Value) + @"\s*,"))
             .Select(match =>
             {
                 /* The match ends ON the opening paren, which is what EndOfParenthesisedStatement wants;
