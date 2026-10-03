@@ -335,7 +335,7 @@ public sealed class ComposeQueryStoreRawDedupeFilterLiveTests
         /* a matching row BEFORE the window, in a partition whose in-window survivor has another module */
         await WriteAsync(WindowStart.AddHours(-2), Row("qsA", 50, 500, t0, 1, "usp_Early", "primary"));
         await WriteAsync(t0.AddMinutes(10), Row("qsA", 50, 500, t0, 5, "usp_Late", "primary"));
-        /* the same key on both servers, the module differing: server scope and server_id must both narrow */
+        /* the same key on both servers, the module differing: the server scope must narrow (60). Dropping server_id alone is not observable here, because server_name is also a key and maps 1:1 to it (61). */
         await WriteAsync(t0.AddMinutes(10), Row("qsA", 60, 600, t0, 4, serverId == ServerId2 ? "usp_Scoped" : "usp_Plain", "primary"));
         await WriteAsync(t0.AddMinutes(10), Row("qsA", 61, 610, t0, 4, serverId == ServerId1 ? "usp_Dual" : "usp_Plain2", "primary"));
     }
