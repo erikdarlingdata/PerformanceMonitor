@@ -53,7 +53,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// No query uses <c>NOW()</c>/<c>CURRENT_TIMESTAMP</c> (every window bound is a parameter), no
 /// <c>QUALIFY</c> appears, and the one <c>any_value()</c> use (the plan-regression drill-down,
 /// same as the fact collector's plan-regression detector) is standard SQL:2023, in Postgres
-/// since 16 (the product's minimum PG is 17) — all pinned by the AN3 tests.
+/// since 16 (the product's minimum PG is 16) — all pinned by the AN3 tests.
 /// </para>
 /// </summary>
 public sealed partial class PgDrillDownCollector : IDrillDownCollector
