@@ -28,6 +28,7 @@ using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using ServerClock = PerformanceMonitor.Analysis.Baselines.ServerClock;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -891,6 +892,20 @@ public sealed class DarlingWorker : BackgroundService
        where it records its slot, so the count only covers slots that came due while the loop was running. */
     private readonly SkipCreditFloor _skipCreditFloor = new();
 
+    /// <summary>Test hook (#4938): the schedule overrides every collector's schedule resolves from, which a test sets to
+    /// give a collector a run time without a store.</summary>
+    internal IReadOnlyList<ScheduleOverride> ScheduleOverridesForTest
+    {
+        get => _scheduleOverrides;
+        set => _scheduleOverrides = value;
+    }
+
+    /// <summary>Test hook (#4938): the floor the pass reads to decide whether a skipped slot counts.</summary>
+    internal SkipCreditFloor SkipCreditFloorForTest => _skipCreditFloor;
+
+    /// <summary>Test hook (#4938): the fleet gate's slot counts.</summary>
+    internal FleetGateStats? FleetGateStatsForTest => _fleetGateStats;
+
     /* Next due time for the managed store-settings self-alert (#4215). Fleet-level (a managed
        store's settings are a store-wide concept), so a single field like the stale-mute cadence above. */
     private DateTime _nextStoreSettingsCheckUtc = DateTime.MinValue;
@@ -1295,6 +1310,61 @@ LIMIT 1";
         _readLatency = readLatency;
     }
 
+    /// <summary>
+    /// #4938: what one daily collector's run-time stamp was computed from, kept beside the stamp in
+    /// <see cref="ServerLoopState.NextDue"/>. A reload that finds the same run time and the same clock leaves the stamp
+    /// alone; a different run time or clock computes the slot again. <see cref="LastRunUtc"/> is when the collector last
+    /// ran (the persisted last-run mark at connect, the hand-off time after that), the input the slot is computed from.
+    /// </summary>
+    internal sealed record RunTimeSlot(int RunAtMinute, int IntervalMinutes, string ClockId, DateTime? LastRunUtc);
+
+    /// <summary>
+    /// #4938: a server's wall clock as the worker holds it: the clock itself and an identity that changes when the server's
+    /// own clock changes (its zone, or its fixed offset), so a slot is computed again only when the clock did change. The
+    /// identity is the clock's zone id, which a fixed offset and UTC also have; a daylight-saving step inside one zone
+    /// does not change it, because the zone already follows that step.
+    /// </summary>
+    internal sealed class ServerClockStamp
+    {
+        public ServerClockStamp(ServerClock clock)
+        {
+            ArgumentNullException.ThrowIfNull(clock);
+            Clock = clock;
+            Id = clock.AsTimeZone().Id;
+            ToUtc = clock.ToUtc;
+        }
+
+        /// <summary>UTC: what a server has until its first <c>server_properties</c> or <c>pg_server_config</c> row is read.</summary>
+        public static ServerClockStamp Utc { get; } = new(ServerClock.Utc);
+
+        public ServerClock Clock { get; }
+
+        public string Id { get; }
+
+        /// <summary>The server-local to UTC conversion the run-time rules take.</summary>
+        public Func<DateTime, DateTime> ToUtc { get; }
+    }
+
+    /// <summary>#4938: the run time and the clock a collector's slot is computed with.</summary>
+    internal readonly record struct RunTimeRule(int RunAtMinute, int ServerId, Func<DateTime, DateTime> LocalToUtc);
+
+    /// <summary>#4938: what the server pass does with a collector that has a run time.</summary>
+    internal enum RunTimeAction
+    {
+        /// <summary>Its slot has not come: leave it.</summary>
+        NotDue,
+
+        /// <summary>Its slot is here, inside the grace: hand it off.</summary>
+        HandOff,
+
+        /// <summary>Its slot is behind it by more than the grace: skip that day, hand nothing off.</summary>
+        SkipDay,
+    }
+
+    /// <summary>#4938: one decision of <see cref="DarlingWorker.StepRunTimeCollector"/>: the action, the stamp to write, and the
+    /// skipped slots to record (1 for a day the sweep loop lost while it was running, else 0).</summary>
+    internal readonly record struct RunTimeStep(RunTimeAction Action, DateTime NextDue, long Skipped);
+
     internal sealed class ServerLoopState
     {
         /* Settable so the reconcile can replace a still-connected server's definition on a config
@@ -1308,6 +1378,22 @@ LIMIT 1";
            keys (never enumerated), so a lock-free concurrent map is a drop-in and eliminates the one structure
            the old strict single-threaded invariant (INV-1) existed to protect from tearing. */
         public ConcurrentDictionary<string, DateTime> NextDue { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /* #4938: what a daily collector's run-time stamp in NextDue was computed from: the run time, the clock and the
+           last run. One entry per collector that has a run time on this server, replaced whole (the record is
+           immutable) so a reader never sees half of an update. Indexed by collector name only, like NextDue. */
+        public ConcurrentDictionary<string, RunTimeSlot> RunTimeSlots { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        private ServerClockStamp _clock = ServerClockStamp.Utc;
+
+        /// <summary>#4938: this server's wall clock as last read from the store: UTC until a clock is read. Held per
+        /// server so a run-time collector's slot is computed from memory, never from a query on a tick.</summary>
+        public ServerClockStamp Clock
+        {
+            get => Volatile.Read(ref _clock);
+            set => Volatile.Write(ref _clock, value);
+        }
+
         public DateTime NextConnectAttempt { get; set; } = DateTime.MinValue;
 
         /* #4710: failed connect attempts in a row, so the retry delay grows (ServerConnectBackoff) while a
@@ -5675,7 +5761,7 @@ LIMIT 1";
     /// change takes effect promptly without over-firing. A server still connecting has no NextDue yet —
     /// <see cref="TryConnectAsync"/> seeds it from the same watermark policy when it connects.
     /// </summary>
-    private async Task RecomputeNextDueAsync(List<ServerLoopState> servers, CancellationToken cancellationToken)
+    internal async Task RecomputeNextDueAsync(List<ServerLoopState> servers, CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
         foreach (var server in servers)
@@ -5688,8 +5774,11 @@ LIMIT 1";
 
             /* #1575: the watermark map is read at most ONCE per server, and only if this reload actually
                introduces a NEW collector entry (a just-enabled collector) — a reload that only tweaks existing
-               entries costs no extra store round-trip. Lazily populated on the first new entry below. */
+               entries costs no extra store round-trip. Lazily populated on the first new entry below.
+               #4938: it is also read, still once, when a reload sets, changes or clears a collector's run time and
+               the last run is not already held in memory. */
             Dictionary<string, DateTime>? watermarks = null;
+            var clock = server.Clock;
 
             foreach (var name in CollectorScheduleDefaults.All.Keys)
             {
@@ -5698,6 +5787,7 @@ LIMIT 1";
                 {
                     /* ConcurrentDictionary has no Remove(key) — TryRemove is the drop-in for the old Remove. */
                     server.NextDue.TryRemove(name, out _);
+                    server.RunTimeSlots.TryRemove(name, out _);
                     continue;
                 }
 
@@ -5705,9 +5795,46 @@ LIMIT 1";
                    it ALSO reruns on OnLoadRecaptureMinutes, exactly like the connect-time seed and the
                    due-collector sweep below. */
                 var interval = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes);
+                RunTimeRule? rule = effective.RunAtMinute is int runAt ? new RunTimeRule(runAt, runtime.ServerId, clock.ToUtc) : null;
+                server.RunTimeSlots.TryGetValue(name, out var slot);
 
                 if (server.NextDue.TryGetValue(name, out var existing))
                 {
+                    if (rule is { } kept && slot is not null
+                        && slot.RunAtMinute == kept.RunAtMinute
+                        && slot.IntervalMinutes == interval
+                        && string.Equals(slot.ClockId, clock.Id, StringComparison.Ordinal))
+                    {
+                        /* #4938: the run time and the clock are the ones this stamp was computed from, so an edit to some
+                           other row leaves it where it is. The cap below would pull a stamp that sits more than one
+                           interval ahead (a 25-hour autumn day, or an interval that was just shortened) in to now plus
+                           the interval, which moves the run to the time of day of the edit. */
+                        continue;
+                    }
+
+                    if (rule is { } changed)
+                    {
+                        /* #4938: a run time that was just set or changed, or a clock that changed, computes the slot again,
+                           from the last run held in memory when there is one and the persisted mark when not. */
+                        watermarks ??= await ReadCollectorWatermarksAsync(_postgres!, runtime.ServerId, _logger, cancellationToken);
+                        var changedLastRun = slot?.LastRunUtc ?? (watermarks.TryGetValue(name, out var cw) ? cw : (DateTime?)null);
+                        server.NextDue[name] = ComputeSeededNextDue(
+                            changedLastRun, interval, now, SeedJitter(runtime.ServerId, interval * 60), changed);
+                        server.RunTimeSlots[name] = new RunTimeSlot(changed.RunAtMinute, interval, clock.Id, changedLastRun);
+                        continue;
+                    }
+
+                    if (slot is not null)
+                    {
+                        /* #4938: the run time was cleared, so the collector returns to the rule it had without one: its
+                           last run plus the interval, or now plus the seed jitter when that has passed. */
+                        watermarks ??= await ReadCollectorWatermarksAsync(_postgres!, runtime.ServerId, _logger, cancellationToken);
+                        var clearedLastRun = slot.LastRunUtc ?? (watermarks.TryGetValue(name, out var xw) ? xw : (DateTime?)null);
+                        server.RunTimeSlots.TryRemove(name, out _);
+                        server.NextDue[name] = ComputeSeededNextDue(clearedLastRun, interval, now, SeedJitter(runtime.ServerId, interval * 60));
+                        continue;
+                    }
+
                     /* Existing entry KEEPS its already-applied phase, but is pulled in to at most now + the
                        (possibly shortened) interval so a frequency change takes effect promptly without
                        over-firing — unchanged from before. */
@@ -5719,11 +5846,20 @@ LIMIT 1";
                     /* NEW entry — a collector this reload newly enables. Seed it from the persisted watermark
                        (the same #1575 policy as the connect-seed) so a newly-enabled long-frequency collector
                        resumes its real cadence instead of deferring up to a full interval; the small capped
-                       jitter still de-clusters an overdue / never-run fleet-wide enable. */
+                       jitter still de-clusters an overdue / never-run fleet-wide enable. With a run time (#4938)
+                       the seed is the slot instead, so a collector enabled at noon waits for its run time. */
                     watermarks ??= await ReadCollectorWatermarksAsync(_postgres!, runtime.ServerId, _logger, cancellationToken);
                     var lastRun = watermarks.TryGetValue(name, out var w) ? w : (DateTime?)null;
                     var jitter = SeedJitter(runtime.ServerId, interval * 60);
-                    server.NextDue[name] = ComputeSeededNextDue(lastRun, interval, now, jitter);
+                    server.NextDue[name] = ComputeSeededNextDue(lastRun, interval, now, jitter, rule);
+                    if (rule is { } seeded)
+                    {
+                        server.RunTimeSlots[name] = new RunTimeSlot(seeded.RunAtMinute, interval, clock.Id, lastRun);
+                    }
+                    else
+                    {
+                        server.RunTimeSlots.TryRemove(name, out _);
+                    }
                 }
             }
         }
@@ -5869,8 +6005,21 @@ LIMIT 1";
     /// Kind-agnostic (compares by ticks; the caller passes matching UTC values) so the policy is unit-tested
     /// without a live store or a connect. Internal so a unit test can pin the decision table.
     /// </summary>
-    internal static DateTime ComputeSeededNextDue(DateTime? lastRunUtc, int frequencyMinutes, DateTime nowUtc, TimeSpan jitter)
+    internal static DateTime ComputeSeededNextDue(DateTime? lastRunUtc, int frequencyMinutes, DateTime nowUtc, TimeSpan jitter,
+        RunTimeRule? runTime = null)
     {
+        /* #4938: a collector that has a run time replaces all three arms below. Its answer is a slot, the instant on the
+           server's clock the run time falls on plus the server's spread (CollectorRunTime.NextDue holds the rules): a
+           last run at or after today's slot waits for the next one, a collector that never ran waits for its first, and
+           only inside the hour after a slot does one run now. NextDue answers "now" for that case and the seed jitter is
+           added here, so the inside-the-grace answer is the one place now + jitter survives. Outside the grace
+           now + jitter would step on the quiet hour the run time exists to keep, so it is never returned there. */
+        if (runTime is { } rule && CollectorRunTime.AllowsRunAt(frequencyMinutes))
+        {
+            var slot = CollectorRunTime.NextDue(nowUtc, lastRunUtc, rule.RunAtMinute, frequencyMinutes, rule.ServerId, rule.LocalToUtc);
+            return slot <= nowUtc ? nowUtc + jitter : slot;
+        }
+
         if (lastRunUtc is DateTime lastRun)
         {
             var due = lastRun.AddMinutes(frequencyMinutes);
@@ -5878,6 +6027,48 @@ LIMIT 1";
         }
 
         return nowUtc + jitter;
+    }
+
+    /// <summary>
+    /// #4938: the server pass's decision for one collector that has a run time, from its stamp. Three outcomes
+    /// (<see cref="RunTimeAction"/>):
+    /// <list type="bullet">
+    /// <item>the stamp is ahead of now: not due. It is judged with the room a run-time stamp needs
+    /// (<see cref="CollectorRunTime.MaxStampAhead"/>: the interval, an hour of spread and a 25-hour autumn day), so a stamp
+    /// a day and an hour away is a wait and not a clock that stepped back;</item>
+    /// <item>the stamp has come and now is no later than the grace after it: hand it off, and the next stamp is the slot
+    /// <c>interval / 1440</c> days on, computed from that date's local time (never the stamp plus 1440 minutes, which is
+    /// an hour off after a daylight-saving change);</item>
+    /// <item>the stamp has come and now is past the grace: that day is skipped and nothing is handed off, as a missed slot is
+    /// skipped everywhere else (#4636). The next stamp is the next slot, or now plus the seed jitter when a later slot's
+    /// grace is already running (a host that slept through several days).</item>
+    /// </list>
+    /// A skipped day counts 1 skipped slot when the sweep loop was running through it, and 0 after a sleep, a pause or a
+    /// stopped service: <paramref name="skipCreditFloor"/> is <see cref="SkipCreditFloor.Floor"/>, the instant the loop last
+    /// came back from a stretch it was not running, and a slot that came due before it is not the gate's doing. A run that is
+    /// handed off is delayed by the fleet cap, never dropped, so it records nothing here. Pure: the pass passes the clock and
+    /// the floor in, so every row is tested without a worker. Internal for that.
+    /// </summary>
+    internal static RunTimeStep StepRunTimeCollector(
+        DateTime due, DateTime nowUtc, DateTime skipCreditFloor, int intervalMinutes, RunTimeRule rule, TimeSpan jitter)
+    {
+        due = CollectorCadence.ClampDue(due, nowUtc, CollectorRunTime.MaxStampAhead(intervalMinutes));
+        if (nowUtc < due)
+        {
+            return new RunTimeStep(RunTimeAction.NotDue, due, 0);
+        }
+
+        if (nowUtc <= due + CollectorRunTime.Grace)
+        {
+            var next = CollectorRunTime.NextDue(nowUtc, nowUtc, rule.RunAtMinute, intervalMinutes, rule.ServerId, rule.LocalToUtc);
+            return new RunTimeStep(RunTimeAction.HandOff, next, 0);
+        }
+
+        var following = CollectorRunTime.NextDue(nowUtc, due, rule.RunAtMinute, intervalMinutes, rule.ServerId, rule.LocalToUtc);
+        return new RunTimeStep(
+            RunTimeAction.SkipDay,
+            following <= nowUtc ? nowUtc + jitter : following,
+            skipCreditFloor <= due ? 1 : 0);
     }
 
     /// <summary>The floor applied to the watermark read below (#4469): how far back
@@ -5999,6 +6190,77 @@ LIMIT 1";
         }
 
         return watermarks;
+    }
+
+    /// <summary>The newest server-scoped <c>TimeZone</c> setting of a PostgreSQL target (#4938), the zone its clock keeps.
+    /// A session-scoped source (a client's own <c>TimeZone</c>) and a per-database or per-role setting do not describe the
+    /// server and are left out, the rules <c>PgTargetBaselineProvider</c> reads the same row by. $1 server_id; $2 the
+    /// oldest snapshot to look at, naive UTC, which bounds the read to the newest chunks of the hypertable: a target
+    /// with no <c>pg_server_config</c> snapshot in that time has no known clock and reads as UTC.</summary>
+    internal const string ReadPgServerClockSql = """
+        SELECT c.setting
+        FROM pg_server_config AS c
+        WHERE c.server_id = $1
+        AND   c.collection_time >= $2
+        AND   c.name = 'TimeZone'
+        AND   c.database_name IS NULL
+        AND   c.role_name IS NULL
+        AND   c.setting IS NOT NULL
+        AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+        ORDER BY c.collection_time DESC
+        LIMIT 1
+        """;
+
+    /// <summary>How far back <see cref="ReadPgServerClockSql"/> looks for a snapshot (#4938). The config collector runs
+    /// every hour, so a week is a long stretch of missed snapshots.</summary>
+    internal static readonly TimeSpan ServerClockLookback = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// #4938: whether a collector's run puts a row in the store that carries its server's clock: <c>server_properties</c>
+    /// for a SQL Server target (its time zone and UTC offset) and <c>pg_server_config</c> for a PostgreSQL one (its
+    /// <c>TimeZone</c> setting). The worker reads the clock again after such a run, so a clock that arrives or changes is
+    /// seen, and never on a tick.
+    /// </summary>
+    internal static bool CarriesServerClock(string collectorName, CollectorTargetEngine engine) =>
+        engine == CollectorTargetEngine.SqlServer
+            ? string.Equals(collectorName, ServerPropertiesCollector.Instance.Name, StringComparison.OrdinalIgnoreCase)
+            : string.Equals(collectorName, PgServerConfigCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #4938: one server's wall clock, from the store: the newest <c>server_properties</c> row for a SQL Server target
+    /// (<see cref="DarlingServerClockReader"/>: its zone where it reports one, else its fixed offset) or the newest
+    /// <c>pg_server_config</c> <c>TimeZone</c> row for a PostgreSQL one (<see cref="ReadPgServerClockSql"/>); UTC when the
+    /// server has no such row yet. Null when the read failed, so a caller keeps the clock it holds: a store hiccup is
+    /// not a clock change, and it must never break the connect or the run that asked. Internal so a live test can
+    /// seed rows and read.
+    /// </summary>
+    internal static async Task<ServerClockStamp?> TryReadServerClockAsync(
+        NpgsqlDataSource postgres, int serverId, CollectorTargetEngine engine, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (engine == CollectorTargetEngine.SqlServer)
+            {
+                return new ServerClockStamp(await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken));
+            }
+
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(ReadPgServerClockSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow - ServerClockLookback, DateTimeKind.Unspecified),
+            });
+
+            var zone = (await command.ExecuteScalarAsync(cancellationToken)) as string;
+            return new ServerClockStamp(string.IsNullOrWhiteSpace(zone) ? ServerClock.Utc : ServerClock.Resolve(zone.Trim(), null));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Observability: server clock read for server_id {ServerId} failed: {Message}", serverId, ex.Message);
+            return null;
+        }
     }
 
     /// <summary>
@@ -11121,6 +11383,15 @@ AND   j.hypertable_name = '{relation}'", connection))
                steady-state advance in RunDueCollectorsAsync stays on the exact interval. */
             var watermarks = await ReadCollectorWatermarksAsync(_postgres!, serverId, _logger, cancellationToken);
 
+            /* #4938: the server's own clock, read once here and held on the server's state, so a collector that has a run
+               time is seeded on this server's wall clock and no tick ever queries for it. A failed read keeps the clock
+               already held (UTC for a server seen the first time); the post-run refresh of server_properties and
+               pg_server_config (RunOneAsync) updates it as those rows arrive. */
+            if (await TryReadServerClockAsync(_postgres!, serverId, runtime.Target.Engine, _logger, cancellationToken) is { } connectClock)
+            {
+                server.Clock = connectClock;
+            }
+
             /* #4732: the first collector pass on this connection is the one the edit check exists for. */
             if (ConnectionIsStale())
             {
@@ -11174,13 +11445,45 @@ AND   j.hypertable_name = '{relation}'", connection))
                     var onLoadInterval = CollectorScheduleDefaults.OnLoadRecaptureMinutes;
                     var onLoadLastRun = watermarks.TryGetValue(name, out var w0) ? w0 : (DateTime?)null;
                     var onLoadJitter = SeedJitter(serverId, onLoadInterval * 60);
-                    server.NextDue[name] = ComputeSeededNextDue(onLoadLastRun, onLoadInterval, now, onLoadJitter);
+                    if (effective.RunAtMinute is int onLoadRunAt)
+                    {
+                        /* #4938: a run time moves the daily re-run of an on-load collector and leaves the run at connect
+                           as it is. That run just happened, so it is the last run: it counts for today when it fell at or
+                           after today's slot, and for the day before when it fell earlier, which leaves today's slot owed.
+                           Seeded from the older mark instead, a connect inside the hour after the slot would run the
+                           collector a second time within seconds. */
+                        var ranAt = DateTime.UtcNow;
+                        var clock = server.Clock;
+                        server.NextDue[name] = ComputeSeededNextDue(
+                            ranAt, onLoadInterval, ranAt, onLoadJitter, new RunTimeRule(onLoadRunAt, serverId, clock.ToUtc));
+                        server.RunTimeSlots[name] = new RunTimeSlot(onLoadRunAt, onLoadInterval, clock.Id, ranAt);
+                    }
+                    else
+                    {
+                        server.RunTimeSlots.TryRemove(name, out _);
+                        server.NextDue[name] = ComputeSeededNextDue(onLoadLastRun, onLoadInterval, now, onLoadJitter);
+                    }
                 }
                 else
                 {
                     var lastRun = watermarks.TryGetValue(name, out var w) ? w : (DateTime?)null;
                     var jitter = SeedJitter(serverId, effective.FrequencyMinutes * 60);
-                    server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);
+
+                    /* #4938: with a run time the seed is the slot (ComputeSeededNextDue holds the rules), on this
+                       server's clock as read above; the slot's inputs are kept beside the stamp so a reload or a clock
+                       change computes it again from the same last run. */
+                    if (effective.RunAtMinute is int runAt)
+                    {
+                        var clock = server.Clock;
+                        server.NextDue[name] = ComputeSeededNextDue(
+                            lastRun, effective.FrequencyMinutes, now, jitter, new RunTimeRule(runAt, serverId, clock.ToUtc));
+                        server.RunTimeSlots[name] = new RunTimeSlot(runAt, effective.FrequencyMinutes, clock.Id, lastRun);
+                    }
+                    else
+                    {
+                        server.RunTimeSlots.TryRemove(name, out _);
+                        server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);
+                    }
                 }
             }
 
@@ -11349,26 +11652,74 @@ AND   j.hypertable_name = '{relation}'", connection))
                 var interval = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes);
                 var intervalSpan = TimeSpan.FromMinutes(interval);
 
-                /* #4732: a due time more than one interval ahead can only be a wall clock that stepped backwards after
-                   the time was stamped; left alone it pauses this collector for as long as the step. Treated as due
-                   now. (RecomputeNextDueAsync, on a schedule reload, does the milder thing: it caps a stored due time
-                   at now plus the interval, so that stamp waits one interval instead of running at once.) */
-                due = CollectorCadence.ClampDue(due, now, intervalSpan);
-                if (now < due)
+                /* #4938: a collector that has a run time is scheduled on its slot, not on the interval grid below. The
+                   slot is the run time on this server's clock plus the server's spread, one a day (RunTimeSlots holds what
+                   the stamp was computed from). The pass hands the run off from the slot until an hour after it and never
+                   later: a day it could not hand off is skipped, not replayed, like any missed slot (#4636). A run handed
+                   off is detached below with every other daily collector, so it waits for the fleet cap and is never
+                   dropped for waiting. The clock is read from memory (ServerLoopState.Clock); a clock that has changed
+                   since the stamp was computed, such as a server's own zone arriving after its first
+                   server_properties row, computes the slot again from the last run held beside the stamp. */
+                if (effective.RunAtMinute is int runAtMinute)
                 {
-                    continue;
-                }
+                    var clock = server.Clock;
+                    var rule = new RunTimeRule(runAtMinute, runtime.ServerId, clock.ToUtc);
+                    var jitter = SeedJitter(runtime.ServerId, interval * 60);
+                    if (!server.RunTimeSlots.TryGetValue(name, out var slot))
+                    {
+                        slot = new RunTimeSlot(runAtMinute, interval, clock.Id, null);
+                        server.RunTimeSlots[name] = slot;
+                    }
+                    else if (!string.Equals(slot.ClockId, clock.Id, StringComparison.Ordinal))
+                    {
+                        due = ComputeSeededNextDue(slot.LastRunUtc, interval, now, jitter, rule);
+                        server.NextDue[name] = due;
+                        slot = slot with { ClockId = clock.Id };
+                        server.RunTimeSlots[name] = slot;
+                    }
 
-                /* #4636: advance on a fixed grid from the previous due time, not from this body's start, so a
-                   late start is not carried into the next slot; a slot missed in a stall is skipped, not replayed.
-                   #4732: and the skipped slots are counted, next to the slot that ran, so a fleet that cannot keep
-                   its cadence shows up as a share of skipped slots instead of one Info line per collector. Only the
-                   slots that came due while the sweep loop was running count (SkipCreditFloor): a host that slept, a
-                   clock that stepped forward or a pause leaves this stamp hours old, and none of those slots was
-                   skipped by a gate that was too narrow. A body that starts late because the gate was full, while the
-                   loop keeps ticking, still counts them all. */
-                _fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan));
-                server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
+                    var step = StepRunTimeCollector(due, now, _skipCreditFloor.Floor, interval, rule, jitter);
+                    if (step.Action == RunTimeAction.NotDue)
+                    {
+                        continue;
+                    }
+
+                    server.NextDue[name] = step.NextDue;
+                    if (step.Action == RunTimeAction.SkipDay)
+                    {
+                        _fleetGateStats?.RecordSkippedSlots(step.Skipped);
+                        _logger.LogInformation(
+                            "  [{Server}] {Collector} skipped today's run: the pass could not hand it off within {Grace} minutes of its run time, so it waits for its next run time, {Next:u} (#4938)",
+                            server.Config.DisplayName, name, CollectorRunTime.GraceMinutes, step.NextDue);
+                        continue;
+                    }
+
+                    _fleetGateStats?.RecordSlot(0);
+                    server.RunTimeSlots[name] = slot with { LastRunUtc = now };
+                }
+                else
+                {
+                    /* #4732: a due time more than one interval ahead can only be a wall clock that stepped backwards after
+                       the time was stamped; left alone it pauses this collector for as long as the step. Treated as due
+                       now. (RecomputeNextDueAsync, on a schedule reload, does the milder thing: it caps a stored due time
+                       at now plus the interval, so that stamp waits one interval instead of running at once.) */
+                    due = CollectorCadence.ClampDue(due, now, intervalSpan);
+                    if (now < due)
+                    {
+                        continue;
+                    }
+
+                    /* #4636: advance on a fixed grid from the previous due time, not from this body's start, so a
+                       late start is not carried into the next slot; a slot missed in a stall is skipped, not replayed.
+                       #4732: and the skipped slots are counted, next to the slot that ran, so a fleet that cannot keep
+                       its cadence shows up as a share of skipped slots instead of one Info line per collector. Only the
+                       slots that came due while the sweep loop was running count (SkipCreditFloor): a host that slept, a
+                       clock that stepped forward or a pause leaves this stamp hours old, and none of those slots was
+                       skipped by a gate that was too narrow. A body that starts late because the gate was full, while the
+                       loop keeps ticking, still counts them all. */
+                    _fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan));
+                    server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
+                }
 
                 /* #2700: query_store is split off this sequential body rather than awaited inline. Its
                    run time is bimodal — a heavy batch runs 100-230+ seconds against a ~5-35s mean, on its
@@ -13031,6 +13382,17 @@ LIMIT 1";
             /* #2674: record this run's cost for the hourly collector_cost aggregate — the same numbers that
                go to collection_log, kept as a compact per-(server, collector) series for the cost panel. */
             _collectorCost.Record(runtime.ServerId, collectorName, result.Rows, result.SqlMs, result.StorageMs);
+
+            /* #4938: a run that has just written this server's clock to the store (server_properties on SQL Server,
+               pg_server_config on PostgreSQL) refreshes the clock the worker holds for it: the first row of a new server
+               replaces the UTC it started with, and a zone change replaces the old zone. The pass computes the slot of a
+               collector that has a run time again when the clock's identity differs from the one its stamp was computed
+               with. One read per run of these two collectors, none on a tick, and a failed read keeps the held clock. */
+            if (CarriesServerClock(collectorName, runtime.Target.Engine)
+                && await TryReadServerClockAsync(_postgres!, runtime.ServerId, runtime.Target.Engine, _logger, cancellationToken) is { } refreshedClock)
+            {
+                server.Clock = refreshedClock;
+            }
 
             /* #2219: statement TEXT rides alongside the statement stats, on its own hourly cadence. Hung off the
                stats collector's success rather than given its own loop because it is meaningless without those
