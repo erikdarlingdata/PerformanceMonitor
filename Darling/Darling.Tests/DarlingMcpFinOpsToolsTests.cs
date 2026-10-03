@@ -59,7 +59,7 @@ public sealed class DarlingMcpFinOpsToolsTests
         //
         //
         // FinOps web parity (#4843), set B: list your views below this line only.
-        var setBViews = new[] { "high_impact", "database_resources", "application_connections" };
+        var setBViews = new[] { "high_impact", "database_resources", "application_connections", "optimization" };
         // FinOps web parity (#4843), set B ends.
         var valid = DarlingMcpFinOpsTools.SetAValid + DarlingMcpFinOpsTools.SetBValid;
         foreach (var view in setAViews.Concat(setBViews))

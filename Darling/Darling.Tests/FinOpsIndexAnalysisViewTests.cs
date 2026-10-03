@@ -207,7 +207,7 @@ public sealed class FinOpsIndexAnalysisViewTests
     [Fact]
     public void OtherViews_RefuseDatabaseNameAndFullText_IndexAnalysisAccepts()
     {
-        foreach (var view in new[] { "utilization", "high_impact", "database_resources" })
+        foreach (var view in new[] { "utilization", "high_impact", "database_resources", "optimization" })
         {
             var db = DarlingMcpFinOpsTools.IndexAnalysisOnlyParamMisuse(view, "d", false);
             Assert.Equal("database_name", db!.Value.Parameter);

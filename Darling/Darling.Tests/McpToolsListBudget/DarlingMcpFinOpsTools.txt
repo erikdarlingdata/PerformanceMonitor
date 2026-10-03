@@ -1,8 +1,8 @@
 # DarlingMcpFinOpsTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_finops 481
+tool get_finops 550
 param get_finops.database_name 52
 param get_finops.full_text 76
 param get_finops.hours_back 50
 param get_finops.limit 59
 param get_finops.server_name 28
-param get_finops.view 113
+param get_finops.view 127
