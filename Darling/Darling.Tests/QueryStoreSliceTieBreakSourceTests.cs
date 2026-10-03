@@ -130,7 +130,6 @@ public sealed class QueryStoreSliceTieBreakSourceTests
         }
     }
 
-    /// <summary>Walks up from the test binary to the repo root so the pin works from any run directory.</summary>
     [Fact]
     public void ComposeCompiler_DedupePartitionByLiteral_EqualsTheRestrictionKey()
     {
@@ -145,6 +144,7 @@ public sealed class QueryStoreSliceTieBreakSourceTests
             m.Groups["cols"].Value);
     }
 
+    /// <summary>Walks up from the test binary to the repo root so the pin works from any run directory.</summary>
     private static string SourcePath(string relative)
     {
         var dir = AppContext.BaseDirectory;
