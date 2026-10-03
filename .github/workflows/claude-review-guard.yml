@@ -430,7 +430,11 @@ jobs:
             exit 0
           fi
 
-          # The step's own conclusion, which separates a clean no-op from a real run.
+          # The step's own conclusion, which separates a clean no-op from a real run. This read and
+          # the review-job read below take ONE item with `.[0]`, and --paginate would apply that once
+          # per page of the jobs list. It is safe here: a run of the review workflow has two jobs
+          # (decide and review), so the list is one page, and the step and the job named each
+          # appear in it once.
           lookup "review-run jobs (step conclusion)" "repos/$R/actions/runs/$run_id/jobs" --paginate \
             --jq '[.jobs[].steps[]? | select(.name == env.REVIEW_STEP)] | .[0].conclusion // empty'
           step=$LOOKUP_OUT
@@ -611,16 +615,24 @@ jobs:
           # ever renamed this reports a false "posted nothing" -- loud and wrong, which is the safer
           # direction for a guard to fail.
           mine='select(.user.login == env.REVIEW_BOT)'
+          # --paginate runs each --jq once PER PAGE, so a tally that ends in `length` prints one
+          # count per page: one number for a list of 30 items or fewer, several for a longer one.
+          # Every user's items count toward a page, and the inline-comment tool files one review
+          # per comment, so a long pull request does reach a second page. The count over every page
+          # is the SUM of those numbers, and sum_pages() adds them; the bare output would make the
+          # arithmetic below a syntax error. A one-page list sums to its own count, and a page that
+          # fails to read still fails the check in lookup(), before any sum.
+          sum_pages() { printf '%s\n' "$1" | awk '{ s += $1 } END { print s + 0 }'; }
           lookup "issue-comment tally" "repos/$R/issues/$PR/comments" --paginate \
             --jq "[.[] | $mine | select(.created_at > \"$created\")] | length"
-          issue=$LOOKUP_OUT
+          issue=$(sum_pages "$LOOKUP_OUT")
           lookup "inline-comment tally" "repos/$R/pulls/$PR/comments" --paginate \
             --jq "[.[] | $mine | select(.created_at > \"$created\")] | length"
-          inline=$LOOKUP_OUT
+          inline=$(sum_pages "$LOOKUP_OUT")
           lookup "review tally" "repos/$R/pulls/$PR/reviews" --paginate \
             --jq "[.[] | $mine | select(.submitted_at != null
                                         and .submitted_at > \"$created\")] | length"
-          reviews=$LOOKUP_OUT
+          reviews=$(sum_pages "$LOOKUP_OUT")
           total=$(( issue + inline + reviews ))
           echo "posted by $REVIEW_BOT since $created -- issue: $issue, inline: $inline,"\
             "reviews: $reviews"
