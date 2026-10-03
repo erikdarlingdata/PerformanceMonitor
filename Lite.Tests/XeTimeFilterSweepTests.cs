@@ -37,6 +37,9 @@ public sealed class XeTimeFilterSweepTests
 
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();
 
+    private static readonly string s_sessionName =
+        LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, "0a1b2c3d");
+
     private static readonly CollectorTargetInfo[] s_targets =
     [
         new CollectorTargetInfo { SqlMajorVersion = 16 },
@@ -117,6 +120,9 @@ public sealed class XeTimeFilterSweepTests
             Deltas = s_deltas,
             Target = target,
             CapturePlanXml = capturePlanXml,
+            /* The long-query read names the session this install made (#4961) and refuses to build without it; without a name
+               the sweep would skip that collector's SQL and report it as built nowhere. */
+            LongQuerySessionName = s_sessionName,
         };
         var type = schema.GetType();
 

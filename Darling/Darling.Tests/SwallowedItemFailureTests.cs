@@ -88,9 +88,10 @@ public sealed class SwallowedItemFailureTests
         Assert.Contains("if (attempted > 0 && failed == attempted && firstFailure is not null)", source, StringComparison.Ordinal);
         Assert.Contains("System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstFailure).Throw();", source, StringComparison.Ordinal);
 
-        /* Some refused: the shared composer, so the wording is the runners'. */
+        /* Some refused: the shared composer, so the wording is the runners'. The first failure is worded as the per-database
+           line words it, so a create or start refused on Azure carries the caps sentence (#4961). */
         Assert.Contains(
-            "var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure?.Message);",
+            "var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure is null ? null : AlwaysOnXeSessions.DescribeFailure(firstFailure));",
             source,
             StringComparison.Ordinal);
         Assert.Contains("return partialNote;", source, StringComparison.Ordinal);

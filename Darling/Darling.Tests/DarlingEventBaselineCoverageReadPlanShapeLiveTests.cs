@@ -30,7 +30,9 @@ namespace Darling.Tests;
 /// same statement without the gate is the control: its log scans do run.</para>
 ///
 /// <para>(b) A server with events reads only its own segment of a compressed chunk. The log is compressed segmented by
-/// <c>server_id</c>, so the <c>server_id = $1</c> condition has to reach the scan of the compressed chunk itself (the
+/// <c>server_id</c> (and, since #4951, by <c>collector_name</c> as well; <c>CollectionLogSegmentByLiveTests</c> pins that
+/// the collector condition reaches the same scan, through this class's plan helpers), so the <c>server_id = $1</c>
+/// condition has to reach the scan of the compressed chunk itself (the
 /// <c>_hyper_N_M_chunk_compressed</c> relation on a fresh store, the old <c>compress_hyper_N_M_chunk</c> one on an
 /// upgraded store), not be applied to rows already decompressed for every server.</para>
 ///
@@ -49,10 +51,11 @@ public sealed class DarlingEventBaselineCoverageReadPlanShapeLiveTests
     /// <summary>Well below any id the generator hands out, so a seeded row can never collide with a real one.</summary>
     private const long LogIdBase = -473_100_000_000L;
 
-    private static readonly DateTime AnalysisTime = new(2026, 3, 4, 14, 0, 0, DateTimeKind.Unspecified);
+    /// <summary>The analysis hour <see cref="ExplainAsync"/> reads the window at; a class that reuses it seeds around this.</summary>
+    internal static readonly DateTime AnalysisTime = new(2026, 3, 4, 14, 0, 0, DateTimeKind.Unspecified);
 
     /// <summary>Inside the window, on the busy server only.</summary>
-    private static readonly DateTime EventTime = new(2026, 2, 8, 9, 10, 0, DateTimeKind.Unspecified);
+    internal static readonly DateTime EventTime = new(2026, 2, 8, 9, 10, 0, DateTimeKind.Unspecified);
 
     [Fact]
     public async Task TheBlockingArm_NeverReadsTheLogForAServerWithoutEvents_AndKeepsTheServerFilterOnTheCompressedScan()
@@ -168,7 +171,7 @@ public sealed class DarlingEventBaselineCoverageReadPlanShapeLiveTests
 
     /// <summary>A chunk's compressed relation: <c>_hyper_N_M_chunk_compressed</c> on a fresh 2.30.1 store, the old
     /// <c>compress_hyper_N_M_chunk</c> name on an upgraded one (see <c>StoreSelfMetrics</c>).</summary>
-    private static bool IsCompressedRelation(string relation) =>
+    internal static bool IsCompressedRelation(string relation) =>
         relation.StartsWith("compress_hyper_", StringComparison.Ordinal)
         || relation.EndsWith("_chunk_compressed", StringComparison.Ordinal);
 
@@ -176,7 +179,7 @@ public sealed class DarlingEventBaselineCoverageReadPlanShapeLiveTests
     private static double Loops(JsonElement node) => node.GetProperty("Actual Loops").GetDouble();
 
     /// <summary>The node's own conditions and its descendants' (a bitmap scan carries its index condition one node down).</summary>
-    private static string Conditions(JsonElement node)
+    internal static string Conditions(JsonElement node)
     {
         var text = new List<string>();
 
@@ -204,7 +207,7 @@ public sealed class DarlingEventBaselineCoverageReadPlanShapeLiveTests
     }
 
     /// <summary>The statement as the provider runs it: the six bound parameters of an unkeyed arm, over the day-grain window.</summary>
-    private static async Task<JsonElement> ExplainAsync(NpgsqlConnection connection, string sql, int serverId, CancellationToken ct)
+    internal static async Task<JsonElement> ExplainAsync(NpgsqlConnection connection, string sql, int serverId, CancellationToken ct)
     {
         var windowEnd = PgBaselineProvider.RoundedDay(AnalysisTime);
         var windowStart = windowEnd.AddDays(-BaselineMath.BaselineWindowDays);

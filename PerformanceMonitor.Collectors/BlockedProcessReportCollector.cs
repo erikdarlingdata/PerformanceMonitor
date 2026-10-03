@@ -763,6 +763,14 @@ ORDER BY
            of which XeShredGate.ShouldShred treats as "shred". */
         var lastExecutionCount = XeShredGate.ReadLast(context.State, context.CurrentDatabaseName);
 
+        /* #4961: the session this database's read names: the shared one, or this install's own when the ensure fell back to
+           it there. Only the session-name literals are replaced, never the table variable that shares the spelling. */
+        var sessionName = AlwaysOnXeSessions.ReadNameFor(AlwaysOnXeSessionKind.BlockedProcess, context.AlwaysOnSessionName);
+        if (!string.Equals(sessionName, XeSessionName, StringComparison.Ordinal))
+        {
+            query = query.Replace($"N'{XeSessionName}'", $"N'{sessionName}'", StringComparison.Ordinal);
+        }
+
         return new CollectorQuery(query, new List<CollectorParameter>
         {
             new("@cutoff_time", cutoffTime, CollectorParameterType.DateTime2),

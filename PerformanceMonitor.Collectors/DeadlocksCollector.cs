@@ -461,6 +461,14 @@ OUTER APPLY
     {
         var text = context.Target.IsAzureSqlDb ? AzureQueryText : ServerScopedQueryText;
 
+        /* #4961: the session this database's read names: the shared one, or this install's own when the ensure fell back to
+           it there. Only the session-name literals are replaced, never the table variable that shares the spelling. */
+        var sessionName = AlwaysOnXeSessions.ReadNameFor(AlwaysOnXeSessionKind.Deadlock, context.AlwaysOnSessionName);
+        if (!string.Equals(sessionName, XeSessionName, StringComparison.Ordinal))
+        {
+            text = text.Replace($"N'{XeSessionName}'", $"N'{sessionName}'", StringComparison.Ordinal);
+        }
+
         /* Splice (Darling) or erase (Lite, flag off — byte-identical) the victim plan capture. */
         text = text
             .Replace("/*DL_PLAN_SELECT*/", context.CapturePlanXml ? PlanSelectFragment : "", StringComparison.Ordinal)

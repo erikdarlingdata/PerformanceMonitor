@@ -343,6 +343,14 @@ public sealed class CaggGroupIndexDropLiveTests
             await dropEnd.ExecuteNonQueryAsync(ct);
         }
 
+        if (simulatedVersion < InstallIdRungTests.RungVersion)
+        {
+            /* V158 (#4961) - the install id's one-row table; the table is the probe's sentinel. */
+            await using var dropInstallId = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS config.config_install_id", connection);
+            await dropInstallId.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < MuteRuleServerIdRungTests.RungVersion)
         {
             /* V157 - the mute rule's store server id; the column is the probe's sentinel. */

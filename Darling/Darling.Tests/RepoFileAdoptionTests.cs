@@ -160,11 +160,16 @@ public sealed class RepoFileAdoptionTests
         /* #3653 item 12 (Q6): its cross-SKU pin slices the multi-line `keyed` CTE out of the Darling provider's
            SOURCE (from `keyed AS (` to `FROM clean` + `)` on the next line) and asserts Lite's source carries the
            identical text; the clock-read twin pin likewise compares a multi-line const body one token apart. */
+        /* #4961: its no-drop pin looks for a statement block that runs across a line break in DarlingXeSessions.cs. */
+        "AlwaysOnXeSessionsTests.cs",
         "LocalClockBucketKeyTests.cs",
         "LockedModeRestoreCoverageTests.cs",
         /* Its always-on guard pin slices EnsureDatabaseScopedAsync's body up to the method's closing brace, on an
            anchor that runs from the line break before that brace to the line break after it. */
         "LongQueryTraceLifecycleTests.cs",
+        /* #4961: its pin slices RunOneAsync's body up to the method's closing brace, on an anchor that starts at the line
+           break before that brace. */
+        "LongQueryTraceRestartTests.cs",
         /* #3541 A10: its top-level-key discriminator anchors on the line break BEFORE the key (a per-row
            collection_time inside a Select is indented deeper and must not match), and its tool-body slicing
            keys on attribute text either side of one. */
@@ -221,6 +226,9 @@ public sealed class RepoFileAdoptionTests
         "ViewTemplatesTests.cs",
         "ViewerFinOpsPickerRefreshPinTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",
+        /* #4961: its RunOneAsync pin takes the body from the method's declaration to the closing brace on its own line
+           (`\n    }\n`), which only matches once the line endings are one spelling. */
+        "XeSessionMissingWarningTests.cs",
     };
 
     /// <summary>

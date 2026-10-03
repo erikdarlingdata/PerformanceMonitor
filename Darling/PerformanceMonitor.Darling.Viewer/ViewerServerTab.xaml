@@ -3751,8 +3751,9 @@
         </TabItem>
 
         <!-- Long Queries Tab (#1496) — completed long-running queries + attentions (cancels/timeouts) from
-             the opt-in PerformanceMonitor_LongQueryCompletions XE session. Default OFF; the banner points to
-             where the switch lives when the collector is disabled. MUST remain the last inner tab (index 18). -->
+             the opt-in XE session the service makes (PerformanceMonitor_Darling_{id}_LongQueryCompletions).
+             Default OFF; the banner points to where the switch lives when the collector is disabled. MUST remain
+             the last inner tab (index 18). -->
         <TabItem Header="Long Queries">
             <Grid Margin="8">
                 <Grid.RowDefinitions>

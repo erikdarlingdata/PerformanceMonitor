@@ -3121,8 +3121,8 @@
             </TabItem>
 
             <!-- Long Queries Tab (#1496) — completed long-running queries + attentions (cancels/timeouts) from
-                 the opt-in PerformanceMonitor_LongQueryCompletions XE session. Default OFF; the banner points to
-                 where the switch lives when the collector is disabled. -->
+                 the opt-in XE session this install makes (PerformanceMonitor_Lite_{id}_LongQueryCompletions).
+                 Default OFF; the banner points to where the switch lives when the collector is disabled. -->
             <TabItem Header="Long Queries">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>

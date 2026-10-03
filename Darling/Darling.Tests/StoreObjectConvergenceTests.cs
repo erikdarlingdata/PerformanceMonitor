@@ -617,6 +617,12 @@ public sealed class CompressionEnableGuardTests
         Assert.Contains("cs.segmentby_column_index IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("hypertable_compression_settings", sql, StringComparison.Ordinal);
 
+        /* The columns are joined with the separator the statement writes them with (#4951: collection_log's
+           segmentby has two columns), so a converged two-column setting reads back exactly as it was written.
+           Any other separator would read every converged pass as "not converged" and re-issue the ALTER, and its
+           ACCESS EXCLUSIVE lock, every hour. */
+        Assert.Contains("string_agg(cs.attname, ', ' ORDER BY cs.segmentby_column_index)", sql, StringComparison.Ordinal);
+
         /* Scoped, for the reason CompressionPolicyStateSql gives: a bring-your-own store may carry its own
            wait_stats hypertable in another schema, and this product must not read — let alone ALTER — it. */
         Assert.Contains("h.hypertable_schema = 'collect'", sql, StringComparison.Ordinal);
@@ -642,6 +648,12 @@ public sealed class CompressionEnableGuardTests
             TimescaleSupport.EnableCompressionSql("query_stats"),
             StringComparison.Ordinal);
 
+        /* #4951: collection_log alone segments by collector as well, and every other table keeps server_id. */
+        Assert.Contains(
+            "timescaledb.compress_segmentby = 'server_id, collector_name'",
+            TimescaleSupport.EnableCompressionSql("collection_log"),
+            StringComparison.Ordinal);
+
         /* The two halves are tied THROUGH the constant, not through a shared spelling: the statement
            interpolates it, and the guard compares against it. Both are asserted on the SOURCE, because a
            rendered statement cannot tell you whether the name came from the constant or from a literal that
@@ -652,11 +664,13 @@ public sealed class CompressionEnableGuardTests
         var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs");
         /* The statement's half is read off the RAW source: the interpolation lives inside a string literal,
            which StripCommentsAndStrings blanks by design. */
-        Assert.Contains("timescaledb.compress_segmentby = '{CompressionSegmentByColumn}'", raw, StringComparison.Ordinal);
+        /* #4951: the value is per table now (collection_log has its own), so both halves go through the one
+           per-table lookup rather than the shared column constant. */
+        Assert.Contains("timescaledb.compress_segmentby = '{CompressionSegmentByFor(table)}'", raw, StringComparison.Ordinal);
         /* The guard's half is code, so it is read off the stripped source — prose about the comparison is not
            the comparison. */
         Assert.Contains(
-            "string.Equals(segmentBy, CompressionSegmentByColumn, StringComparison.Ordinal)",
+            "string.Equals(segmentBy, CompressionSegmentByFor(table), StringComparison.Ordinal)",
             CSharpSourceWalker.StripCommentsAndStrings(raw),
             StringComparison.Ordinal);
     }
@@ -705,6 +719,25 @@ public sealed class CompressionEnableGuardTests
         Assert.False(string.IsNullOrEmpty(collectionLog));
         Assert.Contains("ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);", collectionLog, StringComparison.Ordinal);
         Assert.Contains("if (converged is null || !converged.Contains(CollectionLogTable))", collectionLog, StringComparison.Ordinal);
+
+        /* #4951: and collection_log's ALTER goes only through the bounded helper, which runs it inside its own
+           transaction and treats a lock it could not get as "try next pass" (the live
+           CollectionLogSegmentByLiveTests prove the wait is bounded; this keeps the shape in the unit tier). */
+        Assert.Contains("TrySetCollectionLogCompressionAsync(connection, logger, cancellationToken)", collectionLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("EnableCompressionSql(CollectionLogTable)", collectionLog, StringComparison.Ordinal);
+
+        /* Below TimescaleDB 2.14 the change cannot run while compressed chunks exist, so the version check comes
+           first and the ALTER is not attempted there. No live tier here runs a TimescaleDB that old, so the order
+           is pinned in this one. */
+        var versionCheckAt = collectionLog.IndexOf("CollectionLogSettingsChangeBlockedAsync(connection, logger, cancellationToken)", StringComparison.Ordinal);
+        var alterAt = collectionLog.IndexOf("TrySetCollectionLogCompressionAsync(connection, logger, cancellationToken)", StringComparison.Ordinal);
+        Assert.True(versionCheckAt >= 0 && versionCheckAt < alterAt,
+            "EnsureCollectionLogHypertableAsync must check the TimescaleDB version and compressed chunks before it attempts the settings change");
+        var bounded = MethodBody(storage, "private static async Task<CollectionLogSettingsChange> TrySetCollectionLogCompressionAsync(");
+        Assert.False(string.IsNullOrEmpty(bounded), "could not locate TrySetCollectionLogCompressionAsync — this pin cannot silently pass on a parse miss");
+        Assert.Contains("BeginTransactionAsync(cancellationToken)", bounded, StringComparison.Ordinal);
+        Assert.Contains("EnableCompressionSql(CollectionLogTable), connection, transaction)", bounded, StringComparison.Ordinal);
+        Assert.Contains("PostgresErrorCodes.LockNotAvailable", bounded, StringComparison.Ordinal);
 
         /* A read failure must issue every ALTER rather than skip every ALTER: the conservative direction,
            because a needless ALTER costs one lock and a skipped one costs a table that never compresses.
