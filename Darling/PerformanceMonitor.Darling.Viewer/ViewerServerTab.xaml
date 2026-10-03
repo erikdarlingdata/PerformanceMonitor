@@ -4080,6 +4080,8 @@
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
+                        <!-- Latest row per extension, so the rows can come from different snapshots. -->
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
 
@@ -4104,6 +4106,8 @@
                         <DataGridTextColumn Header="Change Needs" Binding="{Binding Context}" Width="120"/>
                         <DataGridTextColumn Header="Pending Restart" Binding="{Binding PendingRestart}" Width="120"/>
                         <DataGridTextColumn Header="Description" Binding="{Binding ShortDescription}" Width="*"/>
+                        <!-- The snapshot these settings came from; every row shares it. -->
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTime}" Width="150" SortMemberPath="CollectionTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
 
@@ -4752,6 +4756,9 @@
                         <DataGridTextColumn Header="Avg Usage" Binding="{Binding AvgUsageCount}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Pool Used" Binding="{Binding PoolBuffersUsed}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Pool Total" Binding="{Binding PoolBuffersTotal}" ElementStyle="{StaticResource NumericCell}" Width="*"/>
+                        <!-- One collection for every row; a column rather than a label keeps this grid's time
+                             where every other snapshot grid has it. -->
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
@@ -5041,6 +5048,8 @@
                              are a sample and the panel has to say so. -->
                         <DataGridTextColumn Header="Sample Rate" Binding="{Binding SampleRate}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="*"/>
+                        <!-- Newest row per predicate, so the rows can come from different snapshots. -->
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
