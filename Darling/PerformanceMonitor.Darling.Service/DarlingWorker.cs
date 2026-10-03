@@ -6208,8 +6208,11 @@ LIMIT 1";
     /// <summary>The newest server-scoped <c>TimeZone</c> setting of a PostgreSQL target (#4938), the zone its clock keeps.
     /// A session-scoped source (a client's own <c>TimeZone</c>) and a per-database or per-role setting do not describe the
     /// server and are left out, the rules <c>PgTargetBaselineProvider</c> reads the same row by. $1 server_id; $2 the
-    /// oldest snapshot to look at, naive UTC, which bounds the read to the newest chunks of the hypertable: a target
-    /// with no <c>pg_server_config</c> snapshot in that time has no known clock and reads as UTC.</summary>
+    /// oldest snapshot to look at, naive UTC. <see cref="TryReadServerClockAsync"/> runs it up to twice, with the bounds
+    /// <see cref="PgTargetFactCollector.ConfigSnapshotLowerBounds"/> hands the analysis side's read of the same row: the
+    /// newest day first, which lets TimescaleDB plan the day's chunks instead of every retained one, and every retained
+    /// snapshot only when that day held none. A target whose config collector has been off for a week or a season still
+    /// has the clock it last reported, and only a target with no snapshot at all has no known clock and reads as UTC.</summary>
     internal const string ReadPgServerClockSql = """
         SELECT c.setting
         FROM pg_server_config AS c
@@ -6223,10 +6226,6 @@ LIMIT 1";
         ORDER BY c.collection_time DESC
         LIMIT 1
         """;
-
-    /// <summary>How far back <see cref="ReadPgServerClockSql"/> looks for a snapshot (#4938). The config collector runs
-    /// every hour, so a week is a long stretch of missed snapshots.</summary>
-    internal static readonly TimeSpan ServerClockLookback = TimeSpan.FromDays(7);
 
     /// <summary>
     /// #4938: whether a collector's run puts a row in the store that carries its server's clock: <c>server_properties</c>
@@ -6258,16 +6257,25 @@ LIMIT 1";
             }
 
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(ReadPgServerClockSql, connection);
-            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
-            command.Parameters.AddWithValue(serverId);
-            command.Parameters.Add(new NpgsqlParameter<DateTime>
-            {
-                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow - ServerClockLookback, DateTimeKind.Unspecified),
-            });
 
-            var zone = (await command.ExecuteScalarAsync(cancellationToken)) as string;
-            return new ServerClockStamp(string.IsNullOrWhiteSpace(zone) ? ServerClock.Utc : ServerClock.Resolve(zone.Trim(), null));
+            /* The newest day first, then every retained snapshot only when that day held none: the bounds the analysis side
+               reads the same row with. The day's newest qualifying row is the newest one the unbounded read would find, so
+               the two steps cannot disagree; the first only keeps the planner off every retained chunk. A server whose
+               snapshots stopped a week ago must not read as UTC, which would move its run-time slot by its offset. */
+            foreach (var lowerBound in PgTargetFactCollector.ConfigSnapshotLowerBounds(DateTime.UtcNow))
+            {
+                using var command = new NpgsqlCommand(ReadPgServerClockSql, connection);
+                command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                command.Parameters.AddWithValue(serverId);
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = lowerBound });
+
+                if (await command.ExecuteScalarAsync(cancellationToken) is string zone && !string.IsNullOrWhiteSpace(zone))
+                {
+                    return new ServerClockStamp(ServerClock.Resolve(zone.Trim(), null));
+                }
+            }
+
+            return new ServerClockStamp(ServerClock.Utc);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
