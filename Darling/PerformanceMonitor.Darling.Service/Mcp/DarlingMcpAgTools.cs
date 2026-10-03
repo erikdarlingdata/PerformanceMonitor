@@ -38,7 +38,7 @@ public sealed class DarlingMcpAgTools
     /// one AG), the same shape as <c>get_analysis_findings</c>' <c>limit</c>. It no longer decides how many
     /// groups come back on its own: <see cref="DarlingAgReader.Build"/> fills the page most-severe-first while
     /// the SERIALIZED response stays under the shared <see cref="McpResponseBudget.DefaultBytes"/> (32 KB),
-    /// stopping before the group that would cross it (always keeping at least one group, even an oversized one).
+    /// skipping any group that would cross it (always keeping at least one group, even an oversized one, and, #5042, at least one view of each availability group first). Only this MCP path applies the budget; /api/ag passes none.
     /// A fixed count could not do that: #4471 sized 11 from a 2.7 KB/group fixture, and a real 42-group
     /// production fleet (2 replicas plus 6-14 databases per group, ~6 KB/group) measured 63,333 characters at
     /// that cap — about 2x over budget, because real groups ran more than double the fixture's assumed size.

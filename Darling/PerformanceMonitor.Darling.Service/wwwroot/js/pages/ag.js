@@ -81,7 +81,17 @@ export async function renderAg(main) {
     return;
   }
 
-  mount(main, [pageHead(d), rollup(d), ...groups.map(agCard)]);
+  mount(main, [pageHead(d), truncationNote(d), rollup(d), ...groups.map(agCard)]);
+}
+
+/* #5042: the tiles count every view in scope, so when a response says it was cut (a limit or a byte cap) the page
+   must say so too, or the tiles and the cards disagree silently. /api/ag applies no byte cap today; this guards a
+   future limit. Returns null (mount skips it) when nothing was cut. */
+function truncationNote(d) {
+  if (!d || d.groups_truncated !== true) return null;
+  return el("div", { class: "attention-note warn", role: "status" }, [
+    el("span", { text: d.groups_truncated_note || "Some availability group views are not shown." }),
+  ]);
 }
 
 function pageHead(d) {

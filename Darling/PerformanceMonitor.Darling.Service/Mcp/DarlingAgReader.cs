@@ -88,6 +88,7 @@ internal static class DarlingAgReader
         int? serverIdFilter = null,
         DateTime? nowUtc = null,
         int? limit = null,
+        int? responseByteBudget = McpResponseBudget.DefaultBytes,
         CancellationToken cancellationToken = default)
     {
         var effectiveNow = nowUtc ?? DateTime.UtcNow;
@@ -100,7 +101,7 @@ internal static class DarlingAgReader
             ? new List<DatabaseRow>()
             : await ReadDatabasesAsync(postgres, serverIdFilter, effectiveNow, cancellationToken);
 
-        return Build(replicas, databases, effectiveNow, limit);
+        return Build(replicas, databases, effectiveNow, limit, responseByteBudget);
     }
 
     /// <summary>
@@ -129,7 +130,8 @@ internal static class DarlingAgReader
         IReadOnlyList<ReplicaRow> replicas,
         IReadOnlyList<DatabaseRow> databases,
         DateTime nowUtc,
-        int? limit = null)
+        int? limit = null,
+        int? responseByteBudget = McpResponseBudget.DefaultBytes)
     {
         /* Group key is (server_id, ag_name) — one card per reporting server's view of an AG. A NULL ag_name is
            possible under quorum loss (the catalog views fall back to cached metadata); it groups under an empty
@@ -210,72 +212,102 @@ internal static class DarlingAgReader
            ONCE (its own bytes are cached, not re-derived by re-serializing the growing array), so this stays
            O(n) rather than O(n^2) on a large fleet. */
         var effectiveLimit = limit is int callerLimit ? Math.Max(0, Math.Min(callerLimit, totalGroupCount)) : totalGroupCount;
-        var candidateGroups = groups.Take(effectiveLimit).ToList();
+
+        /* #5042: when a limit or the byte budget has to cut, the cut must not hide a whole availability group.
+           The selection order is therefore ONE view per group_id first (the view where the primary is visible if
+           there is one, else the best-ranked view), then every other view in the usual most-severe-first order.
+           The page that comes back is re-sorted into the usual order, so only WHICH views survive changes. */
+        var seedIndexes = new List<int>();
+        var seedByKey = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var i = 0; i < groups.Count; i++)
+        {
+            var key = GroupKey(groups[i]);
+            if (!seedByKey.TryGetValue(key, out var current))
+            {
+                seedByKey[key] = i;
+            }
+            else if (groups[current].PrimaryReplica is null && groups[i].PrimaryReplica is not null)
+            {
+                seedByKey[key] = i;
+            }
+        }
+
+        var seedSet = new HashSet<int>(seedByKey.Values);
+        seedIndexes.AddRange(seedSet.OrderBy(i => i));
+        var selectionOrder = seedIndexes.Concat(Enumerable.Range(0, groups.Count).Where(i => !seedSet.Contains(i))).Take(effectiveLimit).ToList();
 
         /* The envelope's own bytes (everything but the availability_groups array contents) — measured ONCE off
            an empty-page shell of the real result, so the running total below only has to add each group's own
-           bytes plus its separating comma, not re-serialize the whole growing array every step. */
-        var envelopeBytes = SerializedByteCount(BuildResult(nowUtc, groups, Array.Empty<AvailabilityGroupView>(), 0, false, null));
+           bytes plus its separating comma. With no byte budget (the web page) nothing is measured. */
+        var envelopeBytes = responseByteBudget is null
+            ? 0
+            : SerializedByteCount(BuildResult(nowUtc, groups, Array.Empty<AvailabilityGroupView>(), 0, false, null));
 
-        var pagedGroups = new List<AvailabilityGroupView>();
+        var chosen = new List<int>();
         var runningBytes = envelopeBytes;
         var budgetCut = false;
 
-        for (var i = 0; i < candidateGroups.Count; i++)
+        foreach (var index in selectionOrder)
         {
-            var group = candidateGroups[i];
-            var groupBytes = SerializedByteCount(group);
-            /* Every group after the first pays a comma; the first pays none, so this slightly over-counts a
-               single-group page by one byte rather than under-counting — the safe direction for a budget. */
-            var addedBytes = groupBytes + (pagedGroups.Count == 0 ? 0 : 1);
-
-            if (pagedGroups.Count > 0 && runningBytes + addedBytes > McpResponseBudget.DefaultBytes)
+            if (responseByteBudget is int budget)
             {
-                /* Stop BEFORE the group that would cross the budget — but always keep at least 1 group, even
-                   an oversized one, so a single huge AG never reads back as an empty result. */
-                budgetCut = true;
-                break;
+                var groupBytes = SerializedByteCount(groups[index]);
+                /* Every group after the first pays a comma; the first pays none, so this slightly over-counts a
+                   single-group page by one byte rather than under-counting — the safe direction for a budget. */
+                var addedBytes = groupBytes + (chosen.Count == 0 ? 0 : 1);
+
+                if (chosen.Count > 0 && runningBytes + addedBytes > budget)
+                {
+                    /* Skip a view that would cross the budget, but keep trying: a later, smaller view may still
+                       fit. The seed views come first, so a fleet whose one-view-per-group set alone crosses the
+                       budget is cut within that set; only the first view is guaranteed, so a huge AG never reads
+                       back as an empty result. */
+                    budgetCut = true;
+                    continue;
+                }
+
+                runningBytes += addedBytes;
             }
 
-            pagedGroups.Add(group);
-            runningBytes += addedBytes;
+            chosen.Add(index);
         }
 
-        var limitCut = candidateGroups.Count < totalGroupCount;
+        List<AvailabilityGroupView> Page() => chosen.OrderBy(i => i).Select(i => groups[i]).ToList();
+
+        var limitCut = effectiveLimit < totalGroupCount;
         var groupsTruncated = budgetCut || limitCut;
 
         /* The note names the actual reason: a caller who passed a small explicit limit is not helped by being
-           told to raise it if what actually cut the page was the byte budget (or the other way around) — #4474's
-           whole point is that the two can now disagree. budgetCut wins the wording when both are true, since
-           raising limit alone would not change the outcome. */
+           told to raise it if what actually cut the page was the byte budget (or the other way around).
+           budgetCut wins the wording when both are true, since raising limit alone would not change the outcome. */
         string? BuildNote(int returnedCount) =>
             groupsTruncated
                 ? budgetCut
-                    ? $"TRUNCATED: {totalGroupCount} groups were in scope; only {returnedCount} fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget (most severe first, then by the largest lag/queue depth). Scope by server_name to see the rest."
-                    : $"TRUNCATED: {totalGroupCount} groups were in scope; only the top {returnedCount} (most severe first, then by the largest lag/queue depth) are returned. Scope by server_name, or raise limit, to see the rest."
+                    ? $"TRUNCATED: {totalGroupCount} groups were in scope; only {returnedCount} fit the {responseByteBudget:#,0}-byte response budget (at least one view of each availability group is kept first, then most severe first, then by the largest lag/queue depth). Scope by server_name to see the rest."
+                    : $"TRUNCATED: {totalGroupCount} groups were in scope; only the top {returnedCount} (at least one view of each availability group is kept first, then most severe first, then by the largest lag/queue depth) are returned. Scope by server_name, or raise limit, to see the rest."
                 : null;
 
-        var groupsTruncatedNote = BuildNote(pagedGroups.Count);
-        var result = BuildResult(nowUtc, groups, pagedGroups, totalGroupCount, groupsTruncated, groupsTruncatedNote);
+        var result = BuildResult(nowUtc, groups, Page(), totalGroupCount, groupsTruncated, BuildNote(chosen.Count));
 
-        /* The fill loop above measures each candidate group against an envelope with NO note (a null,
-           untruncated shell) — but the note itself (and the groups_truncated flag) are only known once the
-           fill decides whether it truncated, so a note that names actual byte counts can itself push the
-           final result over budget. Re-measure the REAL result — the one actually serialized and returned —
-           and drop the last group (rebuilding the note with the new, smaller count each time, since the note's
-           own text changes with the count) while it's still over budget and more than one group remains. This
-           is a tail correction only: the per-group fill above still serializes each candidate exactly once. */
-        while (SerializedByteCount(result) > McpResponseBudget.DefaultBytes && pagedGroups.Count > 1)
+        /* The fill loop measures each group against an envelope with NO note, but the note (which names byte
+           counts) is only known after the fill, so it can push the final result over budget. Re-measure the
+           REAL result and drop the last-added view (rebuilding the note each time) while it is over budget and
+           more than one view remains. Only reached when a byte budget applies. */
+        while (responseByteBudget is int finalBudget && SerializedByteCount(result) > finalBudget && chosen.Count > 1)
         {
-            pagedGroups.RemoveAt(pagedGroups.Count - 1);
+            chosen.RemoveAt(chosen.Count - 1);
             groupsTruncated = true;
             budgetCut = true;
-            groupsTruncatedNote = BuildNote(pagedGroups.Count);
-            result = BuildResult(nowUtc, groups, pagedGroups, totalGroupCount, groupsTruncated, groupsTruncatedNote);
+            result = BuildResult(nowUtc, groups, Page(), totalGroupCount, groupsTruncated, BuildNote(chosen.Count));
         }
 
         return result;
     }
+
+    /// <summary>The identity of the availability group a view belongs to: its group_id (V151) when known, else
+    /// its AG name, so the keep-one-view-per-AG rule has something to key on before the column is populated.</summary>
+    private static string GroupKey(AvailabilityGroupView group) =>
+        !string.IsNullOrWhiteSpace(group.GroupId) ? "id:" + group.GroupId : "name:" + group.AgName;
 
     /// <summary>Assembles the <see cref="AgHealthResult"/> envelope around a (possibly paged) group list —
     /// factored out of <see cref="Build"/> so the byte-budget walk above can call it with an EMPTY page to
