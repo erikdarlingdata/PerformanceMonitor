@@ -6212,7 +6212,15 @@ LIMIT 1";
                        (possibly shortened) interval so a frequency change takes effect promptly without
                        over-firing — unchanged from before. */
                     var capped = now.AddMinutes(interval);
-                    server.NextDue[name] = existing < capped ? existing : capped;
+                    /* #5033: the stamp is re-read and written under the schedule lock, so a run's record that lands
+                       between the two cannot be overwritten by the older value. */
+                    lock (server.ScheduleLock)
+                    {
+                        if (server.NextDue.TryGetValue(name, out var existingLocked))
+                        {
+                            server.NextDue[name] = existingLocked < capped ? existingLocked : capped;
+                        }
+                    }
                 }
                 else
                 {
@@ -12157,6 +12165,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                     RunTimeSlot slot = null!;
                     RunTimeStep step = default;
                     var stampGone = false;
+                    var floor = _skipCreditFloor.Floor;
                     lock (server.ScheduleLock)
                     {
                         if (!server.NextDue.TryGetValue(name, out due))
@@ -12178,7 +12187,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                                 server.RunTimeSlots[name] = slot;
                             }
 
-                            step = StepRunTimeCollector(due, now, _skipCreditFloor.Floor, interval, rule, jitter);
+                            step = StepRunTimeCollector(due, now, floor, interval, rule, jitter);
                             if (step.Action == RunTimeAction.SkipDay)
                             {
                                 server.NextDue[name] = step.NextDue;
@@ -13601,6 +13610,10 @@ LIMIT 1";
         {
             if (!server.RunTimeSlots.TryGetValue(name, out var current))
             {
+                /* No slot: a reload cleared the run time (or disabled the collector). When one edit clears the run time
+                   and also changes the frequency, this branch stamps the hand-off's old interval for one cycle. That
+                   cannot cause a second run: the reload has no handle on the in-flight hand-off, and the next reload
+                   caps the stamp to the new interval. */
                 if (server.NextDue.ContainsKey(name))
                 {
                     var interval = handOff.Slot.IntervalMinutes;

@@ -602,7 +602,7 @@ public sealed class DarlingRunTimeSchedulingTests
         Assert.Contains("RecordRunTimeHandOff(server, runtime.ServerId, collectorName, runTimeHandOff);", raw, StringComparison.Ordinal);
         Assert.DoesNotContain("server.RunTimeSlots[collectorName] = runTimeHandOff.Slot with", raw, StringComparison.Ordinal);
 
-        var access = new System.Text.RegularExpressions.Regex(@"RunTimeSlots(\[|\.TryRemove\(|\.TryGetValue\()");
+        var access = new System.Text.RegularExpressions.Regex(@"RunTimeSlots(\.\w+\(|\[)");
         var offenders = new List<string>();
         var checkedCount = 0;
         for (var i = 0; i < lines.Length; i++)
@@ -621,6 +621,37 @@ public sealed class DarlingRunTimeSchedulingTests
 
         Assert.True(checkedCount >= 15, $"expected to find the worker's RunTimeSlots accesses, found {checkedCount}");
         Assert.True(offenders.Count == 0, "RunTimeSlots touched outside lock (server.ScheduleLock): " + string.Join("; ", offenders));
+
+        /* The same rule for the stamp map. Each unlocked site below is matched by a text anchor and is
+           deliberate: none of them is a read-modify-write of a run-time collector's schedule. */
+        var unlockedNextDue = new (string Anchor, string Reason)[]
+        {
+            ("server.NextDue[collectorName] = DateTime.UtcNow;", "paused re-read after the permit wait: a blind 'run when unpaused' stamp"),
+            ("state.NextDue.Clear();", "reconnect epoch reset: clears stamps only, never touches the slots"),
+            ("server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);", "grid advance for collectors without a run time"),
+            ("if (server.NextDue.TryGetValue(name, out var existing))", "reload's branch-choice read; every write it leads to re-reads the stamp under the lock"),
+            ("|| !server.NextDue.TryGetValue(name, out var due))", "sweep's pre-filter read; the run-time branch re-reads the stamp under the lock"),
+        };
+        var stampAccess = new System.Text.RegularExpressions.Regex(@"\bNextDue(\.\w+\(|\[)");
+        var stampOffenders = new List<string>();
+        var stampChecked = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!stampAccess.IsMatch(lines[i]))
+            {
+                continue;
+            }
+
+            stampChecked++;
+            if (!IsInsideScheduleLock(lines, i)
+                && !System.Linq.Enumerable.Any(unlockedNextDue, e => lines[i].Contains(e.Anchor, StringComparison.Ordinal)))
+            {
+                stampOffenders.Add($"line {i + 1}: {lines[i].Trim()}");
+            }
+        }
+
+        Assert.True(stampChecked >= 10, $"expected to find the worker's NextDue accesses, found {stampChecked}");
+        Assert.True(stampOffenders.Count == 0, "NextDue touched outside lock (server.ScheduleLock) and not allow-listed: " + string.Join("; ", stampOffenders));
 
         for (var i = 0; i < lines.Length; i++)
         {
