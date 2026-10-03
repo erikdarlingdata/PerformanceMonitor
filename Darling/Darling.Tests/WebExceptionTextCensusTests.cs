@@ -92,6 +92,26 @@ public sealed class WebExceptionTextCensusTests
             "timeout answers with; the exception's text is never read or returned."
         ),
         (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "base(inner.Message, inner)",
+            "The statement-phase timeout marker (#4605) carries the original message for the log; ServerErrorResult reclassifies the sentence before a browser sees it."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "{marker.InnerException!.Message}",
+            "FromRunException on the MCP path (#4605): the same ServerError sentence shape as above, built from the original timeout message; the web route never reaches this arm."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "ex.Message.StartsWith(",
+            "FromRunException (#4605): a type-and-prefix check that only picks WHICH sentence a pool or connect timeout answers with."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "in time: {ex.Message}",
+            "A pool-wait or connect timeout (#4605): the ServerError sentence names the cause and is logged at Error; the web route answers a fixed message through ServerErrorResult, never this text."
+        ),
+        (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingWebOidc.cs"),
             "return new ExchangeResult(null, ex.Message);",
             "Traced (#4283): ExchangeResult.Error's only reader is DarlingWebHostService's sign-in callback, " +
