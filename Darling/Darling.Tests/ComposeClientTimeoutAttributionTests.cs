@@ -174,7 +174,8 @@ public class ComposeClientTimeoutAttributionTests
         Assert.Contains("RunAnnotationsAsync(postgres, plan!, runContext, clientSeconds,", code, StringComparison.Ordinal);
         Assert.Equal(2, Regex.Matches(code, Regex.Escape("command.CommandTimeout = clientDeadlineSeconds;")).Count);
         Assert.DoesNotContain("command.CommandTimeout = composedQuerySeconds;", code, StringComparison.Ordinal);
-        Assert.DoesNotContain("composedQuerySeconds, cancellationToken", code.Replace("var composedQuerySeconds = await", string.Empty), StringComparison.Ordinal);
+        Assert.DoesNotContain("RunComposedQueryAsync(postgres, compiled!, composedQuerySeconds", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("RunAnnotationsAsync(postgres, plan!, runContext, composedQuerySeconds", code, StringComparison.Ordinal);
     }
 
     private static string MethodBody(string code, string signature)
