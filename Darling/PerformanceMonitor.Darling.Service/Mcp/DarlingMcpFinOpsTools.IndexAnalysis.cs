@@ -26,7 +26,7 @@ public sealed partial class DarlingMcpFinOpsTools
         "index_analysis: index cleanup findings and reclaimable space.";
 
     internal const string IndexAnalysisViewGuide =
-        "index_analysis runs the monitor-side sp_IndexCleanup reproduction over the latest collected index snapshot; hours_back other than 24 is refused. overall and databases are the reclaimable-space roll-ups in GB (3 decimals); workload counters are per database only. recommendations is ordered by index size, then name; limit caps it, recommendation_count and counts_by_action count all findings, and truncated says when rows were cut. database_name filters to one database. script and original_index_definition are cut to 300 characters unless full_text=true; the *_truncated flags say so. notes carries the uptime and dedupe-only caveats and the analyzer's stated limitations. REVIEW rows carry no script. Text numbers use the invariant culture.";
+        "index_analysis runs the monitor-side sp_IndexCleanup reproduction over the latest collected index snapshot; hours_back other than 24 is refused. overall and databases are the reclaimable-space roll-ups in GB (3 decimals); workload counters are per database only. recommendations is ordered by index size, then name; limit caps it, recommendation_count and counts_by_action count all findings, and truncated says when rows were cut. databases lists at most 13, largest total_max_savings_gb first, and databases_truncated says when more exist; database_name reads any database, including one outside those 13. script and original_index_definition are cut to 300 characters unless full_text=true, which returns them in full with no size cap; the *_truncated flags say so. notes carries the uptime and dedupe-only caveats and the analyzer's stated limitations. REVIEW rows carry no script. Text numbers use the invariant culture.";
 
     /// <summary>The longest <c>script</c> or <c>original_index_definition</c> text kept when <c>full_text</c> is false.</summary>
     internal const int IndexAnalysisTextCap = 300;
@@ -34,10 +34,10 @@ public sealed partial class DarlingMcpFinOpsTools
     /// <summary>The fixed ceiling on <c>databases</c>: the largest count whose default response (ten full-length recommendations, every note, maximum-width figures and 60-character names) stays under 30,720 bytes.</summary>
     internal const int MaxIndexAnalysisDatabases = 13;
 
-    private const string IndexAnalysisUptimeNote =
+    internal const string IndexAnalysisUptimeNote =
         "Server uptime is under 14 days — index usage data may be incomplete, so some \"Unused Index\" findings could be premature.";
 
-    private const string IndexAnalysisDedupeNote =
+    internal const string IndexAnalysisDedupeNote =
         "Dedupe-only mode is in effect — unused indexes were NOT flagged (server uptime is 7 days or less). Only duplicate/consolidation and compression findings are shown.";
 
     private static readonly string[] IndexAnalysisActions = ["COMPRESS", "DISABLE", "DROP CONSTRAINT", "MAKE UNIQUE", "MERGE", "REVIEW"];
@@ -57,10 +57,14 @@ public sealed partial class DarlingMcpFinOpsTools
     internal static (string Text, bool Truncated) TruncateIndexAnalysisText(string? text, int cap)
     {
         if (text == null) return ("", false);
-        return text.Length > cap ? (text[..cap] + "…", true) : (text, false);
+        return text.Length > cap ? (text[..McpHelpers.TextElementCutLength(text, cap)] + "…", true) : (text, false);
     }
 
-    /// <summary>The recommendation ordering: size, then the full name chain, so a cut never depends on analyzer order.</summary>
+    /// <summary>Treats an empty or whitespace-only <c>database_name</c> as no filter.</summary>
+    internal static string? NormalizeIndexAnalysisDatabaseName(string? databaseName) =>
+        string.IsNullOrWhiteSpace(databaseName) ? null : databaseName;
+
+    /// <summary>The recommendation ordering: size, then the full name chain, action label, consolidation rule (nulls first) and index id, so a cut never depends on analyzer order.</summary>
     internal static List<IndexCleanupRecommendation> OrderIndexAnalysisRecommendations(IEnumerable<IndexCleanupRecommendation> rows) =>
         rows.OrderByDescending(r => r.IndexSizeGb)
             .ThenBy(r => r.DatabaseName, StringComparer.Ordinal)
@@ -68,6 +72,7 @@ public sealed partial class DarlingMcpFinOpsTools
             .ThenBy(r => r.TableName, StringComparer.Ordinal)
             .ThenBy(r => r.IndexName, StringComparer.Ordinal)
             .ThenBy(r => DarlingFinOpsIndexAnalysisReader.ActionLabelFor(r.Action, r.ResultKind), StringComparer.Ordinal)
+            .ThenBy(r => r.ConsolidationRule ?? "", StringComparer.Ordinal)
             .ThenBy(r => r.IndexId)
             .ToList();
 
@@ -180,6 +185,7 @@ public sealed partial class DarlingMcpFinOpsTools
                 ?? McpHelpers.Status("empty", "No index statistics were collected for this server yet, so there is no index analysis.");
         }
 
+        databaseName = NormalizeIndexAnalysisDatabaseName(databaseName);
         var filtered = databaseName != null;
         var rollups = filtered
             ? result.DatabaseRollups.Where(r => string.Equals(r.DatabaseName, databaseName, StringComparison.OrdinalIgnoreCase)).ToList()
@@ -217,7 +223,7 @@ public sealed partial class DarlingMcpFinOpsTools
             dedupe_only_applied = result.DedupeOnlyApplied,
             notes,
             overall = filtered ? null : IndexAnalysisRollupRow(result.OverallRollup, false),
-            overall_workload_reason = "workload counters are reported per database only, as sp_IndexCleanup does",
+            overall_workload_reason = filtered ? null : "workload counters are reported per database only, as sp_IndexCleanup does",
             database_count = dbs.Count,
             databases_truncated = dbs.Count > MaxIndexAnalysisDatabases,
             databases = dbs.Take(MaxIndexAnalysisDatabases).Select(d => IndexAnalysisRollupRow(d, true)).ToList(),

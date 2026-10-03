@@ -19,10 +19,10 @@ namespace Darling.Tests;
 public sealed class FinOpsIndexAnalysisViewTests
 {
     private static IndexCleanupRecommendation Rec(string index, decimal gb = 1m, string db = "d", int id = 2,
-        IndexCleanupResultKind kind = IndexCleanupResultKind.Disable, string script = "S", string def = "D") => new()
+        IndexCleanupResultKind kind = IndexCleanupResultKind.Disable, string script = "S", string def = "D", string? rule = null) => new()
     {
         DatabaseName = db, SchemaName = "dbo", TableName = "t", IndexName = index, IndexId = id,
-        ResultKind = kind, Action = IndexCleanupAction.Disable, IndexSizeGb = gb, Script = script, OriginalIndexDefinition = def,
+        ResultKind = kind, Action = IndexCleanupAction.Disable, IndexSizeGb = gb, Script = script, OriginalIndexDefinition = def, ConsolidationRule = rule,
     };
 
     private static IndexCleanupRollup Roll(string? db, decimal max = 1m) => new() { DatabaseName = db, TotalMaxSavingsGb = max };
@@ -41,6 +41,62 @@ public sealed class FinOpsIndexAnalysisViewTests
         Assert.True(over.Truncated);
         Assert.Equal(new string('x', 300) + "…", over.Text);
         Assert.Equal(("", false), DarlingMcpFinOpsTools.TruncateIndexAnalysisText(null, cap));
+    }
+
+    [Fact]
+    public void TruncateText_NeverSplitsASurrogatePair_AtTheCap()
+    {
+        var text = new string('x', 299) + "\U0001F600" + new string('y', 20);
+        Assert.True(char.IsHighSurrogate(text[299]));
+        var (cut, truncated) = DarlingMcpFinOpsTools.TruncateIndexAnalysisText(text, 300);
+        Assert.True(truncated);
+        Assert.Equal(new string('x', 299) + "…", cut);
+        var json = JsonSerializer.Serialize(cut);
+        Assert.DoesNotContain('\uFFFD', json);
+        Assert.DoesNotContain("\\ud83d", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RecommendationOrder_TwoReviewRowsOnOneIndex_OrderByConsolidationRule_NullsFirst()
+    {
+        var a = Rec("i", kind: IndexCleanupResultKind.Review, rule: "Reverse Duplicate");
+        var b = Rec("i", kind: IndexCleanupResultKind.Review, rule: "Equal Except Filter");
+        var c = Rec("i", kind: IndexCleanupResultKind.Review);
+        foreach (var input in new[] { new[] { a, b, c }, new[] { c, b, a }, new[] { b, a, c } })
+        {
+            var ordered = DarlingMcpFinOpsTools.OrderIndexAnalysisRecommendations(input);
+            Assert.Equal(new string?[] { null, "Equal Except Filter", "Reverse Duplicate" }, ordered.Select(r => r.ConsolidationRule).ToArray());
+        }
+    }
+
+    [Fact]
+    public void DatabaseName_EmptyOrWhitespace_IsNoFilter_AndTheWorkloadReasonFollowsOverall()
+    {
+        Assert.Null(DarlingMcpFinOpsTools.NormalizeIndexAnalysisDatabaseName(""));
+        Assert.Null(DarlingMcpFinOpsTools.NormalizeIndexAnalysisDatabaseName("  "));
+        Assert.Equal("d", DarlingMcpFinOpsTools.NormalizeIndexAnalysisDatabaseName("d"));
+        var r = new IndexCleanupAnalysisResult { DatabaseRollups = [Roll("d")], Recommendations = [Rec("a")] };
+        var blank = Build(r, db: " ");
+        Assert.NotEqual(JsonValueKind.Null, blank.GetProperty("overall").ValueKind);
+        Assert.Equal(JsonValueKind.Null, blank.GetProperty("database_name").ValueKind);
+        Assert.NotEqual(JsonValueKind.Null, blank.GetProperty("overall_workload_reason").ValueKind);
+        var one = Build(r, db: "d");
+        Assert.Equal(JsonValueKind.Null, one.GetProperty("overall").ValueKind);
+        Assert.Equal(JsonValueKind.Null, one.GetProperty("overall_workload_reason").ValueKind);
+        Assert.Null(DarlingMcpFinOpsTools.IndexAnalysisOnlyParamMisuse("utilization", DarlingMcpFinOpsTools.NormalizeIndexAnalysisDatabaseName(""), false));
+        var tool = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.cs").ReplaceLineEndings("\n");
+        Assert.True(tool.IndexOf("database_name = NormalizeIndexAnalysisDatabaseName(database_name);", StringComparison.Ordinal)
+            < tool.IndexOf("IndexAnalysisOnlyParamMisuse(normalized", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Guide_NamesTheDatabaseCap_AndTheUnboundedFullText()
+    {
+        var guide = DarlingMcpFinOpsTools.IndexAnalysisViewGuide;
+        Assert.Contains($"at most {DarlingMcpFinOpsTools.MaxIndexAnalysisDatabases}", guide, StringComparison.Ordinal);
+        Assert.Contains("databases_truncated", guide, StringComparison.Ordinal);
+        Assert.Contains($"outside those {DarlingMcpFinOpsTools.MaxIndexAnalysisDatabases}", guide, StringComparison.Ordinal);
+        Assert.Contains("in full with no size cap", guide, StringComparison.Ordinal);
     }
 
     [Fact]

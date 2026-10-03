@@ -98,6 +98,7 @@ public sealed partial class DarlingMcpFinOpsTools
         if (limit < 1 || limit > MaxLimit)
             return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {MaxLimit}.");
 
+        database_name = NormalizeIndexAnalysisDatabaseName(database_name);
         var misuse = IndexAnalysisOnlyParamMisuse(normalized, database_name, full_text);
         if (misuse is { } m) return McpHelpers.Refusal(m.Parameter, m.Message);
 

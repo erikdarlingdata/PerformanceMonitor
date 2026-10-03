@@ -17,7 +17,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Size pin for the default <c>index_analysis</c> response, built from hand-made rows and no store: ten
-/// recommendations whose script and definition both hit the 300-character cap, fifty databases with long names, both
+/// recommendations whose script and definition both hit the 300-character cap, more databases than the cap, with long names (the cap keeps 13 serialized), both
 /// caveat notes and the analyzer's full note list. The body must fit the default MCP response budget with headroom.
 /// </summary>
 public sealed class FinOpsIndexAnalysisViewSizeTests
@@ -26,7 +26,7 @@ public sealed class FinOpsIndexAnalysisViewSizeTests
 
     private static string Long(string stem, int length) => (stem + new string('x', length))[..length];
 
-    private static IndexCleanupAnalysisResult WorstDefaultResult(int databases, int recommendations)
+    private static IndexCleanupAnalysisResult WorstDefaultResult(int databases, int recommendations, int textLength = 400)
     {
         var rollups = Enumerable.Range(0, databases).Select(i => new IndexCleanupRollup
         {
@@ -45,7 +45,7 @@ public sealed class FinOpsIndexAnalysisViewSizeTests
             Action = IndexCleanupAction.Disable, ResultKind = IndexCleanupResultKind.Merge,
             ConsolidationRule = "Key Duplicate", TargetIndexName = Long("IX_target_", 60), SupersededBy = Long("IX_super_", 60),
             MissingIncludedColumns = Long("[col_a], [col_b], ", 120), AdditionalInfo = Long("Exact duplicate of ", 120),
-            Script = Long("CREATE INDEX ", 400), OriginalIndexDefinition = Long("CREATE NONCLUSTERED INDEX ", 400),
+            Script = Long("CREATE INDEX ", textLength), OriginalIndexDefinition = Long("CREATE NONCLUSTERED INDEX ", textLength),
             IndexSizeGb = 1234.5675m, IndexRows = 123456789012, IndexReads = 123456789012, IndexWrites = 123456789012,
             CanCompress = true, IsForeignKey = true, ScriptOmitsPartitionPlacement = true,
         }).ToList();
@@ -62,12 +62,24 @@ public sealed class FinOpsIndexAnalysisViewSizeTests
     private static int Bytes(string json) => Encoding.UTF8.GetByteCount(json);
 
     [Fact]
-    public void DefaultResponse_WithTenFullLengthRecommendationsAndFiftyDatabases_FitsTheResponseBudget()
+    public void DefaultResponse_WithTenFullLengthRecommendationsAndTheDatabaseCap_FitsTheResponseBudget()
     {
         var json = DarlingMcpFinOpsTools.BuildIndexAnalysisPayload("server", WorstDefaultResult(DarlingMcpFinOpsTools.MaxIndexAnalysisDatabases + 37, 10), 10, null, false, null);
 
-                Assert.True(Bytes(json) <= HeadroomBytes, $"default body is {Bytes(json)} bytes");
+        Assert.True(Bytes(json) <= HeadroomBytes, $"default body is {Bytes(json)} bytes");
         Assert.True(HeadroomBytes <= McpResponseBudget.DefaultBytes);
+    }
+
+    [Fact]
+    public void FullText_WithFiftyRecommendations_ReportsItsSizeAndAssertsNoBudget()
+    {
+        var result = WorstDefaultResult(3, 50, 4000);
+        var json = DarlingMcpFinOpsTools.BuildIndexAnalysisPayload("server", result, 50, null, true, null);
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+
+        /* full_text is documented as unbounded; the size is reported, not asserted against the budget. */
+        Console.WriteLine($"full_text 50-recommendation body: {Bytes(json)} bytes");
+        Assert.Equal(50, doc.RootElement.GetProperty("recommendations").GetArrayLength());
     }
 
     [Fact]

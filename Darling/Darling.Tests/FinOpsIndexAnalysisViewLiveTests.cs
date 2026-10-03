@@ -128,6 +128,35 @@ public sealed class FinOpsIndexAnalysisViewLiveTests
     }
 
     [Fact]
+    public void NoteConstants_EqualTheViewersBannerStrings()
+    {
+        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.IndexAnalysis.cs").ReplaceLineEndings("\n");
+        Assert.Contains("\"" + DarlingMcpFinOpsTools.IndexAnalysisUptimeNote.Replace("\"", "\\\"") + "\"", viewer, StringComparison.Ordinal);
+        Assert.Contains("\"" + DarlingMcpFinOpsTools.IndexAnalysisDedupeNote + "\"", viewer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SeededRecommendations_CarryTheLiteralFieldValues()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live index_analysis view test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs!, ct);
+        await using var pg = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var doc = await ToolAsync(pg, ServerNameC, limit: 50, db: "tenant_alpha", ct: ct);
+        var rows = doc.RootElement.GetProperty("recommendations").EnumerateArray().ToList();
+        /* Ordered by size: the 118 MB duplicate (0.115 GB) precedes the 64 MB unused index (0.063 GB). */
+        Assert.Equal(new[] { "IX_Orders_Cust_Dup", "IX_Orders_Unused" }, rows.Select(r => r.GetProperty("index_name").GetString()).ToArray());
+        var dup = rows[0];
+        Assert.Equal("DISABLE", dup.GetProperty("action").GetString());
+        Assert.Equal(3, dup.GetProperty("index_id").GetInt32());
+        Assert.Equal(0.115m, dup.GetProperty("index_size_gb").GetDecimal());
+        Assert.Equal(51000, dup.GetProperty("index_rows").GetInt64());
+        Assert.StartsWith("ALTER INDEX [IX_Orders_Cust_Dup] ON [tenant_alpha].[dbo].", dup.GetProperty("script").GetString(), StringComparison.Ordinal);
+        Assert.Equal(0.063m, rows[1].GetProperty("index_size_gb").GetDecimal());
+    }
+
+    [Fact]
     public async Task HandPinnedFigures_AreRoundedAndAveragedAsDocumented()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live index_analysis view test.");
