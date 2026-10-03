@@ -22,7 +22,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #4972: the legacy-row check (<see cref="QueryStoreIntervalWide.HasLegacyRowSql"/>, clause 6 of
-/// <c>ReadsTableAsync</c>) gets an index-only path from the partial index
+/// <c>ReadsTableAsync</c>) gets an index read of the partial index
 /// <see cref="PgTableTuning.LegacyRowIndexName"/>, which the start-path tuning pass builds. Own scratch
 /// database per test.
 /// </summary>
@@ -36,8 +36,8 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
 
     /// <summary>
     /// Two servers' interval-stamped rows over three days, the older chunks compressed where TimescaleDB is
-    /// present. The shipped check, EXPLAINed with its real bound parameter types, reads an Index Only Scan on
-    /// the partial index for every uncompressed chunk and never filters a heap scan on the NULL test; and it
+    /// present. The shipped check, EXPLAINed with its real bound parameter types, reads the partial index
+    /// (Index Only Scan, Index Scan or Bitmap Index Scan) for every uncompressed chunk and never filters a heap scan on the NULL test; and it
     /// answers false until a NULL-start row lands for one server.
     /// </summary>
     [Fact]
@@ -179,18 +179,23 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
             && !n.Label.Contains("_compressed", StringComparison.Ordinal)).ToList();
         Assert.NotEmpty(scans);
 
-        var indexOnly = scans.Where(n => n.Label.StartsWith("Index Only Scan using ", StringComparison.Ordinal)).ToList();
-        Assert.NotEmpty(indexOnly);
-        foreach (var scan in indexOnly)
-        {
-            Assert.Contains(PgTableTuning.LegacyRowIndexName, scan.Label, StringComparison.Ordinal);
-        }
+        /* Which index read the planner picks depends on visibility-map state and the platform; any read of
+           the partial index is the fix. A Bitmap Heap Scan counts when its child is a Bitmap Index Scan on it. */
+        var idx = PgTableTuning.LegacyRowIndexName;
+        /* Chunk indexes are renamed with the chunk's prefix, so the label carries the name, not starts with it. */
+        var indexReads = scans.Where(n => n.Label.Contains(idx, StringComparison.Ordinal)
+            && (n.Label.StartsWith("Index Only Scan using ", StringComparison.Ordinal)
+                || n.Label.StartsWith("Index Scan using ", StringComparison.Ordinal)
+                || n.Label.StartsWith("Bitmap Index Scan on ", StringComparison.Ordinal))).ToList();
+        Assert.NotEmpty(indexReads);
 
         foreach (var scan in scans)
         {
             var columnar = scan.Label.Contains("ColumnarScan", StringComparison.Ordinal);
-            var isIndexOnly = scan.Label.StartsWith("Index Only Scan using ", StringComparison.Ordinal);
-            Assert.True(columnar || isIndexOnly, "a chunk is read by a heap scan instead of the partial index:\n" + plan);
+            var isIndexRead = indexReads.Contains(scan);
+            var isBitmapHeap = scan.Label.StartsWith("Bitmap Heap Scan on ", StringComparison.Ordinal)
+                && IsFollowedByBitmapIndexScan(nodes, scan, idx);
+            Assert.True(columnar || isIndexRead || isBitmapHeap, "a chunk is read by a heap scan instead of the partial index:\n" + plan);
             /* A row Filter carrying the NULL test is the heap-filtered shape this index replaces. The columnar
                scan's vectorized filter is a different line label and is fine. */
             Assert.DoesNotContain(scan.Details, d => d.StartsWith("Filter:", StringComparison.Ordinal)
@@ -201,6 +206,14 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
         {
             Assert.Contains(scans, n => n.Label.Contains("ColumnarScan", StringComparison.Ordinal));
         }
+    }
+
+    private static bool IsFollowedByBitmapIndexScan(List<(string Label, List<string> Details)> nodes, (string Label, List<string> Details) heap, string idx)
+    {
+        var at = nodes.IndexOf(heap);
+        return at >= 0 && at + 1 < nodes.Count
+            && nodes[at + 1].Label.StartsWith("Bitmap Index Scan on ", StringComparison.Ordinal)
+            && nodes[at + 1].Label.Contains(idx, StringComparison.Ordinal);
     }
 
     private static async Task<int> CompressOlderChunksAsync(NpgsqlConnection connection, CancellationToken ct)

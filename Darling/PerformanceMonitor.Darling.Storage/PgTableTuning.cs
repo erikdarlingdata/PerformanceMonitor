@@ -309,7 +309,7 @@ public static class PgTableTuning
            On a field store it holds none, and with only the (server_id, collection_time) index that "no" costs
            a fetch of every heap tuple the window touches: 4.1 s and 6.8 M blocks per call on the largest store
            measured (#4969). The read stays exact, because the collector can still store a NULL start when the
-           catalog join misses, so the statement is unchanged and this index gives it an index-only path.
+           catalog join misses, so the statement is unchanged and this index gives it an index read of a near-empty tree.
 
            WHAT IT HOLDS: only rows WHERE interval_start_time_utc IS NULL. On a field store that is nothing, so
            the index costs near-zero writes and WAL (contrast the random-key WAL that #4247 removed from the
@@ -323,14 +323,25 @@ public static class PgTableTuning
            COMPRESSED CHUNKS: CREATE INDEX on the hypertable builds one index per chunk from that chunk's own
            heap, so each compressed chunk gets an empty 8 KB index and the compressed relations get none. The
            check reads those chunks through the columnar scan on the compressed chunk's server_id segmentby
-           index, with the NULL test as a vectorized filter (a few buffers). Uncompressed chunks use an Index
-           Only Scan on this index with no heap fetches, where the plan was the (server_id, collection_time)
-           index scan with the NULL test as a row Filter. On a local TimescaleDB 2.30.1 rig, EXPLAIN of the check
-           changed from that heap-filtered scan to the index-only form on every uncompressed chunk
-           (QueryStoreLegacyRowIndexLiveTests holds the plan).
+           index, with the NULL test as a vectorized filter (a few buffers). Uncompressed chunks take an index
+           scan of this index, which is empty on a field store, so 1-2 buffers per chunk. Before, they took a
+           scan of the (server_id, collection_time) index with a heap fetch per row to test the NULL filter.
+           QueryStoreLegacyRowIndexLiveTests holds the plan. Measured on a local TimescaleDB 2.30.1 rig with
+           the real schema (4 servers x 4 daily chunks x 855,360 rows per server per day, 585 B per row, the
+           2 oldest chunks compressed and the 2 newest uncompressed at 2.0 GB of heap each), one server,
+           bound parameters, median of 3:
+             24 h:  255-359 ms -> 0.043 ms
+             168 h: 1.7-3.0 s (126-138 k buffers) -> 5.9 ms (~7.1 k buffers, all in the compressed chunks'
+                    columnar scans, which this index does not change).
+           As a prepared statement, the check's sixth execution switches to a generic plan with no chunk
+           pruning: 57-76 s at 168 h without the index, 6.2 ms with it. The product does not prepare it today.
 
-           THE BUILD'S COST: one read of every uncompressed chunk's heap, under SetupTimeoutSeconds. A build
-           that runs out the clock is abandoned and retried at the next start; the hourly pass never builds it. */
+           THE BUILD'S COST: one read of every uncompressed chunk's heap, under SetupTimeoutSeconds. On that
+           rig, 4.0 GB of uncompressed heap built in 0.59-0.66 s warm with the default 2 parallel maintenance
+           workers and 1.33 s with none; a serial scan of the same heaps takes 1.21-1.33 s, so the build costs
+           about half a serial scan of the uncompressed heaps. Compressed and empty chunks get an 8 KB index,
+           and NULL-start rows cost about 35 B each. A build that runs out the clock is abandoned and retried
+           at the next start; the hourly pass never builds it. */
         "CREATE INDEX IF NOT EXISTS " + LegacyRowIndexName + " ON collect.query_store_stats (server_id, collection_time) WHERE interval_start_time_utc IS NULL",
         "ALTER TABLE collect.procedure_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_stats SET (" + InsertTuningOptions + ")",
