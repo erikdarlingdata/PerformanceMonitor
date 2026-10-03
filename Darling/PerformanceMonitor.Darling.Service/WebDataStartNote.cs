@@ -32,19 +32,22 @@ namespace PerformanceMonitor.Darling.Service;
 /// so no tool's payload changes. A read the tool already answers with <c>window_truncated</c> (the Queries tab's
 /// grids) is left as the tool wrote it.</para>
 ///
-/// <para><b>Which reads.</b> Only a grid over one collector table whose rows are stamped with the collection time:
-/// <see cref="TableByRead"/>. A chart whose time axis spans the asked range already shows the empty span, a read of
+/// <para><b>Which reads.</b> Only a grid over one collector table whose rows are stamped with the collection time, the
+/// change histories over the config snapshot tables they diff, or the collection log: <see cref="TableByRead"/>. A chart whose time axis spans the asked range already shows the empty span, a read of
 /// the newest snapshot has no window to cut, and an event surface (blocked process reports, deadlocks, system health
 /// events, the default trace) filters on the event's own time, which can reach before the first collection, so a
 /// coverage start could name a time later than the history it shows. Those are not in this list.</para>
 ///
-/// <para><b>A capped list.</b> One listed read is a LIST over time, newest first, under a row cap:
-/// <c>get_waiting_tasks</c> (<see cref="NewestFirstCappedReads"/>). When it hits its cap the grid ends at the oldest
-/// row the read returned, whatever the store covers, so the note names that row (<c>effective_start</c> is
-/// <c>oldest_returned_collection_time</c>, and the text says the grid shows the newest rows back to it). The answer
-/// already carries the time, so this asks the store nothing. The other eight reads keep the coverage rule: seven
-/// are aggregates over the whole window, whose cap keeps the top rows and hides no time range, and
-/// <c>get_pg_predicate_stats</c> is a list ranked by something other than time.</para>
+/// <para><b>A capped list.</b> Three listed reads are LISTS over time, newest first, under a row cap:
+/// <c>get_waiting_tasks</c>, <c>get_collection_log</c> and <c>get_pg_server_config_changes</c>
+/// (<see cref="NewestFirstCappedReads"/>). When one hits its cap the grid ends at the oldest row the read returned,
+/// whatever the store covers, so the note names that row (<c>effective_start</c> is the answer's
+/// <c>oldest_returned_collection_time</c>, or for the configuration changes the earliest <c>changed_at</c> on the page,
+/// and the text says the grid shows the newest rows back to it). The answer already carries the time, so this asks the
+/// store nothing. The collection log keeps the coverage rule when a duration floor ranks its page slowest first, as it
+/// is then a sample of the whole window. The other reads keep the coverage rule: aggregates over the whole window,
+/// whose cap keeps the top rows and hides no time range; <c>get_pg_predicate_stats</c>, a list ranked by something
+/// other than time; and the SQL Server change histories, which carry no cap.</para>
 ///
 /// <para><b>The instants as fields.</b> The note's sentence names its times in UTC. The page prints every time in the
 /// browser's zone, so the answer also carries the instants (<see cref="DataStartField"/> or
