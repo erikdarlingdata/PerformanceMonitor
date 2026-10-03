@@ -517,7 +517,7 @@ public class ScheduleManager
                     if (ResolveRunAtMinute(serverId, s, intervalMinutes) is not null)
                         continue;
 
-                    if (intervalMinutes >= DailyIntervalMinutes && !IsDue(serverId, s, runState, atUtc))
+                    if (IsDailyOrLonger(intervalMinutes) && !IsDue(serverId, s, runState, atUtc))
                         continue;
                 }
 
@@ -529,6 +529,14 @@ public class ScheduleManager
     }
 
     private const int DailyIntervalMinutes = 1440;
+
+    /// <summary>
+    /// #4938: the one rule for a daily-or-longer collector: an effective interval of a day or more, whole days or not.
+    /// The tab-open selection, the start-up read of last runs and a failed attempt all ask it, so a collector one of
+    /// them counts is a collector all of them count. It is not <see cref="CollectorRunTime.AllowsRunAt"/>, which is
+    /// narrower on purpose: a run time needs a whole number of days, and a 2000-minute collector has none to set.
+    /// </summary>
+    internal static bool IsDailyOrLonger(int effectiveIntervalMinutes) => effectiveIntervalMinutes >= DailyIntervalMinutes;
 
     /// <summary>
     /// #4938: the enabled collectors whose effective interval is a day or more (the on-load ones recur daily), with
@@ -546,7 +554,7 @@ public class ScheduleManager
             foreach (var s in schedules.Where(s => s.Enabled))
             {
                 var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(s.FrequencyMinutes);
-                if (intervalMinutes >= DailyIntervalMinutes)
+                if (IsDailyOrLonger(intervalMinutes))
                 {
                     daily[s.Name] = intervalMinutes;
                 }
@@ -648,12 +656,13 @@ public class ScheduleManager
 
     /// <summary>
     /// #4938: records an attempt that did not succeed (an error, a denied permission, a declined sign-in, a lock yield)
-    /// as the run of a daily-or-longer collector (an effective interval of a whole number of days), with or without a
-    /// run time. The attempt wrote its collection_log row, and the start-up read counts every row as the last run whatever
-    /// its status, so the session counts it too: a collector that keeps failing runs once, not on every sweep, and is due
-    /// again an interval after the attempt (with a run time, inside the 60-minute hour that follows its next time). A
-    /// collector that runs more often than that, one the schedule does not list, and one that is switched off are left
-    /// alone: they stay due on the next sweep, as before.
+    /// as the run of a daily-or-longer collector (an effective interval of a day or more, whole days or not, by
+    /// <see cref="IsDailyOrLonger"/>: the rule the start-up read uses), with or without a run time. The attempt wrote its
+    /// collection_log row, and the start-up read counts every row as the last run whatever its status, so the session
+    /// counts it too: a collector that keeps failing runs once, not on every sweep, and is due again an interval after
+    /// the attempt (with a run time, inside the 60-minute hour that follows its next time). A collector that runs more
+    /// often than that, one the schedule does not list, and one that is switched off are left alone: they stay due on
+    /// the next sweep, as before.
     /// </summary>
     public void MarkCollectorAttemptForServer(string serverId, string collectorName, DateTime attemptTime)
     {
@@ -667,7 +676,7 @@ public class ScheduleManager
                 s.Name.Equals(collectorName, StringComparison.OrdinalIgnoreCase));
             if (schedule is null
                 || !schedule.Enabled
-                || !CollectorRunTime.AllowsRunAt(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)))
+                || !IsDailyOrLonger(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)))
             {
                 return;
             }

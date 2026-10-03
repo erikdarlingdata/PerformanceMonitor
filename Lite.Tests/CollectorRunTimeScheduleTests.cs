@@ -191,10 +191,55 @@ public sealed class CollectorRunTimeScheduleTests : IDisposable
             Assert.Empty(Due(weekly, attemptAt + TimeSpan.FromDays(3)));
         }
 
-        /* An interval that is not a whole number of days is not a daily one: its attempt changes nothing. */
-        var odd = Manager(runAt: null, frequency: 2000, clock: Eastern);
-        odd.MarkCollectorAttemptForServer(ServerKey, Daily, attemptAt);
-        Assert.Equal(new[] { Daily }, Due(odd, attemptAt + TimeSpan.FromMinutes(1)));
+        /* An interval of a day or more that is not whole days (2000 minutes) ends its period the same way, with no run
+           time to set: ACollectorWhoseIntervalIsADayOrMoreButNotWholeDays_... below runs it. */
+    }
+
+    [Fact]
+    public void ACollectorWhoseIntervalIsADayOrMoreButNotWholeDays_ThatKeepsFailing_RunsOncePerPeriod_NotOnEverySweep()
+    {
+        /* 2000 minutes is more than a day and not a whole number of days, so it can carry no run time, but it is a
+           daily-or-longer collector all the same: the start-up read seeds its last run, and a failed attempt counts the
+           same way, so a collector that keeps failing is not run again on every sweep. */
+        var manager = Manager(runAt: null, frequency: 2000, clock: Eastern);
+        var start = Slot(Day, 120, Eastern) + TimeSpan.FromMinutes(2);
+
+        var ranAtMinutes = new List<int>();
+        for (var minute = 0; minute <= 4000; minute += 5)
+        {
+            var at = start + TimeSpan.FromMinutes(minute);
+            if (IsDue(manager, Daily, at))
+            {
+                ranAtMinutes.Add(minute);
+                manager.MarkCollectorAttemptForServer(ServerKey, Daily, at);
+            }
+        }
+
+        Assert.Equal(new[] { 0, 2000, 4000 }, ranAtMinutes);
+    }
+
+    [Theory]
+    [InlineData(15)]
+    [InlineData(1439)]
+    [InlineData(1440)]
+    [InlineData(2000)]
+    [InlineData(2880)]
+    [InlineData(10080)]
+    public void TheStartUpSeed_AndTheFailedAttempt_AgreeOnWhichCollectorsAreDailyOrLonger(int frequency)
+    {
+        var manager = Manager(runAt: null, frequency: frequency, clock: Eastern);
+        var attemptAt = Slot(Day, 120, Eastern) + TimeSpan.FromMinutes(2);
+
+        /* One rule, a day or longer, decides both: whether the start-up read looks up the collector's last run, and
+           whether a failed attempt counts as its run. A collector one of them took and the other left would be seeded
+           but run on every sweep after a failure, or the reverse. */
+        var seeded = manager.GetDailyCollectorIntervalsForServer(ServerKey).ContainsKey(Daily);
+
+        manager.MarkCollectorAttemptForServer(ServerKey, Daily, attemptAt);
+        var attemptCounted = !IsDue(manager, Daily, attemptAt + TimeSpan.FromMinutes(1));
+
+        Assert.Equal(frequency >= 1440, seeded);
+        Assert.Equal(seeded, attemptCounted);
     }
 
     [Fact]
