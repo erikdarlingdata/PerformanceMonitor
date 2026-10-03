@@ -340,7 +340,9 @@ public partial class ViewerServerTab
            step compares its answer with that window's start. The rows are ranked by added duration, not by time, so they name no
            earlier start and the cap rule does not apply. */
         var floorTask = _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var rows = await _dataService.GetQueryStoreRegressionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var floorReadTask = _dataService.GetQueryStoreRegressionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(floorReadTask, floorTask, "Query Store Regressions");
+        var rows = floorReadTask.Result;
         _queryStoreRegressionsFilterMgr!.UpdateData(rows);
         await ShowQueryStoreRegressionsDataStartAsync(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
         SetDefaultSortIfNone(QueryStoreRegressionsGrid, "DurationRegressionPercent", ListSortDirection.Descending);
@@ -374,7 +376,9 @@ public partial class ViewerServerTab
     private async Task LoadPlanCorrectionsAsync(DateTime startUtc, DateTime endUtc)
     {
         var dataStartTask = _dataService.GetPlanCorrectionsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var rows = await _dataService.GetPlanCorrectionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetPlanCorrectionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Plan Corrections");
+        var rows = dataReadTask.Result;
         _planCorrectionFilterMgr!.UpdateData(rows);
         /* #4966: the read keeps the newest 200 rows, and the collector re-captures every open recommendation on each cycle, so a
            few recommendations fill the page within hours and a wide range is answered from its newest hours. A full page names its
