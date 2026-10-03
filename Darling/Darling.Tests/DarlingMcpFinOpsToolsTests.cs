@@ -45,14 +45,14 @@ public sealed class DarlingMcpFinOpsToolsTests
         Assert.Equal(typeof(Task<string>), method.ReturnType);
 
         var described = method.GetParameters().Where(p => p.GetCustomAttribute<DescriptionAttribute>() is not null).ToArray();
-        Assert.Equal(new[] { "view", "server_name", "hours_back", "limit" }, described.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "view", "server_name", "hours_back", "limit", "database_name", "full_text" }, described.Select(p => p.Name).ToArray());
         Assert.False(described.Single(p => p.Name == "view").HasDefaultValue, "view is required");
         Assert.Equal(24, described.Single(p => p.Name == "hours_back").DefaultValue);
         Assert.Equal(10, described.Single(p => p.Name == "limit").DefaultValue);
 
         // Each set asserts its own views on its own lines, so two series never edit the same line.
         // FinOps web parity (#4843), set A: list your views below this line only.
-        var setAViews = new[] { "utilization" };
+        var setAViews = new[] { "utilization", "index_analysis" };
         // FinOps web parity (#4843), set A ends.
         // Set A and set B are separated on purpose: keep this gap.
         //
@@ -120,6 +120,13 @@ public sealed class DarlingMcpFinOpsToolsTests
             Assert.True(McpHelpers.IsRefusalEnvelope(refused), $"limit {badLimit}: {refused}");
             Assert.Equal("limit", JsonDocument.Parse(refused).RootElement.GetProperty("hints").GetProperty("parameter").GetString());
         }
+
+        var wrongViewDatabase = await DarlingMcpFinOpsTools.GetFinOps(postgres, "utilization", name, database_name: "db", cancellationToken: ct);
+        Assert.Equal("database_name", JsonDocument.Parse(wrongViewDatabase).RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        var wrongViewText = await DarlingMcpFinOpsTools.GetFinOps(postgres, "high_impact", name, full_text: true, cancellationToken: ct);
+        Assert.Equal("full_text", JsonDocument.Parse(wrongViewText).RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        var staleWindow = await DarlingMcpFinOpsTools.GetFinOps(postgres, "index_analysis", name, hours_back: 48, cancellationToken: ct);
+        Assert.Equal("hours_back", JsonDocument.Parse(staleWindow).RootElement.GetProperty("hints").GetProperty("parameter").GetString());
 
         var unknownServer = await DarlingMcpFinOpsTools.GetFinOps(postgres, "high_impact", "no-such-server", cancellationToken: ct);
         Assert.Equal("invalid", DarlingMcpTestData.StatusOf(unknownServer));
