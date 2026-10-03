@@ -251,6 +251,8 @@ public partial class RemoteCollectorService
             IgnoredWaitTypes = _ignoredWaitTypes.Value,
             ExcludedDatabases = server.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = GetPerfmonCounterOverride(),
+            /* #4961: the long-query definition reads this install's own session, so its context carries the name. */
+            LongQuerySessionName = definition is LongQueryCompletionsCollector ? LongQuerySessionName() : null,
         };
 
         /* Two accumulators, not one contiguous read-then-write pair: the enumeration and Azure paths now
@@ -280,12 +282,30 @@ public partial class RemoteCollectorService
                 ? await databaseListOverride(server, cancellationToken)
                 : await GetAzureDatabaseListAsync(server, cancellationToken);
 
-            /* The long-query trace leaves a database monitored as its own server to that registration, so its
-               read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases). */
+            /* The long-query trace leaves a database monitored as its own server to that registration, and never
+               keeps a session in master, so its read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases).
+               A logical server lists master beside its user databases. master goes first and is not counted as
+               listed: the note below speaks of user databases, and a list of master alone has none to blame it on
+               (#4961). Other collectors read the list as it came. */
+            var listedDatabaseCount = databases.Count;
             if (definition.SkipsSeparatelyMonitoredDatabases)
             {
+                databases = databases.FindAll(LongQueryTraceDatabases.CanHoldSession);
+                listedDatabaseCount = databases.Count;
                 databases = WithoutSeparatelyMonitoredDatabases(server, databases);
             }
+
+            /* #4961: a list with nothing left to read used to record SUCCESS, 0 rows and no note, which reads as
+               "nothing ran". The note names why nothing was read (every user database monitored as its own server,
+               or every database excluded). The status stays SUCCESS: nothing failed. It is held here and merged
+               into the assignment that follows the loop, because that assignment is unconditional and would erase
+               a note put on the telemetry now. Lite has no database scope. Mirrors Darling. */
+            var emptyListNote = EmptyDatabaseListNote.For(
+                listedDatabaseCount,
+                databases.Count,
+                definition.SkipsSeparatelyMonitoredDatabases,
+                exclusionsConfigured: server.ExcludedDatabases is { Count: > 0 },
+                databaseScoped: false);
 
             var attempted = 0;
             var failed = 0;
@@ -334,6 +354,15 @@ public partial class RemoteCollectorService
                     /* The authoritative database_name for XE rows read on this path — see
                        CollectorContext.CurrentDatabaseName. */
                     context.CurrentDatabaseName = databaseName;
+
+                    /* #4961: the deadlock and blocked-process reads name the session the ensure chose for THIS database, so
+                       the name is set per database, beside the database name. Every other definition leaves it null. */
+                    context.AlwaysOnSessionName = definition switch
+                    {
+                        DeadlocksCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.Deadlock),
+                        BlockedProcessReportCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.BlockedProcess),
+                        _ => null,
+                    };
 
                     var dbPlan = plan;
                     if (dbPlan is null)
@@ -592,11 +621,14 @@ public partial class RemoteCollectorService
 
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
-               which is exactly what this path carried before. */
+               which is exactly what this path carried before. The empty-list note (#4961) rides in this
+               assignment: it is the one place the note is set, so nothing assigned earlier can be erased. */
             telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(
-                cycleProbeFailures.Note,
-                EnumeratedCollectorDriver.BuildPartialFailureNote(
-                    failed, attempted, failedDatabases, firstFailure?.Message));
+                emptyListNote,
+                EnumeratedCollectorDriver.MergeNotes(
+                    cycleProbeFailures.Note,
+                    EnumeratedCollectorDriver.BuildPartialFailureNote(
+                        failed, attempted, failedDatabases, firstFailure?.Message)));
             LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a

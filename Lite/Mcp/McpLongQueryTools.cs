@@ -11,7 +11,7 @@ namespace PerformanceMonitorLite.Mcp;
 /// Lite twin of Darling's <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingMcpLongQueryTools"/>,
 /// field-for-field, so the cross-app MCP inventory stays in parity. Returns the longest completed queries
 /// (rpc/batch over the trace's duration threshold) plus attentions (cancels/timeouts) from the opt-in
-/// PerformanceMonitor_LongQueryCompletions XE session, ordered by duration DESC.
+/// PerformanceMonitor_Lite_{id}_LongQueryCompletions XE session this install makes, ordered by duration DESC.
 /// </summary>
 [McpServerToolType]
 public sealed class McpLongQueryTools

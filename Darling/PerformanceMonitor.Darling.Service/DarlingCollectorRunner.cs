@@ -708,7 +708,7 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _queryStoreWriteFence = queryStoreWriteFence;
@@ -730,12 +730,30 @@ public sealed class DarlingCollectorRunner
            what Lite's twin and every pre-#3477 test constructs. */
         _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
         _separatelyMonitoredDatabases = separatelyMonitoredDatabases ?? (_ => Array.Empty<string>());
+        /* #4961: null provider = no install id, so no long-query session can be named (what a test that builds a runner
+           without one gets). The worker passes the id it made at start. */
+        _installId = installId ?? (() => null);
         /* #4004: the store's log-hash key, loaded once by the worker at start and shared by every run that hashes log
            text (pg_log_events on both transports). Null = none could be used: those runs refuse, with the reason. */
         _logHashKey = logHashKey;
     }
 
     private readonly PgLogHashKey? _logHashKey;
+
+    private readonly Func<string?> _installId;
+
+    /// <summary>
+    /// This install's id (#4961), or null when the runner was built without one. The long-query session's name is made
+    /// from it: the lifecycle names the session it creates and drops from it, and the read names the session it reads.
+    /// </summary>
+    internal string? InstallId => _installId();
+
+    /// <summary>
+    /// The name of this install's long-query completions session, or null when there is no install id to make it from
+    /// (#4961). Null means no session exists to create, drop or read, and the caller says why as a fault.
+    /// </summary>
+    internal string? LongQuerySessionName() =>
+        LongQueryCompletionsCollector.TryXeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallId);
 
     /// <summary>The store's log-hash key this runner was given (#4004), null when the service could not load one. The
     /// hourly deadlock re-mask reads it here (#4012's review), the one instance every log-hashing run shares.</summary>
@@ -2129,6 +2147,7 @@ public sealed class DarlingCollectorRunner
             /* #3477: same shared-not-re-derived rule for the scope — one resolution per run, above. */
             DatabaseScope = databaseScope,
             PerfmonCounterOverride = null,
+            LongQuerySessionName = LongQuerySessionName(),
             /* #2862: plan capture is additionally cadence-gated for procedure_stats — see
                ShouldCapturePlanForCollector. Every other collector reads exactly _capturePlans().
                Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
@@ -2232,12 +2251,32 @@ public sealed class DarlingCollectorRunner
                     ? await listOverride(server, cancellationToken)
                     : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
 
-            /* The long-query trace leaves a database monitored as its own server to that registration, so its
-               read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases). */
+            /* The long-query trace leaves a database monitored as its own server to that registration, and never
+               keeps a session in master, so its read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases).
+               A logical server lists master beside its user databases. master goes first and is not counted as
+               listed: the note below speaks of user databases, and a list of master alone has none to blame it on
+               (#4961). Other collectors read the list as it came. Mirrors Lite. */
+            var listedDatabaseCount = databases.Count;
             if (definition.SkipsSeparatelyMonitoredDatabases)
             {
+                databases = databases.FindAll(LongQueryTraceDatabases.CanHoldSession);
+                listedDatabaseCount = databases.Count;
                 databases = AzureSweepScope.WithoutSeparatelyMonitored(databases, SeparatelyMonitoredDatabasesFor(server));
             }
+
+            /* #4961: a list with nothing left to read used to record SUCCESS, 0 rows and no note, which reads as
+               "nothing ran". The note names why nothing was read (every user database monitored as its own server,
+               or every database excluded). The status stays SUCCESS: nothing failed. It is held here and merged
+               into the assignment that follows the loop, because that assignment is unconditional and would erase
+               a note set before it. A database scope can empty the list too, and the exclusions are then
+               not known to be the reason, so a scoped collector gets the separately-monitored note or none.
+               Mirrors Lite. */
+            var emptyListNote = EmptyDatabaseListNote.For(
+                listedDatabaseCount,
+                databases.Count,
+                definition.SkipsSeparatelyMonitoredDatabases,
+                exclusionsConfigured: server.Config.ExcludedDatabases is { Count: > 0 },
+                databaseScoped: databaseScope.Count > 0);
 
             var attempted = 0;
             var failed = 0;
@@ -2297,6 +2336,15 @@ public sealed class DarlingCollectorRunner
                     /* The authoritative database_name for XE rows read on this path — see
                        CollectorContext.CurrentDatabaseName. */
                     context.CurrentDatabaseName = databaseName;
+
+                    /* #4961: the deadlock and blocked-process reads name the session the ensure chose for THIS database, so
+                       the name is set per database, beside the database name. Every other definition leaves it null. */
+                    context.AlwaysOnSessionName = definition switch
+                    {
+                        DeadlocksCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.Deadlock),
+                        BlockedProcessReportCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.BlockedProcess),
+                        _ => null,
+                    };
 
                     /* #2855: cleared once per iteration, because this loop reuses ONE context across every
                        database and without the reset a database whose read faults would print the PREVIOUS
@@ -2803,11 +2851,14 @@ public sealed class DarlingCollectorRunner
 
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
-               which is exactly what this path carried before. */
+               which is exactly what this path carried before. The empty-list note (#4961) rides in this
+               assignment: it is the one place the note is set, so nothing assigned earlier can be erased. */
             collectionNote = EnumeratedCollectorDriver.MergeNotes(
-                cycleProbeFailures.Note,
-                EnumeratedCollectorDriver.BuildPartialFailureNote(
-                    failed, attempted, failedDatabases, firstFailure?.Message));
+                emptyListNote,
+                EnumeratedCollectorDriver.MergeNotes(
+                    cycleProbeFailures.Note,
+                    EnumeratedCollectorDriver.BuildPartialFailureNote(
+                        failed, attempted, failedDatabases, firstFailure?.Message)));
             LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a
@@ -6527,7 +6578,49 @@ RETURNING s.state_key";
            reaches this same path — see the remarks on ServerWatermarkCache.InvalidateServer). */
         _watermarkCache.InvalidateServer(serverId);
         _databaseWatermarkCache.InvalidateServer(serverId);
+
+        /* #4961: the legacy session's record is read again at the next full pass, and the line about an older install's
+           session is logged again, once per connect. */
+        _legacyLongQuery?.OnServerReconnected(serverId);
     }
+
+    /// <summary>
+    /// The choice this install has made for each deadlock and blocked-process session in each Azure SQL Database it monitors
+    /// (#4961): the shared session, or its own. The ensure sets it and the per-database read takes its name from it. In
+    /// memory only: a restart starts every database at the shared session, and the first ensure sets it again.
+    /// </summary>
+    internal AlwaysOnXeChoices AlwaysOnChoices { get; } = new();
+
+    /// <summary>This install's own session of the capture, or null when the runner has no install id to make it from.</summary>
+    internal string? AlwaysOnOwnSessionName(AlwaysOnXeSessionKind kind) =>
+        AlwaysOnXeSessions.TryOwnNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallId, kind);
+
+    /// <summary>
+    /// The session a read of the capture names in one Azure SQL Database: this install's own when the ensure fell back to it
+    /// there, else the shared name.
+    /// </summary>
+    internal string AlwaysOnReadSessionName(ServerRuntime server, string databaseName, AlwaysOnXeSessionKind kind) =>
+        AlwaysOnChoices.NameFor(DarlingAlwaysOnXeSessions.ServerKey(server), databaseName, kind, AlwaysOnOwnSessionName(kind));
+
+    /// <summary>
+    /// Replaces the connection to one Azure SQL Database for the always-on sessions' ensure: the server and the database. The
+    /// ensure's decisions then run against what it returns, in place of a server. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeDatabaseForTests { get; set; }
+
+    /// <summary>
+    /// A test replaces each connection the always-on sessions' ensure would open to one Azure SQL Database, below
+    /// <see cref="AlwaysOnXeDatabaseForTests"/> (which wins when both are set): the server, the database, and the connection
+    /// string the open would use, so a test sees whether each statement goes over a connection with read-only intent (#4961).
+    /// Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeConnectionForTests { get; set; }
+
+    /// <summary>
+    /// Replaces the whole always-on ensure of one server, which otherwise opens a connection to it: a test counts the calls.
+    /// Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, CancellationToken, Task>? XeEnsureOverrideForTests { get; set; }
 
     /// <summary>Replaces the engine target provider resolved for a run. Null in production.</summary>
     internal Func<CollectorTargetInfo, ITargetProvider>? TargetProviderOverrideForTests { get; set; }
@@ -6545,7 +6638,45 @@ RETURNING s.state_key";
     /// Replaces the long-query trace's work in one Azure SQL Database database: called with <c>create</c> true to create
     /// the session there, false to drop it. Null in production.
     /// </summary>
-    internal Func<ServerRuntime, string, bool, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
+    internal Func<ServerRuntime, string, bool, string, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces where the one-time legacy drop keeps its record (<see cref="ILegacyLongQueryRecords"/>), so a test that never
+    /// opens the store has one. Set before the first reconcile. Null in production.
+    /// </summary>
+    internal ILegacyLongQueryRecords? LegacyLongQueryRecordsForTests { get; set; }
+
+    private DarlingLegacyLongQuerySession? _legacyLongQuery;
+
+    /// <summary>
+    /// The one-time drop of the long-query session older versions shared between installs, and what it remembers of its
+    /// record for each registration (#4961). Built on first use, over the store.
+    /// </summary>
+    internal DarlingLegacyLongQuerySession LegacyLongQuery =>
+        LazyInitializer.EnsureInitialized(ref _legacyLongQuery, () => new DarlingLegacyLongQuerySession(LegacyLongQueryRecordsForTests ?? new StoreLegacyLongQueryRecords(_postgres)))!;
+
+    /// <summary>
+    /// Replaces the question the create path asks in the same batch as its existence check: whether the legacy session is in
+    /// the database (the empty name is the server). Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, CancellationToken, Task<bool>>? LegacyLongQueryPresentForTests { get; set; }
+
+    /// <summary>
+    /// Replaces one open-and-act step of the long-query trace's create, below
+    /// <see cref="LongQueryTraceDatabaseOverrideForTests"/>, which wins when both are set (#4961). Called with the server,
+    /// the database (empty for the server's own session), the connection string the step would open, the step, and the
+    /// session name. A test sees which connection each step uses, with or without read-only intent. The step's work is
+    /// not done. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, string, LongQueryTraceStep, string, CancellationToken, Task>? LongQueryTraceStepOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces what the read-only-intent ensure's <see cref="LongQueryTraceStep.Check"/> reads on the replica, with
+    /// <see cref="LongQueryTraceStepOverrideForTests"/> set (#4961): called with the server and the database, answers whether the
+    /// session's definition is visible and whether it runs there. Unset, the stand-in finds neither, as in a database that has
+    /// never had the session. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, LongQueryTraceReplicaState>? LongQueryTraceReplicaStateForTests { get; set; }
 
     /// <summary>
     /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every
