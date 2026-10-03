@@ -602,9 +602,9 @@ END;";
     }
 
     /// <summary>
-    /// The connected half of the verb, over an <see cref="IXeSessionCleanupTarget"/>: find the sessions, print each, drop each
-    /// unless <paramref name="dryRun"/>, print what the drops stop (<see cref="CaptureStopsNote"/>, only when one was
-    /// dropped) and the shared-names warning. Returns
+    /// The connected half of the verb, over an <see cref="IXeSessionCleanupTarget"/>: find the sessions, print the shared-names
+    /// warning (before anything is dropped, so the operator reads it first), print each session, drop each unless
+    /// <paramref name="dryRun"/>, and print what the drops stop (<see cref="CaptureStopsNote"/>, only when one was dropped). Returns
     /// <see cref="DarlingCliCommands.DropXeSessionsExitCode.Success"/> when everything found was dropped (or listed, in a dry
     /// run) or nothing was there, and <see cref="DarlingCliCommands.DropXeSessionsExitCode.TargetUnavailable"/> when the target
     /// could not be searched, a monitored part of it could not be searched, or a drop was refused. A refused drop does not
@@ -657,6 +657,10 @@ END;";
             /* "In the places searched": a database that could not be searched (a Problems entry, exit 2, or a note) may hold a session. */
             output.WriteLine($"No Darling Extended Events sessions ({string.Join(", ", NamesToDrop(installId))}) were found on '{serverLabel}'; nothing to drop in the places searched.");
         }
+
+        /* Before the first drop: the warning says other installs recreate a shared session, which the operator needs to know
+           before the sessions are gone, not after. */
+        output.WriteLine("WARNING: " + SharedNamesWarning);
 
         var dropped = new List<ExistingXeSession>();
         foreach (var drop in drops)
@@ -711,13 +715,12 @@ END;";
             }
         }
 
-        output.WriteLine();
         if (CaptureStopsNote(dropped) is { } captureStops)
         {
+            output.WriteLine();
             output.WriteLine(captureStops);
         }
 
-        output.WriteLine("WARNING: " + SharedNamesWarning);
         return exitCode;
     }
 
@@ -1095,6 +1098,10 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 
             /* The services' own wrapper: reads and the stop go over the own connection, the drop over one without the intent. */
             database = DarlingAlwaysOnXeSessions.WithReadOnlyIntent(connectionString, own, OpenDatabaseForTests);
+            /* Hyperscale limit (#4961): with several high-availability replicas, a read-only connection lands on one replica the app
+               cannot choose, so this stop reaches only that one, and a copy of the session that runs on another replica is not stopped.
+               Microsoft Learn describes no way to address one HA replica; it says the read-intent workload is "distributed arbitrarily
+               across all available HA replicas": https://learn.microsoft.com/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica */
             if (await database.IsStartedAsync(drop.Session.Name, cancellationToken))
             {
                 await database.ExecuteAsync(stop!, cancellationToken);

@@ -776,6 +776,9 @@ public sealed class DropXeSessionsVerbTests
 
         public List<XeSessionDrop> Dropped { get; } = [];
 
+        /// <summary>Runs as each drop starts, before the target answers, so a test can read what the verb had printed by then.</summary>
+        public Action? BeforeDrop { get; set; }
+
         public Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken) =>
             SearchFails is null
                 ? Task.FromResult(new XeSessionSearch(Found.ToList(), Problems.ToList()) { Notes = Notes.ToList() })
@@ -783,6 +786,7 @@ public sealed class DropXeSessionsVerbTests
 
         public Task DropAsync(XeSessionDrop drop, CancellationToken cancellationToken)
         {
+            BeforeDrop?.Invoke();
             if (Refused.Contains(drop.Statement))
             {
                 throw new InvalidOperationException("permission denied");
@@ -827,8 +831,43 @@ public sealed class DropXeSessionsVerbTests
         Assert.Single(Regex.Matches(output, "^WARNING: ", RegexOptions.Multiline));
     }
 
+    /// <summary>
+    /// The warning says other installs recreate a shared session, so it is what the operator reads before anything is
+    /// dropped: it is printed once, ahead of the first drop, and a dry run prints it ahead of the first session it lists.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheSharedNamesWarning_IsPrintedBeforeTheFirstDrop(bool dryRun)
+    {
+        var output = new StringWriter();
+        var target = new FakeTarget();
+        target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Server));
+        target.Found.Add(new ExistingXeSession(Blocked, XeSessionScope.Server));
+        string? outputAtTheFirstDrop = null;
+        target.BeforeDrop = () => outputAtTheFirstDrop ??= output.ToString();
+
+        await DarlingXeSessionCleanup.RunAsync("sql01", dryRun, target, output, new StringWriter(), CancellationToken.None);
+
+        var all = output.ToString();
+        Assert.Single(Regex.Matches(all, "^WARNING: ", RegexOptions.Multiline));
+        Assert.Contains(DarlingXeSessionCleanup.SharedNamesWarning, all, StringComparison.Ordinal);
+        if (dryRun)
+        {
+            Assert.Null(outputAtTheFirstDrop);
+            Assert.True(
+                all.IndexOf("WARNING: ", StringComparison.Ordinal) < all.IndexOf("  Found ", StringComparison.Ordinal),
+                "the warning comes before the first session the dry run lists");
+        }
+        else
+        {
+            Assert.NotNull(outputAtTheFirstDrop);
+            Assert.Contains("WARNING: " + DarlingXeSessionCleanup.SharedNamesWarning, outputAtTheFirstDrop, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
-    public async Task ARealDrop_SaysWhatStopsUntilTheServiceReconnects_OnceAndBeforeTheWarning()
+    public async Task ARealDrop_SaysWhatStopsUntilTheServiceReconnects_OnceAndAfterTheWarning()
     {
         var target = new FakeTarget();
         target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Server));
@@ -840,8 +879,8 @@ public sealed class DropXeSessionsVerbTests
         Assert.Single(Regex.Matches(output, "^NOTE: ", RegexOptions.Multiline));
         Assert.Contains(note, output, StringComparison.Ordinal);
         Assert.True(
-            output.IndexOf(note, StringComparison.Ordinal) < output.IndexOf("WARNING: ", StringComparison.Ordinal),
-            "the note comes before the shared-names warning");
+            output.IndexOf("WARNING: ", StringComparison.Ordinal) < output.IndexOf(note, StringComparison.Ordinal),
+            "the shared-names warning comes before the note on what the drops stopped");
     }
 
     [Theory]
