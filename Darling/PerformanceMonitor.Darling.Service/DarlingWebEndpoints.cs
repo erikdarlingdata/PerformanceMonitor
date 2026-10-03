@@ -1156,6 +1156,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private static async Task<NpgsqlConnection> OpenComposeConnectionAsync(
         NpgsqlDataSource postgres, System.Threading.CancellationToken cancellationToken)
     {
+        var timeout = OpenTimeoutOrZero(postgres);
         var started = Stopwatch.StartNew();
         try
         {
@@ -1165,13 +1166,26 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             /* The shape rules in PostgresOpenTimeout.IsTimedOutOpen miss a timeout that tore the socket down under the driver
                (an aborted read on a loaded runner). Elapsed time covers that without guessing the shape. */
-            var timeout = TimeSpan.FromSeconds(new NpgsqlConnectionStringBuilder(postgres.ConnectionString).Timeout);
             if (PostgresOpenTimeout.IsTimedOutByClock(open.Cause, started.Elapsed, timeout, cancellationToken.IsCancellationRequested))
             {
                 throw new ComposeStoreOpenException(open.Cause) { FailedAfterTimeout = true };
             }
 
             throw;
+        }
+    }
+
+    /// <summary>The data source's open <c>Timeout</c>, read before the open so a parse failure cannot replace the open's
+    /// own error; zero (the clock rule off) when the string cannot be read.</summary>
+    private static TimeSpan OpenTimeoutOrZero(NpgsqlDataSource postgres)
+    {
+        try
+        {
+            return TimeSpan.FromSeconds(new NpgsqlConnectionStringBuilder(postgres.ConnectionString).Timeout);
+        }
+        catch (ArgumentException)
+        {
+            return TimeSpan.Zero;
         }
     }
 

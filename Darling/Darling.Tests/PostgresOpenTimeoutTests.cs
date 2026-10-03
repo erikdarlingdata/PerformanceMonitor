@@ -166,7 +166,16 @@ public sealed class PostgresOpenTimeoutTests
     public void ACallerCancellation_AtTheTimeout_IsNotATimedOutOpen()
     {
         Assert.False(PostgresOpenTimeout.IsTimedOutByClock(AbortedRead(), OneSecond, OneSecond, callerCancelled: true));
-        Assert.False(PostgresOpenTimeout.IsTimedOutByClock(new NpgsqlException("x", new OperationCanceledException()), OneSecond, OneSecond, callerCancelled: false));
+        Assert.False(PostgresOpenTimeout.IsTimedOutByClock(new NpgsqlException("x", new OperationCanceledException()), OneSecond, OneSecond, callerCancelled: true));
+    }
+
+    [Fact]
+    public void ANestedCancellation_WithTheCallerLive_AtTheTimeout_IsTheDriversTimer_AndTimedOut()
+    {
+        Assert.True(PostgresOpenTimeout.IsTimedOutByClock(
+            new NpgsqlException("Exception while reading from stream", new OperationCanceledException()), OneSecond, OneSecond, callerCancelled: false));
+        Assert.True(PostgresOpenTimeout.IsTimedOutByClock(
+            new NpgsqlException("x", new System.IO.IOException("io", new OperationCanceledException())), OneSecond, OneSecond, callerCancelled: false));
     }
 
     [Fact]

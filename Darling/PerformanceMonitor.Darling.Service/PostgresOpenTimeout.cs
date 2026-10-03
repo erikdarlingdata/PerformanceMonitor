@@ -87,8 +87,11 @@ internal static class PostgresOpenTimeout
     /// True when a driver failure came only after the open had used its whole <c>Timeout</c>. The driver's own timer can
     /// tear the socket down under a read, so the failure surfaces as an <see cref="NpgsqlException"/> over an aborted or
     /// interrupted socket instead of a <see cref="TimeoutException"/>; no shape rule sees that, but the clock does. A
-    /// <see cref="PostgresException"/> anywhere in the chain (the server answered), a cancellation, a cancelled caller, or
-    /// a failure well before the timeout (refused, reset, closed, auth) is never a timed-out open. Used beside
+    /// <see cref="PostgresException"/> anywhere in the chain (the server answered), a cancelled caller, or
+    /// a failure well before the timeout (refused, reset, closed, auth) is never a timed-out open. An
+    /// <see cref="OperationCanceledException"/> nested under the <see cref="NpgsqlException"/> is not an exclusion: a
+    /// caller's cancellation never reaches this method and is covered by <paramref name="callerCancelled"/>, so a nested one
+    /// with the caller still live is the driver's own <c>Timeout</c> timer firing under a read. Used beside
     /// <see cref="IsTimedOutOpen"/>, not instead of it.
     /// </summary>
     internal static bool IsTimedOutByClock(Exception exception, TimeSpan elapsed, TimeSpan timeout, bool callerCancelled)
@@ -100,7 +103,7 @@ internal static class PostgresOpenTimeout
 
         for (var current = exception; current is not null; current = current.InnerException)
         {
-            if (current is PostgresException or OperationCanceledException)
+            if (current is PostgresException)
             {
                 return false;
             }
