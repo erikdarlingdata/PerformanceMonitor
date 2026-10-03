@@ -6,14 +6,125 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-/* FinOps "Optimization" tab. This view is not on the web yet. */
+/* FinOps "Optimization" tab: idle databases, tempdb pressure, wait time by category, the most expensive statements by CPU
+   and daily memory-grant efficiency, from one get_finops read (view optimization). Each section reads its own status:
+   ok shows its table, empty shows an empty strip, not_collected shows the section's message. */
 
-import { noticeStrip } from "../../util.js";
+import { VIZ } from "../../panels.js";
+import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat } from "../../util.js";
+
+const HOURS = 24;
+const LIMIT = 20;
+
+const IDLE_COLUMNS = [
+  { key: "database_name", label: "Database" },
+  { key: "total_size_mb", label: "Total size (MB)", format: "num2" },
+  { key: "file_count", label: "Files", format: "int" },
+  { key: "last_execution_server_local", label: "Last execution (server time)" },
+];
+
+const TEMPDB_COLUMNS = [
+  { key: "metric", label: "Metric" },
+  { key: "current_mb", label: "Current (MB)", format: "num2" },
+  { key: "peak_24h_mb", label: "Peak 24h (MB)", format: "num2" },
+  { key: "warning", label: "Warning" },
+];
+
+const WAIT_COLUMNS = [
+  { key: "category", label: "Category" },
+  { key: "total_wait_time_ms", label: "Total wait (ms)", format: "int" },
+  { key: "waiting_tasks", label: "Waiting tasks", format: "int" },
+  { key: "pct_of_total", label: "% of total", format: "num1" },
+  { key: "top_wait_type", label: "Top wait type" },
+  { key: "top_wait_time_ms", label: "Top wait (ms)", format: "int" },
+  { key: "est_cost_usd", label: "Est. cost ($)", format: "num2" },
+];
+
+const QUERY_COLUMNS = [
+  { key: "database_name", label: "Database" },
+  { key: "query_preview", label: "Query preview" },
+  { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
+  { key: "avg_cpu_ms_per_exec", label: "Avg CPU/exec (ms)", format: "num2" },
+  { key: "total_reads", label: "Total reads", format: "int" },
+  { key: "avg_reads_per_exec", label: "Avg reads/exec", format: "int" },
+  { key: "executions", label: "Executions", format: "int" },
+  { key: "has_plan", label: "Has plan", format: "bool" },
+  { key: "est_cost_usd", label: "Est. cost ($)", format: "num2" },
+];
+
+const GRANT_COLUMNS = [
+  { key: "day", label: "Day" },
+  { key: "avg_granted_mb", label: "Avg granted (MB)", format: "num1" },
+  { key: "avg_used_mb", label: "Avg used (MB)", format: "num1" },
+  { key: "efficiency_pct", label: "Efficiency (%)", format: "num1" },
+  { key: "peak_granted_mb", label: "Peak granted (MB)", format: "num1" },
+  { key: "wasted_mb", label: "Wasted (MB)", format: "num1" },
+  { key: "total_grantees", label: "Grantees", format: "int" },
+  { key: "total_waiters", label: "Waiters", format: "int" },
+  { key: "timeout_errors", label: "Timeouts", format: "int" },
+  { key: "forced_grants", label: "Forced", format: "int" },
+];
+
+function idleNotice(s) {
+  let text = (s.rows || []).length + " idle databases over the last " + (s.window_days ?? "?") + " days";
+  text += s.truncated ? "; the top " + (s.rows || []).length + " of " + (s.database_count ?? "more") + "." : ".";
+  return text;
+}
+
+function windowNotice(s) {
+  return "last " + (s.window_hours ?? HOURS) + " hours";
+}
+
+function queryNotice(s) {
+  let text = "Top " + (s.rows || []).length + " by CPU, last " + (s.window_hours ?? HOURS) + " hours";
+  if (s.effective_start) text += ", from " + applyFormat("time", s.effective_start);
+  return text + ".";
+}
+
+function costLine(data) {
+  return data.monthly_cost_usd != null
+    ? "Estimated costs are shares of a monthly cost of $" + applyFormat("num2", data.monthly_cost_usd) + "."
+    : (data.cost_reason ?? "monthly cost not set");
+}
+
+// One section: a heading, then the table, the empty strip or the notice, by the section's own status.
+function sectionView(title, s, columns, emptyText, notice) {
+  const section = s || {};
+  let content;
+  if (section.status === "ok") {
+    content = [noticeStrip(notice(section)), VIZ.table(section, { rowsKey: "rows", columns, emptyText })];
+  } else if (section.status === "empty") {
+    content = [emptyStrip(emptyText)];
+  } else {
+    content = [noticeStrip(section.message ?? "This section was not collected.")];
+  }
+  return el("div", { class: "finops-section" }, [el("h3", { text: title }), ...content]);
+}
 
 export const tab = {
   id: "optimization",
   label: "Optimization",
   build(server, ctx) {
-    return noticeStrip("Not on the web yet: Optimization is available in the desktop viewer.");
+    const body = el("div", {}, [loadingStrip()]);
+    (async () => {
+      try {
+        const res = await readTool("get_finops", { server, view: "optimization", hours: HOURS, limit: LIMIT }, ctx && ctx.signal);
+        if (res.kind === "aborted" || res.kind === "auth") return;
+        if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+        if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+        const data = res.data || {};
+        mount(body, [
+          noticeStrip(costLine(data)),
+          sectionView("Idle Databases", data.idle_databases, IDLE_COLUMNS, "No idle databases detected", idleNotice),
+          sectionView("tempdb Pressure", data.tempdb_pressure, TEMPDB_COLUMNS, "No tempdb data available", windowNotice),
+          sectionView("Wait Stats Summary", data.wait_categories, WAIT_COLUMNS, "No wait stats data available", windowNotice),
+          sectionView("Expensive Queries (Top " + LIMIT + " by CPU)", data.expensive_queries, QUERY_COLUMNS, "No expensive queries found", queryNotice),
+          sectionView("Memory Grant Efficiency", data.memory_grant_efficiency, GRANT_COLUMNS, "No memory grant data available", windowNotice),
+        ]);
+      } catch (e) {
+        if (e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
+      }
+    })();
+    return body;
   },
 };
