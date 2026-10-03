@@ -47,168 +47,218 @@ public sealed partial class ViewerDataService
     /// per collector over the trailing window, with the SKIPPED-counts-as-a-healthy-run rule baked into
     /// the last-success MAX and the PERMISSIONS bucket split out for the NO_PERMISSIONS banding. $1
     /// server_id, $2 window start (naive UTC).
+    ///
+    /// <para><b>Keyed lookups, not ranks (#4955).</b> The three newest-row columns — last_error, last_note and
+    /// latest_run_note — used to come from three <c>ROW_NUMBER()</c> ranks over every run of the window, which
+    /// sorted the whole seven days to read one row per collector. They are lookups now: the plain aggregate
+    /// finds the instant each one needs, and a LATERAL join reads the winning row of that collector at that
+    /// instant through <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>.
+    /// The columns, their order, their types and their values are the ranks' own, tie-breaks included
+    /// (<c>CollectionHealthKeyedLookupParityTests</c> holds each to the pre-change statement).</para>
     /// </summary>
     public const string CollectionHealthSql = $"""
+        WITH health AS
+        (
+            SELECT
+                collector_name,
+                COUNT(*) AS total_runs,
+                -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
+                -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
+                -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
+                -- the shared predicate is for: NULL under this NOT would have dropped it.
+                SUM(CASE WHEN status = 'SUCCESS'
+                          AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                         THEN 1 ELSE 0 END) AS success_count,
+                SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
+                AVG(duration_ms) AS avg_duration_ms,
+                -- SKIPPED counts as a healthy run (dedup / version-gated collectors no-op without being stale)
+                MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
+                MAX(collection_time) AS last_run_time,
+                -- The newest failure OUTRIGHT, text or not — "when did this last fail" means the run, not
+                -- the message. It can only name a different row than last_error if a failure was written
+                -- with no text.
+                MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN collection_time END) AS last_error_time,
+                -- #4955: the instant the last_error lookup below starts from — the newest failure that
+                -- CARRIED text. It can be older than last_error_time when a later failure was written with
+                -- none, and it is the class (a failing status AND a message), not the status alone, so a
+                -- SUCCESS row's note at the same instant cannot be the row the lookup lands on.
+                MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING')
+                          AND error_message IS NOT NULL
+                         THEN collection_time END) AS last_failure_text_time,
+                SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
+                -- YIELDED = the 1s LOCK_TIMEOUT guard fired (#1805): deliberate, benign for collection,
+                -- counted apart from errors because clustering here is a signal about the TARGET's lock
+                -- contention rather than a monitoring fault.
+                SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
+                -- #4955: the instant the last_note lookup below starts from — the newest SUCCESS run that
+                -- CARRIED a note (see last_note).
+                MAX(CASE WHEN status = 'SUCCESS' AND error_message IS NOT NULL THEN collection_time END) AS last_note_time,
+                -- How many of the window's runs carried one. note_count = total_runs is the
+                -- persistently-empty signal: EVERY run this week came back with nothing.
+                COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
+                -- #1852: the one thing that makes a persistently-empty enumeration interesting — does this
+                -- target actually HAVE user databases? Zero items on a server with none is legitimate and
+                -- stays quiet; zero items on a server that HAS them is a login that cannot enter any, or a
+                -- filter that swallowed everything. database_size_stats rather than database_config for
+                -- three reasons: it runs on the scheduled loop (60 min) where database_config is on-load
+                -- and can age past this window on a long-running service; it is indexed on
+                -- (server_id, collection_time) where database_config has no index at all; and it reads
+                -- sys.master_files, so it still sees databases the monitoring login cannot ENTER — exactly
+                -- the case being diagnosed. database_id > 4 excludes the system databases, tempdb
+                -- included: the size collector takes every ONLINE database, so a bare row check
+                -- would be true on every server alive. A NULL database_id is an Azure sibling row
+                -- (#2643/#3262): sys.resource_stats carries no id, and it bills only USER databases,
+                -- so those rows are inventory too — without the IS NULL arm a master-connected Azure
+                -- target with fifty user databases would read as having none.
+                --
+                -- The inventory window is the health read's OWN ($2) — no second parameter, and an
+                -- inventory that aged out says nothing rather than something stale. Uncorrelated, so both
+                -- engines evaluate it once per query (a Postgres InitPlan) instead of per row, and it
+                -- needs no GROUP BY entry and no join. Feeds display text only, through the shared
+                -- formatter; the banding never sees it.
+                CASE
+                    WHEN EXISTS
+                         (
+                             SELECT 1
+                             FROM v_database_size_stats
+                             WHERE server_id = $1
+                             AND   collection_time >= $2
+                             AND   (database_id > 4 OR database_id IS NULL)
+                         )
+                    THEN 1
+                    ELSE 0
+                END AS has_user_databases,
+                -- #2804: runs the #2673 wall-clock budget abandoned. Appended last — this result set is
+                -- read positionally by one shared mapper serving BOTH the per-server and fleet reads.
+                --
+                -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
+                -- window can still hold cycles written before #2803 gave abandonment its own status:
+                -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
+                -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
+                -- filter correct against current writes and silently wrong against older ones, failing in
+                -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
+                -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
+                -- for query_store), so equality against one rendered sentence matches one collector.
+                SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+                         THEN 1 ELSE 0 END) AS abandoned_count,
+                -- #3240: runs skipped because a PostgreSQL extension the collector DECLARES is not installed
+                -- — the EXTENSION_MISSING status the fault mapper split out of PERMISSIONS, counted apart so
+                -- the banding stops calling an uninstalled optional extension NO_PERMISSIONS. APPENDED, never
+                -- inserted: this result set is read positionally by one shared mapper.
+                SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+                -- #3819: the two instants that, with last_run_time above, say whether this collector
+                -- STOPPED producing rather than never having produced here. The same named skip carries
+                -- opposite meanings on those two rows, and the band read both as the benign resting state.
+                -- This grid bands through the SAME shared classifier as the service's reads, so it has to
+                -- feed it the same inputs — left unselected they default to null, this COMPILES, and the
+                -- grid would call a regressed collector HEALTHY while get_collection_health called it
+                -- WARNING. That is #3240's lesson and #2804's before it. The FINDING that names the rows and
+                -- the status is deliberately not carried here: this projection has no rows_stored to count
+                -- and the grid has no column to render prose in, so the band is the whole of what this
+                -- surface needs to agree about. APPENDED, read positionally by the one shared mapper.
+                MAX(CASE WHEN status IS NULL
+                          OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+                         THEN collection_time END) AS last_non_skip_time,
+                MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            GROUP BY collector_name
+        )
         SELECT
-            collector_name,
-            COUNT(*) AS total_runs,
-            -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
-            -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
-            -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
-            -- the shared predicate is for: NULL under this NOT would have dropped it.
-            SUM(CASE WHEN status = 'SUCCESS'
-                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
-                     THEN 1 ELSE 0 END) AS success_count,
-            SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
-            AVG(duration_ms) AS avg_duration_ms,
-            -- SKIPPED counts as a healthy run (dedup / version-gated collectors no-op without being stale)
-            MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
-            MAX(collection_time) AS last_run_time,
+            h.collector_name,
+            h.total_runs,
+            h.success_count,
+            h.error_count,
+            h.avg_duration_ms,
+            h.last_success_time,
+            h.last_run_time,
             -- #1855: the message from the NEWEST failing run, not MAX()'s lexicographically greatest
-            -- one. The status re-check is load-bearing rather than belt-and-braces: when no failing run
-            -- in the window carried text, error_rank = 1 falls through to the newest row of ANY class,
-            -- and without it a SUCCESS row's note could surface here as a fake last error.
+            -- one. The lookup is filtered to the failing class rather than to the instant alone, which is
+            -- load-bearing rather than belt-and-braces: a run of ANY other class at the same instant (a
+            -- SUCCESS row's note) must not surface here as a fake last error, and when no failing run in
+            -- the window carried text the lookup finds nothing and this is NULL. error_message DESC only
+            -- breaks an exact-timestamp tie, and breaks it identically here and in Lite's DuckDB twin,
+            -- which binary-vs-locale collation would not.
             -- #3240: EXTENSION_MISSING is in the exemplar set because its stored sentence IS the remedy
             -- (it names the extension and the database) — without it an EXTENSION_MISSING band would sit
             -- beside a blank Last Error and the operator would have to open the run log to learn why.
-            MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error,
-            -- The newest failure OUTRIGHT, text or not — "when did this last fail" means the run, not
-            -- the message. It can only name a different row than last_error if a failure was written
-            -- with no text.
-            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN collection_time END) AS last_error_time,
-            SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
-            -- YIELDED = the 1s LOCK_TIMEOUT guard fired (#1805): deliberate, benign for collection,
-            -- counted apart from errors because clustering here is a signal about the TARGET's lock
-            -- contention rather than a monitoring fault.
-            SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
+            failed.error_message AS last_error,
+            h.last_error_time,
+            h.permission_denied_count,
+            h.yield_count,
             -- #1837: the note a SUCCEEDING run can leave behind (an enumeration that yielded 0 items,
             -- items whose enumeration probe failed). Gated on SUCCESS specifically, rather than on
             -- every non-failure status: the runners attach a note only to the SUCCESS write, and the looser
             -- complement would drag SESSION_MISSING and CANCELLED messages into a column whose whole
             -- claim is that it is NOT an error. Display text only: no band, no count, no threshold
-            -- reads it, and a legitimately empty target stays HEALTHY exactly as before.
-            MAX(CASE WHEN note_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS last_note,
-            -- How many of the window's runs carried one. note_count = total_runs is the
-            -- persistently-empty signal: EVERY run this week came back with nothing.
-            COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
-            -- #1852: the one thing that makes a persistently-empty enumeration interesting — does this
-            -- target actually HAVE user databases? Zero items on a server with none is legitimate and
-            -- stays quiet; zero items on a server that HAS them is a login that cannot enter any, or a
-            -- filter that swallowed everything. database_size_stats rather than database_config for
-            -- three reasons: it runs on the scheduled loop (60 min) where database_config is on-load
-            -- and can age past this window on a long-running service; it is indexed on
-            -- (server_id, collection_time) where database_config has no index at all; and it reads
-            -- sys.master_files, so it still sees databases the monitoring login cannot ENTER — exactly
-            -- the case being diagnosed. database_id > 4 excludes the system databases, tempdb
-            -- included: the size collector takes every ONLINE database, so a bare row check
-            -- would be true on every server alive. A NULL database_id is an Azure sibling row
-            -- (#2643/#3262): sys.resource_stats carries no id, and it bills only USER databases,
-            -- so those rows are inventory too — without the IS NULL arm a master-connected Azure
-            -- target with fifty user databases would read as having none.
-            --
-            -- The inventory window is the health read's OWN ($2) — no second parameter, and an
-            -- inventory that aged out says nothing rather than something stale. Uncorrelated, so both
-            -- engines evaluate it once per query (a Postgres InitPlan) instead of per row, and it
-            -- needs no GROUP BY entry and no join. Feeds display text only, through the shared
-            -- formatter; the banding never sees it.
-            CASE
-                WHEN EXISTS
-                     (
-                         SELECT 1
-                         FROM v_database_size_stats
-                         WHERE server_id = $1
-                         AND   collection_time >= $2
-                         AND   (database_id > 4 OR database_id IS NULL)
-                     )
-                THEN 1
-                ELSE 0
-            END AS has_user_databases,
-            -- #2804: runs the #2673 wall-clock budget abandoned. Appended last — this result set is
-            -- read positionally by one shared mapper serving BOTH the per-server and fleet reads.
-            --
-            -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
-            -- window can still hold cycles written before #2803 gave abandonment its own status:
-            -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
-            -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
-            -- filter correct against current writes and silently wrong against older ones, failing in
-            -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
-            -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
-            -- for query_store), so equality against one rendered sentence matches one collector.
-            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
-                     THEN 1 ELSE 0 END) AS abandoned_count,
-            -- #3240: runs skipped because a PostgreSQL extension the collector DECLARES is not installed
-            -- — the EXTENSION_MISSING status the fault mapper split out of PERMISSIONS, counted apart so
-            -- the banding stops calling an uninstalled optional extension NO_PERMISSIONS. APPENDED, never
-            -- inserted: this result set is read positionally by one shared mapper.
-            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
-            -- #3819: the two instants that, with last_run_time above, say whether this collector
-            -- STOPPED producing rather than never having produced here. The same named skip carries
-            -- opposite meanings on those two rows, and the band read both as the benign resting state.
-            -- This grid bands through the SAME shared classifier as the service's reads, so it has to
-            -- feed it the same inputs — left unselected they default to null, this COMPILES, and the
-            -- grid would call a regressed collector HEALTHY while get_collection_health called it
-            -- WARNING. That is #3240's lesson and #2804's before it. The FINDING that names the rows and
-            -- the status is deliberately not carried here: this projection has no rows_stored to count
-            -- and the grid has no column to render prose in, so the band is the whole of what this
-            -- surface needs to agree about. APPENDED, read positionally by the one shared mapper.
-            MAX(CASE WHEN status IS NULL
-                      OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
-                     THEN collection_time END) AS last_non_skip_time,
-            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+            -- reads it, and a legitimately empty target stays HEALTHY exactly as before. The NEWEST run
+            -- that carried one (#1855): a later clean run no longer blanks a note the window still holds.
+            -- MAX() was never wrong about WHICH rows to consider, only about which of them wins, and text
+            -- does not sort like the number #1837's probe note carries: 12 item(s) sorts below 9 item(s).
+            -- collection_time settles it; error_message DESC only breaks an exact-timestamp tie.
+            noted.error_message AS last_note,
+            h.note_count,
+            h.has_user_databases,
+            h.abandoned_count,
+            h.extension_missing_count,
+            h.last_non_skip_time,
+            h.last_productive_time,
             -- #4748: the note the collector's NEWEST run left, which is not last_note above (that is the
             -- newest run that CARRIED a note, so a clean run after a partial-failure cycle still shows the
             -- older cycle's note there). The band reads only this one, because the loss an older note names
             -- is not the collector's current state. APPENDED, read positionally by the one shared mapper.
-            MAX(CASE WHEN recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note
-        FROM
+            CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note
+        FROM health h
+        -- #4955: the keyed lookups. Each reads ONE collector's rows through
+        -- idx_collection_log_watermark (server_id, collector_name, collection_time DESC), at an instant the
+        -- aggregate above already found, instead of ranking every run of the window to reach them. The
+        -- window bound ($2) is repeated on each so a chunk older than the window is excluded at plan time.
+        --
+        -- The newest run: the rows at the window's newest instant, the greater status first (the order
+        -- the rank this replaces broke an exact tie in, the way the Darling service read breaks it;
+        -- PostgreSQL's DESC puts a NULL status first).
+        LEFT JOIN LATERAL
         (
-            -- #1855: rank each class of message newest-first so the two exemplar columns above can take
-            -- the LATEST one instead of the lexicographically greatest. Ordering on whether the class's
-            -- CASE came back empty puts every row that carries such a message ahead of every row that
-            -- does not, so rank 1 is the newest one that has text — and a later clean run no longer
-            -- blanks a note the window still holds. MAX() was never wrong about WHICH rows to consider,
-            -- only about which of them wins, and text does not sort like the number #1837's probe note
-            -- carries: 12 item(s) sorts below 9 item(s). collection_time settles it; error_message DESC
-            -- only breaks an exact-timestamp tie, and breaks it identically here and in Lite's DuckDB
-            -- twin, which binary-vs-locale collation would not.
-            SELECT
-                collector_name,
-                collection_time,
-                duration_ms,
-                status,
-                error_message,
-                -- #2926: the abandonment predicate above reads it. Projected here for the same reason
-                -- #2472's three columns are: this subquery ENUMERATES its columns, so an aggregate
-                -- outside naming one it does not carry fails at the STORE and nowhere earlier.
-                rows_collected,
-                ROW_NUMBER() OVER
-                (
-                    PARTITION BY collector_name
-                    ORDER BY (CASE WHEN status = 'SUCCESS' THEN error_message END) IS NULL,
-                             collection_time DESC,
-                             error_message DESC
-                ) AS note_rank,
-                ROW_NUMBER() OVER
-                (
-                    PARTITION BY collector_name
-                    ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) IS NULL,
-                             collection_time DESC,
-                             error_message DESC
-                ) AS error_rank,
-                -- #4748: newest run first, so latest_run_note above takes the newest run's note. status DESC
-                -- only breaks an exact-timestamp tie, the way the Darling service read breaks it.
-                ROW_NUMBER() OVER
-                (
-                    PARTITION BY collector_name
-                    ORDER BY collection_time DESC,
-                             status DESC
-                ) AS recency_rank
-            FROM v_collection_log
-            WHERE server_id = $1
-            AND   collection_time >= $2
-        ) runs
-        GROUP BY collector_name
-        ORDER BY collector_name
+            SELECT n.status,
+                   n.error_message
+            FROM v_collection_log n
+            WHERE n.server_id = $1
+            AND   n.collector_name = h.collector_name
+            AND   n.collection_time >= $2
+            AND   n.collection_time = h.last_run_time
+            ORDER BY n.status DESC
+            LIMIT 1
+        ) newest ON TRUE
+        -- The newest failing run that carried text. No such run: no row, and last_error is NULL.
+        LEFT JOIN LATERAL
+        (
+            SELECT f.error_message
+            FROM v_collection_log f
+            WHERE f.server_id = $1
+            AND   f.collector_name = h.collector_name
+            AND   f.collection_time >= $2
+            AND   f.collection_time = h.last_failure_text_time
+            AND   f.status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING')
+            AND   f.error_message IS NOT NULL
+            ORDER BY f.error_message DESC
+            LIMIT 1
+        ) failed ON TRUE
+        -- The newest SUCCESS run that carried a note.
+        LEFT JOIN LATERAL
+        (
+            SELECT t.error_message
+            FROM v_collection_log t
+            WHERE t.server_id = $1
+            AND   t.collector_name = h.collector_name
+            AND   t.collection_time >= $2
+            AND   t.collection_time = h.last_note_time
+            AND   t.status = 'SUCCESS'
+            AND   t.error_message IS NOT NULL
+            ORDER BY t.error_message DESC
+            LIMIT 1
+        ) noted ON TRUE
+        ORDER BY h.collector_name
         """;
 
     /// <summary>

@@ -53,7 +53,7 @@ public sealed class FinOpsPageShellTests
     public void RenderFinops_AFailedOrEmptyRereadOnAPollNeverMountsOverThePaintedTab()
     {
         var js = Js("pages", "finops.js").ReplaceLineEndings("\n");
-        Assert.Contains("    const show = (node) => {\n      /* A failed or empty re-read on a poll says nothing about the painted page: keep it and the cache. */\n      if (hadCache) return;\n      lastRows = null;\n", js);
+        Assert.Contains("    const show = (node) => {\n      /* A failed re-read on a poll says nothing about the painted page: keep it and the cache. */\n      if (hadCache) return;\n      lastRows = null;\n", js);
     }
 
     [Fact]
@@ -128,19 +128,33 @@ public sealed class FinOpsPageShellTests
         Assert.Contains("opts.poll === true", body);
         Assert.DoesNotContain("keepPainted", body);
         var lines = body.ReplaceLineEndings("\n").Split('\n');
-        var paintIdx = Array.FindIndex(lines, l => l.Trim() == "if (lastRows !== null) paint(lastRows);");
+        var paintIdx = Array.FindIndex(lines, l => l.Trim() == "if (hit) paint(lastRows);");
         var fetchIdx = Array.FindIndex(lines, l => l.Contains("readTool(\"list_servers\""));
         Assert.True(paintIdx >= 0 && paintIdx < fetchIdx, "the cached paint must run before the list_servers read, on polls too (no !isPoll guard)");
-        Assert.Contains("const needFetch = lastRows === null || isPoll;", body);
+        Assert.Contains("const hit = lastRows !== null && (!server || lastRows.some((r) => r.server_name === server || r.display_name === server));", body);
+        Assert.Contains("const hadCache = hit;", body);
+        Assert.Contains("const needFetch = !hit || isPoll;", body);
         Assert.Contains("if (!needFetch) return;", body);
         var ctrlIdx = Array.FindIndex(lines, l => l.Trim() == "let controller = panelAbort = new AbortController();");
+        Assert.True(ctrlIdx > 0 && lines[ctrlIdx - 1].Trim() == "if (panelAbort) panelAbort.abort();",
+            "the previous render's controller must be aborted on the line right before the new one is created");
         Assert.True(ctrlIdx >= 0 && ctrlIdx < Array.FindIndex(lines, l => l.Contains("await ")),
             "the controller must be created unconditionally before the first await");
         Assert.Contains("{ signal: controller.signal }", body);
         Assert.Contains("aria-current", src);
         Assert.DoesNotContain("role: \"tab", src);
         Assert.DoesNotContain("aria-selected", src);
-        Assert.Contains("No servers are registered", body);
+        Assert.Contains("/^No servers are registered/.test(", body);
+        /* An empty registry is a definite answer: both branches go through showEmpty, which is not behind the hadCache guard. */
+        Assert.Contains("return showEmpty();", body);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(body, @"return showEmpty\(\);").Count);
+        var emptyIdx = Array.FindIndex(lines, l => l.Trim() == "const showEmpty = () => {");
+        var showIdx = Array.FindIndex(lines, l => l.Trim() == "const show = (node) => {");
+        Assert.True(emptyIdx >= 0 && showIdx >= 0, "showEmpty and show must both exist");
+        var emptyBlock = string.Join("\n", lines.Skip(emptyIdx).Take(5));
+        Assert.DoesNotContain("hadCache", emptyBlock);
+        Assert.Contains("lastRows = null;", emptyBlock);
+        Assert.Contains("controller.abort();", emptyBlock);
     }
 
     [Fact]
@@ -187,6 +201,7 @@ public sealed class FinOpsPageShellTests
     [InlineData("const label = row.band;", false)]
     [InlineData("const n = rows.length > 0 ? 1 : 2;", false)]
     [InlineData("score: row.score,", false)]
+    [InlineData("rows.map((r) => NUMBER_FMT.format(r.v));", false)]
     public void ThresholdScanner_FlagsOnlyNumericComparisons(string line, bool flagged)
     {
         Assert.Equal(flagged, BrowserDerivedThresholds(line).Count > 0);
@@ -201,7 +216,7 @@ public sealed class FinOpsPageShellTests
         const string ident = "(band|score|pct|percent|ratio|util)";
         var after = new Regex("\\b\\w*" + ident + "\\w*\\b[\\w.\\[\\]()]*\\s*(<=|>=|<|>|===|!==|==|!=)\\s*-?\\d", RegexOptions.IgnoreCase);
         var before = new Regex("-?\\d[\\d.]*\\s*(<=|>=|<|>|===|!==|==|!=)\\s*[\\w.\\[\\]()]*" + ident, RegexOptions.IgnoreCase);
-        var constant = new Regex("(<=|>=|<|>)\\s*[A-Z][A-Z0-9_]{2,}\\b|\\b[A-Z][A-Z0-9_]{2,}\\s*(<=|>=|<|>)");
+        var constant = new Regex("(<=|>=|<|(?<!=)>)\\s*[A-Z][A-Z0-9_]{2,}\\b|\\b[A-Z][A-Z0-9_]{2,}\\s*(<=|>=|<|>)");
         var heatTernary = new Regex("(<=|>=|<|>)\\s*-?\\d[\\d.]*\\s*\\?[^:]*(heat|band)|heat\\w*\\s*=[^;]*(<=|>=|<|>)\\s*-?\\d", RegexOptions.IgnoreCase);
         return source.Split('\n').Where(l => after.IsMatch(l) || before.IsMatch(l) || constant.IsMatch(l) || heatTernary.IsMatch(l)).Select(l => l.Trim()).ToList();
     }

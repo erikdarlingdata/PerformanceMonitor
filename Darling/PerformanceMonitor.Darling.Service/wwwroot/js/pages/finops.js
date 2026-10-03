@@ -166,11 +166,12 @@ export function renderFinops(main, server, tabId, opts) {
 
   /* Every render, poll included, paints from the cache in the same tick: that rebuilds the tab's panels,
      which is how the open tab refreshes its data. The server list is re-read only when there is no cache or on a poll. */
-  const hadCache = lastRows !== null;
-  if (lastRows !== null) paint(lastRows);
+  const hit = lastRows !== null && (!server || lastRows.some((r) => r.server_name === server || r.display_name === server));
+  const hadCache = hit;
+  if (hit) paint(lastRows);
   else mount(main, [el("div", { class: "page-head" }, [el("h2", { text: "FinOps" })]), el("div", { class: "finops-body" }, [loadingStrip("Loading servers")])]);
 
-  const needFetch = lastRows === null || isPoll;
+  const needFetch = !hit || isPoll;
   if (!needFetch) return;
 
   (async () => {
@@ -178,16 +179,22 @@ export function renderFinops(main, server, tabId, opts) {
     if (generation !== renderGeneration) return;
     const body = main.querySelector(".finops-body");
     const show = (node) => {
-      /* A failed or empty re-read on a poll says nothing about the painted page: keep it and the cache. */
+      /* A failed re-read on a poll says nothing about the painted page: keep it and the cache. */
       if (hadCache) return;
       lastRows = null;
       if (body) mount(body, node);
     };
+    /* An empty registry is a definite answer, not a failed read: drop the cache and the painted page's reads. */
+    const showEmpty = () => {
+      lastRows = null;
+      controller.abort();
+      if (body) mount(body, emptyStrip("No servers are registered yet."));
+    };
     /* An empty registry answers with prose, which the read classifies as an error; it is the empty case. */
-    if (res.kind === "error" && /^No servers are registered/.test(res.message || "")) return show(emptyStrip("No servers are registered yet."));
+    if (res.kind === "error" && /^No servers are registered/.test(res.message || "")) return showEmpty();
     if (res.kind === "error") return show(errorStrip(res.message));
     const rows = res.kind === "data" ? serverRows(res.data) : [];
-    if (rows.length === 0) return show(emptyStrip("No servers are registered yet."));
+    if (rows.length === 0) return showEmpty();
     const unchanged = hadCache && lastRows !== null && sameServers(lastRows, rows);
     lastRows = rows;
     if (!unchanged) {
