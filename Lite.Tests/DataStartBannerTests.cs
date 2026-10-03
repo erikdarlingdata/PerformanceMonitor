@@ -125,11 +125,14 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
 
     /// <summary>
     /// The relation list is a closed enum, so no view name ever comes from the caller. Each member must name a real
-    /// archive view (<c>v_</c> plus a table in the archivable set) whose time column is <c>collection_time</c>, with
-    /// a <c>server_id</c> column, which is what the probe's SQL assumes.
+    /// archive view (<c>v_</c> plus a table in the archivable set) whose time column is the one
+    /// <see cref="LocalDataService.QueryWindowRelationTimeColumn"/> names for it (<c>collection_time</c>, or
+    /// <c>capture_time</c> on the three config snapshots, #4966), with a <c>server_id</c> column, which is what the
+    /// probe's SQL assumes. The archive purges each table by that same column, so the probe's window and the
+    /// retention edge are measured on one clock.
     /// </summary>
     [Fact]
-    public async Task EveryRelation_NamesARealArchiveView_WithServerIdAndCollectionTime()
+    public async Task EveryRelation_NamesARealArchiveView_WithServerIdAndItsTimeColumn()
     {
         await _duckDb.InitializeAsync();
         foreach (var relation in Enum.GetValues<QueryWindowRelation>())
@@ -137,14 +140,15 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
             var view = LocalDataService.QueryWindowRelationView(relation);
             Assert.StartsWith("v_", view, StringComparison.Ordinal);
             var table = view[2..];
+            var timeColumn = LocalDataService.QueryWindowRelationTimeColumn(relation);
             Assert.Contains(table, DuckDbInitializer.ArchivableTables);
-            Assert.Contains(ArchiveService.ArchivableTables, t => t.Table == table && t.TimeColumn == "collection_time");
+            Assert.Contains(ArchiveService.ArchivableTables, t => t.Table == table && t.TimeColumn == timeColumn);
 
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync();
             using var readLock = _duckDb.AcquireReadLock();
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = $"SELECT COUNT(*) FROM information_schema.columns WHERE table_name = '{view}' AND column_name IN ('server_id', 'collection_time')";
+            cmd.CommandText = $"SELECT COUNT(*) FROM information_schema.columns WHERE table_name = '{view}' AND column_name IN ('server_id', '{timeColumn}')";
             Assert.Equal(2L, Convert.ToInt64(await cmd.ExecuteScalarAsync()));
         }
     }

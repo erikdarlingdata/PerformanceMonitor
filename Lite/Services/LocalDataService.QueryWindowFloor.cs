@@ -14,7 +14,8 @@ namespace PerformanceMonitorLite.Services;
 
 /// <summary>
 /// The relations a window-floor probe (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>) may read. Each is a
-/// closed member that maps to ONE <c>v_</c> view with <c>server_id</c> and <c>collection_time</c> columns, so no
+/// closed member that maps to ONE <c>v_</c> view with <c>server_id</c> and a time column (<c>collection_time</c>, or
+/// <c>capture_time</c> on the three config snapshots, <see cref="LocalDataService.QueryWindowRelationTimeColumn"/>), so no
 /// caller hands a view name, and nothing a user typed, into the probe's SQL. #4231 began with the three RAW-ONLY
 /// relations (<see cref="QueryStats"/>, <see cref="ProcedureStats"/>, <see cref="QueryStoreStats"/>): every
 /// Queries-tab grid and MCP tool that reads one has no rollup underneath it to fall back on when the requested
@@ -29,6 +30,16 @@ public enum QueryWindowRelation
     ProcedureStats,
     QueryStoreStats,
     QuerySnapshots,
+
+    /* Group C of #4966: Collection Health, System Events, Config Changes and Long Queries. */
+    CollectionLog,
+    SystemHealthEvents,
+    DefaultTraceEvents,
+    ServerConfig,
+    DatabaseConfig,
+    TraceFlags,
+    LongQueryCompletions,
+
     WaitingTasks
 }
 
@@ -40,21 +51,53 @@ public partial class LocalDataService
         QueryWindowRelation.ProcedureStats => "v_procedure_stats",
         QueryWindowRelation.QueryStoreStats => "v_query_store_stats",
         QueryWindowRelation.QuerySnapshots => "v_query_snapshots",
+        /* Group C of #4966: Collection Health, System Events, Config Changes and Long Queries. */
+        QueryWindowRelation.CollectionLog => "v_collection_log",
+        QueryWindowRelation.SystemHealthEvents => "v_system_health_events",
+        QueryWindowRelation.DefaultTraceEvents => "v_default_trace_events",
+        QueryWindowRelation.ServerConfig => "v_server_config",
+        QueryWindowRelation.DatabaseConfig => "v_database_config",
+        QueryWindowRelation.TraceFlags => "v_trace_flags",
+        QueryWindowRelation.LongQueryCompletions => "v_long_query_completions",
         QueryWindowRelation.WaitingTasks => "v_waiting_tasks",
         _ => throw new ArgumentOutOfRangeException(nameof(relation), relation, "unknown QueryWindowRelation")
     };
 
     /// <summary>
     /// The collector whose runs <c>collection_log</c> records for a relation the probe reads by coverage
-    /// (<see cref="QueryWindowRelation.QuerySnapshots"/>, <see cref="QueryWindowRelation.WaitingTasks"/>), or null for
-    /// the three Queries-tab relations, which keep the row-only probe. A closed map, so nothing a caller passes
-    /// reaches the probe's SQL.
+    /// (<see cref="QueryWindowRelation.QuerySnapshots"/>, <see cref="QueryWindowRelation.WaitingTasks"/>, and #4966's
+    /// System Events, Config Changes and Long Queries relations), or null for the three Queries-tab relations and
+    /// <see cref="QueryWindowRelation.CollectionLog"/>, which keep the row-only probe. A closed map, so nothing a
+    /// caller passes reaches the probe's SQL.
     /// </summary>
     internal static string? QueryWindowRelationCollector(QueryWindowRelation relation) => relation switch
     {
         QueryWindowRelation.QuerySnapshots => "query_snapshots",
         QueryWindowRelation.WaitingTasks => "waiting_tasks",
+        /* Group C of #4966. Every event and snapshot table below holds a row only when something happened or changed
+           (system_health and default trace events, long-query completions, and the config snapshots, which the
+           collectors take at load), so a collector's runs are what show the store covered a quiet start.
+           CollectionLog is the run log itself, one dense row per run, so it keeps the row-only probe. */
+        QueryWindowRelation.SystemHealthEvents => "system_health_events",
+        QueryWindowRelation.DefaultTraceEvents => "default_trace_events",
+        QueryWindowRelation.ServerConfig => "server_config",
+        QueryWindowRelation.DatabaseConfig => "database_config",
+        QueryWindowRelation.TraceFlags => "trace_flags",
+        QueryWindowRelation.LongQueryCompletions => "long_query_completions",
         _ => null
+    };
+
+    /// <summary>
+    /// The time column of a relation's view that the probe compares against the window (#4966): <c>collection_time</c>
+    /// for every relation except the three config snapshots, whose collectors stamp <c>capture_time</c> instead
+    /// (<c>ICollectorSchemaInfo.PrefixTimeColumnName</c>, the column the archive purges by too). A closed map, so nothing a
+    /// caller passes reaches the probe's SQL. The collector's own runs in <c>v_collection_log</c> always read
+    /// <c>collection_time</c>.
+    /// </summary>
+    internal static string QueryWindowRelationTimeColumn(QueryWindowRelation relation) => relation switch
+    {
+        QueryWindowRelation.ServerConfig or QueryWindowRelation.DatabaseConfig or QueryWindowRelation.TraceFlags => "capture_time",
+        _ => "collection_time"
     };
 
     /// <summary>
@@ -115,6 +158,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
 
         var collector = QueryWindowRelationCollector(relation);
+        var timeColumn = QueryWindowRelationTimeColumn(relation);
         DateTime? firstInWindow;
         using (var windowCommand = connection.CreateCommand())
         {
@@ -122,14 +166,14 @@ public partial class LocalDataService
                LEAST skips a NULL, so either one alone answers. */
             windowCommand.CommandText = collector is null
                 ? $@"
-SELECT MIN(collection_time)
+SELECT MIN({timeColumn})
 FROM {view}
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3"
+AND   {timeColumn} >= $2
+AND   {timeColumn} <= $3"
                 : $@"
 SELECT LEAST(
-    (SELECT MIN(collection_time) FROM {view} WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3),
+    (SELECT MIN({timeColumn}) FROM {view} WHERE server_id = $1 AND {timeColumn} >= $2 AND {timeColumn} <= $3),
     (SELECT MIN(collection_time) FROM v_collection_log WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time >= $2 AND collection_time <= $3))";
             windowCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
@@ -148,7 +192,7 @@ SELECT LEAST(
 SELECT 1
 FROM {view}
 WHERE server_id = $1
-AND   collection_time < $2
+AND   {timeColumn} < $2
 LIMIT 1";
             olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             olderCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
