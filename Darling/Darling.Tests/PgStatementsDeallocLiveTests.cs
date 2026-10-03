@@ -40,6 +40,12 @@ public sealed class PgStatementsDeallocLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live #4677 collector read.");
 
         var ct = TestContext.Current.CancellationToken;
+
+        /* pg_stat_statements.max is a server setting, readable from any database once the library is preloaded. */
+        var maxEntries = await ReadMaxEntriesAsync(baseConnectionString!, ct);
+        Assert.SkipWhen(maxEntries > MaxEntriesTheEvictionCanFill,
+            $"pg_stat_statements.max is {maxEntries}, more than the {MaxEntriesTheEvictionCanFill} this test fills to force an eviction pass.");
+
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         var bodySucceeded = false;
         try
@@ -63,20 +69,26 @@ public sealed class PgStatementsDeallocLiveTests
             /* #4981: the counter belongs to the SERVER, not to this test. pg_stat_statements_info.dealloc counts the
                eviction passes of every session on the cluster, and a full pg_stat_statements_reset() from another
                live class sets it back to zero and stamps a new stats_reset. Reading it directly once and asserting the
-               collector's read equals it failed whenever another session moved it between the two reads. This test
-               evicts nothing itself, so its own contribution to the counter is zero: the collector's read must lie
-               between a direct read taken just before it and one taken just after, which holds however much the other
-               sessions add. A reset between the two direct reads (a changed stats_reset) voids that attempt, and the
-               read is tried again. */
+               collector's read equals it failed whenever another session moved it between the two reads. The
+               collector's read must lie between a direct read taken just before it and one taken just after, which
+               holds however much the other sessions add (the statements the test itself runs between the reads add
+               to both ends alike). A reset between the two direct reads (a changed stats_reset) voids that attempt,
+               and the read is tried again.
+
+               The bracket only proves something once the counter is above zero: on a cluster that has never evicted
+               it is [0, 0], and a collector that reported 0 for everything would pass. So every attempt first makes
+               sure this cluster has evicted at least once (more distinct statements than pg_stat_statements.max),
+               which also puts the stale-count case, a read below the direct one, out of the bracket. */
             (int Count, long? Dealloc) read = (0, null);
             (long Dealloc, string Epoch) before = (0, string.Empty);
             (long Dealloc, string Epoch) after = (0, string.Empty);
             for (var attempt = 0; attempt < 5; attempt++)
             {
+                await EnsureEvictionsAsync(connection, maxEntries, ct);
                 before = await DeallocAsync(connection, ct);
                 read = await ReadOrdinal30Async(connection, Sql(major, aurora: false), ct);
                 after = await DeallocAsync(connection, ct);
-                if (before.Epoch == after.Epoch)
+                if (before.Epoch == after.Epoch && before.Dealloc > 0)
                 {
                     break;
                 }
@@ -84,6 +96,7 @@ public sealed class PgStatementsDeallocLiveTests
 
             /* Five resets in a row is not noise. */
             Assert.Equal(before.Epoch, after.Epoch);
+            Assert.True(before.Dealloc > 0, "the cluster has evicted nothing, so the bracket could not tell a collector that reports 0");
             Assert.True(read.Count > 0);
             Assert.NotNull(read.Dealloc);
             Assert.InRange(read.Dealloc!.Value, before.Dealloc, after.Dealloc);
@@ -264,6 +277,71 @@ VALUES ($1, $2, $3, $4, 42, 16384, 10, TRUE, 100, 5000, 91.5, 250, 10, 5, 0, 0, 
         }
 
         return (count, dealloc);
+    }
+
+    /// <summary>The most entries a cluster may hold for this test to fill it: each is a statement of its own to run.</summary>
+    private const int MaxEntriesTheEvictionCanFill = 20000;
+
+    private static async Task<int> ReadMaxEntriesAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new NpgsqlCommand("SELECT current_setting('pg_stat_statements.max')::int", connection);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Makes sure pg_stat_statements has evicted on this cluster, so <c>dealloc</c> is above zero: runs more distinct
+    /// statements than the extension can hold, a batch at a time, until the counter moves. A statement's identity is
+    /// the shape of its parse tree, and neither a constant nor an alias is part of it, so the statements differ in
+    /// shape: how many select items, how long an addition each one carries, and which of WHERE, LIMIT and OFFSET
+    /// follow. Does nothing when the counter is already above zero.
+    /// </summary>
+    private static async Task EnsureEvictionsAsync(NpgsqlConnection connection, int maxEntries, CancellationToken ct)
+    {
+        if ((await DeallocAsync(connection, ct)).Dealloc > 0)
+        {
+            return;
+        }
+
+        const int variants = 8;
+        var side = (int)Math.Ceiling(Math.Sqrt((maxEntries + 1) / (double)variants)) + 1;
+        var batch = new System.Text.StringBuilder();
+        var inBatch = 0;
+
+        for (var variant = 0; variant < variants; variant++)
+        {
+            var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
+                + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
+                + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+
+            for (var items = 1; items <= side; items++)
+            {
+                for (var terms = 0; terms <= side; terms++)
+                {
+                    var item = "1" + string.Concat(System.Linq.Enumerable.Repeat("+1", terms));
+                    batch.Append("SELECT ").Append(string.Join(",", System.Linq.Enumerable.Repeat(item, items))).Append(suffix).Append(';');
+
+                    if (++inBatch < 400)
+                    {
+                        continue;
+                    }
+
+                    await DarlingMcpTestData.ExecAsync(connection, ct, batch.ToString());
+                    batch.Clear();
+                    inBatch = 0;
+                    if ((await DeallocAsync(connection, ct)).Dealloc > 0)
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+
+        if (inBatch > 0)
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, batch.ToString());
+        }
     }
 
     /// <summary>

@@ -6698,6 +6698,33 @@ AND   j.hypertable_name = '{relation}'";
     public const string IntervalHonestSourceFilter = "sample_interval_seconds IS DISTINCT FROM 0";
 
     /// <summary>
+    /// The placeholder <see cref="RetentionArmSafetySql"/> writes where a stitched slot's fallback horizon goes
+    /// (#4981). The horizon is BOUND, never computed in the statement: <c>now()::timestamp</c> is effectively
+    /// <c>LOCALTIMESTAMP</c>, so it renders the clock in the store session's TimeZone, while every
+    /// <c>bucket</c> and <c>collection_time</c> it is compared with is naive UTC. Both sides are
+    /// <c>timestamp</c>, so PostgreSQL raises nothing and the probe's upper bound simply moves by the session's
+    /// UTC offset: a session west of UTC ends the scan earlier and misses holes, one east of it ends the scan
+    /// later and reports holes in hours the successor's first refresh has not reached yet. The product pins its
+    /// store sessions to UTC, so that was harmless in production, but the statement's answer should not hang on
+    /// a connection setting (the <see cref="BaselineBackfillProbeSql(string, string)"/> reasoning, which binds
+    /// the same kind of horizon as <c>$1</c>). The caller binds <see cref="RetentionArmSafetyHorizon"/> as the
+    /// statement's only parameter. A slot that is not stitched never names it, and PostgreSQL does not require a
+    /// declared parameter to be referenced.
+    /// </summary>
+    public const string RetentionArmSafetyHorizonPlaceholder = "$1";
+
+    /// <summary>
+    /// The value <see cref="RetentionArmSafetySql"/>'s <see cref="RetentionArmSafetyHorizonPlaceholder"/> is
+    /// bound to: the service's UTC clock (<paramref name="utcNow"/>, the clock that stamped every
+    /// <c>collection_time</c> the buckets derive from) minus <see cref="HourlyRefreshStartSpan"/>, the
+    /// <see cref="HourlyRefreshStartOffset"/> the successor's own first refresh reaches back. Kind
+    /// <see cref="DateTimeKind.Unspecified"/> so Npgsql sends <c>timestamp</c>, not <c>timestamptz</c>, the way
+    /// <see cref="BaselineBackfillProbeSql(string, string)"/>'s horizon is sent.
+    /// </summary>
+    public static DateTime RetentionArmSafetyHorizon(DateTime utcNow)
+        => DateTime.SpecifyKind(utcNow - HourlyRefreshStartSpan, DateTimeKind.Unspecified);
+
+    /// <summary>
     /// Is it safe to arm <paramref name="relation"/>'s retention policy — i.e. does EVERY tier below it already
     /// cover everything this relation holds? Emits the source's oldest row followed by one
     /// <c>min(bucket)</c> column per coverage relation, in <paramref name="coverageRelations"/> order.
@@ -6813,6 +6840,11 @@ AND   j.hypertable_name = '{relation}'";
     /// <c>alter_job</c>/<c>run_job</c> against a raw job's <c>job_id</c> always executes immediately, exactly
     /// as it does for every other job in the catalog — this gate governs the SERVICE's own trigger, not the
     /// database's ordinary admin surface.</para>
+    ///
+    /// <para><b>The statement takes one parameter (#4981).</b> A stitched slot's fallback horizon is
+    /// <see cref="RetentionArmSafetyHorizonPlaceholder"/>, to be bound as <see cref="RetentionArmSafetyHorizon"/>;
+    /// it is not computed from <c>now()</c> in the text, so the verdict does not move with the store session's
+    /// time zone.</para>
     /// </summary>
     public static string RetentionArmSafetySql(string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations)
     {
@@ -6871,9 +6903,10 @@ AND   j.hypertable_name = '{relation}'";
            runs from raw's own filtered floor (below it raw admits no row, so no hole can exist there — a
            gap left by an EARLIER version's purge below that floor is invisible here BY CONSTRUCTION, not
            merely undetected) up to the successor's first bucket strictly ABOVE the legacy's last bucket
-           (or, when the successor holds nothing that high, now() minus HourlyRefreshStartOffset — the successor's
-           own first refresh reaches every bucket newer than that, so a bare empty successor is not a hole)
-           minus one bucket width. That
+           (or, when the successor holds nothing that high, the bound horizon, the service clock minus
+           HourlyRefreshStartOffset — the successor's own first refresh reaches every bucket newer than that, so
+           a bare empty successor is not a hole; see RetentionArmSafetyHorizonPlaceholder for why it is bound and
+           not computed here) minus one bucket width. That
            upper bound is deliberately NOT s.mn: an interior repair materializes successor buckets AT OR
            BELOW l.mx, which moves s.mn itself down, and a probe bounded on s.mn would then miss the seam
            entirely once even one such repair has run. Bounding instead on the successor's first bucket
@@ -6902,7 +6935,7 @@ AND   j.hypertable_name = '{relation}'";
                 + $"                WHEN {LegacySuccessorHoleExistsSql(
                         relation, sourceTimeColumn, successorFilter, legacy, c,
                         fromExpr: $"time_bucket(INTERVAL '1 hour', (SELECT min(src.{sourceTimeColumn}) FROM collect.{relation} AS src{successorFloorWhere}))",
-                        toExpr: $"COALESCE((SELECT min(sa.bucket) FROM collect.{c} AS sa WHERE sa.bucket > l.mx), time_bucket(INTERVAL '1 hour', now()::timestamp - INTERVAL '{HourlyRefreshStartOffset}')) - INTERVAL '1 hour'",
+                        toExpr: $"COALESCE((SELECT min(sa.bucket) FROM collect.{c} AS sa WHERE sa.bucket > l.mx), time_bucket(INTERVAL '1 hour', {RetentionArmSafetyHorizonPlaceholder})) - INTERVAL '1 hour'",
                         bucketWidthLiteral: "INTERVAL '1 hour'")}{Environment.NewLine}"
                 + $"                THEN NULL{Environment.NewLine}"
                 + $"                ELSE LEAST(l.mn, s.mn){Environment.NewLine}"
@@ -7153,6 +7186,11 @@ AND   j.hypertable_name = '{relation}'";
         try
         {
             using var command = new NpgsqlCommand(RetentionArmSafetySql(relation, sourceTimeColumn, coverageRelations), connection) { CommandTimeout = SetupTimeoutSeconds };
+
+            /* #4981: the stitch's fallback horizon, bound off the service's UTC clock and not computed from
+               now() in the SQL (RetentionArmSafetyHorizonPlaceholder says why). Bound for every relation: a
+               statement with no stitched slot (query_store_stats) never names $1, which PostgreSQL allows. */
+            command.Parameters.AddWithValue(RetentionArmSafetyHorizon(DateTime.UtcNow));
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
