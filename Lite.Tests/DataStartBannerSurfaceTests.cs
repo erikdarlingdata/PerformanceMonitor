@@ -827,6 +827,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [InlineData(QueryWindowRelation.DatabaseConfig, "v_database_config", "database_config", "capture_time")]
     [InlineData(QueryWindowRelation.TraceFlags, "v_trace_flags", "trace_flags", "capture_time")]
     [InlineData(QueryWindowRelation.LongQueryCompletions, "v_long_query_completions", "long_query_completions", "collection_time")]
+    [InlineData(QueryWindowRelation.JobHistory, "v_job_history", "job_history", "collection_time")]
     [InlineData(QueryWindowRelation.BlockedProcessReports, "v_blocked_process_reports", "blocked_process_report", "event_time")]
     [InlineData(QueryWindowRelation.Deadlocks, "v_deadlocks", "deadlocks", "deadlock_time")]
     [InlineData(QueryWindowRelation.DmvBlockingSnapshots, "v_dmv_blocking_snapshots", "dmv_blocking_snapshot", "collection_time")]

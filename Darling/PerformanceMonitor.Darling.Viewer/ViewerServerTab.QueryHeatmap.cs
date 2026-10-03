@@ -136,7 +136,9 @@ public partial class ViewerServerTab
     private async Task ReadAndDrawQueryHeatmapAsync(HeatmapMetric metric, DateTime startUtc, DateTime endUtc)
     {
         var dataStartTask = _dataService.GetQueryHeatmapDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var result = await _dataService.GetQueryHeatmapAsync(_server.ServerId, metric, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetQueryHeatmapAsync(_server.ServerId, metric, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Query Heatmap");
+        var result = dataReadTask.Result;
         UpdateQueryHeatmapChart(result);
         await ShowEventDataStartAsync(QueryHeatmapTruncationBanner, dataStartTask, "Query Heatmap", startUtc, result.TimeBuckets.Select(t => (DateTime?)t));
     }

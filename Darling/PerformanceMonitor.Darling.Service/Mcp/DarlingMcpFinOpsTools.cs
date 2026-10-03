@@ -29,6 +29,7 @@ public sealed partial class DarlingMcpFinOpsTools
     internal static readonly string[] Views =
     [
         // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+        UtilizationView,
         // FinOps web parity (#4843), set A ends.
         // Each set belongs to one series of changes. Append to your own set only,
         // so the two series never edit the same lines of this allow-list.
@@ -41,13 +42,14 @@ public sealed partial class DarlingMcpFinOpsTools
         //
         // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
         HighImpactView,
+        DatabaseResourcesView,
         // FinOps web parity (#4843), set B ends.
     ];
 
     // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
-    internal const string SetAViewLines = "";
-    internal const string SetAValid = "";
-    internal const string SetAGuides = "";
+    internal const string SetAViewLines = " " + UtilizationViewLine;
+    internal const string SetAValid = UtilizationView + ", ";
+    internal const string SetAGuides = " " + UtilizationViewGuide;
     // FinOps web parity (#4843), set A ends.
     // Each set belongs to one series of changes. Append to your own set only,
     // so the two series never edit the same lines of these fragments.
@@ -60,9 +62,9 @@ public sealed partial class DarlingMcpFinOpsTools
     //
     //
     // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
-    internal const string SetBViewLines = " " + HighImpactViewLine;
-    internal const string SetBValid = HighImpactView;
-    internal const string SetBGuides = " " + HighImpactViewGuide;
+    internal const string SetBViewLines = " " + HighImpactViewLine + " " + DatabaseResourcesViewLine;
+    internal const string SetBValid = HighImpactView + ", " + DatabaseResourcesView;
+    internal const string SetBGuides = " " + HighImpactViewGuide + " " + DatabaseResourcesViewGuide;
     // FinOps web parity (#4843), set B ends.
 
     private const int DefaultLimit = 10;
@@ -97,6 +99,8 @@ public sealed partial class DarlingMcpFinOpsTools
             switch (normalized)
             {
                 // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+                case UtilizationView:
+                    return await ReadUtilizationAsync(postgres, resolved, hours_back, limit, cancellationToken);
                 // FinOps web parity (#4843), set A ends.
                 // Each set belongs to one series of changes. Append to your own set only,
                 // so the two series never edit the same lines of this switch.
@@ -110,6 +114,8 @@ public sealed partial class DarlingMcpFinOpsTools
                 // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
                 case HighImpactView:
                     return await ReadHighImpactAsync(postgres, resolved, hours_back, limit, cancellationToken);
+                case DatabaseResourcesView:
+                    return await ReadDatabaseResourcesAsync(postgres, resolved, hours_back, limit, cancellationToken);
                 // FinOps web parity (#4843), set B ends.
                 default:
                     return McpHelpers.Refusal("view", $"Invalid view value '{view}'. Valid views: {string.Join(", ", Views)}.");

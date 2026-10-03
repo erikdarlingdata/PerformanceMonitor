@@ -156,7 +156,9 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var data = await _dataService.GetSchedulerIssuesAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetSchedulerIssuesAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seSchedulerFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(SchedulerIssuesNoDataMessage, data.Count);
@@ -167,7 +169,9 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var data = await _dataService.GetSevereErrorsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetSevereErrorsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seSevereErrorFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(SevereErrorsNoDataMessage, data.Count);
@@ -178,7 +182,9 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var data = await _dataService.GetMemoryConditionsAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetMemoryConditionsAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seMemoryConditionsFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(MemoryConditionsNoDataMessage, data.Count);
@@ -189,7 +195,9 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var data = await _dataService.GetMemoryBrokerAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetMemoryBrokerAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seMemoryBrokerFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(MemoryBrokerNoDataMessage, data.Count);
@@ -200,7 +208,9 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var data = await _dataService.GetMemoryNodeOomAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetMemoryNodeOomAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seMemoryNodeOomFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(MemoryNodeOomNoDataMessage, data.Count);
@@ -211,7 +221,9 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var data = await _dataService.GetSignificantWaitsAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetSignificantWaitsAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seSignificantWaitsFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(SignificantWaitsNoDataMessage, data.Count);
@@ -222,7 +234,9 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var data = await _dataService.GetCpuTasksAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetCpuTasksAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seCpuTasksFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(CpuTasksNoDataMessage, data.Count);
@@ -233,7 +247,9 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var data = await _dataService.GetIoIssuesAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetIoIssuesAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seIoIssuesFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(IoIssuesNoDataMessage, data.Count);
@@ -244,7 +260,9 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = _dataService.GetDefaultTraceDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var data = await _dataService.GetDefaultTraceEventsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetDefaultTraceEventsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Default Trace");
+        var data = dataReadTask.Result;
         _seDefaultTraceFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "Default Trace", startUtc, data.Select(r => r.EventTimeUtc));
         if (DefaultTraceGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind) is { } gap)

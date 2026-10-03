@@ -42,7 +42,7 @@ namespace Darling.Tests;
 /// its SQL from another type: it pins the reference in source AND the referent's shipped value at
 /// runtime, so neither a retyped copy nor a changed constant can slip past.</item>
 /// <item><see cref="NoSerialLoopMemberInlinesAStoreScalingRead"/> — total for SQL written INLINE in any of
-/// the ten members. A member that referenced a size-scaling constant declared elsewhere would not match,
+/// the eleven members. A member that referenced a size-scaling constant declared elsewhere would not match,
 /// which is what the tree census below is for.</item>
 /// <item><see cref="PgDatabaseSizeRunsOnlyWhereItsCostHasABudget"/> — total for
 /// <c>pg_database_size</c> anywhere in shipped source, wherever the string lives, so no indirection
@@ -207,7 +207,7 @@ public sealed class SerialLoopStoreSizeSourceTests
 
         Assert.Contains("StoreSelfMetrics.LatestStoreSizeSql", code, StringComparison.Ordinal);
 
-        /* And the deadline regime is unchanged — this member is still one of the ten, so the chain
+        /* And the deadline regime is unchanged — this member is still one of the eleven, so the chain
            arithmetic StartupCommandTimeoutTests defends still describes the same population. Asserted here
            too because the fix would look equally "done" if the site had been moved out of the regime
            instead, and that is a different change with a different justification. */
@@ -237,7 +237,7 @@ public sealed class SerialLoopStoreSizeSourceTests
     }
 
     /// <summary>
-    /// The category invariant, over the ten members
+    /// The category invariant, over the eleven members
     /// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> bounds: none of them may INLINE a read whose
     /// cost scales with the store.
     ///
@@ -266,7 +266,7 @@ public sealed class SerialLoopStoreSizeSourceTests
            back empty — or short by a member — would make the assertion below pass by scanning less than it
            claims, which is the failure this file exists to make impossible for the deadline census.
            Asserted as the site TOTAL rather than as a member count, and tied back to the census's own
-           independently-asserted number instead of to a literal: ten members hold the eleven commands, so a
+           independently-asserted number instead of to a literal: eleven members hold the twelve commands, so a
            count of members is arithmetic nobody can check by eye. */
         Assert.Equal(StartupCommandTimeoutTests.ExpectedSerialLoopSites, sites);
         Assert.True(members > 0, "the serial-loop member projection came back empty");
