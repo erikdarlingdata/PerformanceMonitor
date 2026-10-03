@@ -37,7 +37,7 @@ public sealed class CollectorRunTimeRungTests
     private const string Column = "run_at_minute";
 
     /// <summary>The probe's newest sentinel, so the last argument; the ordinal is a fact of the probe's shape.</summary>
-    private const int ProbeOrdinal = 133;
+    private const int ProbeOrdinal = 135;
 
     private const int ServerId = 41;
 
@@ -46,12 +46,12 @@ public sealed class CollectorRunTimeRungTests
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Name == RungName);
 
     [Fact]
-    public void TheRungIsTheTopOfADenseLadder_AtVersion158()
+    public void TheRungIsTheTopOfADenseLadder_AtVersion160()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
-        Assert.Equal(158, StorageVersion.SchemaVersion);
-        Assert.Equal(158, Rung.Version);
+        Assert.Equal(160, StorageVersion.SchemaVersion);
+        Assert.Equal(160, Rung.Version);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
@@ -93,17 +93,17 @@ public sealed class CollectorRunTimeRungTests
         Assert.Equal("hasCollectorRunAt", method.GetParameters()[ProbeOrdinal].Name);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(158, (int)method.Invoke(null, all)!);
+        Assert.Equal(160, (int)method.Invoke(null, all)!);
 
         var behind = (object[])all.Clone();
         behind[ProbeOrdinal] = false;
-        Assert.Equal(157, (int)method.Invoke(null, behind)!);
+        Assert.Equal(159, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasCollectorRunAt)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasMuteRuleServerId)", StringComparison.Ordinal);
+        var previousArm = viewer.IndexOf("if (hasInstallIdTableOid)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "no sentinel arm: a fully-migrated store would map one rung short");
         Assert.True(thisArm < previousArm, "this arm sits below the previous rung's, so a current store maps one rung short");
-        Assert.Contains("return 158;", viewer[thisArm..previousArm], StringComparison.Ordinal);
+        Assert.Contains("return 160;", viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -261,7 +261,7 @@ public sealed class CollectorRunTimeRungTests
     }
 }
 
-/// <summary>The live half of <see cref="CollectorRunTimeRungTests"/>: the column, its CHECK, an upgrade from V157,
+/// <summary>The live half of <see cref="CollectorRunTimeRungTests"/>: the column, its CHECK, an upgrade from V159,
 /// the service's read and its warning once per load, and what the viewer's schedule save does with the column
 /// present.</summary>
 /* #1776 own-store: each fact mints its own scratch database through ScratchPostgres and never touches the shared
@@ -338,7 +338,7 @@ public sealed class CollectorRunTimeRungLiveTests
     }
 
     [Fact]
-    public async Task AStoreAtV157_UpgradesToTheRung_KeepingItsRowsNull_AndARerunIsIdempotent()
+    public async Task AStoreAtV159_UpgradesToTheRung_KeepingItsRowsNull_AndARerunIsIdempotent()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -349,11 +349,11 @@ public sealed class CollectorRunTimeRungLiveTests
         var bodySucceeded = false;
         try
         {
-            /* Put the store back at V157: no column, its stamp gone, a row an operator already wrote. */
+            /* Put the store back at V159: no column, its stamp gone, a row an operator already wrote. */
             foreach (var sql in new[]
             {
                 "ALTER TABLE config.config_collector_schedules DROP COLUMN run_at_minute",
-                "DELETE FROM darling_schema_version WHERE version >= 158",
+                "DELETE FROM darling_schema_version WHERE version >= 160",
                 "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES (NULL, 'index_object_stats', 1440, 30, TRUE)",
             })
             {
@@ -361,7 +361,7 @@ public sealed class CollectorRunTimeRungLiveTests
                 await step.ExecuteNonQueryAsync(ct);
             }
 
-            Assert.Equal(157, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
+            Assert.Equal(159, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
 
             await PgMigrations.MigrateAsync(connection, ct);
 
