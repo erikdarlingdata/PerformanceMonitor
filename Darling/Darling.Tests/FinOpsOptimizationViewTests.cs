@@ -350,6 +350,7 @@ public sealed class FinOpsOptimizationViewLiveTests
         Assert.Equal(1000m, yesterday.GetProperty("avg_used_mb").GetDecimal());
         Assert.Equal(66.7m, yesterday.GetProperty("efficiency_pct").GetDecimal());
         Assert.Equal(2000m, yesterday.GetProperty("peak_granted_mb").GetDecimal());
+        Assert.Equal(500m, yesterday.GetProperty("wasted_mb").GetDecimal());
         Assert.Equal(6L, yesterday.GetProperty("total_grantees").GetInt64());
         Assert.Equal(3L, yesterday.GetProperty("total_waiters").GetInt64());
         Assert.Equal(5L, yesterday.GetProperty("timeout_errors").GetInt64());
