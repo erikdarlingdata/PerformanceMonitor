@@ -1140,6 +1140,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             : base(inner.Message, inner)
         {
         }
+
+        /// <summary>True when the open failed with a driver exception only after the connection <c>Timeout</c> had elapsed
+        /// (see <see cref="PostgresOpenTimeout.IsTimedOutByClock"/>), whatever shape the driver wrapped the failure in.</summary>
+        internal bool FailedAfterTimeout { get; init; }
+
+        /// <summary>The driver exception this wraps, for classification only (never for answer text).</summary>
+        internal Exception Cause => InnerException!;
     }
 
     /// <summary>Opens a compose runner's store connection, before any statement runs. An <see cref="NpgsqlException"/>
@@ -1147,6 +1154,42 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <see cref="TimeoutException"/> (the driver's wait for a data source's first-time setup, #5016), is raised as
     /// <see cref="ComposeStoreOpenException"/>. A cancellation propagates unchanged: it is the caller's.</summary>
     private static async Task<NpgsqlConnection> OpenComposeConnectionAsync(
+        NpgsqlDataSource postgres, System.Threading.CancellationToken cancellationToken)
+    {
+        var timeout = OpenTimeoutOrZero(postgres);
+        var started = Stopwatch.StartNew();
+        try
+        {
+            return await OpenComposeConnectionCoreAsync(postgres, cancellationToken);
+        }
+        catch (ComposeStoreOpenException open)
+        {
+            /* The shape rules in PostgresOpenTimeout.IsTimedOutOpen miss a timeout that tore the socket down under the driver
+               (an aborted read on a loaded runner). Elapsed time covers that without guessing the shape. */
+            if (PostgresOpenTimeout.IsTimedOutByClock(open.Cause, started.Elapsed, timeout, cancellationToken.IsCancellationRequested))
+            {
+                throw new ComposeStoreOpenException(open.Cause) { FailedAfterTimeout = true };
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>The data source's open <c>Timeout</c>, read before the open so a parse failure cannot replace the open's
+    /// own error; zero (the clock rule off) when the string cannot be read.</summary>
+    private static TimeSpan OpenTimeoutOrZero(NpgsqlDataSource postgres)
+    {
+        try
+        {
+            return TimeSpan.FromSeconds(new NpgsqlConnectionStringBuilder(postgres.ConnectionString).Timeout);
+        }
+        catch (ArgumentException)
+        {
+            return TimeSpan.Zero;
+        }
+    }
+
+    private static async Task<NpgsqlConnection> OpenComposeConnectionCoreAsync(
         NpgsqlDataSource postgres, System.Threading.CancellationToken cancellationToken)
     {
         try
@@ -1184,7 +1227,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             /* #5016: whether an open timed out is not the driver's one shape (a read timeout, an expired budget, a connect, a
                pool wait, the GSS step's wrapper and a bare TimeoutException all differ), so the chain is walked in one helper. */
-            return PostgresOpenTimeout.IsTimedOutOpen(open.InnerException!)
+            return PostgresOpenTimeout.IsTimedOutOpen(open.InnerException!) || open.FailedAfterTimeout
                 ? ComposeRunOutcome.ServerError($"Error running query: could not get a store connection in time: {open.InnerException!.Message}")
                 : ComposeRunOutcome.ServerError($"Error running query: could not open a store connection: {open.InnerException!.Message}");
         }
@@ -1226,7 +1269,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(
         NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken,
-        ReadLatencyRecorder? readLatency = null, int clientDeadlineHeadroomSeconds = 0, bool remapClientTimeout = false, bool includeDataStartFields = false)
+        ReadLatencyRecorder? readLatency = null, int clientDeadlineHeadroomSeconds = 0, bool remapClientTimeout = false, bool includeDataStartFields = false,
+        Action<Exception>? onRunException = null)
     {
         /* #4442 scope 2: recorded ONCE per call, here, so the web /api/compose/run route and the MCP
            run_custom_view_panel tool -- both of which call this ONE runner -- contribute exactly one
@@ -1236,7 +1280,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            a bucket update is the only work in the try, and any failure there is swallowed and logged at
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
-        var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger);
+        var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException);
         RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken);
         return outcome;
     }
@@ -1306,7 +1350,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// a failure it swallows.</summary>
     private static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
         NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields, System.Threading.CancellationToken cancellationToken,
-        ILogger? logger = null)
+        ILogger? logger = null, Action<Exception>? onRunException = null)
     {
         if (body["panel"] is not JsonObject panel)
         {
@@ -1498,6 +1542,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* Test seam: the outcome keeps only the message, so a test that wants the chain gets it here. */
+            onRunException?.Invoke(ex);
             return FromRunException(ex, remapClientTimeout);
         }
     }

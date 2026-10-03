@@ -797,18 +797,7 @@ public partial class ViewerServerTab
         PgWraparoundNote.Text = PanelNote("pg_wraparound_stats", wraparoundTask.Result.Count,
             "No per-database freeze headroom has been collected in this window.");
 
-        PgPlanCaptureGrid.ItemsSource = planCaptureTask.Result
-            .Select(r => new
-            {
-                r.Facet,
-                /* Rendered as words, not a checkbox or a bare bool. The reader is being told whether a
-                   PRECONDITION holds, and "False" beside a remedy sentence reads as a failure rather than as
-                   a step not yet taken. */
-                Satisfied = r.IsSatisfied ? "yes" : "no",
-                Observed = r.Observed ?? "(not reported)",
-                Detail = r.Detail ?? string.Empty,
-            })
-            .ToList();
+        PgPlanCaptureGrid.ItemsSource = planCaptureTask.Result.Select(PgDisplay.PlanCapture).ToList();
 
         /* Three states, and they are genuinely different answers. Gated off is the engine sentence. Zero
            rows means the collector has not run yet on a server that only just started collecting - NOT that

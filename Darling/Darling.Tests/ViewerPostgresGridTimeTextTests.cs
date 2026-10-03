@@ -219,7 +219,7 @@ public sealed class ViewerPostgresGridTimeTextTests
         {
             var row = PgDisplay.ColumnStat(ColumnReader(at));
             return (row.CaptureTime, row.CaptureTimeUtc);
-        });
+        }, ":00");
 
         var shown = PgDisplay.ColumnStat(ColumnReader(FirstPass));
         Assert.Equal("status", shown.ColumnName);
@@ -374,6 +374,8 @@ public sealed class ViewerPostgresGridTimeTextTests
     [InlineData("PgServerConfigGrid")]
     [InlineData("PgBufferUsageGrid")]
     [InlineData("PgPredicateStatsGrid")]
+    [InlineData("PgWraparoundGrid")]
+    [InlineData("PgPlanCaptureGrid")]
     public void EveryBindingOfTheGrid_ResolvesOnItsDisplayRow(string grid)
     {
         var displayType = grid switch
@@ -382,6 +384,8 @@ public sealed class ViewerPostgresGridTimeTextTests
             "PgServerConfigGrid" => typeof(PgDisplay.ServerConfigRow),
             "PgBufferUsageGrid" => typeof(PgDisplay.BufferUsageRow),
             "PgPredicateStatsGrid" => typeof(PgDisplay.PredicateStatRow),
+            "PgWraparoundGrid" => typeof(PgDisplay.WraparoundRow),
+            "PgPlanCaptureGrid" => typeof(PgDisplay.PlanCaptureRow),
             _ => Pair(grid).DisplayType,
         };
         var xaml = ReadRepoFile("Darling", ViewerFolder, "ViewerServerTab.xaml");
