@@ -5186,12 +5186,25 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// #4999: seconds a detached daily run may execute before the hang watchdog (<see cref="WatchDailyRuns"/>)
+    /// reports it: 15 minutes. It is its own number and not <see cref="SweepWatchdogSeconds"/>'s 60 s, because a daily
+    /// run is the slow end of the catalog and a minute is not a stall there. database_config reads every database on
+    /// its server, so on a server with many databases a healthy run takes minutes, and a 60 s line warned once a
+    /// day, on every such server, for no fault. A command deadline cannot be the measure either: a run issues many
+    /// commands (database_config issues a set per database), each bounded by its own deadline, so no single
+    /// deadline bounds a whole run. A run still going after 15 minutes is long enough past a healthy one to be
+    /// worth saying so, and while it goes it keeps one of the daily-run permits and its server's next run is
+    /// skipped. The sweep keeps its own 60 s for its own work.
+    /// </summary>
+    internal const int DailyRunWatchdogSeconds = 15 * 60;
+
+    /// <summary>
     /// #4999: the hang watchdog for detached daily runs, called once per sweep tick with the current time. A run
-    /// that has been executing for <see cref="SweepWatchdogSeconds"/> or more gets ONE Warning that names its server
-    /// and collector, the same threshold and the same action the sweep watchdog uses for a body that has not
-    /// finished (<see cref="ClassifySweepEpisode"/> decides both). Before this a stuck daily run showed only as
-    /// stale data, hours later. A run waiting for a permit is not executing and is not reported here. Returns how
-    /// many runs it warned about, for the test.
+    /// that has been executing for <see cref="DailyRunWatchdogSeconds"/> or more gets ONE Warning that names its
+    /// server and collector, the same action the sweep watchdog takes for a body that has not finished
+    /// (<see cref="ClassifySweepEpisode"/>), on a threshold of its own. Before this a stuck daily run showed only
+    /// as stale data, hours later. A run waiting for a permit is not executing and is not reported here, and its
+    /// wait is not counted toward the threshold. Returns how many runs it warned about, for the test.
     /// </summary>
     internal int WatchDailyRuns(DateTime nowUtc)
     {
@@ -5199,8 +5212,7 @@ LIMIT 1";
         foreach (var watch in _dailyRunWatches.Values)
         {
             var runningSeconds = (nowUtc - watch.StartedUtc).TotalSeconds;
-            if (ClassifySweepEpisode(runningSeconds, running: true, runningSeconds, watch.Warned, alreadyQueuedInfo: true)
-                != SweepEpisodeSignal.Hang)
+            if (watch.Warned || runningSeconds < DailyRunWatchdogSeconds)
             {
                 continue;
             }

@@ -466,14 +466,14 @@ public sealed class DailyRunWatchdogTests
             Assert.True(await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1, Patience), "the daily run starts");
             var startedBy = DateTime.UtcNow;
 
-            Assert.Equal(1, worker.WatchDailyRuns(startedBy.AddSeconds(DarlingWorker.SweepWatchdogSeconds + 1)));
+            Assert.Equal(1, worker.WatchDailyRuns(startedBy.AddSeconds(DarlingWorker.DailyRunWatchdogSeconds + 1)));
 
             var warning = Assert.Single(Warnings(logger));
             Assert.Contains(server.Config.DisplayName, warning, StringComparison.Ordinal);
             Assert.Contains(DailyRunKit.Daily, warning, StringComparison.Ordinal);
 
             /* One Warning per run: a later tick finds the run still going and says nothing more. */
-            Assert.Equal(0, worker.WatchDailyRuns(startedBy.AddSeconds(DarlingWorker.SweepWatchdogSeconds + 600)));
+            Assert.Equal(0, worker.WatchDailyRuns(startedBy.AddSeconds(DarlingWorker.DailyRunWatchdogSeconds + 600)));
             Assert.Single(Warnings(logger));
 
             /* The end of a run the watchdog warned about is logged, and the run is no longer watched. */
@@ -484,7 +484,7 @@ public sealed class DailyRunWatchdogTests
                 e => e.Level == LogLevel.Information
                     && e.Message.Contains("daily run completed", StringComparison.Ordinal)
                     && e.Message.Contains(DailyRunKit.Daily, StringComparison.Ordinal));
-            Assert.Equal(0, worker.WatchDailyRuns(startedBy.AddSeconds(DarlingWorker.SweepWatchdogSeconds + 3600)));
+            Assert.Equal(0, worker.WatchDailyRuns(startedBy.AddSeconds(DarlingWorker.DailyRunWatchdogSeconds + 3600)));
         }
         finally
         {
@@ -507,13 +507,64 @@ public sealed class DailyRunWatchdogTests
             await worker.RunDueCollectorsAsync(server, null!, ct);
             Assert.True(await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1, Patience), "the daily run starts");
 
-            Assert.Equal(0, worker.WatchDailyRuns(before.AddSeconds(DarlingWorker.SweepWatchdogSeconds - 20)));
+            Assert.Equal(0, worker.WatchDailyRuns(before.AddSeconds(DarlingWorker.DailyRunWatchdogSeconds - 20)));
             Assert.Empty(Warnings(logger));
         }
         finally
         {
             runs.ReleaseAll();
         }
+    }
+
+    /// <summary>
+    /// A healthy daily run can take minutes (database_config reads every database on its server), so the sweep's
+    /// 60 seconds is not the measure for it: a run that has been executing for five minutes is working, and
+    /// reporting it would warn once a day on every server with many databases for no fault.
+    /// </summary>
+    [Fact]
+    public async Task ADailyRun_ExecutingForFiveMinutes_IsNotReported_ButOnePastFifteenIsReportedOnce()
+    {
+        var logger = new DailyRunLogger();
+        var worker = DailyRunKit.MakeWorker(logger);
+        var runs = new HeldRuns(worker, DailyRunKit.Daily);
+        var server = DailyRunKit.MakeServer(7305, DailyRunKit.Daily);
+        var ct = TestContext.Current.CancellationToken;
+        var before = DateTime.UtcNow;
+
+        try
+        {
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1, Patience), "the daily run starts");
+            var startedBy = DateTime.UtcNow;
+
+            /* Five minutes on, and ten: past the sweep's threshold, inside the daily run's own. */
+            Assert.Equal(0, worker.WatchDailyRuns(before.AddMinutes(5)));
+            Assert.Equal(0, worker.WatchDailyRuns(before.AddMinutes(10)));
+            Assert.Empty(Warnings(logger));
+
+            /* Past fifteen minutes it is reported, once, naming the server and the collector. */
+            Assert.Equal(1, worker.WatchDailyRuns(startedBy.AddMinutes(15).AddSeconds(1)));
+            var warning = Assert.Single(Warnings(logger));
+            Assert.Contains(server.Config.DisplayName, warning, StringComparison.Ordinal);
+            Assert.Contains(DailyRunKit.Daily, warning, StringComparison.Ordinal);
+            Assert.Equal(0, worker.WatchDailyRuns(startedBy.AddMinutes(45)));
+            Assert.Single(Warnings(logger));
+        }
+        finally
+        {
+            runs.ReleaseAll();
+        }
+    }
+
+    /// <summary>
+    /// The daily run's threshold is its own number, and the sweep's stays what it was: the two measure different
+    /// work, so changing one must not move the other.
+    /// </summary>
+    [Fact]
+    public void TheDailyRunThreshold_IsFifteenMinutes_AndTheSweepsStaysSixtySeconds()
+    {
+        Assert.Equal(15 * 60, DarlingWorker.DailyRunWatchdogSeconds);
+        Assert.Equal(60, DarlingWorker.SweepWatchdogSeconds);
     }
 
     [Fact]

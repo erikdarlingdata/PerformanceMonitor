@@ -2868,20 +2868,34 @@ WHERE server_id = $1
 OR    server_id IS NULL";
 
     /// <summary>
-    /// #4999: reads <see cref="ScheduleOverridesSql"/>. A failure to read costs the roll-up nothing but the
+    /// #4999: every collector schedule override row, the fleet-wide ones and every server's own, for the fleet
+    /// roll-up (<see cref="DarlingFleetReader"/>), which bands the collectors of every server in one read and so
+    /// needs each server's rows. The same columns as <see cref="ScheduleOverridesSql"/>, read the same way.
+    /// </summary>
+    internal const string AllScheduleOverridesSql = @"
+SELECT server_id, collector_name, frequency_minutes, retention_days, enabled
+FROM config.config_collector_schedules";
+
+    /// <summary>
+    /// #4999: reads <see cref="ScheduleOverridesSql"/> for one server, or <see cref="AllScheduleOverridesSql"/> when
+    /// <paramref name="serverId"/> is null. A failure to read costs the roll-up nothing but the
     /// overrides: every row then keeps the shipped cadence it was judged by before, and the health read still
     /// answers. This surface has no logger reachable from a static method, so Trace is the seam, as it is for
     /// the top-queries table fallback above. A cancellation is not swallowed.
     /// </summary>
-    private static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    internal static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(
+        NpgsqlDataSource postgres, int? serverId, CancellationToken cancellationToken)
     {
         var overrides = new List<ScheduleOverride>();
         try
         {
-            await using var command = postgres.CreateCommand(ScheduleOverridesSql);
+            await using var command = postgres.CreateCommand(serverId is null ? AllScheduleOverridesSql : ScheduleOverridesSql);
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            AddInt(command, serverId);
+            if (serverId is int scopedServerId)
+            {
+                AddInt(command, scopedServerId);
+            }
+
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -2917,14 +2931,25 @@ OR    server_id IS NULL";
     {
         foreach (var row in rows)
         {
-            if (!CollectorScheduleDefaults.All.ContainsKey(row.CollectorName))
-            {
-                continue;
-            }
-
-            row.EffectiveFrequencyMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
-                StoreConfigProvider.ResolveSchedule(row.CollectorName, serverId, overrides).FrequencyMinutes);
+            ApplyScheduledFrequency(row, serverId, overrides);
         }
+    }
+
+    /// <summary>
+    /// #4999: <see cref="ApplyScheduledFrequencies"/> for one row. The fleet roll-up
+    /// (<see cref="DarlingFleetReader"/>) stamps each (server, collector) row it reads through this, so its band
+    /// and the per-server read's come from the one resolution.
+    /// </summary>
+    internal static void ApplyScheduledFrequency(
+        CollectorHealth row, int serverId, IReadOnlyList<ScheduleOverride> overrides)
+    {
+        if (!CollectorScheduleDefaults.All.ContainsKey(row.CollectorName))
+        {
+            return;
+        }
+
+        row.EffectiveFrequencyMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+            StoreConfigProvider.ResolveSchedule(row.CollectorName, serverId, overrides).FrequencyMinutes);
     }
 
     /// <summary>One completed per-server collection-health read (#3856): the rows
@@ -4316,8 +4341,9 @@ internal sealed class CollectorHealth
     /// it (<see cref="EffectiveFrequencyMinutes"/>): the per-server schedule override, else the fleet-wide one,
     /// else the shipped default, the order the worker's dispatch resolves it in. The band, the roll-up and the
     /// roll-up's test for what runs in the sweep body therefore judge a collector scheduled every 720 minutes
-    /// against 720, not against the cadence it shipped with. A row nothing stamped (the fleet roll-up builds
-    /// its own) keeps the shipped default.</para></summary>
+    /// against 720, not against the cadence it shipped with. The fleet roll-up builds its own rows and stamps them
+    /// the same way (<c>DarlingFleetReader.MapFleetHealthRow</c>); a row nothing stamped keeps the shipped
+    /// default.</para></summary>
     internal int FrequencyMinutes =>
         EffectiveFrequencyMinutes
         ?? (CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)

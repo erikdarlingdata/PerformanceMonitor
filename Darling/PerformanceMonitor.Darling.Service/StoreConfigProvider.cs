@@ -1838,27 +1838,9 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     {
         var def = CollectorScheduleDefaults.All[collectorName];
 
-        ScheduleOverride? perServer = null;
-        ScheduleOverride? fleet = null;
-        if (overrides is not null)
-        {
-            foreach (var o in overrides)
-            {
-                if (!string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                if (o.ServerId == serverId)
-                {
-                    perServer = o;
-                }
-                else if (o.ServerId is null)
-                {
-                    fleet = o;
-                }
-            }
-        }
+        /* #4999: the rows are picked where every collection-health surface picks them, so a surface that judges a
+           collector against its interval cannot pick a different row than the one this schedules it by. */
+        var (perServer, fleet) = CollectorScheduleDefaults.SelectScheduleOverrides(collectorName, serverId, overrides);
 
         /* Sanitize operator-supplied overrides before they drive scheduling / a destructive purge: a
            negative frequency, a retention < 1 (0 would invert the purge cutoff and wipe the table), or a
@@ -2001,7 +1983,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
 /// (no scope at this level, fall through), an empty list = the EXPLICIT "no scope" that stops the
 /// fall-through; the null/empty distinction is load-bearing and <see cref="StoreConfigProvider.ResolveDatabaseScope"/>
 /// documents it. Defaulted so every pre-V125 construction reads as "no scope column written".</summary>
-public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null);
+public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null) : IScheduleFrequencyOverride;
 
 /// <summary>The resolved per-collector schedule (override layered on <see cref="CollectorScheduleDefaults"/>).</summary>
 public sealed record EffectiveSchedule(int FrequencyMinutes, int RetentionDays, bool Enabled);
