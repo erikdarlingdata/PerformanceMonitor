@@ -766,9 +766,9 @@ public sealed partial class ViewerDataService
     public const int CollectionLogRowCap = 500;
 
     /// <summary>
-    /// The per-collector drill's window in hours (the trailing 7 days): <see cref="GetCollectionLogByCollectorAsync"/> reads from
-    /// this far back by default, and the drill window asks the "Showing since" probe about the same span (#4966). The read has
-    /// no row cap, so the note follows the coverage rule.
+    /// The per-collector drill's window in hours (the trailing 7 days): <see cref="GetCollectionLogByCollectorAsync(int, string, int, CancellationToken)"/>
+    /// reads from this far back by default, and the drill window works one start out of it for both its read and the "Showing since"
+    /// probe (#4966). The read has no row cap, so the note follows the coverage rule.
     /// </summary>
     public const int CollectionLogDrillHours = 168;
 
@@ -809,11 +809,21 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// Collection_log entries for a specific collector on one server, most recent first. Copied from
-    /// Lite's <c>GetCollectionLogByCollectorAsync</c> (default 168-hour / 7-day window). Feeds the
-    /// CollectionLogWindow drill.
+    /// Collection_log entries for a specific collector on one server, most recent first, from <paramref name="hoursBack"/> hours
+    /// before now. Copied from Lite's <c>GetCollectionLogByCollectorAsync</c> (default 168-hour / 7-day window). It reads from the
+    /// start <see cref="GetCollectionLogByCollectorAsync(int, string, DateTime, CancellationToken)"/> takes, which is where a caller
+    /// that also asks the "Showing since" probe about the window names the one start for both.
     /// </summary>
-    public async Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync(int serverId, string collectorName, int hoursBack = CollectionLogDrillHours, CancellationToken cancellationToken = default)
+    public Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync(int serverId, string collectorName, int hoursBack = CollectionLogDrillHours, CancellationToken cancellationToken = default) =>
+        GetCollectionLogByCollectorAsync(serverId, collectorName, DateTime.UtcNow.AddHours(-hoursBack), cancellationToken);
+
+    /// <summary>
+    /// Collection_log entries for a specific collector on one server since <paramref name="startUtc"/> (naive UTC), most recent
+    /// first, with no row cap and no upper bound. Feeds the CollectionLogWindow drill, which passes the start its
+    /// <see cref="GetCollectionLogDataStartAsync"/> probe asks about (#4966): a start the read worked out from the clock on its own
+    /// would move apart from the probe's whenever the drill pins the window's end.
+    /// </summary>
+    public async Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync(int serverId, string collectorName, DateTime startUtc, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(CollectionLogByCollectorSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -821,7 +831,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
-            TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-hoursBack), DateTimeKind.Unspecified),
+            TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified),
         });
 
         return await ReadCollectionLogAsync(command, cancellationToken);

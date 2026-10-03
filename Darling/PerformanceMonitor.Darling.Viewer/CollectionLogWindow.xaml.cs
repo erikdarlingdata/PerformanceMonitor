@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Darling.Viewer
     /// The per-collector collection-history drill window (W1i), copied from Lite's
     /// <c>Windows/CollectionLogWindow.xaml.cs</c>. The Collection Health "Health Summary" grid opens it
     /// on double-click. Purely data-driven; the one change from Lite is the data call — repointed to
-    /// <see cref="ViewerDataService.GetCollectionLogByCollectorAsync"/> (Postgres). Copy/Export use the
+    /// <see cref="ViewerDataService.GetCollectionLogByCollectorAsync(int, string, DateTime, CancellationToken)"/> (Postgres). Copy/Export use the
     /// shared PerformanceMonitor.Ui <see cref="DataGridExport"/> with the viewer's comma separator.
     /// </summary>
     public partial class CollectionLogWindow : Window
@@ -53,7 +53,8 @@ namespace PerformanceMonitor.Darling.Viewer
         /// server's collection log starts when that is later than the week's start. The read has no row cap, so the note follows the
         /// coverage rule: the later of the server's first collection and the log's retention edge, never the collector's first run,
         /// so a collector that ran late in a covered week says nothing. The probe starts beside the read and asks about the same
-        /// span; the note names its times in the viewer's display zone, as the tabs' notes do.
+        /// window: one start, worked out once from the end, goes to both, so a pinned end moves the read as it moves the probe. The
+        /// note names its times in the viewer's display zone, as the tabs' notes do.
         /// </summary>
         /// <param name="asOfUtc">The window's end; null for now. A test names it to pin the window.</param>
         internal static async Task<List<CollectionLogRow>> ReadDrillAsync(
@@ -62,7 +63,7 @@ namespace PerformanceMonitor.Darling.Viewer
             var endUtc = asOfUtc ?? DateTime.UtcNow;
             var startUtc = endUtc.AddHours(-ViewerDataService.CollectionLogDrillHours);
             var dataStartTask = dataService.GetCollectionLogDataStartAsync(serverId, startUtc, endUtc);
-            var logs = await dataService.GetCollectionLogByCollectorAsync(serverId, collectorName, ViewerDataService.CollectionLogDrillHours);
+            var logs = await dataService.GetCollectionLogByCollectorAsync(serverId, collectorName, startUtc);
             await ViewerServerTab.ShowEventDataStartAsync(
                 banner, dataStartTask, "Collection Log Drill", startUtc, logs.Select(l => (DateTime?)l.CollectionTime));
             return logs;

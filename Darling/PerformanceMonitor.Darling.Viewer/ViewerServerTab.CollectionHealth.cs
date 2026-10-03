@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using PerformanceMonitor.Ui;
 
@@ -75,11 +76,7 @@ public partial class ViewerServerTab
 
         _collectionHealthFilterMgr!.UpdateData(healthTask.Result);
         _collectionLogFilterMgr!.UpdateData(logTask.Result);
-        /* #4966: the grid says where the log starts when the range reaches before it. The read keeps the newest CollectionLogRowCap
-           runs, so a full page names its oldest run, whatever the store covers; a page under the cap names the earlier of the probe's
-           answer and its earliest run. */
-        await ShowEventDataStartAsync(CollectionLogTruncationBanner, dataStartTask, "Collection Log", startUtc,
-            logTask.Result.Select(r => (DateTime?)r.CollectionTime), ViewerDataService.CollectionLogRowCap);
+        await ShowCollectionLogDataStartAsync(CollectionLogTruncationBanner, dataStartTask, startUtc, logTask.Result);
         RenderCollectorDurationChart(logTask.Result);
 
         /* #3691 part a2: collapse the section entirely when there is nothing to report — the common case
@@ -88,6 +85,20 @@ public partial class ViewerServerTab
         CollectionCaveatsGrid.ItemsSource = caveats;
         CollectionCaveatsExpander.Visibility = caveats.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    /// <summary>
+    /// The Collection Log grid's "Showing since" note (#4966): the grid says where the log starts when the range reaches before it.
+    /// The read keeps the newest <see cref="ViewerDataService.CollectionLogRowCap"/> runs, so a full page names its oldest run,
+    /// whatever the store covers, with no slack; a page under the cap names the earlier of the probe's answer (the later of the
+    /// server's first collection and the log's retention edge, never a collector's first run) and its earliest run. A step of its
+    /// own so a test drives the tab's banner call on a real store.
+    /// </summary>
+    /// <param name="banner">The grid's banner.</param>
+    /// <param name="probe">The data-start probe the tab started beside its read.</param>
+    /// <param name="startUtc">The start of the range the grid just drew.</param>
+    /// <param name="shown">The runs the read returned.</param>
+    internal static Task ShowCollectionLogDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc, IEnumerable<CollectionLogRow> shown) =>
+        ShowEventDataStartAsync(banner, probe, "Collection Log", startUtc, shown.Select(r => (DateTime?)r.CollectionTime), ViewerDataService.CollectionLogRowCap);
 
     /// <summary>
     /// "Purge Now" (Collection Health): runs the daily retention purge on demand via the fleet-wide
