@@ -20,6 +20,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -69,6 +70,34 @@ public sealed class FinOpsDatabaseResourcesGoldenLiveTests
             return Serialize(usage, top, SqlSnapshots(
                 ViewerDataService.DatabaseResourceUsageSqlFor, ViewerDataService.DatabaseResourceUsageSqlFor,
                 ViewerDataService.TopResourceConsumersSqlFor, ViewerDataService.TopResourceConsumersSqlFor));
+        });
+
+    [Fact]
+    public Task DatabaseResourceReads_MatchGoldenFixture_ThroughTheStorageReaderAndRowMappers() =>
+        RunAsync(async (connectionString, ct) =>
+        {
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            /* A fresh store has no rollups: the same availability and coverage the viewer's probe answers there. */
+            var rollups = RollupAvailability.None;
+            var coverage = RollupCoverage.Unknown;
+            var usage = new Dictionary<string, object?>();
+            var top = new Dictionary<string, object?>();
+            foreach (var (key, id) in new[] { ("a", ServerIdA), ("b", ServerIdB) })
+            {
+                var cutoff = DateTime.UtcNow.AddHours(-24);
+                usage[key] = (await DarlingFinOpsDatabaseResourcesReader.GetDatabaseResourceUsageAsync(
+                    dataSource, id, rollups, coverage, cutoff, 30, ct)).ConvertAll(DatabaseResourceUsageRow.From);
+                var (byTotal, byAvg) = await DarlingFinOpsDatabaseResourcesReader.GetTopResourceConsumersAsync(
+                    dataSource, id, rollups, coverage, DateTime.UtcNow.AddHours(-24), 30, 3, ct);
+                top[key] = new Dictionary<string, object?>
+                {
+                    ["byTotal"] = byTotal.Select(TopResourceConsumerRow.From).ToList(),
+                    ["byAvg"] = byAvg.Select(TopResourceConsumerRow.From).ToList(),
+                };
+            }
+            return Serialize(usage, top, SqlSnapshots(
+                DarlingFinOpsDatabaseResourcesReader.DatabaseResourceUsageSqlFor, DarlingFinOpsDatabaseResourcesReader.DatabaseResourceUsageSqlFor,
+                DarlingFinOpsDatabaseResourcesReader.TopResourceConsumersSqlFor, DarlingFinOpsDatabaseResourcesReader.TopResourceConsumersSqlFor));
         });
 
     internal static readonly DateTime StitchWindowStart = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
