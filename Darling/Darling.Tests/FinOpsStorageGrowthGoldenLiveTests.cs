@@ -17,6 +17,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -68,6 +69,29 @@ public sealed class FinOpsStorageGrowthGoldenLiveTests
                     ["indexDetailOrders"] = await viewer.GetObjectIndexDetailAsync(id, HeatDb, "dbo", "Orders", ct),
                     ["indexDetailHeap"] = await viewer.GetObjectIndexDetailAsync(id, HeatDb, "dbo", "Heap", ct),
                     ["indexDetailMissing"] = await viewer.GetObjectIndexDetailAsync(id, HeatDb, "dbo", "NoSuchTable", ct),
+                };
+            }
+            return FinOpsOptimizationGoldenLiveTests.Serialize(anchor, map);
+        });
+
+    [Fact]
+    public Task StorageGrowthReads_MatchGoldenFixture_ThroughTheStorageReaderAndRowMappers() =>
+        RunAsync(async (connectionString, anchor, ct) =>
+        {
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            var map = new Dictionary<string, object?>();
+            foreach (var (key, id) in new[] { ("a", ServerIdA), ("b", ServerIdB), ("c", ServerIdC), ("d", ServerIdD) })
+            {
+                var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-30), DateTimeKind.Unspecified);
+                var heat = await DarlingFinOpsStorageGrowthReader.GetObjectGrowthHeatmapDataAsync(dataSource, id, HeatDb, windowStart, 30, 4, 30, ct);
+                map[key] = new Dictionary<string, object?>
+                {
+                    ["storageGrowth"] = (await DarlingFinOpsStorageGrowthReader.GetStorageGrowthAsync(dataSource, id, DateTime.UtcNow, 30, ct)).ConvertAll(StorageGrowthRow.From),
+                    ["heatmapObjects"] = heat.Objects.ConvertAll(o => ObjectSizeGrowthRow.From(o, HeatDb)),
+                    ["heatmapSamples"] = heat.Samples,
+                    ["indexDetailOrders"] = (await DarlingFinOpsStorageGrowthReader.GetObjectIndexDetailAsync(dataSource, id, HeatDb, "dbo", "Orders", 30, ct)).ConvertAll(IndexUsageRow.From),
+                    ["indexDetailHeap"] = (await DarlingFinOpsStorageGrowthReader.GetObjectIndexDetailAsync(dataSource, id, HeatDb, "dbo", "Heap", 30, ct)).ConvertAll(IndexUsageRow.From),
+                    ["indexDetailMissing"] = (await DarlingFinOpsStorageGrowthReader.GetObjectIndexDetailAsync(dataSource, id, HeatDb, "dbo", "NoSuchTable", 30, ct)).ConvertAll(IndexUsageRow.From),
                 };
             }
             return FinOpsOptimizationGoldenLiveTests.Serialize(anchor, map);
