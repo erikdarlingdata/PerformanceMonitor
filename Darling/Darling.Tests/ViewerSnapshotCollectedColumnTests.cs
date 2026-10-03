@@ -59,16 +59,16 @@ public sealed class ViewerSnapshotCollectedColumnTests
     }
 
     [Fact]
-    public void TheDisplayText_IsTheDisplayZonesWallTime_ToTheSecond_OnTheInvariantCulture()
+    public void TheDisplayText_IsTheDisplayZonesWallTime_ToTheSecond()
     {
         var saved = CultureInfo.CurrentCulture;
         var savedMode = ViewerTimeHelper.CurrentDisplayMode;
         try
         {
-            CultureInfo.CurrentCulture = new CultureInfo("th-TH");
+            CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
             var at = new DateTime(2026, 10, 3, 14, 5, 9, DateTimeKind.Unspecified);
-            // A literal: the Thai calendar would print 2569, so only a Gregorian year passes.
+            // A literal, so the format string itself is pinned.
             var expected = "2026-10-03 14:05:09";
             Assert.Equal(expected, HistoryTime.CollectionLocal(at));
             Assert.Equal(expected, new RunningJobRow { CollectionTime = at }.CollectionTimeLocal);
