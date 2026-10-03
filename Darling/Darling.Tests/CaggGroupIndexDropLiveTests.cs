@@ -343,6 +343,14 @@ public sealed class CaggGroupIndexDropLiveTests
             await dropEnd.ExecuteNonQueryAsync(ct);
         }
 
+        if (simulatedVersion < CollectorRunTimeRungTests.RungVersion)
+        {
+            /* V160 (#4938) - the collector run time, in a table of its own; the table is the probe's sentinel. */
+            await using var dropRunAt = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS config.config_collector_run_times", connection);
+            await dropRunAt.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < InstallIdTableOidRungTests.RungVersion)
         {
             /* V159 (#4961) - the install id table's own OID and the server's major version, which arrive in the one

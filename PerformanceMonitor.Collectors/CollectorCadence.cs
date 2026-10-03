@@ -65,4 +65,37 @@ public static class CollectorCadence
     /// decides exactly as <c>nowUtc - lastUtc &gt;= interval</c> does.</summary>
     public static bool IntervalElapsed(DateTime lastUtc, DateTime nowUtc, TimeSpan interval) =>
         ClampDue(lastUtc + interval, nowUtc, interval) <= nowUtc;
+
+    /// <summary>
+    /// A deterministic, restart-stable per-server phase offset within a cadence period (#1553 cadence jitter), used
+    /// to break the fleet-wide lockstep at cadence boundaries: the field incident re-herded every server at once, so
+    /// at each boundary all collectors fired together. <paramref name="serverId"/> is the monitored server's id,
+    /// which today is an FNV-1a hash of its name (<c>ServerIdHelper.GetDeterministicHashCode</c>), so a plain modulo
+    /// spreads it across <c>[0, period)</c> without any further mixing (an extra multiply was left out as
+    /// unnecessary: the input is already avalanched). This is the one consumer that wants the value only as a
+    /// spreading function rather than as an identity, so if #2218 ever makes ids sequential the extra mixing that was
+    /// left out has to come back here: consecutive integers modulo a period do not spread, they line up.
+    /// Restart-stable because it is a pure function of the id, with no <see cref="Random"/>.
+    ///
+    /// <para>A non-positive period yields no offset (it guards the callers where a period could in principle be
+    /// zero, and keeps the result well defined for tests). It is applied at initial cadence stamps and never to the
+    /// steady-state advance of a grid: the Darling worker's cold-start sweep spread, its on-connect analysis stamp
+    /// and, capped at 150 seconds, its seed jitter for an overdue or never-run collector (#1575). A daily
+    /// collector's run time takes its fixed per-server spread from it over one hour (#4938,
+    /// <see cref="CollectorRunTime.Spread"/>).</para>
+    ///
+    /// <para>Moved here from the Darling worker (#4938) so the run-time rules in this project can share it, with the
+    /// values unchanged.</para>
+    /// </summary>
+    public static TimeSpan CadencePhaseOffset(int serverId, int periodSeconds)
+    {
+        if (periodSeconds <= 0)
+        {
+            return TimeSpan.Zero;
+        }
+
+        /* Cast to uint first so a negative FNV hash still maps into [0, period): a signed modulo would yield a
+           negative offset and pull the due time into the past. */
+        return TimeSpan.FromSeconds((uint)serverId % periodSeconds);
+    }
 }
