@@ -20,7 +20,7 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSendRead, noticeStrip, parseUtc } from "./util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
 import { renderLineChart, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer } from "./panels.js";
 import { getCatalog } from "./views-api.js";
@@ -230,6 +230,27 @@ function withDrillFilters(spec, drill) {
   return { ...spec, filters: [...(Array.isArray(spec.filters) ? spec.filters : []), ...extra] };
 }
 
+/** The run's partial-window notice in the browser's zone (#4966). The server writes `notice` with its instants in UTC,
+ *  which is all an MCP client can use, but every time this page prints is in the browser's zone (localTime): a notice
+ *  that said "2026-01-02 00:00 UTC" above a chart on a local axis mixed two clocks. When the notice is the data-start
+ *  one, the answer also carries the instants it names (`data_start_utc`, `window_start_utc`, `window_end_utc`) and the
+ *  sentence itself (`data_start_note`), so the sentence is written again by windowNoteText, the composition the server
+ *  page's grid notes use, and put back in place; a row-cap sentence beside it stays as sent. A field that is missing or
+ *  unreadable, or a notice that does not hold the sentence (the tier notice, which names no instant), is drawn as sent. */
+export function composedNoticeText(data) {
+  const notice = data.notice;
+  const sentence = data.data_start_note;
+  if (typeof notice !== "string" || typeof sentence !== "string" || !sentence || !notice.includes(sentence)) return notice;
+  const local = windowNoteText({
+    window_truncated: true,
+    truncation_note: sentence,
+    data_start_utc: data.data_start_utc,
+    window_start_utc: data.window_start_utc,
+    window_end_utc: data.window_end_utc,
+  });
+  return typeof local === "string" && local ? notice.split(sentence).join(local) : notice;
+}
+
 /** Run a composed panel and fill `body` with the chart (or the empty/error state). Used by the card + the live
  *  preview. `opts` (design D5/D6): {drill, onDrill} drive the transient drill-down chip + mark clicks. */
 export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
@@ -261,7 +282,7 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
        requested window. The chosen tier's retention could not cover it, OR the panel's own data starts after
        the window does, OR the row cap truncated the result. Good data, honestly caveated, above the chart.
        No notice means the window was served whole. */
-    if (typeof data.notice === "string" && data.notice) nodes.unshift(noticeStrip(data.notice));
+    if (typeof data.notice === "string" && data.notice) nodes.unshift(noticeStrip(composedNoticeText(data)));
     mount(body, nodes);
   } catch (e) {
     mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));

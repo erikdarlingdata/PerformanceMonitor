@@ -80,12 +80,12 @@ public sealed class NoServiceObjectiveToResizeTests
     }
 
     [Theory]
-    [InlineData("ViewerDataService.FinOps.Utilization.cs")]
-    [InlineData("ViewerDataService.FinOps.Inventory.cs")]
-    public void ProvisioningVerdictCallers_PassTheEdition(string file)
+    [InlineData("PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsUtilizationReader.cs")]
+    [InlineData("PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsInventoryReader.cs")]
+    public void ProvisioningVerdictCallers_PassTheEdition(params string[] segments)
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(
-            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file));
+            RepoFile.ReadRepoFile(["Darling", .. segments]));
         Assert.Matches(new Regex(@"ProvisioningVerdict\s*\.\s*Evaluate\s*\([^;]*edition", RegexOptions.Singleline), source);
     }
 }

@@ -716,7 +716,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             $"expected all 10 ServerTab.Refresh.cs banner calls to pass a GetQueriesTabWindowUtc result " +
             $"(windowStart/windowEnd) (found {refreshBannerCallsOnHelperOutput}) -- a server-local cStart must " +
             "not feed the banner (#4279/#4284).");
-        Assert.Equal(10, Regex.Matches(refreshSource, @"LocalDataService\.GetQueriesTabWindowUtc\(").Count);
+        /* 10 -> 11: the Collection Log's cap-aware notice (RefreshCappedGridBannerAsync, #4989) takes its window from
+           GetQueriesTabWindowUtc too; it is not one of the 10 RefreshWindowTruncatedBannerAsync calls counted above. */
+        Assert.Equal(11, Regex.Matches(refreshSource, @"LocalDataService\.GetQueriesTabWindowUtc\(").Count);
     }
 
     private static string ControlsFile(string name) => Path.Combine(ControlsDir(), name);

@@ -41,6 +41,17 @@ public sealed class ProvisioningTrendRow
     public decimal P95CpuPct { get; set; }
     public decimal MemoryRatio { get; set; }
     public string Status { get; set; } = "";
+
+    public static ProvisioningTrendRow From(ProvisioningTrendDto dto) => new()
+    {
+        Day = dto.Day,
+        AvgCpuPct = dto.AvgCpuPct,
+        MaxCpuPct = dto.MaxCpuPct,
+        P95CpuPct = dto.P95CpuPct,
+        MemoryRatio = dto.MemoryRatio,
+        Status = dto.Status
+    };
+
     public string DayDisplay => Day.ToString("ddd MM/dd");
     public string StatusDisplay => Status == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : Status.Replace("_", " ");
 }
@@ -57,6 +68,20 @@ public sealed class MemoryGrantEfficiencyRow
     public long TotalWaiters { get; set; }
     public long TimeoutErrors { get; set; }
     public long ForcedGrants { get; set; }
+
+    public static MemoryGrantEfficiencyRow From(MemoryGrantEfficiencyDto dto) => new()
+    {
+        Day = dto.Day,
+        AvgGrantedMb = dto.AvgGrantedMb,
+        AvgUsedMb = dto.AvgUsedMb,
+        EfficiencyPct = dto.EfficiencyPct,
+        PeakGrantedMb = dto.PeakGrantedMb,
+        TotalGrantees = dto.TotalGrantees,
+        TotalWaiters = dto.TotalWaiters,
+        TimeoutErrors = dto.TimeoutErrors,
+        ForcedGrants = dto.ForcedGrants
+    };
+
     public string DayDisplay => Day.ToString("ddd MM/dd");
     public decimal WastedMb => AvgGrantedMb - AvgUsedMb;
 }
@@ -72,6 +97,12 @@ public sealed class TopResourceConsumerRow
     public decimal PctIo { get; set; }
     public long TotalCpuTimeMs { get; set; }
     public decimal AvgIoMb { get; set; }
+
+    public static TopResourceConsumerRow From(PerformanceMonitor.Darling.Storage.FinOps.TopResourceConsumer d) => new()
+    {
+        DatabaseName = d.DatabaseName, CpuTimeMs = d.CpuTimeMs, ExecutionCount = d.ExecutionCount, IoTotalMb = d.IoTotalMb,
+        PctCpu = d.PctCpu, PctIo = d.PctIo, TotalCpuTimeMs = d.TotalCpuTimeMs, AvgIoMb = d.AvgIoMb
+    };
 }
 
 /// <summary>Per-database allocated vs used space for the Utilization size chart (with star-width bars).</summary>
@@ -140,6 +171,28 @@ public sealed class UtilizationEfficiencyRow
     public int EngineEdition { get; set; }
     public string ProvisioningStatus { get; set; } = "";
 
+    public static UtilizationEfficiencyRow From(UtilizationEfficiencyDto dto) => new()
+    {
+        AvgCpuPct = dto.AvgCpuPct,
+        MaxCpuPct = dto.MaxCpuPct,
+        P95CpuPct = dto.P95CpuPct,
+        CpuSamples = dto.CpuSamples,
+        TotalMemoryMb = dto.TotalMemoryMb,
+        TargetMemoryMb = dto.TargetMemoryMb,
+        PhysicalMemoryMb = dto.PhysicalMemoryMb,
+        BufferPoolMb = dto.BufferPoolMb,
+        MemoryRatio = dto.MemoryRatio,
+        ProvisioningStatus = dto.ProvisioningStatus,
+        MaxGrantWaiters = dto.MaxGrantWaiters,
+        GrantTimeouts = dto.GrantTimeouts,
+        ForcedGrants = dto.ForcedGrants,
+        GrantUtilizationPct = dto.GrantUtilizationPct,
+        MaxWorkersCount = dto.MaxWorkersCount,
+        CurrentWorkersCount = dto.CurrentWorkersCount,
+        CpuCount = dto.CpuCount,
+        EngineEdition = dto.EngineEdition
+    };
+
     /// <summary>
     /// False when the 24-hour window held no CPU sample at all. The row's <see cref="ProvisioningStatus"/> is then
     /// the empty no-verdict value, and <see cref="P95CpuPct"/> is a 0 that came from nothing rather than from a
@@ -157,6 +210,12 @@ public sealed class UtilizationEfficiencyRow
     public int HealthScore { get; set; }
     public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
 
+    /// <summary>The read-result form of these figures.</summary>
+    public UtilizationEfficiencyDto ToDto() => new(
+        AvgCpuPct, MaxCpuPct, P95CpuPct, CpuSamples, TotalMemoryMb, TargetMemoryMb, PhysicalMemoryMb, BufferPoolMb,
+        MemoryRatio, MaxGrantWaiters, GrantTimeouts, ForcedGrants, GrantUtilizationPct, MaxWorkersCount,
+        CurrentWorkersCount, CpuCount, EngineEdition, ProvisioningStatus);
+
     /// <summary>
     /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. The memory
     /// term reads <see cref="PhysicalMemoryMb"/> and <see cref="BufferPoolMb"/>, which come from <c>memory_stats</c>. On an Azure
@@ -166,10 +225,7 @@ public sealed class UtilizationEfficiencyRow
     /// </summary>
     public int ComputeHealthScore()
     {
-        var bpRatio = PhysicalMemoryMb > 0 ? (decimal)BufferPoolMb / PhysicalMemoryMb : 0m;
-        int? cpuScore = HasCpuSample ? FinOpsHealthCalculator.CpuScore(P95CpuPct) : null;
-        return FinOpsHealthCalculator.Overall(
-            cpuScore, FinOpsHealthCalculator.MemoryScore(bpRatio), FinOpsHealthCalculator.StorageScore(FreeSpacePct));
+        return FinOpsUtilizationFigures.HealthScore(HasCpuSample, P95CpuPct, PhysicalMemoryMb, BufferPoolMb, FreeSpacePct);
     }
 }
 
@@ -187,6 +243,13 @@ public sealed class DatabaseResourceUsageRow
     public long IoStallMs { get; set; }
     public decimal PctCpuShare { get; set; }
     public decimal PctIoShare { get; set; }
+
+    public static DatabaseResourceUsageRow From(PerformanceMonitor.Darling.Storage.FinOps.DatabaseResourceUsage d) => new()
+    {
+        DatabaseName = d.DatabaseName, CpuTimeMs = d.CpuTimeMs, LogicalReads = d.LogicalReads, PhysicalReads = d.PhysicalReads,
+        LogicalWrites = d.LogicalWrites, ExecutionCount = d.ExecutionCount, IoReadMb = d.IoReadMb, IoWriteMb = d.IoWriteMb,
+        IoStallMs = d.IoStallMs, PctCpuShare = d.PctCpuShare, PctIoShare = d.PctIoShare
+    };
 }
 
 /// <summary>Per-application connection counts plus collected per-app resource + session-status metrics (Application Connections sub-tab). Timestamps are localized in the read.</summary>
@@ -369,6 +432,36 @@ public sealed class ServerPropertyRow
     private int? _coresPerSocket;
     private string? _hardwareUnavailableReason;
     private bool HostHardware => ServerHardwareScope.HardwareIsTheHosts(EngineEdition);
+
+    /// <summary>Builds the grid row from the Storage read; the display conversion (the row's own server clock) happens here.</summary>
+    public static ServerPropertyRow From(ServerInventoryDto dto, ServerClock clock) => new()
+    {
+        ServerId = dto.ServerId,
+        Clock = clock,
+        ServerName = dto.ServerName,
+        Edition = dto.Edition,
+        ProductVersion = dto.ProductVersion,
+        EngineEdition = dto.EngineEdition,
+        CpuCount = dto.CpuCount,
+        PhysicalMemoryMb = dto.PhysicalMemoryMb,
+        HardwareUnavailableReason = dto.HardwareUnavailableReason,
+        SocketCount = dto.SocketCount,
+        CoresPerSocket = dto.CoresPerSocket,
+        IsHadrEnabled = dto.IsHadrEnabled,
+        IsClustered = dto.IsClustered,
+        /* #2359: the CONFIG SNAPSHOT time, not a freshness heartbeat. */
+        InventoryAsOf = dto.InventoryAsOfUtc is DateTime asOf ? ViewerTimeHelper.ConvertToDisplay(asOf, ViewerTimeHelper.CurrentDisplayMode, clock) : null,
+        /* #4766: the UTC instants too, so the columns' text can name the offset in the repeated autumn hour. */
+        InventoryAsOfUtc = dto.InventoryAsOfUtc,
+        /* sqlserver_start_time is the server's LOCAL clock — shown as-is like Lite. */
+        SqlServerStartTime = dto.SqlServerStartTime,
+        HostOsVersion = dto.HostOsVersion,
+        AgReplicaRole = dto.AgReplicaRole,
+        IsEnabled = dto.IsEnabled,
+        MonthlyCost = dto.MonthlyCost,
+        LastCollected = dto.LastCollectedUtc is DateTime last ? ViewerTimeHelper.ConvertToDisplay(last, ViewerTimeHelper.CurrentDisplayMode, clock) : null,
+        LastCollectedUtc = dto.LastCollectedUtc
+    };
 
     public int? CpuCount { get => _cpuCount; set => _cpuCount = value ?? 0; }
     public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }
@@ -615,79 +708,35 @@ public sealed class HighImpactQueryRow
     /// Actual Plan"; the Expensive Queries rows (grouped by text, no query_hash) lack it and fall back to disabled.</summary>
     public bool CanGetActualPlan => !string.IsNullOrEmpty(QueryHash);
 
+    /// <summary>Maps the storage read's plain result onto the display row.</summary>
+    public static HighImpactQueryRow From(HighImpactQuery q) => new()
+    {
+        QueryHash = q.QueryHash,
+        DatabaseName = q.DatabaseName,
+        TotalExecutions = q.TotalExecutions,
+        TotalCpuMs = q.TotalCpuMs,
+        TotalDurationMs = q.TotalDurationMs,
+        TotalReads = q.TotalReads,
+        TotalWrites = q.TotalWrites,
+        TotalMemoryMb = q.TotalMemoryMb,
+        CpuShare = q.CpuShare,
+        DurationShare = q.DurationShare,
+        ReadsShare = q.ReadsShare,
+        WritesShare = q.WritesShare,
+        MemoryShare = q.MemoryShare,
+        ExecutionsShare = q.ExecutionsShare,
+        ImpactScore = q.ImpactScore,
+        SampleQueryText = q.SampleQueryText,
+        FullQueryText = q.FullQueryText,
+        QueryPlanXml = q.QueryPlanXml
+    };
+
     public string ImpactScoreColor => ImpactScore switch
     {
         >= 80 => "#E74C3C",
         >= 60 => "#F39C12",
         _ => "#27AE60"
     };
-}
-
-/// <summary>
-/// Identifies top-N queries per resource dimension, computes PERCENT_RANK and share percentages, and
-/// returns the "interesting" set sorted by impact score. Copied verbatim from Lite's HighImpactScorer.
-/// </summary>
-public static class HighImpactScorer
-{
-    public static List<HighImpactQueryRow> Score(List<HighImpactQueryRow> allRows, int topN = 10)
-    {
-        if (allRows.Count == 0) return allRows;
-
-        var interesting = new HashSet<string>();
-        foreach (var hash in allRows.OrderByDescending(r => r.TotalCpuMs).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
-        foreach (var hash in allRows.OrderByDescending(r => r.TotalDurationMs).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
-        foreach (var hash in allRows.OrderByDescending(r => r.TotalReads).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
-        foreach (var hash in allRows.OrderByDescending(r => r.TotalWrites).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
-        foreach (var hash in allRows.OrderByDescending(r => r.TotalMemoryMb).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
-        foreach (var hash in allRows.OrderByDescending(r => r.TotalExecutions).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
-
-        var filtered = allRows.Where(r => interesting.Contains(r.QueryHash)).ToList();
-
-        if (filtered.Count == 0) return filtered;
-
-        var cpuValues = filtered.Select(r => r.TotalCpuMs).OrderBy(v => v).ToList();
-        var durationValues = filtered.Select(r => r.TotalDurationMs).OrderBy(v => v).ToList();
-        var readsValues = filtered.Select(r => (decimal)r.TotalReads).OrderBy(v => v).ToList();
-        var writesValues = filtered.Select(r => (decimal)r.TotalWrites).OrderBy(v => v).ToList();
-        var memoryValues = filtered.Select(r => r.TotalMemoryMb).OrderBy(v => v).ToList();
-        var execValues = filtered.Select(r => (decimal)r.TotalExecutions).OrderBy(v => v).ToList();
-
-        var totalCpu = filtered.Sum(r => r.TotalCpuMs);
-        var totalDuration = filtered.Sum(r => r.TotalDurationMs);
-        var totalReads = filtered.Sum(r => (decimal)r.TotalReads);
-        var totalWrites = filtered.Sum(r => (decimal)r.TotalWrites);
-        var totalMemory = filtered.Sum(r => r.TotalMemoryMb);
-        var totalExecs = filtered.Sum(r => (decimal)r.TotalExecutions);
-
-        foreach (var row in filtered)
-        {
-            var cpuPctl = PercentRank(cpuValues, row.TotalCpuMs);
-            var durationPctl = PercentRank(durationValues, row.TotalDurationMs);
-            var readsPctl = PercentRank(readsValues, (decimal)row.TotalReads);
-            var writesPctl = PercentRank(writesValues, (decimal)row.TotalWrites);
-            var memoryPctl = PercentRank(memoryValues, row.TotalMemoryMb);
-            var execsPctl = PercentRank(execValues, (decimal)row.TotalExecutions);
-
-            row.CpuShare = totalCpu > 0 ? Math.Round(100m * row.TotalCpuMs / totalCpu, 1) : 0;
-            row.DurationShare = totalDuration > 0 ? Math.Round(100m * row.TotalDurationMs / totalDuration, 1) : 0;
-            row.ReadsShare = totalReads > 0 ? Math.Round(100m * row.TotalReads / totalReads, 1) : 0;
-            row.WritesShare = totalWrites > 0 ? Math.Round(100m * row.TotalWrites / totalWrites, 1) : 0;
-            row.MemoryShare = totalMemory > 0 ? Math.Round(100m * row.TotalMemoryMb / totalMemory, 1) : 0;
-            row.ExecutionsShare = totalExecs > 0 ? Math.Round(100m * row.TotalExecutions / totalExecs, 1) : 0;
-
-            var pctlSum = cpuPctl + durationPctl + readsPctl + writesPctl + memoryPctl + execsPctl;
-            row.ImpactScore = (int)(pctlSum / 6m * 100m);
-        }
-
-        return filtered.OrderByDescending(r => r.ImpactScore).ToList();
-    }
-
-    internal static decimal PercentRank(List<decimal> sortedValues, decimal value)
-    {
-        if (sortedValues.Count <= 1) return 0;
-        int rank = sortedValues.Count(v => v < value);
-        return Math.Min(1.0m, (decimal)rank / (sortedValues.Count - 1));
-    }
 }
 
 /// <summary>Per-table size + growth for the Storage Growth object drill (indexes rolled up).</summary>
