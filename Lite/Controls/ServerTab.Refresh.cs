@@ -742,6 +742,12 @@ public partial class ServerTab : UserControl
                         using (Helpers.MethodProfiler.StartTiming("Locking.BindBlockedGrid"))
                             _blockedProcessFilterMgr!.UpdateData(bpr);
                         ApplySeparatelyMonitoredListNote(BlockedProcessReportNoteText);
+                        {
+                            /* Where the stored blocked-process coverage starts (#4966), over the SAME UTC window the grid read
+                               resolves from GetTimeRange. */
+                            var (windowStart6, windowEnd6) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, windowStart6, windowEnd6);
+                        }
                         await LoadBlockingSlicerAsync();
                         break;
                     case 3: // Deadlocks
@@ -750,6 +756,12 @@ public partial class ServerTab : UserControl
                         using (Helpers.MethodProfiler.StartTiming("Locking.BindDeadlockGrid"))
                             _deadlockFilterMgr!.UpdateData(dlrDetails);
                         ApplySeparatelyMonitoredListNote(DeadlockNoteText);
+                        {
+                            /* Where the stored deadlock coverage starts (#4966), over the SAME UTC window the grid read
+                               resolves from GetTimeRange. */
+                            var (windowStart7, windowEnd7) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, windowStart7, windowEnd7);
+                        }
                         await LoadDeadlockSlicerAsync();
                         break;
                     case 4: // Blocking Stats — blocking + deadlock severity (4 charts + summary strip)
@@ -816,6 +828,14 @@ public partial class ServerTab : UserControl
                    see the Current Waits case of the sub-tab switch above. */
                 var (windowStart5, windowEnd5) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.WaitingTasks, CurrentWaitsWindowTruncatedBanner, windowStart5, windowEnd5);
+            }
+
+            {
+                /* Where the stored blocked-process and deadlock coverage starts (#4966), over the SAME UTC window the two
+                   grids read (both resolve it from GetTimeRange); after both grids are bound above. */
+                var (windowStart8, windowEnd8) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, windowStart8, windowEnd8);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, windowStart8, windowEnd8);
             }
 
             await LoadBlockingSlicerAsync();

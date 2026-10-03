@@ -41,6 +41,9 @@ public partial class ServerTab : UserControl
         {
             var bpr = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, 0, e.StartUtc, e.EndUtc, SelectedDatabaseFilter));
             _blockedProcessFilterMgr!.UpdateData(bpr);
+            /* A slicer drag re-reads the grid over a narrower window, which can itself start after the stored coverage does
+               (#4966): the banner follows the SAME UTC pair the read took, as the Queries grids' slicer handlers do. */
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
         {
@@ -54,6 +57,8 @@ public partial class ServerTab : UserControl
         {
             var dlr = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, 0, e.StartUtc, e.EndUtc));
             _deadlockFilterMgr!.UpdateData(await ParseDeadlocksOffUiThreadAsync(dlr));
+            /* Same as OnBlockingSlicerChanged (#4966): the banner follows the UTC pair this read took. */
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
         {

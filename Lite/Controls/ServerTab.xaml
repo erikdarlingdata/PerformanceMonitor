@@ -1741,8 +1741,16 @@
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="BlockingSlicer" Grid.Row="0"/>
-                                <TextBlock x:Name="BlockedProcessReportNoteText" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
-                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <StackPanel Grid.Row="1">
+                                    <!-- Where the stored blocked-process coverage starts, when that is after the window's start (the same
+                                         "Showing since <time>" the Queries grids carry). -->
+                                    <TextBlock x:Name="BlockedProcessReportsWindowTruncatedBanner" Visibility="Collapsed"
+                                               Padding="8,4" FontWeight="Bold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Background="#22FFAA00"/>
+                                    <TextBlock x:Name="BlockedProcessReportNoteText" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </StackPanel>
                             <DataGrid x:Name="BlockedProcessReportGrid" Grid.Row="2"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource BlockingRowStyle}"
@@ -1855,8 +1863,16 @@
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="DeadlockSlicer" Grid.Row="0"/>
-                                <TextBlock x:Name="DeadlockNoteText" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
-                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <StackPanel Grid.Row="1">
+                                    <!-- Where the stored deadlock coverage starts, when that is after the window's start (the same
+                                         "Showing since <time>" the Queries grids carry). -->
+                                    <TextBlock x:Name="DeadlocksWindowTruncatedBanner" Visibility="Collapsed"
+                                               Padding="8,4" FontWeight="Bold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Background="#22FFAA00"/>
+                                    <TextBlock x:Name="DeadlockNoteText" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </StackPanel>
                             <DataGrid x:Name="DeadlockGrid" Grid.Row="2"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource DeadlockRowStyle}"

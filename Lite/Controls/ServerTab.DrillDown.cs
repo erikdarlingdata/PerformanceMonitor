@@ -163,6 +163,9 @@ public partial class ServerTab : UserControl
         BlockingSubTabControl.SelectedIndex = 2; // Blocked Process Reports
         var bpr = await System.Threading.Tasks.Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, 0, fromDate, toDate));
         _blockedProcessFilterMgr!.UpdateData(bpr);
+        /* The drill window is the naive-UTC pair GetDrillWindow built (#4766), which the grid read above took as it is: the
+           banner follows it, so it stops describing the last range read (#4966). */
+        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, fromDate, toDate);
     }
 
     private async void OnDeadlockDrillDown(DateTime time)
@@ -174,6 +177,8 @@ public partial class ServerTab : UserControl
         BlockingSubTabControl.SelectedIndex = 3; // Deadlocks
         var dlr = await System.Threading.Tasks.Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, 0, fromDate, toDate));
         _deadlockFilterMgr!.UpdateData(await ParseDeadlocksOffUiThreadAsync(dlr));
+        /* Same as OnBlockingDrillDown (#4966): the banner follows the drill window's UTC pair. */
+        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, fromDate, toDate);
     }
 
     private async void OnHeatmapDrillDown(DateTime bucketTimeUtc)

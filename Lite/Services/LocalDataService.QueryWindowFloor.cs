@@ -28,6 +28,13 @@ public enum QueryWindowRelation
     QueryStats,
     ProcedureStats,
     QueryStoreStats,
+    // Group B (#4966): the Blocking tab's Blocked Process Reports and Deadlocks grids.
+    /* The Blocked Process Reports grid: the XE collector's table (blocked_process_reports). The grid also lists the
+       always-on DMV blocking snapshots' rows beside it; coverage is read from the XE collector, the one the grid is
+       named for. Holds a row only when a block runs past the threshold, so coverage comes from collector runs. */
+    BlockedProcessReports,
+    /* The Deadlocks grid (deadlocks): a row only when one happens, so coverage comes from collector runs. */
+    Deadlocks,
     QuerySnapshots,
     WaitingTasks
 }
@@ -39,6 +46,9 @@ public partial class LocalDataService
         QueryWindowRelation.QueryStats => "v_query_stats",
         QueryWindowRelation.ProcedureStats => "v_procedure_stats",
         QueryWindowRelation.QueryStoreStats => "v_query_store_stats",
+        // Group B (#4966): the Blocking tab's Blocked Process Reports and Deadlocks grids.
+        QueryWindowRelation.BlockedProcessReports => "v_blocked_process_reports",
+        QueryWindowRelation.Deadlocks => "v_deadlocks",
         QueryWindowRelation.QuerySnapshots => "v_query_snapshots",
         QueryWindowRelation.WaitingTasks => "v_waiting_tasks",
         _ => throw new ArgumentOutOfRangeException(nameof(relation), relation, "unknown QueryWindowRelation")
@@ -53,6 +63,9 @@ public partial class LocalDataService
     internal static string? QueryWindowRelationCollector(QueryWindowRelation relation) => relation switch
     {
         QueryWindowRelation.QuerySnapshots => "query_snapshots",
+        // Group B (#4966): the Blocking tab's Blocked Process Reports and Deadlocks grids.
+        QueryWindowRelation.BlockedProcessReports => "blocked_process_report",
+        QueryWindowRelation.Deadlocks => "deadlocks",
         QueryWindowRelation.WaitingTasks => "waiting_tasks",
         _ => null
     };
