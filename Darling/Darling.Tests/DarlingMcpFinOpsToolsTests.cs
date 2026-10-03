@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// Pins for <c>get_finops</c>: the tool surface, the closed view set, the refusals, the empty answer, the
 /// impact band's cut points, and (live) that every row equals the storage read's on the same seed.
 /// </summary>
+/* #1776 own-store: the only live fact (LiveParity) mints its own scratch database through ScratchPostgres; the other facts touch no store. */
 public sealed class DarlingMcpFinOpsToolsTests
 {
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpFinOpsTools)
