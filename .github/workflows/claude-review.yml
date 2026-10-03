@@ -54,10 +54,12 @@ name: Claude Auto Review
 # arm fails while the newest verdict is changes-requested, so a substantive finding shows as a
 # failed check, which a branch rule can require, and not only as a comment (the #3470-#3473
 # train shipped six findings in one night as comments that auto-merge outran; one was
-# real). Since #3650 the job also fails ITSELF when the run submitted no verdict, with the cause in
-# its log and the transcript attached -- a green here means a verdict exists, and the guard is the
-# second line. It no-ops cleanly until the CLAUDE_CODE_OAUTH_TOKEN repo secret is set, and on fork
-# PRs (which do not receive secrets), so neither case shows a failed check.
+# real). Since #3650 the job also fails ITSELF when the run submitted no verdict, with the cause and
+# the result block's counts in its log -- a green here means a verdict exists, and the guard is the
+# second line. The review keeps no transcript: the file the action writes stays on the runner, and
+# the log carries only that file's result fields, never its message text. It no-ops cleanly until
+# the CLAUDE_CODE_OAUTH_TOKEN repo secret is set, and on fork PRs (which do not receive secrets),
+# so neither case shows a failed check.
 #
 # #3710: across several hundred PRs the verdict was LGTM on very nearly all of them, and every
 # defect it missed that later surfaced (#3487, #3612, #3613, #3636, #3648, the Full-edition
@@ -130,6 +132,9 @@ jobs:
     outputs:
       pass: ${{ steps.pass.outputs.pass }}
       base: ${{ steps.pass.outputs.base }}
+      # Set only for a follow-up, and only once the step has checked that `base` and `head` are both
+      # 40-character hex SHAs: the review job puts the two into its claude_args.
+      head: ${{ steps.pass.outputs.head }}
     steps:
       # Every input arrives through env:, never through a ${{ }} interpolation into the script text.
       # `re-review` appears as a literal in four places in this file (the decide job's `if`, the
@@ -330,6 +335,22 @@ jobs:
             fi
           fi
 
+          # The follow-up's two SHAs become the `git diff` forms the review job allows (its claude_args),
+          # so they are checked here, in the step that produces them: both must be full 40-character hex
+          # SHAs. The marker's head passed that test when it was read; the verdict's commit_id and this
+          # run's head are checked now. A value that fails makes this a full review, which takes no range
+          # and is allowed no `git diff`: the same fail-toward-thorough direction every read above takes.
+          head_sha=''
+          if [ "$pass" = follow-up ]; then
+            sha_re='^[0-9a-f]{40}$'
+            if [[ "$base" =~ $sha_re && "$HEAD_SHA" =~ $sha_re ]]; then
+              head_sha=$HEAD_SHA
+            else
+              reason="the follow-up range (${base:0:12}..${HEAD_SHA:0:12}) is not two 40-character hex SHAs, so this push gets a full review"
+              pass=full; base=''
+            fi
+          fi
+
           echo "review pass: $pass -- $reason"
           if [ "$pass" = skip ]; then
             echo "::notice title=No review - skipped on purpose::$reason."
@@ -342,6 +363,7 @@ jobs:
           {
             echo "pass=$pass"
             echo "base=$base"
+            echo "head=$head_sha"
           } >> "$GITHUB_OUTPUT"
 
   review:
@@ -539,7 +561,9 @@ jobs:
             FOLLOW-UP PASS. This paragraph applies ONLY when REVIEW PASS above is `follow-up`; on a
             `full` pass skip it entirely. An earlier review already covered every commit up to the
             first SHA on the FOLLOW-UP RANGE line (BASE..HEAD, both full SHAs). The commits in that
-            range are your ENTIRE scope: `git diff BASE HEAD` is the change and
+            range are your ENTIRE scope: `git diff BASE HEAD` is the change (for one file's part of
+            it, `git diff BASE HEAD -- <path>`; those two forms, with both SHAs written out in full
+            and nothing else before the `--`, are the only `git diff` this run may use) and
             `git log --first-parent --no-merges BASE..HEAD` lists the author's own commits. The
             checkout holds the whole history, but its own HEAD is a merge of the pull request into
             its base branch, so always pass the two SHAs explicitly. Report defects in those
@@ -557,7 +581,8 @@ jobs:
             PHASE 1 — BLIND READ. Do NOT run `gh pr view`, `git log` or `git show <commit>` in this
             phase: the PR body and the commit messages are the author's account, and you must form
             your own first. Allowed here: `gh pr diff ${{ github.event.pull_request.number }}` (and
-            `--name-only`), Read, Grep, Glob, `git diff`. The PR branch is already checked out.
+            `--name-only`), Read, Grep, Glob. A full review runs no `git diff`: the checkout holds
+            one commit, and `gh pr diff` is the diff. The PR branch is already checked out.
               1. Read the diff, then open every changed file and read each changed region in its
                  surrounding context — the whole method, class member or SQL statement, not the
                  hunk.
@@ -667,7 +692,8 @@ jobs:
           # about thirteen runs, one night). Read-only tools are enough: the reviewer needs to open
           # the files the diff touches, find a symbol's other callers and read a parity twin, and
           # nothing about reviewing needs a write. Nothing here can edit, commit, push or post
-          # outside the gh verbs already listed; the git verbs are the read-only three.
+          # outside the gh verbs already listed; the git verbs are the read-only three, and `git diff`
+          # takes only a follow-up's range (see the git rules below).
           #
           # #3710 adds no tool. The callers rule is Grep; the traps file is Read; the blind read is
           # an ORDERING of the gh verbs already here, enforced by instruction and by the prompt
@@ -676,10 +702,32 @@ jobs:
           # already matches, and no Write tool is needed to stage a body file. --model and
           # --max-turns are the tier's; both are plain claude_args per claude-code-action's
           # docs/configuration.md ("Custom Model", "Limiting Conversation Turns").
+          #
+          # The git rules take only the forms the review runs. The old `git diff:*` rule also matched
+          # `git diff --no-index <path> <path>`, which compares two files wherever they are, and
+          # options such as -O<orderfile> that open a file named on the command line. A full review
+          # needs no `git diff` (it reads `gh pr diff` and works from a one-commit checkout), so it gets
+          # none. A follow-up gets two forms, with its range written into them by the expression in
+          # --allowedTools: `git diff BASE HEAD`, which takes no argument after it, and
+          # `git diff BASE HEAD -- *`, where every argument after `--` is a pathspec and git refuses
+          # one outside the repository. The two SHAs fill the first two arguments, so no option can
+          # come before them. Both come from the decide job, which sets them only when each is a
+          # 40-character hex SHA. `git log` and `git show` keep their prefixes. The other two values
+          # interpolated here, the model and the turn limit, are constants the tier step writes.
+          #
+          # --disallowedTools: Claude Code's permissions page ("Read and Edit") documents `Read` deny
+          # rules with a path: `Read(./secrets/**)`, and `//path` for an absolute one. They apply to
+          # the Read tool and, as a best effort, to Grep and Glob, and a deny rule wins over an allow
+          # rule. The CLI reference and the settings reference say `--disallowedTools` carries such
+          # rules, and the action passes the flag through (base-action/src/parse-sdk-options.ts at
+          # v1 comma-splits the values and merges them into the SDK's disallowedTools). So the file
+          # tools do not read the checkout's .git directory or /proc, though the allowlist grants
+          # Read, Grep and Glob.
           claude_args: |
             --model "${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }}"
             --max-turns ${{ steps.tier.outputs.max_turns || '120' }}
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read,Grep,Glob,Bash(git log:*),Bash(git show:*)${{ needs.decide.outputs.base && needs.decide.outputs.head && format(',Bash(git diff {0} {1}),Bash(git diff {0} {1} -- *)', needs.decide.outputs.base, needs.decide.outputs.head) || '' }}"
+            --disallowedTools "Read(./.git/**),Read(//proc/**)"
 
       # #3650: a review that posted nothing used to finish GREEN. The prompt mandates one formal
       # review per run -- changes-requested on a substantive finding, a clean comment review
@@ -865,18 +913,19 @@ jobs:
             "verdict: $REVIEW_BOT submitted no formal review on PR #$PR since $SINCE, and the"\
             "prompt promises one every run even when clean. Real money was spent and the output"\
             "vanished (#3650; the #2229 failure shape). Do NOT read this PR as reviewed. The"\
-            "transcript is attached to this run as the claude-review-transcript artifact; its"\
-            "result block follows."
+            "review keeps no transcript; the counts from its result block follow."
           summary '- The review ran and submitted no formal review. Not reviewed (#3650).'
           if [ -s "$transcript" ]; then
-            echo "--- result block of $transcript ---"
-            jq -c '.[-1] | {type, subtype, is_error, num_turns, permission_denials_count,
+            # Result fields only (type, subtype, counts, the names of the denied tools): no message
+            # text and no tool input is printed, and nothing is uploaded; the file holds the whole
+            # conversation and stays on the runner. The file's result message carries the denials as a
+            # list (the action's own log derives the count from it), so the count is taken from it here.
+            echo "--- result block of $transcript (fields only) ---"
+            jq -c '.[-1] | {type, subtype, is_error, num_turns,
+                            permission_denials_count: ((.permission_denials // []) | length),
                             total_cost_usd, duration_ms,
                             denied: [.permission_denials[]? | .tool_name]}' "$transcript" \
               2>/dev/null || true
-            echo "--- tail of $transcript ---"
-            tail -c 4000 "$transcript" || true
-            echo
           else
             echo "(no transcript at $transcript)"
           fi
@@ -904,19 +953,3 @@ jobs:
             echo "::warning title=re-review label not cleared::gh api DELETE labels/re-review failed: ${err:-no stderr}. Remove the label by hand if it is still on the pull request."
           fi
           [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
-
-      # #3650: the per-turn transcript is what proves WHY a run said nothing, and it used to die
-      # with the runner -- the denial-ratio evidence above had to be inferred from result blocks in
-      # the step log. Seven days is long enough to diagnose the next swallowed run in one click and
-      # short enough that nothing accumulates. The reviewer's tools are read-only over a public
-      # tree and gh reads of public PR data, so the transcript holds nothing that is not already
-      # public; keep the allowlist that way, because this artifact is readable by anyone who can
-      # read the repo. Missing file (the action refused to run, or was skipped) is not an error.
-      - name: Retain the review transcript
-        if: ${{ always() && env.HAS_OAUTH_TOKEN == 'true' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: claude-review-transcript
-          path: ${{ steps.review.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
-          if-no-files-found: ignore
-          retention-days: 7
