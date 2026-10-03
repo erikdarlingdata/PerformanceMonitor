@@ -20,6 +20,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -55,6 +56,21 @@ public sealed class FinOpsInventoryGoldenLiveTests
             var metrics = (await viewer.GetServerMetricsAsync(ct)).Where(kv => Ids.Contains(kv.Key))
                 .OrderBy(kv => NameOf(kv.Key)).Select(kv => new MetricsEntry { Server = NameOf(kv.Key), Metrics = kv.Value }).ToList();
             var inventory = (await viewer.GetServerInventoryAsync(ct)).Where(r => Ids.Contains(r.ServerId)).ToList();
+            return Serialize(anchor, metrics, inventory);
+        });
+
+    [Fact]
+    public Task InventoryReads_MatchGoldenFixture_ThroughTheStorageReaderAndRowMappers() =>
+        RunAsync(async (connectionString, anchor, ct) =>
+        {
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            var rollups = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
+            var coverage = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, rollups, ct);
+            var dtos = await DarlingFinOpsInventoryReader.GetServerMetricsAsync(dataSource, rollups, coverage, 30, ct);
+            var metrics = dtos.Where(kv => Ids.Contains(kv.Key)).OrderBy(kv => NameOf(kv.Key))
+                .Select(kv => new MetricsEntry { Server = NameOf(kv.Key), Metrics = ViewerDataService.ServerMetricsRow.From(kv.Value) }).ToList();
+            var inventory = (await DarlingFinOpsInventoryReader.GetServerInventoryAsync(dataSource, 30, ct))
+                .Where(d => Ids.Contains(d.ServerId)).Select(d => ServerPropertyRow.From(d, PerformanceMonitor.Analysis.Baselines.ServerClock.FixedOffset(0))).ToList();
             return Serialize(anchor, metrics, inventory);
         });
 

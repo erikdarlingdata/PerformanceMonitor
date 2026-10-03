@@ -81,7 +81,7 @@ public sealed class NoServiceObjectiveToResizeTests
 
     [Theory]
     [InlineData("ViewerDataService.FinOps.Utilization.cs")]
-    [InlineData("ViewerDataService.FinOps.Inventory.cs")]
+    [InlineData("../PerformanceMonitor.Darling.Storage/FinOps/DarlingFinOpsInventoryReader.cs")]
     public void ProvisioningVerdictCallers_PassTheEdition(string file)
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(

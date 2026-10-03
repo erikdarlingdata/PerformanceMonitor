@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using System.IO;
 using System.Runtime.CompilerServices;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Viewer;
@@ -167,11 +168,16 @@ public sealed class ViewerFinOpsRowClockTests : IDisposable
         var inventorySource = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.ViewerSource("ViewerDataService.FinOps.Inventory.cs", ThisFile()));
         var inventory = ViewerTypedRangeTests.MemberText(inventorySource, "GetServerInventoryAsync");
         Assert.Contains("GetServerClocksAsync(null, cancellationToken)", inventory);
-        Assert.Contains("ClockForServerOrMachine(clocks, serverId, TimeZoneInfo.Local, nowUtc)", inventory);
-        Assert.Contains("Clock = clock", inventory);
-        Assert.Contains("ConvertToDisplay(reader.GetDateTime(13), ViewerTimeHelper.CurrentDisplayMode, clock)", inventory);
-        Assert.Contains("ConvertToDisplay(reader.GetDateTime(19), ViewerTimeHelper.CurrentDisplayMode, clock)", inventory);
+        Assert.Contains("ClockForServerOrMachine(clocks, dto.ServerId, TimeZoneInfo.Local, nowUtc)", inventory);
+        Assert.Contains("ServerPropertyRow.From(dto, clock)", inventory);
         Assert.DoesNotContain("ForDisplay(", inventory);
+
+        /* The display conversion stays in the viewer's row mapper, on the row's own clock. */
+        var mapper = File.ReadAllText(Path.Combine(Path.GetDirectoryName(ThisFile())!, "..", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.cs")).ReplaceLineEndings("\n");
+        Assert.Contains("Clock = clock", mapper);
+        Assert.Contains("ConvertToDisplay(asOf, ViewerTimeHelper.CurrentDisplayMode, clock)", mapper);
+        Assert.Contains("ConvertToDisplay(last, ViewerTimeHelper.CurrentDisplayMode, clock)", mapper);
+        Assert.DoesNotContain("ForDisplay(", mapper.Substring(mapper.IndexOf("public static ServerPropertyRow From", StringComparison.Ordinal), 2500));
     }
 
     private static string ThisFile([CallerFilePath] string thisFile = "") => thisFile;
