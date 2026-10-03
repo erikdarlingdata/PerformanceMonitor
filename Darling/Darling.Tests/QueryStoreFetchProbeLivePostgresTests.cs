@@ -32,6 +32,13 @@ public sealed class QueryStoreFetchProbeLivePostgresTests
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private const string Db = "ProbeDb";
 
+    /* #4981: every plan content this class lands in the shared digest-keyed dimension. The cleanup removes them by
+       digest, so a dimension row an older run left behind (its map rows long gone) cannot skew this run either. */
+    private const string PlanOne = "<plan one/>";
+    private const string PlanRestart = "<plan restart/>";
+    private const string PlanOnlyOurs = "<plan only-ours/>";
+    private const string PlanShared = "<plan shared/>";
+
     /* #2776: the store-write path now takes an explicit command timeout instead of inheriting Npgsql's
        30s default. These fixtures write a handful of rows, so the value is immaterial to what they assert —
        it is here only because the parameter is required, which is deliberate: making it required is what
@@ -68,7 +75,7 @@ public sealed class QueryStoreFetchProbeLivePostgresTests
                 connection, ServerId, Db,
                 new[]
                 {
-                    new FetchedPlan(1, "<plan one/>", "0xAAAA"),
+                    new FetchedPlan(1, PlanOne, "0xAAAA"),
                     new FetchedPlan(2, PlanXml: null, PlanHash: "0xBBBB"),
                 },
                 landedAt, TestTimeoutSeconds, ct);
@@ -177,7 +184,7 @@ SELECT
 
             await QueryStorePlanWriter.WriteAsync(
                 connection, ServerId, Db,
-                new[] { new FetchedPlan(201, "<plan restart/>", "0xR1") },
+                new[] { new FetchedPlan(201, PlanRestart, "0xR1") },
                 landedAt, TestTimeoutSeconds, ct);
             await QueryStoreTextWriter.WriteAsync(
                 connection, ServerId, Db,
@@ -243,8 +250,127 @@ SELECT
         }
     }
 
+    /// <summary>
+    /// #4981: the cleanup every test here ends with leaves the shared store as it found it. The plan content two of
+    /// these tests land goes to the digest-keyed dimension, which the map-row delete never reached, so each run left
+    /// dimension rows behind. This lands one plan only this server points at and one a second server also points at,
+    /// runs the cleanup, and expects the first gone and the second kept.
+    /// </summary>
+    [Fact]
+    public async Task TheCleanup_RemovesTheDimensionRowsItLanded_ButKeepsOnesAnotherServerPointsAt()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live fetch-probe test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var otherServerId = ServerIdHelper.GetDeterministicHashCode(ServerName + "-other");
+
+        /* The second server's rows, removed at the start as well as the end so a run that died mid-way cannot break
+           the next one. otherServerId is an int computed here, never user input: safe to inline, which also keeps
+           this a simple-protocol batch (a parameterised command may not carry more than one statement). */
+        async Task DeleteOtherServerRowsAsync(NpgsqlConnection target, CancellationToken token)
+        {
+            using var other = new NpgsqlCommand(
+                "DELETE FROM collect.query_plan_dim AS d WHERE d.digest IN "
+                + $"(SELECT m.digest FROM collect.query_store_plan_map AS m WHERE m.server_id = {otherServerId});"
+                + $"DELETE FROM collect.query_store_plan_map WHERE server_id = {otherServerId}", target);
+            await other.ExecuteNonQueryAsync(token);
+        }
+
+        await DeleteOtherServerRowsAsync(connection, ct);
+        var bodySucceeded = false;
+        try
+        {
+            var landedAt = DateTime.UtcNow.AddHours(-(QueryStoreLivenessTouchGuard.GuardHours + 1));
+            await QueryStorePlanWriter.WriteAsync(
+                connection, ServerId, Db,
+                new[]
+                {
+                    new FetchedPlan(301, PlanOnlyOurs, "0xC1"),
+                    new FetchedPlan(302, PlanShared, "0xC2"),
+                },
+                landedAt, TestTimeoutSeconds, ct);
+
+            async Task<byte[]> DigestOfAsync(long planId)
+            {
+                using var read = new NpgsqlCommand(
+                    "SELECT digest FROM collect.query_store_plan_map WHERE server_id = $1 AND database_name = $2 AND plan_id = $3", connection);
+                read.Parameters.AddWithValue(ServerId);
+                read.Parameters.AddWithValue(Db);
+                read.Parameters.AddWithValue(planId);
+                return (byte[])(await read.ExecuteScalarAsync(ct))!;
+            }
+
+            async Task<long> DimRowsAsync(byte[] digest)
+            {
+                using var count = new NpgsqlCommand("SELECT COUNT(*) FROM collect.query_plan_dim WHERE digest = $1", connection);
+                count.Parameters.AddWithValue(digest);
+                return (long)(await count.ExecuteScalarAsync(ct))!;
+            }
+
+            var ours = await DigestOfAsync(301);
+            var shared = await DigestOfAsync(302);
+
+            /* The cleanup's by-content delete is only as good as this: the stored digest is the content's digest. */
+            Assert.Equal(PayloadDimensions.Digest(PlanOnlyOurs), ours);
+            Assert.Equal(PayloadDimensions.Digest(PlanShared), shared);
+            Assert.Equal(1L, await DimRowsAsync(ours));
+            Assert.Equal(1L, await DimRowsAsync(shared));
+
+            using (var other = new NpgsqlCommand(
+                "INSERT INTO collect.query_store_plan_map (server_id, database_name, plan_id, digest, plan_hash, last_seen) VALUES ($1, $2, 1, $3, '0xC2', $4)", connection))
+            {
+                other.Parameters.AddWithValue(otherServerId);
+                other.Parameters.AddWithValue(Db);
+                other.Parameters.AddWithValue(shared);
+                other.Parameters.AddWithValue(QueryStorePlanMap.Naive(landedAt));
+                await other.ExecuteNonQueryAsync(ct);
+            }
+
+            await DeleteRowsAsync(connection, ct);
+
+            Assert.Equal(0L, await DimRowsAsync(ours));
+            Assert.Equal(1L, await DimRowsAsync(shared));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteOtherServerRowsAsync(cleanup, cleanupCt);
+                await DeleteRowsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4981: removes every row this class plants. The plan CONTENT lands in the digest-keyed
+    /// <c>collect.query_plan_dim</c>, which no server id scopes, so deleting the map rows alone left one dimension
+    /// row per plan behind in the shared store on every run (eight of them failed a later class). Dimension rows go
+    /// first, while the map rows still say which digests are ours, plus the digests of the contents this class is
+    /// known to write, so a row an older run left behind goes too. A digest another server's map row also points at
+    /// stays.
+    /// </summary>
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
+        var knownDigests = new[] { PlanOne, PlanRestart, PlanOnlyOurs, PlanShared }.Select(PayloadDimensions.Digest).ToArray();
+        using (var dimension = new NpgsqlCommand(
+            "DELETE FROM collect.query_plan_dim AS d "
+            + "WHERE (d.digest = ANY($1) OR d.digest IN (SELECT m.digest FROM collect.query_store_plan_map AS m "
+            + $"WHERE m.server_id = {ServerId})) "
+            + "AND NOT EXISTS (SELECT 1 FROM collect.query_store_plan_map AS o "
+            + $"WHERE o.digest = d.digest AND o.server_id <> {ServerId})", connection))
+        {
+            dimension.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Bytea, knownDigests);
+            await dimension.ExecuteNonQueryAsync(ct);
+        }
+
         var sql =
             $"DELETE FROM collect.query_store_plan_map WHERE server_id = {ServerId};" +
             $"DELETE FROM collect.query_store_text WHERE server_id = {ServerId};" +
