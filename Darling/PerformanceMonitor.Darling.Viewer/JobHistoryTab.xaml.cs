@@ -37,6 +37,11 @@ public partial class JobHistoryTab : UserControl
     private DateTime? _lastRefreshed;
     private readonly DispatcherTimer _staleDataTimer;
 
+    /// <summary>The rows the last read returned, before the Status, Category and column filters (#4966). The cap label
+    /// belongs to the read, so the column-filter handler, which only sees the grid, needs this to say whether the read was
+    /// cut at <see cref="RowCap"/>.</summary>
+    private int _lastReadRowCount;
+
     /// <summary>Raised with a short status message on load outcomes so the shell can show it.</summary>
     public event Action<string>? StatusChanged;
 
@@ -136,11 +141,10 @@ public partial class JobHistoryTab : UserControl
 
             /* The cap applies to the UNFILTERED read (all.Count), not the client-side-filtered display count:
                a Status/Category filter narrowing the grid must not make the "newest 2,000" label disappear when
-               the underlying read still hit the cap. */
-            var capLabel = JobHistoryCap.Label(all.Count, RowCap);
-            JobCountIndicator.Text = displayCount == 0
-                ? ""
-                : capLabel.Length > 0 ? $"{displayCount} run(s) ({capLabel})" : $"{displayCount} run(s)";
+               the underlying read still hit the cap. The column-filter handler builds the same text from the same
+               row count (#4966). */
+            _lastReadRowCount = all.Count;
+            JobCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap);
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -403,7 +407,10 @@ public partial class JobHistoryTab : UserControl
         }
 
         _filterManager?.SetFilter(e.FilterState);
-        JobCountIndicator.Text = JobHistoryDataGrid.Items.Count > 0 ? $"{JobHistoryDataGrid.Items.Count} run(s)" : "";
+
+        /* The count follows the column filter, and keeps the cap label whenever the read hit the cap (#4966): this used
+           to rewrite it as a bare "N run(s)", which took the label off a count whose read was still cut. */
+        JobCountIndicator.Text = JobHistoryCap.CountText(JobHistoryDataGrid.Items.Count, _lastReadRowCount, RowCap);
     }
 
     private void FilterPopup_FilterCleared(object? sender, EventArgs e)

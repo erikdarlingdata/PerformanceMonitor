@@ -129,10 +129,7 @@ public partial class JobHistoryTab : UserControl
             /* The cap applies to the UNFILTERED read (all.Count), not the client-side-filtered display count:
                a Status/Category filter narrowing the grid must not make the "newest 2,000" label disappear when
                the underlying read still hit the cap. */
-            var capLabel = JobHistoryCap.Label(all.Count, RowCap);
-            JobCountIndicator.Text = displayCount == 0
-                ? ""
-                : capLabel.Length > 0 ? $"{displayCount} run(s) ({capLabel})" : $"{displayCount} run(s)";
+            JobCountIndicator.Text = JobHistoryCap.CountText(displayCount, all.Count, RowCap);
             AppLogger.Debug("JobHistory", $"Loaded {displayCount} job run(s) (query returned {all.Count}, hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"})");
 
             _lastRefreshed = DateTime.UtcNow;

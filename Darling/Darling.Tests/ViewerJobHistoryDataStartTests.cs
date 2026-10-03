@@ -146,7 +146,11 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
         /* The unfiltered read, the one the cap label counts: the Status and Category filters narrow the grid on the client and say
            nothing about where the data starts. */
         Assert.Equal(1, Matches(load, @"await ShowJobHistoryDataStartAsync\(JobHistoryTruncationBanner,\s*dataStartTask,\s*sinceUtc,\s*all\);"));
-        Assert.Equal(1, Matches(load, @"JobHistoryCap\.Label\(all\.Count,\s*RowCap\)"));
+        /* #4966: the cap label is built by JobHistoryCap.CountText from the last read's row count, which the load takes from the unfiltered
+           read (all), so the Status and Category filters cannot take the label away; the column-filter handler builds the same text from
+           the same field (JobHistoryCountTextTests). */
+        Assert.Equal(1, Matches(load, @"_lastReadRowCount\s*=\s*all\.Count;"));
+        Assert.Equal(1, Matches(load, @"JobHistoryCap\.CountText\(displayCount,\s*_lastReadRowCount,\s*RowCap\)"));
         Assert.DoesNotContain("ShowJobHistoryDataStartAsync(JobHistoryTruncationBanner, dataStartTask, sinceUtc, filtered)", load, StringComparison.Ordinal);
     }
 

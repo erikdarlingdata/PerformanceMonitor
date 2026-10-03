@@ -9,7 +9,9 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using System.Linq;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
@@ -25,23 +27,116 @@ public partial class LocalDataService
     /// function (a step_id 0 outcome row exceeding 2x its job's average successful-outcome duration, floored
     /// at 60s so tiny jobs never flag), and each row carries its job's last successful outcome run.
     /// <para>
-    /// run_datetime is the monitored server's LOCAL wall clock (decoded from run_date/run_time), so it is
-    /// windowed against and displayed in local wall-clock time — the time SSMS shows for the run — rather
-    /// than re-converted. With no <paramref name="serverId"/> the read aggregates ALL servers (the tab
-    /// default); with one it scopes to that server (the Server filter combo).
+    /// run_datetime is the monitored server's LOCAL wall clock (decoded from run_date/run_time), and the grid
+    /// still shows it as stored — the time SSMS shows for the run — rather than re-converted. The WINDOW is
+    /// another matter (#4966): "the last N hours" is an exact UTC span, so it is worked out on THAT server's
+    /// clock (<see cref="GetServerClockAsync"/>, as the Default Trace read does) and not on the host's: a server
+    /// in another zone used to shift the window by the zone difference. Per server, the SQL pre-filters on the
+    /// server-local start of the span, widened by an hour, and each row's run time is converted to UTC with the
+    /// clock at the run's own date (<see cref="JobHistoryRow.RunDateTimeUtc"/>) and held to the exact span. With
+    /// no <paramref name="serverId"/> the read aggregates ALL servers (the tab default), one clock read and one
+    /// bounded read per server, merged newest first by the real instant of each run and cut to
+    /// <paramref name="limit"/>; with one it scopes to that server (the Server filter combo). A server with no
+    /// collected clock yet is windowed on the machine's own (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>),
+    /// which is what this read did for every server before. The Darling viewer's twin converts through the same
+    /// clock and shows the instant in its display zone.
     /// </para>
     /// </summary>
     public async Task<List<JobHistoryRow>> GetJobHistoryAsync(int hoursBack = 24, int limit = 1000, int? serverId = null)
     {
+        var windowStartUtc = DateTime.UtcNow.AddHours(-hoursBack);
+
+        var serverIds = serverId.HasValue
+            ? new List<int> { serverId.Value }
+            : await ReadJobHistoryServerIdsAsync(windowStartUtc);
+
+        var rows = new List<JobHistoryRow>();
+        foreach (var id in serverIds)
+        {
+            var clock = await ReadJobHistoryClockAsync(id);
+            rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, limit));
+        }
+
+        return ApplyJobHistoryWindow(rows, windowStartUtc, limit);
+    }
+
+    /// <summary>
+    /// Every server with a run at or after the earliest server-local instant any server's pre-filter can start at: the
+    /// window's UTC start less 12 hours (the westernmost zone, UTC-12) and the hour the pre-filter widens by. A server
+    /// whose own window starts later is found here too and its own read narrows it; the list is where the per-server
+    /// reads and clock reads come from, so a server with no run that recent costs neither.
+    /// </summary>
+    private async Task<List<int>> ReadJobHistoryServerIdsAsync(DateTime windowStartUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT DISTINCT server_id
+FROM v_job_history
+WHERE run_datetime >= $1
+ORDER BY server_id";
+        command.Parameters.Add(new DuckDBParameter { Value = windowStartUtc.AddHours(-13) });
+
+        var ids = new List<int>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            ids.Add((int)ToInt64(reader.GetValue(0)));
+
+        return ids;
+    }
+
+    /// <summary>
+    /// The clock one server's window is worked out on (#4966): its collected clock (<see cref="GetServerClockAsync"/>),
+    /// else the machine's, the end of the chain the Alert History tab uses
+    /// (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>). This read has no open tab to ask, so
+    /// that middle link is empty. A clock read that fails leaves the server on the machine's clock rather than failing
+    /// every server's runs, as <c>AlertsHistoryTab.ReadCollectedClocksAsync</c> does.
+    /// </summary>
+    internal async Task<ServerClock> ReadJobHistoryClockAsync(int serverId)
+    {
+        ServerClock? collected = null;
+        try
+        {
+            collected = await GetServerClockAsync(serverId);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Debug("JobHistory", $"Server clock read failed for server {serverId}, its window takes the machine's clock: {ex.Message}");
+        }
+
+        return ServerTimeHelper.ClockForServer(collected, openTabClock: null);
+    }
+
+    /// <summary>
+    /// The exact window, after the server-local to UTC conversion: keeps the runs at or after
+    /// <paramref name="windowStartUtc"/> (each server's SQL pre-filter is widened by an hour, so a run just before the
+    /// window can still be in the set), orders them newest first by their real instant (two servers' stored wall clocks
+    /// are in different zones, so the raw order is not the order the runs happened in), and keeps the newest
+    /// <paramref name="limit"/>. The server id is the last tie-break so the order is the same on every read.
+    /// </summary>
+    internal static List<JobHistoryRow> ApplyJobHistoryWindow(List<JobHistoryRow> rows, DateTime windowStartUtc, int limit)
+    {
+        return rows
+            .Where(r => r.RunDateTimeUtc is { } runUtc && runUtc >= windowStartUtc)
+            .OrderByDescending(r => r.RunDateTimeUtc)
+            .ThenByDescending(r => r.InstanceId)
+            .ThenByDescending(r => r.ServerId)
+            .Take(Math.Max(limit, 0))
+            .ToList();
+    }
+
+    /// <summary>One server's runs: the newest <paramref name="limit"/> at or after the server-local start of the window,
+    /// each with its run time converted to UTC through <paramref name="clock"/>. Not yet held to the exact window.</summary>
+    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit)
+    {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        /* run_datetime is server-local wall clock; the cutoff is a local wall-clock instant so a same-tz
-           Lite host (the common case) windows "last N hours" against the run time the way a DBA reads it. */
-        var cutoff = DateTime.Now.AddHours(-hoursBack);
-
-        var serverFilter = serverId.HasValue ? "AND   server_id = $2" : string.Empty;
-        var limitParam = serverId.HasValue ? "$3" : "$2";
+        /* The server-local start of the exact UTC window: job_stats' lower bound, so the per-job average and last
+           success cover the window the way they always have. base pre-filters an hour earlier, which covers a
+           daylight-saving change inside the span; ApplyJobHistoryWindow drops what that lets in (#4966). */
+        var statsStart = clock.ToServerLocal(windowStartUtc);
+        var preFilterStart = statsStart.AddHours(-1);
 
         /* #4229 (Darling parity): the per-job average/max used to run as a window function OVER every step
            row the window matched, forcing a full sort/aggregate of the whole set before ORDER BY/LIMIT could
@@ -60,8 +155,8 @@ WITH job_stats AS (
     FROM v_job_history
     WHERE step_id = 0
     AND   run_status = 1
-    AND   run_datetime >= $1
-    {serverFilter}
+    AND   run_datetime >= $3
+    AND   server_id = $2
     GROUP BY server_id, job_id
 ),
 base AS (
@@ -84,9 +179,9 @@ base AS (
         message
     FROM v_job_history
     WHERE run_datetime >= $1
-    {serverFilter}
+    AND   server_id = $2
     ORDER BY run_datetime DESC, instance_id DESC
-    LIMIT {limitParam}
+    LIMIT $4
 )
 SELECT
     base.collection_time,
@@ -121,15 +216,18 @@ LEFT JOIN job_stats
     AND job_stats.job_id = base.job_id
 ORDER BY base.run_datetime DESC, base.instance_id DESC";
 
-        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
-        if (serverId.HasValue)
-            command.Parameters.Add(new DuckDBParameter { Value = serverId.Value });
+        command.Parameters.Add(new DuckDBParameter { Value = preFilterStart });
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = statsStart });
         command.Parameters.Add(new DuckDBParameter { Value = limit });
 
         var items = new List<JobHistoryRow>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* The stored wall clock stays as it is for the grid; the instant is the same time through the server's clock at
+               the run's own date, so a run on the far side of a daylight-saving change is not an hour off (#4966). */
+            DateTime? runDateTime = reader.IsDBNull(12) ? null : reader.GetDateTime(12);
             items.Add(new JobHistoryRow
             {
                 CollectionTime = reader.GetDateTime(0),
@@ -144,7 +242,8 @@ ORDER BY base.run_datetime DESC, base.instance_id DESC";
                 StepName = reader.IsDBNull(9) ? null : reader.GetString(9),
                 RunStatus = (int)ToInt64(reader.GetValue(10)),
                 RunStatusDesc = reader.IsDBNull(11) ? null : reader.GetString(11),
-                RunDateTime = reader.IsDBNull(12) ? null : reader.GetDateTime(12),
+                RunDateTime = runDateTime,
+                RunDateTimeUtc = runDateTime.HasValue ? clock.ToUtc(runDateTime.Value) : null,
                 RunDurationSeconds = ToInt64(reader.GetValue(13)),
                 RetriesAttempted = (int)ToInt64(reader.GetValue(14)),
                 Message = reader.IsDBNull(15) ? null : reader.GetString(15),
@@ -247,7 +346,14 @@ public class JobHistoryRow
     public string? StepName { get; set; }
     public int RunStatus { get; set; }
     public string? RunStatusDesc { get; set; }
+    /// <summary>The run's time as <c>sysjobhistory</c> stored it: the SERVER's own wall clock, which is what the grid shows.</summary>
     public DateTime? RunDateTime { get; set; }
+
+    /// <summary><see cref="RunDateTime"/> as naive UTC (#4966): the stored wall clock through its server's clock at the run's own date.
+    /// What the Job History window and its newest-first order use, so runs of servers in different zones compare by when
+    /// they happened. Not shown in the grid, which keeps the server's wall clock. Null when the run has no time.</summary>
+    public DateTime? RunDateTimeUtc { get; set; }
+
     public long RunDurationSeconds { get; set; }
     public int RetriesAttempted { get; set; }
     public string? Message { get; set; }
