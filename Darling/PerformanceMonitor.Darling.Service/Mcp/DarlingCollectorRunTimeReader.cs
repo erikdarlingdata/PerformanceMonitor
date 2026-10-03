@@ -78,7 +78,7 @@ internal static class DarlingCollectorRunTimeReader
     /// </summary>
     public static async Task<IReadOnlyDictionary<string, CollectorRunTimeReading>> ReadAsync(
         NpgsqlDataSource postgres, int serverId, IReadOnlyCollection<CollectorHealth> rows, DateTime nowUtc,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         var overrides = new List<ScheduleOverride>();
         await using (var command = postgres.CreateCommand(ScheduleSql))
@@ -97,7 +97,7 @@ internal static class DarlingCollectorRunTimeReader
             }
         }
 
-        var runTimes = await ReadRunTimesAsync(postgres, serverId, cancellationToken);
+        var runTimes = await ReadRunTimesAsync(postgres, serverId, logger, cancellationToken);
         var layered = StoreConfigProvider.MergeRunTimes(overrides, runTimes);
 
         if (!layered.Any(o => o.RunAtMinute is >= 0))
@@ -115,7 +115,7 @@ internal static class DarlingCollectorRunTimeReader
     /// so the health tool never fails as a whole for a missing optional layer; any other failure propagates. The state code,
     /// not the message text, is matched: lc_messages is not always English.</summary>
     private static Task<IReadOnlyList<RunTimeOverride>> ReadRunTimesAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken) =>
+        NpgsqlDataSource postgres, int serverId, Microsoft.Extensions.Logging.ILogger? logger, CancellationToken cancellationToken) =>
         ReadRunTimesAsync(
             async () =>
             {
@@ -134,7 +134,22 @@ internal static class DarlingCollectorRunTimeReader
 
                 return runTimes;
             },
-            message => System.Diagnostics.Trace.TraceWarning(message));
+            WarnTo(logger));
+
+    /// <summary>The warning's destination: the MCP tool's logger, which reaches the service log. The service wires no Trace
+    /// listener, so a Trace warning would reach nothing; Trace stays only as the fallback when no logger was passed.</summary>
+    internal static Action<string> WarnTo(Microsoft.Extensions.Logging.ILogger? logger) =>
+        message =>
+        {
+            if (logger is null)
+            {
+                System.Diagnostics.Trace.TraceWarning(message);
+            }
+            else
+            {
+                Microsoft.Extensions.Logging.LoggerExtensions.LogWarning(logger, "{Message}", message);
+            }
+        };
 
     /// <summary>The state-code handling of <see cref="ReadRunTimesAsync(NpgsqlDataSource,int,CancellationToken)"/>, with the read
     /// and the warning passed in so the two refusals are testable without a store.</summary>
