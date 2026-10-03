@@ -822,7 +822,7 @@ The Viewer's editor shows what the time means in server time and in UTC. A fleet
 Two numbers around the run time are not settings.
 
 - Each server starts at the run time plus a fixed offset of under 60 minutes. The offset depends only on the server id, so it is the same after every restart. A fleet-wide `02:00` spreads the fleet across 02:00 to 03:00 instead of starting every server in the same minute.
-- A run can start from that slot until 60 minutes after it. A collector that starts inside that hour runs at once. One that cannot (the service was down or busy) waits for the next day's slot. A missed day is skipped, not replayed. A run held by the concurrency cap starts when a slot frees, which can be after the hour.
+- A run can start from that slot until 60 minutes after it. A collector that starts inside that hour runs at once. One that cannot (the service was down or busy) waits for the next day's slot. A missed day is skipped, not replayed. A run held by the concurrency cap starts when a place under the cap frees, which can be after the grace hour.
 
 The time follows the server's clock through a daylight-saving change, so it stays at the same local time.
 

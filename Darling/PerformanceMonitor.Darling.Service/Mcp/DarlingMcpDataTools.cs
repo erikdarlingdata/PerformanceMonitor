@@ -1269,6 +1269,7 @@ public sealed class DarlingMcpDataTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Return every field for every collector. Default compacts a HEALTHY collector with nothing to report; failing, stale, stopped, erroring, denied or regressed collectors always keep every field.")] bool full_detail = false,
+        Microsoft.Extensions.Logging.ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -1301,7 +1302,7 @@ public sealed class DarlingMcpDataTools
             /* #4938: a collector's run time, read fresh and AFTER the memo. The rows above are held for a minute and
                the run time is an operator setting, so a time that was just set shows on the next call. It is never an
                input to the band: HealthStatus is classified from the shipped cadence inside the aggregate. */
-            var runTimes = await DarlingCollectorRunTimeReader.ReadAsync(postgres, resolved.ServerId, rows, nowUtc, cancellationToken);
+            var runTimes = await DarlingCollectorRunTimeReader.ReadAsync(postgres, resolved.ServerId, rows, nowUtc, cancellationToken, logger);
 
             var compactCount = full_detail ? 0 : rows.Count(IsCollectionHealthCompactEligible);
             /* #4198's second cut: a row that fails the predicate above used to keep the full ~30-field shape
