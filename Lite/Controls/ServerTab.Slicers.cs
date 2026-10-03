@@ -101,6 +101,8 @@ public partial class ServerTab : UserControl
             var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, e.StartUtc, e.EndUtc, SelectedDatabaseFilter));
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
             LiveSnapshotIndicator.Text = "";
+            /* The banner takes e.StartUtc/e.EndUtc, the UTC pair the grid read above takes (same as the three Queries grids). */
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
         {

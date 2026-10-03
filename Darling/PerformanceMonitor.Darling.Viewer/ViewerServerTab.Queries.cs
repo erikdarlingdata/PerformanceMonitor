@@ -181,7 +181,7 @@ public partial class ViewerServerTab
            ViewerDataService.GetTopQueriesByCpuTierAsync) — the raw-floor banner (#4231 stage 1/2) and this
            tier disclosure are independent facts, so both may show at once (a window aged past raw AND
            routed to hourly). */
-        UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, startUtc, tier == "hourly" ? HourlyTierSuffix : null);
+        UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), startUtc, tier == "hourly" ? HourlyTierSuffix : null);
         await LoadQueryStatsSlicerAsync(startUtc, endUtc);
         await RefreshQueryStatsComparisonAsync(startUtc, endUtc);
     }
@@ -198,7 +198,7 @@ public partial class ViewerServerTab
         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
            banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
-        UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, startUtc, tier == "hourly" ? HourlyTierSuffix : null);
+        UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), startUtc, tier == "hourly" ? HourlyTierSuffix : null);
         await LoadProcStatsSlicerAsync(startUtc, endUtc);
         await RefreshProcStatsComparisonAsync(startUtc, endUtc);
     }
@@ -213,7 +213,7 @@ public partial class ViewerServerTab
         var (rows, widePlan) = await _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
         _queryStoreFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
-        UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc, widePlan: widePlan);
+        UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), startUtc, widePlan: widePlan);
         await LoadQueryStoreSlicerAsync(startUtc, endUtc);
         await RefreshQueryStoreComparisonAsync(startUtc, endUtc);
     }
@@ -223,8 +223,8 @@ public partial class ViewerServerTab
     /// <paramref name="floor"/> sits past <see cref="RawWindowFloor.IsTruncated"/>'s slack after
     /// <paramref name="requestedStartUtc"/>, collapsed otherwise. The chart-title idiom
     /// (<see cref="DescribeTrendCoverage"/>) states the same fact on Performance Trends; this is its grid-header
-    /// form, in <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>'s <c>yyyy-MM-dd HH:mm</c>, the format
-    /// every trend chart title already uses for a head timestamp.
+    /// form, in <c>yyyy-MM-dd HH:mm</c>, the format every trend chart title already uses for a head timestamp, in the
+    /// display zone and on the invariant culture (<see cref="BannerTime"/>).
     /// </summary>
     internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null,
         QueryStoreIntervalWide.WideReadPlan? widePlan = null)
@@ -241,13 +241,13 @@ public partial class ViewerServerTab
             if (wideTruncated || slicerTruncated || !string.IsNullOrEmpty(tierSuffix))
             {
                 var slicerSince = slicerTruncated
-                    ? ViewerTimeHelper.FormatForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc), "yyyy-MM-dd HH:mm")
+                    ? BannerTime(RawWindowFloor.EffectiveStart(floor, requestedStartUtc))
                     : null;
                 var text = wideTruncated
-                    ? $"Showing since {ViewerTimeHelper.FormatForDisplay(wideStart, "yyyy-MM-dd HH:mm")}{QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)}"
+                    ? $"Showing since {BannerTime(wideStart)}{QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)}"
                         + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}")
                     : slicerSince is null
-                        ? $"Showing {ViewerTimeHelper.FormatForDisplay(requestedStartUtc, "yyyy-MM-dd HH:mm")}"
+                        ? $"Showing {BannerTime(requestedStartUtc)}"
                         : $"Slicer since {slicerSince} (the grid shows the full window)";
 
                 banner.Text = text + tierSuffix;
@@ -272,9 +272,45 @@ public partial class ViewerServerTab
         }
 
         banner.Text = truncated
-            ? $"Showing since {ViewerTimeHelper.FormatForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc), "yyyy-MM-dd HH:mm")}{tierSuffix}"
-            : $"Showing {ViewerTimeHelper.FormatForDisplay(requestedStartUtc, "yyyy-MM-dd HH:mm")}{tierSuffix}";
+            ? $"Showing since {BannerTime(RawWindowFloor.EffectiveStart(floor, requestedStartUtc))}{tierSuffix}"
+            : $"Showing {BannerTime(requestedStartUtc)}{tierSuffix}";
         banner.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// The instant a "Showing since" banner names, in the display zone with the ambiguous-hour offset suffix (the same
+    /// zone and suffix <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> gives) but on the invariant
+    /// culture, as Lite's banner (<c>DisplayZone.Format</c>) and the web's notice are. A banner is one line of
+    /// disclosure, not a grid cell, and a machine whose default calendar is not the Gregorian one (Thai Buddhist,
+    /// Hijri) would otherwise print 2026 as 2569 or 1448. <c>FormatForDisplay</c> stays on the current culture on
+    /// purpose for the grids' own columns.
+    /// </summary>
+    private static string BannerTime(DateTime naiveUtc) =>
+        PerformanceMonitor.Ui.DisplayZone.Format(naiveUtc, ViewerTimeHelper.CurrentDisplayZone(), "yyyy-MM-dd HH:mm");
+
+    /// <summary>
+    /// Where a data-start probe says the data starts (Active Queries, Current Waits, and the Queries tab's Query Stats,
+    /// Procedure Stats and Query Store window-floor probes: the caller starts the probe before its grid read and awaits
+    /// it here), or null when the probe throws. The probe is only the "Showing since" disclosure, so its failure must
+    /// not unwind the refresh past the slicer, the comparison or the charts that follow it: the answer goes on to
+    /// <see cref="UpdateTruncationBanner"/>, for which a null floor names no cut (the banner hides, unless the hourly-tier
+    /// suffix or the interval-table plan the Queries tab passes beside it still has something to say), the failure is
+    /// logged (<paramref name="warn"/> takes the log source and the message, <see cref="ViewerLogger.Warn"/> by
+    /// default), and the refresh goes on.
+    /// </summary>
+    internal static async Task<DateTime?> DataStartOrNullAsync(Task<DateTime?> probe, string surface, Action<string, string>? warn = null)
+    {
+        try
+        {
+            return await probe;
+        }
+        catch (Exception ex)
+        {
+            (warn ?? ViewerLogger.Warn)(
+                "ViewerServerTab",
+                $"{surface}: the data-start probe failed, so no \"Showing since\" banner is shown | {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>
@@ -324,7 +360,7 @@ public partial class ViewerServerTab
             var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             var (rows, tier) = await _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _queryStatsFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
+            UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -349,7 +385,7 @@ public partial class ViewerServerTab
             var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             var (rows, tier) = await _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _procStatsFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
+            UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -375,7 +411,7 @@ public partial class ViewerServerTab
             /* #3953 clause 4: a slicer selection is always a literal, user-drawn sub-range, never a preset. */
             var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc);
             _queryStoreFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, e.StartUtc);
+            UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), e.StartUtc);
             await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
