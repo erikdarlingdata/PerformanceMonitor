@@ -33,11 +33,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// helpers, minus the DuckDB BigInteger case Postgres never produces.
 /// <para>
 /// The <b>Health Summary</b> aggregate keeps Lite's fixed 7-day horizon (its staleness banding needs a
-/// stable window regardless of the toolbar). The <b>Collection Log</b> read (feeding the log grid + the
-/// Duration Trends chart) diverges from Lite in ONE deliberate way: it bounds <c>collection_time</c> on
+/// stable window regardless of the toolbar). The <b>Collection Log</b> read (feeding the log grid) diverges
+/// from Lite in ONE deliberate way: it bounds <c>collection_time</c> on
 /// BOTH sides so the per-server toolbar's custom From/To is honored EXACTLY — Lite (and this file's first
 /// port) took a single now-relative <c>hoursBack</c> lower bound, which rounded a custom range to a
-/// hours-back-from-now span.
+/// hours-back-from-now span. The <b>Duration Trends</b> chart does not draw that page (#4966): it has its own
+/// bucketed read over the whole range (<see cref="GetCollectorDurationTrendAsync"/>).
 /// </para>
 /// </summary>
 public sealed partial class ViewerDataService
@@ -482,6 +483,35 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
+    /// The Duration Trends chart's own read (#4966): the successful runs of one server over the WHOLE toolbar range, per
+    /// collector and bucket, as the bucket's longest and average duration and its run count. The chart used to draw the
+    /// Collection Log grid's page (<see cref="RecentCollectionLogSql"/>, the newest <see cref="CollectionLogRowCap"/> runs),
+    /// so a server logging about 20 runs a minute drew the newest ~25 minutes of "Last 24 hours" and left the rest of the
+    /// axis empty. This read has no row cap: a bucket is the unit, <see cref="CollectorDurationBucketMinutes"/> widens it
+    /// until the range fits the chart budget, and the bucket origin is the one every trend read shares
+    /// (<see cref="TrendBucketSql.OriginSql"/>), so a width bins the same runs the same way as the other trends. The first
+    /// bucket's start is clamped to the window's start, as the other trend reads clamp it. A run counts when the chart
+    /// counted it before: status SUCCESS with a duration. $1 server_id, $2 window start, $3 window end (naive UTC),
+    /// $4 bucket width in minutes.
+    /// </summary>
+    public const string CollectorDurationTrendSql = $$"""
+        SELECT
+            collector_name,
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+            MAX(duration_ms) AS max_duration_ms,
+            AVG(duration_ms) AS avg_duration_ms,
+            COUNT(*) AS run_count
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   status = 'SUCCESS'
+        AND   duration_ms IS NOT NULL
+        GROUP BY collector_name, 2
+        ORDER BY collector_name, 2
+        """;
+
+    /// <summary>
     /// Lite's per-collector drill read (<c>GetCollectionLogByCollectorAsync</c>) verbatim: every
     /// collection_log row for one collector on one server since the window start, newest first. Feeds
     /// the CollectionLogWindow the Health Summary grid opens on double-click. $1 server_id, $2
@@ -785,7 +815,9 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Collection_log entries for one server between the window's naive-UTC start/end bounds, most recent
-    /// first (<see cref="CollectionLogRowCap"/>-row cap). Feeds the Collection Log sub-tab grid and the Duration Trends chart. The window
+    /// first (<see cref="CollectionLogRowCap"/>-row cap). Feeds the Collection Log sub-tab grid, and only the grid: the Duration Trends
+    /// chart reads its own buckets over the whole range (<see cref="GetCollectorDurationTrendAsync"/>, #4966), because this page ends
+    /// wherever the 500th newest run falls. The window
     /// is the per-server toolbar's settable range (<c>GetWindowUtc</c>): a preset ends "now", a custom
     /// From/To bounds EXACTLY — unlike the old hours-back read, a custom range no longer rounds to a
     /// hours-back-from-now span. Mirrors how <see cref="GetDistinctWaitTypesAsync"/> windows its read.
@@ -806,6 +838,58 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = maxRows });
 
         return await ReadCollectionLogAsync(command, cancellationToken);
+    }
+
+    /// <summary>
+    /// The bucket width, in minutes, the Duration Trends chart reads at for the range (#4966): the shared ladder's narrowest width that
+    /// keeps the range within <see cref="TrendBudget.Chart"/>'s point budget, sized as <see cref="GetCpuUtilizationAsync"/> and the
+    /// blocking trends size theirs (one series, so a collector's line holds at most that many points). A minute for 24 hours, ten
+    /// for 7 days. A function of its own so a test holds it to the shared helper without a store.
+    /// </summary>
+    /// <param name="startUtc">The range's start.</param>
+    /// <param name="endUtc">The range's end.</param>
+    public static int CollectorDurationBucketMinutes(DateTime startUtc, DateTime endUtc)
+    {
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        return TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+    }
+
+    /// <summary>
+    /// The Duration Trends chart's feed (#4966): per collector and bucket, the longest and average duration of the successful runs
+    /// and their count, over the whole range (<see cref="CollectorDurationTrendSql"/>), in collector then time order. Read beside
+    /// <see cref="GetRecentCollectionLogAsync"/>, not from it: the grid's page keeps the newest <see cref="CollectionLogRowCap"/>
+    /// runs, and the chart's axis spans the range. Each bucket is <see cref="CollectorDurationBucketMinutes"/> wide.
+    /// </summary>
+    public async Task<List<CollectorDurationBucket>> GetCollectorDurationTrendAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(CollectorDurationTrendSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        {
+            TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified),
+        });
+        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        {
+            TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
+        });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = CollectorDurationBucketMinutes(startUtc, endUtc) });
+
+        var items = new List<CollectorDurationBucket>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            /* MAX and AVG read type-agnostically (an integer column's AVG is numeric); COUNT is bigint. The WHERE keeps NULL durations out,
+               so no bucket here has a NULL maximum or average. */
+            items.Add(new CollectorDurationBucket(
+                reader.GetString(0),
+                reader.GetDateTime(1),
+                Convert.ToInt32(reader.GetValue(2)),
+                Convert.ToDouble(reader.GetValue(3)),
+                reader.GetInt64(4)));
+        }
+
+        return items;
     }
 
     /// <summary>
@@ -924,6 +1008,14 @@ public sealed partial class ViewerDataService
 /// </summary>
 public sealed record ManualPurgeRunRecord(
     DateTime CollectionTime, string Status, string? ErrorMessage, int? RowsCollected, int? DurationMs);
+
+/// <summary>
+/// One collector's successful runs in one bucket of the Duration Trends chart (#4966): the longest and the average duration among
+/// them and how many runs that is. <see cref="BucketStart"/> is the bucket's start in the store's naive UTC, clamped to the range's
+/// start for the first bucket. The chart draws <see cref="MaxDurationMs"/>, so a slow run shows however wide the bucket is.
+/// </summary>
+public sealed record CollectorDurationBucket(
+    string CollectorName, DateTime BucketStart, int MaxDurationMs, double AvgDurationMs, long RunCount);
 
 /// <summary>
 /// One row of the Collection Log grid / drill window — a single collector run's outcome. Copied

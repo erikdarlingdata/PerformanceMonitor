@@ -25,7 +25,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>CollectionHealthGrid_MouseDoubleClick</c> drill, and <c>UpdateCollectorDurationChart</c>), reads
 /// rewired to Postgres. It REPLACES the shell's single latest-run-per-collector grid. Health Summary =
 /// the 7-day per-collector aggregate (double-click opens the per-collector CollectionLogWindow drill);
-/// Collection Log = the recent run log; Duration Trends = the per-collector success-duration scatter.
+/// Collection Log = the recent run log (the newest <see cref="ViewerDataService.CollectionLogRowCap"/> runs of the range);
+/// Duration Trends = the per-collector success-duration lines, drawn from their own bucketed read over the whole range (#4966), not
+/// from the grid's page: a page of the newest 500 runs ends wherever the 500th falls, and the chart's axis spans the range.
 /// The chart's only render-body change from Lite is the time axis: where Lite shifts the raw stored
 /// time by its per-server <c>UtcOffsetMinutes</c>, the viewer plots every point at its naive-UTC instant
 /// and draws the labels in <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (the convention every Darling
@@ -49,10 +51,11 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// Collection Health tab load: the 7-day per-collector health aggregate and the recent collection
-    /// log read concurrently (NpgsqlDataSource pools a connection for each), then each grid goes through
-    /// its filter manager's UpdateData so active column filters survive the refresh, and the log also
-    /// feeds the Duration Trends chart. Mirrors Lite's <c>RefreshCollectionHealthAsync</c> — but the
+    /// Collection Health tab load: the 7-day per-collector health aggregate, the recent collection
+    /// log and the Duration Trends chart's own bucketed read (#4966) concurrently (NpgsqlDataSource pools a
+    /// connection for each), then each grid goes through
+    /// its filter manager's UpdateData so active column filters survive the refresh, and the chart draws its read's
+    /// buckets over the whole range rather than the log's page. Mirrors Lite's <c>RefreshCollectionHealthAsync</c> — but the
     /// reads are genuinely async, so there is no Task.Run wrap. LoadInnerTabAsync owns the try/catch that
     /// surfaces failures on the status bar.
     /// </summary>
@@ -63,21 +66,23 @@ public partial class ViewerServerTab
            settable window EXACTLY — a preset or a custom From/To — via GetWindowUtc(), matching the Wait
            Stats / Blocking tabs (the old GetWindowHoursBack() rounded a custom range to a now-relative span). */
         var (startUtc, endUtc) = GetWindowUtc();
-        using var readFanOut = ViewerReadFanOut.Of(4);
+        using var readFanOut = ViewerReadFanOut.Of(5);
         var healthTask = _dataService.GetCollectionHealthAsync(_server.ServerId);
         var dataStartTask = _dataService.GetCollectionLogDataStartAsync(_server.ServerId, startUtc, endUtc);
         var logTask = _dataService.GetRecentCollectionLogAsync(_server.ServerId, startUtc, endUtc);
+        /* The chart's own read (#4966): the grid's page ends at the 500th newest run, and this chart's axis spans the range. */
+        var durationTask = _dataService.GetCollectorDurationTrendAsync(_server.ServerId, startUtc, endUtc);
         var caveatsTask = _dataService.GetCollectionCaveatsAsync(_server.ServerId);
-        await Task.WhenAll(healthTask, logTask, caveatsTask);
+        await Task.WhenAll(healthTask, logTask, durationTask, caveatsTask);
 
-        /* The three reads are done: end the declared width here, before the data-start note below awaits its probe (#4966), so that
+        /* The four reads are done: end the declared width here, before the data-start note below awaits its probe (#4966), so that
            await is not priced against contention that has already finished. */
         readFanOut.Release();
 
         _collectionHealthFilterMgr!.UpdateData(healthTask.Result);
         _collectionLogFilterMgr!.UpdateData(logTask.Result);
         await ShowCollectionLogDataStartAsync(CollectionLogTruncationBanner, dataStartTask, startUtc, logTask.Result);
-        RenderCollectorDurationChart(logTask.Result);
+        RenderCollectorDurationChart(durationTask.Result);
 
         /* #3691 part a2: collapse the section entirely when there is nothing to report — the common case
            (a healthy analysis pass, or a store below V141) — rather than showing an empty grid. */
@@ -322,16 +327,24 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// Per-collector success-duration scatter over the window. Copied from Lite's
+    /// Per-collector success-duration lines over the window. Copied from Lite's
     /// <c>UpdateCollectorDurationChart</c>: one line per collector (SUCCESS runs with a duration, needing
-    /// at least two points), cycling the shared palette. The one change is the time axis — every point's X
+    /// at least two points), cycling the shared palette. Two changes. The time axis: every point's X
     /// is the naive-UTC instant itself, drawn in <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (Lite
     /// shifts by its per-server UtcOffsetMinutes) — and line polish uses the shared <see cref="ChartStyle.StyleScatter"/>.
+    /// And the feed (#4966): the buckets of <see cref="ViewerDataService.GetCollectorDurationTrendAsync"/> over the whole range,
+    /// not the Collection Log grid's page of the newest runs, so the lines reach across the axis the range pins. A point is a
+    /// bucket and draws its MAXIMUM, so a slow run still shows however wide the bucket is (a minute for 24 hours, ten for 7 days);
+    /// the shared hover popup prints a label, a value and a time, so a point's hover names the collector, that maximum and the
+    /// bucket's start, and the bucket's average and run count (<see cref="CollectorDurationSeries"/> carries them) are not drawn.
     /// </summary>
-    private void RenderCollectorDurationChart(List<CollectionLogRow> data)
+    private void RenderCollectorDurationChart(List<CollectorDurationBucket> data)
     {
         ClearChart(CollectorDurationChart);
         ApplyTheme(CollectorDurationChart);
+
+        /* The old lines are off the plot: drop them from the hover as well, or an empty range would still tooltip their points. */
+        _collectorDurationHover?.Clear();
 
         /* Pin the X axis to the toolbar's settable window (the same idiom as the wait / tempdb-size charts)
            rather than AutoScale()'ing to the data — an AutoScale fits X to the data plus ScottPlot's ~10%
@@ -350,34 +363,21 @@ public partial class ViewerServerTab
             return;
         }
 
-        /* Group by collector, plot each as a separate series */
-        var groups = data
-            .Where(d => d.DurationMs.HasValue && d.Status == "SUCCESS")
-            .GroupBy(d => d.CollectorName)
-            .OrderBy(g => g.Key)
-            .ToList();
-
-        _collectorDurationHover?.Clear();
+        /* Group by collector, plot each as a separate series: its bucket maxima, in collector then time order. */
         int colorIdx = 0;
-        foreach (var group in groups)
+        foreach (var series in CollectorDurationSeries.Build(data))
         {
-            var points = group.OrderBy(d => d.CollectionTime).ToList();
-            if (points.Count < 2) continue;
-
-            var times = points.Select(d => d.CollectionTime.ToOADate()).ToArray();
-            var durations = points.Select(d => (double)d.DurationMs!.Value).ToArray();
-
-            var scatter = CollectorDurationChart.Plot.Add.TimeSeries(times, durations);
-            scatter.LegendText = group.Key;
+            var scatter = CollectorDurationChart.Plot.Add.TimeSeries(series.Times, series.MaxMs);
+            scatter.LegendText = series.Collector;
             scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             ChartStyle.StyleScatter(scatter);
-            _collectorDurationHover?.Add(scatter, group.Key);
+            _collectorDurationHover?.Add(scatter, series.Collector);
             colorIdx++;
         }
 
         CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ReapplyAxisColors(CollectorDurationChart);
-        CollectorDurationChart.Plot.YLabel("Duration (ms)");
+        CollectorDurationChart.Plot.YLabel("Slowest run per bucket (ms)");
         CollectorDurationChart.Plot.Axes.AutoScaleY();
         CollectorDurationChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ShowChartLegend(CollectorDurationChart);

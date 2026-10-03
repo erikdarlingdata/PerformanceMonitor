@@ -132,11 +132,12 @@ public sealed class ViewerCollectionLogDataStartTests
     {
         var load = MethodBody(TabFile(), @"private async Task LoadHealthAsync\(");
 
-        /* Four reads in flight (the health rollup, the probe, the log and the caveats), so the width declared to the deadline is four. */
-        Assert.Equal(1, Matches(load, @"using var readFanOut = ViewerReadFanOut\.Of\(4\);"));
-        Assert.Equal(4, Matches(load, @"_dataService\.Get\w+Async\("));
+        /* Five reads in flight (the health rollup, the probe, the log, the chart's bucketed read and the caveats, #4966), so the width
+           declared to the deadline is five. */
+        Assert.Equal(1, Matches(load, @"using var readFanOut = ViewerReadFanOut\.Of\(5\);"));
+        Assert.Equal(5, Matches(load, @"_dataService\.Get\w+Async\("));
 
-        var declared = load.IndexOf("ViewerReadFanOut.Of(4)", StringComparison.Ordinal);
+        var declared = load.IndexOf("ViewerReadFanOut.Of(5)", StringComparison.Ordinal);
         var probe = load.IndexOf("_dataService.GetCollectionLogDataStartAsync(_server.ServerId, startUtc, endUtc)", StringComparison.Ordinal);
         var read = load.IndexOf("_dataService.GetRecentCollectionLogAsync(_server.ServerId, startUtc, endUtc)", StringComparison.Ordinal);
         var join = load.IndexOf("await Task.WhenAll(", StringComparison.Ordinal);
@@ -152,8 +153,9 @@ public sealed class ViewerCollectionLogDataStartTests
         Assert.Equal(1, Matches(load,
             @"await ShowCollectionLogDataStartAsync\(CollectionLogTruncationBanner,\s*dataStartTask,\s*startUtc,\s*logTask\.Result\);"));
 
-        /* The probe is only the disclosure: it is not part of the join and is never awaited bare, so one that throws costs its banner and nothing after it. */
-        Assert.Matches(@"await Task\.WhenAll\(healthTask,\s*logTask,\s*caveatsTask\);", load);
+        /* The probe is only the disclosure: it is not part of the join and is never awaited bare, so one that throws costs its banner and nothing after it.
+           The chart's read is a read the tab draws, so it is joined with the others. */
+        Assert.Matches(@"await Task\.WhenAll\(healthTask,\s*logTask,\s*durationTask,\s*caveatsTask\);", load);
         Assert.DoesNotContain("await dataStartTask", load, StringComparison.Ordinal);
     }
 
