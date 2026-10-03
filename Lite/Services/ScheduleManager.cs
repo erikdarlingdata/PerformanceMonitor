@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Models;
 
@@ -107,6 +108,16 @@ public class ScheduleManager
     /// Kept separate from config because runtime state is not persisted to JSON.
     /// </summary>
     private readonly Dictionary<string, Dictionary<string, DateTime>> _serverRunState = new();
+
+    /// <summary>#4938: what a run time needs to know about each server: the stable id its spread is taken from, the
+    /// name a warning shows, and the server's clock (null until a server_properties row has been read, when the run
+    /// time reads as UTC). Set by RemoteCollectorService.</summary>
+    private readonly Dictionary<string, RunTimeServer> _runTimeServers = new();
+
+    /// <summary>#4938: the ignored run times already warned about, so a bad value logs once, not every cycle.</summary>
+    private readonly HashSet<string> _warnedRunTimes = new();
+
+    private sealed record RunTimeServer(int StorageId, string Name, ServerClock? Clock);
 
     public ScheduleManager(string configDirectory, ILogger<ScheduleManager>? logger = null)
     {
@@ -245,28 +256,201 @@ public class ScheduleManager
                 if (!s.Enabled)
                     continue;
 
-                var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(s.FrequencyMinutes);
-
-                if (runState == null || !runState.TryGetValue(s.Name, out var lastRun))
-                {
-                    due.Add(s); // never run — due immediately
-                    continue;
-                }
-
-                /* #4732: due when lastRun plus the interval has come, decided through the shared clamp. A run recorded
-                   after atUtc is either what a wall clock that stepped backwards leaves behind for every collector (the
-                   plain elapsed check would hold each one back for as long as the step), or a tab-open or refresh run
-                   that recorded its own start time after this cycle's time was taken (RemoteCollectorService, only the
-                   collectors it ran); the clamp counts either as due now. A run one interval or more before atUtc is
-                   due and one less than an interval before is not, exactly as before. */
-                var interval = TimeSpan.FromMinutes(intervalMinutes);
-                if (CollectorCadence.ClampDue(lastRun + interval, atUtc, interval) <= atUtc)
+                if (IsDue(serverId, s, runState, atUtc))
                 {
                     due.Add(s);
                 }
             }
 
             return due;
+        }
+    }
+
+    /// <summary>
+    /// #4938: whether one collector is due. A collector with a run time (a valid <c>run_at</c> on an interval of whole
+    /// days) asks <see cref="CollectorRunTime.NextDue"/> and is due when the answer is at or before
+    /// <paramref name="atUtc"/>: from the day's time to the end of the 60-minute grace, once a day. A never-run
+    /// collector, or one that missed its day, waits for the next day's time. Every other collector keeps the interval rule.
+    /// </summary>
+    private bool IsDue(string serverId, CollectorSchedule s, Dictionary<string, DateTime>? runState, DateTime atUtc)
+    {
+        var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(s.FrequencyMinutes);
+        DateTime? lastRun = runState != null && runState.TryGetValue(s.Name, out var last) ? last : null;
+
+        if (ResolveRunAtMinute(serverId, s, intervalMinutes) is int runAtMinute)
+        {
+            _runTimeServers.TryGetValue(serverId, out var server);
+            /* The spread takes an int id: the stable id Lite stores for the server (the deterministic hash of its
+               storage name), registered by RemoteCollectorService. Before one is registered, a hash of the connection id. */
+            var spreadId = server?.StorageId ?? PerformanceMonitor.Common.ServerIdHelper.GetDeterministicHashCode(serverId);
+            Func<DateTime, DateTime> localToUtc = CollectorRunTime.LocalIsUtc;
+            if (server?.Clock is { } clock)
+            {
+                localToUtc = clock.ToUtc;
+            }
+
+            var next = CollectorRunTime.NextDue(atUtc, lastRun, runAtMinute, intervalMinutes, spreadId, localToUtc);
+
+            /* The clock-step check with the room a run-time stamp needs (an interval, the spread, a 25-hour day). */
+            return CollectorCadence.ClampDue(next, atUtc, CollectorRunTime.MaxStampAhead(intervalMinutes)) <= atUtc;
+        }
+
+        if (lastRun is not { } ran)
+        {
+            return true; // never run — due immediately
+        }
+
+        /* #4732: due when lastRun plus the interval has come, decided through the shared clamp. A run recorded
+           after atUtc is either what a wall clock that stepped backwards leaves behind for every collector (the
+           plain elapsed check would hold each one back for as long as the step), or a tab-open or refresh run
+           that recorded its own start time after this cycle's time was taken (RemoteCollectorService, only the
+           collectors it ran); the clamp counts either as due now. A run one interval or more before atUtc is
+           due and one less than an interval before is not, exactly as before. */
+        var interval = TimeSpan.FromMinutes(intervalMinutes);
+        return CollectorCadence.ClampDue(ran + interval, atUtc, interval) <= atUtc;
+    }
+
+    /// <summary>
+    /// #4938: the collector's run time in minutes after midnight on the server's clock, or null when it has none that
+    /// applies. A value that is not a 24-hour HH:MM time, or that sits on an interval that is not a whole number of
+    /// days, is ignored with one warning that names the collector and the server.
+    /// </summary>
+    private int? ResolveRunAtMinute(string serverId, CollectorSchedule s, int intervalMinutes)
+    {
+        if (string.IsNullOrWhiteSpace(s.RunAt))
+        {
+            return null;
+        }
+
+        var serverName = _runTimeServers.TryGetValue(serverId, out var server) ? server.Name : serverId;
+        if (!CollectorRunTime.TryParse(s.RunAt, out var minute))
+        {
+            if (_warnedRunTimes.Add($"{serverId}|{s.Name}|{s.RunAt}|format"))
+            {
+                _logger?.LogWarning("Collector '{Name}' on server '{Server}' has run_at '{RunAt}'. {Message} The run time is ignored.",
+                    s.Name, serverName, s.RunAt, CollectorRunTime.InvalidRunAtMessage);
+            }
+
+            return null;
+        }
+
+        if (!CollectorRunTime.AllowsRunAt(intervalMinutes))
+        {
+            if (_warnedRunTimes.Add($"{serverId}|{s.Name}|{s.RunAt}|{intervalMinutes}"))
+            {
+                _logger?.LogWarning("{Message} The run time {RunAt} on server '{Server}' is ignored.",
+                    CollectorRunTime.IntervalRefusalMessage(s.Name, intervalMinutes), s.RunAt, serverName);
+            }
+
+            return null;
+        }
+
+        return minute;
+    }
+
+    /// <summary>
+    /// #4938: tells the scheduler what a run time needs about a server: the stable id the spread is taken from
+    /// (<c>RemoteCollectorService.GetServerId</c>, the deterministic hash of the storage name), the name warnings show,
+    /// and the server's clock from its newest server_properties row. A null clock reads the run time as UTC until one
+    /// arrives; every due check uses the clock set last, so a new clock moves the next slot with no other step.
+    /// </summary>
+    public void SetServerRunContext(string serverId, int storageServerId, string serverName, ServerClock? clock)
+    {
+        lock (_lock)
+        {
+            _runTimeServers[serverId] = new RunTimeServer(storageServerId, serverName, clock);
+        }
+    }
+
+    /// <summary>
+    /// #4938: the collectors the tab-open run starts, in schedule order. An on-load collector (frequency 0) always
+    /// runs: that is its connect capture, and a run time moves only its daily re-capture. A collector with a run time
+    /// does not run, because its time owns it. A collector that runs once a day or less often and is not due does not
+    /// run either, so opening a tab no longer re-runs it. Every other enabled collector runs, as before.
+    /// </summary>
+    public IReadOnlyList<CollectorSchedule> GetCollectorsForTabOpen(string serverId, DateTime atUtc)
+    {
+        lock (_lock)
+        {
+            var schedules = _serverOverrides.TryGetValue(serverId, out var over)
+                ? over.Collectors
+                : _defaultSchedule;
+
+            _serverRunState.TryGetValue(serverId, out var runState);
+
+            var run = new List<CollectorSchedule>();
+            foreach (var s in schedules)
+            {
+                if (!s.Enabled)
+                    continue;
+
+                if (s.IsScheduled)
+                {
+                    var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(s.FrequencyMinutes);
+                    if (ResolveRunAtMinute(serverId, s, intervalMinutes) is not null)
+                        continue;
+
+                    if (intervalMinutes >= DailyIntervalMinutes && !IsDue(serverId, s, runState, atUtc))
+                        continue;
+                }
+
+                run.Add(s);
+            }
+
+            return run;
+        }
+    }
+
+    private const int DailyIntervalMinutes = 1440;
+
+    /// <summary>
+    /// #4938: the enabled collectors whose effective interval is a day or more (the on-load ones recur daily), with
+    /// that interval. These are the ones whose last run is read from collection_log at start-up.
+    /// </summary>
+    public IReadOnlyDictionary<string, int> GetDailyCollectorIntervalsForServer(string serverId)
+    {
+        lock (_lock)
+        {
+            var schedules = _serverOverrides.TryGetValue(serverId, out var over)
+                ? over.Collectors
+                : _defaultSchedule;
+
+            var daily = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var s in schedules.Where(s => s.Enabled))
+            {
+                var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(s.FrequencyMinutes);
+                if (intervalMinutes >= DailyIntervalMinutes)
+                {
+                    daily[s.Name] = intervalMinutes;
+                }
+            }
+
+            return daily;
+        }
+    }
+
+    /// <summary>
+    /// #4938: fills in the last run of collectors from the local collection_log at start-up. The run state lives in
+    /// memory, so without this every collector is "never run, due now" after a launch. A run already on record
+    /// stays when it is the later of the two.
+    /// </summary>
+    public void SeedLastRunsForServer(string serverId, IReadOnlyDictionary<string, DateTime> lastRuns)
+    {
+        lock (_lock)
+        {
+            if (!_serverRunState.TryGetValue(serverId, out var runState))
+            {
+                runState = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+                _serverRunState[serverId] = runState;
+            }
+
+            foreach (var (name, ran) in lastRuns)
+            {
+                if (!runState.TryGetValue(name, out var existing) || existing < ran)
+                {
+                    runState[name] = ran;
+                }
+            }
         }
     }
 
@@ -714,7 +898,8 @@ public class ScheduleManager
             Enabled = s.Enabled,
             FrequencyMinutes = s.FrequencyMinutes,
             RetentionDays = s.RetentionDays,
-            Description = s.Description
+            Description = s.Description,
+            RunAt = s.RunAt
         };
     }
 

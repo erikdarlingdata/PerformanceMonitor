@@ -315,7 +315,9 @@ public partial class CollectorScheduleEditorWindow : Window
             Enabled = s.Enabled,
             FrequencyMinutes = s.FrequencyMinutes,
             RetentionDays = s.RetentionDays,
-            Description = s.Description
+            Description = s.Description,
+            /* #4938: keep a hand-set run time, so saving a server's override does not erase it. */
+            RunAt = s.RunAt
         }).ToList();
     }
 }

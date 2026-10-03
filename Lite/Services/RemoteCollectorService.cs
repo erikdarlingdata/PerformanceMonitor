@@ -541,6 +541,10 @@ public partial class RemoteCollectorService
                changed (state-tracked); creates on enable, drops on disable. */
             await ReconcileLongQueryCompletionsXeSessionAsync(server, cancellationToken);
 
+            /* #4938: the last runs and the server's clock are read once before the first due check, so a restart does not
+               make a daily collector due and a run time reads the server's clock. */
+            await EnsureRunTimeReadyAsync(server, cancellationToken);
+
             var dueCollectors = _scheduleManager.GetDueCollectorsForServer(server.Id, cycleStartUtc);
             foreach (var collector in dueCollectors)
             {
@@ -591,9 +595,11 @@ public partial class RemoteCollectorService
             return;
         }
 
-        var enabledSchedules = _scheduleManager.GetSchedulesForServer(server.Id)
-            .Where(s => s.Enabled)
-            .ToList();
+        /* #4938: the tab-open run does not start a collector that has a run time or a daily collector that is not
+           due; on-load collectors still run (their connect capture). The last runs are read first, so a tab opened
+           at launch sees the same state as the scheduled sweep. */
+        await EnsureRunTimeReadyAsync(server, cancellationToken);
+        var enabledSchedules = _scheduleManager.GetCollectorsForTabOpen(server.Id, DateTime.UtcNow).ToList();
 
         AppLogger.Info("Collector", $"Running {enabledSchedules.Count} collectors for '{server.DisplayName}' (serverId={GetServerId(server)}, initial load)");
 
@@ -761,6 +767,12 @@ public partial class RemoteCollectorService
             };
 
             _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, scheduledAtUtc ?? startTime);
+
+            /* #4938: a new server_properties row is the server's clock arriving or changing; a run time reads it from the next check. */
+            if (string.Equals(collectorName, "server_properties", StringComparison.Ordinal))
+            {
+                await RefreshRunTimeClockAsync(server, cancellationToken);
+            }
 
             /* #3653 A5: the identity-epoch account, if this run's definition saw one — the twin of the drain
                in DarlingWorker.RunOneAsync, for the same reason: the definition composed the sentence (old
