@@ -368,7 +368,7 @@ public class QueryStoreHealthRow
     public DateTime CaptureTime { get; set; }
 
     /// <summary>#4966: when this row's snapshot was captured, to the second, in the display zone (the grid's Collected column,
-    /// which sorts by <see cref="CaptureTime"/>). Config is captured on connect, so this is how old the shown value can be.</summary>
+    /// which sorts by <see cref="CaptureTime"/>). Query Store health is captured hourly, so this is how old the shown value can be.</summary>
     public string CaptureTimeLocal => ServerTimeHelper.FormatServerTime(CaptureTime);
     public string DatabaseName { get; set; } = "";
     public string ActualState { get; set; } = "";

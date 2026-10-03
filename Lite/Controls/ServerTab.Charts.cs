@@ -78,7 +78,7 @@ public partial class ServerTab : UserControl
     /// <paramref name="emptyText"/> (the strip's own no-value marker) when there is no snapshot, so an empty strip shows no time.
     /// </summary>
     internal static string SnapshotCollectedText(DateTime? collectionTimeUtc, TimeZoneInfo zone, string emptyText) =>
-        collectionTimeUtc is { } time ? DisplayZone.Format(time, zone, "yyyy-MM-dd HH:mm:ss") : emptyText;
+        collectionTimeUtc.HasValue ? DisplayZone.Format(collectionTimeUtc.Value, zone, "yyyy-MM-dd HH:mm:ss") : emptyText;
 
     /// <summary>
     /// A Memory Overview page-file figure. On an Azure SQL Database the memory collector has no page-file source and
