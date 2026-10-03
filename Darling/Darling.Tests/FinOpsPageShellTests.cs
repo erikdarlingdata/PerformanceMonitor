@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text.RegularExpressions;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -60,10 +61,16 @@ public sealed class FinOpsPageShellTests
     {
         var app = Js("app.js");
         Assert.Contains("import { renderFinops } from \"./pages/finops.js\";", app);
-        Assert.Contains("#/finops", app);
-        Assert.Contains("name: \"finops\"", app);
-        Assert.Contains("param: decodeURIComponent(rest.slice(0, slash))", app);
-        Assert.Contains("tab: decodeURIComponent(rest.slice(slash + 1))", app);
+        Assert.Contains("h.startsWith(\"#/finops/\")", app);
+        var start = app.IndexOf("function finopsRoute(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "finopsRoute must exist");
+        var end = app.IndexOf("\n}\n", start, StringComparison.Ordinal);
+        var body = app.Substring(start, end - start);
+        Assert.Contains("name: \"finops\"", body);
+        Assert.Contains("param: safeDecode(rest.slice(0, slash))", body);
+        Assert.Contains("tab: safeDecode(rest.slice(slash + 1))", body);
+        Assert.DoesNotContain("decodeURIComponent(", body);
+        Assert.Contains("catch {", app.Substring(app.IndexOf("function safeDecode(", StringComparison.Ordinal), 120));
         Assert.Contains("renderFinops(main, r.param, r.tab, opts)", app);
     }
 
@@ -88,6 +95,38 @@ public sealed class FinOpsPageShellTests
         Assert.Contains("finops.server", src);
         Assert.True(src.IndexOf("setPanelSignal(", StringComparison.Ordinal) < src.IndexOf(".build(", StringComparison.Ordinal),
             "the panel signal must be set before a tab is built");
+    }
+
+    [Fact]
+    public void FinopsTabsArray_IsInXamlOrder_AndEachLabelMatchesItsXamlHeader()
+    {
+        var src = Js("pages", "finops.js");
+        var m = Regex.Match(src, "FINOPS_TABS = \\[(?<ids>[^\\]]*)\\];");
+        Assert.True(m.Success, "FINOPS_TABS array not found");
+        var ids = m.Groups["ids"].Value.Split(',').Select(x => x.Trim()).Where(x => x.Length > 0).ToArray();
+        Assert.Equal(TabIds.Select(i => i.Replace('-', '_')).ToArray(), ids);
+        for (var i = 0; i < TabIds.Length; i++)
+            Assert.Contains($"label: \"{WebUtility.HtmlDecode(XamlHeaders[i])}\",", TabFile(TabIds[i]));
+    }
+
+    [Fact]
+    public void RenderFinops_ResolvesToTheRowKey_PollsOnlyOnOpts_AndOpensTheControllerBeforeAnyAwait()
+    {
+        var src = Js("pages", "finops.js");
+        var start = src.IndexOf("export function renderFinops(", StringComparison.Ordinal);
+        var body = src.Substring(start);
+        Assert.Contains("rows.find((r) => r.display_name === wanted)", src);
+        Assert.Contains("const chosen = resolveRow(rows, wanted).server_name;", body);
+        Assert.DoesNotContain("known(", src);
+        Assert.Contains("opts.poll === true", body);
+        Assert.Contains("if (lastRows !== null && !isPoll) return paint(lastRows);", body);
+        Assert.True(body.IndexOf("new AbortController()", StringComparison.Ordinal) < body.IndexOf("await ", StringComparison.Ordinal),
+            "the controller must be created before the first await");
+        Assert.Contains("{ signal: controller.signal }", body);
+        Assert.Contains("aria-current", src);
+        Assert.DoesNotContain("role: \"tab", src);
+        Assert.DoesNotContain("aria-selected", src);
+        Assert.Contains("No servers are registered", body);
     }
 
     [Fact]
@@ -124,7 +163,15 @@ public sealed class FinOpsPageShellTests
     [InlineData("if (row.score > 50) {", true)]
     [InlineData("x = pct >= 0.8 ? a : b;", true)]
     [InlineData("if (10 < row.band_value)", true)]
+    [InlineData("if (row.avg_cpu_percent > 80) {", true)]
+    [InlineData("if (r.utilization_percent >= 90) {", true)]
+    [InlineData("if (row.cpu_ratio > 0.5) {", true)]
+    [InlineData("if (row.cpu_pct > CRIT) {", true)]
+    [InlineData("if (row.size_gb > MAX_SIZE) {", true)]
+    [InlineData("const heat = v > 0.8 ? 3 : 2;", true)]
+    [InlineData("const cls = v > 0.8 ? \"heat-3\" : \"heat-1\";", true)]
     [InlineData("const label = row.band;", false)]
+    [InlineData("const n = rows.length > 0 ? 1 : 2;", false)]
     [InlineData("score: row.score,", false)]
     public void ThresholdScanner_FlagsOnlyNumericComparisons(string line, bool flagged)
     {
@@ -137,8 +184,11 @@ public sealed class FinOpsPageShellTests
     /// </summary>
     internal static List<string> BrowserDerivedThresholds(string source)
     {
-        var after = new Regex("\\b\\w*(band|score|pct)\\w*\\b[\\w.\\[\\]()]*\\s*(<=|>=|<|>|===|!==|==|!=)\\s*-?\\d", RegexOptions.IgnoreCase);
-        var before = new Regex("-?\\d[\\d.]*\\s*(<=|>=|<|>|===|!==|==|!=)\\s*[\\w.\\[\\]()]*(band|score|pct)", RegexOptions.IgnoreCase);
-        return source.Split('\n').Where(l => after.IsMatch(l) || before.IsMatch(l)).Select(l => l.Trim()).ToList();
+        const string ident = "(band|score|pct|percent|ratio|util)";
+        var after = new Regex("\\b\\w*" + ident + "\\w*\\b[\\w.\\[\\]()]*\\s*(<=|>=|<|>|===|!==|==|!=)\\s*-?\\d", RegexOptions.IgnoreCase);
+        var before = new Regex("-?\\d[\\d.]*\\s*(<=|>=|<|>|===|!==|==|!=)\\s*[\\w.\\[\\]()]*" + ident, RegexOptions.IgnoreCase);
+        var constant = new Regex("(<=|>=|<|>)\\s*[A-Z][A-Z0-9_]{2,}\\b|\\b[A-Z][A-Z0-9_]{2,}\\s*(<=|>=|<|>)");
+        var heatTernary = new Regex("(<=|>=|<|>)\\s*-?\\d[\\d.]*\\s*\\?[^:]*(heat|band)|heat\\w*\\s*=[^;]*(<=|>=|<|>)\\s*-?\\d", RegexOptions.IgnoreCase);
+        return source.Split('\n').Where(l => after.IsMatch(l) || before.IsMatch(l) || constant.IsMatch(l) || heatTernary.IsMatch(l)).Select(l => l.Trim()).ToList();
     }
 }

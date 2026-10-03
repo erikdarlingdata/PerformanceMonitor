@@ -123,14 +123,22 @@ function serverRoute(rest) {
 
 /* #/finops, #/finops/{server} and #/finops/{server}/{tab}: the server and the sub-tab id ride in the hash, as on
    the server page. The server name is encodeURIComponent'd, so a '/' inside it arrives as %2F. */
+function safeDecode(s) {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
 function finopsRoute(rest) {
   if (!rest) return { name: "finops" };
   const slash = rest.indexOf("/");
-  if (slash < 0) return { name: "finops", param: decodeURIComponent(rest) };
+  if (slash < 0) return { name: "finops", param: safeDecode(rest) };
   return {
     name: "finops",
-    param: decodeURIComponent(rest.slice(0, slash)),
-    tab: decodeURIComponent(rest.slice(slash + 1)),
+    param: safeDecode(rest.slice(0, slash)),
+    tab: safeDecode(rest.slice(slash + 1)),
   };
 }
 

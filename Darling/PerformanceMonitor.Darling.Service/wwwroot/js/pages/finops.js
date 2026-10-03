@@ -11,7 +11,8 @@
  * FinOps tab. Route: #/finops, #/finops/{server} and #/finops/{server}/{tab}; the server and the tab id ride in
  * the hash so a view is deep-linkable and survives the shell poll, which re-renders the whole route.
  *
- * Each sub-tab lives in its own file under pages/finops/ and exports `tab = { id, label, build(server, ctx) }`.
+ * Each sub-tab lives in its own file under pages/finops/ and exports `tab = { id, label, build(server, ctx) }`; ctx is `{ signal }`, the AbortSignal that
+ * cancels the tab's reads when the page redraws.
  * The registry below is the one place the twelve are named, in the desktop tab strip's order, so a tab's own
  * file is the only thing a tab ever changes. The browser derives no band, score or percentage threshold: a tab
  * shows what the read returned.
@@ -56,6 +57,9 @@ const TAB_KEY = "finops.tab";
 
 let renderGeneration = 0;
 let panelAbort = null;
+/* The last list_servers rows, so a hashchange paints in the same tick and only the poll re-reads them. */
+let lastRows = null;
+let painted = false;
 
 function storedGet(key) {
   try {
@@ -91,13 +95,12 @@ function serverRows(data) {
 function tabBar(server, active) {
   return el(
     "nav",
-    { class: "subtabs finops-tabs", role: "tablist", "aria-label": "FinOps sections" },
+    { class: "subtabs finops-tabs", "aria-label": "FinOps sections" },
     FINOPS_TABS.map((t) =>
       el("a", {
         class: "subtab" + (t.id === active.id ? " active" : ""),
         href: hashFor(server, t.id),
-        role: "tab",
-        "aria-selected": t.id === active.id ? "true" : "false",
+        "aria-current": t.id === active.id ? "page" : null,
         text: t.label,
       })
     )
@@ -119,40 +122,84 @@ function serverPicker(rows, server, tabId) {
 }
 
 /**
+ * Resolve the hash or stored value to a registry row, by key or by display name; the first row when neither
+ * matches. Everything downstream (select value, build, storage, tab links) continues with the row's server_name.
+ */
+function resolveRow(rows, wanted) {
+  return rows.find((r) => r.server_name === wanted) || rows.find((r) => r.display_name === wanted) || rows[0];
+}
+
+function sameServers(a, b) {
+  return a.length === b.length && a.every((r, i) => r.server_name === b[i].server_name && r.display_name === b[i].display_name);
+}
+
+/**
  * @param {HTMLElement} main
- * @param {string} [server] server key from the hash; falls back to the stored choice, then the first server
+ * @param {string} [server] server key (or display name) from the hash; falls back to the stored choice, then the first server
  * @param {string} [tabId] sub-tab id from the hash; an unknown or absent id resolves to the first tab
  * @param {object} [opts] `{ poll: true }` when this call is the shell poll's refresh (see renderServer)
  */
 export function renderFinops(main, server, tabId, opts) {
+  const isPoll = !!(opts && opts.poll === true);
   const generation = ++renderGeneration;
   const active = findTab(tabId || storedGet(TAB_KEY));
-  const head = el("div", { class: "page-head" }, [el("h2", { text: "FinOps" })]);
-  const body = el("div", { class: "finops-body" });
-  mount(main, [head, body]);
-  mount(body, loadingStrip("Loading servers"));
+  const wanted = server || storedGet(SERVER_KEY);
 
-  (async () => {
-    const res = await readTool("list_servers", {});
-    if (generation !== renderGeneration) return;
-    if (res.kind === "error") return mount(body, errorStrip(res.message));
-    const rows = res.kind === "data" ? serverRows(res.data) : [];
-    if (rows.length === 0) return mount(body, emptyStrip("No servers are registered yet."));
+  /* Abort the previous render's reads and open this render's controller before any await. A poll over a page
+     that is already painted keeps its controller: nothing is redrawn, so its reads are still wanted. */
+  const keepPainted = isPoll && lastRows !== null && painted;
+  let controller = panelAbort;
+  if (!keepPainted) {
+    if (panelAbort) panelAbort.abort();
+    controller = panelAbort = new AbortController();
+  }
 
-    const known = (name) => rows.some((r) => r.server_name === name || r.display_name === name);
-    const wanted = server || storedGet(SERVER_KEY);
-    const chosen = known(wanted) ? wanted : rows[0].server_name;
+  const paint = (rows) => {
+    const head = el("div", { class: "page-head" }, [el("h2", { text: "FinOps" })]);
+    const body = el("div", { class: "finops-body" });
+    const chosen = resolveRow(rows, wanted).server_name;
     storedSet(SERVER_KEY, chosen);
     storedSet(TAB_KEY, active.id);
-
     head.appendChild(el("div", { class: "spacer" }));
     head.appendChild(serverPicker(rows, chosen, active.id));
+    setPanelSignal(controller.signal);
+    mount(main, [head, body]);
+    mount(body, [
+      tabBar(chosen, active),
+      el("div", { class: "finops-panel" }, [active.build(chosen, { signal: controller.signal })]),
+    ]);
+    painted = true;
+  };
 
-    /* Every redraw replaces the tab body, so the previous build's pending reads are for nobody. */
-    if (panelAbort) panelAbort.abort();
-    panelAbort = new AbortController();
-    setPanelSignal(panelAbort.signal);
+  if (lastRows !== null && !isPoll) return paint(lastRows);
 
-    mount(body, [tabBar(chosen, active), el("div", { class: "finops-panel" }, [active.build(chosen, {})])]);
+  if (!keepPainted) {
+    painted = false;
+    mount(main, [el("div", { class: "page-head" }, [el("h2", { text: "FinOps" })]), el("div", { class: "finops-body" }, [loadingStrip("Loading servers")])]);
+  }
+
+  (async () => {
+    const res = await readTool("list_servers", {}, controller.signal);
+    if (generation !== renderGeneration) return;
+    const body = main.querySelector(".finops-body");
+    const show = (node) => {
+      lastRows = null;
+      painted = false;
+      if (body) mount(body, node);
+    };
+    /* An empty registry answers with prose, which the read classifies as an error; it is the empty case. */
+    if (res.kind === "error" && /^No servers are registered/.test(res.message || "")) return show(emptyStrip("No servers are registered yet."));
+    if (res.kind === "error") return show(errorStrip(res.message));
+    const rows = res.kind === "data" ? serverRows(res.data) : [];
+    if (rows.length === 0) return show(emptyStrip("No servers are registered yet."));
+    const unchanged = keepPainted && lastRows !== null && sameServers(lastRows, rows);
+    lastRows = rows;
+    if (!unchanged) {
+      if (keepPainted) {
+        if (panelAbort) panelAbort.abort();
+        controller = panelAbort = new AbortController();
+      }
+      paint(rows);
+    }
   })();
 }
