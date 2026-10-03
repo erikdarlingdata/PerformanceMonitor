@@ -61,7 +61,7 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
             await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, id, S.AddDays(-60), S.AddDays(4), null, null, ct);
         }
 
-        /* Different read starts: servers 0 and 3 share the latest claim, so the tie goes to server 0. */
+        /* Different read starts: servers 0 and 3 share the latest claim, so the tie goes to the lower server_id, qsiw-fleet-03. */
         for (var i = 0; i < eligibleIds.Length; i++)
         {
             var hours = i == 0 || i == 3 ? 14 : 12 + (i % 2);
@@ -87,7 +87,7 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         NpgsqlConnection connection, DateTime end, CancellationToken ct)
     {
         var servers = new List<(int Id, string Name)>();
-        await using (var cmd = new NpgsqlCommand("SELECT server_id, server_name FROM collect.servers WHERE is_enabled", connection))
+        await using (var cmd = new NpgsqlCommand("SELECT server_id, server_name FROM collect.servers WHERE is_enabled ORDER BY server_id", connection))
         await using (var reader = await cmd.ExecuteReaderAsync(ct))
         {
             while (await reader.ReadAsync(ct))
@@ -133,15 +133,21 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         var expected = await SerialAsync(connection, end, ct);
         Assert.True(expected.Eligible);
         Assert.Equal(S.AddHours(14), expected.WideStart);
-        Assert.Equal("qsiw-fleet-00", expected.SettingServer);
+        Assert.Equal("qsiw-fleet-03", expected.SettingServer);
 
         var floorReads = 0;
+        var scratchDb = new NpgsqlConnectionStringBuilder(scratch.ConnectionString).Database;
         using var listener = new ActivityListener
         {
             ShouldListenTo = src => src.Name == "Npgsql",
             Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
             ActivityStopped = a =>
             {
+                if (!string.Equals(a.GetTagItem("db.namespace") as string, scratchDb, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
                 var text = (a.GetTagItem("db.query.text") ?? a.GetTagItem("db.statement")) as string;
                 if (text is not null && text.Contains("table_is_hypertable", StringComparison.Ordinal) && text.Contains("raw_floor", StringComparison.Ordinal))
                 {
