@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Darling.Viewer;
  * "Copy, don't promote" is about Lite versus Darling: Lite and the Dashboard keep their own copy of these
  * models, and inside Darling the pure compute (health score, cost math) is shared with the service through
  * PerformanceMonitor.Darling.Storage.FinOps.
- * Two deliberate deviations from Lite's models, both because the headless store lacks the source:
+ * Two deliberate deviations from Lite's models, both because the headless store sources the data differently:
  *   (1) The per-server FinOps COST attribution (MonthlyCost / MonthlyCostShare / AnnualCost) is sourced from
  *       the registry: the viewer reads servers.monthly_cost_usd (carried on the selected DarlingServer as
  *       MonthlyCostUsd) and the loaders compute the shares from it; 0 hides the cost affordances. Lite and the

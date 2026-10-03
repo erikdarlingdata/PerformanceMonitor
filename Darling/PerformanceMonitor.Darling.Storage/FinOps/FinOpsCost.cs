@@ -20,10 +20,10 @@ public static class FinOpsCost
     /// <summary>The monthly budget scaled to a window of <paramref name="hoursBack"/> hours.</summary>
     public static decimal WindowBudget(decimal monthly, int hoursBack) => monthly * (hoursBack / HoursPerMonth);
 
-    /// <summary><paramref name="part"/> as a fraction of <paramref name="total"/>, times the window budget.</summary>
+    /// <summary><paramref name="part"/> as a fraction of <paramref name="total"/>, times the window budget. <paramref name="total"/> must be greater than 0; callers check it first, so the division never throws.</summary>
     public static decimal Share(decimal part, decimal total, decimal budget) => (part / total) * budget;
 
-    /// <summary>A database's share of the monthly cost by allocated size.</summary>
+    /// <summary>A database's share of the monthly cost by allocated size. <paramref name="totalMb"/> must be greater than 0; callers check it first, so the division never throws.</summary>
     public static decimal StorageShare(decimal sizeMb, decimal totalMb, decimal monthly) => (sizeMb / totalMb) * monthly;
 
     /// <summary>The annual cost of a monthly cost.</summary>
