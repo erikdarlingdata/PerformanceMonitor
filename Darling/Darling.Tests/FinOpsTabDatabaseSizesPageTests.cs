@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Linq;
 using System.Text.RegularExpressions;
 using Xunit;
@@ -33,11 +34,43 @@ public sealed class FinOpsTabDatabaseSizesPageTests
     [Fact]
     public void EveryShownColumnKeyIsEmittedByTheTool()
     {
-        var keys = Regex.Matches(Tab(), "\\{ key: \"([a-z_]+)\"").Select(m => m.Groups[1].Value).ToList();
+        var keys = Regex.Matches(Tab(), "\\bkey: \"([a-z_]+)\"").Select(m => m.Groups[1].Value).ToList();
         Assert.NotEmpty(keys);
         var source = ToolSource();
+        var fileSlice = source[source.IndexOf("FilePayload(DarlingObjectStatsReader.DatabaseSizeRow", StringComparison.Ordinal)..];
+        var rowNoteKey = Regex.Match(
+            ReadRepoFile("PerformanceMonitor.Common", "AzureSiblingDatabaseSize.cs"),
+            "const string RowNoteKey = \"([a-z_]+)\"").Groups[1].Value;
+        Assert.NotEmpty(rowNoteKey);
         foreach (var key in keys)
-            Assert.Contains("\"" + key + "\"", source);
+        {
+            if (key == "database_name")
+                Assert.Contains("\"database_name\"", source[source.IndexOf("DatabaseSizesPayload(string", StringComparison.Ordinal)..]);
+            else if (key == rowNoteKey)
+                Assert.Contains("[AzureSiblingDatabaseSize.RowNoteKey]", fileSlice);
+            else
+                Assert.Contains("\"" + key + "\"", fileSlice);
+        }
+        Assert.Contains(rowNoteKey, keys);
+    }
+
+    [Fact]
+    public void AnAbortedReadReturnsBeforeAnythingIsMounted()
+    {
+        var tab = Tab();
+        Assert.Contains("readTool(\"get_database_sizes\", { server }, ctx && ctx.signal)", tab);
+        Assert.Contains("if (res.kind === \"aborted\" || res.kind === \"auth\") return;", tab);
+    }
+
+    [Fact]
+    public void AMaxSizeOfMinusOneShowsUnlimitedAndTheCaptureTimeIsFormatted()
+    {
+        var tab = Tab();
+        Assert.Contains("row.max_size_mb === -1 ? \"Unlimited\"", tab);
+        Assert.DoesNotContain("auto_growth_mb", tab);
+        Assert.Contains("relTime(data.captured_at)", tab);
+        Assert.Contains("localTime(data.captured_at)", tab);
+        Assert.Contains("e?.name !== \"AbortError\"", tab);
     }
 
     [Fact]
