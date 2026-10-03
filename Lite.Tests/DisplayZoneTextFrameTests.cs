@@ -225,7 +225,9 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
         Assert.Contains(
             "ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode, _serverClock, refreshedUtc)", refresh, StringComparison.Ordinal);
         Assert.Contains("DisplayZone.ToDisplay(refreshedUtc, GetPickerZone())", refresh, StringComparison.Ordinal);
-        Assert.Contains("ApplyWindowFloorToBanner(banner, floor, startUtc, GetPickerZone());", refresh, StringComparison.Ordinal);
+        /* #4989: the shared step words the earlier of the probe's floor and the oldest row a capped grid shows; the zone
+           it is worded in is still the tab's own picker zone. */
+        Assert.Contains("ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestRowShownUtc), startUtc, GetPickerZone());", refresh, StringComparison.Ordinal);
         Assert.Contains(
             "internal static bool ApplyWindowFloorToBanner(TextBlock banner, DateTime? floor, DateTime startUtc, TimeZoneInfo zone)",
             refresh, StringComparison.Ordinal);
