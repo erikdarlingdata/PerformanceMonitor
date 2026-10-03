@@ -380,6 +380,9 @@ WHERE status = 'in_progress'
             case "disable_collector":
                 return ResolveCollectorToggle(command, enabled: false);
 
+            case "set_collector_run_at":
+                return ResolveCollectorRunAt(command);
+
             case "test_connect":
                 return string.IsNullOrWhiteSpace(command.ArgsJson)
                     ? Fail("test_connect requires args_json with the server definition")
@@ -504,6 +507,86 @@ WHERE status = 'in_progress'
             "INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled) VALUES (NULL, $1, " + flag + ") " +
             "ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET enabled = EXCLUDED.enabled",
             new object?[] { collectorName }, successStatus + " (fleet-wide)");
+    }
+
+    /// <summary>
+    /// set_collector_run_at -> set or clear the time of day a once-a-day collector runs (<c>config_collector_schedules.run_at_minute</c>,
+    /// #4938) for the collector named in args_json.collector_name, scoped the way <see cref="ResolveCollectorToggle"/> scopes
+    /// it: <c>target_server_id</c>, else args_json.server_id, else the fleet-wide row. args_json.run_at is a 24-hour <c>HH:MM</c>
+    /// (the monitored server's own clock), <c>none</c> or <c>default</c>, in any letter case.
+    ///
+    /// <para>A time or <c>none</c> on a server touches ONLY <c>run_at_minute</c> (ON CONFLICT DO UPDATE SET that one column), so a
+    /// frequency, retention, databases or enabled value already on the row survives. A row that does not exist yet is created
+    /// with the collector's effective enabled state: the fleet row's flag when there is one, else the code default. The column's
+    /// own default is TRUE, and a time set on a collector that ships OFF, or one a fleet row turned off, must not switch it on.</para>
+    ///
+    /// <para><c>none</c> on a server row writes -1, which the service reads as "no fixed time on this server" and which stops the
+    /// fleet's time for that server only. On the fleet row it clears the column to NULL, because the fleet has no time to stop.
+    /// <c>default</c> clears the column to NULL so the next level applies again. A clear is an UPDATE and never creates a row.</para>
+    ///
+    /// <para>The interval rule (a time works only on a collector that runs once a day or less often) is not applied here, because
+    /// this plan is pure and cannot see the rows that decide a collector's interval. The CLI verb judges it against the store
+    /// before it executes this plan, and the service ignores a time on a collector that runs more often than daily.</para>
+    /// </summary>
+    private static CommandPlan ResolveCollectorRunAt(ClaimedCommand command)
+    {
+        const string Verb = "set_collector_run_at";
+        var collectorName = TryReadString(command.ArgsJson, "collector_name", "collectorName");
+        if (string.IsNullOrWhiteSpace(collectorName))
+        {
+            return Fail($"{Verb} requires args_json.collector_name");
+        }
+
+        if (!CollectorScheduleDefaults.All.TryGetValue(collectorName, out var entry))
+        {
+            return Fail($"{Verb}: unknown collector '{collectorName}'");
+        }
+
+        var runAt = TryReadString(command.ArgsJson, "run_at", "runAt");
+        if (runAt is null)
+        {
+            return Fail($"{Verb} requires args_json.run_at (HH:MM, none or default)");
+        }
+
+        var word = runAt.Trim();
+        var useDefault = string.Equals(word, "default", StringComparison.OrdinalIgnoreCase);
+        var none = string.Equals(word, "none", StringComparison.OrdinalIgnoreCase);
+        var minute = 0;
+        if (!useDefault && !none && !CollectorRunTime.TryParse(runAt, out minute))
+        {
+            return Fail(CollectorRunTime.InvalidRunAtMessage);
+        }
+
+        var serverId = command.TargetServerId ?? TryReadInt(command.ArgsJson, "server_id", "serverId");
+
+        if (useDefault || (none && serverId is null))
+        {
+            var cleared = "collector run time cleared";
+            return serverId is int clearedId
+                ? StoreWrite(
+                    "UPDATE config.config_collector_schedules SET run_at_minute = NULL WHERE server_id = $1 AND collector_name = $2",
+                    new object?[] { clearedId, collectorName }, cleared)
+                : StoreWrite(
+                    "UPDATE config.config_collector_schedules SET run_at_minute = NULL WHERE server_id IS NULL AND collector_name = $1",
+                    new object?[] { collectorName }, cleared + " (fleet-wide)");
+        }
+
+        /* The stored value is a smallint (V158): -1 for "none" on a server, else the minute after midnight. Boxed as a
+           short so it binds as smallint and the plan's parameters say what the column holds. */
+        var stored = none ? (short)-1 : (short)minute;
+        if (serverId is int scopedId)
+        {
+            return StoreWrite(
+                "INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled, run_at_minute) " +
+                "VALUES ($1, $2, COALESCE((SELECT f.enabled FROM config.config_collector_schedules f WHERE f.server_id IS NULL AND f.collector_name = $2), $3), $4) " +
+                "ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SET run_at_minute = EXCLUDED.run_at_minute",
+                new object?[] { scopedId, collectorName, entry.DefaultEnabled, stored }, "collector run time set");
+        }
+
+        return StoreWrite(
+            "INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled, run_at_minute) VALUES (NULL, $1, $2, $3) " +
+            "ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET run_at_minute = EXCLUDED.run_at_minute",
+            new object?[] { collectorName, entry.DefaultEnabled, stored }, "collector run time set (fleet-wide)");
     }
 
     /// <summary>test_connect result mapping (pure): success carries the probe facts, failure the error.</summary>
