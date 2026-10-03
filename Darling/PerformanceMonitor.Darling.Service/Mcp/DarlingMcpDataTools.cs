@@ -675,12 +675,12 @@ public sealed class DarlingMcpDataTools
                     return McpHelpers.Status(
                         "empty",
                         windowTruncated
-                            ? $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the part of the window raw query_stats still holds (from {effectiveStart:o}; the older part was not read), so this is that part's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan."
+                            ? $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the part of the window raw query_stats still holds (from {McpHelpers.FormatEffectiveStart(effectiveStart)}; the older part was not read), so this is that part's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan."
                             : $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
                         new
                         {
                             filter_applied = filterApplied,
-                            effective_start = effectiveStart.ToString("o"),
+                            effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                             effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                             window_truncated = windowTruncated
                         });
@@ -768,7 +768,7 @@ public sealed class DarlingMcpDataTools
                 hours_back,
                 /* #4231: what was served, beside what was asked for — the same disclosure get_query_store_top
                    makes (#2364), over query_stats instead of query_store_stats. */
-                effective_start = effectiveStart.ToString("o"),
+                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                 effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                 /* #2235: echoed so a stored or pasted payload cannot be misread as the other grouping —
                    the two answer different questions and the rows look alike. */
@@ -911,7 +911,7 @@ public sealed class DarlingMcpDataTools
                 server = resolved.ServerName,
                 hours_back,
                 /* #4231: what was served, beside what was asked for. */
-                effective_start = effectiveStart.ToString("o"),
+                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                 effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                 /* #4231 stage 3b: which tier answered — "raw" or "hourly" (never bare truncated/degraded
                    vocabulary; see McpHelpers.WindowTruncatedDescription's own rule). precision_note explains
@@ -1067,7 +1067,7 @@ public sealed class DarlingMcpDataTools
                            and the raw tier may not reach the whole of the one asked for. */
                         : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, new
                         {
-                            effective_start = effectiveStart.ToString("o"),
+                            effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                             effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                             window_truncated = truncated
                         });
@@ -1122,7 +1122,7 @@ public sealed class DarlingMcpDataTools
                 hours_back,
                 /* #2364: what was served, beside what was asked for. hours_back alone was a request echoed
                    back as though it described the data. */
-                effective_start = effectiveStart.ToString("o"),
+                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                 effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                 /* Which tier answered. */
                 history_source = tablePlan is null ? "raw" : "interval_table",
@@ -1140,7 +1140,7 @@ public sealed class DarlingMcpDataTools
                         ? "The window reaches further back than this server's raw query_store_stats retains, so the "
                           + "older part of it was not read. This tool reads the raw tier only: the corrected rollups "
                           + "carry no query_id or plan_id, and plan identity is what it exists to return."
-                        : QueryStoreIntervalWide.HistoryNote(effectiveStart, tablePlan.Value.StartBound, manyServers: false),
+                        : QueryStoreTableNote(effectiveStart, tablePlan.Value.StartBound),
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -1149,6 +1149,17 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.FormatError("get_query_store_top", ex);
         }
     }
+
+    /// <summary>
+    /// #4966: <c>get_query_store_top</c>'s interval-table note, which names the window's start in the one text the
+    /// <c>effective_start</c> beside it prints (<see cref="McpHelpers.FormatEffectiveStart"/>: UTC, with the Z). The
+    /// start is formatted here, once, and handed to <see cref="QueryStoreIntervalWide.HistoryNote"/> as text, so the
+    /// field and the sentence cannot spell the instant two ways. The web shows the instant in the browser's zone by
+    /// finding the field's exact text in the note; a plain "o" of the interval table's naive floor has no Z, so the
+    /// note was drawn in bare UTC above a grid of local times.
+    /// </summary>
+    internal static string QueryStoreTableNote(DateTime effectiveStart, QueryStoreIntervalWide.WideStartBound bound) =>
+        QueryStoreIntervalWide.HistoryNote(McpHelpers.FormatEffectiveStart(effectiveStart), bound, manyServers: false);
 
     /* ═══════════════════════════ discovery / health ═══════════════════════════ */
 
@@ -1467,10 +1478,15 @@ public sealed class DarlingMcpDataTools
                existed as a service-log warning ("collection body has not completed … skipping relaunch").
                The verdict compares the collectors' combined execution demand (average duration amortized
                by cadence) against the minute the fastest cadence holds; heaviest_collectors names where
-               the budget goes, which is the actionable half of the answer. */
-            var pressure = SweepPressureClassifier.Compute(
-                rows.Select(r => (r.CollectorName, r.AvgDurationMs, r.P95DurationMs, r.FrequencyMinutes)));
-            var heaviest = rows
+               the budget goes, which is the actionable half of the answer.
+
+               #4999: of the collectors that run IN the body only. A collector that runs detached (every
+               daily one, and query_store, plan_correction, pg_wait_sampling) runs beside the body, so its
+               single-run cost is not a cost the body pays: charged to it, index_object_stats read as the
+               collector that owns a body it never ran in. One filter feeds both readings, so the roll-up and
+               the heaviest list describe the same population. */
+            var pressure = SweepPressureClassifier.Compute(SweepBodyCollectors(rows));
+            var heaviest = SweepBodyRows(rows)
                 .Where(r => r.FrequencyMinutes > 0 && r.AvgDurationMs > 0)
                 .OrderByDescending(r => r.AvgDurationMs / r.FrequencyMinutes)
                 .Take(3)
@@ -1707,6 +1723,25 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.FormatError("get_collection_health", ex);
         }
     }
+
+    /// <summary>
+    /// #4999: the collectors whose single-run cost the server's sequential pass pays: every row except those that
+    /// run detached from it. The test is <see cref="DarlingWorker.RunsDetached"/>, the one the worker's dispatch
+    /// uses, so this reading and the pass cannot disagree about what runs in the body. The cadence it is given is
+    /// the row's, which the health read stamped with the interval the collector is scheduled at on this server
+    /// (a per-server override, else the fleet-wide one, else the shipped default: the worker's own resolution),
+    /// so an override that moves a collector across the daily line moves it in this read exactly as it moves it
+    /// in the worker's dispatch.
+    /// </summary>
+    internal static IEnumerable<CollectorHealth> SweepBodyRows(IEnumerable<CollectorHealth> rows) =>
+        rows.Where(r => !DarlingWorker.RunsDetached(r.CollectorName, r.FrequencyMinutes));
+
+    /// <summary>
+    /// #4999: <see cref="SweepBodyRows"/> in the shape <see cref="SweepPressureClassifier.Compute"/> takes.
+    /// </summary>
+    internal static IEnumerable<(string CollectorName, double AvgDurationMs, double P95DurationMs, int FrequencyMinutes)> SweepBodyCollectors(
+        IEnumerable<CollectorHealth> rows) =>
+        SweepBodyRows(rows).Select(r => (r.CollectorName, r.AvgDurationMs, r.P95DurationMs, r.FrequencyMinutes));
 
     /* #4198: the default-argument size cut for get_collection_health, which unlike a row-limited tool has no
        row to drop — every collector on the server is one row, and a health read must never hide one that is
