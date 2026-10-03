@@ -62,35 +62,9 @@ public sealed partial class ViewerDataService
     /// Per-application connection counts plus the collected per-app resource + session-status metrics from
     /// session_stats (last 24h). AVG/MAX over the window for connection/running/sleeping/dormant counts and
     /// CPU/reads/writes/logical-reads (the resource columns are nullable, so AVG/MAX yield NULL until populated).
-    /// $1 server_id, $2 cutoff.
+    /// The SQL lives in <see cref="DarlingFinOpsApplicationConnectionsReader"/>. $1 server_id, $2 cutoff.
     /// </summary>
-    public const string ApplicationConnectionsSql = @"
-SELECT
-    program_name,
-    CAST(AVG(connection_count) AS INTEGER) AS avg_connections,
-    MAX(connection_count) AS max_connections,
-    CAST(AVG(running_count) AS INTEGER) AS avg_running,
-    MAX(running_count) AS max_running,
-    CAST(AVG(sleeping_count) AS INTEGER) AS avg_sleeping,
-    MAX(sleeping_count) AS max_sleeping,
-    CAST(AVG(dormant_count) AS INTEGER) AS avg_dormant,
-    MAX(dormant_count) AS max_dormant,
-    CAST(AVG(total_cpu_time_ms) AS BIGINT) AS avg_cpu_time_ms,
-    MAX(total_cpu_time_ms) AS max_cpu_time_ms,
-    CAST(AVG(total_reads) AS BIGINT) AS avg_reads,
-    MAX(total_reads) AS max_reads,
-    CAST(AVG(total_writes) AS BIGINT) AS avg_writes,
-    MAX(total_writes) AS max_writes,
-    CAST(AVG(total_logical_reads) AS BIGINT) AS avg_logical_reads,
-    MAX(total_logical_reads) AS max_logical_reads,
-    COUNT(*) AS sample_count,
-    MIN(collection_time) AS first_seen,
-    MAX(collection_time) AS last_seen
-FROM v_session_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-GROUP BY program_name
-ORDER BY max_connections DESC";
+    public const string ApplicationConnectionsSql = DarlingFinOpsApplicationConnectionsReader.ApplicationConnectionsSql;
 
     public async Task<List<ApplicationConnectionRow>> GetApplicationConnectionsAsync(int serverId, CancellationToken cancellationToken = default)
     {
@@ -102,44 +76,9 @@ ORDER BY max_connections DESC";
         var clock = ViewerTimeHelper.ClockForServerOrMachine(
             await GetServerClocksAsync(serverId, cancellationToken), serverId, TimeZoneInfo.Local, DateTime.UtcNow);
 
-        await using var command = _dataSource.CreateCommand(ApplicationConnectionsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-
-        var items = new List<ApplicationConnectionRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(new ApplicationConnectionRow
-            {
-                ApplicationName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                AvgConnections = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
-                MaxConnections = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2)),
-                AvgRunning = reader.IsDBNull(3) ? 0 : Convert.ToInt32(reader.GetValue(3)),
-                MaxRunning = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)),
-                AvgSleeping = reader.IsDBNull(5) ? 0 : Convert.ToInt32(reader.GetValue(5)),
-                MaxSleeping = reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
-                AvgDormant = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
-                MaxDormant = reader.IsDBNull(8) ? 0 : Convert.ToInt32(reader.GetValue(8)),
-                AvgCpuTimeMs = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
-                MaxCpuTimeMs = reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
-                AvgReads = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
-                MaxReads = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
-                AvgWrites = reader.IsDBNull(13) ? 0L : Convert.ToInt64(reader.GetValue(13)),
-                MaxWrites = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
-                AvgLogicalReads = reader.IsDBNull(15) ? 0L : Convert.ToInt64(reader.GetValue(15)),
-                MaxLogicalReads = reader.IsDBNull(16) ? 0L : Convert.ToInt64(reader.GetValue(16)),
-                SampleCount = reader.IsDBNull(17) ? 0 : Convert.ToInt64(reader.GetValue(17)),
-                FirstSeenLocal = ViewerTimeHelper.ConvertToDisplay(reader.GetDateTime(18), ViewerTimeHelper.CurrentDisplayMode, clock),
-                LastSeenLocal = ViewerTimeHelper.ConvertToDisplay(reader.GetDateTime(19), ViewerTimeHelper.CurrentDisplayMode, clock),
-                /* #4766: the UTC instants too, so the columns' text can name the offset in the repeated autumn hour. */
-                FirstSeenUtc = reader.GetDateTime(18),
-                LastSeenUtc = reader.GetDateTime(19),
-                Clock = clock
-            });
-        }
-        return items;
+        var items = await DarlingFinOpsApplicationConnectionsReader.GetApplicationConnectionsAsync(
+            _dataSource, serverId, cutoff, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return items.ConvertAll(d => ApplicationConnectionRow.From(d, clock));
     }
 
     /// <summary>

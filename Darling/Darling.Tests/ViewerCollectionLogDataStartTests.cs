@@ -145,7 +145,8 @@ public sealed class ViewerCollectionLogDataStartTests
         var declared = load.IndexOf("ViewerReadFanOut.Of(5)", StringComparison.Ordinal);
         var probe = load.IndexOf("_dataService.GetCollectionLogDataStartAsync(_server.ServerId, startUtc, endUtc)", StringComparison.Ordinal);
         var read = load.IndexOf("_dataService.GetRecentCollectionLogAsync(_server.ServerId, startUtc, endUtc)", StringComparison.Ordinal);
-        var join = load.IndexOf("await Task.WhenAll(", StringComparison.Ordinal);
+        /* #5034: the join is awaited through the watching helper, which is the same join with the probe watched beside it. */
+        var join = load.IndexOf("await AwaitReadWatchingProbeAsync(Task.WhenAll(", StringComparison.Ordinal);
         var release = load.IndexOf("readFanOut.Release();", StringComparison.Ordinal);
         var banner = load.IndexOf("await ShowCollectionHealthAsync(", StringComparison.Ordinal);
 
@@ -160,7 +161,7 @@ public sealed class ViewerCollectionLogDataStartTests
 
         /* The probe is only the disclosure: it is not part of the join and is never awaited bare, so one that throws costs its banner and nothing after it.
            The chart's read is a read the tab draws, so it is joined with the others. */
-        Assert.Matches(@"await Task\.WhenAll\(healthTask,\s*logTask,\s*durationTask,\s*caveatsTask\);", load);
+        Assert.Matches(@"await AwaitReadWatchingProbeAsync\(Task\.WhenAll\(healthTask,\s*logTask,\s*durationTask,\s*caveatsTask\),\s*dataStartTask,\s*""Collection Log""\);", load);
         Assert.DoesNotContain("await dataStartTask", load, StringComparison.Ordinal);
     }
 
@@ -209,7 +210,8 @@ public sealed class ViewerCollectionLogDataStartTests
         Assert.Equal(1, Matches(read, @"var endUtc = asOfUtc \?\? DateTime\.UtcNow;"));
         Assert.Equal(1, Matches(read, @"var startUtc = endUtc\.AddHours\(-ViewerDataService\.CollectionLogDrillHours\);"));
         Assert.Equal(1, Matches(read, @"dataService\.GetCollectionLogDataStartAsync\(serverId,\s*startUtc,\s*endUtc\);"));
-        Assert.Equal(1, Matches(read, @"await dataService\.GetCollectionLogByCollectorAsync\(serverId,\s*collectorName,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(read, @"var dataReadTask = dataService\.GetCollectionLogByCollectorAsync\(serverId,\s*collectorName,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(read, @"await ViewerProbeWatch\.AwaitReadWatchingProbeAsync\(dataReadTask,\s*dataStartTask,\s*""Collection Log Drill""\);"));
 
         /* No second clock read and no hours handed to the read: either would let the read's start move apart from the probe's. */
         Assert.Equal(1, Matches(read, @"DateTime\.UtcNow"));
@@ -246,7 +248,8 @@ public sealed class ViewerCollectionLogDataStartTests
 
         var declared = read.IndexOf("ViewerReadFanOut.Of(2)", StringComparison.Ordinal);
         var probe = read.IndexOf("dataService.GetCollectionLogDataStartAsync(", StringComparison.Ordinal);
-        var runs = read.IndexOf("await dataService.GetCollectionLogByCollectorAsync(", StringComparison.Ordinal);
+        var runs = read.IndexOf("await ViewerProbeWatch.AwaitReadWatchingProbeAsync(dataReadTask", StringComparison.Ordinal);
+        Assert.True(read.IndexOf("var dataReadTask = dataService.GetCollectionLogByCollectorAsync(", StringComparison.Ordinal) > probe, "the runs start beside the probe");
         var release = read.IndexOf("readFanOut.Release();", StringComparison.Ordinal);
         var note = read.IndexOf("await ViewerServerTab.ShowEventDataStartAsync(", StringComparison.Ordinal);
 
