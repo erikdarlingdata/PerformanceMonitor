@@ -20,9 +20,10 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The desktop viewer's System Events and Default Trace grids against a real store (#4966). Both window on the event's own
-/// time and a server's first collection stores the server's event history, so the notice names the earlier of the
-/// collector's coverage start and the earliest event the grid shows. Four stores per grid, each read through the same two
+/// The desktop viewer's System Events, Default Trace and Long Queries grids against a real store (#4966). The first two window
+/// on the event's own time, Long Queries on the collection time while showing the event's, and a server's first collection
+/// stores the server's event history, so the notice names the earlier of the collector's coverage start and the earliest
+/// event the grid shows. Four stores per grid, each read through the same two
 /// calls the server tab makes (the grid's rows, the data-start probe) and the same rule it applies. Default Trace stores
 /// the server's own clock: every server here runs 5 hours behind UTC, so a notice that skipped the per-row conversion
 /// would name the history's start 5 hours early.
@@ -35,6 +36,7 @@ public sealed class ViewerSystemEventsDataStartLiveTests
     {
         SystemEvents,
         DefaultTrace,
+        LongQueries,
     }
 
     /// <summary>The server's clock: 5 hours behind UTC, as a server in the US Central daylight zone reports.</summary>
@@ -50,6 +52,7 @@ public sealed class ViewerSystemEventsDataStartLiveTests
     [Theory]
     [InlineData(Grid.SystemEvents)]
     [InlineData(Grid.DefaultTrace)]
+    [InlineData(Grid.LongQueries)]
     public async Task RowsThatStartInsideTheRange_GiveANotice_AtTheCoverageStart_AgainstDevPostgres(Grid grid)
     {
         var ct = TestContext.Current.CancellationToken;
@@ -66,6 +69,7 @@ public sealed class ViewerSystemEventsDataStartLiveTests
     [Theory]
     [InlineData(Grid.SystemEvents)]
     [InlineData(Grid.DefaultTrace)]
+    [InlineData(Grid.LongQueries)]
     public async Task AQuietStart_GivesNoNotice_AgainstDevPostgres(Grid grid)
     {
         var ct = TestContext.Current.CancellationToken;
@@ -83,6 +87,7 @@ public sealed class ViewerSystemEventsDataStartLiveTests
     [Theory]
     [InlineData(Grid.SystemEvents)]
     [InlineData(Grid.DefaultTrace)]
+    [InlineData(Grid.LongQueries)]
     public async Task HistoryThatReachesBeforeTheCoverage_GivesANotice_AtTheHistorysStart_AgainstDevPostgres(Grid grid)
     {
         var ct = TestContext.Current.CancellationToken;
@@ -101,6 +106,7 @@ public sealed class ViewerSystemEventsDataStartLiveTests
     [Theory]
     [InlineData(Grid.SystemEvents)]
     [InlineData(Grid.DefaultTrace)]
+    [InlineData(Grid.LongQueries)]
     public async Task HistoryThatReachesTheRangeStart_GivesNoNotice_AgainstDevPostgres(Grid grid)
     {
         var ct = TestContext.Current.CancellationToken;
@@ -135,6 +141,7 @@ public sealed class ViewerSystemEventsDataStartLiveTests
         public Task<DateTime?> CoverageAsync(Grid grid, int serverId, CancellationToken ct) => grid switch
         {
             Grid.SystemEvents => _viewer.GetSystemHealthEventsDataStartAsync(serverId, Start, End, ct),
+            Grid.LongQueries => _viewer.GetLongQueriesDataStartAsync(serverId, Start, End, ct),
             _ => _viewer.GetDefaultTraceDataStartAsync(serverId, Start, End, ct),
         };
 
@@ -149,6 +156,15 @@ public sealed class ViewerSystemEventsDataStartLiveTests
                 var errors = await _viewer.GetSevereErrorsAsync(serverId, Start, End, cancellationToken: ct);
                 Assert.NotEmpty(errors);
                 return ViewerEventDataStart.Of(coverage, ViewerEventDataStart.EarliestOf(errors.Select(r => r.EventTime)));
+            }
+
+            if (grid == Grid.LongQueries)
+            {
+                /* The read windows on collection_time and shows event_time; a full page names its oldest row. */
+                var completions = await _viewer.GetRecentLongQueryCompletionsAsync(serverId, Start, End, cancellationToken: ct);
+                Assert.NotEmpty(completions);
+                return ViewerEventDataStart.Of(coverage, ViewerEventDataStart.EarliestOf(completions.Select(r => r.EventTime)),
+                    ViewerEventDataStart.ReadHitCap(completions.Count, ViewerDataService.LongQueriesRowCap));
             }
 
             var trace = await _viewer.GetDefaultTraceEventsAsync(serverId, Start, End, cancellationToken: ct);
@@ -173,7 +189,12 @@ public sealed class ViewerSystemEventsDataStartLiveTests
 
                     var now = DateTime.UtcNow;
                     end = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, DateTimeKind.Utc);
-                    var table = grid == Grid.SystemEvents ? "system_health_events" : "default_trace_events";
+                    var table = grid switch
+                    {
+                        Grid.SystemEvents => "system_health_events",
+                        Grid.LongQueries => "long_query_completions",
+                        _ => "default_trace_events",
+                    };
                     var collector = DataWindowFloor.Source.ForCollectorTable(table).CollectorName!;
 
                     /* Added 2 days ago; its first event came a day later, collected when it happened. */
@@ -213,7 +234,23 @@ public sealed class ViewerSystemEventsDataStartLiveTests
         private static async Task InsertEventsAsync(
             NpgsqlConnection connection, Grid grid, int serverId, DateTime firstUtc, DateTime lastUtc, DateTime? collectedFirst, CancellationToken ct)
         {
-            var sql = grid == Grid.SystemEvents
+            var sql = grid == Grid.LongQueries
+                ? """
+                    INSERT INTO collect.long_query_completions
+                        (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, duration_microseconds, statement_text)
+                    SELECT
+                        row_number() OVER () + $4,
+                        COALESCE($5::timestamp, t),
+                        $1,
+                        'event-grids',
+                        t,
+                        'sql_batch_completed',
+                        'EventDb',
+                        5000000,
+                        'SELECT 1'
+                    FROM generate_series($2::timestamp, $3::timestamp, interval '6 hours') AS t
+                    """
+                : grid == Grid.SystemEvents
                 ? """
                     INSERT INTO collect.system_health_events
                         (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
