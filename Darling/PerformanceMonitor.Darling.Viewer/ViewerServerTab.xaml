@@ -2434,17 +2434,34 @@
                     <TabItem Header="Trends">
                         <Grid>
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            <Border Grid.Row="0" Margin="0,0,0,4">
+                            <!-- One "Showing since" banner per chart (#4966): the three charts draw from three different floors
+                                 (wait_stats, the blocked-process-report sources, deadlocks), so no one note is true of all of them. -->
+                            <TextBlock Grid.Row="0" x:Name="LockWaitTrendTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="1" Margin="0,0,0,4">
                                 <scottplot:WpfPlot x:Name="LockWaitTrendChart"/>
                             </Border>
-                            <Border Grid.Row="1" Margin="0,4,0,4">
+                            <TextBlock Grid.Row="2" x:Name="BlockingTrendTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="3" Margin="0,4,0,4">
                                 <scottplot:WpfPlot x:Name="BlockingTrendChart"/>
                             </Border>
-                            <Border Grid.Row="2" Margin="0,4,0,0">
+                            <TextBlock Grid.Row="4" x:Name="DeadlockTrendTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="5" Margin="0,4,0,0">
                                 <scottplot:WpfPlot x:Name="DeadlockTrendChart"/>
                             </Border>
                         </Grid>
@@ -2470,7 +2487,9 @@
                              don't collide on a short (768px) laptop. The summary strip spans both columns below. -->
                         <Grid>
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
@@ -2478,19 +2497,30 @@
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <Border Grid.Row="0" Grid.Column="0" Margin="0,0,4,4">
+                            <!-- One "Showing since" banner per chart pair (#4966): the blocking pair draws from the blocked-process-report
+                                 sources and the deadlock pair from deadlocks, which have different floors. The summary strip below is
+                                 covered by these. -->
+                            <TextBlock Grid.Row="0" Grid.ColumnSpan="2" x:Name="BlockingStatsBlockingTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="1" Grid.Column="0" Margin="0,0,4,4">
                                 <scottplot:WpfPlot x:Name="BlockingDurationChart"/>
                             </Border>
-                            <Border Grid.Row="0" Grid.Column="1" Margin="4,0,0,4">
+                            <Border Grid.Row="1" Grid.Column="1" Margin="4,0,0,4">
                                 <scottplot:WpfPlot x:Name="BlockingTotalDurationChart"/>
                             </Border>
-                            <Border Grid.Row="1" Grid.Column="0" Margin="0,4,4,0">
+                            <TextBlock Grid.Row="2" Grid.ColumnSpan="2" x:Name="BlockingStatsDeadlockTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="3" Grid.Column="0" Margin="0,4,4,0">
                                 <scottplot:WpfPlot x:Name="DeadlockWaitChart"/>
                             </Border>
-                            <Border Grid.Row="1" Grid.Column="1" Margin="4,4,0,0">
+                            <Border Grid.Row="3" Grid.Column="1" Margin="4,4,0,0">
                                 <scottplot:WpfPlot x:Name="DeadlockTotalWaitChart"/>
                             </Border>
-                            <Border Grid.Row="2" Grid.ColumnSpan="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
+                            <Border Grid.Row="4" Grid.ColumnSpan="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                                     <TextBlock Text="Blocking Events:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                     <TextBlock x:Name="BlockingStatsEventCountText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
