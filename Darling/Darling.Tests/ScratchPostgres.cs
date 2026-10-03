@@ -219,7 +219,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// <summary>
     /// How long one drop at exit may run, in seconds. This stays at the library default on purpose: a dead cluster
     /// never gets as far as a command (its connect fails first), and a drop on a live cluster ends with an immediate
-    /// checkpoint that took 11 seconds on a busy local cluster, so a shorter limit cancelled a drop that was working
+    /// checkpoint that took 11 seconds on a loaded local cluster, so a shorter limit cancelled a drop that was working
     /// and left the very database the drain exists to remove.
     /// </summary>
     internal const int ExitDrainCommandTimeoutSeconds = 30;
@@ -238,7 +238,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// touching the databases that other tests, running in parallel, still hold.
     /// </summary>
     /// <remarks>
-    /// Connects with the short timeouts above, and stops trying a cluster once a connect to it fails without the
+    /// Connects with the short connect wait above, and stops trying a cluster once a connect to it fails without the
     /// server answering (a stopped cluster, a refused or timed-out connection), so N databases on a dead cluster cost
     /// one short wait, not N. A server that answers with an error (a bad password, a missing database) is not a dead
     /// cluster, and a failed drop on a live cluster never stops the others; each skipped database is still named.
