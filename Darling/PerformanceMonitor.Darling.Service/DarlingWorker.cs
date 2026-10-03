@@ -2311,12 +2311,14 @@ LIMIT 1";
            its own connection, its own catch, drained with the other background startup work below. */
         var planForceDetailScrub = RunPlanForceActionDetailScrubAsync(postgres, stoppingToken);
 
-        /* #4605: the BRIN index on collect.query_store_interval_wide (collection_time), built CONCURRENTLY in the
-           background QueryStoreIntervalWideBrinIndex.StartDelay after start so the full-heap read stays off the
-           post-restart IO burst. Launched after migrations confirm the table exists, never awaited on the startup
-           path, one attempt per start, and RunDelayedAsync never throws. Drained with the other background work. */
-        var intervalWideBrin = QueryStoreIntervalWideBrinIndex.RunDelayedAsync(
-            postgres, _logger, QueryStoreIntervalWideBrinIndex.StartDelay, stoppingToken);
+        /* #4605, #4952: the Query Store read indexes - the BRIN on collect.query_store_interval_wide (collection_time)
+           and the btree on its (server_id, first_execution_time) - built in the background
+           QueryStoreBackgroundIndexes.StartDelay after start so their heap reads stay off the post-restart IO burst,
+           one after another, each failure-isolated. Launched after migrations confirm the tables exist, never awaited
+           on the startup path, one attempt per start, and RunDelayedAsync never throws. Drained with the other
+           background work. */
+        var queryStoreIndexes = QueryStoreBackgroundIndexes.RunDelayedAsync(
+            postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, QueryStoreBackgroundIndexes.All, stoppingToken);
 
         /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
            the first MCP or web call finds each rollup's floor already measured and does not wait ~10 s on the
@@ -3818,8 +3820,8 @@ LIMIT 1";
             /* Expected on shutdown. */
         }
 
-        /* And the interval-wide BRIN index ensure (#4605), which absorbs its own failures. */
-        await intervalWideBrin;
+        /* And the Query Store read index ensures (#4605, #4952), which absorb their own failures. */
+        await queryStoreIndexes;
 
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
         await rollupCoverageWarm;
