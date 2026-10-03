@@ -5148,6 +5148,28 @@ LIMIT 1";
         string.Equals(collectorName, PgWaitSamplingCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// #4999: whether a collector runs detached from its server's sequential pass BY NAME: query_store (#2700),
+    /// plan_correction (#2717) and pg_wait_sampling (#3604), each for a cost that does not belong in the pass.
+    /// The daily collectors are the other half, detached by cadence (<see cref="IsDailyInterval"/>), and the two
+    /// together are <see cref="RunsDetached"/>. The parameter is <c>name</c>, as in the dispatch loop: the Lite
+    /// suite counts the plan_correction predicate's calls that are spelled with <c>collectorName</c>, to pin that
+    /// the gate acquisition tests it once, and this is not that call.
+    /// </summary>
+    internal static bool IsDetachedByName(string name) =>
+        IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name) || IsPgWaitSamplingCollector(name);
+
+    /// <summary>
+    /// #4999: THE test for whether a collector's scheduled run leaves its server's sequential pass: the three
+    /// detached by name (<see cref="IsDetachedByName"/>) and every daily collector by cadence
+    /// (<see cref="IsDailyInterval"/>, over the EFFECTIVE interval, where an on-load collector's 0 is already its
+    /// daily recapture). The pass dispatches by it, and get_collection_health leaves exactly these collectors
+    /// out of its sweep-body roll-up by it, so the two cannot disagree about what runs in the pass: a detached
+    /// run is not part of the body, and a long run of it is not an overrun of the body.
+    /// </summary>
+    internal static bool RunsDetached(string name, int effectiveIntervalMinutes) =>
+        IsDetachedByName(name) || IsDailyInterval(effectiveIntervalMinutes);
+
+    /// <summary>
     /// #2219: refreshes this PostgreSQL server's statement text if it is due, and swallows everything if not.
     ///
     /// <para><b>Best-effort by construction.</b> It runs after the statistics have already been collected and
@@ -11377,7 +11399,15 @@ AND   j.hypertable_name = '{relation}'", connection))
                 var peerMaxAtDispatchMs = PeerMaxOrNull(server);
                 /* #3604: pg_wait_sampling is the third, and the reason is different in kind — see
                    IsPgWaitSamplingCollector: a deliberate 30 s sampling window, not a bimodal tail. */
-                if (IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name) || IsPgWaitSamplingCollector(name))
+                /* #4999: ONE test decides whether a collector leaves this pass, RunsDetached: the three above by
+                   name and every daily collector by cadence. get_collection_health asks the same test to leave
+                   those collectors out of its sweep-body roll-up, so the dispatch and the reading cannot
+                   disagree about what runs in the body. */
+                if (!RunsDetached(name, interval))
+                {
+                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
+                }
+                else if (IsDetachedByName(name))
                 {
                     _ = RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
                 }
@@ -11385,21 +11415,17 @@ AND   j.hypertable_name = '{relation}'", connection))
                    minutes across 72 databases in a field case, and awaited here that stalled the server's
                    1-minute collectors for the whole run: the earlier "amortised to nil" reading counted how often
                    it runs, not how long the body waits when it does. The three above stay on their own rules
-                   (they are tested first, so a daily override on one of them changes nothing). A daily run goes
-                   through the same per-(server, collector) single-flight slot, taken in RunOneAsync, and a
-                   fleet-wide cap on how many run at once; a run over the cap waits and is never dropped.
+                   (the by-name arm is asked first, so a daily override on one of them changes nothing). A daily
+                   run goes through the same per-(server, collector) single-flight slot, taken in RunOneAsync, and
+                   a fleet-wide cap on how many run at once; a run over the cap waits and is never dropped.
                    The pass gives its fleet permit back at once, as for the detached runs above. The interval is
                    the EFFECTIVE one resolved above, where an on-load collector's 0 is already its daily
                    recapture. Only this scheduled dispatch detaches: the at-connect run of an on-load collector
                    stays inline in TryConnectAsync, because it is a short config snapshot the first sweep and
                    the analysis read right after connecting, and it runs once per connect, outside any pass. */
-                else if (IsDailyInterval(interval))
-                {
-                    TrackDailyRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true));
-                }
                 else
                 {
-                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
+                    TrackDailyRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true));
                 }
             }
         }
