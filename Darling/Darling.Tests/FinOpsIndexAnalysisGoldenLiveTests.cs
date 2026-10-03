@@ -21,6 +21,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
 
 namespace Darling.Tests;
@@ -50,6 +51,21 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
             var noProps = await viewer.GetIndexCleanupOptionsAsync(ServerIdB, ct);
             var result = await viewer.GetIndexAnalysisAsync(ServerIdA, ct);
             var empty = await viewer.GetIndexAnalysisAsync(ServerIdB, ct);
+            return Serialize(anchor, inputs, options, noProps, result,
+                ViewerDataService.ProjectRecommendations(result), ViewerDataService.ProjectRollups(result),
+                ViewerDataService.ProjectRollups(empty));
+        });
+
+    [Fact]
+    public Task IndexAnalysisReads_MatchGoldenFixture_ThroughTheStorageReaderAndRowProjections() =>
+        RunAsync(async (connectionString, anchor, ct) =>
+        {
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            var inputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, ServerIdA, 30, ct);
+            var options = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdA, 30, ct);
+            var noProps = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdB, 30, ct);
+            var result = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(dataSource, ServerIdA, 30, ct);
+            var empty = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(dataSource, ServerIdB, 30, ct);
             return Serialize(anchor, inputs, options, noProps, result,
                 ViewerDataService.ProjectRecommendations(result), ViewerDataService.ProjectRollups(result),
                 ViewerDataService.ProjectRollups(empty));
