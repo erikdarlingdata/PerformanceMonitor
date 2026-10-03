@@ -20,6 +20,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -45,7 +46,31 @@ public sealed class FinOpsUtilizationGoldenLiveTests
     private static readonly int ServerIdB = ServerIdHelper.GetDeterministicHashCode(ServerNameB);
 
     [Fact]
-    public async Task UtilizationReads_MatchGoldenFixture_ThroughTheViewer()
+    public Task UtilizationReads_MatchGoldenFixture_ThroughTheViewer() =>
+        RunAsync(async (connectionString, anchor, ct) =>
+        {
+            await using var viewer = new ViewerDataService(connectionString);
+            var efficiency = await viewer.GetUtilizationEfficiencyAsync(ServerIdA, ct);
+            var trend = await viewer.GetProvisioningTrendAsync(ServerIdB, ct);
+            var grants = await viewer.GetMemoryGrantEfficiencyAsync(ServerIdB, hoursBack: 24 * 6, ct);
+            return Serialize(anchor, efficiency, trend, grants);
+        });
+
+    [Fact]
+    public Task UtilizationReads_MatchGoldenFixture_ThroughTheStorageReaderAndRowMappers() =>
+        RunAsync(async (connectionString, anchor, ct) =>
+        {
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            var dto = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(dataSource, ServerIdA, 30, ct);
+            var efficiency = dto is null ? null : UtilizationEfficiencyRow.From(dto);
+            var trend = (await DarlingFinOpsUtilizationReader.GetProvisioningTrendAsync(dataSource, ServerIdB, 30, ct))
+                .ConvertAll(ProvisioningTrendRow.From);
+            var grants = (await DarlingFinOpsUtilizationReader.GetMemoryGrantEfficiencyAsync(dataSource, ServerIdB, 24 * 6, 30, ct))
+                .ConvertAll(MemoryGrantEfficiencyRow.From);
+            return Serialize(anchor, efficiency, trend, grants);
+        });
+
+    private static async Task RunAsync(Func<string, DateTime, CancellationToken, Task<string>> read)
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -57,18 +82,13 @@ public sealed class FinOpsUtilizationGoldenLiveTests
         await PgMigrations.MigrateAsync(connection, ct);
         await CleanupAsync(connection, ct);
 
-        await using var viewer = new ViewerDataService(connectionString!);
         var succeeded = false;
         try
         {
             var anchor = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
             await SeedAsync(connection, anchor, ct);
 
-            var efficiency = await viewer.GetUtilizationEfficiencyAsync(ServerIdA, ct);
-            var trend = await viewer.GetProvisioningTrendAsync(ServerIdB, ct);
-            var grants = await viewer.GetMemoryGrantEfficiencyAsync(ServerIdB, hoursBack: 24 * 6, ct);
-
-            var actual = Serialize(anchor, efficiency, trend, grants);
+            var actual = await read(connectionString!, anchor, ct);
             AssertGolden(actual);
             succeeded = true;
         }
