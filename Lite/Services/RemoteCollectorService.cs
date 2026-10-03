@@ -1452,14 +1452,14 @@ public partial class RemoteCollectorService
                 await conn.OpenAsync(openCancellation?.Token ?? cancellationToken);
                 return conn;
             }
-            catch
+            catch (Exception ex)
             {
                 conn.Dispose();
 
-                /* The prompt's Cancel ends the open through the linked token; the caller's own token ending it is a shutdown,
-                   which is no decline. A decline is flagged so the opens queued behind this one stop instead of each raising a
-                   prompt of its own, as CreateConnectionAsync does. */
-                if (deviceCode is not null && deviceCode.Token.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                /* A declined sign-in is flagged so the opens queued behind this one stop instead of each raising a prompt of
+                   its own, and it is decided as CreateConnectionAsync decides it, by the same helper, for either interactive
+                   mode: an Entra MFA sign-in the user cancelled in the browser is as much a decline as a closed code window. */
+                if (signsInInteractively && UserDeclinedSignIn(ex, deviceCode, cancellationToken))
                 {
                     _serverManager.GetConnectionStatus(server.Id).UserCancelledMfa = true;
                     AppLogger.Info("Collector", $"  [{server.DisplayName}] interactive authentication cancelled by user - flagging to abort other pending connections");
@@ -1554,22 +1554,10 @@ public partial class RemoteCollectorService
                     if (isInteractiveServer)
                     {
                         /* Mark a user-declined sign-in immediately, so the other connections queued
-                           behind the lock abort instead of each raising their own prompt.
-
-                           Two detections, because the two interactive modes fail differently. Entra
-                           MFA reports cancellation in the exception MESSAGE, which is all the broker
-                           gives. Device code reports it as the cancellation of the token above - and
-                           the collector's own token is linked into that same source, so the token
-                           alone cannot say which side fired. A shutdown is not a decline: flagging
-                           one would leave the server skipped for the rest of the session over an app
-                           restart nobody chose. */
-                        var userDeclined =
-                            MfaAuthenticationHelper.IsMfaCancelledException(ex) ||
-                            (deviceCode is not null
-                                && deviceCode.Token.IsCancellationRequested
-                                && !cancellationToken.IsCancellationRequested);
-
-                        if (userDeclined)
+                           behind the lock abort instead of each raising their own prompt. What counts
+                           as a decline is decided in UserDeclinedSignIn, which the per-database open
+                           asks too. */
+                        if (UserDeclinedSignIn(ex, deviceCode, cancellationToken))
                         {
                             var serverStatus = _serverManager.GetConnectionStatus(server.Id);
                             serverStatus.UserCancelledMfa = true;
@@ -1594,6 +1582,25 @@ public partial class RemoteCollectorService
                 s_mfaAuthLock.Release();
             }
         }
+    }
+
+    /// <summary>
+    /// Whether an interactive open that failed failed because the user declined the sign-in. Both opens that can raise a prompt,
+    /// <see cref="CreateConnectionAsync"/> and <see cref="OpenAzureDatabaseConnectionAsync"/>, ask it here, so what counts as a
+    /// decline cannot differ between them (#4961).
+    ///
+    /// Two detections, because the two interactive modes fail differently. Entra MFA reports cancellation in the exception
+    /// MESSAGE, which is all the broker gives. Device code reports it as the cancellation of the prompt's own token - and the
+    /// collector's own token is linked into the same source the open waits on, so the token the open threw on cannot say which
+    /// side fired. A shutdown is not a decline: flagging one would leave the server skipped for the rest of the session over an
+    /// app restart nobody chose.
+    /// </summary>
+    private static bool UserDeclinedSignIn(Exception ex, EntraDeviceCodeAttempt? deviceCode, CancellationToken cancellationToken)
+    {
+        return MfaAuthenticationHelper.IsMfaCancelledException(ex) ||
+            (deviceCode is not null
+                && deviceCode.Token.IsCancellationRequested
+                && !cancellationToken.IsCancellationRequested);
     }
 
     /// <summary>
