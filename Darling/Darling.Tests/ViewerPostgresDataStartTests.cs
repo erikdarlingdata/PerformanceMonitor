@@ -32,9 +32,22 @@ public sealed class ViewerPostgresDataStartTests
         ("pg_lock_stats", "pg_lock_stats", "PgLockStatsDataStartBanner", "LoadPgLockStatsAsync", false),
         ("pg_kernel_stats", "pg_kernel_stats", "PgKernelStatsDataStartBanner", "LoadPgKernelStatsAsync", false),
         ("pg_plan_capture", "pg_plan_capture", "PgCapturedPlansDataStartBanner", "LoadPgPlanCaptureAsync", false),
+        ("pg_cpu_utilization", "pg_cpu_utilization", "PgCpuDataStartBanner", "LoadPgCpuUtilizationAsync", false),
+        ("pg_wait_sampling", "pg_wait_sampling", "PgWaitSamplingDataStartBanner", "LoadPgWaitSamplingAsync", false),
+        ("pg_session_states", "pg_session_states", "PgSessionStatesDataStartBanner", "LoadPgVacuumAsync", false),
+        ("pg_xmin_horizon", "pg_xmin_horizon", "PgXminDataStartBanner", "LoadPgVacuumAsync", false),
+        ("pg_autovacuum_stats", "pg_autovacuum_stats", "PgAutovacuumDataStartBanner", "LoadPgVacuumAsync", false),
+        ("pg_wait_stats", "pg_wait_stats", "PgWaitStatsDataStartBanner", "LoadPgWaitsAsync", false),
+        ("pg_io_stats", "pg_io_stats", "PgIoStatsDataStartBanner", "LoadPgIoAsync", false),
+        ("pg_replication_stats", "pg_replication_stats", "PgReplicationStatsDataStartBanner", "LoadPgReplicationStatsAsync", false),
+        ("pg_table_bloat_stats", "pg_table_bloat_stats", "PgTableBloatDataStartBanner", "LoadPgStorageAsync", false),
+        ("pg_index_usage_stats", "pg_index_usage_stats", "PgIndexUsageDataStartBanner", "LoadPgStorageAsync", false),
     ];
 
-    public static readonly string[] ProbeTables = [.. Grids.Select(g => g.Table)];
+    /// <summary>Write Stats is the one grid with no probe: its row carries the window's first sample, which is the coverage start.</summary>
+    public const string WriteStatsTable = "pg_write_stats";
+
+    public static readonly string[] ProbeTables = [.. Grids.Select(g => g.Table), WriteStatsTable];
 
     public static TheoryData<string> TableNames()
     {
@@ -123,7 +136,23 @@ public sealed class ViewerPostgresDataStartTests
 
         /* Six reads and three probes in the Activity load; a read and a probe in each of the five loaders that runs both (two more `Of(2)` scopes were there before). */
         Assert.Contains("ViewerReadFanOut.Of(9)", tab);
-        Assert.Equal(7, tab.Split("ViewerReadFanOut.Of(2)").Length - 1);
+        Assert.Equal(11, tab.Split("ViewerReadFanOut.Of(2)").Length - 1);
+        Assert.Contains("ViewerReadFanOut.Of(8)", tab);
+        Assert.Contains("ViewerReadFanOut.Of(4)", tab);
+    }
+
+    [Fact]
+    public void WriteStats_UsesTheRowsWindowStart_WithNoProbe()
+    {
+        var tab = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.Postgres.cs").ReplaceLineEndings("\n");
+        var xaml = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.xaml").ReplaceLineEndings("\n");
+        var start = tab.IndexOf("Task LoadPgWriteStatsAsync(", StringComparison.Ordinal);
+        var body = tab[start..];
+        body = body[..body.IndexOf("\n    private ", 10, StringComparison.Ordinal)];
+
+        Assert.Contains("x:Name=\"PgWriteStatsDataStartBanner\" Visibility=\"Collapsed\"", xaml);
+        Assert.Contains("UpdateTruncationBanner(PgWriteStatsDataStartBanner, row?.WindowStartUtc, startUtc)", body);
+        Assert.DoesNotContain("StartPgDataStartProbe", body);
     }
 
     [Fact]
