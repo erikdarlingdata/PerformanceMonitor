@@ -297,6 +297,43 @@ public sealed class DailyCollectorDetachTests
         }
     }
 
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(60, false)]
+    [InlineData(1439, false)]
+    [InlineData(1440, true)]
+    [InlineData(2880, true)]
+    public void ADailyInterval_IsOneDayOrMore(int effectiveIntervalMinutes, bool expected) =>
+        Assert.Equal(expected, DarlingWorker.IsDailyInterval(effectiveIntervalMinutes));
+
+    [Fact]
+    public void TheDailyCollectors_AreTheOnLoadSetAndTheCatalogsOneDayCollectors()
+    {
+        var daily = CollectorScheduleDefaults.All
+            .Where(kv => DarlingWorker.IsDailyInterval(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(kv.Value.FrequencyMinutes)))
+            .Select(kv => kv.Key)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        Assert.Equal(
+            new[]
+            {
+                "database_config", "database_scoped_config", "index_object_stats", "pg_column_stats", "pg_extension_availability",
+                "pg_index_bloat", "pg_index_usage_stats", "server_config", "server_properties", "trace_flags",
+            },
+            daily);
+    }
+
+    [Fact]
+    public void ADetachedDailyRun_DoesNotFoldItsDurationIntoTheSweepBodysPeerMark()
+    {
+        /* index_object_stats carries no wall-clock budget, so the inline run folds; detached, it must not. */
+        Assert.False(CollectorCatalog.HasWallClockBudget(Daily));
+        Assert.True(DarlingWorker.FoldsIntoSweepPeerMark(Daily, detachedDaily: false));
+        Assert.False(DarlingWorker.FoldsIntoSweepPeerMark(Daily, detachedDaily: true));
+        Assert.True(DarlingWorker.FoldsIntoSweepPeerMark(FastTier, detachedDaily: false));
+    }
+
     private sealed class RecordingLogger : ILogger<DarlingWorker>
     {
         private List<(LogLevel Level, string Message, Exception? Exception)> Entries { get; } = [];

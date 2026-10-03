@@ -3623,6 +3623,11 @@ LIMIT 1";
             inFlightSweeps.Add(_storeMetricsTick);
         }
 
+        /* #4938: the daily runs detached from those bodies. They ran inside the bodies, and so inside this wait,
+           before they were detached; the stopping token has already cancelled them, and a run still queued for a
+           permit ends at once. They never fault (RunDetachedAsync contains the cancel). */
+        inFlightSweeps.AddRange(InFlightDailyRuns);
+
         if (inFlightSweeps.Count > 0)
         {
             await Task.WhenAny(
@@ -4988,6 +4993,109 @@ LIMIT 1";
     /// same server never contend for one slot.
     /// </summary>
     private readonly ConcurrentDictionary<(int ServerId, string CollectorName), DetachedCollectorGate> _detachedCollectorGates = new();
+
+    /// <summary>
+    /// #4938: the effective interval, in minutes, from which a collector counts as a daily one: it runs detached
+    /// from its server's sequential pass instead of inside it. Applied to the interval the schedule resolves for
+    /// that server (<see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/>), so it covers the
+    /// five on-load collectors' once-a-day recapture, the catalog's 1440-minute collectors, and any collector an
+    /// operator slows to a day or more.
+    /// </summary>
+    internal const int DailyCollectorIntervalMinutes = 1440;
+
+    /// <summary>
+    /// #4938: how many detached daily runs may be going at once across the whole fleet. Each holds a connection to
+    /// its monitored server and one to the store for as long as it runs (index_object_stats took 43 minutes across
+    /// 72 databases in a field case), so the cap is what bounds the load that daily work can add beside the sweep.
+    /// A run over the cap waits for a permit and is never dropped.
+    /// </summary>
+    internal const int MaxConcurrentDailyRuns = 16;
+
+    /// <summary>
+    /// #4938: the permits behind <see cref="MaxConcurrentDailyRuns"/>. An instance field and a semaphore of its
+    /// own, never a waiting mode on <see cref="DetachedCollectorGate"/>, whose try-only contract is what makes a
+    /// held single-flight slot mean "skip this tick". A daily run takes its (server, collector) slot first and
+    /// waits here second, so a run that is still queued for a permit counts as unfinished and the next tick skips.
+    /// </summary>
+    private readonly SemaphoreSlim _dailyRunPermits = new(MaxConcurrentDailyRuns, MaxConcurrentDailyRuns);
+
+    /// <summary>
+    /// #4938: the detached daily runs that have not finished, so a shutdown can wait for them the way it waits for
+    /// the per-server bodies. They used to run inside those bodies and so inside that wait; detached, nothing else
+    /// holds on to them. A run removes itself when it ends.
+    /// </summary>
+    private readonly ConcurrentDictionary<Task, byte> _dailyRuns = new();
+
+    /// <summary>Test hook and shutdown-drain input (#4938): the detached daily runs that have not finished.</summary>
+    internal IReadOnlyCollection<Task> InFlightDailyRuns => _dailyRuns.Keys.ToArray();
+
+    /// <summary>
+    /// #4938: whether a collector whose effective interval is <paramref name="effectiveIntervalMinutes"/> is a
+    /// daily one, and so runs detached (see <see cref="DailyCollectorIntervalMinutes"/>). Takes the EFFECTIVE
+    /// interval, where an on-load collector's 0 has already become its daily recapture.
+    /// </summary>
+    internal static bool IsDailyInterval(int effectiveIntervalMinutes) =>
+        effectiveIntervalMinutes >= DailyCollectorIntervalMinutes;
+
+    /// <summary>
+    /// #4938: whether a finished run's cost goes into the sweep body's peer high-water mark (#2864). Not for a
+    /// budgeted collector, and not for a detached daily run: it ran beside the body rather than in it, finishes
+    /// minutes to hours after the body that dispatched it, and would put its own duration into whichever body is
+    /// running at that moment, which then reads as slow peers that were never slow.
+    /// </summary>
+    internal static bool FoldsIntoSweepPeerMark(string collectorName, bool detachedDaily) =>
+        !detachedDaily && !CollectorCatalog.HasWallClockBudget(collectorName);
+
+    /// <summary>
+    /// #4938: keeps a detached daily run in <see cref="InFlightDailyRuns"/> until it ends. The removal is attached
+    /// after the add, so a run that finished in between is still removed.
+    /// </summary>
+    private void TrackDailyRun(Task run)
+    {
+        if (run.IsCompleted)
+        {
+            return;
+        }
+
+        _dailyRuns.TryAdd(run, 0);
+        _ = run.ContinueWith(
+            static (finished, state) => ((ConcurrentDictionary<Task, byte>)state!).TryRemove(finished, out _),
+            _dailyRuns,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// #4938: takes one of the fleet's daily-run permits, waiting for it when all are in use. Waits on the
+    /// service's own token, so only shutdown ends the wait and a run is never dropped for waiting. The wait is
+    /// logged once, at Debug, when it starts: a run waits once, so a tick that skips behind it adds no line.
+    /// </summary>
+    private async Task<IDisposable> AcquireDailyRunPermitAsync(ServerLoopState server, string collectorName, CancellationToken cancellationToken)
+    {
+        if (!await _dailyRunPermits.WaitAsync(0, cancellationToken))
+        {
+            _logger.LogDebug(
+                "  [{Server}] {Collector} is waiting for one of {Cap} daily-run permits (#4938)",
+                server.Config.DisplayName, collectorName, MaxConcurrentDailyRuns);
+            await _dailyRunPermits.WaitAsync(cancellationToken);
+        }
+
+        return new DailyRunPermit(_dailyRunPermits);
+    }
+
+    /// <summary>
+    /// #4938: one held daily-run permit. Returns it once and only once, however many times it is disposed, so a
+    /// double dispose can never hand a permit back that another run has since taken.
+    /// </summary>
+    private sealed class DailyRunPermit : IDisposable
+    {
+        private SemaphoreSlim? _permits;
+
+        public DailyRunPermit(SemaphoreSlim permits) => _permits = permits;
+
+        public void Dispose() => Interlocked.Exchange(ref _permits, null)?.Release();
+    }
 
     /// <summary>
     /// #2219: whether this is the PostgreSQL statement-stats collector, whose success is what triggers a text
@@ -11273,6 +11381,22 @@ AND   j.hypertable_name = '{relation}'", connection))
                 {
                     _ = RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
                 }
+                /* #4938: and every DAILY collector, by cadence rather than by name. index_object_stats took 43
+                   minutes across 72 databases in a field case, and awaited here that stalled the server's
+                   1-minute collectors for the whole run: the earlier "amortised to nil" reading counted how often
+                   it runs, not how long the body waits when it does. The three above stay on their own rules
+                   (they are tested first, so a daily override on one of them changes nothing). A daily run goes
+                   through the same per-(server, collector) single-flight slot, taken in RunOneAsync, and a
+                   fleet-wide cap on how many run at once; a run over the cap waits and is never dropped.
+                   The pass gives its fleet permit back at once, as for the detached runs above. The interval is
+                   the EFFECTIVE one resolved above, where an on-load collector's 0 is already its daily
+                   recapture. Only this scheduled dispatch detaches: the at-connect run of an on-load collector
+                   stays inline in TryConnectAsync, because it is a short config snapshot the first sweep and
+                   the analysis read right after connecting, and it runs once per connect, outside any pass. */
+                else if (IsDailyInterval(interval))
+                {
+                    TrackDailyRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true));
+                }
                 else
                 {
                     await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
@@ -12537,7 +12661,15 @@ LIMIT 1";
     /// times over, so a value read at completion describes some unrelated later tick. Those two are among
     /// the heavies this diagnostic exists to explain, so reading it late is wrong exactly where it matters.
     /// </param>
-    private async Task<int> RunOneAsync(ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken)
+    /// <param name="detachedDaily">
+    /// #4938: true for a daily collector's scheduled run, which RunDueCollectorsAsync detaches. Such a run takes
+    /// the same per-(server, collector) single-flight slot as plan_correction, then one of the fleet's daily-run
+    /// permits, and does not fold its duration into the sweep body's peer mark (see <see cref="FoldsIntoSweepPeerMark"/>).
+    /// False for every other caller, including the at-connect run of an on-load collector and snapshot_now.
+    /// </param>
+    private async Task<int> RunOneAsync(
+        ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken,
+        bool detachedDaily = false)
     {
         var runtime = server.Runtime;
         if (runtime is null || !s_dispatch.TryGetValue(collectorName, out var run))
@@ -12576,17 +12708,45 @@ LIMIT 1";
            NotGated (mirroring QueryStoreServerGate's) collapses this to a single null check below — a
            future third collector needs only its own IsXCollector check added to this one condition,
            never a second one to keep in sync. */
-        using var detachedGate = IsPlanCorrectionCollector(collectorName) || IsPgWaitSamplingCollector(collectorName)
+        using var detachedGate = IsPlanCorrectionCollector(collectorName) || IsPgWaitSamplingCollector(collectorName) || detachedDaily
             ? _detachedCollectorGates.GetOrAdd((runtime.ServerId, collectorName), static _ => new DetachedCollectorGate()).TryAcquire()
             : DetachedCollectorGate.NotGated;
 
         if (detachedGate is null)
         {
+            if (detachedDaily)
+            {
+                /* #4938: a daily run's skip costs a whole day for that collector on that server, not one tick, so
+                   it says so rather than "re-reads next tick". It only happens when the previous run, which may
+                   still be waiting for a permit, has not finished by the time this one comes due. */
+                _logger.LogInformation(
+                    "  [{Server}] {Collector} skipped this run — its previous daily run has not finished (#4938). " +
+                    "It runs again at its next daily interval.",
+                    server.Config.DisplayName, collectorName);
+                return 0;
+            }
+
             _logger.LogInformation(
                 "  [{Server}] {Collector} skipped this tick — a previous detached run has not finished (#2717). " +
                 "Re-reads the live set next tick; no rows are lost.",
                 server.Config.DisplayName, collectorName);
             return 0;
+        }
+
+        /* #4938: a daily run waits here for one of the fleet's permits, holding its single-flight slot while it
+           waits, so a run that has not yet started still counts as unfinished. The permit is held to the end of
+           the run, through the store writes. The wait can last hours behind other daily runs, so what the run
+           works on is read again after it: a server removed or reconnected in the meantime must not be run
+           against the connection it had when this run was dispatched. */
+        using var dailyPermit = detachedDaily ? await AcquireDailyRunPermitAsync(server, collectorName, cancellationToken) : null;
+        if (detachedDaily)
+        {
+            if (server.Retired || server.Runtime is not { } currentRuntime)
+            {
+                return 0;
+            }
+
+            runtime = currentRuntime;
         }
 
         if (RunOneBodyOverride is { } bodyOverride)
@@ -12792,7 +12952,7 @@ LIMIT 1";
                mark that included procedure_stats would be dominated by exactly the run in question.
                Asked of the catalog rather than a name list here: the list would be right until a fifth
                collector earned a budget and silently wrong after. */
-            if (!CollectorCatalog.HasWallClockBudget(collectorName))
+            if (FoldsIntoSweepPeerMark(collectorName, detachedDaily))
             {
                 server.SweepPeerMaxMs = (int)Math.Min(int.MaxValue, Math.Max(server.SweepPeerMaxMs, result.SqlMs));
             }
@@ -13344,11 +13504,12 @@ LIMIT 1";
     /// containment every other fire-and-track body in this file gets.
     /// </summary>
     private async Task RunDetachedAsync(
-        ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken)
+        ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken,
+        bool detachedDaily = false)
     {
         try
         {
-            await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs, cancellationToken);
+            await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs, cancellationToken, detachedDaily);
         }
         catch (OperationCanceledException)
         {
@@ -13356,7 +13517,13 @@ LIMIT 1";
                specifically for having no wall-clock-derived window (query_store's is watermark-driven,
                #1960; plan_correction re-reads the live DMV set whole on every pass), so a run dropped
                here resumes correctly — from the same watermark, or by re-reading the current set — on
-               the next start. */
+               the next start.
+
+               #4938: a daily run is the same. It reads the target as it is now (a delta-family collector
+               cannot be scheduled this slowly, see CollectorDeltaCalculator.MaxDeltaFrequencyMinutes), and
+               a run dropped here wrote no row, so the next start seeds it overdue from its last-run mark
+               and runs it promptly. A run still waiting for a permit ends here too: the wait is on this
+               same token. */
         }
     }
 
