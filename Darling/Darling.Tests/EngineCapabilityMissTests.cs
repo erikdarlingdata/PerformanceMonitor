@@ -334,6 +334,10 @@ public sealed class EngineCapabilityReadWiringTests
     private static readonly Regex HelperDeclaration = new(
         @"private static async Task<string> (\w+)(?:<\w+>)?\(", RegexOptions.Compiled);
 
+    // The lookbehind excludes the helper's own declaration, which a joined part file puts inside a tool body.
+    private static string HelperCallPattern(string helperName) =>
+        $@"(?<!Task<string> )\b{Regex.Escape(helperName)}\(";
+
     /// <summary>
     /// Every collector name a shipped read asks the capability question about, across both SKUs. Exposed so
     /// <see cref="CollectorEngineCapabilityTests.EveryCapturePathEntry_NamesARealCollectorThatIsActuallyGatedSomewhere"/>
@@ -359,9 +363,20 @@ public sealed class EngineCapabilityReadWiringTests
     {
         var wired = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
 
-        foreach (var file in RepoFilesIn(mcpDirectory))
+        /* A partial class split across files (X.cs plus X.*.cs) is one source: a helper in one part is
+           called by a tool in another. X.cs comes first, the rest in ordinal order. */
+        var groups = RepoFilesIn(mcpDirectory)
+            .GroupBy(f => Path.GetFileName(f).Split('.')[0], StringComparer.Ordinal)
+            .OrderBy(g => g.Key, StringComparer.Ordinal);
+
+        foreach (var group in groups)
         {
-            var source = File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal);
+            var parts = group
+                .OrderBy(f => Path.GetFileName(f).Equals(group.Key + ".cs", StringComparison.Ordinal) ? 0 : 1)
+                .ThenBy(f => Path.GetFileName(f), StringComparer.Ordinal)
+                .ToList();
+            var file = string.Join("+", parts.Select(Path.GetFileName));
+            var source = string.Join("\n", parts.Select(f => File.ReadAllText(f).Replace("\r\n", "\n", StringComparison.Ordinal)));
             var consts = CollectorConst.Matches(source)
                 .ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
             var marks = ToolMark.Matches(source);
@@ -390,7 +405,7 @@ public sealed class EngineCapabilityReadWiringTests
                     continue;
                 }
 
-                Assert.True(owner is not null, $"{Path.GetFileName(file)}: a capability call sits outside any MCP tool");
+                Assert.True(owner is not null, $"{file}: a capability call sits outside any MCP tool");
 
                 if (!wired.TryGetValue(owner!.Groups[1].Value, out var collectors))
                 {
@@ -407,7 +422,7 @@ public sealed class EngineCapabilityReadWiringTests
                 var body = source[marks[i].Index..end];
                 foreach (var (helperName, helperCollectors) in viaHelper)
                 {
-                    if (!Regex.IsMatch(body, $@"\b{Regex.Escape(helperName)}\("))
+                    if (!Regex.IsMatch(body, HelperCallPattern(helperName)))
                     {
                         continue;
                     }
@@ -428,9 +443,9 @@ public sealed class EngineCapabilityReadWiringTests
                     Enumerable.Range(0, marks.Count).Any(i =>
                     {
                         var end = i + 1 < marks.Count ? marks[i + 1].Index : source.Length;
-                        return Regex.IsMatch(source[marks[i].Index..end], $@"\b{Regex.Escape(helperName)}\(");
+                        return Regex.IsMatch(source[marks[i].Index..end], HelperCallPattern(helperName));
                     }),
-                    $"{Path.GetFileName(file)}: helper {helperName} asks the capability question but no tool calls it");
+                    $"{file}: helper {helperName} asks the capability question but no tool calls it");
             }
         }
 
@@ -513,6 +528,17 @@ public sealed class EngineCapabilityReadWiringTests
 
         return kinds.Any(kind => editions.Any(edition =>
             CollectorEngineCapability.NotCollectedMessage("probe", edition, kind, collectorName) is not null));
+    }
+
+    /// <summary>get_finops lives in DarlingMcpFinOpsTools.cs and asks its question through a helper in the
+    /// partial DarlingMcpFinOpsTools.HighImpact.cs; the scan reads both parts as one source.</summary>
+    [Fact]
+    public void GetFinOps_IsWiredToQueryStats_AcrossThePartialClass()
+    {
+        var wired = WiredReads(DarlingMcp);
+
+        Assert.True(wired.TryGetValue("get_finops", out var collectors), "get_finops has no wired read");
+        Assert.Equal(new[] { "query_stats" }, collectors!.ToArray());
     }
 
     /// <summary>

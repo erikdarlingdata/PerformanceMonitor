@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -199,7 +200,7 @@ public partial class FinOpsTab
             dbSizes = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId);
             var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);
             var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);
-            data.FreeSpacePct = totalStorageMb > 0 ? totalFreeMb / totalStorageMb * 100m : 100m;
+            data.FreeSpacePct = FinOpsUtilizationFigures.FreeSpacePct(totalStorageMb, totalFreeMb);
         }
 
         UpdateUtilizationSummary(data);
@@ -296,21 +297,16 @@ public partial class FinOpsTab
         SetBar(FinOpsMaxCpuBar, FinOpsMaxCpuFilled, FinOpsMaxCpuEmpty, data.MaxCpuPct);
 
         /* Stolen Memory % = (Total Server Memory - Buffer Pool) / Total Server Memory */
-        var stolenPct = data.TotalMemoryMb > 0
-            ? (double)(data.TotalMemoryMb - data.BufferPoolMb) / data.TotalMemoryMb * 100.0
-            : 0;
+        var stolenPct = FinOpsUtilizationFigures.StolenMemoryPct(data.TotalMemoryMb, data.BufferPoolMb);
         FinOpsMemoryUtilText.Text = $"{stolenPct:N0}%";
         SetBar(FinOpsMemoryUtilBar, FinOpsMemUtilFilled, FinOpsMemUtilEmpty, stolenPct);
 
         /* Buffer Pool % = Buffer Pool / Physical Memory */
-        var bpPct = data.PhysicalMemoryMb > 0
-            ? (double)data.BufferPoolMb / data.PhysicalMemoryMb * 100.0
-            : 0;
+        var bpPct = FinOpsUtilizationFigures.BufferPoolPct(data.BufferPoolMb, data.PhysicalMemoryMb);
 
         /* Physical memory and the buffer pool's share of it come from memory_stats, which on an Azure SQL Database is the
            database's own (its memory limit, from committed_target_kb), not the host's RAM. So both are shown on every
            edition, and only the caption and the verdict's wording change there. */
-        var azureSqlDb = ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition);
         FinOpsMemoryRatioText.Text = $"{bpPct:N0}%";
         SetBar(FinOpsMemoryRatioBar, FinOpsMemRatioFilled, FinOpsMemRatioEmpty, bpPct);
 
@@ -320,20 +316,7 @@ public partial class FinOpsTab
         FinOpsTotalMemoryText.Text = $"{data.TotalMemoryMb:N0} MB";
         FinOpsBufferPoolText.Text = $"{data.BufferPoolMb:N0} MB";
 
-        FinOpsClassificationExplanation.Text = data.ProvisioningStatus switch
-        {
-            "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(data.AvgCpuPct, data.P95CpuPct, bpPct, azureSqlDb),
-            "OVER_PROVISIONED" => ServerHardwareScope.OverProvisionedExplanation(data.AvgCpuPct, data.MaxCpuPct, bpPct, azureSqlDb),
-            /* The reason comes from the same place as the verdict. This branch used to read
-               "P95CpuPct > 85 ? CPU : memory ratio is {x} (threshold: 0.95)", so a server flagged for grant
-               pressure or worker saturation would have been explained as a memory ratio that no longer
-               decides anything, citing a threshold the code does not check (#2246). */
-            "UNDER_PROVISIONED" => ProvisioningVerdict.UnderProvisionedReason(
-                data.P95CpuPct, data.MaxGrantWaiters, data.GrantTimeouts, data.ForcedGrants,
-                data.MaxWorkersCount, data.CurrentWorkersCount),
-            ProvisioningVerdict.NotApplicable => ProvisioningVerdict.NotApplicableExplanation,
-            _ => ""
-        };
+        FinOpsClassificationExplanation.Text = FinOpsUtilizationFigures.Explanation(data.ToDto(), CultureInfo.CurrentCulture);
 
         /* Cost summary cards — shown only when a monthly budget is configured (0 = hidden, like Lite). */
         if (data.MonthlyCost > 0)
