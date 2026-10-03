@@ -72,7 +72,7 @@ public partial class ViewerServerTab
 
         await Task.WhenAll(latchTrendTask, latchSnapshotTask, spinlockTrendTask, spinlockSnapshotTask);
 
-        /* The join is over: free its width before the probes read again, so they are priced against two lanes, not four finished ones. */
+        /* The join is over: free its width before the probes read again, so they are priced against two reads, not four finished ones. */
         readFanOut.Release();
 
         RenderLatchStatsChart(latchTrendTask.Result);
