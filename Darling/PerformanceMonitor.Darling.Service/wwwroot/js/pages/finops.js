@@ -178,6 +178,8 @@ export function renderFinops(main, server, tabId, opts) {
     if (generation !== renderGeneration) return;
     const body = main.querySelector(".finops-body");
     const show = (node) => {
+      /* A failed or empty re-read on a poll says nothing about the painted page: keep it and the cache. */
+      if (hadCache) return;
       lastRows = null;
       if (body) mount(body, node);
     };

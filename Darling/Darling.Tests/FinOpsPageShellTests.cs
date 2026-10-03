@@ -50,6 +50,13 @@ public sealed class FinOpsPageShellTests
     private static string TabFile(string id) => Js("pages", "finops", id + ".js");
 
     [Fact]
+    public void RenderFinops_AFailedOrEmptyRereadOnAPollNeverMountsOverThePaintedTab()
+    {
+        var js = Js("pages", "finops.js").ReplaceLineEndings("\n");
+        Assert.Contains("    const show = (node) => {\n      /* A failed or empty re-read on a poll says nothing about the painted page: keep it and the cache. */\n      if (hadCache) return;\n      lastRows = null;\n", js);
+    }
+
+    [Fact]
     public void IndexHtml_HasTheFinOpsNavEntry()
     {
         var html = ReadRepoFileLf(Wwwroot.Concat(new[] { "index.html" }).ToArray());
