@@ -1909,13 +1909,21 @@
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Margin="8,4,0,4" FontSize="11"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
                                        TextWrapping="Wrap"
                                        Text="The engine's own automatic plan correction findings — sys.dm_db_tuning_recommendations, with the regressed query's text resolved through Query Store at collection time. The engine keeps recommendations only until it restarts, so a captured row can be the only surviving record that a regression happened. Per-database enablement state is on the Configuration tab's Automatic Tuning sub-tab."/>
-                            <DataGrid Grid.Row="1" x:Name="PlanCorrectionGrid" Style="{StaticResource DarkGrid}"
+                            <!-- "Showing since <start>" when this server's plan corrections start after the range does, or the newest
+                                 200 rows (the read's cap) reach back no further than the row named: the earlier of the collector's
+                                 coverage (DataWindowFloor) and the earliest row shown, or the oldest row of a full page (#4966). -->
+                            <TextBlock Grid.Row="1" x:Name="PlanCorrectionsTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <DataGrid Grid.Row="2" x:Name="PlanCorrectionGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime">

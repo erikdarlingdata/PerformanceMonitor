@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -337,8 +338,14 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadPlanCorrectionsAsync(DateTime startUtc, DateTime endUtc)
     {
+        var dataStartTask = _dataService.GetPlanCorrectionsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var rows = await _dataService.GetPlanCorrectionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _planCorrectionFilterMgr!.UpdateData(rows);
+        /* #4966: the read keeps the newest 200 rows, and the collector re-captures every open recommendation on each cycle, so a
+           few recommendations fill the page within hours and a wide range is answered from its newest hours. A full page names its
+           oldest row, over a range the store covers too; a read under the cap names the earlier of the coverage start and the
+           earliest row shown. The rows window on collection_time, the column they show, so there is no earlier event time to name. */
+        await ShowEventDataStartAsync(PlanCorrectionsTruncationBanner, dataStartTask, "Plan Corrections", startUtc, rows.Select(r => (DateTime?)r.CollectionTime), ViewerDataService.PlanCorrectionsRowCap);
         SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
     }
 
