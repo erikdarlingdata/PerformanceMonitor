@@ -37,6 +37,11 @@ public sealed class ViewerProbeWatchCensusTests
         @"(?:\bvar|\bTask\s*<\s*DateTime\s*\?\s*>)\s+(\w+)\s*=\s*[^;]*?\.Get\w*(?:DataStart|WindowFloor)Async\(",
         RegexOptions.Compiled);
 
+    /* "await DataStartOrNullAsync(" and its two siblings: removed from a line before the line is judged a read await. */
+    private static readonly Regex CatchingProbeAwait = new(
+        @"await\s+(?:DataStartOrNullAsync|DataStartAnswerAsync|ShowEventDataStartAsync)\(",
+        RegexOptions.Compiled);
+
     private static string ViewerDir()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -67,8 +72,24 @@ public sealed class ViewerProbeWatchCensusTests
                     /* The first await after this probe starts. If it is the helper, the read is watched. If it names the probe, the probe is
                        awaited first (the banner step) and no read stood in front of it. Otherwise a read is awaited bare. */
                     var after = body[(probe.Index + probe.Length)..];
-                    var awaitLine = after.Split('\n').FirstOrDefault(l => l.Contains("await ", StringComparison.Ordinal));
-                    if (awaitLine is null) continue;
+                    /* The catching probe helpers (DataStartOrNullAsync, DataStartAnswerAsync, ShowEventDataStartAsync) swallow every failure, so
+                       awaiting one is a probe await, not a read. One that names this probe ends the scan; one for another probe is skipped. */
+                    string? awaitLine = null;
+                    var probeAwaited = false;
+                    foreach (var line in after.Split('\n'))
+                    {
+                        if (!line.Contains("await ", StringComparison.Ordinal)) continue;
+                        var rest = CatchingProbeAwait.Replace(line, "");
+                        if (rest.Length != line.Length && Regex.IsMatch(line, @"\b" + name + @"\b") && !rest.Contains("await ", StringComparison.Ordinal))
+                        {
+                            probeAwaited = true;
+                            break;
+                        }
+                        if (!rest.Contains("await ", StringComparison.Ordinal)) continue;
+                        awaitLine = rest;
+                        break;
+                    }
+                    if (probeAwaited || awaitLine is null) continue;
                     var watched = awaitLine.Contains("AwaitReadWatchingProbeAsync", StringComparison.Ordinal);
                     if (!watched && Regex.IsMatch(awaitLine, @"\b" + name + @"\b")) continue;
                     sites++;
@@ -126,5 +147,13 @@ public sealed class ViewerProbeWatchCensusTests
         Assert.Equal(new[] { "T.cs::LoadWAsync" }, Scan(new[] { ("T.cs", Commented) }).Offenders);
         const string TwoProbes = "public partial class T\n{\n    private async Task LoadVAsync()\n    {\n        var aTask = _d.GetADataStartAsync(1);\n        var rA = _d.GetAAsync(1);\n        await AwaitReadWatchingProbeAsync(rA, aTask, \"A\");\n        var bTask = _d.GetBWindowFloorAsync(1);\n        var rows = await _d.GetBAsync(1);\n    }\n}\n";
         Assert.Equal(new[] { "T.cs::LoadVAsync" }, Scan(new[] { ("T.cs", TwoProbes) }).Offenders);
+
+        /* The catching probe helpers swallow every failure, so awaiting them after a probe starts is not a bare read. */
+        const string TwoCatching = "public partial class T\n{\n    private async Task LoadUAsync()\n    {\n        var aTask = _d.GetADataStartAsync(1);\n        var bTask = _d.GetBDataStartAsync(1);\n        var latchStart = await DataStartOrNullAsync(aTask, \"A\");\n        var spinStart = await DataStartOrNullAsync(bTask, \"B\");\n    }\n}\n";
+        const string BannerForm = "public partial class T\n{\n    private async Task LoadTAsync()\n    {\n        var aTask = _d.GetADataStartAsync(1);\n        var bTask = _d.GetBWindowFloorAsync(1);\n        UpdateTruncationBanner(ABanner, await DataStartOrNullAsync(bTask, \"B\"), s);\n        UpdateTruncationBanner(BBanner, await DataStartOrNullAsync(aTask, \"A\"), s);\n    }\n}\n";
+        const string CatchingThenBare = "public partial class T\n{\n    private async Task LoadSAsync()\n    {\n        var aTask = _d.GetADataStartAsync(1);\n        var bTask = _d.GetBDataStartAsync(1);\n        var x = await DataStartOrNullAsync(bTask, \"B\");\n        var rows = await _d.GetAAsync(1);\n    }\n}\n";
+        Assert.Empty(Scan(new[] { ("T.cs", TwoCatching) }).Offenders);
+        Assert.Empty(Scan(new[] { ("T.cs", BannerForm) }).Offenders);
+        Assert.Equal(new[] { "T.cs::LoadSAsync" }, Scan(new[] { ("T.cs", CatchingThenBare) }).Offenders);
     }
 }
