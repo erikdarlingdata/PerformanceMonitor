@@ -495,6 +495,7 @@ public sealed class PostgresEngineGateBehaviorTests
         SetField(worker, "_serversLock", new object());
         SetField(worker, "_logger", NullLogger<DarlingWorker>.Instance);
         SetField(worker, "_postgres", postgres);
+        SetField(worker, "_collectorFaultStacks", new CollectorFaultStackLog());
         /* The analysis pass reads the published registry for an Azure master target's separately monitored
            databases. Unpublished, it reads as none, as it does before the worker first publishes. */
         SetField(worker, "_registryState", new PerformanceMonitor.Darling.Service.Mcp.MonitoredServerRegistryState());
