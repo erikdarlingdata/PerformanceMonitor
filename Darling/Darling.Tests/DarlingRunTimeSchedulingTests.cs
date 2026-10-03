@@ -219,7 +219,7 @@ public sealed class DarlingRunTimeSchedulingTests
         var runAt = RunTimeTwelveHoursAway();
         var worker = MakeWorker(FleetRunTime(Collector, runAt));
         var started = 0;
-        worker.RunOneBodyOverride = (_, _, _) =>
+        worker.RunOneBodyOverride = (_, _, _, _) =>
         {
             Interlocked.Increment(ref started);
             return Task.FromResult(1);
@@ -244,7 +244,7 @@ public sealed class DarlingRunTimeSchedulingTests
         var runAt = RunTimeTwelveHoursAway();
         var worker = MakeWorker(FleetRunTime(Collector, runAt));
         var started = 0;
-        worker.RunOneBodyOverride = (_, _, _) =>
+        worker.RunOneBodyOverride = (_, _, _, _) =>
         {
             Interlocked.Increment(ref started);
             return Task.FromResult(1);
@@ -268,7 +268,7 @@ public sealed class DarlingRunTimeSchedulingTests
         var runAt = RunTimeTwelveHoursAway();
         var worker = MakeWorker(FleetRunTime(Collector, runAt));
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        worker.RunOneBodyOverride = (_, _, _) =>
+        worker.RunOneBodyOverride = (_, _, _, _) =>
         {
             started.TrySetResult();
             return Task.FromResult(1);
