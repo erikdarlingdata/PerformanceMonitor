@@ -377,6 +377,103 @@ public sealed class DailyCollectorDetachTests
         Assert.Equal(120, server.SweepPeerMaxMs);
     }
 
+    private static async Task<(int CollectorsRun, List<(string Collector, string Reason)> Skipped)> ReadSnapshotAsync(Task<CommandOutcome> snapshot)
+    {
+        var outcome = await snapshot;
+        Assert.True(outcome.Success);
+        using var json = System.Text.Json.JsonDocument.Parse(outcome.ResultJson!);
+        var skipped = new List<(string, string)>();
+        if (json.RootElement.TryGetProperty("skipped", out var list))
+        {
+            foreach (var item in list.EnumerateArray())
+            {
+                skipped.Add((item.GetProperty("collector").GetString()!, item.GetProperty("reason").GetString()!));
+            }
+        }
+
+        return (json.RootElement.GetProperty("collectorsRun").GetInt32(), skipped);
+    }
+
+    /// <summary>
+    /// #4999: snapshot_now takes the same single-flight slot a scheduled daily run holds. While that run is going
+    /// the snapshot leaves the collector out and says its scheduled run is still going, instead of running it a
+    /// second time beside the first. The snapshot's other collectors still run, and it still ends.
+    /// </summary>
+    [Fact]
+    public async Task ASnapshot_SkipsADailyCollector_WhoseScheduledRunIsStillGoing_AndSaysSo()
+    {
+        var worker = MakeWorker(new RecordingLogger());
+        var runs = new FakeRuns(worker);
+        var server = MakeServer(4501, Daily);
+        var ct = TestContext.Current.CancellationToken;
+
+        var scheduledPass = worker.RunDueCollectorsAsync(server, null!, ct);
+        Task<CommandOutcome>? snapshot = null;
+        try
+        {
+            Assert.True(await EndsWithinAsync(scheduledPass, Patience));
+            Assert.True(await BecomesTrueAsync(() => runs.Started(Daily) == 1, Patience), "the scheduled daily run is going");
+
+            snapshot = worker.RunSnapshotAsync([server], null!, server.Config.ServerId, ct);
+            Assert.True(
+                await EndsWithinAsync(snapshot, Patience),
+                "the snapshot must skip the collector whose scheduled run holds the slot, not run it a second time and wait on it");
+
+            var (collectorsRun, skipped) = await ReadSnapshotAsync(snapshot);
+            Assert.Equal(1, runs.Started(Daily));
+            Assert.True(collectorsRun > 0, "the snapshot's other collectors still run");
+            var only = Assert.Single(skipped);
+            Assert.Equal(Daily, only.Collector);
+            Assert.Contains("scheduled", only.Reason, StringComparison.Ordinal);
+            Assert.Contains("still going", only.Reason, StringComparison.Ordinal);
+        }
+        finally
+        {
+            runs.ReleaseAll();
+            await EndsWithinAsync(scheduledPass, Patience);
+            if (snapshot is not null)
+            {
+                await EndsWithinAsync(snapshot, Patience);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #4999: with the slot free the snapshot runs the daily collector inline (the snapshot waits for it), holds
+    /// the slot for that run, and gives it back after: the next scheduled run is not skipped by a snapshot that
+    /// is over.
+    /// </summary>
+    [Fact]
+    public async Task ASnapshot_RunsADailyCollectorInline_HoldingTheSlotOnlyForThatRun()
+    {
+        var worker = MakeWorker(new RecordingLogger());
+        var runs = new FakeRuns(worker);
+        var server = MakeServer(4601);
+        var ct = TestContext.Current.CancellationToken;
+
+        var snapshot = worker.RunSnapshotAsync([server], null!, server.Config.ServerId, ct);
+        try
+        {
+            Assert.True(await BecomesTrueAsync(() => runs.Started(Daily) == 1, Patience), "the snapshot runs the daily collector");
+            Assert.False(snapshot.IsCompleted, "the daily run is inline: the snapshot waits for it");
+
+            runs.ReleaseAll();
+            Assert.True(await EndsWithinAsync(snapshot, Patience));
+            var (_, skipped) = await ReadSnapshotAsync(snapshot);
+            Assert.Empty(skipped);
+
+            /* The slot is free again: a scheduled run of the same collector starts. */
+            MarkDue(server, Daily);
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(await BecomesTrueAsync(() => runs.Started(Daily) == 2, Patience), "the slot was released after the snapshot's run");
+        }
+        finally
+        {
+            runs.ReleaseAll();
+            await EndsWithinAsync(snapshot, Patience);
+        }
+    }
+
     /// <summary>
     /// The run reaches the mark only through the rule above: the one call in the run, and the one place that
     /// writes the high-water mark. A write inline in the run would bypass the rule and read as correct in every

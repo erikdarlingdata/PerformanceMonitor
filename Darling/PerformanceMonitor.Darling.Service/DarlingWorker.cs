@@ -11466,7 +11466,7 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// <see cref="ServerLoopState.CollectionGate"/> so the two never double-collect. Waits its turn for the
     /// gate (unlike the main loop, which skips) because an explicit operator snapshot should not be dropped.
     /// </summary>
-    private async Task<CommandOutcome> RunSnapshotAsync(
+    internal async Task<CommandOutcome> RunSnapshotAsync(
         List<ServerLoopState> servers, DarlingCollectorRunner runner, int serverId, CancellationToken cancellationToken)
     {
         ServerLoopState? server;
@@ -11500,6 +11500,7 @@ AND   j.hypertable_name = '{relation}'", connection))
 
             var collectorsRun = 0;
             var totalRows = 0;
+            var skippedDaily = new List<string>();
             foreach (var name in CollectorScheduleDefaults.All.Keys)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -11525,8 +11526,34 @@ AND   j.hypertable_name = '{relation}'", connection))
                     continue;
                 }
 
+                /* #4999: a daily collector's scheduled run is detached and holds its (server, collector) slot until it
+                   ends, which can be hours (it may still be waiting for one of the fleet's permits). An operator
+                   snapshot of the same collector would run it a second time beside that run, so the snapshot takes
+                   the same slot: held means the scheduled run is still going, and the snapshot leaves that
+                   collector out and says so. Free means the snapshot runs it inline, as before, holds the slot for
+                   that run only, and gives it back after, so a snapshot that is over never makes the next scheduled
+                   run skip. The three collectors detached by name take their own slot inside RunOneAsync. */
+                IDisposable? snapshotSlot = DetachedCollectorGate.NotGated;
+                if (RunsDetached(name, CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes))
+                    && !IsDetachedByName(name))
+                {
+                    snapshotSlot = _detachedCollectorGates.GetOrAdd((runtime.ServerId, name), static _ => new DetachedCollectorGate()).TryAcquire();
+                    if (snapshotSlot is null)
+                    {
+                        skippedDaily.Add(name);
+                        _logger.LogInformation(
+                            "  [{Server}] snapshot_now skipped {Collector}: its scheduled daily run is still going (#4999)",
+                            server.Config.DisplayName, name);
+                        continue;
+                    }
+                }
+
                 /* null for the same reason as the on-load loop: an operator snapshot is not a body. */
-                totalRows += await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
+                using (snapshotSlot)
+                {
+                    totalRows += await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
+                }
+
                 collectorsRun++;
             }
 
@@ -11538,8 +11565,19 @@ AND   j.hypertable_name = '{relation}'", connection))
                 server = server.Config.DisplayName,
                 collectorsRun,
                 rows = totalRows,
+                /* #4999: the collectors the snapshot left out because their scheduled daily run is still going. */
+                skipped = skippedDaily.Select(collector => new
+                {
+                    collector,
+                    reason = "its scheduled daily run is still going",
+                }).ToList(),
             });
-            return new CommandOutcome(true, "snapshot complete", json);
+            return new CommandOutcome(
+                true,
+                skippedDaily.Count == 0
+                    ? "snapshot complete"
+                    : $"snapshot complete; {skippedDaily.Count} collector(s) skipped because their scheduled daily run is still going",
+                json);
         }
         finally
         {
