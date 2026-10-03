@@ -5727,8 +5727,9 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         public const int Success = 0;
 
         /// <summary>Bad arguments, a config that is missing or invalid, a connection string that cannot be used, a
-        /// managed store's credential that is not stored or cannot be read, an unknown collector, or a
-        /// <c>--server</c> that names no server or more than one.</summary>
+        /// managed store's credential that is not stored or cannot be read, an unknown collector, a
+        /// <c>--server</c> that names no server or more than one, or (<c>--set-collector-run-at</c> only) a store that has not
+        /// been upgraded to the run-time column yet.</summary>
         public const int UsageOrConfig = 1;
 
         /// <summary>The store cannot be reached, or it refuses the write (or the read-back after it).</summary>
@@ -6170,7 +6171,9 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     /// is the remedy that refusal names.</para>
     ///
     /// <para>Exit codes are <see cref="CollectorToggleExitCode"/>'s: 0 when the row was written and read back; 1 on an argument, config,
-    /// time, interval, credential or server-resolution problem; 2 when the store cannot be reached or refuses the change.</para>
+    /// time, interval, credential or server-resolution problem, or when the store has not been upgraded to the run-time column yet
+    /// (<see cref="RunTimeColumnMissingMessage"/>: nothing is written, and the service migrates the store when it starts); 2 when the
+    /// store cannot be reached or refuses the change for any other reason.</para>
     /// </summary>
     /// <param name="rest">The arguments AFTER the verb itself.</param>
     public static async Task<int> SetCollectorRunAtAsync(
@@ -6245,6 +6248,17 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         {
             await DarlingCommandExecutor.ExecuteStoreWriteAsync(dataSource, plan, cancellationToken);
         }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)
+        {
+            /* The plan names the run-time column and no other column a store can lack, so an undefined column here is a store
+               the service has not migrated to it yet, and the one statement wrote nothing. The toggle verbs read such a store
+               back without the column; this verb cannot write without it, so it says why in plain words and exits with the
+               code of its other refusals of a store that is not ready. The state code, not the message text, is what is
+               matched: lc_messages is not always English. */
+            error.WriteLine(RunTimeColumnMissingMessage(Verb));
+            error.WriteLine("Nothing was changed.");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             error.WriteLine($"Could not update the control-plane store: {ex.Message}");
@@ -6262,6 +6276,11 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
         return await PrintCollectorScheduleReadbackAsync(dataSource, collectorName, output, error, cancellationToken);
     }
+
+    /// <summary>What <c>--set-collector-run-at</c> says on a store that has no run-time column yet (<paramref name="verb"/> is the
+    /// verb as typed). Plain words, no store error text. Pure, so the sentence pins.</summary>
+    internal static string RunTimeColumnMissingMessage(string verb) =>
+        $"The store has not been upgraded to the run-time column yet. Start the service once to migrate it, then run {verb} again.";
 
     /// <summary>Exit codes <see cref="DropXeSessionsAsync(string[], TextWriter, TextWriter, CancellationToken)"/> returns for
     /// <c>--drop-xe-sessions</c> (#4732), in the two-failure-kind shape <see cref="CollectorToggleExitCode"/> uses, so a script

@@ -849,7 +849,7 @@ The verb refuses a time that is not a 24-hour `HH:MM` time. It also refuses a ti
 
 After the write the verb reads the collector's rows back from the store and prints them. A row that carries a time prints `run_at=02:00 server time`, so what you see is what the service will resolve. The exit codes, `--config` and the managed-mode rule are those of `--enable-collector`.
 
-The write needs the run-time column, which the service adds when it starts. On a store the service has not migrated yet, the store refuses the write (exit `2`). `--enable-collector` and `--disable-collector` read back without the `run_at=` part instead of failing.
+The write needs the run-time column, which the service adds when it starts. On a store the service has not migrated yet, the verb says so, tells you to start the service once to migrate it and run the command again, exits `1` and changes nothing. `--enable-collector` and `--disable-collector` read back without the `run_at=` part instead of failing.
 
 ### Drop the Extended Events sessions a removed server left behind (`--drop-xe-sessions`)
 

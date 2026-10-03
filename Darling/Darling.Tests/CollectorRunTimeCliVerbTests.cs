@@ -628,4 +628,48 @@ public sealed class CollectorRunTimeCliVerbLiveTests
             await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, async (_, _) => { });
         }
     }
+
+    /// <summary>A store the service has not migrated to the run-time column yet cannot take a run time. The verb refuses with a
+    /// plain message that says to start the service once, instead of the store's raw "column does not exist" error; it exits
+    /// <c>1</c> like its other refusals, not the store-unavailable <c>2</c>; and nothing is written. The time, <c>none</c> and
+    /// <c>default</c> each reach the store through their own statement, so each is held to it.</summary>
+    [Theory]
+    [InlineData("04:30", null)]
+    [InlineData("none", "sql01")]
+    [InlineData("default", null)]
+    public async Task OnAStoreWithoutTheRunTimeColumn_TheVerbRefusesWithAPlainMessage_ExitsOne_AndWritesNothing(string runAt, string? server)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(rig.Connection, "ALTER TABLE config.config_collector_schedules DROP COLUMN run_at_minute", ct);
+            var before = Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT COUNT(*) FROM config.config_collector_schedules", ct));
+
+            var args = server is null ? new[] { Daily, runAt } : new[] { Daily, runAt, "--server", server };
+            var (exit, output, error) = await RunAsync(rig, ct, args);
+
+            Assert.Equal(DarlingCliCommands.CollectorToggleExitCode.UsageOrConfig, exit);
+            Assert.Contains("has not been upgraded to the run-time column yet", error, StringComparison.Ordinal);
+            Assert.Contains("Start the service once to migrate it, then run --set-collector-run-at again.", error, StringComparison.Ordinal);
+            Assert.Contains("Nothing was changed.", error, StringComparison.Ordinal);
+
+            /* The store's own error, with the column's name in it, is not what the operator is shown. */
+            Assert.DoesNotContain("run_at_minute", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("Could not update the control-plane store", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("[SET]", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("[CLEARED]", output, StringComparison.Ordinal);
+
+            Assert.Equal(before, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT COUNT(*) FROM config.config_collector_schedules", ct)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
 }
