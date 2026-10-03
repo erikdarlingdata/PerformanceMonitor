@@ -69,6 +69,10 @@ public partial class ViewerServerTab
         var caveatsTask = _dataService.GetCollectionCaveatsAsync(_server.ServerId);
         await Task.WhenAll(healthTask, logTask, caveatsTask);
 
+        /* The three reads are done: end the declared width here, before the data-start note below awaits its probe (#4966), so that
+           await is not priced against contention that has already finished. */
+        readFanOut.Release();
+
         _collectionHealthFilterMgr!.UpdateData(healthTask.Result);
         _collectionLogFilterMgr!.UpdateData(logTask.Result);
         /* #4966: the grid says where the log starts when the range reaches before it. The read keeps the newest CollectionLogRowCap
