@@ -13,6 +13,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -23,7 +24,8 @@ namespace Darling.Tests;
 /// <c>node --check</c> only parses, so nothing else catches that. Two checks guard it, and they catch different things.
 /// The Node load imports every file under wwwroot/js (each one separately, app.js included) with a stubbed DOM; it
 /// catches a link-time missing export (<c>import { X }</c> from a module that does not export X, a SyntaxError) and an
-/// unimported name used AT TOP LEVEL while the module loads. It does NOT catch an unimported name used only inside a
+/// unimported name used AT TOP LEVEL while the module loads, and (after the imports, the harness drains the event loop)
+/// an error thrown or rejected in async work a module starts, such as app.js's un-awaited start() calls. It does NOT catch an unimported name used only inside a
 /// function body, because that throws only when the function runs. The source pin catches that case: it reads every
 /// module's <c>export</c> lines and flags a module that uses an exported name it neither imports nor declares. The Node
 /// load is skipped when Node is not installed; the source pin still guards a runner without Node.
@@ -52,15 +54,22 @@ public sealed class WebModuleLoadTests
 
         using (proc)
         {
-            var error = proc.StandardError.ReadToEndAsync();
-            var output = proc.StandardOutput.ReadToEnd();
-            if (!proc.WaitForExit(30000))
+            var errorTask = proc.StandardError.ReadToEndAsync();
+            var outputTask = proc.StandardOutput.ReadToEndAsync();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            try
+            {
+                await proc.WaitForExitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException) when (!TestContext.Current.CancellationToken.IsCancellationRequested)
             {
                 proc.Kill(entireProcessTree: true);
                 Assert.Fail("the module load script did not finish in 30 s");
             }
 
-            Assert.True(proc.ExitCode == 0, "a web module failed to load: " + await error);
+            var output = await outputTask;
+            Assert.True(proc.ExitCode == 0, "a web module failed to load or left an async error unhandled: " + await errorTask);
             Assert.Contains("loaded app.js", output);
             Assert.Contains("loaded pages/finops/utilization.js", output);
             Assert.Equal(AllModules().Length, Regex.Matches(output, @"(?m)^loaded (?!\d+ modules)").Count);
@@ -78,8 +87,27 @@ public sealed class WebModuleLoadTests
             var src = File.ReadAllText(file).ReplaceLineEndings("\n");
             foreach (Match m in Regex.Matches(src, @"(?m)^export\s+(?:async\s+)?(?:function\*?|const|let|class)\s+([A-Za-z_$][\w$]*)"))
                 names.Add(m.Groups[1].Value);
+            foreach (var n in ExportListNames(src))
+                names.Add(n);
         }
         return names;
+    }
+
+    /// <summary>Names exported by a local <c>export { a, b as c };</c> list (a re-export with <c>from</c> is not one).</summary>
+    internal static List<string> ExportListNames(string source)
+    {
+        var names = new List<string>();
+        foreach (Match m in Regex.Matches(source.ReplaceLineEndings("\n"), @"(?m)^export\s*\{([^}]*)\}\s*;?[ \t]*(?!\s*from\b)$"))
+            foreach (var part in m.Groups[1].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                names.Add(part.Split(" as ", StringSplitOptions.None).Last().Trim());
+        return names;
+    }
+
+    [Fact]
+    public void TheExportReaderSeesAnExportListAndNotAReExport()
+    {
+        Assert.Equal(new[] { "a", "c" }, ExportListNames("const a = 1;\nexport { a, b as c };\n"));
+        Assert.Empty(ExportListNames("export { x } from \"./y.js\";\n"));
     }
 
     private static string StripCommentsAndStrings(string body)
@@ -90,20 +118,28 @@ public sealed class WebModuleLoadTests
         return Regex.Replace(body, "'(?:[^'\\\\\\n]|\\\\.)*'", "''");
     }
 
-    /// <summary>The identifiers a module uses that a shared module exports but its import lines do not name.</summary>
-    internal static List<string> UnimportedSharedNames(string source, HashSet<string> exports)
+    private static HashSet<string> ImportedNames(string source)
     {
-        source = source.ReplaceLineEndings("\n");
         var imported = new HashSet<string>(StringComparer.Ordinal);
         foreach (Match m in Regex.Matches(source, @"(?m)^import\s*\{([^}]*)\}\s*from\s*""[^""]+"";"))
             foreach (var part in m.Groups[1].Value.Split(','))
                 imported.Add(part.Trim().Split(" as ", StringSplitOptions.None).Last().Trim());
+        return imported;
+    }
+
+    /// <summary>The code of a module with its re-exports, comments, strings and object-literal keys neutralized.</summary>
+    private static string CodeBody(string source)
+    {
         // A re-export (export { x } from "...") forwards a name without using it, so it is not a use.
         var body = StripCommentsAndStrings(Regex.Replace(source, @"(?m)^(?:import|export)\s*\{[^}]*\}\s*from\s*""[^""]+"";", ""));
         // An object-literal key (`{ tab: x }`) names a property, not the shared binding.
-        body = Regex.Replace(body, @"(?<=[{,]\s*)[A-Za-z_$][\w$]*(?=\s*:)", "_key");
-        // A name the module declares itself is its own, not the shared one: declarations, function parameters,
-        // arrow parameters, catch bindings and destructuring all bind a local.
+        return Regex.Replace(body, @"(?<=[{,]\s*)[A-Za-z_$][\w$]*(?=\s*:)", "_key");
+    }
+
+    /// <summary>Names a module binds locally: declarations, function parameters, arrow parameters, catch bindings and
+    /// destructuring all bind a local.</summary>
+    private static HashSet<string> LocalBindings(string body)
+    {
         var declared = new HashSet<string>(
             Regex.Matches(body, @"\b(?:function\*?|const|let|var|class)\s+([A-Za-z_$][\w$]*)").Select(m => m.Groups[1].Value),
             StringComparer.Ordinal);
@@ -111,10 +147,50 @@ public sealed class WebModuleLoadTests
             for (var g = 1; g <= 5; g++)
                 foreach (Match id in Regex.Matches(m.Groups[g].Value, @"[A-Za-z_$][\w$]*"))
                     declared.Add(id.Value);
+        return declared;
+    }
+
+    /// <summary>Names a module both imports and binds locally. The pin treats a locally bound name as the module's own,
+    /// so such a name would silently switch the pin off for that import; it has to be empty.</summary>
+    internal static List<string> ImportedNamesAlsoBoundLocally(string source) =>
+        ImportedNames(source.ReplaceLineEndings("\n"))
+            .Where(n => LocalBindings(CodeBody(source.ReplaceLineEndings("\n"))).Contains(n))
+            .OrderBy(n => n, StringComparer.Ordinal).ToList();
+
+    /// <summary>The identifiers a module uses that a shared module exports but its import lines do not name.</summary>
+    internal static List<string> UnimportedSharedNames(string source, HashSet<string> exports)
+    {
+        source = source.ReplaceLineEndings("\n");
+        var imported = ImportedNames(source);
+        var body = CodeBody(source);
+        var declared = LocalBindings(body);
         return exports
             .Where(n => !imported.Contains(n) && !declared.Contains(n)
                 && Regex.IsMatch(body, @"(?<![\w$.])" + Regex.Escape(n) + @"(?![\w$])"))
             .OrderBy(n => n, StringComparer.Ordinal).ToList();
+    }
+
+    [Fact]
+    public void NoWebModuleBindsLocallyANameItImports()
+    {
+        var root = PathTo(JsRoot);
+        foreach (var file in AllModules())
+        {
+            var both = ImportedNamesAlsoBoundLocally(File.ReadAllText(file));
+            Assert.True(both.Count == 0, Path.GetRelativePath(root, file) + " imports and also binds locally: " + string.Join(", ", both)
+                + " (the source pin would treat the name as the module's own and stop checking it)");
+        }
+    }
+
+    [Fact]
+    public void ThePinFailsWhenAModuleImportsANameAndAlsoBindsItAsAParameter()
+    {
+        const string collides = "import { field } from \"./util.js\";\nexport function f(field) { return field; }\n";
+        Assert.Equal(new[] { "field" }, ImportedNamesAlsoBoundLocally(collides));
+        const string clean = "import { field } from \"./util.js\";\nexport function f(x) { return field(x); }\n";
+        Assert.Empty(ImportedNamesAlsoBoundLocally(clean));
+        // A name that is NOT imported and is bound locally is the module's own, and stays out of the report.
+        Assert.Empty(ImportedNamesAlsoBoundLocally("export function f(field) { return field; }\n"));
     }
 
     [Fact]

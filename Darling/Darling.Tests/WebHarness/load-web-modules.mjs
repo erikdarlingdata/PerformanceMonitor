@@ -5,6 +5,12 @@ import { pathToFileURL } from "node:url";
    stubbed DOM and fetch. Catches a link-time missing export and an unimported name used at module top level.
    A name used only inside a function body does not throw here; the source pin in WebModuleLoadTests covers that.
    Every stub is inert: no timer fires, no request leaves, no listener runs. */
+const problems = [];
+let loading = "(none)";
+const record = (kind, e) => problems.push(kind + " after " + loading + ": " + (e && e.stack ? e.stack.split("\n").slice(0, 3).join(" | ") : String(e)));
+process.on("unhandledRejection", (e) => record("unhandled rejection", e));
+process.on("uncaughtException", (e) => record("uncaught exception", e));
+
 const noop = () => {};
 const node = () => ({
   style: {}, classList: { add: noop, remove: noop, toggle: noop, contains: () => false }, appendChild: noop, append: noop,
@@ -16,6 +22,7 @@ globalThis.document = {
   getElementById: node, querySelector: () => null, querySelectorAll: () => [], addEventListener: noop,
   removeEventListener: noop, body: node(), documentElement: node(), cookie: "", hidden: false,
 };
+globalThis.Node = class {};
 globalThis.window = globalThis;
 globalThis.location = { hash: "", pathname: "/", search: "", href: "http://localhost/", origin: "http://localhost" };
 globalThis.history = { pushState: noop, replaceState: noop, back: noop };
@@ -49,6 +56,7 @@ let count = 0;
 for (const f of files) {
   const name = f.slice(root.length + 1);
   let m;
+  loading = name;
   try {
     m = await import(pathToFileURL(f).href);
   } catch (e) {
@@ -66,6 +74,17 @@ for (const f of files) {
   }
   console.log("loaded " + name);
   count++;
+}
+// Work the modules start (app.js start() does not await refreshSidebar or route) settles over several turns, because
+// the fetch stub resolves asynchronously. Drain until three consecutive turns record nothing new (capped).
+for (let quiet = 0, turns = 0; quiet < 3 && turns < 50; turns++) {
+  const before = problems.length;
+  await new Promise((r) => setImmediate(r));
+  quiet = problems.length === before ? quiet + 1 : 0;
+}
+if (problems.length > 0) {
+  for (const p of problems) console.error(p);
+  process.exit(1);
 }
 console.log("loaded " + count + " modules");
 process.exit(0);
