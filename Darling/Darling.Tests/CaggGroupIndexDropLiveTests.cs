@@ -345,18 +345,19 @@ public sealed class CaggGroupIndexDropLiveTests
 
         if (simulatedVersion < CollectorRunTimeRungTests.RungVersion)
         {
-            /* V160 (#4938) - the collector run time; the column is the probe's sentinel (its CHECK goes with it). */
+            /* V160 (#4938) - the collector run time, in a table of its own; the table is the probe's sentinel. */
             await using var dropRunAt = new NpgsqlCommand(
-                "ALTER TABLE config.config_collector_schedules DROP COLUMN IF EXISTS run_at_minute", connection);
+                "DROP TABLE IF EXISTS config.config_collector_run_times", connection);
             await dropRunAt.ExecuteNonQueryAsync(ct);
         }
 
         if (simulatedVersion < InstallIdTableOidRungTests.RungVersion)
         {
-            /* V159 (#4961) - the install id table's own OID; the column is the probe's sentinel. IF EXISTS on the table,
-               because a store simulated below the install id's own rung has had the table dropped already. */
+            /* V159 (#4961) - the install id table's own OID and the server's major version, which arrive in the one
+               statement; the OID's column is the probe's sentinel. IF EXISTS on the table, because a store simulated below
+               the install id's own rung has had the table dropped already. */
             await using var dropTableOid = new NpgsqlCommand(
-                "ALTER TABLE IF EXISTS config.config_install_id DROP COLUMN IF EXISTS table_oid", connection);
+                "ALTER TABLE IF EXISTS config.config_install_id DROP COLUMN IF EXISTS table_oid, DROP COLUMN IF EXISTS server_major", connection);
             await dropTableOid.ExecuteNonQueryAsync(ct);
         }
 

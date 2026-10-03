@@ -208,6 +208,77 @@ public sealed class InstallIdStoreTests : IDisposable
     }
 
     /// <summary>
+    /// Two processes replace the same bad file at the same moment and must end on one id. The two stores here share the
+    /// process-wide resolve lock, so they take turns; the second finds the first's file and keeps its id. One Warning in
+    /// total, and one file left behind.
+    /// </summary>
+    [Fact]
+    public void TwoReplacersOfOneBadFile_EndWithTheSameId_AndOneWarning()
+    {
+        var dir = NewDir();
+        WriteFile(dir, "NOT-AN-ID", MachineA, SidA);
+        AppLogger.DrainBufferedLines();
+
+        var ids = ResolveTogether(new[] { StoreFor(dir), StoreFor(dir) });
+        var warnings = Warnings(AppLogger.DrainBufferedLines());
+
+        var id = Assert.Single(ids.Distinct());
+        Assert.True(InstallId.IsValid(id), $"made '{id}'");
+        AssertFile(dir, id!, MachineA, SidA);
+        Assert.Equal(new[] { InstallIdStore.FileName }, FilesIn(dir));
+        Assert.Single(warnings);
+    }
+
+    /// <summary>
+    /// A replacer that judged the file bad is slow, and another process replaces it first. The slow one must end on that
+    /// process's id and leave its file alone: the file at the path is no longer the one it judged, so an id of its own
+    /// put over it would leave the two processes with different ids.
+    /// </summary>
+    [Fact]
+    public void ASlowReplacer_AdoptsTheIdAnotherReplacerAlreadyMade_AndLeavesItsFileAlone()
+    {
+        var dir = NewDir();
+        WriteFile(dir, "NOT-AN-ID", MachineA, SidA);
+        string? first = null;
+        var slow = StoreFor(dir);
+        slow.BeforeReplace = () => first = StoreFor(dir).GetId();
+        AppLogger.DrainBufferedLines();
+
+        var id = slow.GetId();
+        var warnings = Warnings(AppLogger.DrainBufferedLines());
+
+        Assert.True(InstallId.IsValid(first), $"the other replacer made '{first}'");
+        Assert.Equal(first, id);
+        AssertFile(dir, first!, MachineA, SidA);
+        Assert.Equal(new[] { InstallIdStore.FileName }, FilesIn(dir));
+        var line = Assert.Single(warnings);
+        Assert.Contains(first!, line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Another replacer has already moved the bad file out of the way and has not yet made the new one. This replacer
+    /// finds no file at the path, makes the file itself, and the other replacer's own create then finds it and adopts
+    /// its id.
+    /// </summary>
+    [Fact]
+    public void AReplacerThatFindsTheBadFileAlreadyMovedAside_MakesTheFile_AndALaterReadFindsOneId()
+    {
+        var dir = NewDir();
+        WriteFile(dir, "NOT-AN-ID", MachineA, SidA);
+        var store = StoreFor(dir);
+        store.BeforeReplace = () => File.Move(IdFile(dir), IdFile(dir) + ".other-replacer");
+        AppLogger.DrainBufferedLines();
+
+        var id = store.GetId();
+        var warnings = Warnings(AppLogger.DrainBufferedLines());
+
+        Assert.True(InstallId.IsValid(id), $"made '{id}'");
+        AssertFile(dir, id!, MachineA, SidA);
+        Assert.Equal(id, StoreFor(dir).GetId());
+        Assert.Single(warnings);
+    }
+
+    /// <summary>
     /// Test 3, Lite half, bad id: an id that is not eight lowercase hex digits (wrong case, wrong length, not hex,
     /// missing, or not a string) makes a new id and exactly one Warning. The old value is not an id, so the
     /// Warning names it as "invalid" and does not repeat what the file held.

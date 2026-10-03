@@ -1063,10 +1063,12 @@ SELECT
     /* V159 (#4961) adds the install id table's own OID as a third binding. The column is the sentinel. Named only in
        this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_install_id' AND column_name = 'table_oid'),
-    /* V160 (#4938) gives a collector an optional run time. The column is the sentinel. Not read by any viewer surface
-       yet, so the connect-time version check rests on the standing invariant alone. Named only in this probe line,
-       never in prose, per the V71 finding. */
-    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_collector_schedules' AND column_name = 'run_at_minute')";
+    /* V160 (#4938) gives a collector an optional run time, in a table of its own. The table is the sentinel, found by
+       name in the catalog so the answer does not depend on which privileges the connecting role holds on it. No viewer
+       surface reads a run time yet (the schedule window reads them in a follow-up), so on this branch the connect-time
+       version check rests on the standing invariant alone. Named only in this probe line, never in prose, per the V71
+       finding. */
+    EXISTS (SELECT 1 WHERE to_regclass('config.config_collector_run_times') IS NOT NULL)";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>

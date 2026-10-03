@@ -257,7 +257,7 @@ IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N
     DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_BlockedProcess] ON DATABASE;
 ```
 
-If the registration used read-only intent, first stop the session over a read-only connection with `ALTER EVENT SESSION [name] ON DATABASE STATE = STOP;`. Then run the drop over a connection without the intent, which reaches the primary.
+If the registration used read-only intent, first stop the session over a read-only connection with `ALTER EVENT SESSION [name] ON DATABASE STATE = STOP;`. Then run the drop over a connection without the intent, which reaches the primary. On Hyperscale with several high-availability replicas, the stop reaches only the replica that a read-only connection lands on. A copy of the session that runs on another replica is not stopped. Microsoft Learn describes no way to address one high-availability replica: [Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica).
 
 The shared `PerformanceMonitor_Deadlock` and `PerformanceMonitor_BlockedProcess` sessions need the same statements with those names. Run them only when no other install monitors the server, because every install that monitors it uses them.
 
