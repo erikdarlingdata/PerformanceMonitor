@@ -262,8 +262,8 @@ public sealed class DarlingMcpBlockingTools
                 /* Min/Max over the rows rather than rows[0] / rows[^1]: those coincide only under time
                    ordering, and a dedup_key page is the matching rows rather than a contiguous slice.
                    Enumerable.Min over DateTime? skips nulls and yields null for a page with no stamps. */
-                oldest_returned_event_time = page.Min(r => r.EventTime)?.ToString("o"),
-                newest_returned_event_time = page.Max(r => r.EventTime)?.ToString("o"),
+                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.EventTime)),
+                newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
                 order = "event_time_desc",
                 /* The fingerprint scan, stated only when one ran: how many window rows were fingerprinted
                    and whether the window held more than the scan could reach. Null rather than 0 without a
@@ -384,8 +384,8 @@ public sealed class DarlingMcpBlockingTools
                    the epoch. */
                 deadlocks_returned = page.Count,
                 truncated,
-                oldest_returned_deadlock_time = page.Min(r => r.DeadlockTime)?.ToString("o"),
-                newest_returned_deadlock_time = page.Max(r => r.DeadlockTime)?.ToString("o"),
+                oldest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.DeadlockTime)),
+                newest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.DeadlockTime)),
                 order = "deadlock_time_desc",
                 rows_examined = filtering ? examined : (int?)null,
                 scan_truncated = filtering ? scanTruncated : (bool?)null,
@@ -504,8 +504,8 @@ public sealed class DarlingMcpBlockingTools
                    caller needs. */
                 deadlocks_returned = withXml.Count,
                 truncated,
-                oldest_returned_deadlock_time = withXml.Min(r => r.DeadlockTime)?.ToString("o"),
-                newest_returned_deadlock_time = withXml.Max(r => r.DeadlockTime)?.ToString("o"),
+                oldest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(withXml.Min(r => r.DeadlockTime)),
+                newest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(withXml.Max(r => r.DeadlockTime)),
                 order = "deadlock_time_desc",
                 rows_examined = filtering ? examined : (int?)null,
                 scan_truncated = filtering ? scanTruncated : (bool?)null,
@@ -573,8 +573,8 @@ public sealed class DarlingMcpBlockingTools
                    XML in the window than limit". */
                 reports_returned = withXml.Count,
                 truncated,
-                oldest_returned_event_time = withXml.Min(r => r.EventTime)?.ToString("o"),
-                newest_returned_event_time = withXml.Max(r => r.EventTime)?.ToString("o"),
+                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(withXml.Min(r => r.EventTime)),
+                newest_returned_event_time = McpHelpers.FormatEffectiveStart(withXml.Max(r => r.EventTime)),
                 order = "event_time_desc",
                 reports = result
             }, McpHelpers.JsonOptions);

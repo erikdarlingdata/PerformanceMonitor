@@ -215,25 +215,27 @@ public sealed class McpWaitTools
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The read was UNBOUNDED with a Take(limit) on top, and the envelope stated no bound. */
             var rows = await dataService.GetWaitingTasksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
-            if (rows.Count == 0)
-            {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "waiting_tasks")
-                    ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.");
-            }
 
-            var truncated = rows.Count > limit;
-            var page = truncated ? rows.Take(limit).ToList() : rows;
-
-            /* #4966: where this server's waiting_tasks start for the window, beside the page cut above — truncated
+            /* #4966: where this server's waiting_tasks start for the window, beside the page cut below — truncated
                says the window held more than limit, this says the store did not hold the window's head. The page's
                oldest_returned_collection_time already names where ITS rows stop, so no key is added for that. The
                probe reads coverage (the collector's logged runs count as well as rows: nothing waits for hours on a
                quiet server, so its first row can come long after the store began covering the window), from the
-               same view the page was read from. */
+               same view the page was read from. Read ahead of the empty answer, which carries it too: nothing
+               waiting over a window the store does not reach back to is not a true negative. */
             var requestedStart = windowEnd.AddHours(-hours_back);
             var notice = await McpQueryTools.WindowNoticeAsync(
                 () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.WaitingTasks, resolved.ServerId, requestedStart, windowEnd),
-                requestedStart, windowEnd, "waiting_tasks");
+                requestedStart, windowEnd, "waiting_tasks", emptyAnswer: rows.Count == 0);
+
+            if (rows.Count == 0)
+            {
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "waiting_tasks")
+                    ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.", notice.AsHints());
+            }
+
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
 
             var result = page.Select(r => new
             {
@@ -262,9 +264,9 @@ public sealed class McpWaitTools
                 tasks_returned = page.Count,
                 truncated,
                 /* #4966: where the page's rows stop describes the window the page covers, so it prints like
-                   effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                   effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
                 oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = page.Max(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.CollectionTime)),
                 order = "collection_time_desc",
                 tasks = result
             }, McpHelpers.JsonOptions);
