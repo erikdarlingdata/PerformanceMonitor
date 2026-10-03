@@ -47,8 +47,7 @@ public sealed class RestartRowIndexLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        var first = await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
-        Assert.True(first >= PgTableTuning.Statements.Count, "every statement should have applied");
+        await TuningStartPasses.ConvergeAsync(connection, ct);
 
         await AssertIndexAsync(connection, PgTableTuning.QueryStatsRestartRowIndexName, "collect.query_stats", ct);
         await AssertIndexAsync(connection, PgTableTuning.ProcedureStatsRestartRowIndexName, "collect.procedure_stats", ct);
@@ -84,7 +83,7 @@ public sealed class RestartRowIndexLiveTests
 
         await SeedAsync(connection, "collect.query_stats", utcNow, ct);
         await SeedAsync(connection, "collect.procedure_stats", utcNow, ct);
-        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+        await TuningStartPasses.ConvergeAsync(connection, ct);
         await Exec(connection, "ANALYZE collect.query_stats", ct);
         await Exec(connection, "ANALYZE collect.procedure_stats", ct);
 
@@ -96,6 +95,16 @@ public sealed class RestartRowIndexLiveTests
         var newestRestart = await ScalarAsync(connection, "SELECT max(collection_time) FROM collect.query_stats WHERE sample_interval_seconds = 0", ct);
         var clipped = await RunAsync(connection, IntervalRollupRestartRows.QueryStatsRestartRowsSql, windowStart, (DateTime)newestRestart!, ct);
         Assert.Equal(expected - 1, clipped);
+    }
+
+    [Fact]
+    public void TheRestartRowReads_CarryPresenceOnly_NoWorkerTimeColumn()
+    {
+        foreach (var sql in new[] { IntervalRollupRestartRows.QueryStatsRestartRowsSql, IntervalRollupRestartRows.ProcedureStatsRestartRowsSql })
+        {
+            Assert.DoesNotContain("delta_worker_time", sql, StringComparison.Ordinal);
+            Assert.Contains("r.collection_time, r.sample_interval_seconds", sql, StringComparison.Ordinal);
+        }
     }
 
     private static async Task AssertIndexAsync(NpgsqlConnection connection, string name, string table, CancellationToken ct)
@@ -190,20 +199,36 @@ public sealed class RestartRowIndexLiveTests
     }
 
     /// <summary>
-    /// Walks the plan. Every scan of a chunk must be an index scan or bitmap index scan on the chunk's copy of the
-    /// partial index (the chunk index name carries the index name); a Seq Scan of a chunk fails the plan. A
-    /// Bitmap Heap Scan is fine when its child is the Bitmap Index Scan on that index.
+    /// Nodes a plan of a restart-row read may contain: index reads, the bitmap heap fetch that follows a bitmap
+    /// index scan, and the plumbing that joins chunks. Any other node, a Seq Scan, a Tid Scan, a Sample Scan or a
+    /// Custom Scan that decompresses a chunk, fails the plan. This test seeds one uncompressed chunk, so it says
+    /// nothing about compressed chunks.
+    /// </summary>
+    private static readonly HashSet<string> AllowedNodes = new(StringComparer.Ordinal)
+    {
+        "Index Scan", "Index Only Scan", "Bitmap Index Scan", "Bitmap Heap Scan", "Append", "Result", "Custom Scan (ChunkAppend)",
+    };
+
+    /// <summary>
+    /// Walks the plan. Every node must be on the allow-list; every index node must read the chunk's copy of the
+    /// partial index (the chunk index name carries the index name). A Bitmap Heap Scan is fine when its child is
+    /// the Bitmap Index Scan on that index.
     /// </summary>
     private static void Collect(JsonElement node, List<(string, string)> reads, List<string> heapScans)
     {
         var type = node.GetProperty("Node Type").GetString()!;
-        if (type is "Index Scan" or "Index Only Scan" or "Bitmap Index Scan")
+        if (node.TryGetProperty("Custom Plan Provider", out var provider) && type == "Custom Scan")
         {
-            reads.Add((type, node.GetProperty("Index Name").GetString()!));
+            type += " (" + provider.GetString() + ")";
         }
-        else if (type is "Seq Scan" or "Tid Scan")
+
+        if (!AllowedNodes.Contains(type))
         {
             heapScans.Add(type + " on " + (node.TryGetProperty("Relation Name", out var r) ? r.GetString() : "?"));
+        }
+        else if (type is "Index Scan" or "Index Only Scan" or "Bitmap Index Scan")
+        {
+            reads.Add((type, node.GetProperty("Index Name").GetString()!));
         }
 
         if (node.TryGetProperty("Plans", out var children))
