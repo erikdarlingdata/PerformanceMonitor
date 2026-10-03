@@ -94,9 +94,19 @@ public sealed class LongQueryTraceReadOnlyIntentLiteTests : IDisposable
             DropSteps.Where(s => s.SessionName == LongQueryCompletionsCollector.LegacyXeSessionName)
                 .Select(s => (s.Step, s.Database, s.ConnectionString)).ToList();
 
-        /// <summary>This rig's lines at Warning or above since the last drain.</summary>
+        /// <summary>
+        /// This rig's lines at Warning or above since the last drain, whatever they say. Nothing narrows them by a word, so a
+        /// Warning a test does not expect, such as a failed stop or a failed drop of the legacy session, is among them.
+        /// </summary>
         public List<string> LoudLines() =>
-            Lines().Where(line => line.Contains("WARN", StringComparison.Ordinal) || line.Contains("ERROR", StringComparison.Ordinal)).ToList();
+            Lines().Where(line => line.Contains("[WARN ]", StringComparison.Ordinal) || line.Contains("[ERROR]", StringComparison.Ordinal)).ToList();
+
+        /// <summary>
+        /// The end of the one line a create that a read-only database refused logs at Warning: the level and source, the
+        /// registration, the database and the message the long-query trace words for it.
+        /// </summary>
+        public string ReadOnlyLineEnd(string database) =>
+            $"[WARN ] [XeSession] [{Server.DisplayName}] [{database}] {LongQueryTraceDatabases.ReadOnlyDatabaseMessage()}";
 
         /// <summary>This rig's lines in the log buffer since the last drain.</summary>
         public List<string> Lines() =>
@@ -160,12 +170,6 @@ public sealed class LongQueryTraceReadOnlyIntentLiteTests : IDisposable
 
     private static string DatabaseOf(string connectionString) =>
         new SqlConnectionStringBuilder(connectionString).InitialCatalog;
-
-    /* A line at Warning or above that speaks of a read-only database: what an operator reads about it. The one-time drop of
-       the legacy session logs lines of its own, which these tests do not read. */
-    private static bool IsLoud(string line) =>
-        (line.Contains("WARN", StringComparison.Ordinal) || line.Contains("ERROR", StringComparison.Ordinal))
-        && line.Contains("read-only", StringComparison.OrdinalIgnoreCase);
 
     /* ── Azure SQL Database ── */
 
@@ -433,8 +437,9 @@ public sealed class LongQueryTraceReadOnlyIntentLiteTests : IDisposable
 
             await rig.ReconcileAsync();
 
-            /* One line at Warning or above, and it says why and what to change. */
-            var loud = Assert.Single(rig.Lines(), IsLoud);
+            /* One line at Warning or above, whatever it says: the read-only message, which says why and what to change. */
+            var loud = Assert.Single(rig.LoudLines());
+            Assert.EndsWith(rig.ReadOnlyLineEnd("beta"), loud, StringComparison.Ordinal);
             Assert.Contains("read-only", loud, StringComparison.Ordinal);
             Assert.Contains("3906", loud, StringComparison.Ordinal);
             Assert.Contains("Register the primary database instead", loud, StringComparison.Ordinal);
@@ -449,14 +454,14 @@ public sealed class LongQueryTraceReadOnlyIntentLiteTests : IDisposable
             await rig.ReconcileAsync();
             await rig.ReconcileAsync();
             Assert.Single(rig.Steps);
-            Assert.DoesNotContain(rig.Lines(), IsLoud);
+            Assert.Empty(rig.LoudLines());
             Assert.NotNull(rig.Service.LongQueryTraceFaultState(rig.Server.Id));
 
             /* An hour after the first attempt: one more, and it logs at Debug, so the one message stays the only one. */
             rig.Clock += TimeSpan.FromMinutes(1);
             await rig.ReconcileAsync();
             Assert.Equal(2, rig.Steps.Count);
-            Assert.DoesNotContain(rig.Lines(), IsLoud);
+            Assert.Empty(rig.LoudLines());
             Assert.NotNull(rig.Service.LongQueryTraceFaultState(rig.Server.Id));
         }
         finally

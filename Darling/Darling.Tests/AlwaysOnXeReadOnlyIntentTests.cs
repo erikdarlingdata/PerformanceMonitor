@@ -191,11 +191,21 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
                 Runner, remaining: null, traceOn: _ => false,
                 instanceGuard: _ => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers), Logger, CancellationToken.None);
 
-        /// <summary>The lines at Warning or above that this routine wrote about a session.</summary>
+        /// <summary>
+        /// Every line at Warning or above that this routine wrote, whatever it says. Nothing narrows it by a word, so a Warning a
+        /// test does not expect, such as a failed stop or a failed drop, is among them.
+        /// </summary>
         public List<string> Loud() => Logger.Entries
-            .Where(e => e.Level >= LogLevel.Warning && e.Message.Contains("session", StringComparison.OrdinalIgnoreCase))
+            .Where(e => e.Level >= LogLevel.Warning)
             .Select(e => e.Message)
             .ToList();
+
+        /// <summary>
+        /// The one line a create that a read-only database refused logs at Warning for a capture: the registration, the database
+        /// and the message that session's kind is worded with.
+        /// </summary>
+        public string ReadOnlyLine(string database, AlwaysOnXeSessionKind kind) =>
+            $"[{Runtime.Config.DisplayName}] [{database}] {AlwaysOnXeSessions.ReadOnlyDatabaseMessage(kind)}";
     }
 
     private Rig BuildRig(bool readOnlyIntent)
@@ -390,8 +400,9 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
 
         await rig.EnsureAsync();
 
-        /* One line a capture, and it says why and what to change. */
-        Assert.Equal(2, rig.Loud().Count);
+        /* One line a capture at Warning or above, whatever it says, and each is the read-only message: why, and what to change. */
+        var expected = Kinds.Select(kind => rig.ReadOnlyLine("alpha", kind)).OrderBy(line => line, StringComparer.Ordinal).ToList();
+        Assert.Equal(expected, rig.Loud().OrderBy(line => line, StringComparer.Ordinal));
         Assert.All(rig.Loud(), line =>
         {
             Assert.Contains("read-only", line, StringComparison.Ordinal);
@@ -399,13 +410,11 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
             Assert.Contains("Register the primary database instead", line, StringComparison.Ordinal);
             Assert.DoesNotContain(AlwaysOnXeSessions.AzureCapsSentence, line, StringComparison.Ordinal);
         });
-        Assert.Contains(rig.Loud(), line => line.Contains("deadlock", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(rig.Loud(), line => line.Contains("blocked process", StringComparison.OrdinalIgnoreCase));
 
         /* The pass an hour later asks again, and says nothing new at Warning. */
         await rig.EnsureAsync();
         await rig.EnsureAsync();
-        Assert.Equal(2, rig.Loud().Count);
+        Assert.Equal(expected, rig.Loud().OrderBy(line => line, StringComparer.Ordinal));
     }
 
     private static SqlException ReadOnlyRefusal() =>

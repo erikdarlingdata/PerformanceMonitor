@@ -74,13 +74,20 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
                 .Select(s => (s.Step, s.Database, s.ConnectionString)).ToList();
 
         /// <summary>
-        /// The lines logged at Warning or above that speak of a read-only database: what an operator reads about it. The
-        /// one-time drop of the legacy session logs lines of its own, which these tests do not read.
+        /// Every line logged at Warning or above, whatever it says: what an operator reads. Nothing narrows it by a word, so a
+        /// Warning a test does not expect, such as a failed stop or a failed drop of the legacy session, is among them.
         /// </summary>
         public List<string> Loud() => Logger.Entries
-            .Where(e => e.Level >= LogLevel.Warning && e.Message.Contains("read-only", StringComparison.OrdinalIgnoreCase))
+            .Where(e => e.Level >= LogLevel.Warning)
             .Select(e => e.Message)
             .ToList();
+
+        /// <summary>
+        /// The one line a create that a read-only database refused logs at Warning: the registration, the database and the
+        /// message the long-query trace words for it.
+        /// </summary>
+        public string ReadOnlyLine(string database) =>
+            $"[{State.Config.DisplayName}] [{database}] {LongQueryTraceDatabases.ReadOnlyDatabaseMessage()}";
     }
 
     private Rig BuildRig(string database, bool readOnlyIntent, bool azureSqlDatabase = true)
@@ -378,8 +385,9 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
 
         await rig.ReconcileAsync();
 
-        /* One line at Warning or above, and it says why and what to change. */
+        /* One line at Warning or above, whatever it says: the read-only message, which says why and what to change. */
         var loud = Assert.Single(rig.Loud());
+        Assert.Equal(rig.ReadOnlyLine("beta"), loud);
         Assert.Contains("read-only", loud, StringComparison.Ordinal);
         Assert.Contains("3906", loud, StringComparison.Ordinal);
         Assert.Contains("Register the primary database instead", loud, StringComparison.Ordinal);
@@ -394,7 +402,7 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         await rig.ReconcileAsync();
         await rig.ReconcileAsync();
         Assert.Single(rig.Steps);
-        Assert.Single(rig.Loud());
+        Assert.Equal(new[] { rig.ReadOnlyLine("beta") }, rig.Loud());
         Assert.NotNull(rig.State.LongQueryTraceFault);
 
         /* An hour after the first attempt: one more, and it logs at Debug, so the one message stays the only one. */
@@ -402,7 +410,7 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         await rig.ReconcileAsync();
         await rig.ReconcileAsync();
         Assert.Equal(2, rig.Steps.Count);
-        Assert.Single(rig.Loud());
+        Assert.Equal(new[] { rig.ReadOnlyLine("beta") }, rig.Loud());
         Assert.NotNull(rig.State.LongQueryTraceFault);
     }
 
