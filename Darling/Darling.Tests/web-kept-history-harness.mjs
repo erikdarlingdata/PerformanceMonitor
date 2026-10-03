@@ -167,6 +167,26 @@ const cpuPanel = {
 };
 const RANGE = { hours: 720, label: "last 30 days" };
 
+/* #4966: a grid read whose table starts covering the server after the window does answers with these three fields. */
+const FLOOR_NOTE =
+  "partial window: this panel's data starts at 2026-01-02 00:00 UTC, after the window's start at 2025-12-26 00:00 UTC. " +
+  "The panel covers 2026-01-02 00:00 to 2026-01-03 00:00 UTC.";
+const WAITING_TASKS_FLOOR = {
+  tasks: [{ wait_type: "LCK_M_X", wait_duration_ms: 250 }],
+  window_truncated: true,
+  effective_start: "2026-01-02T00:00:00.0000000",
+  truncation_note: FLOOR_NOTE,
+};
+const waitingTasksPanel = {
+  title: "Waiting Tasks",
+  read: "get_waiting_tasks",
+  params: { server: "SRV1", hours: 168 },
+  viz: "table",
+  rowsKey: "tasks",
+  columns: [{ key: "wait_type", label: "Wait type" }],
+  emptyText: "No waiting tasks in this window.",
+};
+
 /* A body for the reads whose rows start a second read (the wait, counter and query pickers), so the trend reads
    behind them are fetched too. Every other read answers an empty object. */
 const PICKER_ROWS = {
@@ -214,6 +234,34 @@ const scenarios = {
   loaderRefusedTwice: () => {
     answer = (url) => (asked(url) === "720" ? refusal(720, 168, 7) : refusal(asked(url), 96, 4));
     return [modules.panels.renderPanel(cpuPanel)];
+  },
+  // #4966: a grid whose response says its table starts covering the server after the window does shows that note.
+  floorTableTruncated: () => {
+    answer = () => data(WAITING_TASKS_FLOOR);
+    return [modules.panels.renderPanel(waitingTasksPanel)];
+  },
+  // The same grid over a window the table covered: the response carries no floor fields, and the grid draws none.
+  floorTableCovered: () => {
+    answer = () => data({ tasks: WAITING_TASKS_FLOOR.tasks });
+    return [modules.panels.renderPanel(waitingTasksPanel)];
+  },
+  // A chart over a response that carries the fields draws no strip: its time axis already spans the asked range.
+  floorChartIgnored: () => {
+    answer = () => data({ ...CPU, window_truncated: true, truncation_note: FLOOR_NOTE });
+    return [modules.panels.renderPanel(cpuPanel)];
+  },
+  // A grid that names `truncation_note` as its own note (the Queries tab's grids) draws it once, not twice.
+  floorOwnNoteOnce: () => {
+    answer = () => data(WAITING_TASKS_FLOOR);
+    return [modules.panels.renderPanel({ ...waitingTasksPanel, noteKey: "truncation_note" })];
+  },
+  // The Wait Stats composite draws the note above its grid.
+  floorWaitStats: () => {
+    answer = (url) =>
+      tool(url) === "get_wait_stats"
+        ? data({ waits: [{ wait_type: "LCK_M_X" }], window_truncated: true, truncation_note: FLOOR_NOTE })
+        : data({ trend: [{ time: "2026-01-01T00:00:00", wait_time_ms_per_second: 1 }] });
+    return [modules.tabs.waitsPanel("SRV1", RANGE)];
   },
   // A hand-built composite over one read (File I/O).
   fileIoRefused: () => {
