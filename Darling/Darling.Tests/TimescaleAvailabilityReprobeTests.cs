@@ -54,6 +54,8 @@ public sealed class TimescaleAvailabilityReprobeTests
     private const string TickGuard = "if (StampIsDue(_nextCompressionCheckUtc, CompressionCheckSpan, DateTime.UtcNow))";
     private const string Stamp = "_nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);";
     private const string Latch = "_timescaleAvailable";
+    private const string LaunchCall = "TryStartStoreMaintenanceTick(token => RunStoreMaintenanceTickAsync(token)";
+    private const string TickSignature = "private async Task RunStoreMaintenanceTickAsync(CancellationToken stoppingToken)";
     private const string ReprobeSignature = "private async Task ReprobeTimescaleAvailabilityAsync(CancellationToken cancellationToken)";
 
     /// <summary>
@@ -84,11 +86,26 @@ public sealed class TimescaleAvailabilityReprobeTests
         /* INSTRUMENT FIRST. The probe is required to be under exactly two conditions of its own - the tick's
            due time, and the negated latch - so a walk that returned nothing, or that lost the innermost
            frame, fails here rather than reporting the absence of a positive guard it never looked for. */
-        Assert.True(
+        Assert.False(
             reprobeGuards.Any(g => g.Contains("_nextCompressionCheckUtc", StringComparison.Ordinal)),
-            "the guard walk did not find the store-maintenance tick's due-time condition around the re-probe. "
-          + "Either the probe has been given a cadence of its own - which is a second timer on a tick that "
-          + $"exists to hold them - or the walk is not reading this block. Guards seen: {Describe(reprobeGuards)}");
+            "the re-probe has been given a cadence of its own - which is a second timer on a tick that "
+          + $"exists to hold them. Guards seen: {Describe(reprobeGuards)}");
+
+        /* The probe lives in the tick's own method body (#4970); the tick's due-time condition now guards the
+           single launch call site, and that condition must not test the latch positively either. */
+        var tickBody = MethodBody(code, TickSignature);
+        Assert.False(string.IsNullOrEmpty(tickBody), "could not locate RunStoreMaintenanceTickAsync");
+        Assert.Contains(ReprobeCall, tickBody, StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(code, LaunchCall));
+        var launchGuards = EnclosingGuards(code, code.IndexOf(LaunchCall, StringComparison.Ordinal));
+        Assert.True(
+            launchGuards.Any(g => g.Contains("_nextCompressionCheckUtc", StringComparison.Ordinal)),
+            "the guard walk did not find the tick's due-time condition around the launch call. "
+          + $"Guards seen: {Describe(launchGuards)}");
+        Assert.True(
+            !launchGuards.Any(TestsTheLatchPositively),
+            "the hourly tick is launched from behind a guard that requires _timescaleAvailable, so a falsely-degraded "
+          + $"service could never re-probe (#3815): {Describe(launchGuards)}");
 
         Assert.True(
             reprobeGuards.Any(g => g.Replace(" ", string.Empty, StringComparison.Ordinal).Contains("!" + Latch, StringComparison.Ordinal)),
@@ -146,6 +163,7 @@ public sealed class TimescaleAvailabilityReprobeTests
            would break without breaking anything else. */
         Assert.Equal(1, CountOf(code, TickGuard));
         Assert.Equal(1, CountOf(code, Stamp));
+        Assert.Equal(1, CountOf(code, LaunchCall));
         Assert.Equal(1, CountOf(code, CompressionCall));
         Assert.Equal(1, CountOf(code, RetentionCall));
         /* #3817's store-object convergence is the fourth tenant, and the count is here for the same reason
@@ -155,18 +173,30 @@ public sealed class TimescaleAvailabilityReprobeTests
         /* The latch is gone from the tick's OUTER condition; it now sits one level in. */
         Assert.DoesNotContain(Latch + " && StampIsDue(_nextCompressionCheckUtc", code, StringComparison.Ordinal);
 
+        /* In the loop: due-time guard, then the stamp, then the launch. */
         var guardAt = code.IndexOf(TickGuard, StringComparison.Ordinal);
         var stampAt = code.IndexOf(Stamp, StringComparison.Ordinal);
-        var reprobeAt = code.IndexOf(ReprobeCall, StringComparison.Ordinal);
-        var compressionAt = code.IndexOf(CompressionCall, StringComparison.Ordinal);
-        var retentionAt = code.IndexOf(RetentionCall, StringComparison.Ordinal);
-        var convergenceAt = code.IndexOf(ConvergenceCall, StringComparison.Ordinal);
+        var launchAt = code.IndexOf(LaunchCall, StringComparison.Ordinal);
         Assert.True(
-            guardAt > 0 && stampAt > guardAt && reprobeAt > stampAt && compressionAt > reprobeAt && retentionAt > compressionAt
+            guardAt > 0 && stampAt > guardAt && launchAt > stampAt,
+            "the loop runs: due-time guard, stamp, launch of the tick - in that order (got "
+          + $"{guardAt}, {stampAt}, {launchAt})");
+
+        /* In the tick's method body: availability re-probe, flag gate, compression read, retention pass,
+           store-object convergence - in that order. */
+        var tickBody = MethodBody(code, TickSignature);
+        Assert.False(string.IsNullOrEmpty(tickBody), "could not locate RunStoreMaintenanceTickAsync");
+        var reprobeAt = tickBody.IndexOf(ReprobeCall, StringComparison.Ordinal);
+        var flagGateAt = tickBody.IndexOf("if (" + Latch + ")", StringComparison.Ordinal);
+        var compressionAt = tickBody.IndexOf(CompressionCall, StringComparison.Ordinal);
+        var retentionAt = tickBody.IndexOf(RetentionCall, StringComparison.Ordinal);
+        var convergenceAt = tickBody.IndexOf(ConvergenceCall, StringComparison.Ordinal);
+        Assert.True(
+            reprobeAt >= 0 && flagGateAt > reprobeAt && compressionAt > flagGateAt && retentionAt > compressionAt
             && convergenceAt > retentionAt,
-            "the tick runs: due-time guard, stamp, availability re-probe, compression read, retention pass, "
+            "the tick body runs: availability re-probe, flag gate, compression read, retention pass, "
           + "store-object convergence - in that order (got "
-          + $"{guardAt}, {stampAt}, {reprobeAt}, {compressionAt}, {retentionAt}, {convergenceAt})");
+          + $"{reprobeAt}, {flagGateAt}, {compressionAt}, {retentionAt}, {convergenceAt})");
 
         /* And the stamp itself is not behind the latch, which is the cadence claim proper. The instrument
            check comes first for the reason it does above: "no guard requires the latch" is satisfied just as
@@ -183,13 +213,6 @@ public sealed class TimescaleAvailabilityReprobeTests
             "the due time is stamped forward from inside a guard that requires _timescaleAvailable, so on a "
           + "store in plain-PostgreSQL mode it never advances and the re-probe fires on every 15-second sweep "
           + $"pass instead of hourly: {Describe(stampGuards)}");
-
-        /* The flag gate is still there, between the probe and the two tenants that need it. Searched FROM the
-           stamp: the start-path block carries the same text thousands of lines earlier. */
-        var flagGateAt = code.IndexOf("if (" + Latch + ")", stampAt, StringComparison.Ordinal);
-        Assert.True(flagGateAt > reprobeAt && flagGateAt < compressionAt,
-            "the compression read, the retention pass and the store-object convergence must still be behind the "
-          + "latch, one level in from the tick");
     }
 
     /// <summary>
