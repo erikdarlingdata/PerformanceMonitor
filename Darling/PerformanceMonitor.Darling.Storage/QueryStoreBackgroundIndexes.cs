@@ -270,8 +270,18 @@ SELECT EXISTS
 
     private static string IndexNames(IReadOnlyList<IndexSpec> specs) => string.Join(", ", specs.Select(spec => spec.IndexName));
 
-    private static string SqlStateSuffix(Exception ex) =>
-        ex is NpgsqlException { SqlState: { Length: > 0 } state } ? $", SQLSTATE {state}" : string.Empty;
+    /* ", SQLSTATE 53100" for a server error that carries a SQLSTATE (a full disk reads differently from a lock timeout),
+       nothing otherwise. A block body, because TsqlConventionGuardTests' member scan stops short of an expression-bodied
+       member that has a property pattern in it. */
+    private static string SqlStateSuffix(Exception ex)
+    {
+        if (ex is NpgsqlException npgsql && !string.IsNullOrEmpty(npgsql.SqlState))
+        {
+            return $", SQLSTATE {npgsql.SqlState}";
+        }
+
+        return string.Empty;
+    }
 
     private static void LogEnsureFailure(ILogger logger, string indexName, Exception ex)
     {
