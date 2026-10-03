@@ -324,7 +324,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     /// The surfaces of the same group that carry NO notice, and why. A chart whose time axis is pinned to the asked
     /// range already draws the empty span before the first stored row, so a reader cannot take it for a quiet period;
     /// this holds each of them to that: every one of these methods pins the X axis to the window the read took
-    /// (<c>GetChartWindow</c>, or <c>GetXAxisWindow</c> for the Overview lanes), so one that moves to an axis the data
+    /// (<c>GetChartWindow</c>, or <c>GetXAxisWindow</c> for the Overview's five timeline charts), so one that moves to an axis the data
     /// decides fails here and needs a notice instead. The Memory Overview summary reads only the newest snapshot, which
     /// is not a window at all.
     /// </summary>
