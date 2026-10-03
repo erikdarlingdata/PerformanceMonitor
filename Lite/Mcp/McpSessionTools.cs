@@ -56,7 +56,7 @@ public sealed class McpSessionTools
             var requestedStart = windowEnd.AddHours(-hours_back);
             var notice = await McpQueryTools.WindowNoticeAsync(
                 () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QuerySnapshots, resolved.ServerId, requestedStart, windowEnd),
-                requestedStart, windowEnd, "query_snapshots");
+                requestedStart, windowEnd, "query_snapshots", emptyAnswer: rows.Count == 0);
 
             if (rows.Count == 0)
             {
@@ -132,9 +132,9 @@ public sealed class McpSessionTools
                 truncated,
                 order = "collection_time_desc",
                 /* #4966: where the page's rows stop describes the window the page covers, so it prints like
-                   effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                   effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
                 oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(shown[^1].CollectionTime),
-                newest_returned_collection_time = shown[0].CollectionTime.ToString("o"),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(shown[0].CollectionTime),
                 queries = result
             }, McpHelpers.JsonOptions);
         }

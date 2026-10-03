@@ -78,7 +78,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 postgres, resolved.ServerId, start, end, database_name, limit + 1, baselineStart, cancellationToken);
 
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, baselineStart, hours_back, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, baselineStart, hours_back, database_name, cancellationToken);
 
             var truncated = rows.Count > limit;
             var shown = rows.Take(limit);
@@ -187,10 +187,10 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, string serverName, int serverId, DateTime start, DateTime end, DateTime baselineStart, int hours_back,
-        CancellationToken cancellationToken)
+        string? databaseName, CancellationToken cancellationToken)
     {
         var (hasBaseline, hasRecent) = await DarlingQueryStoreRegressionReader.GetCoverageAsync(
-            postgres, serverId, start, end, baselineStart, cancellationToken);
+            postgres, serverId, start, end, baselineStart, cancellationToken: cancellationToken);
 
         if (!hasBaseline && !hasRecent)
         {
@@ -212,6 +212,22 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             return McpHelpers.Status(
                 "empty",
                 $"{serverName} has Query Store history from before this window but nothing collected IN the last {hours_back} hour(s), so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.");
+        }
+
+        /* #5015: the probe above is the SERVER's, so it answers a database_name filter that matched nothing the same as
+           one that matched and found nothing wrong, and the second is the only one that is the all-clear. The filter
+           reads the same database the read was asked for: no capture of it in the baseline or in the window means no
+           query in it was compared. Lite's twin words it the same. */
+        if (!string.IsNullOrWhiteSpace(databaseName))
+        {
+            var (filteredBaseline, filteredRecent) = await DarlingQueryStoreRegressionReader.GetCoverageAsync(
+                postgres, serverId, start, end, baselineStart, databaseName, cancellationToken);
+            if (!filteredBaseline && !filteredRecent)
+            {
+                return McpHelpers.Status(
+                    "empty",
+                    $"No Query Store capture on {serverName} in the last {hours_back} hour(s) or in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline before it matched database_name '{databaseName}', so the filter matched nothing and this is NOT the all-clear: no query in that database was compared. Check the database name, or drop the filter to read every database.");
+            }
         }
 
         return McpHelpers.Status(

@@ -127,9 +127,9 @@ public sealed class DarlingMcpPlanCorrectionTools
                    recommendation rows and only the tuning snapshot answered. */
                 recommendations_returned = page.Count,
                 truncated,
-                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
                 oldest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = page.Count == 0 ? null : page.Max(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Max(r => r.CollectionTime)),
                 order = "collection_time_desc",
                 recommendations,
             }, McpHelpers.JsonOptions);

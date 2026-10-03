@@ -471,10 +471,11 @@ public sealed class McpQueryTools
             var notice = await WindowNoticeAsync(
                 () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd),
                 baselineStart, windowEnd, "query_store_stats",
-                "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.");
+                "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.",
+                emptyAnswer: rows.Count == 0);
 
             if (rows.Count == 0)
-                return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, notice);
+                return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, notice, databases);
 
             var truncated = rows.Count > limit;
 
@@ -577,7 +578,8 @@ public sealed class McpQueryTools
     /// regressions" there is a confident wrong answer rather than a missing one.</para>
     /// </summary>
     private static async Task<string> EmptyRegressionsAsync(
-        LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice)
+        LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
+        string[]? databases)
     {
         /* The anchor is threaded in rather than resolved again: the coverage probe answers "does a BEFORE
            exist for this window", and a window it computed for itself would be a different one. */
@@ -604,6 +606,23 @@ public sealed class McpQueryTools
                 "empty",
                 $"{serverName} has Query Store history from before this window but nothing collected IN the last {hours_back} hour(s), so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
                 notice.AsHints());
+        }
+
+        /* #5015: the probe above is the SERVER's, so it answers a database_name filter that matched nothing the same as
+           one that matched and found nothing wrong, and the second is the only one that is the all-clear. The filter
+           reads the same databases the read was asked for: no capture of them in the baseline or in the window means
+           no query of theirs was compared. Darling's twin words it the same. */
+        if (databases is not null)
+        {
+            var (filteredBaseline, filteredRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(
+                serverId, hours_back, asOfUtc: windowEnd, databaseNames: databases);
+            if (!filteredBaseline && !filteredRecent)
+            {
+                return McpHelpers.Status(
+                    "empty",
+                    $"No Query Store capture on {serverName} in the last {hours_back} hour(s) or in the {LocalDataService.BaselineLookbackDays}-day baseline before it matched database_name '{databases[0]}', so the filter matched nothing and this is NOT the all-clear: no query in that database was compared. Check the database name, or drop the filter to read every database.",
+                    notice.AsHints());
+            }
         }
 
         return McpHelpers.Status(
@@ -674,7 +693,7 @@ public sealed class McpQueryTools
             var requestedStart = windowEnd.AddHours(-hours_back);
             var notice = await WindowNoticeAsync(
                 () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, resolved.ServerId, requestedStart, windowEnd),
-                requestedStart, windowEnd, "query_stats");
+                requestedStart, windowEnd, "query_stats", emptyAnswer: rows.Count == 0);
 
             if (rows.Count == 0)
                 return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, notice);
@@ -1054,9 +1073,24 @@ public sealed class McpQueryTools
     /// tool compares (a tool that sets two windows against each other passes the older one's start), and
     /// <paramref name="floor"/> the probe's answer for that start (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>).
     /// <paramref name="tail"/> is one more sentence for a tool whose reading of the window needs it.
+    /// <para><paramref name="emptyAnswer"/> (#5015): the answer this notice rides on holds no rows. A null floor then
+    /// means the store holds no collection for this server in the window at all, and an empty answer over a window
+    /// nothing was read from is not a true negative, so the notice says NOT covered: <c>window_truncated</c> true,
+    /// no <c>effective_start</c> (there is no start to name) and a note that the store holds no collection in the
+    /// window. On an answer WITH rows a null floor keeps its old meaning (covered, at the start that was asked for).</para>
     /// </summary>
-    internal static McpWindowNotice WindowNotice(DateTime? floor, DateTime requestedStart, string table, string? tail = null)
+    internal static McpWindowNotice WindowNotice(
+        DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false)
     {
+        if (floor is null && emptyAnswer)
+        {
+            return new McpWindowNotice(
+                null,
+                true,
+                $"The store holds no collection of {table} for this server in this window, so nothing was read, and this empty answer is not a report that nothing happened. "
+                    + "The window may reach further back than the store retains, this server may have been monitored for less time than that, or collection may have stopped; get_collection_health shows which.");
+        }
+
         var truncated = IsWindowTruncated(floor, requestedStart);
         return new McpWindowNotice(
             McpHelpers.FormatEffectiveStart(EffectiveWindowStart(floor, requestedStart)),
@@ -1074,13 +1108,23 @@ public sealed class McpQueryTools
     /// keys all go through here, so a read of an hour or less makes no probe call, as the Lite tabs' banner step does.
     /// The probe is passed as a delegate and is not started for a short window. A short window's
     /// <c>effective_start</c> is the start that was asked for, because no floor was read.
+    /// <para>#5015: an EMPTY answer (<paramref name="emptyAnswer"/>) is always probed, whatever the window's length. The skip
+    /// answers "covered" without reading anything, which is right beside rows (the page itself shows the data) but is a
+    /// claim an empty answer cannot make: nothing was read, so nothing says the store held the window at all. A probe
+    /// that finds no row and no run in the window then reads as NOT covered (<see cref="WindowNotice"/>).</para>
     /// </summary>
     internal static async Task<McpWindowNotice> WindowNoticeAsync(
-        Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null) =>
-        WindowNotice(CanWindowBeTruncated(requestedStart, windowEnd) ? await probe() : null, requestedStart, table, tail);
+        Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null, bool emptyAnswer = false) =>
+        WindowNotice(
+            emptyAnswer || CanWindowBeTruncated(requestedStart, windowEnd) ? await probe() : null,
+            requestedStart, table, tail, emptyAnswer);
 
-    /// <summary>The three window-floor keys <see cref="WindowNotice"/> answers, as the values a tool writes into its payload.</summary>
-    internal readonly record struct McpWindowNotice(string EffectiveStart, bool WindowTruncated, string? TruncationNote)
+    /// <summary>
+    /// The three window-floor keys <see cref="WindowNotice"/> answers, as the values a tool writes into its payload.
+    /// <see cref="EffectiveStart"/> is null only for an empty answer over a window the store holds nothing in
+    /// (#5015): there is no start to name.
+    /// </summary>
+    internal readonly record struct McpWindowNotice(string? EffectiveStart, bool WindowTruncated, string? TruncationNote)
     {
         /// <summary>
         /// #4966: the same three keys, with the same values and wording, for an <c>empty</c> status, which carries them under

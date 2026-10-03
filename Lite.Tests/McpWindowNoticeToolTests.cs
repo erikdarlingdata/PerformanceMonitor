@@ -116,7 +116,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
            UTC, with the trailing Z a covered window's requested start has always carried; the instant is unchanged. */
         Assert.Equal(DateTime.SpecifyKind(floor, DateTimeKind.Utc).ToString("o"), notice.EffectiveStart);
         Assert.EndsWith("Z", notice.EffectiveStart, StringComparison.Ordinal);
-        Assert.Equal(floor, ParseUtc(notice.EffectiveStart));
+        Assert.Equal(floor, ParseUtc(notice.EffectiveStart!));
         Assert.NotNull(notice.TruncationNote);
         Assert.Contains("raw query_snapshots retains", notice.TruncationNote, StringComparison.Ordinal);
         Assert.EndsWith("so the older part of it was not read.", notice.TruncationNote, StringComparison.Ordinal);
@@ -140,7 +140,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         /* A floor inside the slack is no cut, but it still moves the served start onto the floor (the clamp only stops
            it going earlier than asked), and that instant carries the Z too. */
         var insideSlack = Naive(start.AddMinutes(60));
-        Assert.Equal(insideSlack, ParseUtc(McpQueryTools.WindowNotice(insideSlack, start, "waiting_tasks").EffectiveStart));
+        Assert.Equal(insideSlack, ParseUtc(McpQueryTools.WindowNotice(insideSlack, start, "waiting_tasks").EffectiveStart!));
 
         Assert.Equal(start.ToString("o"), McpQueryTools.WindowNotice(null, start, "waiting_tasks").EffectiveStart);
         Assert.Equal(start.ToString("o"), McpQueryTools.WindowNotice(start, start, "waiting_tasks").EffectiveStart);
@@ -535,17 +535,92 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         AssertCovered(EmptyHints(root), now.AddHours(-168));
     }
 
+    /// <summary>
+    /// #5015: an EMPTY answer is probed whatever the window's length, because nothing was read and the skip would answer
+    /// "covered" for it. A run 35 minutes into the hour is the floor, inside the slack: covered, and effective_start is
+    /// the run.
+    /// </summary>
     [Fact]
-    public async Task GetActiveQueries_AnEmptyOneHourWindow_MakesNoProbeCall_AndNamesItsOwnStart()
+    public async Task GetActiveQueries_AnEmptyOneHourWindow_IsProbed_AndNamesTheFirstRunInIt()
     {
         await _duckDb.InitializeAsync();
         var now = DateTime.UtcNow;
-        /* A run 35 minutes in: the probe would have answered that run and put effective_start 25 minutes after the start. */
         await SeedLogRunsAsync("query_snapshots", now.AddMinutes(-35), now.AddMinutes(-35), everyMinutes: 30);
 
         var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 1));
 
-        AssertCovered(EmptyHints(root), now.AddHours(-1));
+        AssertCoveredFrom(EmptyHints(root), now.AddMinutes(-35));
+    }
+
+    /// <summary>
+    /// #5015, the ruling's RED: an empty answer over a 60-minute window with no run in it never says "covered". Nothing was
+    /// read, so the answer is NOT covered: no effective_start, and a note that the store holds no collection in the window.
+    /// </summary>
+    [Fact]
+    public async Task GetActiveQueries_AnEmptyOneHourWindow_WithNoRunInIt_IsNotCovered()
+    {
+        await _duckDb.InitializeAsync();
+
+        var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 1));
+
+        AssertNothingHeld(EmptyHints(root), "query_snapshots");
+    }
+
+    /// <summary>#5015, RED: a server that was never collected has no row and no run in any window, so an empty answer is NOT covered.</summary>
+    [Fact]
+    public async Task GetActiveQueries_AnEmptyAnswer_OnAServerNeverCollected_IsNotCovered()
+    {
+        await _duckDb.InitializeAsync();
+
+        var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 168));
+
+        AssertNothingHeld(EmptyHints(root), "query_snapshots");
+    }
+
+    /// <summary>#5015, RED: runs 9 and 10 days old are not in a 168-hour window, so nothing waiting there is not a verdict on it.</summary>
+    [Fact]
+    public async Task GetWaitingTasks_AnEmptyWideWindow_WhoseRunsAreAllOlder_IsNotCovered()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedLogRunsAsync("waiting_tasks", now.AddDays(-10), now.AddDays(-9), everyMinutes: 60);
+
+        var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 168));
+
+        AssertNothingHeld(EmptyHints(root), "waiting_tasks");
+    }
+
+    [Fact]
+    public async Task GetWaitingTasks_AnEmptyOneHourWindow_WithNoRunInIt_IsNotCovered()
+    {
+        await _duckDb.InitializeAsync();
+
+        var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 1));
+
+        AssertNothingHeld(EmptyHints(root), "waiting_tasks");
+    }
+
+    /// <summary>
+    /// #5015: the helper's own rule. An empty answer asks the probe even for a 60-minute window, and a null floor then reads
+    /// as NOT covered; the same null floor on an answer WITH rows keeps its old meaning (covered, at the asked-for start).
+    /// </summary>
+    [Fact]
+    public async Task WindowNoticeAsync_AnEmptyAnswerOver60Minutes_AsksTheProbe_AndANullFloorIsNotCovered()
+    {
+        var end = DateTime.UtcNow;
+        var start = end.AddMinutes(-60);
+        var probes = 0;
+
+        var empty = await McpQueryTools.WindowNoticeAsync(
+            () => { probes++; return Task.FromResult<DateTime?>(null); }, start, end, "query_snapshots", emptyAnswer: true);
+        var withRows = McpQueryTools.WindowNotice(null, start, "query_snapshots");
+
+        Assert.Equal(1, probes);
+        Assert.True(empty.WindowTruncated);
+        Assert.Null(empty.EffectiveStart);
+        Assert.Contains("holds no collection of query_snapshots", empty.TruncationNote, StringComparison.Ordinal);
+        Assert.False(withRows.WindowTruncated);
+        Assert.Equal(PerformanceMonitor.Common.McpHelpers.FormatEffectiveStart(start), withRows.EffectiveStart);
     }
 
     [Fact]
@@ -574,7 +649,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     }
 
     [Fact]
-    public async Task GetWaitingTasks_AnEmptyOneHourWindow_MakesNoProbeCall_AndNamesItsOwnStart()
+    public async Task GetWaitingTasks_AnEmptyOneHourWindow_IsProbed_AndNamesTheFirstRunInIt()
     {
         await _duckDb.InitializeAsync();
         var now = DateTime.UtcNow;
@@ -582,7 +657,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 1));
 
-        AssertCovered(EmptyHints(root), now.AddHours(-1));
+        AssertCoveredFrom(EmptyHints(root), now.AddMinutes(-35));
     }
 
     [Fact]
@@ -615,6 +690,25 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, database_name: "NoSuchDb"));
 
         AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
+        /* #5015: the probe is the table's, so the filter that matched nothing used to get the all-clear text. It says the filter missed. */
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("database_name 'NoSuchDb'", message, StringComparison.Ordinal);
+        Assert.Contains("the filter matched nothing and this is NOT the all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5015: a filter that matches, and finds nothing wrong, is still the all-clear.</summary>
+    [Fact]
+    public async Task GetQueryStoreRegressions_AFilterThatMatches_AndFindsNothingWrong_IsTheAllClear()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedRegressionAsync(now.AddDays(-3), queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 1000, intervalId: 2);
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, database_name: "Db"));
+
+        Assert.Contains("this IS the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -675,7 +769,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     }
 
     [Fact]
-    public async Task GetQueryHeatmap_AnEmptyOneHourWindow_MakesNoProbeCall_AndNamesItsOwnStart()
+    public async Task GetQueryHeatmap_AnEmptyOneHourWindow_IsProbed_AndNamesTheFirstRowInIt()
     {
         await _duckDb.InitializeAsync();
         var now = DateTime.UtcNow;
@@ -683,21 +777,25 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 1, database_name: "NoSuchDb"));
 
-        AssertCovered(EmptyHints(root), now.AddHours(-1));
+        AssertCoveredFrom(EmptyHints(root), now.AddMinutes(-35));
     }
 
+    /// <summary>
+    /// #5015, RED: rows only from 30 days ago leave a 168-hour grid with no columns, and the answer used to say "nothing
+    /// collected IN the last 168 hour(s)" beside <c>window_truncated: false</c>, a contradiction. The store holds no
+    /// collection in the window, so the keys now say so.
+    /// </summary>
     [Fact]
-    public async Task GetQueryHeatmap_NothingCollectedInTheWindow_CarriesTheSameKeys()
+    public async Task GetQueryHeatmap_RowsOnlyOutsideTheWindow_SaysTheStoreHoldsNothingInIt()
     {
         await _duckDb.InitializeAsync();
         var now = DateTime.UtcNow;
-        /* Query stats from outside the window and none inside it: the grid has no columns, and says where the data starts. */
         await SeedQueryStatsAsync(now.AddDays(-30), "0xH0");
 
-        var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 1));
+        var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 168));
 
-        Assert.Contains("nothing collected IN the last 1 hour(s)", root.GetProperty("message").GetString(), StringComparison.Ordinal);
-        AssertCovered(EmptyHints(root), now.AddHours(-1));
+        Assert.Contains("nothing collected IN the last 168 hour(s)", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        AssertNothingHeld(EmptyHints(root), "query_stats");
     }
 
     /* ───────────────────────── assertions ───────────────────────── */
@@ -724,6 +822,32 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         var note = root.GetProperty("truncation_note").GetString();
         Assert.NotNull(note);
         Assert.Contains($"raw {table} retains", note, StringComparison.Ordinal);
+        AssertNoReachKey(root);
+    }
+
+    /// <summary>
+    /// #5015: an empty answer over a window the store holds no collection in. Not covered: <c>window_truncated</c> true, no
+    /// <c>effective_start</c> (null, there is no start to name) and a note that says so.
+    /// </summary>
+    private static void AssertNothingHeld(JsonElement root, string table)
+    {
+        Assert.True(root.GetProperty("window_truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("effective_start").ValueKind);
+        var note = root.GetProperty("truncation_note").GetString();
+        Assert.NotNull(note);
+        Assert.Contains($"holds no collection of {table}", note, StringComparison.Ordinal);
+        AssertNoReachKey(root);
+    }
+
+    /// <summary>The probe found data inside the slack: covered, and <c>effective_start</c> is where the data starts.</summary>
+    private static void AssertCoveredFrom(JsonElement root, DateTime firstInstant)
+    {
+        Assert.False(root.GetProperty("window_truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+        var text = root.GetProperty("effective_start").GetString()!;
+        Assert.EndsWith("Z", text, StringComparison.Ordinal);
+        Assert.True(Math.Abs((ParseUtc(text) - firstInstant).TotalSeconds) < 5,
+            $"effective_start {text} should be the first collection {firstInstant:o}");
         AssertNoReachKey(root);
     }
 

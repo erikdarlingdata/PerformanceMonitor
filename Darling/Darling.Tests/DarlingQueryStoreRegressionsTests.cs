@@ -173,6 +173,17 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
         Assert.Equal(2, CountOf(sql, "EXISTS ("));
     }
 
+    /// <summary>
+    /// #5015: the coverage probe takes the read's database filter ($5), in both of its questions, so a filter that matched
+    /// nothing can be told from one that matched and found nothing wrong.
+    /// </summary>
+    [Fact]
+    public void CoverageSql_TakesTheReadsDatabaseFilter_InBothQuestions()
+    {
+        var sql = DarlingQueryStoreRegressionReader.RegressionCoverageSql;
+        Assert.Equal(2, CountOf(sql, "$5::text[] IS NULL OR database_name = ANY($5)"));
+    }
+
     [Theory]
     [InlineData(nameof(DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql))]
     [InlineData(nameof(DarlingQueryStoreRegressionReader.RegressionCoverageSql))]
@@ -370,6 +381,53 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             var exact = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, null, 1));
             Assert.Equal(1, exact.GetProperty("regression_count").GetInt32());
             Assert.False(exact.GetProperty("truncated").GetBoolean());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #5015: a database_name filter that matches nothing in the baseline or the window says the filter matched nothing, not
+    /// "this IS the all-clear" (the server-wide probe saw both sides collected). A filter that matches, and finds nothing
+    /// wrong, is still the all-clear.
+    /// </summary>
+    [Fact]
+    public async Task AFilteredMiss_SaysTheFilterMatchedNothing_NotTheAllClear_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live regressions test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var baseNow = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 1);
+
+            var miss = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, "NoSuchDb"));
+            Assert.Equal("empty", miss.GetProperty("status").GetString());
+            var missText = miss.GetProperty("message").GetString()!;
+            Assert.Contains("database_name 'NoSuchDb'", missText, StringComparison.Ordinal);
+            Assert.Contains("the filter matched nothing and this is NOT the all-clear", missText, StringComparison.Ordinal);
+            Assert.DoesNotContain("this IS the all-clear", missText, StringComparison.Ordinal);
+
+            var match = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, Db));
+            Assert.Contains("this IS the all-clear", match.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

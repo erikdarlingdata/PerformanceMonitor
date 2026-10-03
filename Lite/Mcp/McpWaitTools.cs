@@ -226,7 +226,7 @@ public sealed class McpWaitTools
             var requestedStart = windowEnd.AddHours(-hours_back);
             var notice = await McpQueryTools.WindowNoticeAsync(
                 () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.WaitingTasks, resolved.ServerId, requestedStart, windowEnd),
-                requestedStart, windowEnd, "waiting_tasks");
+                requestedStart, windowEnd, "waiting_tasks", emptyAnswer: rows.Count == 0);
 
             if (rows.Count == 0)
             {
@@ -264,9 +264,9 @@ public sealed class McpWaitTools
                 tasks_returned = page.Count,
                 truncated,
                 /* #4966: where the page's rows stop describes the window the page covers, so it prints like
-                   effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                   effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
                 oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = page.Max(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.CollectionTime)),
                 order = "collection_time_desc",
                 tasks = result
             }, McpHelpers.JsonOptions);

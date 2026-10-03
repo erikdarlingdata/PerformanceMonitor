@@ -983,9 +983,9 @@ public sealed class McpHealthTools
                     thing only under time ordering, and the ranked page would report the wrong ends while
                     the time-ordered test kept passing.
                 */
-                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
                 oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = rows.Max(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Max(r => r.CollectionTime)),
                 /* Which ordering this page came back in, stated rather than left to be inferred from the
                    filters sent. Same two tokens as Darling's twin, from the shared constants. */
                 order = min_duration_ms is null
@@ -1099,9 +1099,9 @@ public sealed class McpHealthTools
                 hours_back = hours,
                 run_count = rows.Count,
                 truncated,
-                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
                 oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = rows.Max(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Max(r => r.CollectionTime)),
                 order = min_duration_ms is null
                     ? McpHelpers.CollectionLogOrderNewestFirst
                     : McpHelpers.CollectionLogOrderSlowestFirst,
