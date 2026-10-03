@@ -422,24 +422,20 @@ public sealed class DarlingEmptyEnumerationInventoryTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            /* The fleet read is scoped to the CONFIG registry, not the collector-side servers table. */
-            await DarlingMcpTestData.ExecAsync(connection, ct, @"
-INSERT INTO config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE)
-ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
 
             await SeedLogAsync(connection, ct, FleetProbeCollector, MinutesAgo(30), EnumeratedCollectorDriver.EmptyEnumerationMessage);
             await SeedSizeAsync(connection, ct, "AdventureWorks", 7, MinutesAgo(25));
 
-            /* #1863's decision, extended: the fleet rollup projects the ordinal and NOT the value. It
-               groups server_id INTO the result, so there is no single server to probe an inventory for,
-               and its only caller counts bands — with last_note already NULL the formatter returns blank
-               whatever the flag says. A real value here would be a second cross-collector join across
-               every enabled server on a query the status bar re-runs on every aggregate-tab refresh,
-               which is the cost #1855 measured and declined. Asserted against live data that WOULD
-               qualify on the per-server read, so a fleet read that quietly grew the join fails here. */
+            /* #1863's decision, extended: the fleet rollup projects no inventory at all. It groups server_id
+               INTO the result, so there is no single server to probe an inventory for, and its callers (the
+               Overview cards and the status bar, through the by-server read) count bands — the formatter
+               returns blank whatever the flag says. A real value here would be a second cross-collector join
+               across every server on a query the status bar re-runs on every aggregate-tab refresh, which is
+               the cost #1855 measured and declined. Asserted against live data that WOULD qualify on the
+               per-server read, so a fleet read that quietly grew the join fails here. */
             await using var viewer = new ViewerDataService(cs!);
 
-            var fleet = (await viewer.GetFleetCollectionHealthAsync(ct))
+            var fleet = (await viewer.GetFleetCollectionHealthByServerAsync(ct))[ServerId]
                 .Where(h => h.CollectorName == FleetProbeCollector)
                 .ToList();
 
@@ -465,9 +461,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
     /* ── helpers ── */
 
     /// <summary>
-    /// The fleet read rolls up EVERY enabled server and its rows carry no server_id, so the fleet
-    /// assertions scope themselves by a collector name no real install has — the sentinel-server
-    /// discipline applied to the only key that projection exposes.
+    /// The fleet read rolls up EVERY server in the store, so the fleet assertions scope themselves by this
+    /// sentinel server's rows and by a collector name no real install has — the sentinel-server
+    /// discipline.
     /// </summary>
     private const string FleetProbeCollector = "inventory_fleet_probe";
 

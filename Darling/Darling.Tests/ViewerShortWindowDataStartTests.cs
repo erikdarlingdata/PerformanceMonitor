@@ -8,12 +8,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
@@ -138,6 +141,88 @@ public sealed class ViewerShortWindowDataStartTests : IDisposable
         Assert.Null(await viewer.GetLongQueriesDataStartAsync(1, RangeStart, end, ct));
         Assert.Null(await viewer.GetSystemHealthEventsDataStartAsync(1, RangeStart, end, ct));
         await Assert.ThrowsAnyAsync<Exception>(() => viewer.GetQueryStoreRegressionsDataStartAsync(1, RangeStart, end, ct));
+    }
+
+    // ── The Queries tab's three floor probes ──
+
+    /* One of the Queries tab's three raw-table floor probes, by the table it reads, asked through the viewer's own method. */
+    private static Task<DateTime?> QueriesTabFloorAsync(ViewerDataService viewer, string table, DateTime startUtc, DateTime endUtc, CancellationToken ct) => table switch
+    {
+        "query_stats" => viewer.GetQueryStatsWindowFloorAsync(1, startUtc, endUtc, ct),
+        "procedure_stats" => viewer.GetProcedureStatsWindowFloorAsync(1, startUtc, endUtc, ct),
+        "query_store_stats" => viewer.GetQueryStoreWindowFloorAsync(1, startUtc, endUtc, ct),
+        _ => throw new ArgumentOutOfRangeException(nameof(table), table, "not one of the Queries tab's floor probes"),
+    };
+
+    /* The same three reads as Darling's MCP tools make them, through DarlingDataReader and the shared probe. */
+    private static Task<DateTime?> McpFloorAsync(NpgsqlDataSource source, string table, DateTime startUtc, DateTime endUtc, CancellationToken ct) => table switch
+    {
+        "query_stats" => DarlingDataReader.GetQueryStatsWindowFloorAsync(source, 1, startUtc, endUtc, ct),
+        "procedure_stats" => DarlingDataReader.GetProcedureStatsWindowFloorAsync(source, 1, startUtc, endUtc, ct),
+        "query_store_stats" => DarlingDataReader.GetQueryStoreWindowFloorAsync(source, 1, startUtc, endUtc, ct),
+        _ => throw new ArgumentOutOfRangeException(nameof(table), table, "not one of the MCP floor reads"),
+    };
+
+    /* The Query Stats, Procedure Stats and Query Store probes answer a window of an hour up to the slack itself at once, with no
+       query against a store nothing listens on: the answer sits at or before the window's end, so no coverage note can show for it. */
+    [Theory]
+    [InlineData("query_stats", 60)]
+    [InlineData("query_stats", 90)]
+    [InlineData("procedure_stats", 60)]
+    [InlineData("procedure_stats", 90)]
+    [InlineData("query_store_stats", 60)]
+    [InlineData("query_store_stats", 90)]
+    public async Task AQueriesTabFloorProbe_OverAWindowNoLongerThanTheSlack_StartsNoQuery_AgainstNoStore(string table, int minutes)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var viewer = new ViewerDataService(UnreachableStore);
+
+        Assert.Null(await QueriesTabFloorAsync(viewer, table, RangeStart, RangeStart.AddMinutes(minutes), ct));
+    }
+
+    /* One minute over the slack starts the query, which fails against that store: the skip stops at the slack. */
+    [Theory]
+    [InlineData("query_stats")]
+    [InlineData("procedure_stats")]
+    [InlineData("query_store_stats")]
+    public async Task AQueriesTabFloorProbe_OneMinuteOverTheSlack_StartsItsQuery_AgainstNoStore(string table)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var viewer = new ViewerDataService(UnreachableStore);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => QueriesTabFloorAsync(viewer, table, RangeStart, RangeStart.AddMinutes(91), ct));
+    }
+
+    /* Darling's MCP tools read the same shared probe's null as "nothing was read", so the skip is the viewer's alone: an MCP floor
+       read over a short window still queries the store, and fails against one nothing listens on. */
+    [Theory]
+    [InlineData("query_stats", 60)]
+    [InlineData("query_stats", 90)]
+    [InlineData("procedure_stats", 60)]
+    [InlineData("procedure_stats", 90)]
+    [InlineData("query_store_stats", 60)]
+    [InlineData("query_store_stats", 90)]
+    public async Task AnMcpFloorRead_OverAWindowNoLongerThanTheSlack_StillQueriesTheStore_AgainstNoStore(string table, int minutes)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var source = NpgsqlDataSource.Create(UnreachableStore);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => McpFloorAsync(source, table, RangeStart, RangeStart.AddMinutes(minutes), ct));
+    }
+
+    /* Every floor read the Queries tab makes, three loads and three slicer re-reads of a sub-range, goes through those viewer
+       methods, so each carries the skip; none reaches the shared probe on its own. */
+    [Fact]
+    public void EveryQueriesTabFloorRead_GoesThroughTheViewersMethod_NeverTheSharedProbe()
+    {
+        var tabs = string.Join("\n", Directory.GetFiles(RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Viewer"), "ViewerServerTab*.cs").Select(File.ReadAllText));
+
+        foreach (var method in new[] { "GetQueryStatsWindowFloorAsync", "GetProcedureStatsWindowFloorAsync", "GetQueryStoreWindowFloorAsync" })
+        {
+            Assert.Equal(2, Regex.Matches(tabs, $@"_dataService\.{method}\(").Count);
+        }
+
+        Assert.DoesNotContain("RawWindowFloor.GetAsync(", tabs, StringComparison.Ordinal);
     }
 
     // ── The banner, read off the real control ──

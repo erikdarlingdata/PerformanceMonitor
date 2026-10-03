@@ -41,6 +41,17 @@ public sealed class ProvisioningTrendRow
     public decimal P95CpuPct { get; set; }
     public decimal MemoryRatio { get; set; }
     public string Status { get; set; } = "";
+
+    public static ProvisioningTrendRow From(ProvisioningTrendDto dto) => new()
+    {
+        Day = dto.Day,
+        AvgCpuPct = dto.AvgCpuPct,
+        MaxCpuPct = dto.MaxCpuPct,
+        P95CpuPct = dto.P95CpuPct,
+        MemoryRatio = dto.MemoryRatio,
+        Status = dto.Status
+    };
+
     public string DayDisplay => Day.ToString("ddd MM/dd");
     public string StatusDisplay => Status == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : Status.Replace("_", " ");
 }
@@ -57,6 +68,20 @@ public sealed class MemoryGrantEfficiencyRow
     public long TotalWaiters { get; set; }
     public long TimeoutErrors { get; set; }
     public long ForcedGrants { get; set; }
+
+    public static MemoryGrantEfficiencyRow From(MemoryGrantEfficiencyDto dto) => new()
+    {
+        Day = dto.Day,
+        AvgGrantedMb = dto.AvgGrantedMb,
+        AvgUsedMb = dto.AvgUsedMb,
+        EfficiencyPct = dto.EfficiencyPct,
+        PeakGrantedMb = dto.PeakGrantedMb,
+        TotalGrantees = dto.TotalGrantees,
+        TotalWaiters = dto.TotalWaiters,
+        TimeoutErrors = dto.TimeoutErrors,
+        ForcedGrants = dto.ForcedGrants
+    };
+
     public string DayDisplay => Day.ToString("ddd MM/dd");
     public decimal WastedMb => AvgGrantedMb - AvgUsedMb;
 }
@@ -140,6 +165,28 @@ public sealed class UtilizationEfficiencyRow
     public int EngineEdition { get; set; }
     public string ProvisioningStatus { get; set; } = "";
 
+    public static UtilizationEfficiencyRow From(UtilizationEfficiencyDto dto) => new()
+    {
+        AvgCpuPct = dto.AvgCpuPct,
+        MaxCpuPct = dto.MaxCpuPct,
+        P95CpuPct = dto.P95CpuPct,
+        CpuSamples = dto.CpuSamples,
+        TotalMemoryMb = dto.TotalMemoryMb,
+        TargetMemoryMb = dto.TargetMemoryMb,
+        PhysicalMemoryMb = dto.PhysicalMemoryMb,
+        BufferPoolMb = dto.BufferPoolMb,
+        MemoryRatio = dto.MemoryRatio,
+        ProvisioningStatus = dto.ProvisioningStatus,
+        MaxGrantWaiters = dto.MaxGrantWaiters,
+        GrantTimeouts = dto.GrantTimeouts,
+        ForcedGrants = dto.ForcedGrants,
+        GrantUtilizationPct = dto.GrantUtilizationPct,
+        MaxWorkersCount = dto.MaxWorkersCount,
+        CurrentWorkersCount = dto.CurrentWorkersCount,
+        CpuCount = dto.CpuCount,
+        EngineEdition = dto.EngineEdition
+    };
+
     /// <summary>
     /// False when the 24-hour window held no CPU sample at all. The row's <see cref="ProvisioningStatus"/> is then
     /// the empty no-verdict value, and <see cref="P95CpuPct"/> is a 0 that came from nothing rather than from a
@@ -157,6 +204,12 @@ public sealed class UtilizationEfficiencyRow
     public int HealthScore { get; set; }
     public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
 
+    /// <summary>The read-result form of these figures.</summary>
+    public UtilizationEfficiencyDto ToDto() => new(
+        AvgCpuPct, MaxCpuPct, P95CpuPct, CpuSamples, TotalMemoryMb, TargetMemoryMb, PhysicalMemoryMb, BufferPoolMb,
+        MemoryRatio, MaxGrantWaiters, GrantTimeouts, ForcedGrants, GrantUtilizationPct, MaxWorkersCount,
+        CurrentWorkersCount, CpuCount, EngineEdition, ProvisioningStatus);
+
     /// <summary>
     /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. The memory
     /// term reads <see cref="PhysicalMemoryMb"/> and <see cref="BufferPoolMb"/>, which come from <c>memory_stats</c>. On an Azure
@@ -166,10 +219,7 @@ public sealed class UtilizationEfficiencyRow
     /// </summary>
     public int ComputeHealthScore()
     {
-        var bpRatio = PhysicalMemoryMb > 0 ? (decimal)BufferPoolMb / PhysicalMemoryMb : 0m;
-        int? cpuScore = HasCpuSample ? FinOpsHealthCalculator.CpuScore(P95CpuPct) : null;
-        return FinOpsHealthCalculator.Overall(
-            cpuScore, FinOpsHealthCalculator.MemoryScore(bpRatio), FinOpsHealthCalculator.StorageScore(FreeSpacePct));
+        return FinOpsUtilizationFigures.HealthScore(HasCpuSample, P95CpuPct, PhysicalMemoryMb, BufferPoolMb, FreeSpacePct);
     }
 }
 
