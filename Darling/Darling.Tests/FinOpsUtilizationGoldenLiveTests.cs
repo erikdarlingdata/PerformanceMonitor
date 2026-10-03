@@ -1,0 +1,208 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// Golden-fixture pin for the three FinOps Utilization reads (<c>GetUtilizationEfficiencyAsync</c>,
+/// <c>GetProvisioningTrendAsync</c>, <c>GetMemoryGrantEfficiencyAsync</c>). A deterministic seeded store is read
+/// through the reads and the results are serialized (declaration-order properties with a public setter, decimals at
+/// their stored scale, day values as offsets from the seed anchor) and compared byte-for-byte to
+/// <c>Fixtures/FinOpsUtilization/golden.json</c>. Set <c>DARLING_WRITE_GOLDEN=1</c> to regenerate the fixture.
+///
+/// <para>Two servers are seeded. Server A has rows relative to now (all inside the 24-hour window) for the
+/// point-in-time efficiency read. Server B has rows on fixed days before today's UTC midnight at fixed hours, for the
+/// two per-day reads, so the day buckets never depend on the time of day the test runs.</para>
+/// </summary>
+[Collection("live-postgres")]
+public sealed class FinOpsUtilizationGoldenLiveTests
+{
+    private const string ServerNameA = "darling-finops-util-golden-a";
+    private const string ServerNameB = "darling-finops-util-golden-b";
+    private static readonly int ServerIdA = ServerIdHelper.GetDeterministicHashCode(ServerNameA);
+    private static readonly int ServerIdB = ServerIdHelper.GetDeterministicHashCode(ServerNameB);
+
+    [Fact]
+    public async Task UtilizationReads_MatchGoldenFixture_ThroughTheViewer()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live FinOps utilization golden test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, ct);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+        var succeeded = false;
+        try
+        {
+            var anchor = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
+            await SeedAsync(connection, anchor, ct);
+
+            var efficiency = await viewer.GetUtilizationEfficiencyAsync(ServerIdA, ct);
+            var trend = await viewer.GetProvisioningTrendAsync(ServerIdB, ct);
+            var grants = await viewer.GetMemoryGrantEfficiencyAsync(ServerIdB, hoursBack: 24 * 6, ct);
+
+            var actual = Serialize(anchor, efficiency, trend, grants);
+            AssertGolden(actual);
+            succeeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, succeeded, async (cleanup, cleanupCt) =>
+                await CleanupAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task SeedAsync(NpgsqlConnection connection, DateTime anchor, CancellationToken ct)
+    {
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdA, ServerNameA, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdB, ServerNameB, ct);
+
+        var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+
+        /* Server A: four CPU samples, two memory snapshots (the newest wins), grant pressure, an Enterprise 8-core row. */
+        var cpu = new[] { 10, 20, 30, 95 };
+        for (var i = 0; i < cpu.Length; i++)
+            await InsertCpuAsync(connection, ServerIdA, ServerNameA, now.AddHours(-1 - i), cpu[i], ct);
+        await InsertMemoryAsync(connection, ServerIdA, ServerNameA, now.AddHours(-5), 6000m, 8000m, 16000m, 5000m, 512, 80, ct);
+        await InsertMemoryAsync(connection, ServerIdA, ServerNameA, now.AddHours(-2), 7000m, 8000m, 16000m, 6000m, 512, 100, ct);
+        await InsertGrantAsync(connection, ServerIdA, ServerNameA, now.AddHours(-3), 100m, 40m, 1000m, 4, 2, 1, 3, ct);
+        await InsertGrantAsync(connection, ServerIdA, ServerNameA, now.AddHours(-2), 150m, 60m, 1000m, 6, 0, null, 2, ct);
+        await InsertPropertiesAsync(connection, ServerIdA, ServerNameA, now.AddDays(-1), "Enterprise Edition", 3, 8, null, ct);
+
+        /* Server B: four fixed days at 12:00 and 13:00 UTC, varied load, an Azure SQL Database row. */
+        var avgCpu = new[] { 5, 22, 45, 80 };
+        for (var d = 0; d < 4; d++)
+        {
+            var day = anchor.AddDays(-4 + d);
+            await InsertCpuAsync(connection, ServerIdB, ServerNameB, day.AddHours(12), avgCpu[d], ct);
+            await InsertCpuAsync(connection, ServerIdB, ServerNameB, day.AddHours(13), avgCpu[d] + 7, ct);
+            await InsertMemoryAsync(connection, ServerIdB, ServerNameB, day.AddHours(12), 3000m + (d * 400m), 4000m, 8192m, 2000m, 300, 40 + d, ct);
+            await InsertGrantAsync(connection, ServerIdB, ServerNameB, day.AddHours(12), 200m + (d * 50m), 90m, 2000m, 5 + d, d, d == 2 ? null : 1, d, ct);
+            await InsertGrantAsync(connection, ServerIdB, ServerNameB, day.AddHours(13), 300m + (d * 25m), 120m, 2000m, 3, d, 0, d + 1, ct);
+        }
+        await InsertPropertiesAsync(connection, ServerIdB, ServerNameB, anchor.AddDays(-2), "SQL Azure", 5, 4, 2, ct);
+    }
+
+    private static Task InsertCpuAsync(NpgsqlConnection c, int id, string name, DateTime at, int pct, CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, $6, 1)",
+            CollectionIdGenerator.Next(), at, id, name, at, pct);
+
+    private static Task InsertMemoryAsync(NpgsqlConnection c, int id, string name, DateTime at, decimal total, decimal target,
+        decimal physical, decimal bufferPool, int maxWorkers, int currentWorkers, CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, total_server_memory_mb, target_server_memory_mb, buffer_pool_mb, max_workers_count, current_workers_count) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            CollectionIdGenerator.Next(), at, id, name, physical, total, target, bufferPool, maxWorkers, currentWorkers);
+
+    private static Task InsertGrantAsync(NpgsqlConnection c, int id, string name, DateTime at, decimal granted, decimal used,
+        decimal target, int grantees, int waiters, long? timeoutDelta, long forcedDelta, CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO memory_grant_stats (collection_id, collection_time, server_id, server_name, target_memory_mb, granted_memory_mb, used_memory_mb, grantee_count, waiter_count, timeout_error_count_delta, forced_grant_count_delta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            CollectionIdGenerator.Next(), at, id, name, target, granted, used, grantees, waiters, timeoutDelta, forcedDelta);
+
+    private static Task InsertPropertiesAsync(NpgsqlConnection c, int id, string name, DateTime at, string edition,
+        int engineEdition, int cpuCount, int? vcores, CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, engine_edition, cpu_count, vcore_count) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            CollectionIdGenerator.Next(), at, id, name, edition, engineEdition, cpuCount, vcores);
+
+    private static Task CleanupAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            $"DELETE FROM cpu_utilization_stats WHERE server_id IN ({ServerIdA},{ServerIdB}); " +
+            $"DELETE FROM memory_stats WHERE server_id IN ({ServerIdA},{ServerIdB}); " +
+            $"DELETE FROM memory_grant_stats WHERE server_id IN ({ServerIdA},{ServerIdB}); " +
+            $"DELETE FROM server_properties WHERE server_id IN ({ServerIdA},{ServerIdB}); " +
+            $"DELETE FROM servers WHERE server_id IN ({ServerIdA},{ServerIdB})");
+
+    /// <summary>Serializes the three results as indented JSON: public settable properties in declaration order,
+    /// decimals at their stored scale, and every DateTime as a whole-day offset from <paramref name="anchor"/>.</summary>
+    private static string Serialize(DateTime anchor, object? efficiency, object trend, object grants)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
+        {
+            writer.WriteStartObject();
+            writer.WritePropertyName("utilizationEfficiency");
+            WriteValue(writer, efficiency, anchor);
+            writer.WritePropertyName("provisioningTrend");
+            WriteValue(writer, trend, anchor);
+            writer.WritePropertyName("memoryGrantEfficiency");
+            WriteValue(writer, grants, anchor);
+            writer.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(stream.ToArray()).ReplaceLineEndings("\n") + "\n";
+    }
+
+    private static void WriteValue(Utf8JsonWriter writer, object? value, DateTime anchor)
+    {
+        switch (value)
+        {
+            case null: writer.WriteNullValue(); break;
+            case string s: writer.WriteStringValue(s); break;
+            case bool b: writer.WriteBooleanValue(b); break;
+            case int i: writer.WriteNumberValue(i); break;
+            case long l: writer.WriteNumberValue(l); break;
+            case decimal m: writer.WriteNumberValue(m); break;
+            case DateTime t:
+                var offset = t - anchor;
+                writer.WriteStringValue($"anchor{(offset < TimeSpan.Zero ? "-" : "+")}{Math.Abs(offset.TotalDays).ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}d");
+                break;
+            case System.Collections.IEnumerable list:
+                writer.WriteStartArray();
+                foreach (var item in list) WriteValue(writer, item, anchor);
+                writer.WriteEndArray();
+                break;
+            default:
+                writer.WriteStartObject();
+                foreach (var p in value.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                             .Where(p => p.SetMethod is { IsPublic: true })
+                             .OrderBy(p => p.MetadataToken))
+                {
+                    writer.WritePropertyName(p.Name);
+                    WriteValue(writer, p.GetValue(value), anchor);
+                }
+                writer.WriteEndObject();
+                break;
+        }
+    }
+
+    private static string GoldenSourcePath([CallerFilePath] string testFile = "") =>
+        Path.Combine(Path.GetDirectoryName(testFile)!, "Fixtures", "FinOpsUtilization", "golden.json");
+
+    private static void AssertGolden(string actual)
+    {
+        if (Environment.GetEnvironmentVariable("DARLING_WRITE_GOLDEN") == "1")
+            File.WriteAllText(GoldenSourcePath(), actual);
+
+        var golden = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "FinOpsUtilization", "golden.json"))
+            .ReplaceLineEndings("\n");
+        Assert.Equal(golden, actual);
+    }
+}

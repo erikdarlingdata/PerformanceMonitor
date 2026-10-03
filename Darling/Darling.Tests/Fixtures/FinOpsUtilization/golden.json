@@ -1,0 +1,105 @@
+{
+  "utilizationEfficiency": {
+    "AvgCpuPct": 38.7500000000000000,
+    "MaxCpuPct": 95,
+    "P95CpuPct": 85.25,
+    "CpuSamples": 4,
+    "TotalMemoryMb": 7000,
+    "TargetMemoryMb": 8000,
+    "PhysicalMemoryMb": 16000,
+    "BufferPoolMb": 6000,
+    "MemoryRatio": 0.87500000000000000000,
+    "MaxGrantWaiters": 2,
+    "GrantTimeouts": 1,
+    "ForcedGrants": 5,
+    "GrantUtilizationPct": 15.0000000000000000,
+    "MaxWorkersCount": 512,
+    "CurrentWorkersCount": 100,
+    "CpuCount": 8,
+    "EngineEdition": 3,
+    "ProvisioningStatus": "UNDER_PROVISIONED",
+    "MonthlyCost": 0,
+    "FreeSpacePct": 0,
+    "HealthScore": 0
+  },
+  "provisioningTrend": [
+    {
+      "Day": "anchor-4d",
+      "AvgCpuPct": 8.5000000000000000,
+      "MaxCpuPct": 12,
+      "P95CpuPct": 11.65,
+      "MemoryRatio": 0.75000000000000000000,
+      "Status": "UNDER_PROVISIONED"
+    },
+    {
+      "Day": "anchor-3d",
+      "AvgCpuPct": 25.5000000000000000,
+      "MaxCpuPct": 29,
+      "P95CpuPct": 28.65,
+      "MemoryRatio": 0.85000000000000000000,
+      "Status": "UNDER_PROVISIONED"
+    },
+    {
+      "Day": "anchor-2d",
+      "AvgCpuPct": 48.5000000000000000,
+      "MaxCpuPct": 52,
+      "P95CpuPct": 51.65,
+      "MemoryRatio": 0.95000000000000000000,
+      "Status": "UNDER_PROVISIONED"
+    },
+    {
+      "Day": "anchor-1d",
+      "AvgCpuPct": 83.5000000000000000,
+      "MaxCpuPct": 87,
+      "P95CpuPct": 86.65,
+      "MemoryRatio": 1.05000000000000000000,
+      "Status": "UNDER_PROVISIONED"
+    }
+  ],
+  "memoryGrantEfficiency": [
+    {
+      "Day": "anchor-4d",
+      "AvgGrantedMb": 250.0000000000000000,
+      "AvgUsedMb": 105.0000000000000000,
+      "EfficiencyPct": 42.0,
+      "PeakGrantedMb": 300.00,
+      "TotalGrantees": 8,
+      "TotalWaiters": 0,
+      "TimeoutErrors": 1,
+      "ForcedGrants": 1
+    },
+    {
+      "Day": "anchor-3d",
+      "AvgGrantedMb": 287.5000000000000000,
+      "AvgUsedMb": 105.0000000000000000,
+      "EfficiencyPct": 36.5,
+      "PeakGrantedMb": 325.00,
+      "TotalGrantees": 9,
+      "TotalWaiters": 2,
+      "TimeoutErrors": 1,
+      "ForcedGrants": 3
+    },
+    {
+      "Day": "anchor-2d",
+      "AvgGrantedMb": 325.0000000000000000,
+      "AvgUsedMb": 105.0000000000000000,
+      "EfficiencyPct": 32.3,
+      "PeakGrantedMb": 350.00,
+      "TotalGrantees": 10,
+      "TotalWaiters": 4,
+      "TimeoutErrors": 0,
+      "ForcedGrants": 5
+    },
+    {
+      "Day": "anchor-1d",
+      "AvgGrantedMb": 362.5000000000000000,
+      "AvgUsedMb": 105.0000000000000000,
+      "EfficiencyPct": 29.0,
+      "PeakGrantedMb": 375.00,
+      "TotalGrantees": 11,
+      "TotalWaiters": 6,
+      "TimeoutErrors": 1,
+      "ForcedGrants": 7
+    }
+  ]
+}
