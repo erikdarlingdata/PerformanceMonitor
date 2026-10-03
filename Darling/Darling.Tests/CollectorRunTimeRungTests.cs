@@ -387,6 +387,69 @@ public sealed class CollectorRunTimeRungLiveTests
         }
     }
 
+    /// <summary>
+    /// The install id's row survives the upgrade from V159 untouched (#4938, #4961). V159 is the install id table's final
+    /// shape (the table's own OID and the server's major version, one statement), and this rung adds a column to the
+    /// schedules table and restates nothing of it: the id, its bindings (the database OID, the table OID and the server
+    /// major) and its creation time read the same after the rung as before it, and the table keeps exactly its seven
+    /// columns.
+    /// </summary>
+    [Fact]
+    public async Task AStoreAtV159_KeepsItsInstallIdRowAndTableShapeUnchanged_AcrossTheUpgradeToTheRung()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = await MigratedAsync(scratch, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            const string ReadRow =
+                "SELECT install_id || '|' || system_identifier || '|' || database_oid || '|' || table_oid || '|' || server_major || '|' || created_at::text FROM config.config_install_id";
+            const string ReadShape =
+                "SELECT string_agg(column_name || ':' || data_type, ',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_install_id'";
+            const string Row = "0a1b2c3d|7000000000000000001|16384|16400|17|2026-01-02 03:04:05.678901";
+            const string Shape = "id:smallint,install_id:text,system_identifier:bigint,database_oid:bigint,created_at:timestamp without time zone,table_oid:bigint,server_major:integer";
+
+            /* A fresh store migrates all the way to 160 and carries the install id table's final shape. */
+            Assert.Equal(160, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
+            Assert.Equal(Shape, await ScalarAsync(connection, ReadShape, ct));
+
+            /* Put the store back at V159: the run time's column and stamp gone, an install id row the service already made. */
+            foreach (var sql in new[]
+            {
+                "ALTER TABLE config.config_collector_schedules DROP COLUMN run_at_minute",
+                "DELETE FROM darling_schema_version WHERE version >= 160",
+                "INSERT INTO config.config_install_id (install_id, system_identifier, database_oid, table_oid, server_major, created_at) VALUES ('0a1b2c3d', 7000000000000000001, 16384, 16400, 17, '2026-01-02 03:04:05.678901')",
+            })
+            {
+                await using var step = new NpgsqlCommand(sql, connection);
+                await step.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.Equal(159, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
+            Assert.Equal(Row, await ScalarAsync(connection, ReadRow, ct));
+            Assert.Equal(Shape, await ScalarAsync(connection, ReadShape, ct));
+
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            Assert.Equal(160, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
+            Assert.Equal("smallint", await ScalarAsync(connection,
+                "SELECT data_type FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_collector_schedules' AND column_name = 'run_at_minute'", ct));
+            Assert.Equal(Row, await ScalarAsync(connection, ReadRow, ct));
+            Assert.Equal(Shape, await ScalarAsync(connection, ReadShape, ct));
+            Assert.Equal(1, Convert.ToInt32(await ScalarAsync(connection, "SELECT COUNT(*) FROM config.config_install_id", ct)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
     /// <summary>The viewer's schedule save, with the column present: it still works, and because it deletes the
     /// scope's rows and inserts them again without naming the column, a run time stored in that scope is cleared.
     /// This pins today's behavior so the change that makes the editor carry the time has to flip it on purpose.</summary>
