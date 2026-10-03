@@ -36,9 +36,10 @@ internal sealed record CollectorRunTimeReading(string RunAt, DateTime? NextRunUt
 /// own clock, which is the newest server_properties row's (UTC while the store holds none).
 ///
 /// <para><b>A run counts the way the start-up read counts it.</b> The last run is the health row's newest
-/// collection_log row of ANY status, so a failed attempt is the day's run here as it is in the sweep. The health read
-/// covers seven days; a collector whose last run is older reads as never run, which gives the same next slot for every
-/// interval up to seven days.</para>
+/// collection_log row of ANY status, so a failed attempt is the day's run here as it is in the sweep. A run older than
+/// the collector's floor, its interval plus a day (<see cref="ScheduleManager.LastRunFloor"/>), reads as never run, the
+/// same floor the sweep applies to each collector it seeds, so the two name the same next run. The health read covers
+/// seven days, which holds a floor for an interval up to six days; a run older than seven days is not seen here.</para>
 ///
 /// <para><b>Nothing here is banded.</b> The health band is read from the shipped cadence and never sees any of this.</para>
 ///
@@ -107,10 +108,10 @@ public sealed class McpCollectorRunTimes
             {
                 byCollector.TryGetValue(setting.Collector, out var row);
 
-                /* The health row's stamp is naive UTC. */
-                DateTime? last = row?.LastRunTime is { } ran
-                    ? DateTime.SpecifyKind(ran, DateTimeKind.Utc)
-                    : null;
+                /* The health row's stamp is naive UTC. A run older than the collector's floor (its interval plus a day) reads
+                   as never run, the floor the sweep's start-up read applies, so the tool names the sweep's next run. */
+                DateTime? last = ScheduleManager.LastRunWithinFloor(
+                    row?.LastRunTime is { } ran ? DateTime.SpecifyKind(ran, DateTimeKind.Utc) : null, nowUtc, setting.IntervalMinutes);
                 next = CollectorRunTime.NextDue(nowUtc, last, setting.RunAtMinute, setting.IntervalMinutes, storageServerId, localToUtc);
                 if (row is not null)
                 {

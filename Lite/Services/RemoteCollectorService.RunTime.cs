@@ -38,8 +38,9 @@ public partial class RemoteCollectorService
     /// <para><b>The statuses that count as a run: all of them.</b> Darling's connect-time last-run read
     /// (<c>DarlingWorker.ReadCollectorWatermarksAsync</c>) has no status filter, because a failed attempt still wrote
     /// a row and still reset the cadence clock, so this read has none either and the two apps agree. The read covers
-    /// the longest daily interval plus a day, in the live collection_log only; a collector whose last run is older
-    /// than that is due anyway.</para>
+    /// the longest daily interval plus a day, in the live collection_log only, and each collector keeps a run only from
+    /// inside its own interval plus a day (<see cref="ScheduleManager.LastRunFloor"/>, the floor get_collection_health
+    /// applies too); a collector whose last run is older than that is due anyway.</para>
     ///
     /// <para>Failure-isolated: a store hiccup leaves the collectors as never run, which is how Lite started before
     /// this read, and never stops the sweep.</para>
@@ -65,9 +66,21 @@ public partial class RemoteCollectorService
             var daily = _scheduleManager.GetDailyCollectorIntervalsForServer(server.Id);
             if (daily.Count > 0)
             {
-                var lookback = TimeSpan.FromMinutes(daily.Values.Max()) + TimeSpan.FromDays(1);
+                /* The read reaches back as far as the longest floor; each collector then keeps a run only from inside
+                   its own (interval plus a day), the floor get_collection_health applies, so the two name the same next run. */
+                var lookback = ScheduleManager.LastRunFloor(daily.Values.Max());
                 var lastRuns = await ReadCollectorLastRunsAsync(storageId, daily.Keys, lookback, CancellationToken.None);
-                _scheduleManager.SeedLastRunsForServer(server.Id, lastRuns);
+                var nowUtc = DateTime.UtcNow;
+                var withinFloor = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (name, ran) in lastRuns)
+                {
+                    if (ScheduleManager.LastRunWithinFloor(ran, nowUtc, daily[name]) is DateTime kept)
+                    {
+                        withinFloor[name] = kept;
+                    }
+                }
+
+                _scheduleManager.SeedLastRunsForServer(server.Id, withinFloor);
             }
 
             return true;
