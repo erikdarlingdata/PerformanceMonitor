@@ -542,7 +542,7 @@ public sealed class EngineCapabilityReadWiringTests
         /* Set A views: append their collectors here. */
         var setA = new[] { "memory_stats" };
         /* Set B views: append their collectors here. */
-        var setB = new[] { "file_io_stats", "query_stats", "session_stats" };
+        var setB = new[] { "database_size_stats", "file_io_stats", "memory_grant_stats", "query_stats", "session_stats", "tempdb_stats", "wait_stats" };
 
         /* Exact: the sorted union of the per-set lists equals the scanned set, so an unlisted collector still fails. */
         Assert.Equal(setA.Concat(setB).OrderBy(c => c, StringComparer.Ordinal).ToArray(), collectors!.OrderBy(c => c, StringComparer.Ordinal).ToArray());

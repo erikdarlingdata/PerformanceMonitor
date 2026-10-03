@@ -44,6 +44,7 @@ public sealed partial class DarlingMcpFinOpsTools
         HighImpactView,
         DatabaseResourcesView,
         ApplicationConnectionsView,
+        OptimizationView,
         // FinOps web parity (#4843), set B ends.
     ];
 
@@ -63,9 +64,9 @@ public sealed partial class DarlingMcpFinOpsTools
     //
     //
     // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
-    internal const string SetBViewLines = " " + HighImpactViewLine + " " + DatabaseResourcesViewLine + " " + ApplicationConnectionsViewLine;
-    internal const string SetBValid = HighImpactView + ", " + DatabaseResourcesView + ", " + ApplicationConnectionsView;
-    internal const string SetBGuides = " " + HighImpactViewGuide + " " + DatabaseResourcesViewGuide + " " + ApplicationConnectionsViewGuide;
+    internal const string SetBViewLines = " " + HighImpactViewLine + " " + DatabaseResourcesViewLine + " " + ApplicationConnectionsViewLine + " " + OptimizationViewLine;
+    internal const string SetBValid = HighImpactView + ", " + DatabaseResourcesView + ", " + ApplicationConnectionsView + ", " + OptimizationView;
+    internal const string SetBGuides = " " + HighImpactViewGuide + " " + DatabaseResourcesViewGuide + " " + ApplicationConnectionsViewGuide + " " + OptimizationViewGuide;
     // FinOps web parity (#4843), set B ends.
 
     private const int DefaultLimit = 10;
@@ -119,6 +120,8 @@ public sealed partial class DarlingMcpFinOpsTools
                     return await ReadDatabaseResourcesAsync(postgres, resolved, hours_back, limit, cancellationToken);
                 case ApplicationConnectionsView:
                     return await ReadApplicationConnectionsAsync(postgres, resolved, hours_back, limit, cancellationToken);
+                case OptimizationView:
+                    return await ReadOptimizationAsync(postgres, resolved, hours_back, limit, cancellationToken);
                 // FinOps web parity (#4843), set B ends.
                 default:
                     return McpHelpers.Refusal("view", $"Invalid view value '{view}'. Valid views: {string.Join(", ", Views)}.");
