@@ -72,6 +72,18 @@ public sealed class McpHostService : BackgroundService
             baselineCache: BaselineCache.For(duckDb)));
     }
 
+    /// <summary>
+    /// #4938: registers the run-time source get_collection_health reads: the collector schedules the sweep reads, and the
+    /// server list a storage id is looked up in. The tool takes the service as an optional parameter, so a host that left
+    /// this registration out would not fail on a call: the parameter would keep its null default and every collector would
+    /// read as having no run time. Extracted so a test resolves the service from the production registration instead of a
+    /// hand-built one that could drift from it.
+    /// </summary>
+    internal static void RegisterCollectorRunTimes(IServiceCollection services, ScheduleManager? schedules, ServerManager serverManager)
+    {
+        services.AddSingleton(new McpCollectorRunTimes(schedules, serverManager));
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         try
@@ -91,8 +103,9 @@ public sealed class McpHostService : BackgroundService
             builder.Services.AddSingleton(_dataService);
             builder.Services.AddSingleton(_serverManager);
             builder.Services.AddSingleton(_muteRuleService);
-            /* #4938: get_collection_health shows each collector's run time and next run, from the schedule the sweep reads. */
-            builder.Services.AddSingleton(new McpCollectorRunTimes(_scheduleManager, _serverManager));
+            /* #4938: get_collection_health shows each collector's run time and next run, from the schedule the sweep reads.
+               Registered through the method a test also calls (see RegisterCollectorRunTimes). */
+            RegisterCollectorRunTimes(builder.Services, _scheduleManager, _serverManager);
             var planFetcher = new SqlPlanFetcher(_serverManager);
             /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
             RegisterAnalysisService(builder.Services, _duckDb, planFetcher, _serverManager, _scheduleManager);
