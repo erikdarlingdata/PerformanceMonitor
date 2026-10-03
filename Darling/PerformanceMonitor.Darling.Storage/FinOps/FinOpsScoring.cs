@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Darling.Storage.FinOps;
 
@@ -55,4 +57,71 @@ public static class FinOpsHealthCalculator
         >= 60 => "#F39C12",
         _ => "#E74C3C"
     };
+}
+
+/// <summary>
+/// Identifies top-N queries per resource dimension, computes PERCENT_RANK and share percentages, and
+/// returns the "interesting" set sorted by impact score. Copied verbatim from Lite's HighImpactScorer.
+/// </summary>
+public static class HighImpactScorer
+{
+    public static List<HighImpactQuery> Score(List<HighImpactQuery> allRows, int topN = 10)
+    {
+        if (allRows.Count == 0) return allRows;
+
+        var interesting = new HashSet<string>();
+        foreach (var hash in allRows.OrderByDescending(r => r.TotalCpuMs).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
+        foreach (var hash in allRows.OrderByDescending(r => r.TotalDurationMs).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
+        foreach (var hash in allRows.OrderByDescending(r => r.TotalReads).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
+        foreach (var hash in allRows.OrderByDescending(r => r.TotalWrites).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
+        foreach (var hash in allRows.OrderByDescending(r => r.TotalMemoryMb).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
+        foreach (var hash in allRows.OrderByDescending(r => r.TotalExecutions).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
+
+        var filtered = allRows.Where(r => interesting.Contains(r.QueryHash)).ToList();
+
+        if (filtered.Count == 0) return filtered;
+
+        var cpuValues = filtered.Select(r => r.TotalCpuMs).OrderBy(v => v).ToList();
+        var durationValues = filtered.Select(r => r.TotalDurationMs).OrderBy(v => v).ToList();
+        var readsValues = filtered.Select(r => (decimal)r.TotalReads).OrderBy(v => v).ToList();
+        var writesValues = filtered.Select(r => (decimal)r.TotalWrites).OrderBy(v => v).ToList();
+        var memoryValues = filtered.Select(r => r.TotalMemoryMb).OrderBy(v => v).ToList();
+        var execValues = filtered.Select(r => (decimal)r.TotalExecutions).OrderBy(v => v).ToList();
+
+        var totalCpu = filtered.Sum(r => r.TotalCpuMs);
+        var totalDuration = filtered.Sum(r => r.TotalDurationMs);
+        var totalReads = filtered.Sum(r => (decimal)r.TotalReads);
+        var totalWrites = filtered.Sum(r => (decimal)r.TotalWrites);
+        var totalMemory = filtered.Sum(r => r.TotalMemoryMb);
+        var totalExecs = filtered.Sum(r => (decimal)r.TotalExecutions);
+
+        foreach (var row in filtered)
+        {
+            var cpuPctl = PercentRank(cpuValues, row.TotalCpuMs);
+            var durationPctl = PercentRank(durationValues, row.TotalDurationMs);
+            var readsPctl = PercentRank(readsValues, (decimal)row.TotalReads);
+            var writesPctl = PercentRank(writesValues, (decimal)row.TotalWrites);
+            var memoryPctl = PercentRank(memoryValues, row.TotalMemoryMb);
+            var execsPctl = PercentRank(execValues, (decimal)row.TotalExecutions);
+
+            row.CpuShare = totalCpu > 0 ? Math.Round(100m * row.TotalCpuMs / totalCpu, 1) : 0;
+            row.DurationShare = totalDuration > 0 ? Math.Round(100m * row.TotalDurationMs / totalDuration, 1) : 0;
+            row.ReadsShare = totalReads > 0 ? Math.Round(100m * row.TotalReads / totalReads, 1) : 0;
+            row.WritesShare = totalWrites > 0 ? Math.Round(100m * row.TotalWrites / totalWrites, 1) : 0;
+            row.MemoryShare = totalMemory > 0 ? Math.Round(100m * row.TotalMemoryMb / totalMemory, 1) : 0;
+            row.ExecutionsShare = totalExecs > 0 ? Math.Round(100m * row.TotalExecutions / totalExecs, 1) : 0;
+
+            var pctlSum = cpuPctl + durationPctl + readsPctl + writesPctl + memoryPctl + execsPctl;
+            row.ImpactScore = (int)(pctlSum / 6m * 100m);
+        }
+
+        return filtered.OrderByDescending(r => r.ImpactScore).ToList();
+    }
+
+    internal static decimal PercentRank(List<decimal> sortedValues, decimal value)
+    {
+        if (sortedValues.Count <= 1) return 0;
+        int rank = sortedValues.Count(v => v < value);
+        return Math.Min(1.0m, (decimal)rank / (sortedValues.Count - 1));
+    }
 }

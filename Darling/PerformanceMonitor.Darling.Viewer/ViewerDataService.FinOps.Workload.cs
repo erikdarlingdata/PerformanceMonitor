@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -649,93 +650,13 @@ LIMIT $3";
         return items;
     }
 
-    /// <summary>
-    /// High-impact queries — 80/20 analysis across CPU/duration/reads/writes/memory/executions. Aggregates
-    /// to query_hash level in SQL (with correlated sample-text subqueries, as Lite does), then scores in C#
-    /// via <see cref="HighImpactScorer"/>. $1 server_id, $2 cutoff.
-    /// </summary>
-    public const string HighImpactQueriesSql = $@"
-SELECT
-    query_hash,
-    MIN(database_name) AS database_name,
-    SUM(delta_execution_count) AS total_executions,
-    SUM(delta_worker_time) / 1000.0 AS total_cpu_ms,
-    SUM(delta_elapsed_time) / 1000.0 AS total_duration_ms,
-    SUM(delta_logical_reads) AS total_reads,
-    SUM(delta_logical_writes) AS total_writes,
-    SUM(COALESCE(max_grant_kb, 0)) / 1024.0 AS total_memory_mb,
-    (SELECT LEFT(qs2.query_text, 200) FROM v_query_stats qs2
-     WHERE qs2.query_hash = qs.query_hash
-     AND qs2.server_id = $1
-     AND qs2.collection_time >= $2
-     AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
-     ORDER BY qs2.delta_execution_count DESC NULLS LAST
-     LIMIT 1) AS sample_query_text,
-    (SELECT qs2.query_text FROM v_query_stats qs2
-     WHERE qs2.query_hash = qs.query_hash
-     AND qs2.server_id = $1
-     AND qs2.collection_time >= $2
-     AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
-     ORDER BY qs2.delta_execution_count DESC NULLS LAST
-     LIMIT 1) AS full_query_text,
-    (SELECT qs2.query_plan_xml FROM v_query_stats qs2
-     WHERE qs2.query_hash = qs.query_hash
-     AND qs2.server_id = $1
-     AND qs2.collection_time >= $2
-     AND qs2.query_plan_xml IS NOT NULL AND qs2.query_plan_xml != ''
-     ORDER BY qs2.delta_execution_count DESC NULLS LAST
-     LIMIT 1) AS query_plan_xml,
-    (SELECT qs2.query_plan_gz FROM v_query_stats qs2
-     WHERE qs2.query_hash = qs.query_hash
-     AND qs2.server_id = $1
-     AND qs2.collection_time >= $2
-     AND qs2.query_plan_gz IS NOT NULL
-     ORDER BY qs2.delta_execution_count DESC NULLS LAST
-     LIMIT 1) AS query_plan_gz
-FROM v_query_stats AS qs
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   query_hash IS NOT NULL AND query_hash != ''
-AND   delta_execution_count > 0
-AND   {TimescaleSupport.IntervalHonestSourceFilter}
-GROUP BY query_hash
-HAVING SUM(delta_execution_count) > 0
-ORDER BY SUM(delta_worker_time) DESC";
+    /// <summary>The high-impact read's SQL; lives in <see cref="DarlingFinOpsHighImpactReader"/>.</summary>
+    public const string HighImpactQueriesSql = DarlingFinOpsHighImpactReader.HighImpactQueriesSql;
 
     public async Task<List<HighImpactQueryRow>> GetHighImpactQueriesAsync(int serverId, int hoursBack = 24, CancellationToken cancellationToken = default)
     {
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
-
-        await using var command = _dataSource.CreateCommand(HighImpactQueriesSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-
-        var allRows = new List<HighImpactQueryRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            allRows.Add(new HighImpactQueryRow
-            {
-                QueryHash = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                TotalExecutions = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
-                TotalCpuMs = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
-                TotalDurationMs = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
-                TotalReads = reader.IsDBNull(5) ? 0 : Convert.ToInt64(reader.GetValue(5)),
-                TotalWrites = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
-                TotalMemoryMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
-                SampleQueryText = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                FullQueryText = reader.IsDBNull(9) ? "" : reader.GetString(9),
-                /* #2069: the two correlated subqueries may land on DIFFERENT sample rows (one
-                   pre-V54 text row, one post-V54 gz row); either is "a sample plan for the hash",
-                   and text-first keeps the free form when both exist. */
-                QueryPlanXml = PayloadDimensions.ResolveContent(
-                    reader.IsDBNull(10) ? null : reader.GetString(10),
-                    reader.IsDBNull(11) ? null : reader.GetFieldValue<byte[]>(11))
-            });
-        }
-
-        return HighImpactScorer.Score(allRows);
+        var rows = await DarlingFinOpsHighImpactReader.ReadAsync(
+            _dataSource, serverId, hoursBack, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return rows.Select(HighImpactQueryRow.From).ToList();
     }
 }
