@@ -318,7 +318,7 @@ public class RdsLogStateConcurrencyTests
     [Fact]
     public void TheRunnerPublishesOneIngestorForEachRdsCollector()
     {
-        var runner = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
+        var runner = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
 
         foreach (var field in new[] { "_rdsPlans", "_rdsDeadlocks", "_rdsLogEvents", "_rdsCpu" })
         {

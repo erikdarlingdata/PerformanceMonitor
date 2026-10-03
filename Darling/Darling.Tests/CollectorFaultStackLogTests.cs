@@ -129,7 +129,7 @@ public class CollectorFaultStackLogTests
     [Fact]
     public void OnlyTheGeneralFailureArmWritesTheFullTextAndItIsTheFirstOfAKindOnly()
     {
-        var worker = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
 
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(worker, @"_collectorFaultStacks\.TakeFirst\(collectorName, ex\)"));
 
