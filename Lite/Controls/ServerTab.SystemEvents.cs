@@ -106,6 +106,7 @@ public partial class ServerTab : UserControl
         _seSchedulerFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(SchedulerIssuesNoDataMessage, data.Count);
         SchedulerIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, SchedulerIssuesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadSevereErrorsAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -114,6 +115,7 @@ public partial class ServerTab : UserControl
         _seSevereErrorFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(SevereErrorsNoDataMessage, data.Count);
         SevereErrorsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, SevereErrorsWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadMemoryConditionsAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -122,6 +124,7 @@ public partial class ServerTab : UserControl
         _seMemoryConditionsFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(MemoryConditionsNoDataMessage, data.Count);
         MemoryConditionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, MemoryConditionsWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadMemoryBrokerAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -130,6 +133,7 @@ public partial class ServerTab : UserControl
         _seMemoryBrokerFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(MemoryBrokerNoDataMessage, data.Count);
         MemoryBrokerCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, MemoryBrokerWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadMemoryNodeOomAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -138,6 +142,7 @@ public partial class ServerTab : UserControl
         _seMemoryNodeOomFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(MemoryNodeOomNoDataMessage, data.Count);
         MemoryNodeOomCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, MemoryNodeOomWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadSignificantWaitsAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -146,6 +151,7 @@ public partial class ServerTab : UserControl
         _seSignificantWaitsFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(SignificantWaitsNoDataMessage, data.Count);
         SignificantWaitsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, SignificantWaitsWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadCpuTasksAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -154,6 +160,7 @@ public partial class ServerTab : UserControl
         _seCpuTasksFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(CpuTasksNoDataMessage, data.Count);
         CpuTasksCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, CpuTasksWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadIoIssuesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -162,6 +169,7 @@ public partial class ServerTab : UserControl
         _seIoIssuesFilterMgr!.UpdateData(data);
         ShowSystemHealthEmptyState(IoIssuesNoDataMessage, data.Count);
         IoIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.SystemHealthEvents, IoIssuesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadDefaultTraceEventsAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -172,6 +180,7 @@ public partial class ServerTab : UserControl
             DefaultTraceNoDataMessage.Text = gap;
         DefaultTraceNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         DefaultTraceCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.DefaultTraceEvents, DefaultTraceWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     /// <summary>
@@ -198,6 +207,22 @@ public partial class ServerTab : UserControl
     /// where each grid keeps its "no events in this window" text and the charts show.</summary>
     internal static string? SystemHealthGapNote(string serverName, bool isAzureSqlDatabase) =>
         EngineGapNote(serverName, isAzureSqlDatabase, "system_health_events");
+
+    /// <summary>
+    /// #4966: the "Showing since" banner of one grid that reads stored rows over the toolbar's window (the System Events and
+    /// Default Trace grids and the Config Changes grids: none of them caps its read; the Collection Log and Long Queries
+    /// read a capped page and go through <see cref="RefreshCappedGridBannerAsync{T}"/> over the same window, #4989). It probes
+    /// the UTC window the grid's read took, the same <see cref="LocalDataService.GetTimeRange"/> pair
+    /// (<see cref="LocalDataService.GetQueriesTabWindowUtc"/>), through <see cref="RefreshWindowTruncatedBannerAsync"/>, so a
+    /// probe that throws hides the banner and the refresh goes on. Each surface calls it after its rows are bound, from the one
+    /// method its read runs through, so every read path of the surface (the sub-tab switch, a range change and the Refresh
+    /// button) refreshes it.
+    /// </summary>
+    private System.Threading.Tasks.Task RefreshStoredWindowBannerAsync(QueryWindowRelation relation, TextBlock banner, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    {
+        var (startUtc, endUtc) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+        return RefreshWindowTruncatedBannerAsync(relation, banner, startUtc, endUtc);
+    }
 
     /// <summary>A system_health grid's empty state: shown when the window has no rows. On an Azure SQL Database it says
     /// that the collector does not run there, in place of the grid's "no events in this window" text.</summary>

@@ -2248,11 +2248,14 @@ public sealed class McpPayloadContractCensusTests
 
     /// <summary>
     /// Every literal <c>LIMIT n</c> (<c>n &gt; 1</c>) that ENDS a reader statement on either SKU — the shape
-    /// #3541 A3 and #3659 found behind tools that advertised <c>limit</c>. Seven remain, all in Lite's
-    /// service layer, none behind a tool that takes a <c>limit</c>: six are viewer-only reads and one
+    /// #3541 A3 and #3659 found behind tools that advertised <c>limit</c>. Six remain, all in Lite's
+    /// service layer, none behind a tool that takes a <c>limit</c>: five are viewer-only reads and one
     /// (<c>GetPlanCacheSnapshotAsync</c>, behind <c>get_plan_cache_bloat</c>, which takes no cap) is a
     /// ceiling of 30 over a population of a dozen cache types. <c>LIMIT 1</c> is the latest-row idiom and is
-    /// not a page. Pinned so a new terminal literal has to say what it is, and so the Lite twin of
+    /// not a page. The Long Queries grid's read (<c>GetRecentLongQueryCompletionsAsync</c>) left the roster in
+    /// #4989: its cap is the named constant <c>LongQueryGridCap</c>, written into the statement as
+    /// <c>LIMIT {LongQueryGridCap}</c>, so no literal ends it, and the grid's "Showing since" notice reads the same
+    /// constant. Pinned so a new terminal literal has to say what it is, and so the Lite twin of
     /// <see cref="McpPageContractTests.EveryPagedRead_BindsItsCapAsAParameter_NeverALiteral"/> has a
     /// population to shrink.
     /// </summary>
@@ -2260,7 +2263,6 @@ public sealed class McpPayloadContractCensusTests
     [
         ("LocalDataService.Blocking.cs", "GetBlockingPairRowsAsync", 5000),
         ("LocalDataService.FinOps.Recommendations.cs", "GetRecommendationsAsync", 10),
-        ("LocalDataService.LongQueries.cs", "GetRecentLongQueryCompletionsAsync", 200),
         ("LocalDataService.PlanCache.cs", "GetPlanCacheSnapshotAsync", 30),
         ("LocalDataService.RunningJobs.cs", "GetAnomalousJobsAsync", 5),
         ("LocalDataService.WaitStats.cs", "GetAllQuerySnapshotsInRangeAsync", 2000),

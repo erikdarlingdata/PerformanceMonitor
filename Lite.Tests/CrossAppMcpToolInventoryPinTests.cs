@@ -338,6 +338,7 @@ public sealed class CrossAppMcpToolInventoryPinTests
         //
         //
         // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+        "get_finops",
         // FinOps web parity (#4843), set B ends.
     };
 
