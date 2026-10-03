@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -31,18 +32,27 @@ public sealed class DarlingMcpFinOpsInventoryTools
     /// <summary>The views <c>get_finops_inventory</c> accepts.</summary>
     internal static readonly string[] Views = ["server_inventory"];
 
-    internal const int DefaultLimit = 33;
+    internal const int DefaultLimit = 34;
+
+    /// <summary>The short <c>hardware_note</c> an Azure SQL Database row carries; <c>hardware_note_legend</c> spells it out once.</summary>
+    internal const string HostScopedNoteCode = "host_scoped";
+
+    /// <summary>The shared wire options with null fields left out of a row.</summary>
+    internal static readonly JsonSerializerOptions WireOptions = new(McpHelpers.JsonOptions)
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
     internal const int MaxLimit = 200;
 
     private const string InventoryGuide =
-        " server_inventory: health_score 0-100 weights CPU 40%, memory 30% and storage 30%, using the 24-hour average CPU; memory and storage are fixed defaults (80 and 100), and with no CPU sample the CPU term is left out. health_band is good at 80 and above, fair at 60 and above, else poor. annual_cost_usd is monthly × 12; 0 means no budget is set. license_warning flags Standard edition over 24 CPUs or 128 GB. On Azure SQL Database, memory and sockets are the host's and are null. sqlserver_start_time_local is the server's own clock, not UTC. Servers without a collected properties snapshot are not listed. truncated means total_servers > servers_returned; raise limit (max 200).";
+        " server_inventory: health_score 0-100 weights CPU 40%, memory 30% and storage 30%, using the 24-hour average CPU; memory and storage are fixed defaults (80 and 100), and with no CPU sample the CPU term is left out. health_band is good at 80 and above, fair at 60 and above, else poor. annual_cost_usd is monthly × 12; 0 means no budget is set. license_warning flags Standard edition over 24 CPUs or 128 GB. On Azure SQL Database, memory and sockets are the host's and are null. sqlserver_start_time_local is the server's own clock, not UTC. Servers without a collected properties snapshot are not listed. A field with no value is left out of its row. hardware_note host_scoped is spelled out in hardware_note_legend. truncated means total_servers > servers_returned; raise limit (max 200).";
 
     [McpServerTool(Name = "get_finops_inventory"), Description(
-        "FinOps Server Inventory for the whole fleet: one row per server with a collected properties snapshot. Fixed windows: CPU over the last 24 hours, idle databases over the last 7 days; times UTC; no server_name, hours_back or as_of. Views: server_inventory. An unknown view is refused with the valid list. <<GUIDE>>" + InventoryGuide)]
+        "FinOps Server Inventory for the whole fleet: one row per server with a collected properties snapshot. Fixed windows: CPU over the last 24 hours, idle databases over the last 7 days; times UTC except sqlserver_start_time_local (the server's own clock); no server_name, hours_back or as_of. Views: server_inventory. An unknown view is refused with the valid list. <<GUIDE>>" + InventoryGuide)]
     public static async Task<string> GetFinOpsInventory(
         NpgsqlDataSource postgres,
         [Description("Which view to read. Valid: server_inventory.")] string view,
-        [Description("Most servers returned (1-200, default 33).")] int limit = DefaultLimit,
+        [Description("Most servers returned (1-200, default 34).")] int limit = DefaultLimit,
         CancellationToken cancellationToken = default)
     {
         /* An abandoned request answers nothing, not even a refusal. */
@@ -52,9 +62,7 @@ public sealed class DarlingMcpFinOpsInventoryTools
         var normalized = view.Trim().ToLowerInvariant();
         if (!Views.Contains(normalized))
             return McpHelpers.Refusal("view", $"Invalid view value '{view}'. Valid views: {string.Join(", ", Views)}.");
-        var limitError = McpHelpers.ValidateTop(limit);
-        if (limitError != null) return limitError;
-        if (limit > MaxLimit)
+        if (limit < 1 || limit > MaxLimit)
             return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {MaxLimit}.");
 
         try
@@ -75,18 +83,7 @@ public sealed class DarlingMcpFinOpsInventoryTools
                 .ThenBy(s => s.ServerName, StringComparer.Ordinal)
                 .ThenBy(s => s.ServerId)
                 .ToList();
-            var rows = ordered.Take(limit).Select(s => InventoryRow(s, metrics.TryGetValue(s.ServerId, out var overlay) ? overlay : default)).ToList();
-
-            return JsonSerializer.Serialize(new
-            {
-                view = normalized,
-                cpu_window_hours = 24,
-                idle_window_days = 7,
-                total_servers = ordered.Count,
-                servers_returned = rows.Count,
-                truncated = ordered.Count > rows.Count,
-                servers = rows,
-            }, McpHelpers.JsonOptions);
+            return JsonSerializer.Serialize(Envelope(normalized, ordered.Count, ordered.Take(limit).ToList(), metrics), WireOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -94,10 +91,32 @@ public sealed class DarlingMcpFinOpsInventoryTools
         }
     }
 
+    /// <summary>The response envelope for one page of servers; the legend is present only when a row uses the code.</summary>
+    internal static object Envelope(string view, int total, System.Collections.Generic.IReadOnlyList<ServerInventoryDto> page,
+        System.Collections.Generic.IReadOnlyDictionary<int, ServerMetricsDto> metrics)
+    {
+        var rows = page.Select(s => InventoryRow(s, metrics.TryGetValue(s.ServerId, out var overlay) ? overlay : default)).ToList();
+        var legend = page.Any(s => NoteFor(s) == HostScopedNoteCode)
+            ? new System.Collections.Generic.Dictionary<string, string> { [HostScopedNoteCode] = ServerHardwareScope.InventoryHardwareNote }
+            : null;
+        return new
+        {
+            view,
+            cpu_window_hours = 24,
+            idle_window_days = 7,
+            total_servers = total,
+            servers_returned = rows.Count,
+            truncated = total > rows.Count,
+            hardware_note_legend = legend,
+            servers = rows,
+        };
+    }
+
     /// <summary>One server in the wire shape: snake_case keys, every figure from the Storage helpers, no internal id.</summary>
     internal static object InventoryRow(ServerInventoryDto s, ServerMetricsDto m)
     {
-        var note = FinOpsInventoryFigures.HardwareNote(s.EngineEdition, s.HardwareUnavailableReason);
+        var note = NoteFor(s);
+        var denied = s.HardwareUnavailableReason != null;
         var score = FinOpsInventoryFigures.HealthScore(m.AvgCpuPct);
         var annual = FinOpsCost.Annual(s.MonthlyCost);
         return new
@@ -108,10 +127,10 @@ public sealed class DarlingMcpFinOpsInventoryTools
             engine_edition = s.EngineEdition,
             product_version = s.ProductVersion,
             host_os_version = string.IsNullOrEmpty(s.HostOsVersion) ? null : s.HostOsVersion,
-            cpu_count = s.CpuCount == 0 && note != null ? (int?)null : s.CpuCount,
-            physical_memory_mb = FinOpsInventoryFigures.PhysicalMemoryMb(s.EngineEdition, s.PhysicalMemoryMb),
-            socket_count = FinOpsInventoryFigures.SocketCount(s.EngineEdition, s.SocketCount),
-            cores_per_socket = FinOpsInventoryFigures.CoresPerSocket(s.EngineEdition, s.CoresPerSocket),
+            cpu_count = denied ? (int?)null : s.CpuCount,
+            physical_memory_mb = denied ? null : FinOpsInventoryFigures.PhysicalMemoryMb(s.EngineEdition, s.PhysicalMemoryMb),
+            socket_count = denied ? null : FinOpsInventoryFigures.SocketCount(s.EngineEdition, s.SocketCount),
+            cores_per_socket = denied ? null : FinOpsInventoryFigures.CoresPerSocket(s.EngineEdition, s.CoresPerSocket),
             hardware_note = note,
             provisioning_status = m.ProvisioningStatus,
             avg_cpu_pct = m.AvgCpuPct is decimal cpu ? Math.Round(cpu, 1, MidpointRounding.AwayFromZero) : (decimal?)null,
@@ -131,6 +150,10 @@ public sealed class DarlingMcpFinOpsInventoryTools
             last_collected = Utc(s.LastCollectedUtc),
         };
     }
+
+    /// <summary>The reader's own note, else the short host-scoped code, else null.</summary>
+    private static string? NoteFor(ServerInventoryDto s) =>
+        s.HardwareUnavailableReason ?? (FinOpsInventoryFigures.HardwareNote(s.EngineEdition, null) != null ? HostScopedNoteCode : null);
 
     private static string? Utc(DateTime? t) => t is DateTime v
         ? DateTime.SpecifyKind(v, DateTimeKind.Utc).ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)

@@ -34,7 +34,7 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
             "Windows Server 2022", "Standalone", enabled, monthly, new DateTime(2026, 10, 2, 8, 0, 0, DateTimeKind.Unspecified));
 
     private static JsonElement Row(ServerInventoryDto dto, ServerMetricsDto metrics) =>
-        JsonSerializer.SerializeToElement(DarlingMcpFinOpsInventoryTools.InventoryRow(dto, metrics), McpHelpers.JsonOptions);
+        JsonSerializer.SerializeToElement(DarlingMcpFinOpsInventoryTools.InventoryRow(dto, metrics), DarlingMcpFinOpsInventoryTools.WireOptions);
 
     [Fact]
     public void ToolSurface_ExactlyGetFinOpsInventory_WithItsParametersAndViews()
@@ -53,7 +53,6 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
         Assert.Equal(new[] { "view", "limit" }, described.Select(p => p.Name).ToArray());
         Assert.False(described.Single(p => p.Name == "view").HasDefaultValue, "view is required");
         Assert.Equal(DarlingMcpFinOpsInventoryTools.DefaultLimit, described.Single(p => p.Name == "limit").DefaultValue);
-        Assert.Equal(33, DarlingMcpFinOpsInventoryTools.DefaultLimit);
         Assert.Equal(200, DarlingMcpFinOpsInventoryTools.MaxLimit);
         Assert.Equal(new[] { "server_inventory" }, DarlingMcpFinOpsInventoryTools.Views);
     }
@@ -75,12 +74,13 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
     [InlineData(0)]
     [InlineData(-1)]
     [InlineData(201)]
-    public async Task BadLimit_IsRefusedNamingLimit_BeforeTheStoreIsTouched(int limit)
+    public async Task BadLimit_IsRefusedNamingLimit_WithOneRange_BeforeTheStoreIsTouched(int limit)
     {
         var result = await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(null!, "server_inventory", limit);
         using var doc = JsonDocument.Parse(result);
         Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
         Assert.Equal("limit", doc.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.Equal($"Invalid limit value '{limit}'. Must be an integer from 1 to 200.", doc.RootElement.GetProperty("message").GetString());
     }
 
     [Theory]
@@ -118,31 +118,47 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
     {
         var row = Row(Dto(enabled: false), default);
         Assert.Equal("stopped", row.GetProperty("monitoring").GetString());
-        Assert.Equal(JsonValueKind.Null, row.GetProperty("avg_cpu_pct").ValueKind);
-        Assert.Equal(JsonValueKind.Null, row.GetProperty("storage_total_gb").ValueKind);
-        Assert.Equal(JsonValueKind.Null, row.GetProperty("idle_db_count").ValueKind);
+        Assert.False(row.TryGetProperty("avg_cpu_pct", out _), "avg_cpu_pct is left out");
+        Assert.False(row.TryGetProperty("storage_total_gb", out _), "storage_total_gb is left out");
+        Assert.False(row.TryGetProperty("idle_db_count", out _), "idle_db_count is left out");
     }
 
     [Fact]
     public void Row_AzureSqlDatabase_NullsTheHostHardware_AndNeverWarnsOnItsMemory()
     {
         var row = Row(Dto(edition: "Azure SQL Database (Standard)", engineEdition: 5, cpus: 2, memoryMb: 934000), default);
-        Assert.Equal(JsonValueKind.Null, row.GetProperty("physical_memory_mb").ValueKind);
-        Assert.Equal(JsonValueKind.Null, row.GetProperty("socket_count").ValueKind);
-        Assert.Equal(JsonValueKind.Null, row.GetProperty("cores_per_socket").ValueKind);
-        Assert.Equal(JsonValueKind.Null, row.GetProperty("license_warning").ValueKind);
+        Assert.False(row.TryGetProperty("physical_memory_mb", out _), "physical_memory_mb is left out");
+        Assert.False(row.TryGetProperty("socket_count", out _), "socket_count is left out");
+        Assert.False(row.TryGetProperty("cores_per_socket", out _), "cores_per_socket is left out");
+        Assert.False(row.TryGetProperty("license_warning", out _), "license_warning is left out");
         Assert.Equal(2, row.GetProperty("cpu_count").GetInt32());
-        Assert.False(string.IsNullOrEmpty(row.GetProperty("hardware_note").GetString()));
+        Assert.Equal("host_scoped", row.GetProperty("hardware_note").GetString());
     }
 
     [Fact]
-    public void Row_ZeroCpuWithAHardwareNote_IsUnknownNotZero()
+    public void Legend_IsEmittedOnlyWhenARowCarriesTheCode_AndHoldsTheFullNote()
     {
-        var row = Row(Dto(cpus: 0, memoryMb: 0, note: "no permission"), default);
-        Assert.Equal(JsonValueKind.Null, row.GetProperty("cpu_count").ValueKind);
-        Assert.Equal("no permission", row.GetProperty("hardware_note").GetString());
+        var withCode = JsonSerializer.SerializeToElement(Envelope(new[] { Dto(edition: "Azure SQL Database (Standard)", engineEdition: 5, cpus: 2) }), DarlingMcpFinOpsInventoryTools.WireOptions);
+        Assert.Equal(ServerHardwareScope.InventoryHardwareNote, withCode.GetProperty("hardware_note_legend").GetProperty("host_scoped").GetString());
+        var without = JsonSerializer.SerializeToElement(Envelope(new[] { Dto() }), DarlingMcpFinOpsInventoryTools.WireOptions);
+        Assert.False(without.TryGetProperty("hardware_note_legend", out _));
+    }
+
+    private static object Envelope(ServerInventoryDto[] dtos) => DarlingMcpFinOpsInventoryTools.Envelope(
+        "server_inventory", dtos.Length, dtos, new System.Collections.Generic.Dictionary<int, ServerMetricsDto>());
+
+    [Fact]
+    public void Row_DeniedHardwareRead_NullsAllFourHardwareFields_NeverZero()
+    {
+        var row = Row(Dto(cpus: 0, memoryMb: 0, note: "unavailable - VIEW SERVER STATE"), default);
+        Assert.False(row.TryGetProperty("cpu_count", out _));
+        Assert.False(row.TryGetProperty("physical_memory_mb", out _));
+        Assert.False(row.TryGetProperty("socket_count", out _));
+        Assert.False(row.TryGetProperty("cores_per_socket", out _));
+        Assert.Equal("unavailable - VIEW SERVER STATE", row.GetProperty("hardware_note").GetString());
         var plain = Row(Dto(cpus: 0, memoryMb: 0), default);
         Assert.Equal(0, plain.GetProperty("cpu_count").GetInt32());
+        Assert.Equal(0, plain.GetProperty("physical_memory_mb").GetInt64());
     }
 
     [Fact]
@@ -153,32 +169,35 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
             row.GetProperty("license_warning").GetString());
     }
 
-    /// <summary>The longest plausible row: every string field long, a two-part license warning, a hardware note.</summary>
-    private static ServerInventoryDto RealisticDto(int n) =>
+    /// <summary>The widest on-premises row: Standard edition, a two-part license warning, long version and OS strings.</summary>
+    private static ServerInventoryDto OnPremDto(int n) =>
         new(n, "prod-sql-cluster-" + n.ToString("D3") + ".corp.example.internal\\INSTANCE_NAME_LONG", "Standard Edition (64-bit)",
             "16.0.4175.1 - RTM-CU18-GDR (KB5046861)", 3, 48, 524288L, null, 4, 12, true, true,
             new DateTime(2026, 10, 1, 12, 30, 15, DateTimeKind.Unspecified), new DateTime(2026, 9, 1, 3, 4, 5, DateTimeKind.Unspecified),
             "Windows Server 2022 Datacenter 10.0 <X64> (Build 20348: ) (Hypervisor)", "SECONDARY", true, 12345.67m,
             new DateTime(2026, 10, 2, 8, 0, 0, DateTimeKind.Unspecified));
 
-    [Fact]
-    public void DefaultLimit_OfRealisticRows_FitsTheDefaultResponseBudget()
+    /// <summary>The widest Azure SQL Database row: the host-scoped code, a long name, a Standard-tier edition.</summary>
+    private static ServerInventoryDto AzureDto(int n) =>
+        new(n, "prod-sql-server-" + n.ToString("D3") + ".database.windows.net\\ELASTIC_POOL_DATABASE_NAME", "Azure SQL Database (Standard)",
+            "12.0.2000.8 - Azure SQL Database", 5, 8, 934000L, null, null, null, true, false,
+            new DateTime(2026, 10, 1, 12, 30, 15, DateTimeKind.Unspecified), new DateTime(2026, 9, 1, 3, 4, 5, DateTimeKind.Unspecified),
+            "", "PRIMARY", true, 12345.67m, new DateTime(2026, 10, 2, 8, 0, 0, DateTimeKind.Unspecified));
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DefaultLimit_OfTheWidestRowOfEachType_FitsTheDefaultResponseBudget(bool azure)
     {
         var metrics = new ServerMetricsDto(63.45m, 98765.4m, 12, "RIGHT_SIZED");
-        var rows = Enumerable.Range(1, DarlingMcpFinOpsInventoryTools.DefaultLimit)
-            .Select(n => DarlingMcpFinOpsInventoryTools.InventoryRow(RealisticDto(n), metrics)).ToList();
-        var body = JsonSerializer.Serialize(new
-        {
-            view = "server_inventory",
-            cpu_window_hours = 24,
-            idle_window_days = 7,
-            total_servers = 999,
-            servers_returned = rows.Count,
-            truncated = true,
-            servers = rows,
-        }, McpHelpers.JsonOptions);
-        Assert.True(System.Text.Encoding.UTF8.GetByteCount(body) <= 30 * 1024,
-            $"{DarlingMcpFinOpsInventoryTools.DefaultLimit} realistic rows serialize to {body.Length} bytes");
-        Assert.True(System.Text.Encoding.UTF8.GetByteCount(body) <= McpResponseBudget.DefaultBytes);
+        var page = Enumerable.Range(1, DarlingMcpFinOpsInventoryTools.DefaultLimit)
+            .Select(n => azure ? AzureDto(n) : OnPremDto(n)).ToList();
+        var byId = page.ToDictionary(d => d.ServerId, _ => metrics);
+        var body = JsonSerializer.Serialize(DarlingMcpFinOpsInventoryTools.Envelope("server_inventory", 999, page, byId),
+            DarlingMcpFinOpsInventoryTools.WireOptions);
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(body);
+        Assert.True(bytes <= 30 * 1024, $"{page.Count} widest rows (azure={azure}) serialize to {bytes} bytes");
+        Assert.True(bytes <= McpResponseBudget.DefaultBytes);
+        Assert.Equal(azure, body.Contains("\"hardware_note_legend\"", StringComparison.Ordinal));
     }
 }

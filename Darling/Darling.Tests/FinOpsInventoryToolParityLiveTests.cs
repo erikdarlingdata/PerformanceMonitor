@@ -122,7 +122,7 @@ public sealed class FinOpsInventoryToolParityLiveTests
         var expected = inventory.Where(s => s.ServerName.StartsWith("darling-finops-inv-tool-", StringComparison.Ordinal))
             .OrderByDescending(s => s.IsEnabled).ThenBy(s => s.ServerName, StringComparer.Ordinal)
             .Select(s => JsonSerializer.SerializeToElement(
-                DarlingMcpFinOpsInventoryTools.InventoryRow(s, metrics.TryGetValue(s.ServerId, out var m) ? m : default), McpHelpers.JsonOptions))
+                DarlingMcpFinOpsInventoryTools.InventoryRow(s, metrics.TryGetValue(s.ServerId, out var m) ? m : default), DarlingMcpFinOpsInventoryTools.WireOptions))
             .ToList();
 
         var body = await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 50, ct);
@@ -140,15 +140,17 @@ public sealed class FinOpsInventoryToolParityLiveTests
         Assert.Equal(1234.5m * 12, alpha.GetProperty("annual_cost_usd").GetDecimal());
 
         var gamma = servers[1];
-        Assert.Equal(JsonValueKind.Null, gamma.GetProperty("avg_cpu_pct").ValueKind);
+        Assert.False(gamma.TryGetProperty("avg_cpu_pct", out _));
         Assert.Equal(FinOpsInventoryFigures.HealthScore(null), gamma.GetProperty("health_score").GetInt32());
         Assert.NotEqual(FinOpsInventoryFigures.HealthScore(0m), gamma.GetProperty("health_score").GetInt32());
 
         var beta = servers[2];
         Assert.Equal("stopped", beta.GetProperty("monitoring").GetString());
-        Assert.Equal(JsonValueKind.Null, beta.GetProperty("physical_memory_mb").ValueKind);
+        Assert.False(beta.TryGetProperty("physical_memory_mb", out _));
         Assert.False(string.IsNullOrEmpty(beta.GetProperty("hardware_note").GetString()));
-        Assert.Equal(JsonValueKind.Null, beta.GetProperty("license_warning").ValueKind);
+        Assert.False(beta.TryGetProperty("license_warning", out _));
+        if (beta.GetProperty("hardware_note").GetString() == DarlingMcpFinOpsInventoryTools.HostScopedNoteCode)
+            Assert.Equal(ServerHardwareScope.InventoryHardwareNote, doc.RootElement.GetProperty("hardware_note_legend").GetProperty("host_scoped").GetString());
     }
 
     [Fact]
