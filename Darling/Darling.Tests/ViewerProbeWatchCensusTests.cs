@@ -33,7 +33,9 @@ public sealed class ViewerProbeWatchCensusTests
         @"^ {4,8}(?:(?:private|internal|public|protected|static|async|override|virtual)\s+)+[\w<>\[\],\.\(\)\? ]+?\s+(\w+)\s*(?:<[^>]*>)?\(",
         RegexOptions.Multiline);
 
-    private static readonly Regex ProbeStart = new(@"\bvar\s+(\w+)\s*=\s*[\w\.]*\.Get\w*DataStartAsync\(", RegexOptions.Compiled);
+    private static readonly Regex ProbeStart = new(
+        @"(?:\bvar|\bTask\s*<\s*DateTime\s*\?\s*>)\s+(\w+)\s*=\s*[^;]*?\.Get\w*(?:DataStart|WindowFloor)Async\(",
+        RegexOptions.Compiled);
 
     private static string ViewerDir()
     {
@@ -49,27 +51,30 @@ public sealed class ViewerProbeWatchCensusTests
     {
         var offenders = new List<string>();
         var sites = 0;
-        foreach (var (file, source) in files)
+        foreach (var (file, raw) in files)
         {
+            /* Comments and string literals blanked, so an "await" or a probe name in prose cannot decide a site. */
+            var source = CSharpSourceWalker.StripCommentsAndStrings(raw);
             var headers = MethodHeader.Matches(source).ToList();
             for (var i = 0; i < headers.Count; i++)
             {
                 var end = i + 1 < headers.Count ? headers[i + 1].Index : source.Length;
                 var body = source[headers[i].Index..end];
-                var probe = ProbeStart.Match(body);
-                if (!probe.Success) continue;
-                var name = probe.Groups[1].Value;
+                foreach (Match probe in ProbeStart.Matches(body))
+                {
+                    var name = probe.Groups[1].Value;
 
-                /* The first await after the probe starts. If it is the helper, the read is watched. If it names the probe, the probe is
-                   awaited first (the banner step) and no read stood in front of it. Otherwise a read is awaited bare. */
-                var after = body[(probe.Index + probe.Length)..];
-                var awaitLine = after.Split('\n').FirstOrDefault(l => l.Contains("await ", StringComparison.Ordinal));
-                if (awaitLine is null) continue;
-                var watched = awaitLine.Contains("AwaitReadWatchingProbeAsync", StringComparison.Ordinal);
-                if (!watched && Regex.IsMatch(awaitLine, @"\b" + name + @"\b")) continue;
-                sites++;
-                if (watched) continue;
-                offenders.Add($"{file}::{headers[i].Groups[1].Value}");
+                    /* The first await after this probe starts. If it is the helper, the read is watched. If it names the probe, the probe is
+                       awaited first (the banner step) and no read stood in front of it. Otherwise a read is awaited bare. */
+                    var after = body[(probe.Index + probe.Length)..];
+                    var awaitLine = after.Split('\n').FirstOrDefault(l => l.Contains("await ", StringComparison.Ordinal));
+                    if (awaitLine is null) continue;
+                    var watched = awaitLine.Contains("AwaitReadWatchingProbeAsync", StringComparison.Ordinal);
+                    if (!watched && Regex.IsMatch(awaitLine, @"\b" + name + @"\b")) continue;
+                    sites++;
+                    if (watched) continue;
+                    offenders.Add($"{file}::{headers[i].Groups[1].Value}");
+                }
             }
         }
         return (offenders, sites);
@@ -99,7 +104,7 @@ public sealed class ViewerProbeWatchCensusTests
     {
         /* A scan that matched nothing would pass forever: the viewer has two dozen such loads. */
         var (_, sites) = Scan(ViewerSources());
-        Assert.True(sites >= 20, $"expected at least 20 probe-beside-read sites, found {sites}");
+        Assert.True(sites >= 35, $"expected at least 35 probe-beside-read sites, found {sites}");
     }
 
     [Fact]
@@ -109,5 +114,17 @@ public sealed class ViewerProbeWatchCensusTests
         const string Watched = "public partial class T\n{\n    private async Task LoadXAsync()\n    {\n        var dataStartTask = _dataService.GetXDataStartAsync(1);\n        var rowsTask = _dataService.GetXAsync(1);\n        await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, \"X\");\n        await ShowEventDataStartAsync(b, dataStartTask, \"X\");\n    }\n}\n";
         Assert.Equal(new[] { "T.cs::LoadXAsync" }, Scan(new[] { ("T.cs", Bare) }).Offenders);
         Assert.Empty(Scan(new[] { ("T.cs", Watched) }).Offenders);
+
+        /* The WindowFloor probe shape, typed rather than var, and a conditional start. */
+        const string BareFloor = "public partial class T\n{\n    private async Task LoadYAsync()\n    {\n        Task<DateTime?> floorTask = _dataService.GetYWindowFloorAsync(1);\n        var rows = await _dataService.GetYAsync(1);\n    }\n}\n";
+        const string BareConditional = "public partial class T\n{\n    private async Task LoadZAsync()\n    {\n        var floorTask = on ? _dataService.GetZDataStartAsync(1) : Task.FromResult<DateTime?>(null);\n        var rows = await _dataService.GetZAsync(1);\n    }\n}\n";
+        Assert.Equal(new[] { "T.cs::LoadYAsync" }, Scan(new[] { ("T.cs", BareFloor) }).Offenders);
+        Assert.Equal(new[] { "T.cs::LoadZAsync" }, Scan(new[] { ("T.cs", BareConditional) }).Offenders);
+
+        /* An await named only in a comment does not make a read look watched; every probe in a method is checked, not just the first. */
+        const string Commented = "public partial class T\n{\n    private async Task LoadWAsync()\n    {\n        var dataStartTask = _dataService.GetWDataStartAsync(1);\n        // await AwaitReadWatchingProbeAsync(rows, dataStartTask, \"W\");\n        var rows = await _dataService.GetWAsync(1);\n    }\n}\n";
+        Assert.Equal(new[] { "T.cs::LoadWAsync" }, Scan(new[] { ("T.cs", Commented) }).Offenders);
+        const string TwoProbes = "public partial class T\n{\n    private async Task LoadVAsync()\n    {\n        var aTask = _d.GetADataStartAsync(1);\n        var rA = _d.GetAAsync(1);\n        await AwaitReadWatchingProbeAsync(rA, aTask, \"A\");\n        var bTask = _d.GetBWindowFloorAsync(1);\n        var rows = await _d.GetBAsync(1);\n    }\n}\n";
+        Assert.Equal(new[] { "T.cs::LoadVAsync" }, Scan(new[] { ("T.cs", TwoProbes) }).Offenders);
     }
 }

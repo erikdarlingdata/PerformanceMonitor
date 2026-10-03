@@ -175,7 +175,9 @@ public partial class ViewerServerTab
     private async Task LoadTopQueriesAsync(DateTime startUtc, DateTime endUtc)
     {
         var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
-        var (rows, tier) = await _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Stats");
+        var (rows, tier) = dataReadTask.Result;
         _queryStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         /* #4231 stage 3: an hourly-routed page holds no per-caller detail (see
@@ -194,7 +196,9 @@ public partial class ViewerServerTab
     private async Task LoadTopProceduresAsync(DateTime startUtc, DateTime endUtc)
     {
         var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
-        var (rows, tier) = await _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Procedure Stats");
+        var (rows, tier) = dataReadTask.Result;
         _procStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
@@ -211,7 +215,9 @@ public partial class ViewerServerTab
            applied_through. A preset's endUtc is GetWindowUtc()'s own DateTime.UtcNow (the viewer's clock, not
            the store's), so passing it as a literal here would send a slow-clocked viewer to raw on every
            ordinary read (M1) — null tells the gate this end is open. */
-        var (rows, widePlan) = await _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
+        var dataReadTask = _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
+        await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Store");
+        var (rows, widePlan) = dataReadTask.Result;
         _queryStoreFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
         UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), startUtc, widePlan: widePlan);
@@ -404,7 +410,9 @@ public partial class ViewerServerTab
         try
         {
             var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var (rows, tier) = await _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Stats");
+            var (rows, tier) = dataReadTask.Result;
             _queryStatsFilterMgr!.UpdateData(rows);
             UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
@@ -429,7 +437,9 @@ public partial class ViewerServerTab
         try
         {
             var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var (rows, tier) = await _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Procedure Stats");
+            var (rows, tier) = dataReadTask.Result;
             _procStatsFilterMgr!.UpdateData(rows);
             UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
@@ -455,7 +465,9 @@ public partial class ViewerServerTab
         {
             var floorTask = _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             /* #3953 clause 4: a slicer selection is always a literal, user-drawn sub-range, never a preset. */
-            var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc);
+            var dataReadTask = _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc);
+            await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Store");
+            var rows = dataReadTask.Result;
             _queryStoreFilterMgr!.UpdateData(rows);
             UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), e.StartUtc);
             await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);

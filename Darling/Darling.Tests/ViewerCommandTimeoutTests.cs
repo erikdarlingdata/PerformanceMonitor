@@ -713,6 +713,31 @@ public sealed class ViewerCommandTimeoutTests
     }
 
     /// <summary>
+    /// The routed-read exclusion looks only at the member that owns the task, not at the rest of the file. A same-named task routed
+    /// through <c>AwaitReadWatchingProbeAsync</c> in a LATER member must not hide an earlier member's undeclared two-wide fan-out.
+    /// </summary>
+    [Fact]
+    public void TheRoutedReadExclusion_DoesNotReachIntoALaterMember()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            "private async Task FirstAsync()\n{\n"
+            + "    var firstTask = _dataService.GetOneAsync();\n"
+            + "    var readTask = _dataService.GetTwoAsync();\n"
+            + "    await Task.Yield();\n}\n"
+            + "private async Task SecondAsync()\n{\n"
+            + "    var probeTask = _dataService.GetThreeAsync();\n"
+            + "    var readTask = _dataService.GetFourAsync();\n"
+            + "    await AwaitReadWatchingProbeAsync(readTask, probeTask, \"X\");\n}\n");
+        var bodies = MemberBodies(code);
+        var deferred = DeferredReads(code);
+        var first = bodies.Single(b => b.Name == "FirstAsync");
+        var inFirst = deferred.Where(d => Owner(bodies, d.Index) is { } o && o.Start == first.Start).ToArray();
+
+        Assert.True(inFirst.Length == 2, $"the first member's {inFirst.Length} deferred read(s) were counted, not 2: the later routed `readTask` hid one");
+        Assert.True(ConcurrentRun(code, inFirst) >= 2, "the first member's undeclared two-wide fan-out was not caught");
+    }
+
+    /// <summary>
     /// The member walk sees a generic method: type parameters after the name, constraints before the body.
     /// A member the walk cannot see cannot be required to declare a width, which is #3019's failure
     /// reproduced inside the fix for it.
@@ -962,9 +987,12 @@ public sealed class ViewerCommandTimeoutTests
            load: the routed spelling of `await read`, with the probe the one task beside it. That is the same concurrency the unrouted
            `var probe = ...; var x = await read;` had, and which this census never counted as a deferred pair, so the routed form is not
            counted as one either. A Task.WhenAll(...) first argument is still a join and is still matched by s_joinedFanOut. */
+        var bodies = MemberBodies(code);
+
         return s_deferredRead.Matches(code)
             .Where(match => !Regex.IsMatch(
-                code[match.Index..],
+                /* Only the owning member: a same-named task routed in a later member says nothing about this one. */
+                code[match.Index..(Owner(bodies, match.Index) is { } owner ? owner.End : code.Length)],
                 @"await\s+AwaitReadWatchingProbeAsync\(\s*" + Regex.Escape(match.Groups["name"].Value) + @"\s*,"))
             .Select(match =>
             {
