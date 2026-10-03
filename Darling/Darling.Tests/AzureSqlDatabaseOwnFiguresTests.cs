@@ -501,7 +501,7 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
     [Fact]
     public void WorkerReads_KeepANullInUseCountNull_InAllThreePlaces()
     {
-        var utilization = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Utilization.cs");
+        var utilization = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsUtilizationReader.cs");
         var inventory = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsInventoryReader.cs");
 
         /* Point-in-time read, 7-day trend and fleet read: the in-use count is read as NULL, not coalesced to 0. */

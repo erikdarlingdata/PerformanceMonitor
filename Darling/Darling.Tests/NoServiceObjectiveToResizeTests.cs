@@ -80,7 +80,7 @@ public sealed class NoServiceObjectiveToResizeTests
     }
 
     [Theory]
-    [InlineData("PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Utilization.cs")]
+    [InlineData("PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsUtilizationReader.cs")]
     [InlineData("PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsInventoryReader.cs")]
     public void ProvisioningVerdictCallers_PassTheEdition(params string[] segments)
     {

@@ -529,12 +529,25 @@ public sealed partial class ViewerDataService
     /// — the shared probe (<see cref="RawWindowFloor"/>), never a second, hand-copied floor query. The
     /// Queries tab's <c>LoadTopQueriesAsync</c> reads this beside
     /// <see cref="GetTopQueriesByCpuAsync"/> so the grid header can disclose a window the raw tier no longer
-    /// fully holds, the same fact <c>get_top_queries_by_cpu</c> reports over MCP.
+    /// fully holds, the same fact <c>get_top_queries_by_cpu</c> reports over MCP. A window no longer than
+    /// <see cref="DurationTrendRouting.TruncationSlack"/> answers null without a store read (#4966): no banner can show for one.
     /// </summary>
     public Task<DateTime?> GetQueryStatsWindowFloorAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.QueryStats, serverId, startUtc, endUtc,
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        /* #4966: a window no longer than the truncation slack can never get a coverage note. The answer is at or before the window's
+           end, and RawWindowFloor.IsTruncated needs it MORE than the slack after the window's start, so the tab's banner could not
+           show it. The probe would read the store for nothing: it starts no query, as DataWindowFloor.GetForServerAsync's does not.
+           The skip is here, in the viewer's methods, and not in RawWindowFloor.GetAsync: Darling's MCP tools share that probe and
+           read its null as "nothing was read" (see its remarks). */
+        if (endUtc - startUtc <= DurationTrendRouting.TruncationSlack)
+        {
+            return Task.FromResult<DateTime?>(null);
+        }
+
+        return RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.QueryStats, serverId, startUtc, endUtc,
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+    }
 
     /// <summary>
     /// Top-Queries comparison — Lite's <c>GetQueryStatsComparisonAsync</c> ported. Unions the top-100
