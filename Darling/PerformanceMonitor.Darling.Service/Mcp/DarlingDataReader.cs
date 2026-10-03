@@ -2794,6 +2794,8 @@ internal static class DarlingDataReader
         NpgsqlDataSource postgres, int serverId, DateTime windowStartUtc, CancellationToken cancellationToken = default)
     {
         var rows = new List<CollectorHealth>();
+        /* #4999: the schedule read finishes before the health statement's reader opens, so one call never holds two. */
+        var scheduleOverrides = await ReadScheduleOverridesAsync(postgres, serverId, cancellationToken);
         await using var command = postgres.CreateCommand(CollectionHealthSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
@@ -2849,7 +2851,80 @@ internal static class DarlingDataReader
             });
         }
 
+        ApplyScheduledFrequencies(rows, serverId, scheduleOverrides);
         return rows;
+    }
+
+    /// <summary>
+    /// #4999: this server's collector schedule overrides, its own rows and the fleet-wide ones, the two levels
+    /// the worker layers over the shipped defaults. The table is sparse (an absent row is the default), so this
+    /// is usually empty. Only the frequency matters here: the retention and enabled columns ride along because
+    /// <see cref="ScheduleOverride"/> carries them, and a collector's database scope is not read.
+    /// </summary>
+    internal const string ScheduleOverridesSql = @"
+SELECT server_id, collector_name, frequency_minutes, retention_days, enabled
+FROM config.config_collector_schedules
+WHERE server_id = $1
+OR    server_id IS NULL";
+
+    /// <summary>
+    /// #4999: reads <see cref="ScheduleOverridesSql"/>. A failure to read costs the roll-up nothing but the
+    /// overrides: every row then keeps the shipped cadence it was judged by before, and the health read still
+    /// answers. This surface has no logger reachable from a static method, so Trace is the seam, as it is for
+    /// the top-queries table fallback above. A cancellation is not swallowed.
+    /// </summary>
+    private static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var overrides = new List<ScheduleOverride>();
+        try
+        {
+            await using var command = postgres.CreateCommand(ScheduleOverridesSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            AddInt(command, serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                overrides.Add(new ScheduleOverride(
+                    reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetInt32(2),
+                    reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                    reader.GetBoolean(4)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Trace.TraceWarning($"#4999 collection health could not read the collector schedule overrides for server {serverId}; its collectors are judged by their shipped cadences: {ex.GetType().Name}: {ex.Message}");
+            return Array.Empty<ScheduleOverride>();
+        }
+
+        return overrides;
+    }
+
+    /// <summary>
+    /// #4999: stamps each catalog collector's row with the interval the worker schedules it at on
+    /// <paramref name="serverId"/>. The resolution is <see cref="StoreConfigProvider.ResolveSchedule"/>, the call
+    /// the worker's dispatch makes (a per-server override, else the fleet-wide one, else the shipped default,
+    /// with an override that cannot be honoured falling through), then
+    /// <see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/> exactly as the dispatch does,
+    /// so an on-load collector reads as its daily recapture. A name the catalog does not know is left unstamped:
+    /// <c>ResolveSchedule</c> indexes the catalog and would throw on it. Pure, so a test applies a set of
+    /// overrides without a store.
+    /// </summary>
+    internal static void ApplyScheduledFrequencies(
+        IEnumerable<CollectorHealth> rows, int serverId, IReadOnlyList<ScheduleOverride> overrides)
+    {
+        foreach (var row in rows)
+        {
+            if (!CollectorScheduleDefaults.All.ContainsKey(row.CollectorName))
+            {
+                continue;
+            }
+
+            row.EffectiveFrequencyMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+                StoreConfigProvider.ResolveSchedule(row.CollectorName, serverId, overrides).FrequencyMinutes);
+        }
     }
 
     /// <summary>One completed per-server collection-health read (#3856): the rows
@@ -4233,14 +4308,29 @@ internal sealed class CollectorHealth
     /// on-load collector's catalog 0 reads as the daily recapture interval, which is what lets
     /// <see cref="CollectorHealthClassifier.Classify"/> band it on the SAME ladder as any other. A name the
     /// catalog doesn't know keeps 0 and the classifier's floor thresholds, as before #4000: resolving it to
-    /// daily too would leave a collector that went dark HEALTHY for a day and a half. The banding uses the
-    /// shipped default, not the resolved per-server override, so all three surfaces stay in parity. Internal
-    /// since #2296: the tool's sweep-pressure roll-up amortizes each collector's average duration by this same
-    /// cadence, so both readers of it share one resolution.</summary>
+    /// daily too would leave a collector that went dark HEALTHY for a day and a half. Internal since #2296:
+    /// the tool's sweep-pressure roll-up amortizes each collector's average duration by this same cadence, so
+    /// both readers of it share one resolution.
+    ///
+    /// <para>#4999: the cadence the collector RUNS at on this server, when the read that built the row stamped
+    /// it (<see cref="EffectiveFrequencyMinutes"/>): the per-server schedule override, else the fleet-wide one,
+    /// else the shipped default, the order the worker's dispatch resolves it in. The band, the roll-up and the
+    /// roll-up's test for what runs in the sweep body therefore judge a collector scheduled every 720 minutes
+    /// against 720, not against the cadence it shipped with. A row nothing stamped (the fleet roll-up builds
+    /// its own) keeps the shipped default.</para></summary>
     internal int FrequencyMinutes =>
-        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
+        EffectiveFrequencyMinutes
+        ?? (CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
             ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
-            : 0;
+            : 0);
+
+    /// <summary>
+    /// #4999: the interval, in minutes, this collector is scheduled at on the server the row was read for, as
+    /// <see cref="DarlingDataReader.ApplyScheduledFrequencies"/> resolves it, or null when nothing resolved one
+    /// (an unknown collector name, a row built outside the per-server health read). Set once, inside the read
+    /// that builds the row, because that read is memoized and its rows are shared between callers.
+    /// </summary>
+    internal int? EffectiveFrequencyMinutes { get; set; }
 
     /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —

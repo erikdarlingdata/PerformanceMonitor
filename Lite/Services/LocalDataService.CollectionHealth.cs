@@ -404,7 +404,46 @@ ORDER BY collector_name";
             });
         }
 
+        ApplyScheduledFrequencies(items, serverId, CollectorFrequencyMinutes);
         return items;
+    }
+
+    /// <summary>
+    /// #4999: Lite's schedule store as the health read sees it: a server's EFFECTIVE interval for one collector
+    /// (<c>ScheduleManager.GetFrequencyForStorageServer</c>, the per-server override else the global schedule),
+    /// keyed by the storage server id this reader takes, or null for an unknown server or collector. Null here
+    /// means no schedule store is wired, and every row keeps the shipped cadence it was judged by before.
+    /// </summary>
+    internal Func<int, string, int?>? CollectorFrequencyMinutes { get; set; }
+
+    /// <summary>
+    /// #4999: stamps each catalog collector's row with the interval it is scheduled at on
+    /// <paramref name="serverId"/>: the schedule store's answer through
+    /// <see cref="CollectorScheduleDefaults.ResolveFrequencyMinutes"/> (an answer that cannot be honoured falls
+    /// back to the shipped default, as the analysis lookback does), then
+    /// <see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/> as the scheduler does, so an
+    /// on-load collector reads as its daily recapture. A name the catalog does not know is left unstamped.
+    /// Pure, so a test applies a set of schedules without a database.
+    /// </summary>
+    internal static void ApplyScheduledFrequencies(
+        IEnumerable<CollectorHealthRow> rows, int serverId, Func<int, string, int?>? collectorFrequencyMinutes)
+    {
+        if (collectorFrequencyMinutes is null)
+        {
+            return;
+        }
+
+        foreach (var row in rows)
+        {
+            if (!CollectorScheduleDefaults.All.ContainsKey(row.CollectorName))
+            {
+                continue;
+            }
+
+            row.EffectiveFrequencyMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+                CollectorScheduleDefaults.ResolveFrequencyMinutes(
+                    row.CollectorName, collectorFrequencyMinutes(serverId, row.CollectorName), fleetOverride: null));
+        }
     }
 
     /// <summary>
@@ -1027,13 +1066,26 @@ public class CollectorHealthRow
     /// what lets <see cref="CollectorHealthClassifier.Classify"/> band an on-load collector on the SAME ladder
     /// as any other. A name the catalog doesn't know keeps 0 and the classifier's floor thresholds, as before
     /// #4000: resolving it to daily too would leave a collector that went dark HEALTHY for a day and a half.
-    /// The banding uses the shipped default, not the per-install ScheduleManager override, so all three
-    /// surfaces stay in parity. Internal since #2296: the tool's sweep-pressure roll-up amortizes each
-    /// collector's average duration by this same cadence, so both readers of it share one resolution.</summary>
+    /// Internal since #2296: the tool's sweep-pressure roll-up amortizes each collector's average duration by
+    /// this same cadence, so both readers of it share one resolution.
+    ///
+    /// <para>#4999: the interval the collector is SCHEDULED at on this server, when the read that built the row
+    /// stamped it (<see cref="EffectiveFrequencyMinutes"/>): the per-server schedule override, else the global
+    /// schedule, else the shipped default. The band and the roll-up then judge a collector scheduled every 720
+    /// minutes against 720, not against the cadence it shipped with. A row nothing stamped keeps the shipped
+    /// default.</para></summary>
     internal int FrequencyMinutes =>
-        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
+        EffectiveFrequencyMinutes
+        ?? (CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
             ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
-            : 0;
+            : 0);
+
+    /// <summary>
+    /// #4999: the interval, in minutes, this collector is scheduled at on the server the row was read for, as
+    /// <see cref="LocalDataService.ApplyScheduledFrequencies"/> resolves it from the schedule store, or null
+    /// when nothing resolved one (no schedule store wired, or a collector name the catalog does not know).
+    /// </summary>
+    internal int? EffectiveFrequencyMinutes { get; set; }
 
     /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
