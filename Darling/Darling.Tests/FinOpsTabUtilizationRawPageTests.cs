@@ -112,11 +112,12 @@ public sealed class FinOpsTabUtilizationRawPageTests
     }
 
     [Fact]
-    public void EachLatestSnapshotPanel_ShowsWhenItWasCollected()
+    public void TheMemoryPanel_ShowsWhenItWasCollected_AndTheSizesAreReadOnce()
     {
         var src = Tab();
         var tile = "{ key: \"captured_at\", label: \"Collected\", format: \"reltime\", small: true }";
-        Assert.Equal(2, Regex.Matches(src, Regex.Escape(tile)).Count);
+        Assert.Single(Regex.Matches(src, Regex.Escape(tile)));
+        Assert.Single(Regex.Matches(src, "read: \"get_database_sizes\""));
         Assert.Contains("reltime: relTime,", ReadRepoFileLf(Svc.Concat(["wwwroot", "js", "util.js"]).ToArray()).ReplaceLineEndings("\n"));
     }
 

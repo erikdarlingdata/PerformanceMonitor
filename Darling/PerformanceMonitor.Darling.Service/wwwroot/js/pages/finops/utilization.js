@@ -8,7 +8,9 @@
 
 /* FinOps "Utilization" tab, raw panels: CPU over the last day (get_cpu_utilization), the latest memory snapshot
    (get_memory_stats) and allocated versus used size per database (get_database_sizes). Each section has its own
-   container, so the provisioning verdict, health score, cost cards and trend can be added above them. */
+   container, so the provisioning verdict, health score, cost cards and trend can be added above them. The sizes
+   table's snapshot time is not shown (a table panel has no slot for a top-level field); a second panel would read
+   get_database_sizes twice. A known gap. */
 
 import { el, noticeStrip } from "../../util.js";
 import { renderPanel } from "../../panels.js";
@@ -39,8 +41,6 @@ const MEMORY_STATS = [
   { key: "system_memory_state", label: "System state", format: "text", small: true, nullKey: "system_memory_state_note" },
   { key: "sql_memory_model", label: "Memory model", format: "text", small: true },
 ];
-
-const SIZES_STAMP = [{ key: "captured_at", label: "Collected", format: "reltime", small: true }];
 
 function section(id, children) {
   return el("div", { class: "finops-section", "data-section": id }, children);
@@ -83,16 +83,6 @@ export const tab = {
         }),
       ]),
       section("sizes", [
-        /* The sizes table has no tile row of its own, so the snapshot's stamp is a one-tile panel over the same read. */
-        renderPanel({
-          title: "Database Sizes snapshot",
-          subtitle: "latest snapshot",
-          read: "get_database_sizes",
-          params: { server },
-          viz: "stat",
-          stats: SIZES_STAMP,
-          span: 2,
-        }),
         renderPanel({
           title: "Database Sizes",
           subtitle: "latest snapshot",
