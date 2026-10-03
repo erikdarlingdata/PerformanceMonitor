@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -219,6 +220,43 @@ public sealed class QueryStoreBackgroundIndexesTests
         Assert.Contains("retried at the next start", logger.Joined, StringComparison.Ordinal);
         Assert.Contains(Wide.IndexName, logger.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain("(shutdown)", logger.Joined, StringComparison.Ordinal);
+    }
+
+    /* A failed ensure's warning names the server error's SQLSTATE, so a full disk (53100) reads differently from a lock
+       timeout without opening the exception. An error that carries no SQLSTATE names none. */
+    [Fact]
+    public async Task AFailedEnsure_NamesTheServerErrorsSqlState_InTheWarning()
+    {
+        var line = await LogOneFailedEnsureAsync(new PostgresException("could not extend file", "ERROR", "ERROR", "53100"));
+
+        Assert.StartsWith("Warning:", line, StringComparison.Ordinal);
+        Assert.Contains(nameof(PostgresException) + ", SQLSTATE 53100:", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AFailedEnsure_NamesNoSqlState_WhenTheErrorCarriesNone()
+    {
+        var notFromTheServer = await LogOneFailedEnsureAsync(new InvalidOperationException("the build failed"));
+        var noStateOnTheError = await LogOneFailedEnsureAsync(new NpgsqlException("the connection was closed"));
+
+        Assert.DoesNotContain("SQLSTATE", notFromTheServer, StringComparison.Ordinal);
+        Assert.Contains(nameof(InvalidOperationException) + ": the build failed", notFromTheServer, StringComparison.Ordinal);
+        Assert.DoesNotContain("SQLSTATE", noStateOnTheError, StringComparison.Ordinal);
+        Assert.Contains(nameof(NpgsqlException) + ": the connection was closed", noStateOnTheError, StringComparison.Ordinal);
+    }
+
+    private static async Task<string> LogOneFailedEnsureAsync(Exception failure)
+    {
+        var logger = new CapturingTestLogger();
+
+        await QueryStoreBackgroundIndexes.RunDelayedAsync(
+            logger,
+            TimeSpan.Zero,
+            new[] { Wide },
+            (_, _) => throw failure,
+            CancellationToken.None);
+
+        return Assert.Single(logger.Lines);
     }
 
     /* The delayed run's three shutdown lines each name the index they are about: the one in progress, or, before the
