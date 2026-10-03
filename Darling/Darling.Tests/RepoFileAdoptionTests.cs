@@ -139,6 +139,7 @@ public sealed class RepoFileAdoptionTests
            comments, which continue on the same line. */
         "DarlingPgOperationalAlertTests.cs",
         "FinOpsPageShellTests.cs",
+        "FinOpsTabLockingPageTests.cs",
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         /* #3735: its source pin anchors the collection-health statement's tail across three line breaks
            (`FROM v_collection_log` / `WHERE` / `AND` / `GROUP BY`) and the CreateCommand line on the

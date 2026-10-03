@@ -18,9 +18,11 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the Darling rung that adds the install id table's own OID (<c>config.config_install_id.table_oid</c>, nullable
-/// bigint) as a third binding for the id (#4961). A managed major upgrade keeps the database's OID and the table's OID
-/// and makes a new cluster id, so the id now follows the two OIDs. The rung is one catalog-only ALTER: a row made before
-/// it has no table OID, and the service fills it in on its first start after the rung.
+/// bigint) and the server's major version (<c>server_major</c>, nullable integer) to the binding for the id (#4961). A
+/// managed major upgrade keeps the database's OID and the table's OID, makes a new cluster id and raises the major, so the
+/// id follows the two OIDs, and a changed cluster id keeps it only when the major rose. The rung is one catalog-only
+/// ALTER: a row made before it has neither value, and the service fills both in on its first start after the rung. The
+/// table OID is the viewer probe's sentinel; the major arrives in the same statement.
 ///
 /// <para>Every fact finds the rung by NAME, so a renumber is one edit to the registration, the constant and the
 /// viewer's <c>return</c>.</para>
@@ -53,12 +55,15 @@ public sealed class InstallIdTableOidRungTests
     }
 
     [Fact]
-    public void TheRungAddsOneNullableColumn_IdempotentlyAndSchemaQualified_AndNothingElse()
+    public void TheRungAddsTwoNullableColumns_IdempotentlyAndSchemaQualified_AndNothingElse()
     {
         var sql = Rung.Sql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        var body = Regex.Replace(sql, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline);
+        var body = Regex.Replace(Regex.Replace(sql, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline), @"\s+", " ").Trim();
 
-        Assert.Contains("ALTER TABLE config.config_install_id ADD COLUMN IF NOT EXISTS table_oid bigint;", body, StringComparison.Ordinal);
+        /* One statement, so the two columns arrive together or not at all, and a second run changes nothing. */
+        Assert.Equal(
+            "ALTER TABLE config.config_install_id ADD COLUMN IF NOT EXISTS table_oid bigint, ADD COLUMN IF NOT EXISTS server_major integer;",
+            body);
         Assert.Single(Regex.Matches(body, "ALTER TABLE"));
         foreach (var absent in new[] { "NOT NULL", "DEFAULT", "INSERT ", "UPDATE ", "DELETE ", "DROP ", "CREATE ", "TRIGGER" })
         {
