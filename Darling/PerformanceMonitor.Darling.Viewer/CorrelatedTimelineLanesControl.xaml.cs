@@ -254,7 +254,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             else
                 ShowEmpty(FileIoChart, "I/O ms");
 
-            /* #4966: the blocking lane draws event counts, so an empty stretch reads as "nothing happened" and the lane says where
+            /* #4966: the blocking chart draws event counts, so an empty stretch reads as "nothing happened" and the chart says where
                its data starts. The note is last and on its own: the two coverage probes start only after the ten reads above have
                finished (they are not part of that WhenAll, whose ten-wide declaration still covers them), so they add no
                read to that batch, and a probe that fails costs the note and never the bars drawn above. */
@@ -279,10 +279,10 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
-    /// Raises or hides the blocking lane's "Showing since" note (#4966). The lane's two series, blocking reports and
+    /// Raises or hides the blocking chart's "Showing since" note (#4966). The chart's two series, blocking reports and
     /// deadlocks, are event counts: an empty stretch before a series starts reads as "nothing happened". A window of 90
     /// minutes or less, which can never earn a note, starts no probe. The note goes through the server tab's shared step
-    /// (<see cref="ViewerServerTab.UpdateTruncationBanner"/>), so it uses the lanes' own clock, to the second.
+    /// (<see cref="ViewerServerTab.UpdateTruncationBanner"/>), so it uses the charts' own clock, to the second.
     /// </summary>
     private async Task ShowBlockingLaneDataStartAsync(
         DateTime startUtc, DateTime endUtc, IEnumerable<DateTime> blockingBars, IEnumerable<DateTime> deadlockBars)

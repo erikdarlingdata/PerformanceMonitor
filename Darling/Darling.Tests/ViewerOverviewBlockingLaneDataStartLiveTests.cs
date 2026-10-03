@@ -126,17 +126,17 @@ public sealed class ViewerOverviewBlockingLaneDataStartLiveTests
                     await PgMigrations.MigrateAsync(connection, ct);
 
                     /* The coverage of both series starts at the server's first collection, or at an earlier row in the window. */
-                    await EventGridSeed.AddServerAsync(connection, LaterDeadlocksServerId, "lane-later", end.AddDays(-2), deadlockCollector, end, clockOffsetMinutes: null, ct);
-                    await InsertBlockingAsync(connection, LaterDeadlocksServerId, "lane-later", end.AddDays(-2), end, ct);
-                    await InsertDeadlockAsync(connection, LaterDeadlocksServerId, "lane-later", end.AddDays(-3), end, ct);
+                    await EventGridSeed.AddServerAsync(connection, LaterDeadlocksServerId, "bl-later", end.AddDays(-2), deadlockCollector, end, clockOffsetMinutes: null, ct);
+                    await InsertBlockingAsync(connection, LaterDeadlocksServerId, "bl-later", end.AddDays(-2), end, ct);
+                    await InsertDeadlockAsync(connection, LaterDeadlocksServerId, "bl-later", end.AddDays(-3), end, ct);
 
-                    await EventGridSeed.AddServerAsync(connection, EarlyBarServerId, "lane-early", end.AddDays(-2), deadlockCollector, end, clockOffsetMinutes: null, ct);
-                    await InsertBlockingAsync(connection, EarlyBarServerId, "lane-early", end.AddDays(-4), end, ct);
-                    await InsertDeadlockAsync(connection, EarlyBarServerId, "lane-early", end.AddDays(-3), end, ct);
+                    await EventGridSeed.AddServerAsync(connection, EarlyBarServerId, "bl-early", end.AddDays(-2), deadlockCollector, end, clockOffsetMinutes: null, ct);
+                    await InsertBlockingAsync(connection, EarlyBarServerId, "bl-early", end.AddDays(-4), end, ct);
+                    await InsertDeadlockAsync(connection, EarlyBarServerId, "bl-early", end.AddDays(-3), end, ct);
 
-                    await EventGridSeed.AddServerAsync(connection, OneSeriesServerId, "lane-one", end.AddDays(-3), deadlockCollector, end, clockOffsetMinutes: null, ct);
+                    await EventGridSeed.AddServerAsync(connection, OneSeriesServerId, "bl-one", end.AddDays(-3), deadlockCollector, end, clockOffsetMinutes: null, ct);
 
-                    await EventGridSeed.AddServerAsync(connection, NeitherServerId, "lane-neither", end.AddDays(-3), "wait_stats", end, clockOffsetMinutes: null, ct);
+                    await EventGridSeed.AddServerAsync(connection, NeitherServerId, "bl-neither", end.AddDays(-3), "wait_stats", end, clockOffsetMinutes: null, ct);
                 }
 
                 return new Store(scratch, new ViewerDataService(scratch.ConnectionString), end);
