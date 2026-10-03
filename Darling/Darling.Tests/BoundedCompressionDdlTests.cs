@@ -69,7 +69,7 @@ public sealed class BoundedCompressionDdlTests
         var collector = Body(text, "public static async Task<int> ApplyCompressionPolicyAsync(");
         Assert.Contains("bool hourly, CancellationToken cancellationToken", collector, StringComparison.Ordinal);
         Assert.Contains("var skipEnable = hourly && converged is null;", collector, StringComparison.Ordinal);
-        Assert.Contains("else if (!skipEnable)", collector, StringComparison.Ordinal);
+        Assert.Contains("if (skipEnable)", collector, StringComparison.Ordinal);
 
         var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs").Replace("\r\n", "\n");
         Assert.Contains("ApplyCompressionPolicyAsync(connection, logger, hourly: true, ct)", worker, StringComparison.Ordinal);

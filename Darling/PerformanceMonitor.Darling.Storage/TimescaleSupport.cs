@@ -10067,14 +10067,15 @@ WHERE ca.view_schema = 'collect'
            do not already carry it. The ALTER takes an AccessExclusiveLock even as a no-op (measured — see
            CompressionEnabledStateSql), which was free on the start path and is a lock convoy on the hourly
            tick at :30, in the same minute the collectors are COPYing into these tables. A null answer means
-           the read failed: the start path then issues every ALTER (bounded), and the hourly pass issues none. */
+           the read failed: the start path then issues every ALTER (bounded), and the hourly pass issues none and skips the
+           policy calls too. */
         var converged = await ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);
         var enabledAlready = 0;
         var skipEnable = hourly && converged is null;
         if (skipEnable)
         {
             logger?.LogWarning(
-                "TimescaleDB: the compression settings read failed; skipping the compression-enable ALTERs this pass; the next hourly pass retries");
+                "TimescaleDB: the compression settings read failed; skipping the compression-enable ALTERs and the compression-policy calls this pass; the next hourly pass retries");
         }
 
         var applied = 0;
@@ -10082,14 +10083,24 @@ WHERE ca.view_schema = 'collect'
         {
             try
             {
-                /* The POLICY half still runs unconditionally: add_compression_policy's if_not_exists returns
-                   -1 against an existing policy and takes no exclusive lock on the hypertable, so it is
-                   idempotent in cost as well as in effect. Only the ALTER needed guarding. */
+                /* After a failed settings read on the hourly pass the policy call is skipped with the ALTER: a
+                   converged table's call is a no-op returning -1, a table without compression fails it anyway
+                   (one "Compression policy failed" Warning per table per hour for as long as the read keeps
+                   failing), and the next pass after a good read does both. The read-failed Warning above is
+                   the one line this pass logs. */
+                if (skipEnable)
+                {
+                    continue;
+                }
+
+                /* The POLICY half otherwise runs unconditionally: add_compression_policy's if_not_exists
+                   returns -1 against an existing policy and takes no exclusive lock on the hypertable, so it
+                   is idempotent in cost as well as in effect. Only the ALTER needed guarding. */
                 if (converged is not null && converged.Contains(schema.TargetTable))
                 {
                     enabledAlready++;
                 }
-                else if (!skipEnable)
+                else
                 {
                     var outcome = await TryRunBoundedDdlAsync(
                         connection, new[] { EnableCompressionSql(schema) }, logger,
@@ -10210,7 +10221,7 @@ WHERE h.hypertable_schema = 'collect'";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogDebug(
-                "TimescaleDB: could not read the hypertables' compression settings, so this pass issues the compression-enable statement for every table as it did before the #3817 guard: {Message}",
+                "TimescaleDB: could not read the hypertables' compression settings, so the start path issues the compression-enable statement for every table (bounded) and the hourly pass issues none and skips the compression-policy calls: {Message}",
                 ex.Message);
             return null;
         }
@@ -11141,8 +11152,8 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
     /// The ALTER moves the hypertable to <see cref="CollectionLogSegmentBy"/>; every chunk already
     /// compressed keeps the settings it was compressed with, and only chunks compressed from then on use the new
     /// one, so no chunk is rewritten and the mix ages out with retention. The ALTER runs only when the settings
-    /// differ, in its own transaction, waiting at most <see cref="CollectionLogSettingsLockTimeout"/> for its
-    /// lock (<see cref="TrySetCollectionLogCompressionAsync"/>). Changing the settings while compressed chunks
+    /// differ, in its own transaction, waiting at most <see cref="HourlyDdlLockTimeout"/> for its
+    /// lock (<see cref="TryRunBoundedDdlAsync"/>). Changing the settings while compressed chunks
     /// exist needs TimescaleDB <see cref="CompressionSettingsChangeWithCompressedChunksFrom"/>; on an older store
     /// with compressed chunks the ALTER is not attempted, and the table keeps compressing by <c>server_id</c> until
     /// the extension is upgraded (<see cref="CollectionLogSettingsChangeBlockedAsync"/>).</para>
@@ -11186,15 +11197,18 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
         {
             if (!await CollectionLogSettingsChangeBlockedAsync(connection, logger, cancellationToken))
             {
-                switch (await TrySetCollectionLogCompressionAsync(connection, logger, cancellationToken))
+                var outcome = await TryRunBoundedDdlAsync(
+                    connection, new[] { EnableCompressionSql(CollectionLogTable) }, logger,
+                    "collection_log's compression settings", cancellationToken);
+                switch (outcome)
                 {
                     /* The table is busy, and the policy step could queue behind the same lock: the next pass does both. */
-                    case CollectionLogSettingsChange.LockBusy:
+                    case BoundedDdlOutcome.LockBusy:
                         return false;
 
                     /* The table keeps its current settings and stays compressible under them, so the policy step
                        still runs; the pass reports the failure after it. */
-                    case CollectionLogSettingsChange.Failed:
+                    case BoundedDdlOutcome.Failed:
                         settingsFailed = true;
                         break;
                 }
@@ -11290,73 +11304,6 @@ SELECT (SELECT e.extversion FROM pg_extension AS e WHERE e.extname = 'timescaled
             "TimescaleDB: collection_log keeps compressing by server_id: TimescaleDB {Version} cannot change compression settings while compressed chunks exist, and {Floor} and later can. Each hourly pass checks again, so the change applies after the extension is upgraded (#4951)",
             version, CompressionSettingsChangeWithCompressedChunksFrom);
         return true;
-    }
-
-    /// <summary>
-    /// The lock wait collection_log's compression-settings ALTER tolerates (#4951), as a PostgreSQL
-    /// <c>lock_timeout</c> literal. The ALTER takes <c>AccessExclusiveLock</c> on the hypertable, and every
-    /// collector cycle writes a row to collection_log, so an ALTER queued behind one long reader would not merely
-    /// wait: every collector's write would queue behind it for as long as that reader runs (the convoy
-    /// <see cref="HourlyRefreshStartOffset"/> documents). Three seconds is long enough for the lock to be free
-    /// whenever no long reader holds the table, and short enough that one costs the collectors' writes at most
-    /// that much and this pass nothing but a log line; the next hourly pass tries again. Set with
-    /// <c>SET LOCAL</c> inside the ALTER's own transaction, so it never outlives the statement it guards.
-    /// </summary>
-    public const string CollectionLogSettingsLockTimeout = "3s";
-
-    /// <summary>What <see cref="TrySetCollectionLogCompressionAsync"/> did (#4951).</summary>
-    private enum CollectionLogSettingsChange
-    {
-        /// <summary>The ALTER committed.</summary>
-        Applied,
-
-        /// <summary>Another session held the table past <see cref="CollectionLogSettingsLockTimeout"/>; nothing changed.</summary>
-        LockBusy,
-
-        /// <summary>The ALTER failed for another reason and rolled back; the table keeps its current settings.</summary>
-        Failed,
-    }
-
-    /// <summary>
-    /// collection_log's compression-settings ALTER, bounded by <see cref="CollectionLogSettingsLockTimeout"/> (#4951).
-    /// An explicit transaction, because <c>SET LOCAL</c> outside one is a no-op with a warning, and the one-command
-    /// <c>BEGIN; ...; COMMIT;</c> form leaves the connection inside a failed transaction when a statement in it
-    /// fails. Any failure rolls the whole change back, so the table and its compressed chunks keep exactly the
-    /// settings they had, and the next pass tries again. The result tells a busy lock from any other failure,
-    /// because the caller runs the policy step after the second and not after the first.
-    /// </summary>
-    private static async Task<CollectionLogSettingsChange> TrySetCollectionLogCompressionAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{CollectionLogSettingsLockTimeout}'", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
-            {
-                await timeout.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            using (var enable = new NpgsqlCommand(EnableCompressionSql(CollectionLogTable), connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
-            {
-                await enable.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            await transaction.CommitAsync(cancellationToken);
-            return CollectionLogSettingsChange.Applied;
-        }
-        catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.LockNotAvailable, StringComparison.Ordinal))
-        {
-            logger?.LogInformation(
-                "TimescaleDB: collection_log's compression settings were not changed this pass: another session held the table for {Timeout}, and waiting longer would hold up every collector's writes to it. The table keeps its current settings, and the next hourly pass tries again (#4951)",
-                CollectionLogSettingsLockTimeout);
-            return CollectionLogSettingsChange.LockBusy;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger?.LogWarning(
-                "TimescaleDB: collection_log's compression settings could not be changed, so the change was rolled back: the table and its compressed chunks keep their current settings, and the next hourly pass tries again (#4951): {Message}",
-                ex.Message);
-            return CollectionLogSettingsChange.Failed;
-        }
     }
 
     /* ---------------- compression-job self-heal (#1581) ---------------- */

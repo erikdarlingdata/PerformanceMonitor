@@ -335,7 +335,7 @@ public sealed class DarlingWorker : BackgroundService
     /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/>) take an ACCESS EXCLUSIVE lock even
     /// when they change nothing, so since #3817 each is issued only for a table whose compression settings
     /// differ from what the product wants, and a converged store's pass issues none. collection_log's waits at
-    /// most <see cref="TimescaleSupport.CollectionLogSettingsLockTimeout"/> for its lock (#4951). The summary
+    /// most <see cref="TimescaleSupport.HourlyDdlLockTimeout"/> for its lock (#4951). The summary
     /// line carries an elapsed so a slow pass shows.</para>
     /// </summary>
     private static readonly StoreObjectConvergenceStep[] s_storeObjectConvergence =
