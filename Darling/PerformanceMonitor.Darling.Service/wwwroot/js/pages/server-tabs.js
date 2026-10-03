@@ -3448,6 +3448,13 @@ const COLLECTOR_COLUMNS = [
   { key: "rows_stored", label: "Rows", format: "int" },
   { key: "runs_with_rows", label: "Runs w/ Rows", format: "int" },
   { key: "last_success", label: "Last Success", format: "time" },
+  /* #4938: a daily collector's run time on the monitored server's clock, when it is next due (UTC, shown in local
+     time like Last Success), and the note a skipped day carries. The Heaviest Collectors table below ranks by cost
+     per minute, which puts a once-a-day collector last, so this is the table that lists every collector with a run
+     time. Each column is left out unless a row fills it, so a server with no run times shows none of them. */
+  { key: "run_at", label: "Run at", hideWhenEmpty: true },
+  { key: "next_run_utc", label: "Next run", format: "time", hideWhenEmpty: true },
+  { key: "run_time_note", label: "Run time", wrap: true, hideWhenEmpty: true },
   { key: "last_error", label: "Last Error", wrap: true },
   /* #1837: what a NON-failing run reported (an enumeration that came back with 0 items). Blank for a
      plainly healthy collector; the same column the two WPF grids carry, so the web view is not the one
@@ -3474,6 +3481,9 @@ const HEAVIEST_COLUMNS = [
   { key: "p95_duration_ms", label: "p95", format: "ms" },
   { key: "max_duration_ms", label: "Max", format: "ms" },
   { key: "frequency_minutes", label: "Every (min)", format: "num1" },
+  /* #4938: the collector's run time on the monitored server's clock, beside the cadence it runs on. Left out unless a
+     row has one, so a server with no run times shows no column of dashes. */
+  { key: "run_at", label: "Run at", hideWhenEmpty: true },
   { key: "amortized_ms_per_minute", label: "ms/min", format: "num1" },
   { key: "pct_of_sweep_budget_per_run", label: "% of sweep", format: "num1" },
 ];
