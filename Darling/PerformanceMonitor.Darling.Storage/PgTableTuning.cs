@@ -364,15 +364,16 @@ public static class PgTableTuning
            is a first-start build of roughly 30-70 s, inside SetupTimeoutSeconds with over 4x headroom. A build that runs
            out the clock is abandoned and retried at the next start; the hourly pass never builds it. */
         "CREATE INDEX IF NOT EXISTS " + LegacyRowIndexName + " ON collect.query_store_stats (server_id, collection_time) WHERE interval_start_time_utc IS NULL",
-        /* The restart rows of query_stats and procedure_stats (#4605). A restart row is a first collection after a
-           service or server restart: sample_interval_seconds = 0, a delta that cannot be rated. The hourly interval
+        /* The restart rows of query_stats and procedure_stats (#4605). A restart row is a row whose delta was
+           not knowable, sample_interval_seconds = 0: a first sighting, a counter reset (a restart, a plan-cache
+           eviction) or a gap past the policy (CollectorDeltaCalculator). The hourly interval
            rollups exclude them, so a read of a long window from the rollups adds the raw restart rows back
            (IntervalRollupRestartRows). With only the (server_id, collection_time) index that arm walks every raw
            row in the window to find a few: 109 s and 12 s on the largest production store measured.
 
-           WHAT IT HOLDS: only rows WHERE sample_interval_seconds = 0. A restart row is written once per
-           collector after a restart, so the index costs near-zero writes and WAL, and its tree stays small
-           however long the window.
+           WHAT IT HOLDS: only rows WHERE sample_interval_seconds = 0. On the largest production store measured,
+           a 23-hour window of query_stats held 34,254 of them, a small fraction of its rows, so the index costs few
+           writes and little WAL and its tree stays small.
 
            WHY THE START PATH: the plain CREATE INDEX takes a ShareLock on the hypertable root, which is safe
            before collectors start and not while they write. CONCURRENTLY is refused on hypertables, so the build

@@ -10,8 +10,9 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The restart arm of a long-window read that takes its rows from the hourly interval rollups of
-/// <c>collect.query_stats</c> and <c>collect.procedure_stats</c> (#4605). A restart row is a first collection
-/// after a service or server restart, <c>sample_interval_seconds = 0</c>: its delta cannot be rated, so the
+/// <c>collect.query_stats</c> and <c>collect.procedure_stats</c> (#4605). A restart row is a row whose delta
+/// was not knowable, <c>sample_interval_seconds = 0</c>: the collector writes one for a first sighting, a counter
+/// reset (a restart, a plan-cache eviction) or a gap past the policy. Its delta cannot be rated, so the
 /// rollups exclude it, and a read that wants those rows back takes them from the raw table. These two reads are
 /// that arm. The routing that runs them beside the rollups lands separately, after the production measurement.
 /// <para>Each read carries the predicate of the partial index built for it in <see cref="PgTableTuning"/>
