@@ -140,11 +140,16 @@ public partial class RemoteCollectorService
     private readonly InstallIdStore? _installIdStore;
 
     /// <summary>
-    /// This install's id (#4961), or null when the service was built without a store. Resolved from the store on
-    /// first use rather than at construction, so the first sweeps that need it, running in parallel, share one
-    /// resolve. Nothing reads it yet: the session names are built from it in a later change.
+    /// This install's id (#4961), or null when the service was built without a store, or its store cannot give one right now
+    /// (its file exists and cannot be read, or a new id cannot be saved: <see cref="InstallIdFailure"/> says which). Resolved
+    /// from the store on first use rather than at construction, so the first sweeps that need it, running in parallel, share
+    /// one resolve. A cycle with no id creates, starts and drops no session; the store goes back to the disk on a later cycle.
     /// </summary>
     internal string? GetInstallId() => _installIdStore?.GetId();
+
+    /// <summary>Why the store has no id right now, or null: there is none to explain (an id is held, or the service has no store).</summary>
+    internal string? InstallIdFailure() => _installIdStore?.Failure;
+
     private readonly DeltaCalculator _deltaCalculator;
     public DeltaCalculator DeltaCalculator => _deltaCalculator;
 
