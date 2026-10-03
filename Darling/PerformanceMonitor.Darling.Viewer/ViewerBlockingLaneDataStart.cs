@@ -14,16 +14,16 @@ using System.Threading.Tasks;
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
-/// Where the Overview's blocking lane says its data starts (#4966). The lane draws two event-count series, blocking reports and
+/// Where the Overview's blocking chart says its data starts (#4966). The chart draws two event-count series, blocking reports and
 /// deadlocks, so an empty stretch before a series starts reads as "nothing happened". Each series starts at the earlier of its
-/// coverage and its earliest bar drawn (<see cref="ViewerEventDataStart.Of"/>); the lane has one note, and it names the LATER of the
+/// coverage and its earliest bar drawn (<see cref="ViewerEventDataStart.Of"/>); the chart has one note, and it names the LATER of the
 /// two starts so it is true of both series. A series that has no start (its probe found nothing and it drew no bar, or its probe
-/// threw) is left out; when neither has one the lane shows no note.
+/// threw) is left out; when neither has one the chart shows no note.
 /// </summary>
 internal static class ViewerBlockingLaneDataStart
 {
     /// <summary>
-    /// The instant the lane's note names, or null when it names nothing. A probe that throws costs its series' start and
+    /// The instant the chart's note names, or null when it names nothing. A probe that throws costs its series' start and
     /// nothing else: it is logged and the other series answers alone.
     /// </summary>
     internal static async Task<DateTime?> ChooseAsync(
@@ -56,7 +56,7 @@ internal static class ViewerBlockingLaneDataStart
         {
             ViewerLogger.Warn(
                 "CorrelatedTimelineLanesControl",
-                $"Overview blocking lane ({series}): the data-start probe failed, so that series names no start | {ex.GetType().Name}: {ex.Message}");
+                $"Overview blocking chart ({series}): the data-start probe failed, so that series names no start | {ex.GetType().Name}: {ex.Message}");
             return (true, null);
         }
     }

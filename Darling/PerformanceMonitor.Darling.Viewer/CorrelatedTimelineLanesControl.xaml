@@ -44,7 +44,7 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
-                <!-- The "Showing since" note: Auto, so a hidden note gives the whole lane back to the chart. -->
+                <!-- The "Showing since" note: Auto, so a hidden note gives the whole chart back to the chart. -->
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>

@@ -15,7 +15,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// How the Overview's blocking chart is wired to say where its data starts (#4966), read from the source because the control needs a
-/// window to run: the probes sit outside the lanes' main <c>Task.WhenAll</c>, the note is fed from both series, and the banner is
+/// window to run: the probes sit outside the charts' main <c>Task.WhenAll</c>, the note is fed from both series, and the banner is
 /// declared in an Auto row. The choice itself is in <c>ViewerOverviewBlockingLaneDataStartTests</c>.
 /// </summary>
 public sealed class ViewerOverviewBlockingLaneDataStartPinTests
