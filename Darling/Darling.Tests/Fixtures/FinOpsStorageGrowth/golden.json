@@ -38,6 +38,18 @@
         "HasLogServiceFile": false
       },
       {
+        "DatabaseName": "SiblingOmega",
+        "CurrentSizeMb": 600.00,
+        "Size7dAgoMb": 560.00,
+        "Size30dAgoMb": null,
+        "Growth7dMb": 40.00,
+        "Growth30dMb": null,
+        "DailyGrowthRateMb": 5.0000000000000000,
+        "GrowthPct30d": null,
+        "HasSiblingRow": true,
+        "HasLogServiceFile": false
+      },
+      {
         "DatabaseName": "GrowBeta",
         "CurrentSizeMb": 800.00,
         "Size7dAgoMb": 780.00,

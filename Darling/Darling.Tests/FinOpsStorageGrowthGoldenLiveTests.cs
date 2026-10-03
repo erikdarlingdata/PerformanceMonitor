@@ -149,6 +149,13 @@ public sealed class FinOpsStorageGrowthGoldenLiveTests
         await Size(c, ct, ServerIdA, ServerNameA, anchor.AddDays(-6), "GrowAlpha", 1, 99999m);
         await Size(c, ct, ServerIdA, ServerNameA, anchor.AddDays(-29), "GrowAlpha", 1, 88888m);
 
+        /* Azure sibling database on server A: one whole-database row per snapshot (file_id NULL, file_name = the sibling name),
+           so HasSiblingRow is true. The p30 row is an old-shape row (no used_size_mb); ExcludePreFixRows drops it, so the
+           30-day point and growth are blank. Were it counted, they would be 100 MB and 500 MB. */
+        await Sibling(c, ct, ServerIdA, ServerNameA, latest, "SiblingOmega", 600m, 500m);
+        await Sibling(c, ct, ServerIdA, ServerNameA, p7, "SiblingOmega", 560m, 450m);
+        await Sibling(c, ct, ServerIdA, ServerNameA, p30, "SiblingOmega", 100m, null);
+
         /* Server B: one snapshot, so the latest probe's two-day window is empty and the fallback finds it. */
         await Size(c, ct, ServerIdB, ServerNameB, anchor.AddDays(-5), "OnlyBeta", 1, 123.75m);
 
@@ -185,6 +192,11 @@ public sealed class FinOpsStorageGrowthGoldenLiveTests
         DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, file_id, total_size_mb) VALUES ($1, $2, $3, $4, $5, $6, $7)",
             CollectionIdGenerator.Next(), at, serverId, serverName, db, fileId, sizeMb);
+
+    private static Task Sibling(NpgsqlConnection c, CancellationToken ct, int serverId, string serverName, DateTime at, string db, decimal sizeMb, decimal? usedMb) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, file_id, file_name, total_size_mb, used_size_mb) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8)",
+            CollectionIdGenerator.Next(), at, serverId, serverName, db, AzureSiblingDatabaseSize.FileName, sizeMb, usedMb);
 
     private static Task Idx(NpgsqlConnection c, CancellationToken ct, DateTime at, string table, int indexId, string? indexName, string type,
         decimal reserved, long rows, long? seeks, long? scans, long? lookups, long? updates,
