@@ -38,7 +38,12 @@ namespace Darling.Tests;
 ///
 /// <para>Where the oracle's own order is not total (two rows equal on every ORDER BY key and different in a
 /// selected column) either row is a right answer, so no such case is seeded.</para>
+///
+/// <para>Each live test mints its own scratch database, so the rows it seeds and the plans it explains are its own:
+/// no other class's rows or chunks can reach them (#4650).</para>
 /// </summary>
+/* #1776 own-store: each live test mints its own scratch database, so no other class's rows or chunks shape what it
+   reads or how its plans come out. */
 [Collection("live-postgres")]
 public sealed class CollectionHealthKeyedLookupParityTests
 {
@@ -75,10 +80,11 @@ public sealed class CollectionHealthKeyedLookupParityTests
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live collection-health plan test.");
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live collection-health plan test (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
-        using var connection = new NpgsqlConnection(cs);
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteRowsAsync(connection, ct);
@@ -108,7 +114,7 @@ public sealed class CollectionHealthKeyedLookupParityTests
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, DeleteRowsAsync);
         }
     }
 
@@ -117,10 +123,11 @@ public sealed class CollectionHealthKeyedLookupParityTests
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live collection-health parity test.");
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live collection-health parity test (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
-        using var connection = new NpgsqlConnection(cs);
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteRowsAsync(connection, ct);
@@ -151,6 +158,7 @@ public sealed class CollectionHealthKeyedLookupParityTests
                connection alone and is gone with it. */
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "CREATE TEMP TABLE v_collection_log AS SELECT * FROM collect.v_collection_log WHERE server_id = $1", ServerId);
+            var nullStatusCasesRan = false;
             try
             {
                 await SeedNullStatusCasesAsync(connection, now, ct);
@@ -167,17 +175,21 @@ public sealed class CollectionHealthKeyedLookupParityTests
                 var viewerCurrentNull = await ReadAsync(connection, ViewerDataService.CollectionHealthSql, windowStart, ct);
                 AssertSameRows("viewer+null status", viewerOracleNull, viewerCurrentNull);
                 Assert.Null(viewerOracleNull.Row("null_status_tie")["latest_run_note"]);
+                nullStatusCasesRan = true;
             }
             finally
             {
-                await DarlingMcpTestData.ExecAsync(connection, ct, "DROP TABLE IF EXISTS pg_temp.v_collection_log");
+                /* #1902: RunOwnedAsync, not RunAsync - the temp table is session-local, so the drop has to run on
+                   this very connection; a fresh one would leave the shadow in place and report success. */
+                await LiveStoreCleanup.RunOwnedAsync(nullStatusCasesRan, async () =>
+                    await DarlingMcpTestData.ExecAsync(connection, ct, "DROP TABLE IF EXISTS pg_temp.v_collection_log"));
             }
 
             bodySucceeded = true;
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, DeleteRowsAsync);
         }
     }
 
