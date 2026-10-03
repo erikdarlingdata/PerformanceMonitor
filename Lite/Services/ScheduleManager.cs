@@ -431,6 +431,50 @@ public class ScheduleManager
         return lines;
     }
 
+    /// <summary>One collector's run time on one server: the minutes after midnight on the server's clock, the interval
+    /// the run time is judged on (a whole number of days), and whether the collector is enabled.</summary>
+    internal readonly record struct RunTimeSetting(string Collector, int RunAtMinute, int IntervalMinutes, bool Enabled);
+
+    /// <summary>
+    /// #4938: which of <paramref name="collectors"/> have a run time that applies on one server, read from the schedule
+    /// the sweep reads (the server's own schedule when it has one, else the default), through the same check
+    /// (<see cref="ResolveRunAtMinute"/>): a value that is not an HH:MM time, or that sits on an interval that is not a
+    /// whole number of days, is none. The server is the stable storage id the health reads are keyed by
+    /// (<see cref="RemoteCollectorService.GetServerId"/>), looked up in <paramref name="servers"/> the way
+    /// <see cref="GetFrequencyForStorageServer"/> does; a server the list no longer holds has none. A disabled collector
+    /// is listed, so a reader can tell "no run time" from "disabled".
+    /// </summary>
+    internal IReadOnlyList<RunTimeSetting> GetRunTimeSettingsForStorageServer(
+        ServerManager servers, int storageServerId, IEnumerable<string> collectors)
+    {
+        var settings = new List<RunTimeSetting>();
+        var server = servers.GetAllServers().FirstOrDefault(s =>
+            RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == storageServerId);
+        if (server is null)
+        {
+            return settings;
+        }
+
+        lock (_lock)
+        {
+            foreach (var name in collectors)
+            {
+                if (GetScheduleForServer(server.Id, name) is not { } schedule)
+                {
+                    continue;
+                }
+
+                var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes);
+                if (ResolveRunAtMinute(server.Id, schedule, intervalMinutes) is int minute)
+                {
+                    settings.Add(new RunTimeSetting(schedule.Name, minute, intervalMinutes, schedule.Enabled));
+                }
+            }
+        }
+
+        return settings;
+    }
+
     /// <summary>
     /// #4938: tells the scheduler what a run time needs about a server: the stable id the spread is taken from
     /// (<c>RemoteCollectorService.GetServerId</c>, the deterministic hash of the storage name), the name warnings show,

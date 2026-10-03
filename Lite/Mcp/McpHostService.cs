@@ -91,6 +91,8 @@ public sealed class McpHostService : BackgroundService
             builder.Services.AddSingleton(_dataService);
             builder.Services.AddSingleton(_serverManager);
             builder.Services.AddSingleton(_muteRuleService);
+            /* #4938: get_collection_health shows each collector's run time and next run, from the schedule the sweep reads. */
+            builder.Services.AddSingleton(new McpCollectorRunTimes(_scheduleManager, _serverManager));
             var planFetcher = new SqlPlanFetcher(_serverManager);
             /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
             RegisterAnalysisService(builder.Services, _duckDb, planFetcher, _serverManager, _scheduleManager);

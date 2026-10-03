@@ -282,7 +282,8 @@ public sealed class McpHealthTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Return every field for every collector. Default compacts a HEALTHY collector with nothing to report; failing, stale, stopped, erroring, denied or regressed collectors always keep every field.")] bool full_detail = false)
+        [Description("Return every field for every collector. Default compacts a HEALTHY collector with nothing to report; failing, stale, stopped, erroring, denied or regressed collectors always keep every field.")] bool full_detail = false,
+        McpCollectorRunTimes? runTimes = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -295,6 +296,12 @@ public sealed class McpHealthTools
                 return McpHelpers.Status("unavailable", "No collection health data available.");
             }
 
+            /* #4938: a collector's run time, read fresh on every call from the schedule the sweep reads. It is never an
+               input to the band: HealthStatus is classified from the shipped cadence inside the health read. */
+            var runTimeReadings = runTimes is null
+                ? new Dictionary<string, CollectorRunTimeReading>(StringComparer.OrdinalIgnoreCase)
+                : await runTimes.ReadAsync(dataService, resolved.ServerId, rows, DateTime.UtcNow);
+
             var compactCount = full_detail ? 0 : rows.Count(IsCollectionHealthCompactEligible);
             /* #4198's second cut: a row that fails the predicate above used to keep the full ~30-field shape
                below regardless of full_detail. Measured on both SKUs' #4198 fixtures that alone could not clear
@@ -302,13 +309,17 @@ public sealed class McpHealthTools
                previewing free text cannot touch -- so that row now gets PartialCollectionHealthRow instead,
                unless full_detail=true asks for everything. */
             var partialCount = full_detail ? 0 : rows.Count - compactCount;
-            var result = rows.Select(r => full_detail
-                ? (object)FullCollectionHealthRow(r)
-                : IsCollectionHealthCompactEligible(r)
-                    ? (object)CompactCollectionHealthRow(r)
-                    : (object)PartialCollectionHealthRow(r));
+            var result = rows.Select(r =>
+            {
+                runTimeReadings.TryGetValue(r.CollectorName, out var runTime);
+                return full_detail
+                    ? (object)FullCollectionHealthRow(r, runTime)
+                    : IsCollectionHealthCompactEligible(r)
+                        ? (object)CompactCollectionHealthRow(r, runTime)
+                        : (object)PartialCollectionHealthRow(r, runTime);
+            });
 
-            static object FullCollectionHealthRow(CollectorHealthRow r) => new
+            static object FullCollectionHealthRow(CollectorHealthRow r, CollectorRunTimeReading? runTime) => new
             {
                 collector = r.CollectorName,
                 status = r.HealthStatus,
@@ -454,7 +465,15 @@ public sealed class McpHealthTools
                     run_ms = r.SlowestRunDurationMs,
                     slowest_share_pct = Math.Round(r.FanoutSlowestSharePercent!.Value, 2),
                     dominance = Math.Round(r.FanoutDominance.Value, 2)
-                }
+                },
+                /* #4938: the collector's run time, appended after the last field so nothing a consumer indexes by
+                   position moved. run_at is the configured time as HH:MM on the monitored server's clock; null
+                   means the collector has no run time. next_run_utc is when it is next due, UTC: the run time plus
+                   the server's fixed spread, and the time of this read when the collector is due now. Null with a
+                   run_at present means the collector is disabled. Neither field is a band input.
+                   Field-for-field Darling's twin. */
+                run_at = runTime?.RunAt,
+                next_run_utc = runTime?.NextRunUtcText
             };
 
             /* #2296: the roll-up that makes half-rate collection visible. Every collector on a saturated
@@ -476,6 +495,9 @@ public sealed class McpHealthTools
                     p95_duration_ms = Math.Round(r.P95DurationMs, 0),
                     max_duration_ms = Math.Round(r.MaxDurationMs, 0),
                     frequency_minutes = r.FrequencyMinutes,
+                    /* #4938: the run time beside the shipped cadence it replaces for a daily collector; null when the
+                       collector has none. */
+                    run_at = runTimeReadings.TryGetValue(r.CollectorName, out var heaviestRunTime) ? heaviestRunTime.RunAt : null,
                     /* #2446: the ranking key said out loud, beside the single-run cost it is derived from.
                        The list still ranks by amortized contribution, because that is what explains
                        busy_percent — but an operator reading it to find the collector that overran a body
@@ -718,16 +740,33 @@ public sealed class McpHealthTools
     /// without the ~30 fields a row with nothing to report does not need. <c>compact: true</c> is the caller's
     /// signal that this row was shortened — a full row never carries the property, so its mere presence is
     /// unambiguous without a second lookup against <c>full_detail</c>.</summary>
-    private static object CompactCollectionHealthRow(CollectorHealthRow r) => new
-    {
-        collector = r.CollectorName,
-        status = r.HealthStatus,
-        compact = true,
-        total_runs = r.TotalRuns,
-        rows_stored = r.RowsStored,
-        avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
-        last_success = r.LastSuccessTime?.ToString("o"),
-    };
+    private static object CompactCollectionHealthRow(CollectorHealthRow r, CollectorRunTimeReading? runTime) => runTime is null
+        ? new
+        {
+            collector = r.CollectorName,
+            status = r.HealthStatus,
+            compact = true,
+            total_runs = r.TotalRuns,
+            rows_stored = r.RowsStored,
+            avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
+            last_success = r.LastSuccessTime?.ToString("o"),
+        }
+        /* #4938: a compact row exists to stay small, so two null keys on every one of ~40 rows would only make it
+           bigger. A compact row carries the run time only when the collector has one, which is the row that needs it:
+           a healthy daily collector is exactly what compacts by default. A compact row without the keys has none.
+           Field-for-field Darling's twin. */
+        : new
+        {
+            collector = r.CollectorName,
+            status = r.HealthStatus,
+            compact = true,
+            total_runs = r.TotalRuns,
+            rows_stored = r.RowsStored,
+            avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
+            last_success = r.LastSuccessTime?.ToString("o"),
+            run_at = (string?)runTime.RunAt,
+            next_run_utc = runTime.NextRunUtcText,
+        };
 
     /// <summary>#4198: the shape a row that FAILS <see cref="IsCollectionHealthCompactEligible"/> gets by
     /// default -- neither the full ~30-field shape nor <see cref="CompactCollectionHealthRow"/>'s "nothing to
@@ -739,12 +778,13 @@ public sealed class McpHealthTools
     /// scanning for <c>compact != true</c> never skips it, and reusing that marker here would defeat that check
     /// silently. full_detail=true restores every field named in the guide above, same as it does for a compact
     /// row.</summary>
-    private static object PartialCollectionHealthRow(CollectorHealthRow r)
+    private static object PartialCollectionHealthRow(CollectorHealthRow r, CollectorRunTimeReading? runTime)
     {
         /* OutputFinding recomputes FormatOutputFinding's sentence on every access -- read it once rather than
            twice (preview, then the truncated comparison). */
         var outputFinding = r.OutputFinding;
-        return new
+        return runTime is null
+        ? new
         {
             collector = r.CollectorName,
             status = r.HealthStatus,
@@ -777,6 +817,32 @@ public sealed class McpHealthTools
             regression_finding = r.AnyRegressionFinding,
             output_finding = McpHelpers.Truncate(outputFinding, OutputFindingPreviewLength),
             output_finding_truncated = outputFinding is not null && outputFinding.Length > OutputFindingPreviewLength,
+        }
+        /* #4938: a partial row carries the run time only when the collector has one, like a compact row, so a collector
+           with none adds no bytes to a payload that is sized to sit under the default budget. The fields are the same two
+           the full row ends with; a partial row without them has no run time. */
+        : new
+        {
+            collector = r.CollectorName,
+            status = r.HealthStatus,
+            partial_detail = true,
+            total_runs = r.TotalRuns,
+            errors = r.ErrorCount,
+            session_missing = r.SessionMissingCount,
+            abandoned = r.AbandonedCount,
+            rows_stored = r.RowsStored,
+            last_success = r.LastSuccessTime?.ToString("o"),
+            last_error = McpHelpers.Truncate(r.LastError, ErrorMessagePreviewLength),
+            last_error_truncated = r.LastError is not null && r.LastError.Length > ErrorMessagePreviewLength,
+            last_error_at = r.LastErrorTime?.ToString("o"),
+            last_denied_at = r.LastDeniedTime?.ToString("o"),
+            denied_since_last_success = r.DeniedSinceLastSuccess,
+            regressed_from_productive = r.AnyRegression,
+            regression_finding = r.AnyRegressionFinding,
+            output_finding = McpHelpers.Truncate(outputFinding, OutputFindingPreviewLength),
+            output_finding_truncated = outputFinding is not null && outputFinding.Length > OutputFindingPreviewLength,
+            run_at = (string?)runTime.RunAt,
+            next_run_utc = runTime.NextRunUtcText,
         };
     }
 
