@@ -36,6 +36,20 @@ public enum QueryWindowRelation
     PlanCorrection,
     ProcedureStats,
     QueryStoreStats,
+    // Group B (#4966): the Blocking tab's Blocked Process Reports and Deadlocks grids.
+    /* The Blocked Process Reports grid: the XE collector's table (blocked_process_reports). The grid also lists the
+       always-on DMV blocking snapshots' rows beside it, so its coverage is the EARLIER of this collector's and that
+       one's (DmvBlockingSnapshots, QueryWindowRelationAlsoCoveredBy). Holds a row only when a block runs past the
+       threshold, so coverage comes from collector runs. The grid filters on the report's own event_time. */
+    BlockedProcessReports,
+    /* The Deadlocks grid (deadlocks): a row only when one happens, so coverage comes from collector runs. The grid
+       filters on the deadlock's own deadlock_time. */
+    Deadlocks,
+    /* The always-on DMV blocking snapshots (dmv_blocking_snapshots) that the Blocked Process Reports grid lists beside
+       its XE reports. Not a surface of its own: it is probed only as the second collector behind
+       BlockedProcessReports, for a server whose blocked process threshold is unset (so no XE report is ever stored) and
+       for the stretch before the XE collector was switched on. Its event_time IS its collection_time. */
+    DmvBlockingSnapshots,
     QuerySnapshots,
 
     /* Group C of #4966: Collection Health, System Events, Config Changes and Long Queries. */
@@ -60,6 +74,10 @@ public partial class LocalDataService
         QueryWindowRelation.PlanCorrection => "v_plan_correction",
         QueryWindowRelation.ProcedureStats => "v_procedure_stats",
         QueryWindowRelation.QueryStoreStats => "v_query_store_stats",
+        // Group B (#4966): the Blocking tab's Blocked Process Reports and Deadlocks grids.
+        QueryWindowRelation.BlockedProcessReports => "v_blocked_process_reports",
+        QueryWindowRelation.Deadlocks => "v_deadlocks",
+        QueryWindowRelation.DmvBlockingSnapshots => "v_dmv_blocking_snapshots",
         QueryWindowRelation.QuerySnapshots => "v_query_snapshots",
         /* Group C of #4966: Collection Health, System Events, Config Changes and Long Queries. */
         QueryWindowRelation.CollectionLog => "v_collection_log",
@@ -87,6 +105,10 @@ public partial class LocalDataService
         // Group A (Queries tab: Plan Corrections)
         QueryWindowRelation.PlanCorrection => "plan_correction",
         QueryWindowRelation.QuerySnapshots => "query_snapshots",
+        // Group B (#4966): the Blocking tab's Blocked Process Reports and Deadlocks grids.
+        QueryWindowRelation.BlockedProcessReports => "blocked_process_report",
+        QueryWindowRelation.Deadlocks => "deadlocks",
+        QueryWindowRelation.DmvBlockingSnapshots => "dmv_blocking_snapshot",
         QueryWindowRelation.WaitingTasks => "waiting_tasks",
         QueryWindowRelation.MemoryPressureEvents => "memory_pressure_events",
         /* Group C of #4966. Every event and snapshot table below holds a row only when something happened or changed
@@ -107,8 +129,14 @@ public partial class LocalDataService
     /// grid filters on, so a banner never names a time later than the earliest row its grid shows. That is
     /// <c>collection_time</c> for most relations, <c>capture_time</c> for the three config snapshots (their collectors stamp
     /// it instead, <c>ICollectorSchemaInfo.PrefixTimeColumnName</c>, and the archive purges by it), and <c>event_time</c>
-    /// for the two event relations (#4989): the System Events grids that read system_health events and the Default Trace
-    /// grid filter on the event's own time, not on the time a run stored it. A server's first run can store events from
+    /// for the event relations (#4989): the System Events grids that read system_health events, the Default Trace grid and
+    /// the Blocked Process Reports grid's XE reports filter on the event's own time, not on the time a run stored it. The
+    /// Deadlocks grid filters on <c>deadlock_time</c> in the same way (#4966). Both are the XE <c>@timestamp</c>, UTC, so
+    /// neither is a server-clock relation (<see cref="QueryWindowRelationTimeIsServerLocal"/> stays false for them), a
+    /// first run of either collector stores only <see cref="PerformanceMonitor.Collectors.CollectorContext.EventFallbackWindow"/>
+    /// of history, and the archive still purges both tables by <c>collection_time</c>. The always-on DMV blocking
+    /// snapshots' <c>event_time</c> is their own <c>collection_time</c>, so that relation keeps <c>collection_time</c>.
+    /// A server's first run can store events from
     /// before itself, every row stamped with that run's <c>collection_time</c> while its <c>event_time</c> is older, and the
     /// probe reading <c>collection_time</c> there named the run above rows from before it. How far back depends on the
     /// collector: the Default Trace's first run stores the history the trace files already hold, which can go back days,
@@ -129,10 +157,27 @@ public partial class LocalDataService
     internal static string QueryWindowRelationTimeColumn(QueryWindowRelation relation) => relation switch
     {
         QueryWindowRelation.ServerConfig or QueryWindowRelation.DatabaseConfig or QueryWindowRelation.TraceFlags => "capture_time",
-        QueryWindowRelation.SystemHealthEvents or QueryWindowRelation.DefaultTraceEvents => "event_time",
+        QueryWindowRelation.SystemHealthEvents or QueryWindowRelation.DefaultTraceEvents or QueryWindowRelation.BlockedProcessReports => "event_time",
+        QueryWindowRelation.Deadlocks => "deadlock_time",
         QueryWindowRelation.MemoryPressureEvents => "sample_time",
         _ => "collection_time"
     };
+
+    /// <summary>
+    /// The second relation whose coverage also feeds a grid (#4966), or null for every grid fed by one collector. Only the
+    /// Blocked Process Reports grid has one: it lists the XE collector's reports and, beside them, the always-on DMV blocking
+    /// snapshots (<see cref="GetRecentBlockedProcessReportsAsync"/>), which stand in for the XE reports where no blocked process
+    /// threshold is set. The probe answers the EARLIER of the two collectors' coverage
+    /// (<see cref="EarlierCoverageFloor"/>), so with XE collection off a range the DMV collector covers gets no notice, and one that
+    /// starts before the DMV collector's coverage names it. The same rule as the Darling viewer's Blocked Process Reports grid.
+    /// A closed map, so nothing a caller passes reaches the probe's SQL.
+    /// </summary>
+    internal static QueryWindowRelation? QueryWindowRelationAlsoCoveredBy(QueryWindowRelation relation) =>
+        relation == QueryWindowRelation.BlockedProcessReports ? QueryWindowRelation.DmvBlockingSnapshots : null;
+
+    /// <summary>The earlier of two probe answers, a null (nothing to report in the window) giving way to the other; null when both are.</summary>
+    internal static DateTime? EarlierCoverageFloor(DateTime? first, DateTime? second) =>
+        first is DateTime a && second is DateTime b ? (a <= b ? a : b) : first ?? second;
 
     /// <summary>
     /// Whether the relation's time column (<see cref="QueryWindowRelationTimeColumn"/>) holds the monitored server's LOCAL
@@ -206,8 +251,23 @@ public partial class LocalDataService
     /// take the earlier of the first row and the collector's first run, which is UTC, in C#
     /// (<c>GetServerLocalQueryWindowFloorAsync</c>). Every UTC relation, system_health's included (the XE <c>@timestamp</c>),
     /// keeps the single-query path and ignores the clock.</para>
+    ///
+    /// <para><b>A grid fed by two collectors (the Blocked Process Reports grid, #4966).</b> The grid lists the XE collector's
+    /// reports and, beside them, the always-on DMV blocking snapshots, so for it the answer is the earlier of the two
+    /// collectors' (<see cref="QueryWindowRelationAlsoCoveredBy"/>, <see cref="EarlierCoverageFloor"/>): a null answer from
+    /// one (no row and no logged run of that collector in the window) gives way to the other's.</para>
     /// </summary>
     public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock = null)
+    {
+        var own = await GetOwnQueryWindowFloorAsync(relation, serverId, startUtc, endUtc, serverClock);
+        return QueryWindowRelationAlsoCoveredBy(relation) is QueryWindowRelation also
+            ? EarlierCoverageFloor(own, await GetOwnQueryWindowFloorAsync(also, serverId, startUtc, endUtc, serverClock))
+            : own;
+    }
+
+    /// <summary>One relation's own probe, which <see cref="GetQueryWindowFloorAsync"/> documents. Each call opens and releases its
+    /// own connection, so the two answers of a grid fed by two collectors never nest the non-recursive read lock.</summary>
+    private async Task<DateTime?> GetOwnQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock)
     {
         var view = QueryWindowRelationView(relation);
         using var _q = TimeQuery("GetQueryWindowFloorAsync", $"{view} window floor");

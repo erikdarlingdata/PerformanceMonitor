@@ -160,6 +160,13 @@ public static class PgTableTuning
     /// </summary>
     public const string ForcePlanFailuresIndexName = "idx_query_store_stats_server_time_forcing";
 
+    /// <summary>
+    /// The partial index that answers <see cref="QueryStoreIntervalWide.HasLegacyRowSql"/> without reading the
+    /// heap: <c>(server_id, collection_time)</c> over only the rows whose <c>interval_start_time_utc</c> is NULL.
+    /// Exposed so the live pin can find it by name in <c>pg_indexes</c> and in the plan.
+    /// </summary>
+    public const string LegacyRowIndexName = "idx_query_store_stats_server_time_null_start";
+
     public static IReadOnlyList<string> ForcePlanFailuresIndexColumns { get; } = new[]
     {
         "server_id", "collection_time",
@@ -297,6 +304,54 @@ public static class PgTableTuning
            may be its unforced one), so that index needs the statement reshaped and its first-sighting
            semantics changed — the cheaper long-run shape, deferred rather than smuggled in. */
         "CREATE INDEX IF NOT EXISTS " + ForcePlanFailuresIndexName + " ON collect.query_store_stats (server_id, collection_time DESC) INCLUDE (database_name, query_id, plan_id, force_failure_count, is_forced_plan, plan_forcing_type, last_force_failure_reason)",
+        /* The legacy-row check (QueryStoreIntervalWide.HasLegacyRowSql, clause 6 of ReadsTableAsync, run once
+           per server by the fleet panels) asks whether the server's window holds a row with no interval start.
+           On a field store it holds none, and with only the (server_id, collection_time) index that "no" costs
+           a fetch of every heap tuple the window touches: a mean of 4.1 s and 6.8 M blocks per call over a
+           day on the largest store measured (#4969), most of it heap fetches in the uncompressed chunks. The read stays exact, because the collector can still store a NULL start when the
+           catalog join misses, so the statement is unchanged and this index gives it an index read of a near-empty
+           tree.
+
+           WHAT IT HOLDS: only rows WHERE interval_start_time_utc IS NULL. On a field store that is nothing, so
+           the index costs near-zero writes and WAL (contrast the random-key WAL that #4247 removed from the
+           composer indexes), and it grows only with the rare legacy row.
+
+           WHY THE START PATH: the plain CREATE INDEX takes a ShareLock on the hypertable root, which is safe
+           before collectors start and not while they write. CONCURRENTLY is refused on hypertables, and the
+           per-chunk form and a background build are unsafe because the Query Store backfill writes backdated
+           rows into older chunks (see QueryStoreBackgroundIndexes).
+
+           COMPRESSED CHUNKS: CREATE INDEX on the hypertable builds one index per chunk from that chunk's own
+           heap, so each compressed chunk gets an empty 8 KB index and the compressed relations get none. The
+           check reads those chunks through the columnar scan on the compressed chunk's server_id segmentby
+           index, with the NULL test as a vectorized filter (a few thousand buffers per chunk; 65-153 ms each on the largest production
+           store measured). Uncompressed chunks take an index
+           scan of this index, which is empty on a field store, so 1-2 buffers per chunk. Before, they took a
+           scan of the (server_id, collection_time) index with a heap fetch per row to test the NULL filter.
+           QueryStoreLegacyRowIndexLiveTests holds the plan. Measured on a local TimescaleDB 2.30.1 rig with
+           the real schema (4 servers x 4 daily chunks x 855,360 rows per server per day, 585 B per row, the
+           2 oldest chunks compressed and the 2 newest uncompressed at 2.0 GB of heap each), one server,
+           bound parameters, median of 3:
+             24 h:  255-359 ms -> 0.043 ms
+             168 h: 1.7-3.0 s (126-138 k buffers) -> 5.9 ms (~7.1 k buffers, all in the compressed chunks'
+                    columnar scans, which this index does not change).
+           On the largest production store measured (6-hour chunks, the last ~27 hours uncompressed), the check for the
+           busiest server took 614 ms at 24 h, all of it Bitmap Heap Scans of the five uncompressed chunks that removed
+           667,802 rows by the NULL filter; the index serves that whole window. At 168 h it took 1,723 ms, 1.34 s of it
+           in the twelve compressed chunks' columnar scans, which this index does not reach.
+           As a prepared statement, the check's sixth execution switches to a generic plan with no chunk
+           pruning: 57-76 s at 168 h without the index, 6.2 ms with it. The product does not prepare it today.
+
+           THE BUILD'S COST: one read of every uncompressed chunk's heap, under SetupTimeoutSeconds. On that
+           rig, 4.0 GB of uncompressed heap built in 0.59-0.66 s warm with the default 2 parallel maintenance
+           workers and 1.33 s with none; a serial scan of the same heaps takes 1.21-1.33 s, so the build costs
+           about half a serial scan of the uncompressed heaps. Compressed and empty chunks get an 8 KB index,
+           and NULL-start rows cost about 35 B each. On the largest production store measured, the build's read set (12
+           compressed chunks with empty heaps, 5 uncompressed holding 11.2 GB of heap and 19.7 M rows, none with a NULL
+           start) took 56.1 s as one serial scan, 48.3 s of it reading 1.37 M blocks from disk; at the rig's ratio that
+           is a first-start build of roughly 30-70 s, inside SetupTimeoutSeconds with over 4x headroom. A build that runs
+           out the clock is abandoned and retried at the next start; the hourly pass never builds it. */
+        "CREATE INDEX IF NOT EXISTS " + LegacyRowIndexName + " ON collect.query_store_stats (server_id, collection_time) WHERE interval_start_time_utc IS NULL",
         "ALTER TABLE collect.procedure_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_store_stats SET (" + InsertTuningOptions + ")",
