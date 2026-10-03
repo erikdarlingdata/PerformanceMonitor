@@ -71,7 +71,7 @@ public sealed class FinOpsTabOptimizationPageTests
         Assert.Contains(call, tab);
         Assert.Matches("(?m)^const HOURS = 24;$", tab);
         Assert.Matches("(?m)^const LIMIT = 20;$", tab);
-        Assert.Equal(1, Regex.Matches(tab, "readTool\\(").Count);
+        Assert.Single(Regex.Matches(tab, "readTool\\("));
     }
 
     [Fact]
@@ -146,8 +146,9 @@ public sealed class FinOpsTabOptimizationPageTests
     public void TheNoticesAndTheCostLineAreExact()
     {
         var tab = Tab();
-        Assert.Contains("let text = (s.rows || []).length + \" idle databases over the last \" + (s.window_days ?? \"?\") + \" days\";", tab);
-        Assert.Contains("text += s.truncated ? \"; the top \" + (s.rows || []).length + \" of \" + (s.database_count ?? \"more\") + \".\" : \".\";", tab);
+        Assert.Contains("const n = (s.rows || []).length;", tab);
+        Assert.Contains("let text = (n === 1 ? \"1 idle database\" : n + \" idle databases\") + \" over the last \" + (s.window_days ?? \"?\") + \" days\";", tab);
+        Assert.Contains("text += s.truncated ? \"; the top \" + n + \" of \" + (s.database_count ?? \"more\") + \".\" : \".\";", tab);
         Assert.Contains("return \"last \" + (s.window_hours ?? HOURS) + \" hours\";", tab);
         Assert.Contains("let text = \"Top \" + (s.rows || []).length + \" by CPU, last \" + (s.window_hours ?? HOURS) + \" hours\";", tab);
         Assert.Contains("if (s.effective_start) text += \", from \" + applyFormat(\"time\", s.effective_start);", tab);

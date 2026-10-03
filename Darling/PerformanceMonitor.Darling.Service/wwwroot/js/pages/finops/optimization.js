@@ -66,8 +66,9 @@ const GRANT_COLUMNS = [
 ];
 
 function idleNotice(s) {
-  let text = (s.rows || []).length + " idle databases over the last " + (s.window_days ?? "?") + " days";
-  text += s.truncated ? "; the top " + (s.rows || []).length + " of " + (s.database_count ?? "more") + "." : ".";
+  const n = (s.rows || []).length;
+  let text = (n === 1 ? "1 idle database" : n + " idle databases") + " over the last " + (s.window_days ?? "?") + " days";
+  text += s.truncated ? "; the top " + n + " of " + (s.database_count ?? "more") + "." : ".";
   return text;
 }
 
