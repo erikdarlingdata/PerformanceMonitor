@@ -61,6 +61,29 @@ public sealed class FinOpsApplicationConnectionsViewTests
     [Fact]
     public void ViewsAllowList_ContainsTheView() =>
         Assert.Contains("application_connections", DarlingMcpFinOpsTools.Views);
+
+    private static ApplicationConnectionUsage Usage(string name, int max, int avg, DateTime first, DateTime last) =>
+        new(name, avg, max, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, first, last);
+
+    [Fact]
+    public void OrderApplicationRows_BreaksEveryTieDeterministically_FromAReversedInput()
+    {
+        var t1 = new DateTime(2026, 10, 1, 8, 0, 0, DateTimeKind.Unspecified);
+        var t2 = t1.AddHours(1);
+        /* Expected order, then fed in reverse so a missing key leaves the wrong row first. The first Alpha was first seen earlier
+           but last seen later, so the last-seen key cannot stand in for the first-seen key. */
+        var expected = new[]
+        {
+            Usage("Alpha", 9, 5, t1, t2.AddHours(1)),
+            Usage("Alpha", 9, 5, t2, t2),
+            Usage("Bravo", 9, 5, t1, t1),
+            Usage("Aaa", 9, 4, t1, t1),
+            Usage("Zzz", 3, 3, t1, t1),
+        };
+        var ordered = DarlingMcpFinOpsTools.OrderApplicationRows(expected.Reverse());
+        Assert.Equal(new[] { "Alpha", "Alpha", "Bravo", "Aaa", "Zzz" }, ordered.Select(r => r.ApplicationName).ToArray());
+        Assert.Equal(new[] { t1, t2, t1, t1, t1 }, ordered.Select(r => r.FirstSeenUtc).ToArray());
+    }
 }
 
 /* #1776 own-store: each fact seeds its own scratch database, so nothing here shares rows with another test. */
@@ -73,7 +96,10 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
     private static readonly int EmptyServerId = ServerIdHelper.GetDeterministicHashCode(EmptyServerName);
     private static readonly int PostgresServerId = ServerIdHelper.GetDeterministicHashCode(PostgresServerName);
 
-    private static async Task<ScratchPostgres> SeedAsync(string cs, CancellationToken ct)
+    /// <summary>The seed's clock, whole seconds, so a seeded instant has a known literal wire string.</summary>
+    private DateTime seedNow;
+
+    private async Task<ScratchPostgres> SeedAsync(string cs, CancellationToken ct)
     {
         var scratch = await ScratchPostgres.CreateAsync(cs, ct);
         await using var c = new NpgsqlConnection(scratch.ConnectionString);
@@ -83,6 +109,8 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await DarlingMcpTestData.RegisterServerAsync(c, EmptyServerId, EmptyServerName, ct);
         await PgTargetFactCollectorTests.RegisterServerAsync(c, PostgresServerId, PostgresServerName, MonitoredEngineKind.Postgres, 16, ct);
         var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+        now = new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, now.Kind);
+        seedNow = now;
         /* Zulu and Alpha tie on peak (12): Zulu's average (8) is higher, so it leads although its name sorts last. */
         await Row(c, ct, now.AddHours(-2), "Zulu", 12, 3, 5, 4, 10, 20, 30, 40);
         await Row(c, ct, now.AddHours(-3), "Zulu", 4, 0, 4, 0, 12, 22, 32, 42);
@@ -92,7 +120,11 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         /* Lima and Mike tie on peak and average: the name decides. */
         await Row(c, ct, now.AddHours(-2), "Mike", 9, 1, 1, 1, 5, 6, 7, 8);
         await Row(c, ct, now.AddHours(-2), "Lima", 9, 1, 1, 1, 5, 6, 7, 8);
-        /* An unattributed program name, and a program seen only outside the window. */
+        /* Quebec: two samples whose sixteen average and peak figures are all different, for the field-by-field fact.
+           Peak 11 ranks it below Zulu and Alpha (12) and above Lima and Mike (9). */
+        await Row(c, ct, now.AddHours(-5), "Quebec", 11, 9, 8, 5, 1000, 5000, 400, 70000);
+        await Row(c, ct, now.AddHours(-4), "Quebec", 3, 3, 12, 1, 3000, 9000, 800, 100000);
+        /* A program with a NULL name (shown with an empty name), and a program seen only outside the window. */
         await Row(c, ct, now.AddHours(-6), null, 20, 0, 0, 0, 100, 200, 300, 400);
         await Row(c, ct, now.AddHours(-26), "Outside", 50, 5, 5, 5, 1, 1, 1, 1);
         return scratch;
@@ -131,14 +163,14 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, ct));
-        Assert.Equal(5, tool.RootElement.GetProperty("application_count").GetInt32());
+        Assert.Equal(6, tool.RootElement.GetProperty("application_count").GetInt32());
         Assert.False(tool.RootElement.GetProperty("truncated").GetBoolean());
         Assert.Equal(24, tool.RootElement.GetProperty("hours_back").GetInt32());
         Assert.Equal(await ExpectedRowsJsonAsync(ds, ct), tool.RootElement.GetProperty("rows").GetRawText());
         var names = tool.RootElement.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("application_name").GetString()).ToArray();
         Assert.DoesNotContain("Outside", names);
         Assert.Equal("", names[0]);
-        /* The unattributed program carries 0 for the columns the collector left unset; Alpha's are NULL in the store. */
+        /* Alpha's resource columns are NULL in the store, so they read 0 in the row. */
         var alpha = tool.RootElement.GetProperty("rows").EnumerateArray().Single(r => r.GetProperty("application_name").GetString() == "Alpha");
         Assert.Equal(0, alpha.GetProperty("max_cpu_time_ms").GetInt64());
     }
@@ -152,7 +184,7 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
 
         using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, ct));
         var names = tool.RootElement.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("application_name").GetString()).ToArray();
-        Assert.Equal(new[] { "", "Zulu", "Alpha", "Lima", "Mike" }, names.Take(5).ToArray());
+        Assert.Equal(new[] { "", "Zulu", "Alpha", "Quebec", "Lima", "Mike" }, names);
     }
 
     [Fact]
@@ -172,9 +204,42 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
             Assert.EndsWith("Z", first, StringComparison.Ordinal);
             Assert.EndsWith("Z", last, StringComparison.Ordinal);
             var expected = reader[row.GetProperty("application_name").GetString()!];
-            Assert.Equal(DateTime.SpecifyKind(expected.FirstSeenUtc, DateTimeKind.Utc), DateTimeOffset.Parse(first).UtcDateTime);
-            Assert.Equal(DateTime.SpecifyKind(expected.LastSeenUtc, DateTimeKind.Utc), DateTimeOffset.Parse(last).UtcDateTime);
+            Assert.Equal(McpHelpers.FormatEffectiveStart(expected.FirstSeenUtc), first);
+            Assert.Equal(McpHelpers.FormatEffectiveStart(expected.LastSeenUtc), last);
         }
+        /* One row pinned to the literal seed: Quebec's samples sit 5 and 4 hours before the seed clock. */
+        var quebec = tool.RootElement.GetProperty("rows").EnumerateArray().Single(r => r.GetProperty("application_name").GetString() == "Quebec");
+        Assert.Equal(seedNow.AddHours(-5).ToString("yyyy-MM-dd'T'HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + ".0000000Z", quebec.GetProperty("first_seen_utc").GetString());
+        Assert.Equal(seedNow.AddHours(-4).ToString("yyyy-MM-dd'T'HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + ".0000000Z", quebec.GetProperty("last_seen_utc").GetString());
+    }
+
+    [Fact]
+    public async Task OneSeededProgram_ReadsFieldByField_AgainstLiteralValues()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, ct));
+        var q = tool.RootElement.GetProperty("rows").EnumerateArray().Single(r => r.GetProperty("application_name").GetString() == "Quebec");
+        Assert.Equal("Quebec", q.GetProperty("application_name").GetString());
+        Assert.Equal(7, q.GetProperty("avg_connections").GetInt64());
+        Assert.Equal(11, q.GetProperty("max_connections").GetInt64());
+        Assert.Equal(6, q.GetProperty("avg_running").GetInt64());
+        Assert.Equal(9, q.GetProperty("max_running").GetInt64());
+        Assert.Equal(10, q.GetProperty("avg_sleeping").GetInt64());
+        Assert.Equal(12, q.GetProperty("max_sleeping").GetInt64());
+        Assert.Equal(3, q.GetProperty("avg_dormant").GetInt64());
+        Assert.Equal(5, q.GetProperty("max_dormant").GetInt64());
+        Assert.Equal(2000, q.GetProperty("avg_cpu_time_ms").GetInt64());
+        Assert.Equal(3000, q.GetProperty("max_cpu_time_ms").GetInt64());
+        Assert.Equal(7000, q.GetProperty("avg_reads").GetInt64());
+        Assert.Equal(9000, q.GetProperty("max_reads").GetInt64());
+        Assert.Equal(600, q.GetProperty("avg_writes").GetInt64());
+        Assert.Equal(800, q.GetProperty("max_writes").GetInt64());
+        Assert.Equal(85000, q.GetProperty("avg_logical_reads").GetInt64());
+        Assert.Equal(100000, q.GetProperty("max_logical_reads").GetInt64());
+        Assert.Equal(2, q.GetProperty("sample_count").GetInt64());
     }
 
     [Fact]
