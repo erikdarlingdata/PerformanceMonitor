@@ -5235,12 +5235,12 @@ LIMIT 1";
     /// #4938, #4999: the detached runs that have not finished, so a shutdown can wait for them the way it waits for
     /// the per-server bodies. They used to run inside those bodies and so inside that wait; detached, nothing else
     /// holds on to them. That is every daily run and, since #4999, the three collectors detached by name. A run
-    /// removes itself when it ends. The names say "daily" because the daily runs came first.
+    /// removes itself when it ends.
     /// </summary>
-    private readonly ConcurrentDictionary<Task, byte> _dailyRuns = new();
+    private readonly ConcurrentDictionary<Task, byte> _detachedRuns = new();
 
     /// <summary>Test hook and shutdown-drain input (#4938, #4999): the detached runs that have not finished, daily and by name.</summary>
-    internal IReadOnlyCollection<Task> InFlightDailyRuns => _dailyRuns.Keys.ToArray();
+    internal IReadOnlyCollection<Task> InFlightDetachedRuns => _detachedRuns.Keys.ToArray();
 
     /// <summary>
     /// #4999: the detached runs that are executing right now, one per (server, collector), which the hang watchdog
@@ -5394,20 +5394,21 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// #4938: keeps a detached daily run in <see cref="InFlightDailyRuns"/> until it ends. The removal is attached
-    /// after the add, so a run that finished in between is still removed.
+    /// #4938, #4999: keeps a detached run, a daily run or one of the three detached by name, in
+    /// <see cref="InFlightDetachedRuns"/> until it ends. The removal is attached after the add, so a run that finished
+    /// in between is still removed.
     /// </summary>
-    private void TrackDailyRun(Task run)
+    private void TrackDetachedRun(Task run)
     {
         if (run.IsCompleted)
         {
             return;
         }
 
-        _dailyRuns.TryAdd(run, 0);
+        _detachedRuns.TryAdd(run, 0);
         _ = run.ContinueWith(
             static (finished, state) => ((ConcurrentDictionary<Task, byte>)state!).TryRemove(finished, out _),
-            _dailyRuns,
+            _detachedRuns,
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
@@ -5424,7 +5425,7 @@ LIMIT 1";
     /// </summary>
     internal async Task DrainInFlightAsync(List<Task> inFlight)
     {
-        inFlight.AddRange(InFlightDailyRuns);
+        inFlight.AddRange(InFlightDetachedRuns);
 
         if (inFlight.Count > 0)
         {
@@ -12130,7 +12131,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                     /* #4999: tracked like the daily runs below, so the shutdown drain waits for a run that is still
                        going. Dropped on the floor, as these three used to be, nothing held them once the pass that
                        dispatched them ended. */
-                    TrackDailyRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken));
+                    TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken));
                 }
                 /* #4938: and every DAILY collector, by cadence rather than by name. index_object_stats took 43
                    minutes across 72 databases in a field case, and awaited here that stalled the server's
@@ -12146,7 +12147,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                    the analysis read right after connecting, and it runs once per connect, outside any pass. */
                 else
                 {
-                    TrackDailyRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true));
+                    TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true));
                 }
             }
         }
