@@ -797,7 +797,7 @@ The overrides that do exist live in the **store**, not the file: `config.config_
 
 #### What the run time sets
 
-The run time sets one thing: the time of day a collector that runs once a day or less often starts. The `run_at_minute` column holds it as minutes after midnight on the *monitored server's own clock*. The Viewer and the CLI take it as a 24-hour `HH:MM` time such as `02:00`.
+The run time sets one thing: the time of day a collector that runs once a day or less often starts. The `config.config_collector_run_times` table holds it, one row per collector (fleet-wide or for one server), as minutes after midnight on the *monitored server's own clock*; a collector with no row has no run time, and the Viewer's schedule Save never touches the table. The Viewer and the CLI take it as a 24-hour `HH:MM` time such as `02:00`.
 
 Without a run time, such a collector starts when the service happened to start. That can be the busiest hour of the server's day. With one, it starts in the hour you chose.
 
@@ -849,7 +849,7 @@ The verb refuses a time that is not a 24-hour `HH:MM` time. It also refuses a ti
 
 After the write the verb reads the collector's rows back from the store and prints them. A row that carries a time prints `run_at=02:00 server time`, so what you see is what the service will resolve. The exit codes, `--config` and the managed-mode rule are those of `--enable-collector`.
 
-The write needs the run-time column, which the service adds when it starts. On a store the service has not migrated yet, the verb says so, tells you to start the service once to migrate it and run the command again, exits `1` and changes nothing. `--enable-collector` and `--disable-collector` read back without the `run_at=` part instead of failing.
+The write needs the run-time table, which the service adds when it starts. On a store the service has not migrated yet, the verb says so, tells you to start the service once to migrate it and run the command again, exits `1` and changes nothing. `--enable-collector` and `--disable-collector` read back without the `run_at=` part instead of failing.
 
 ### Drop the Extended Events sessions a removed server left behind (`--drop-xe-sessions`)
 

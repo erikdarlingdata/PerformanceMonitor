@@ -244,37 +244,25 @@ public sealed class ViewerCollectorSchedulesSqlTests
     {
         var sql = ViewerDataService.CollectorScheduleFleetUpsertSql;
         Assert.Contains("INSERT INTO config_collector_schedules", sql, StringComparison.Ordinal);
-        /* $5 is the V125 databases scope (#3477) and $6 the V160 run time (#4938) — pinned at the FULL
-           arity, because the five-place prefix is a substring of the six-place list and a prefix pin
-           would keep passing while a dropped sixth bind shifted nothing visible. */
-        Assert.Contains("VALUES (NULL, $1, $2, $3, $4, $5, $6)", sql, StringComparison.Ordinal);
+        /* $5 is the V125 databases scope (#3477) — pinned at the FULL arity, because the four-place
+           prefix is a substring of the five-place list and a prefix pin would keep passing while a
+           dropped fifth bind shifted nothing visible. */
+        Assert.Contains("VALUES (NULL, $1, $2, $3, $4, $5)", sql, StringComparison.Ordinal);
         Assert.Contains("ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE", sql, StringComparison.Ordinal);
         Assert.Contains("frequency_minutes = EXCLUDED.frequency_minutes", sql, StringComparison.Ordinal);
         Assert.Contains("retention_days = EXCLUDED.retention_days", sql, StringComparison.Ordinal);
         Assert.Contains("enabled = EXCLUDED.enabled", sql, StringComparison.Ordinal);
         Assert.Contains("databases = EXCLUDED.databases", sql, StringComparison.Ordinal);
-        Assert.Contains("run_at_minute = EXCLUDED.run_at_minute", sql, StringComparison.Ordinal);
     }
 
     [Fact]
     public void ServerUpsert_ArbitratesOnServerIdCollectorName_WhereServerIdIsNotNull()
     {
         var sql = ViewerDataService.CollectorScheduleServerUpsertSql;
-        /* $6 is the V125 databases scope (#3477) and $7 the V160 run time (#4938); full arity for the fleet pin's reason. */
-        Assert.Contains("VALUES ($1, $2, $3, $4, $5, $6, $7)", sql, StringComparison.Ordinal);
+        /* $6 is the V125 databases scope (#3477); full arity for the fleet pin's reason. */
+        Assert.Contains("VALUES ($1, $2, $3, $4, $5, $6)", sql, StringComparison.Ordinal);
         Assert.Contains("ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE", sql, StringComparison.Ordinal);
         Assert.Contains("databases = EXCLUDED.databases", sql, StringComparison.Ordinal);
-        Assert.Contains("run_at_minute = EXCLUDED.run_at_minute", sql, StringComparison.Ordinal);
-    }
-
-    /// <summary>The editor's read selects the run time last, in the service's column order, so a row the save writes
-    /// back carries the time the store holds (#4938).</summary>
-    [Fact]
-    public void SelectSql_ReadsTheRunTimeLast_InTheServicesColumnOrder()
-    {
-        Assert.Contains(
-            "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases, run_at_minute FROM config_collector_schedules",
-            ViewerDataService.CollectorSchedulesSelectSql, StringComparison.Ordinal);
     }
 
     [Fact]

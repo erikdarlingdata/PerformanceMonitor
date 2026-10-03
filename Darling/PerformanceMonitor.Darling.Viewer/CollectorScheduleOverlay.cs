@@ -22,19 +22,19 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public static class CollectorScheduleOverlay
 {
-    /// <summary>What the Run at cell shows for a row with no run time of its own (the column is NULL): the scope falls
-    /// through to the fleet row, or to no fixed time (#4938).</summary>
+    /// <summary>What the Run at cell shows for a scope with no run-time row of its own: the scope falls through to the
+    /// fleet row, or to no fixed time (#4938).</summary>
     public const string UseDefaultRunAtText = "Use default";
 
     /// <summary>What a server row's Run at cell shows for -1: no fixed time on this server, which stops a fleet-wide
     /// time (#4938). On the fleet row it is read as clearing the time, because the fleet has nothing to stop.</summary>
     public const string NoRunAtText = "None";
 
-    /// <summary>The stored value for "no fixed time on this server", the V160 column's -1.</summary>
+    /// <summary>The stored value for "no fixed time on this server", the V160 table's -1 (a server row only).</summary>
     private const int NoFixedRunTime = -1;
 
     /// <summary>
-    /// The text the Run at cell holds for a stored value: NULL (and a value the V160 CHECK would refuse, which the
+    /// The text the Run at cell holds for a stored value: none (and a value the V160 CHECK would refuse, which the
     /// service also reads as not set) is <see cref="UseDefaultRunAtText"/>, -1 is <see cref="NoRunAtText"/>, and a
     /// minute after midnight is <c>HH:MM</c> through the shared <see cref="CollectorRunTime.Format"/>.
     /// </summary>
@@ -88,27 +88,54 @@ public static class CollectorScheduleOverlay
     /// scope (<paramref name="serverId"/> null) shows code-default-over-fleet; editing a server shows the full
     /// effective schedule it currently collects on.
     ///
-    /// <para>The Run at cell (#4938) is the one column that does NOT layer: it holds the edited scope's OWN stored
-    /// value, so a server whose column is NULL shows "Use default" and not the fleet's time. If the cell took the
-    /// fleet's value, a save would write it into every server row and "Use default" could never survive a save.</para>
+    /// <para>The Run at cell (#4938) comes from the run-time table (<paramref name="runTimes"/>), not from the schedule
+    /// rows, and is the one column that does NOT layer: it holds the edited scope's OWN stored value, so a server with no
+    /// run-time row shows "Use default" and not the fleet's time. If the cell took the fleet's value, a save would write
+    /// it into every server's run-time rows and "Use default" could never survive a save. A run time needs no schedule
+    /// row: a collector at its default cadence with a run time of its own has a run-time row and no schedule row.</para>
     /// </summary>
     public static List<CollectorScheduleEditItem> BuildEffectiveSchedule(
-        IReadOnlyList<CollectorScheduleRow> allOverrides, int? serverId)
+        IReadOnlyList<CollectorScheduleRow> allOverrides, IReadOnlyList<CollectorRunTimeRow> runTimes, int? serverId)
     {
         ArgumentNullException.ThrowIfNull(allOverrides);
+        ArgumentNullException.ThrowIfNull(runTimes);
 
         var schedule = CollectorSchedulePresets.BuildDefaultSchedule();
 
-        ApplyScope(schedule, allOverrides.Where(o => o.ServerId is null), applyRunAt: serverId is null);
+        ApplyScope(schedule, allOverrides.Where(o => o.ServerId is null));
         if (serverId is int sid)
         {
-            ApplyScope(schedule, allOverrides.Where(o => o.ServerId == sid), applyRunAt: true);
+            ApplyScope(schedule, allOverrides.Where(o => o.ServerId == sid));
         }
+
+        ApplyRunTimes(schedule, runTimes.Where(r => r.ServerId == serverId));
 
         return schedule;
     }
 
-    private static void ApplyScope(List<CollectorScheduleEditItem> schedule, IEnumerable<CollectorScheduleRow> scopeRows, bool applyRunAt)
+    /// <summary>The schedule rows alone, with no run times: every Run at cell reads "Use default". The shape released viewers
+    /// have, kept so a caller that has no run-time rows (the schedule overlay's own tests, a store below V160) need not
+    /// invent an empty list. The editor window passes the run times it read, through the overload above.</summary>
+    public static List<CollectorScheduleEditItem> BuildEffectiveSchedule(
+        IReadOnlyList<CollectorScheduleRow> allOverrides, int? serverId) =>
+        BuildEffectiveSchedule(allOverrides, Array.Empty<CollectorRunTimeRow>(), serverId);
+
+    /// <summary>Puts the edited scope's own run times on the grid items (#4938): a collector with a row in the scope shows
+    /// it (<see cref="FormatRunAt"/>), and every other collector keeps "Use default". A row for a collector this build no
+    /// longer defines is ignored, the way a schedule row for one is.</summary>
+    private static void ApplyRunTimes(List<CollectorScheduleEditItem> schedule, IEnumerable<CollectorRunTimeRow> scopeRunTimes)
+    {
+        foreach (var runTime in scopeRunTimes)
+        {
+            var item = schedule.FirstOrDefault(s => s.Name.Equals(runTime.CollectorName, StringComparison.OrdinalIgnoreCase));
+            if (item is not null)
+            {
+                item.RunAtText = FormatRunAt(runTime.RunAtMinute);
+            }
+        }
+    }
+
+    private static void ApplyScope(List<CollectorScheduleEditItem> schedule, IEnumerable<CollectorScheduleRow> scopeRows)
     {
         foreach (var row in scopeRows)
         {
@@ -134,11 +161,6 @@ public static class CollectorScheduleOverlay
             if (row.Databases is not null)
             {
                 item.DatabasesText = FormatDatabases(row.Databases);
-            }
-
-            if (applyRunAt)
-            {
-                item.RunAtText = FormatRunAt(row.RunAtMinute);
             }
 
             item.Enabled = row.Enabled;
@@ -216,12 +238,19 @@ public static class CollectorScheduleOverlay
         return true;
     }
 
-    /// <summary>True when the store holds any override row for this server (the editor's "custom vs. use
-    /// default" initial state).</summary>
-    public static bool ServerHasOverride(IReadOnlyList<CollectorScheduleRow> allOverrides, int serverId)
+    /// <summary>True when the store holds any schedule row for this server (the released rule, with no run-time rows to count).</summary>
+    public static bool ServerHasOverride(IReadOnlyList<CollectorScheduleRow> allOverrides, int serverId) =>
+        ServerHasOverride(allOverrides, Array.Empty<CollectorRunTimeRow>(), serverId);
+
+    /// <summary>True when the store holds any override row for this server, a schedule row or a run-time row (the editor's
+    /// "custom vs. use default" initial state). A server that has only a run time of its own (set from the command line, say,
+    /// which writes no schedule row) is custom, so the editor shows that run time instead of the fleet's (#4938).</summary>
+    public static bool ServerHasOverride(
+        IReadOnlyList<CollectorScheduleRow> allOverrides, IReadOnlyList<CollectorRunTimeRow> runTimes, int serverId)
     {
         ArgumentNullException.ThrowIfNull(allOverrides);
-        return allOverrides.Any(o => o.ServerId == serverId);
+        ArgumentNullException.ThrowIfNull(runTimes);
+        return allOverrides.Any(o => o.ServerId == serverId) || runTimes.Any(r => r.ServerId == serverId);
     }
 
     /// <summary>
@@ -251,18 +280,12 @@ public static class CollectorScheduleOverlay
             /* #3477: a non-empty scope is an override in its own right — a collector at default
                cadence scoped to one database must still write its fleet row, or the scope silently
                never takes effect (the #2064/#2061 skipped-row failure, one column over). */
-            /* #4938: a run time is an override in its own right, the #3477 skipped-row failure one more column over:
-               a collector left at its default cadence with a fleet run time must still write its row. On the fleet
-               row "None" is the same as no value (the fleet has no time to stop), so only a real time counts; a
-               cell that does not parse is left to ValidateSchedule and writes nothing here. */
-            TryParseRunAt(item.RunAtText, out var parsedRunAt, out _);
-            int? runAtMinute = parsedRunAt is >= 0 ? parsedRunAt : null;
-
+            /* #4938: a run time is not an override of THIS table. It has its own table (ToRunTimeChanges), so a
+               collector left at its default cadence with a fleet run time writes no schedule row. */
             if (item.FrequencyMinutes == def.FrequencyMinutes
                 && item.RetentionDays == def.RetentionDays
                 && item.Enabled == def.DefaultEnabled
-                && databases.Count == 0
-                && runAtMinute is null)
+                && databases.Count == 0)
             {
                 continue; /* Matches the code default — no override row (keeps the table sparse). */
             }
@@ -271,7 +294,7 @@ public static class CollectorScheduleOverlay
                no lower layer to opt back out of, and NULL is this table's "column not overridden". */
             rows.Add(new CollectorScheduleRow(
                 null, item.Name, item.FrequencyMinutes, item.RetentionDays, item.Enabled,
-                databases.Count > 0 ? databases : null, runAtMinute));
+                databases.Count > 0 ? databases : null));
         }
 
         return rows;
@@ -292,17 +315,75 @@ public static class CollectorScheduleOverlay
                array (not NULL), so a customizing server collects exactly the shown scope and a
                fleet-level scope cannot bleed through a server whose grid shows none. The empty/NULL
                distinction is the resolver's documented contract. */
-            /* #4938: the run time rides the row the way the scope does. A cell that is "Use default" writes NULL, so
-               the server falls through to the fleet's time; "None" writes -1, which stops a fleet-wide time on this
-               server only; a time writes its minute. A cell that does not parse writes NULL here, because the window
-               validates before it writes. */
-            .Select(item =>
-            {
-                TryParseRunAt(item.RunAtText, out var runAtMinute, out _);
-                return new CollectorScheduleRow(
-                    serverId, item.Name, item.FrequencyMinutes, item.RetentionDays, item.Enabled,
-                    ParseDatabases(item.DatabasesText), runAtMinute);
-            })
+            /* #4938: the run time does not ride these rows (ToRunTimeChanges writes it to its own table), so this Save
+               carries no run time and leaves every one as it was. */
+            .Select(item => new CollectorScheduleRow(
+                serverId, item.Name, item.FrequencyMinutes, item.RetentionDays, item.Enabled,
+                ParseDatabases(item.DatabasesText)))
             .ToList();
+    }
+
+    /// <summary>
+    /// The run-time table changes that make the store match the edited grid for one scope (#4938), each of them a statement
+    /// of its own (<see cref="ViewerDataService.SaveCollectorRunTimesAsync"/>): only the collectors whose time differs from
+    /// what <paramref name="runTimes"/> holds for the scope, so a Save that did not touch a run time writes none and does not
+    /// reload the service for it.
+    ///
+    /// <para>A cell that is "Use default" means no row at this level (a delete, when there is one); a time is an upsert; "None"
+    /// is -1 on a server row, which stops a fleet-wide time for that server only, and on the fleet scope it is read as no row
+    /// because the fleet has nothing to stop (the CHECK refuses -1 there). A server scope that "uses the default schedule"
+    /// (<paramref name="usesDefault"/>) deletes every run-time row the server has, so the server follows the fleet again; a cell
+    /// that does not parse is left to <see cref="ValidateSchedule"/> and changes nothing. A collector this build does not
+    /// define is never written. A stored row is deleted by the name it is stored under, so a row an older writer left in a
+    /// different letter case is removed too. Pure.</para>
+    /// </summary>
+    public static List<CollectorRunTimeChange> ToRunTimeChanges(
+        IReadOnlyList<CollectorScheduleEditItem> edited, IReadOnlyList<CollectorRunTimeRow> runTimes, int? serverId, bool usesDefault)
+    {
+        ArgumentNullException.ThrowIfNull(edited);
+        ArgumentNullException.ThrowIfNull(runTimes);
+
+        var changes = new List<CollectorRunTimeChange>();
+        var stored = runTimes.Where(r => r.ServerId == serverId).ToList();
+
+        foreach (var item in edited)
+        {
+            if (!CollectorScheduleDefaults.All.ContainsKey(item.Name))
+            {
+                continue; /* Not a known collector — never persist a run time for it. */
+            }
+
+            int? wanted;
+            if (usesDefault)
+            {
+                wanted = null;
+            }
+            else if (!TryParseRunAt(item.RunAtText, out wanted, out _))
+            {
+                continue;
+            }
+            else if (serverId is null && wanted == NoFixedRunTime)
+            {
+                wanted = null;
+            }
+
+            var current = stored.Where(r => r.CollectorName.Equals(item.Name, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (wanted is int minute)
+            {
+                if (current.Count == 0 || current.Any(r => r.RunAtMinute != minute))
+                {
+                    changes.Add(new CollectorRunTimeChange(serverId, item.Name, minute));
+                }
+            }
+            else
+            {
+                foreach (var row in current)
+                {
+                    changes.Add(new CollectorRunTimeChange(serverId, row.CollectorName, null));
+                }
+            }
+        }
+
+        return changes;
     }
 }

@@ -37,42 +37,45 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>config_version</c> once per sweep). The fleet scope stays sparse (only collectors that differ from the
 /// code default get a row); a per-server "custom" scope writes an explicit row per collector, matching Lite's
 /// full-snapshot per-server override so the grid is WYSIWYG regardless of the fleet layer.</para>
+///
+/// <para><b>A collector's run time is not a column of these rows (#4938).</b> It lives in its own table,
+/// <c>config.config_collector_run_times</c>, because the whole-scope Save above deletes a scope's rows and inserts them
+/// again with a fixed column list: a viewer that did not know the column would clear it on every Save. This partial reads
+/// that table with <see cref="GetCollectorRunTimesAsync"/> and writes it with <see cref="SaveCollectorRunTimesAsync"/>,
+/// each change its own statement (an upsert of one row, or the delete of the row for "no run time"). The schedule
+/// statements never name the run time, so a Save here leaves every run time as it was.</para>
 /// </summary>
 public sealed partial class ViewerDataService
 {
     /// <summary>All override rows (both scopes), for the editor to overlay on the code defaults. Column order
     /// matches the service's <c>ReadScheduleOverridesAsync</c>.</summary>
     public const string CollectorSchedulesSelectSql =
-        "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases, run_at_minute FROM config_collector_schedules ORDER BY server_id NULLS FIRST, collector_name";
+        "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases FROM config_collector_schedules ORDER BY server_id NULLS FIRST, collector_name";
 
     /// <summary>Upserts one FLEET-WIDE override row (server_id NULL). Arbiter matches V17's
     /// <c>ux_config_collector_schedules_fleet</c>. $1 collector_name, $2 frequency (nullable), $3 retention
     /// (nullable), $4 enabled, $5 databases (nullable — the V125 scope; NULL and empty are distinct,
-    /// see <see cref="CollectorScheduleRow.Databases"/>), $6 run_at_minute (nullable smallint — the V160 run
-    /// time, minutes after midnight on the server's clock; NULL falls through to the code default).</summary>
+    /// see <see cref="CollectorScheduleRow.Databases"/>).</summary>
     public const string CollectorScheduleFleetUpsertSql = @"
-INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases, run_at_minute)
-VALUES (NULL, $1, $2, $3, $4, $5, $6)
+INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases)
+VALUES (NULL, $1, $2, $3, $4, $5)
 ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET
     frequency_minutes = EXCLUDED.frequency_minutes,
     retention_days = EXCLUDED.retention_days,
     enabled = EXCLUDED.enabled,
-    databases = EXCLUDED.databases,
-    run_at_minute = EXCLUDED.run_at_minute";
+    databases = EXCLUDED.databases";
 
     /// <summary>Upserts one PER-SERVER override row. Arbiter matches V17's
     /// <c>ux_config_collector_schedules_server</c>. $1 server_id, $2 collector_name, $3 frequency (nullable),
-    /// $4 retention (nullable), $5 enabled, $6 databases (nullable — the V125 scope), $7 run_at_minute
-    /// (nullable smallint — the V160 run time; -1 is "no fixed time on this server").</summary>
+    /// $4 retention (nullable), $5 enabled, $6 databases (nullable — the V125 scope).</summary>
     public const string CollectorScheduleServerUpsertSql = @"
-INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases, run_at_minute)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SET
     frequency_minutes = EXCLUDED.frequency_minutes,
     retention_days = EXCLUDED.retention_days,
     enabled = EXCLUDED.enabled,
-    databases = EXCLUDED.databases,
-    run_at_minute = EXCLUDED.run_at_minute";
+    databases = EXCLUDED.databases";
 
     /// <summary>Deletes every fleet-wide override row (revert the fleet scope to code defaults).</summary>
     public const string CollectorScheduleDeleteFleetScopeSql =
@@ -86,6 +89,45 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     /// reset), leaving the fleet-wide defaults (<c>server_id IS NULL</c>) untouched.</summary>
     public const string CollectorScheduleDeleteAllServerScopesSql =
         "DELETE FROM config_collector_schedules WHERE server_id IS NOT NULL";
+
+    /// <summary>All run-time rows (both scopes), for the editor to show next to the schedule rows (#4938). Its own read of
+    /// <c>config.config_collector_run_times</c>, the V160 table, and not a column of the schedule rows: the Save above deletes
+    /// a scope's schedule rows and inserts them again with a fixed column list, so a viewer that did not know a run-time column
+    /// would clear it. Schema-qualified, so a 42P01 from it can only mean this table is missing.</summary>
+    public const string CollectorRunTimesSelectSql =
+        "SELECT server_id, collector_name, run_at_minute FROM config.config_collector_run_times ORDER BY server_id NULLS FIRST, collector_name";
+
+    /// <summary>Upserts one FLEET-WIDE run time (server_id NULL). Arbiter matches V160's
+    /// <c>ux_config_collector_run_times_fleet</c>. $1 collector_name, $2 run_at_minute (smallint, minutes after midnight on the
+    /// server's clock). A plain INSERT: the table's own statement-level trigger bumps <c>config_version</c>, so a running
+    /// service reloads.</summary>
+    public const string CollectorRunTimeFleetUpsertSql = @"
+INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute)
+VALUES (NULL, $1, $2)
+ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET
+    run_at_minute = EXCLUDED.run_at_minute";
+
+    /// <summary>Upserts one PER-SERVER run time. Arbiter matches V160's <c>ux_config_collector_run_times_server</c>. $1 server_id,
+    /// $2 collector_name, $3 run_at_minute (smallint; -1 is "no fixed time on this server").</summary>
+    public const string CollectorRunTimeServerUpsertSql = @"
+INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute)
+VALUES ($1, $2, $3)
+ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SET
+    run_at_minute = EXCLUDED.run_at_minute";
+
+    /// <summary>Deletes the fleet-wide run time of one collector ("no run time", or back to the default). $1 collector_name.</summary>
+    public const string CollectorRunTimeFleetDeleteSql =
+        "DELETE FROM config.config_collector_run_times WHERE server_id IS NULL AND collector_name = $1";
+
+    /// <summary>Deletes one server's run time of one collector ("use the fleet's time", or back to the default). $1 server_id,
+    /// $2 collector_name.</summary>
+    public const string CollectorRunTimeServerDeleteSql =
+        "DELETE FROM config.config_collector_run_times WHERE server_id = $1 AND collector_name = $2";
+
+    /// <summary>Deletes EVERY per-server run time in one statement, leaving the fleet-wide ones (<c>server_id IS NULL</c>) alone:
+    /// the run-time half of the fleet-wide "Apply Default to All" reset, which sends every server back to the fleet's schedule.</summary>
+    public const string CollectorRunTimeDeleteAllServerScopesSql =
+        "DELETE FROM config.config_collector_run_times WHERE server_id IS NOT NULL";
 
     /// <summary>All override rows in the store (both fleet + per-server), for the editor overlay.</summary>
     public async Task<List<CollectorScheduleRow>> GetCollectorSchedulesAsync(CancellationToken cancellationToken = default)
@@ -105,13 +147,115 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
                 reader.GetBoolean(4),
                 /* V125 (#3477): NULL and empty stay distinct through the round trip — the service's
                    ReadScheduleOverridesAsync says why the collapse would be a semantic change. */
-                reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5),
-                /* V160 (#4938): minutes after midnight on the server's clock, -1 = no fixed time on this server.
-                   NULL stays null so it falls through the layering exactly like the scope above. */
-                reader.IsDBNull(6) ? null : Convert.ToInt32(reader.GetValue(6), CultureInfo.InvariantCulture)));
+                reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5)));
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// Every run-time row in the store, both scopes (#4938), read from <c>config.config_collector_run_times</c>. A store
+    /// below V160 has no such table, and that is "no run times", which is what every collector had before it existed: the
+    /// 42P01 is answered with an empty list. The viewer's connect gate normally refuses such a store first, but its schema
+    /// probe fails open when it throws, so a store below V160 can still reach the editor, and the editor must open on it.
+    /// Matched on the state code, not the message text, because lc_messages is not always English. Any other failure
+    /// propagates.
+    /// </summary>
+    public async Task<List<CollectorRunTimeRow>> GetCollectorRunTimesAsync(CancellationToken cancellationToken = default)
+    {
+        var rows = new List<CollectorRunTimeRow>();
+
+        try
+        {
+            await using var command = _dataSource.CreateCommand(CollectorRunTimesSelectSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(new CollectorRunTimeRow(
+                    reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                    reader.GetString(1),
+                    Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == UndefinedTableSqlState)
+        {
+            return new List<CollectorRunTimeRow>();
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Writes the run-time changes the editor made (#4938), each one a statement of its own against
+    /// <c>config.config_collector_run_times</c>: a value upserts the row for its scope and collector, and null deletes it.
+    /// Never the schedule rows' delete-and-reinsert Save, so a run time is never carried through (or cleared by) that
+    /// statement. The changes share one transaction, so a failure leaves none of them written; the table's own
+    /// statement-level trigger bumps <c>config_version</c>, so a running service reloads.
+    ///
+    /// <para>A read-only seat (42501) throws <see cref="ViewerReadOnlyException"/>. A store below V160 (42P01 undefined_table)
+    /// throws <see cref="ViewerSchemaSkewException"/>, the message that says the store is older than this viewer and the
+    /// service must migrate it, and not the raw error: the connect gate refuses such a store first, but its probe fails open
+    /// when it throws, so the save has to say it itself.</para>
+    /// </summary>
+    public async Task SaveCollectorRunTimesAsync(IReadOnlyList<CollectorRunTimeChange> changes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(changes);
+        if (changes.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            foreach (var change in changes)
+            {
+                await using var command = BuildRunTimeCommand(change, connection, transaction);
+                command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
+    }
+
+    /// <summary>The one statement for one change (#4938): the upsert of the row when it carries a time, else the delete of the
+    /// row, for the fleet or for the server. The time binds as a smallint, the column's type.</summary>
+    private static NpgsqlCommand BuildRunTimeCommand(CollectorRunTimeChange change, NpgsqlConnection connection, NpgsqlTransaction transaction)
+    {
+        var fleet = change.ServerId is null;
+        var command = new NpgsqlCommand(
+            change.RunAtMinute is null
+                ? (fleet ? CollectorRunTimeFleetDeleteSql : CollectorRunTimeServerDeleteSql)
+                : (fleet ? CollectorRunTimeFleetUpsertSql : CollectorRunTimeServerUpsertSql),
+            connection, transaction);
+
+        if (change.ServerId is int serverId)
+        {
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });                         // $1 (server scope)
+        }
+
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = change.CollectorName });              // $1 fleet / $2 server
+
+        if (change.RunAtMinute is int minute)
+        {
+            /* checked: a value that does not fit a smallint is a bug in the caller, never a silent wrap. The column's own CHECK
+               refuses anything outside 0-1439 (and -1 off a server row), so the store is the last word on the range. */
+            command.Parameters.Add(new NpgsqlParameter<short> { TypedValue = checked((short)minute) });         // $2 fleet / $3 server
+        }
+
+        return command;
     }
 
     /// <summary>
@@ -136,12 +280,40 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     /// returns the number of override rows removed. The V17 <c>trg_bump_collector_schedules</c> trigger bumps
     /// <c>config_version</c> on the DELETE, so the service re-resolves schedules on its next sweep (same reload
     /// path as <see cref="ReplaceServerSchedulesAsync"/>). A read-only seat throws <see cref="ViewerReadOnlyException"/>.
+    ///
+    /// <para>It deletes schedule rows only, exactly as a released viewer does (#4938): the run times live in their own table
+    /// and this statement never touches them. The editor's "Apply Default to All Servers" follows it with
+    /// <see cref="ResetAllServerRunTimesAsync"/>, a statement of its own.</para>
     /// </summary>
     public async Task<int> ResetAllServerSchedulesAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(CollectorScheduleDeleteAllServerScopesSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         return await ExecuteWriteAsync(command, cancellationToken);
+    }
+
+    /// <summary>
+    /// Removes EVERY server's run time in one statement of its own (#4938), leaving the fleet-wide run times alone: the run-time
+    /// half of "Apply Default to All Servers", because a server's run time is part of its override and the reset sends every
+    /// server back to the fleet's schedule. Returns the rows removed. A store below V160 has no such table, which is no run
+    /// times to remove (42P01), so it returns 0. A read-only seat throws <see cref="ViewerReadOnlyException"/>.
+    /// </summary>
+    public async Task<int> ResetAllServerRunTimesAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var command = _dataSource.CreateCommand(CollectorRunTimeDeleteAllServerScopesSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            return await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState == UndefinedTableSqlState)
+        {
+            return 0;
+        }
     }
 
     private async Task ReplaceScheduleScopeAsync(int? serverId, IEnumerable<CollectorScheduleRow> rows, CancellationToken cancellationToken)
@@ -181,7 +353,6 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
                 AddNullableInt(upsert, row.RetentionDays);                                                    // retention
                 upsert.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.Enabled });               // enabled
                 AddNullableTextArray(upsert, row.Databases);                                                  // databases (V125 scope)
-                AddNullableSmallint(upsert, row.RunAtMinute);                                                 // run_at_minute (V160) — written by name, so a save keeps what the row carries and a row with none stores NULL
                 await upsert.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -198,16 +369,6 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
         {
             NpgsqlDbType = NpgsqlDbType.Integer,
             Value = value.HasValue ? value.Value : DBNull.Value,
-        });
-
-    /// <summary>Binds the V160 <c>run_at_minute</c> as a smallint, which is the column's type: null binds SQL NULL (no
-    /// run time at this level, falls through the layering), a value binds as written — 0-1439 is a minute of the day
-    /// and -1 is "no fixed time on this server" (the column's CHECK refuses anything else).</summary>
-    private static void AddNullableSmallint(NpgsqlCommand command, int? value) =>
-        command.Parameters.Add(new NpgsqlParameter
-        {
-            NpgsqlDbType = NpgsqlDbType.Smallint,
-            Value = value.HasValue ? checked((short)value.Value) : DBNull.Value,
         });
 
     /// <summary>Binds the V125 <c>databases</c> scope: null binds SQL NULL (no scope at this level,
@@ -230,6 +391,18 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
 /// null = column NULL (falls through), empty = the explicit "no scope" that stops the fall-through,
 /// non-empty = collect only those databases (<c>excludedDatabases</c> still wins downstream).
 /// </summary>
-public sealed record CollectorScheduleRow(
-    int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null,
-    int? RunAtMinute = null);
+public sealed record CollectorScheduleRow(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null);
+
+/// <summary>
+/// One <c>config.config_collector_run_times</c> row as the viewer reads it (#4938): the time of day a collector that runs
+/// once a day or less often starts. <see cref="ServerId"/> NULL = fleet-wide. <see cref="RunAtMinute"/> is minutes after
+/// midnight on the monitored server's own clock (0-1439), or -1 on a server row for "no fixed time on this server", which
+/// stops a fleet-wide time for that server only. No row is no run time at that level.
+/// </summary>
+public sealed record CollectorRunTimeRow(int? ServerId, string CollectorName, int RunAtMinute);
+
+/// <summary>
+/// One change the editor makes to the run-time table (#4938), each written as a statement of its own: a value upserts the
+/// row for the scope and collector, and null deletes it (no run time at that level, so the scope falls back to the next one).
+/// </summary>
+public sealed record CollectorRunTimeChange(int? ServerId, string CollectorName, int? RunAtMinute);

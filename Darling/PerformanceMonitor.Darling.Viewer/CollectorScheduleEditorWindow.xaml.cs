@@ -27,6 +27,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <see cref="ViewerDataService.ReplaceFleetSchedulesAsync"/> / <see cref="ViewerDataService.ReplaceServerSchedulesAsync"/>.
 /// Presets change frequencies only (enabled + retention untouched), exactly as Lite. A read-only seat shows a
 /// banner and disables the writes.
+///
+/// <para>The Run at column (#4938) is read from, and written to, <c>config.config_collector_run_times</c>, a table of its
+/// own: the schedule Save deletes a scope's schedule rows and inserts them again, and a run time kept on those rows
+/// would be cleared by it. So Save writes the run-time changes first, each as a statement of its own
+/// (<see cref="ViewerDataService.SaveCollectorRunTimesAsync"/>), then the schedule rows exactly as it always has.</para>
 /// </summary>
 public partial class CollectorScheduleEditorWindow : Window
 {
@@ -34,6 +39,7 @@ public partial class CollectorScheduleEditorWindow : Window
     private readonly IReadOnlyList<DarlingServer> _servers;
 
     private List<CollectorScheduleRow> _allOverrides = new();
+    private List<CollectorRunTimeRow> _runTimes = new();
     private List<CollectorScheduleEditItem> _editing = new();
     private int? _scopeServerId;           // null = fleet-wide default scope
     private bool _suppressPresetChange;
@@ -92,11 +98,32 @@ public partial class CollectorScheduleEditorWindow : Window
             StatusText.Text = $"Could not read the current schedules: {ex.Message}";
         }
 
+        await ReloadRunTimesAsync();
+
         /* Default to the fleet scope (index 0). */
         _suppressScopeReload = true;
         ScopeCombo.SelectedIndex = 0;
         _suppressScopeReload = false;
         LoadScopeSchedule();
+    }
+
+    /// <summary>
+    /// Reads the run times (#4938) from their own table. A store below V160 has no such table, and
+    /// <see cref="ViewerDataService.GetCollectorRunTimesAsync"/> answers that with no run times, so the editor opens with every
+    /// Run at cell on "Use default". Any other failure is said in the status line (appended, so it does not replace the
+    /// schedule read's) and leaves no run times shown, which a Save then treats as nothing stored for them.
+    /// </summary>
+    private async Task ReloadRunTimesAsync()
+    {
+        try
+        {
+            _runTimes = await _dataService.GetCollectorRunTimesAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _runTimes = new List<CollectorRunTimeRow>();
+            StatusText.Text += $" Could not read the run times: {ex.Message}";
+        }
     }
 
     private void PopulateScopeCombos()
@@ -142,7 +169,7 @@ public partial class CollectorScheduleEditorWindow : Window
         {
             HeaderText.Text = $"Collector Schedules — {(ScopeCombo.SelectedItem as ComboBoxItem)?.Content}";
             SubHeaderText.Text = "This server's custom schedule. Uncheck 'Use default schedule' to override the fleet-wide defaults for it.";
-            var hasOverride = CollectorScheduleOverlay.ServerHasOverride(_allOverrides, _scopeServerId!.Value);
+            var hasOverride = CollectorScheduleOverlay.ServerHasOverride(_allOverrides, _runTimes, _scopeServerId!.Value);
 
             _suppressPresetChange = true;
             UseDefaultCheckBox.IsChecked = !hasOverride;
@@ -218,7 +245,7 @@ public partial class CollectorScheduleEditorWindow : Window
             return;
         }
 
-        var fleetRunAt = _allOverrides
+        int? fleetRunAt = _runTimes
             .FirstOrDefault(r => r.ServerId is null && string.Equals(r.CollectorName, item.Name, StringComparison.OrdinalIgnoreCase))
             ?.RunAtMinute;
 
@@ -242,7 +269,7 @@ public partial class CollectorScheduleEditorWindow : Window
         /* Fleet scope, or a server "using default", shows the fleet-over-default effective (server rows
            excluded); a customizing server shows its own effective schedule. */
         var overlayScope = usesDefault ? (int?)null : _scopeServerId;
-        _editing = CollectorScheduleOverlay.BuildEffectiveSchedule(_allOverrides, overlayScope);
+        _editing = CollectorScheduleOverlay.BuildEffectiveSchedule(_allOverrides, _runTimes, overlayScope);
 
         BindGrid();
         UpdateEditableState(!usesDefault);
@@ -376,7 +403,7 @@ public partial class CollectorScheduleEditorWindow : Window
             return;
         }
 
-        _editing = CollectorScheduleOverlay.BuildEffectiveSchedule(_allOverrides, source.ServerId);
+        _editing = CollectorScheduleOverlay.BuildEffectiveSchedule(_allOverrides, _runTimes, source.ServerId);
         BindGrid();
         DetectActivePreset();
     }
@@ -397,6 +424,16 @@ public partial class CollectorScheduleEditorWindow : Window
         SaveButton.IsEnabled = false;
         try
         {
+            /* #4938: the run times go to their own table, each change a statement of its own and never through the
+               schedule rows' delete-and-reinsert below. They go first, so a store that cannot take them (below V160,
+               which the viewer says in its own words) is refused before anything is written, and a Save that did not
+               change a run time writes none. */
+            var runTimeChanges = CollectorScheduleOverlay.ToRunTimeChanges(_editing, _runTimes, _scopeServerId, usesDefault);
+            if (runTimeChanges.Count > 0)
+            {
+                await _dataService.SaveCollectorRunTimesAsync(runTimeChanges);
+            }
+
             if (_scopeServerId is int serverId)
             {
                 var rows = usesDefault
@@ -459,11 +496,14 @@ public partial class CollectorScheduleEditorWindow : Window
         try
         {
             var removed = await _dataService.ResetAllServerSchedulesAsync();
+            /* #4938: a server's run time is part of its override, so the reset takes those too, in a statement of its own. */
+            removed += await _dataService.ResetAllServerRunTimesAsync();
             Saved = true;
 
             /* Re-read the overrides so the editor reflects the reset (every per-server row is now gone) and
                reload the current scope's grid + preset detection. */
             _allOverrides = await _dataService.GetCollectorSchedulesAsync();
+            await ReloadRunTimesAsync();
             LoadScopeSchedule();
 
             StatusText.Text = removed > 0

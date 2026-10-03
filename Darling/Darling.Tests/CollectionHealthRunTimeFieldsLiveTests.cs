@@ -126,17 +126,27 @@ public sealed class CollectionHealthRunTimeFieldsLiveTests
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>One schedule row: a fleet row when <paramref name="serverId"/> is null, else that server's. The run
-    /// time is minutes after midnight, or -1 for "no fixed time".</summary>
+    /// <summary>One run-time row (<c>config.config_collector_run_times</c>): a fleet row when <paramref name="serverId"/> is null,
+    /// else that server's. The run time is minutes after midnight, or -1 for "no fixed time". A run time needs no schedule row, so
+    /// one is written only for a collector that is switched OFF (<paramref name="enabled"/> false): every other call reads the
+    /// run time with no schedule row at all.</summary>
     private static async Task SetRunTimeAsync(NpgsqlConnection connection, int? serverId, string collector, int minute, CancellationToken ct, bool enabled = true)
     {
         await using var command = new NpgsqlCommand(
-            "INSERT INTO config.config_collector_schedules (server_id, collector_name, run_at_minute, enabled) VALUES ($1, $2, $3, $4)", connection);
+            "INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute) VALUES ($1, $2, $3)", connection);
         command.Parameters.Add(new NpgsqlParameter { Value = (object?)serverId ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
         command.Parameters.AddWithValue(collector);
         command.Parameters.Add(new NpgsqlParameter { Value = (short)minute, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint });
-        command.Parameters.AddWithValue(enabled);
         await command.ExecuteNonQueryAsync(ct);
+
+        if (!enabled)
+        {
+            await using var schedule = new NpgsqlCommand(
+                "INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled) VALUES ($1, $2, FALSE)", connection);
+            schedule.Parameters.Add(new NpgsqlParameter { Value = (object?)serverId ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
+            schedule.Parameters.AddWithValue(collector);
+            await schedule.ExecuteNonQueryAsync(ct);
+        }
     }
 
     private static Task SetFleetRunTimeAsync(NpgsqlConnection connection, string collector, int minute, CancellationToken ct) =>

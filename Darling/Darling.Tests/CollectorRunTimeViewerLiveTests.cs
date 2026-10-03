@@ -21,20 +21,21 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The Collector Schedules window's "Run at" column against a real store (#4938): the read, the save and the clear,
-/// for the fleet row and for a server's row, driven the way the window drives them (read the rows, build the editable
-/// schedule, edit a cell, validate, save). What the service then resolves from the stored rows is checked with its own
-/// <see cref="StoreConfigProvider.ResolveSchedule"/>, so "None on a server over a fleet time" is judged by the rule
-/// the collectors run on and not by a restatement of it.
+/// for the fleet and for a server, driven the way the window drives them (read the schedule rows and the run times,
+/// build the editable schedule, edit a cell, validate, write the run-time changes, then the schedule rows). The run time
+/// lives in <c>config.config_collector_run_times</c>, a table of its own, so a schedule Save never carries it. What the
+/// service then resolves from the stored rows is checked with its own <see cref="StoreConfigProvider.ResolveSchedule"/>,
+/// so "None on a server over a fleet time" is judged by the rule the collectors run on and not by a restatement of it.
 /// </summary>
 /* #1776 own-store: each fact mints its own scratch database through ScratchPostgres and never touches the shared
    store's tables, so it cannot race the live collection and serializing it would be pure slowdown. */
 public sealed class CollectorRunTimeViewerLiveTests
 {
-    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-
-    private const string SkipText = "Set DARLING_TEST_PG to a Postgres connection string to run the run-time column's viewer pins (each mints its own scratch database).";
-
     private const string Daily = "index_object_stats";
+    private const string AnotherDaily = "server_properties";
+    private const string SkipText = "DARLING_TEST_PG is not set: the viewer run-time tests need a disposable PostgreSQL store.";
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     private static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
@@ -42,35 +43,45 @@ public sealed class CollectorRunTimeViewerLiveTests
         return await command.ExecuteScalarAsync(ct);
     }
 
-    /// <summary>The stored run time of the collector's row, or null for a NULL column or no row.</summary>
-    private static async Task<int?> StoredRunAtAsync(NpgsqlConnection connection, int? serverId, CancellationToken ct)
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
-        var scope = serverId is int id ? $"server_id = {id}" : "server_id IS NULL";
-        var value = await ScalarAsync(connection,
-            $"SELECT run_at_minute FROM config.config_collector_schedules WHERE {scope} AND collector_name = '{Daily}'", ct);
-        return value is null or DBNull ? null : Convert.ToInt32(value);
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task<long> RowCountAsync(NpgsqlConnection connection, int? serverId, CancellationToken ct)
-    {
-        var scope = serverId is int id ? $"server_id = {id}" : "server_id IS NULL";
-        return Convert.ToInt64(await ScalarAsync(connection,
-            $"SELECT COUNT(*) FROM config.config_collector_schedules WHERE {scope} AND collector_name = '{Daily}'", ct));
-    }
+    /// <summary>Every stored run time, one text: <c>fleet/collector=minute</c> or <c>serverId/collector=minute</c>.</summary>
+    private static async Task<string> RunTimesAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        (string)(await ScalarAsync(connection,
+            "SELECT COALESCE(string_agg(COALESCE(server_id::text, 'fleet') || '/' || collector_name || '=' || run_at_minute, ',' ORDER BY server_id NULLS FIRST, collector_name), '') FROM config.config_collector_run_times", ct))!;
 
-    /// <summary>One save through the window's own steps: read the rows, build the editable schedule for the scope, let
-    /// <paramref name="edit"/> change cells, validate, and write the scope back.</summary>
+    private static async Task<long> ScheduleRowCountAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        (long)(await ScalarAsync(connection, "SELECT count(*) FROM config.config_collector_schedules", ct))!;
+
+    /// <summary>The window's own steps for a scope: read both tables, build the editable schedule, let the caller edit it,
+    /// validate, write the run-time changes (one statement each), then the schedule rows exactly as a released viewer does.</summary>
     private static async Task SaveAsync(
-        ViewerDataService viewer, int? serverId, Action<List<CollectorScheduleEditItem>> edit, CancellationToken ct)
+        ViewerDataService viewer, int? serverId, Action<List<CollectorScheduleEditItem>> edit, CancellationToken ct, bool usesDefault = false)
     {
-        var rows = await viewer.GetCollectorSchedulesAsync(ct);
-        var editing = CollectorScheduleOverlay.BuildEffectiveSchedule(rows, serverId);
+        var schedules = await viewer.GetCollectorSchedulesAsync(ct);
+        var runTimes = await viewer.GetCollectorRunTimesAsync(ct);
+        var editing = CollectorScheduleOverlay.BuildEffectiveSchedule(schedules, runTimes, usesDefault ? null : serverId);
         edit(editing);
-        Assert.True(CollectorScheduleOverlay.ValidateSchedule(editing, out var error), error);
 
-        if (serverId is int id)
+        if (!usesDefault)
         {
-            await viewer.ReplaceServerSchedulesAsync(id, CollectorScheduleOverlay.ToServerOverrideRows(editing, id), ct);
+            Assert.True(CollectorScheduleOverlay.ValidateSchedule(editing, out var error), error);
+        }
+
+        var changes = CollectorScheduleOverlay.ToRunTimeChanges(editing, runTimes, serverId, usesDefault);
+        if (changes.Count > 0)
+        {
+            await viewer.SaveCollectorRunTimesAsync(changes, ct);
+        }
+
+        if (serverId is int sid)
+        {
+            var rows = usesDefault ? new List<CollectorScheduleRow>() : CollectorScheduleOverlay.ToServerOverrideRows(editing, sid);
+            await viewer.ReplaceServerSchedulesAsync(sid, rows, ct);
         }
         else
         {
@@ -78,20 +89,23 @@ public sealed class CollectorRunTimeViewerLiveTests
         }
     }
 
-    private static void SetRunAt(List<CollectorScheduleEditItem> editing, string text) =>
-        editing.Single(i => i.Name == Daily).RunAtText = text;
+    private static void SetRunAt(List<CollectorScheduleEditItem> editing, string text, string collector = Daily) =>
+        editing.Single(i => i.Name == collector).RunAtText = text;
 
-    /// <summary>What a collector with this run time on this server would do, through the service's own resolver.</summary>
+    /// <summary>What the service resolves for the collector on the server, from the store's own rows.</summary>
     private static async Task<int?> ResolvedRunAtAsync(ViewerDataService viewer, int serverId, CancellationToken ct)
     {
-        var overrides = (await viewer.GetCollectorSchedulesAsync(ct))
-            .Select(r => new ScheduleOverride(r.ServerId, r.CollectorName, r.FrequencyMinutes, r.RetentionDays, r.Enabled, r.Databases, r.RunAtMinute))
+        var schedules = (await viewer.GetCollectorSchedulesAsync(ct))
+            .Select(r => new ScheduleOverride(r.ServerId, r.CollectorName, r.FrequencyMinutes, r.RetentionDays, r.Enabled, r.Databases))
             .ToList();
-        return StoreConfigProvider.ResolveSchedule(Daily, serverId, overrides).RunAtMinute;
+        var runTimes = (await viewer.GetCollectorRunTimesAsync(ct))
+            .Select(r => new RunTimeOverride(r.ServerId, r.CollectorName, r.RunAtMinute))
+            .ToList();
+        return StoreConfigProvider.ResolveSchedule(Daily, serverId, StoreConfigProvider.MergeRunTimes(schedules, runTimes)).RunAtMinute;
     }
 
     [Fact]
-    public async Task TheFleetRow_SetsAndKeepsAndClearsARunTime_ThroughTheWindowsOwnSteps()
+    public async Task TheFleetRunTime_IsSetKeptAndCleared_ThroughTheRunTimeTable_AndNeverAScheduleRow()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -106,50 +120,38 @@ public sealed class CollectorRunTimeViewerLiveTests
         {
             await using var viewer = new ViewerDataService(scratch.ConnectionString);
 
-            /* Nothing stored: the cell reads "Use default" and no row exists. */
-            Assert.Equal(0, await RowCountAsync(connection, null, ct));
+            /* Nothing stored: the cell reads "Use default" and a save writes nothing anywhere. */
             await SaveAsync(viewer, null, editing => Assert.Equal("Use default", editing.Single(i => i.Name == Daily).RunAtText), ct);
-            Assert.Equal(0, await RowCountAsync(connection, null, ct));
+            Assert.Equal("", await RunTimesAsync(connection, ct));
+            Assert.Equal(0L, await ScheduleRowCountAsync(connection, ct));
 
-            /* SET: a fleet run time on a collector left at its default cadence still writes its row. */
+            /* SET: a fleet time on a collector left at its default cadence is a run-time row and NO schedule row. */
             await SaveAsync(viewer, null, editing => SetRunAt(editing, "02:00"), ct);
-            Assert.Equal(120, await StoredRunAtAsync(connection, null, ct));
-            var read = Assert.Single(await viewer.GetCollectorSchedulesAsync(ct), r => r.CollectorName == Daily);
-            Assert.Null(read.ServerId);
-            Assert.Equal(120, read.RunAtMinute);
+            Assert.Equal($"fleet/{Daily}=120", await RunTimesAsync(connection, ct));
+            Assert.Equal(0L, await ScheduleRowCountAsync(connection, ct));
+            var read = Assert.Single(await viewer.GetCollectorRunTimesAsync(ct));
+            Assert.Equal(new CollectorRunTimeRow(null, Daily, 120), read);
 
-            /* KEEP: the window reads the stored time into the cell, and a save that edits something else carries it. */
+            /* KEEP: the window reads the stored time into the cell, and a save that edits only a schedule column (the
+               schedule rows are deleted and inserted again) leaves the run time as it was. */
             await SaveAsync(viewer, null, editing =>
             {
                 Assert.Equal("02:00", editing.Single(i => i.Name == Daily).RunAtText);
-                editing.Single(i => i.Name == "wait_stats").Enabled = false;
+                editing.Single(i => i.Name == AnotherDaily).RetentionDays = 77;
             }, ct);
-            Assert.Equal(120, await StoredRunAtAsync(connection, null, ct));
-            Assert.Equal(false, await ScalarAsync(connection,
-                "SELECT enabled FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = 'wait_stats'", ct));
+            Assert.Equal($"fleet/{Daily}=120", await RunTimesAsync(connection, ct));
+            Assert.Equal(1L, await ScheduleRowCountAsync(connection, ct));
 
-            /* EDIT: a new time replaces the old one. */
-            await SaveAsync(viewer, null, editing => SetRunAt(editing, "23:59"), ct);
-            Assert.Equal(1439, await StoredRunAtAsync(connection, null, ct));
+            /* EDIT: a new time replaces the old one in the same row. */
+            await SaveAsync(viewer, null, editing => SetRunAt(editing, "03:15"), ct);
+            Assert.Equal($"fleet/{Daily}=195", await RunTimesAsync(connection, ct));
 
-            /* CLEAR: "Use default" removes it. The fleet row of a collector at its defaults is not stored at all. */
+            /* CLEAR: "Use default" deletes the row, and so does "None" (the fleet has nothing to stop). */
             await SaveAsync(viewer, null, editing => SetRunAt(editing, "Use default"), ct);
-            Assert.Null(await StoredRunAtAsync(connection, null, ct));
-            Assert.Equal(0, await RowCountAsync(connection, null, ct));
-
-            /* A fleet row that has other overrides keeps its row and stores NULL for a cleared time. */
-            await SaveAsync(viewer, null, editing =>
-            {
-                var item = editing.Single(i => i.Name == Daily);
-                item.FrequencyMinutes = 2880;
-                item.RunAtText = "02:00";
-            }, ct);
-            Assert.Equal(120, await StoredRunAtAsync(connection, null, ct));
-            await SaveAsync(viewer, null, editing => SetRunAt(editing, ""), ct);
-            Assert.Equal(1, await RowCountAsync(connection, null, ct));
-            Assert.Null(await StoredRunAtAsync(connection, null, ct));
-            Assert.Equal(2880, Convert.ToInt32(await ScalarAsync(connection,
-                $"SELECT frequency_minutes FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = '{Daily}'", ct)));
+            Assert.Equal("", await RunTimesAsync(connection, ct));
+            await SaveAsync(viewer, null, editing => SetRunAt(editing, "01:00"), ct);
+            await SaveAsync(viewer, null, editing => SetRunAt(editing, "None"), ct);
+            Assert.Equal("", await RunTimesAsync(connection, ct));
 
             bodySucceeded = true;
         }
@@ -160,7 +162,7 @@ public sealed class CollectorRunTimeViewerLiveTests
     }
 
     [Fact]
-    public async Task AServerRow_UsesDefaultNoneOrItsOwnTime_AndNoneStopsAFleetTime()
+    public async Task AServerRunTime_UsesDefaultNoneOrItsOwnTime_AndNoneStopsAFleetTime()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -174,62 +176,31 @@ public sealed class CollectorRunTimeViewerLiveTests
         try
         {
             await using var viewer = new ViewerDataService(scratch.ConnectionString);
-            const int server = 7;
-            const int otherServer = 8;
 
             await SaveAsync(viewer, null, editing => SetRunAt(editing, "02:00"), ct);
+            Assert.Equal(120, await ResolvedRunAtAsync(viewer, 7, ct));
 
-            /* USE DEFAULT: a server that customizes without touching the cell keeps NULL, so it falls through to the
-               fleet's time and follows a later change of it. The cell never took the fleet's value on. */
-            await SaveAsync(viewer, server, editing => Assert.Equal("Use default", editing.Single(i => i.Name == Daily).RunAtText), ct);
-            Assert.Equal(1, await RowCountAsync(connection, server, ct));
-            Assert.Null(await StoredRunAtAsync(connection, server, ct));
-            Assert.Equal(120, await ResolvedRunAtAsync(viewer, server, ct));
+            /* "Use default" on a customizing server writes no row for it, so the fleet's time applies. */
+            await SaveAsync(viewer, 7, editing => Assert.Equal("Use default", editing.Single(i => i.Name == Daily).RunAtText), ct);
+            Assert.Equal($"fleet/{Daily}=120", await RunTimesAsync(connection, ct));
+            Assert.Equal(120, await ResolvedRunAtAsync(viewer, 7, ct));
 
-            await SaveAsync(viewer, null, editing => SetRunAt(editing, "03:00"), ct);
-            Assert.Equal(180, await ResolvedRunAtAsync(viewer, server, ct));
-            await SaveAsync(viewer, null, editing => SetRunAt(editing, "02:00"), ct);
+            /* ITS OWN TIME replaces the fleet's for that server only. */
+            await SaveAsync(viewer, 7, editing => SetRunAt(editing, "04:30"), ct);
+            Assert.Equal($"fleet/{Daily}=120,7/{Daily}=270", await RunTimesAsync(connection, ct));
+            Assert.Equal(270, await ResolvedRunAtAsync(viewer, 7, ct));
+            Assert.Equal(120, await ResolvedRunAtAsync(viewer, 8, ct));
 
-            /* NONE: -1 on the server's row stops the fleet's time on that server only. */
-            await SaveAsync(viewer, server, editing => SetRunAt(editing, "None"), ct);
-            Assert.Equal(-1, await StoredRunAtAsync(connection, server, ct));
-            Assert.Null(await ResolvedRunAtAsync(viewer, server, ct));
-            Assert.Equal(120, await ResolvedRunAtAsync(viewer, otherServer, ct));
-            Assert.Equal(120, await StoredRunAtAsync(connection, null, ct));
+            /* NONE is -1 on the server's row, which stops the fleet's time for that server. */
+            await SaveAsync(viewer, 7, editing => SetRunAt(editing, "None"), ct);
+            Assert.Equal($"fleet/{Daily}=120,7/{Daily}=-1", await RunTimesAsync(connection, ct));
+            Assert.Null(await ResolvedRunAtAsync(viewer, 7, ct));
+            Assert.Equal(120, await ResolvedRunAtAsync(viewer, 8, ct));
 
-            /* KEEP: the cell shows None, and a save that edits something else carries -1 through. */
-            await SaveAsync(viewer, server, editing =>
-            {
-                Assert.Equal("None", editing.Single(i => i.Name == Daily).RunAtText);
-                editing.Single(i => i.Name == "wait_stats").Enabled = false;
-            }, ct);
-            Assert.Equal(-1, await StoredRunAtAsync(connection, server, ct));
-
-            /* SET: its own time wins over the fleet's. */
-            await SaveAsync(viewer, server, editing => SetRunAt(editing, "03:30"), ct);
-            Assert.Equal(210, await StoredRunAtAsync(connection, server, ct));
-            Assert.Equal(210, await ResolvedRunAtAsync(viewer, server, ct));
-
-            /* KEEP, again with a time: edit a different cell and the time stays. */
-            await SaveAsync(viewer, server, editing =>
-            {
-                Assert.Equal("03:30", editing.Single(i => i.Name == Daily).RunAtText);
-                editing.Single(i => i.Name == "wait_stats").Enabled = true;
-            }, ct);
-            Assert.Equal(210, await StoredRunAtAsync(connection, server, ct));
-
-            /* CLEAR: "Use default" returns the server to the fleet's time. */
-            await SaveAsync(viewer, server, editing => SetRunAt(editing, "Use default"), ct);
-            Assert.Null(await StoredRunAtAsync(connection, server, ct));
-            Assert.Equal(120, await ResolvedRunAtAsync(viewer, server, ct));
-
-            /* The window's "Use default schedule" box removes the server's rows, run time included. */
-            await SaveAsync(viewer, server, editing => SetRunAt(editing, "04:00"), ct);
-            Assert.Equal(240, await StoredRunAtAsync(connection, server, ct));
-            await viewer.ReplaceServerSchedulesAsync(server, Array.Empty<CollectorScheduleRow>(), ct);
-            Assert.Equal(0, await RowCountAsync(connection, server, ct));
-            Assert.Equal(120, await ResolvedRunAtAsync(viewer, server, ct));
-            Assert.Equal(120, await StoredRunAtAsync(connection, null, ct));
+            /* "Use the default schedule" deletes the server's schedule rows AND its run-time rows. */
+            await SaveAsync(viewer, 7, _ => { }, ct, usesDefault: true);
+            Assert.Equal($"fleet/{Daily}=120", await RunTimesAsync(connection, ct));
+            Assert.Equal(120, await ResolvedRunAtAsync(viewer, 7, ct));
 
             bodySucceeded = true;
         }
@@ -240,7 +211,7 @@ public sealed class CollectorRunTimeViewerLiveTests
     }
 
     [Fact]
-    public async Task TheStoreRead_ReturnsTheRunTimeOnItsRow_AndNullWhenTheColumnIsNull()
+    public async Task AScheduleSave_ThroughTheViewersRealSql_LeavesEveryRunTimeAlone_AndApplyDefaultToAllRemovesOnlyTheServerOnes()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -253,25 +224,72 @@ public sealed class CollectorRunTimeViewerLiveTests
         var bodySucceeded = false;
         try
         {
-            foreach (var sql in new[]
-            {
-                "INSERT INTO config.config_collector_schedules (server_id, collector_name, run_at_minute) VALUES (NULL, 'index_object_stats', 0)",
-                "INSERT INTO config.config_collector_schedules (server_id, collector_name, run_at_minute) VALUES (3, 'index_object_stats', -1)",
-                "INSERT INTO config.config_collector_schedules (server_id, collector_name, run_at_minute) VALUES (3, 'server_properties', 1439)",
-                "INSERT INTO config.config_collector_schedules (server_id, collector_name) VALUES (3, 'wait_stats')",
-            })
-            {
-                await using var seed = new NpgsqlCommand(sql, connection);
-                await seed.ExecuteNonQueryAsync(ct);
-            }
-
             await using var viewer = new ViewerDataService(scratch.ConnectionString);
-            var rows = await viewer.GetCollectorSchedulesAsync(ct);
+            await ExecAsync(connection,
+                $"INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute) VALUES (NULL, '{Daily}', 0), (3, '{Daily}', -1), (3, '{AnotherDaily}', 1439)", ct);
+            const string Expected = $"fleet/{Daily}=0,3/{Daily}=-1,3/{AnotherDaily}=1439";
 
-            Assert.Equal(0, rows.Single(r => r.ServerId is null && r.CollectorName == "index_object_stats").RunAtMinute);
-            Assert.Equal(-1, rows.Single(r => r.ServerId == 3 && r.CollectorName == "index_object_stats").RunAtMinute);
-            Assert.Equal(1439, rows.Single(r => r.ServerId == 3 && r.CollectorName == "server_properties").RunAtMinute);
-            Assert.Null(rows.Single(r => r.ServerId == 3 && r.CollectorName == "wait_stats").RunAtMinute);
+            /* The viewer's own schedule statements, the fleet's and a server's, replace schedule rows only. */
+            await viewer.ReplaceFleetSchedulesAsync(new[] { new CollectorScheduleRow(null, Daily, 1440, 30, true) }, ct);
+            await viewer.ReplaceServerSchedulesAsync(3, new[] { new CollectorScheduleRow(3, Daily, null, null, true) }, ct);
+            await viewer.ReplaceServerSchedulesAsync(3, Array.Empty<CollectorScheduleRow>(), ct);
+            Assert.Equal(Expected, await RunTimesAsync(connection, ct));
+
+            /* The read returns the rows as stored: minute 0, the last minute of the day, and -1 on a server row. */
+            var rows = await viewer.GetCollectorRunTimesAsync(ct);
+            Assert.Equal(0, rows.Single(r => r.ServerId is null).RunAtMinute);
+            Assert.Equal(-1, rows.Single(r => r.ServerId == 3 && r.CollectorName == Daily).RunAtMinute);
+            Assert.Equal(1439, rows.Single(r => r.ServerId == 3 && r.CollectorName == AnotherDaily).RunAtMinute);
+
+            /* "Apply Default to All Servers" sends every server back to the fleet, run times included, and keeps the fleet's. */
+            Assert.Equal(0, await viewer.ResetAllServerSchedulesAsync(ct));
+            Assert.Equal(Expected, await RunTimesAsync(connection, ct));   /* the schedule reset alone leaves every run time */
+            Assert.Equal(2, await viewer.ResetAllServerRunTimesAsync(ct));
+            Assert.Equal($"fleet/{Daily}=0", await RunTimesAsync(connection, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    /// <summary>The viewer's schema probe fails open when it throws, so a store below V160 can reach the editor. The run-time read
+    /// must then be "no run times" (42P01 undefined_table), the editor's Run at cells must all read "Use default", and saving a run
+    /// time must say the store is older than this viewer (not the raw error). A schedule save and the reset still work.</summary>
+    [Fact]
+    public async Task AStoreWithoutTheRunTimeTable_ReadsNoRunTimes_AndASaveSaysTheStoreIsOlder()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(connection, "DROP TABLE config.config_collector_run_times", ct);
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+            Assert.Empty(await viewer.GetCollectorRunTimesAsync(ct));
+            var editing = CollectorScheduleOverlay.BuildEffectiveSchedule(
+                await viewer.GetCollectorSchedulesAsync(ct), await viewer.GetCollectorRunTimesAsync(ct), null);
+            Assert.All(editing, i => Assert.Equal(CollectorScheduleOverlay.UseDefaultRunAtText, i.RunAtText));
+
+            var skew = await Assert.ThrowsAsync<ViewerSchemaSkewException>(() =>
+                viewer.SaveCollectorRunTimesAsync(new[] { new CollectorRunTimeChange(null, Daily, 120) }, ct));
+            Assert.Contains("Update or restart the Darling service", skew.Message, StringComparison.Ordinal);
+            Assert.IsType<PostgresException>(skew.InnerException);
+
+            /* Everything that does not touch a run time still works on such a store. */
+            await viewer.ReplaceFleetSchedulesAsync(new[] { new CollectorScheduleRow(null, Daily, 1440, 30, true) }, ct);
+            Assert.Equal(1L, await ScheduleRowCountAsync(connection, ct));
+            Assert.Equal(0, await viewer.ResetAllServerSchedulesAsync(ct));
+            Assert.Equal(0, await viewer.ResetAllServerRunTimesAsync(ct));
 
             bodySucceeded = true;
         }

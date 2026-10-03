@@ -484,14 +484,17 @@ public sealed class ViewerSchemaVersionGateTests
     [Fact]
     public void ABuildThatReadsTheRunTimeColumn_RefusesAStoreWithoutIt_AtConnect()
     {
-        /* The schedule read and save name the column. */
-        Assert.Contains("run_at_minute", ViewerDataService.CollectorSchedulesSelectSql, StringComparison.Ordinal);
-        Assert.Contains("run_at_minute", ViewerDataService.CollectorScheduleFleetUpsertSql, StringComparison.Ordinal);
-        Assert.Contains("run_at_minute", ViewerDataService.CollectorScheduleServerUpsertSql, StringComparison.Ordinal);
+        /* The schedule read and save never name the run time (the schedule Save deletes and re-inserts a scope's rows, so a column
+           there would be cleared), and the run-time read and write name the table the V160 rung created. */
+        Assert.DoesNotContain("run_at_minute", ViewerDataService.CollectorSchedulesSelectSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("run_at_minute", ViewerDataService.CollectorScheduleFleetUpsertSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("run_at_minute", ViewerDataService.CollectorScheduleServerUpsertSql, StringComparison.Ordinal);
+        Assert.Contains("FROM config.config_collector_run_times", ViewerDataService.CollectorRunTimesSelectSql, StringComparison.Ordinal);
+        Assert.Contains("INTO config.config_collector_run_times", ViewerDataService.CollectorRunTimeServerUpsertSql, StringComparison.Ordinal);
 
-        /* The probe carries the column as a sentinel. */
+        /* The probe carries the table as a sentinel. */
         Assert.Contains(
-            "table_name = 'config_collector_schedules' AND column_name = 'run_at_minute'",
+            "to_regclass('config.config_collector_run_times') IS NOT NULL",
             ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         /* The map: every sentinel up to and including this one present is V160, and this one absent is V159, which is below

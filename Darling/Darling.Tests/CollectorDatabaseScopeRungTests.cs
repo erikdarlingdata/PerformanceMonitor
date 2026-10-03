@@ -184,9 +184,9 @@ public sealed class CollectorDatabaseScopeRungTests
             service, StringComparison.Ordinal);
         Assert.Contains("reader.GetFieldValue<string[]>(5)", service, StringComparison.Ordinal);
 
-        /* The viewer's editor select mirrors the service's column order (the V160 run time follows the scope). */
+        /* The viewer's editor select mirrors the service's column order. */
         Assert.Contains(
-            "enabled, databases, run_at_minute FROM config_collector_schedules",
+            "enabled, databases FROM config_collector_schedules",
             ViewerDataService.CollectorSchedulesSelectSql, StringComparison.Ordinal);
 
         /* Both viewer upserts write the column through the conflict arm — or Save silently drops

@@ -58,70 +58,99 @@ public sealed class CollectorRunTimeViewerTests
     {
         var rows = new[]
         {
-            new CollectorScheduleRow(null, Daily, null, null, true, null, 120),
-            new CollectorScheduleRow(1, Daily, null, null, true, null, null),
-            new CollectorScheduleRow(2, Daily, null, null, true, null, -1),
-            new CollectorScheduleRow(3, Daily, null, null, true, null, 195),
+            new CollectorRunTimeRow(null, Daily, 120),
+            new CollectorRunTimeRow(2, Daily, -1),
+            new CollectorRunTimeRow(3, Daily, 195),
         };
 
         string Cell(int? serverId) =>
-            CollectorScheduleOverlay.BuildEffectiveSchedule(rows, serverId).Single(i => i.Name == Daily).RunAtText;
+            CollectorScheduleOverlay.BuildEffectiveSchedule(Array.Empty<CollectorScheduleRow>(), rows, serverId).Single(i => i.Name == Daily).RunAtText;
 
         Assert.Equal("02:00", Cell(null));
-        /* A server whose own column is NULL shows "Use default", not the fleet's 02:00: if the cell took the fleet's
-           value, a save would write it into every server row and "Use default" could never survive. */
+        /* A server with no run-time row of its own shows "Use default", not the fleet's 02:00: if the cell took the fleet's
+           value, a save would write it into every server's run-time rows and "Use default" could never survive. */
         Assert.Equal("Use default", Cell(1));
         Assert.Equal("None", Cell(2));
         Assert.Equal("03:15", Cell(3));
         Assert.Equal("Use default", Cell(99));
 
         Assert.All(
-            CollectorScheduleOverlay.BuildEffectiveSchedule(rows, 3).Where(i => i.Name != Daily),
+            CollectorScheduleOverlay.BuildEffectiveSchedule(Array.Empty<CollectorScheduleRow>(), rows, 3).Where(i => i.Name != Daily),
             i => Assert.Equal("Use default", i.RunAtText));
     }
 
     [Fact]
-    public void AFleetRunTime_OnADefaultCadenceCollector_StillWritesItsRow()
+    public void ARunTime_NeedsNoScheduleRow_AndAScheduleRowCarriesNone()
     {
-        /* The #2064 and #3477 failure over again, one column further: a row that matches the code default writes
-           nothing, so a run time on a collector left at its default cadence would silently never be stored. */
-        var written = Assert.Single(CollectorScheduleOverlay.ToFleetOverrideRows(new[] { Item(Daily, "02:00") }));
-        Assert.Null(written.ServerId);
-        Assert.Equal(Daily, written.CollectorName);
-        Assert.Equal(120, written.RunAtMinute);
+        /* A run time lives in its own table, so a collector left at its default cadence with a run time writes a run-time
+           change and NO schedule row, and the schedule rows a Save writes name no run time at all. */
+        Assert.Empty(CollectorScheduleOverlay.ToFleetOverrideRows(new[] { Item(Daily, "02:00") }));
 
-        Assert.Empty(CollectorScheduleOverlay.ToFleetOverrideRows(new[] { Item(Daily, "Use default") }));
-        Assert.Empty(CollectorScheduleOverlay.ToFleetOverrideRows(new[] { Item(Daily, "") }));
+        var change = Assert.Single(CollectorScheduleOverlay.ToRunTimeChanges(
+            new[] { Item(Daily, "02:00") }, Array.Empty<CollectorRunTimeRow>(), serverId: null, usesDefault: false));
+        Assert.Equal(new CollectorRunTimeChange(null, Daily, 120), change);
+
+        var serverRows = CollectorScheduleOverlay.ToServerOverrideRows(new[] { Item(Daily, "02:00"), Item(AnotherDaily, "None") }, 5);
+        Assert.All(serverRows, r => Assert.Equal(5, r.ServerId));
+        Assert.DoesNotContain(
+            typeof(CollectorScheduleRow).GetProperties(), p => p.Name.Contains("RunAt", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void NoneOnTheFleetRow_ClearsItToNull_BecauseTheFleetHasNothingToStop()
+    public void NoneOnTheFleet_IsNoRow_BecauseTheFleetHasNothingToStop()
     {
-        Assert.Empty(CollectorScheduleOverlay.ToFleetOverrideRows(new[] { Item(Daily, "None") }));
+        var stored = new[] { new CollectorRunTimeRow(null, Daily, 120) };
 
-        var written = Assert.Single(CollectorScheduleOverlay.ToFleetOverrideRows(
-            new[] { Item(Daily, "None", frequency: 2880) }));
-        Assert.Null(written.RunAtMinute);
+        /* A stored fleet time set to None is deleted, and None with nothing stored writes nothing. */
+        var change = Assert.Single(CollectorScheduleOverlay.ToRunTimeChanges(new[] { Item(Daily, "None") }, stored, null, false));
+        Assert.Equal(new CollectorRunTimeChange(null, Daily, null), change);
+        Assert.Empty(CollectorScheduleOverlay.ToRunTimeChanges(new[] { Item(Daily, "None") }, Array.Empty<CollectorRunTimeRow>(), null, false));
     }
 
     [Fact]
-    public void AServersRows_CarryTheirOwnRunTime_NullFallsThrough_AndNoneIsMinusOne()
+    public void TheRunTimeChanges_AreOnlyTheDifferences_AndNoneIsMinusOneOnAServer()
     {
-        var rows = CollectorScheduleOverlay.ToServerOverrideRows(
+        var stored = new[]
+        {
+            new CollectorRunTimeRow(5, Daily, 120),
+            new CollectorRunTimeRow(5, AnotherDaily, 300),
+            new CollectorRunTimeRow(5, "pg_column_stats", 60),
+            new CollectorRunTimeRow(6, "pg_index_bloat", 10),
+            new CollectorRunTimeRow(null, "pg_index_bloat", 20),
+        };
+
+        var changes = CollectorScheduleOverlay.ToRunTimeChanges(
             new[]
             {
-                Item(Daily, "Use default"),
-                Item(AnotherDaily, "None"),
-                Item("pg_column_stats", "04:15"),
-                Item("pg_index_bloat", " 23:59 "),
+                Item(Daily, "02:00"),                  // unchanged: no change
+                Item(AnotherDaily, "Use default"),     // had a row: delete it
+                Item("pg_column_stats", "None"),       // 60 -> -1
+                Item("pg_index_bloat", "23:59"),       // no row for server 5: insert
             },
-            5);
+            stored, 5, usesDefault: false);
 
-        Assert.All(rows, r => Assert.Equal(5, r.ServerId));
-        Assert.Null(rows.Single(r => r.CollectorName == Daily).RunAtMinute);
-        Assert.Equal(-1, rows.Single(r => r.CollectorName == AnotherDaily).RunAtMinute);
-        Assert.Equal(4 * 60 + 15, rows.Single(r => r.CollectorName == "pg_column_stats").RunAtMinute);
-        Assert.Equal(23 * 60 + 59, rows.Single(r => r.CollectorName == "pg_index_bloat").RunAtMinute);
+        Assert.Equal(
+            new[]
+            {
+                new CollectorRunTimeChange(5, AnotherDaily, null),
+                new CollectorRunTimeChange(5, "pg_column_stats", -1),
+                new CollectorRunTimeChange(5, "pg_index_bloat", 23 * 60 + 59),
+            },
+            changes);
+
+        /* "Use the default schedule" deletes every run-time row the server has, and no other server's or the fleet's. */
+        var reset = CollectorScheduleOverlay.ToRunTimeChanges(CollectorSchedulePresets.BuildDefaultSchedule(), stored, 5, usesDefault: true);
+        Assert.Equal(3, reset.Count);
+        Assert.All(reset, c => { Assert.Equal(5, c.ServerId); Assert.Null(c.RunAtMinute); });
+    }
+
+    [Fact]
+    public void AServerWithOnlyARunTimeRow_IsCustom_NotUsingTheDefault()
+    {
+        var runTimes = new[] { new CollectorRunTimeRow(7, Daily, 90) };
+        Assert.True(CollectorScheduleOverlay.ServerHasOverride(Array.Empty<CollectorScheduleRow>(), runTimes, 7));
+        Assert.False(CollectorScheduleOverlay.ServerHasOverride(Array.Empty<CollectorScheduleRow>(), runTimes, 8));
+        Assert.False(CollectorScheduleOverlay.ServerHasOverride(Array.Empty<CollectorScheduleRow>(), 7));
     }
 
     [Theory]

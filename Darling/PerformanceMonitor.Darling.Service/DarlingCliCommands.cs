@@ -5567,21 +5567,7 @@ public static class DarlingCliCommands
     /// </summary>
     internal const string CollectorScheduleReadbackSql = @"
 SELECT cs.server_id, cs.collector_name, cs.frequency_minutes, cs.retention_days, cs.enabled, cs.databases,
-       COALESCE(s.display_name, s.server_name) AS server_label, cs.run_at_minute
-FROM config.config_collector_schedules cs
-LEFT JOIN collect.servers s ON s.server_id = cs.server_id
-WHERE lower(cs.collector_name) = lower($1)
-ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
-
-    /// <summary>
-    /// The same read for a store the service has not migrated to V160 yet, which has no <c>run_at_minute</c> column (#4938): the
-    /// column list and its positions are identical, with the run time as a NULL smallint so no row prints a <c>run_at=</c>. The
-    /// verbs work against a store older than the binary (a missing column is the idiom, as <see cref="StoreIsSetToPlainTextPlansAsync"/>
-    /// reads the V62 column), so a toggle's read-back must not fail on a store whose write succeeded.
-    /// </summary>
-    internal const string CollectorScheduleReadbackWithoutRunAtSql = @"
-SELECT cs.server_id, cs.collector_name, cs.frequency_minutes, cs.retention_days, cs.enabled, cs.databases,
-       COALESCE(s.display_name, s.server_name) AS server_label, NULL::smallint AS run_at_minute
+       COALESCE(s.display_name, s.server_name) AS server_label
 FROM config.config_collector_schedules cs
 LEFT JOIN collect.servers s ON s.server_id = cs.server_id
 WHERE lower(cs.collector_name) = lower($1)
@@ -5591,34 +5577,17 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     /// <see cref="ScheduleOverride"/> columns plus the registry label the operator knows the server by.</summary>
     internal sealed record CollectorScheduleReadbackRow(
         int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled,
-        IReadOnlyList<string>? Databases, string? ServerLabel, int? RunAtMinute = null);
+        IReadOnlyList<string>? Databases, string? ServerLabel);
 
     internal static async Task<List<CollectorScheduleReadbackRow>> ReadCollectorScheduleRowsAsync(
         NpgsqlDataSource postgres, string collectorName, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await ReadCollectorScheduleRowsAsync(postgres, collectorName, CollectorScheduleReadbackSql, cancellationToken);
-        }
-        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)
-        {
-            /* A store the service has not migrated to V160 yet has no run_at_minute: read the rows without it, so the
-               read-back omits run_at= instead of failing after a write that already committed. A different missing
-               column fails the same way here and is reported as it is. The state code, not the message text, is what
-               is matched: lc_messages is not always English. */
-            return await ReadCollectorScheduleRowsAsync(postgres, collectorName, CollectorScheduleReadbackWithoutRunAtSql, cancellationToken);
-        }
-    }
-
-    private static async Task<List<CollectorScheduleReadbackRow>> ReadCollectorScheduleRowsAsync(
-        NpgsqlDataSource postgres, string collectorName, string sql, CancellationToken cancellationToken)
     {
         var rows = new List<CollectorScheduleReadbackRow>();
         /* The deadline is written ON the construction, as every CLI store command in this file writes it: the
            #2874 straggler census counts this file's sites and reads the initializer from the construction span,
            so a deadline assigned a statement later would be a site it cannot certify. */
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+        await using var command = new NpgsqlCommand(CollectorScheduleReadbackSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -5632,9 +5601,59 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
                 /* V125 (#3477): NULL and an empty array are different readings — keep both, as the service's
                    ReadScheduleOverridesAsync does, so the printout says which one the row carries. */
                 reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                /* V160 (#4938): the run time is a smallint, NULL for "no override", -1 for "no fixed time on this server". */
-                reader.IsDBNull(7) ? null : reader.GetInt16(7)));
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The read-back of the collector's run times (#4938): the rows of <c>config.config_collector_run_times</c> for the
+    /// collector, both scopes, each per-server row labelled from the registry the way <see cref="CollectorScheduleReadbackSql"/>
+    /// labels it. Its own read, because a run time is not a column of the schedule rows (the viewer's schedule Save deletes and
+    /// re-inserts those rows). Matched on <c>lower()</c> like the schedule read-back, and schema-qualified, so a 42P01 from it can
+    /// only mean this table is missing. $1 collector_name. Internal const so Darling.Tests can pin the dialect.
+    /// </summary>
+    internal const string CollectorRunTimeReadbackSql = @"
+SELECT rt.server_id, rt.collector_name, rt.run_at_minute, COALESCE(s.display_name, s.server_name) AS server_label
+FROM config.config_collector_run_times rt
+LEFT JOIN collect.servers s ON s.server_id = rt.server_id
+WHERE lower(rt.collector_name) = lower($1)
+ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
+
+    /// <summary>One <c>config_collector_run_times</c> row as the verb reads it back, with the registry label the operator knows
+    /// the server by. <see cref="RunAtMinute"/> is minutes after midnight on the server's clock, or -1 on a server row for
+    /// "no fixed time on this server".</summary>
+    internal sealed record CollectorRunTimeReadbackRow(int? ServerId, string CollectorName, int RunAtMinute, string? ServerLabel);
+
+    /// <summary>
+    /// Reads the collector's run-time rows (#4938). A store the service has not migrated to V160 yet has no such table, which is
+    /// "no run times" (what every collector had before it existed) and not a failure: the toggle verbs work against a store older
+    /// than the binary, so their read-back must not fail on a store whose write succeeded. The state code, not the message text,
+    /// is what is matched: lc_messages is not always English. Any other failure propagates.
+    /// </summary>
+    internal static async Task<List<CollectorRunTimeReadbackRow>> ReadCollectorRunTimeRowsAsync(
+        NpgsqlDataSource postgres, string collectorName, CancellationToken cancellationToken)
+    {
+        var rows = new List<CollectorRunTimeReadbackRow>();
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var command = new NpgsqlCommand(CollectorRunTimeReadbackSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(new CollectorRunTimeReadbackRow(
+                    reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                    reader.GetString(1),
+                    reader.GetInt16(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3)));
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            return new List<CollectorRunTimeReadbackRow>();
         }
 
         return rows;
@@ -5643,9 +5662,11 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     /// <summary>
     /// Renders the read-back as operator lines: the code default first (so "(default)" in a row has a number
     /// beside it), then one line per override row — scope, enabled, frequency, retention, and the database scope
-    /// when the row carries one. PURE, so the layout pins without a store (the <see cref="FormatProbeLine"/> split).
+    /// when the row carries one — then, when the collector has run times (#4938), one line per run-time row. PURE, so the
+    /// layout pins without a store (the <see cref="FormatProbeLine"/> split).
     /// </summary>
-    internal static IReadOnlyList<string> FormatCollectorScheduleRows(string collectorName, IReadOnlyList<CollectorScheduleReadbackRow> rows)
+    internal static IReadOnlyList<string> FormatCollectorScheduleRows(
+        string collectorName, IReadOnlyList<CollectorScheduleReadbackRow> rows, IReadOnlyList<CollectorRunTimeReadbackRow>? runTimes = null)
     {
         var lines = new List<string>();
         var entry = CollectorScheduleDefaults.All.TryGetValue(collectorName, out var e) ? e : null;
@@ -5662,28 +5683,19 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         if (rows.Count == 0)
         {
             lines.Add("  (none — the code default applies everywhere)");
+            AppendRunTimeLines(lines, collectorName, runTimes);
             return lines;
         }
 
         foreach (var row in rows)
         {
-            var scope = row.ServerId is null
-                ? "fleet-wide"
-                : string.IsNullOrEmpty(row.ServerLabel)
-                    ? string.Format(CultureInfo.InvariantCulture, "server_id {0} (not in the servers registry)", row.ServerId)
-                    : string.Format(CultureInfo.InvariantCulture, "{0} (server_id {1})", row.ServerLabel, row.ServerId);
+            var scope = DescribeReadbackScope(row.ServerId, row.ServerLabel);
             var frequency = row.FrequencyMinutes is int f ? DescribeFrequency(f) : "(default)";
             var retention = row.RetentionDays is int r ? string.Format(CultureInfo.InvariantCulture, "{0} days", r) : "(default)";
             var line = string.Format(
                 CultureInfo.InvariantCulture,
                 "  {0}: enabled={1}  frequency={2}  retention={3}",
                 scope, row.Enabled ? "true" : "false", frequency, retention);
-            /* #4938: printed only for a row that carries a run time, so every other row reads exactly as it always has. */
-            if (row.RunAtMinute is int runAt)
-            {
-                line += "  run_at=" + DescribeRunAt(runAt, row.ServerId is null);
-            }
-
             if (row.Databases is not null)
             {
                 line += row.Databases.Count == 0
@@ -5699,7 +5711,37 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             lines.Add("  (a server's own row wins over the fleet-wide row for that server, column by column)");
         }
 
+        AppendRunTimeLines(lines, collectorName, runTimes);
         return lines;
+    }
+
+    /// <summary>The scope a read-back row is printed under: <c>fleet-wide</c>, or the server's registry label with its id, or the
+    /// id alone for a server with no registry row (one that has never connected).</summary>
+    private static string DescribeReadbackScope(int? serverId, string? serverLabel) =>
+        serverId is null
+            ? "fleet-wide"
+            : string.IsNullOrEmpty(serverLabel)
+                ? string.Format(CultureInfo.InvariantCulture, "server_id {0} (not in the servers registry)", serverId)
+                : string.Format(CultureInfo.InvariantCulture, "{0} (server_id {1})", serverLabel, serverId);
+
+    /// <summary>
+    /// The run-time lines of the read-back (#4938): a heading and one line per run-time row (scope, then the time on the
+    /// server's clock, or "none" for a server that is opted out of the fleet's time). Nothing is printed for a collector with no run
+    /// time, so every other read-back reads exactly as it always has.
+    /// </summary>
+    private static void AppendRunTimeLines(List<string> lines, string collectorName, IReadOnlyList<CollectorRunTimeReadbackRow>? runTimes)
+    {
+        if (runTimes is null || runTimes.Count == 0)
+        {
+            return;
+        }
+
+        lines.Add($"Run times in the store for {collectorName}:");
+        foreach (var runTime in runTimes)
+        {
+            lines.Add("  " + DescribeReadbackScope(runTime.ServerId, runTime.ServerLabel)
+                + ": run_at=" + DescribeRunAt(runTime.RunAtMinute, runTime.ServerId is null));
+        }
     }
 
     private static string DescribeFrequency(int minutes) =>
@@ -5729,7 +5771,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         /// <summary>Bad arguments, a config that is missing or invalid, a connection string that cannot be used, a
         /// managed store's credential that is not stored or cannot be read, an unknown collector, a
         /// <c>--server</c> that names no server or more than one, or (<c>--set-collector-run-at</c> only) a store that has not
-        /// been upgraded to the run-time column yet.</summary>
+        /// been upgraded to the run-time table yet.</summary>
         public const int UsageOrConfig = 1;
 
         /// <summary>The store cannot be reached, or it refuses the write (or the read-back after it).</summary>
@@ -5985,9 +6027,11 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
            say nothing about a frequency override the write preserved or a per-server row the fleet row does not
            govern. A failure HERE is reported as what it is — the write is already committed. */
         List<CollectorScheduleReadbackRow> rows;
+        List<CollectorRunTimeReadbackRow> runTimes;
         try
         {
             rows = await ReadCollectorScheduleRowsAsync(dataSource, collectorName, cancellationToken);
+            runTimes = await ReadCollectorRunTimeRowsAsync(dataSource, collectorName, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -5995,7 +6039,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             return CollectorToggleExitCode.StoreUnavailable;
         }
 
-        foreach (var line in FormatCollectorScheduleRows(collectorName, rows))
+        foreach (var line in FormatCollectorScheduleRows(collectorName, rows, runTimes))
         {
             output.WriteLine(line);
         }
@@ -6153,7 +6197,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
     /// <summary>
     /// <c>--set-collector-run-at</c> (#4938): sets, stops or clears the time of day a once-a-day collector runs, in
-    /// <c>config.config_collector_schedules.run_at_minute</c>, fleet-wide or for one server with <c>--server</c>, and prints the rows
+    /// <c>config.config_collector_run_times</c>, fleet-wide or for one server with <c>--server</c>, and prints the rows
     /// read back from the store.
     ///
     /// <para><b>Same shape as the toggle verbs.</b> It parses strictly, checks the collector name and the time through the executor's
@@ -6161,8 +6205,9 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     /// (<see cref="TryCreateCollectorStoreDataSource"/>), resolves <c>--server</c> through the one shared resolver
     /// (<see cref="ResolveCollectorScopeAsync"/>), writes the executor's plan through
     /// <see cref="DarlingCommandExecutor.ExecuteStoreWriteAsync(NpgsqlDataSource, CommandPlan, CancellationToken)"/>, and reads the rows back.
-    /// The verb owns no SQL. The plan touches only the run time, so the enabled flag, frequency and retention already on the row survive,
-    /// and the <c>trg_bump_collector_schedules</c> trigger bumps <c>config_version</c> so the running service re-resolves within one sweep.</para>
+    /// The verb owns no SQL. The run time has a table of its own, so the plan never touches a schedule row (the enabled flag, frequency
+    /// and retention are neither read nor written), and the table's <c>trg_bump_collector_run_times</c> trigger bumps <c>config_version</c>
+    /// so the running service re-resolves within one sweep.</para>
     ///
     /// <para><b>The interval check.</b> A time is accepted only when the collector's interval, for the row being written, is a whole
     /// number of days (<see cref="CollectorRunTime.AllowsRunAt"/>): the target row's frequency, else the fleet row's, else the code
@@ -6171,8 +6216,8 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     /// is the remedy that refusal names.</para>
     ///
     /// <para>Exit codes are <see cref="CollectorToggleExitCode"/>'s: 0 when the row was written and read back; 1 on an argument, config,
-    /// time, interval, credential or server-resolution problem, or when the store has not been upgraded to the run-time column yet
-    /// (<see cref="RunTimeColumnMissingMessage"/>: nothing is written, and the service migrates the store when it starts); 2 when the
+    /// time, interval, credential or server-resolution problem, or when the store has not been upgraded to the run-time table yet
+    /// (<see cref="RunTimeTableMissingMessage"/>: nothing is written, and the service migrates the store when it starts); 2 when the
     /// store cannot be reached or refuses the change for any other reason.</para>
     /// </summary>
     /// <param name="rest">The arguments AFTER the verb itself.</param>
@@ -6248,14 +6293,14 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         {
             await DarlingCommandExecutor.ExecuteStoreWriteAsync(dataSource, plan, cancellationToken);
         }
-        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
-            /* The plan names the run-time column and no other column a store can lack, so an undefined column here is a store
-               the service has not migrated to it yet, and the one statement wrote nothing. The toggle verbs read such a store
-               back without the column; this verb cannot write without it, so it says why in plain words and exits with the
-               code of its other refusals of a store that is not ready. The state code, not the message text, is what is
-               matched: lc_messages is not always English. */
-            error.WriteLine(RunTimeColumnMissingMessage(Verb));
+            /* The plan names the run-time table and no other table a store can lack, so an undefined table here is a store
+               the service has not migrated to it yet (V160), and the one statement wrote nothing. The toggle verbs read such a
+               store back without it; this verb cannot write without it, so it says why in plain words and exits with the code
+               of its other refusals of a store that is not ready. The state code, not the message text, is what is matched:
+               lc_messages is not always English. */
+            error.WriteLine(RunTimeTableMissingMessage(Verb));
             error.WriteLine("Nothing was changed.");
             return CollectorToggleExitCode.UsageOrConfig;
         }
@@ -6277,10 +6322,10 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         return await PrintCollectorScheduleReadbackAsync(dataSource, collectorName, output, error, cancellationToken);
     }
 
-    /// <summary>What <c>--set-collector-run-at</c> says on a store that has no run-time column yet (<paramref name="verb"/> is the
+    /// <summary>What <c>--set-collector-run-at</c> says on a store that has no run-time table yet (<paramref name="verb"/> is the
     /// verb as typed). Plain words, no store error text. Pure, so the sentence pins.</summary>
-    internal static string RunTimeColumnMissingMessage(string verb) =>
-        $"The store has not been upgraded to the run-time column yet. Start the service once to migrate it, then run {verb} again.";
+    internal static string RunTimeTableMissingMessage(string verb) =>
+        $"The store has not been upgraded to the run-time table yet. Start the service once to migrate it, then run {verb} again.";
 
     /// <summary>Exit codes <see cref="DropXeSessionsAsync(string[], TextWriter, TextWriter, CancellationToken)"/> returns for
     /// <c>--drop-xe-sessions</c> (#4732), in the two-failure-kind shape <see cref="CollectorToggleExitCode"/> uses, so a script

@@ -84,7 +84,6 @@ public sealed class CollectorDatabaseScopeLivePostgresTests
             fleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = DBNull.Value });
             fleet.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = true });
             fleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text, Value = new[] { "RefDb" } });
-            fleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint, Value = DBNull.Value });   // $6 run_at_minute (V160)
             await fleet.ExecuteNonQueryAsync(ct);
         }
 
@@ -96,7 +95,6 @@ public sealed class CollectorDatabaseScopeLivePostgresTests
             server.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = DBNull.Value });
             server.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = true });
             server.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text, Value = Array.Empty<string>() });
-            server.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint, Value = DBNull.Value });  // $7 run_at_minute (V160)
             await server.ExecuteNonQueryAsync(ct);
         }
 

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -51,8 +52,18 @@ internal static class DarlingCollectorRunTimeReader
     /// <summary>The fleet row and this server's row, the only two layers <see cref="StoreConfigProvider.ResolveSchedule"/>
     /// reads for one server. $1 server_id. The table is small (one row per override), so this is one cheap read.</summary>
     public const string ScheduleSql = """
-        SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, run_at_minute
+        SELECT server_id, collector_name, frequency_minutes, retention_days, enabled
         FROM config.config_collector_schedules
+        WHERE server_id = $1 OR server_id IS NULL
+        """;
+
+    /// <summary>The same two layers of the run times, from their own table (<c>config.config_collector_run_times</c>), which the
+    /// service reads the same way (<see cref="StoreConfigProvider.RunTimesSelectSql"/>): a run time is not a column of the
+    /// schedule rows, because the viewer's schedule Save deletes and re-inserts those. $1 server_id. Schema-qualified, so a 42P01
+    /// from it can only mean this table is missing.</summary>
+    public const string RunTimeSql = """
+        SELECT server_id, collector_name, run_at_minute
+        FROM config.config_collector_run_times
         WHERE server_id = $1 OR server_id IS NULL
         """;
 
@@ -61,7 +72,9 @@ internal static class DarlingCollectorRunTimeReader
 
     /// <summary>
     /// The run time and next due time of every collector in <paramref name="rows"/> that has a run time on this server.
-    /// A server with no run time anywhere costs the one schedule read: the clock is read only when a run time exists.
+    /// A server with no run time anywhere costs the two small reads: the clock is read only when a run time exists. The run
+    /// times are layered onto the schedule rows by <see cref="StoreConfigProvider.MergeRunTimes"/>, the service's own merge. A
+    /// store below V160 has no run-time table, which is no run times, so the 42P01 is answered with none.
     /// </summary>
     public static async Task<IReadOnlyDictionary<string, CollectorRunTimeReading>> ReadAsync(
         NpgsqlDataSource postgres, int serverId, IReadOnlyCollection<CollectorHealth> rows, DateTime nowUtc,
@@ -80,19 +93,49 @@ internal static class DarlingCollectorRunTimeReader
                     reader.GetString(1),
                     reader.IsDBNull(2) ? null : reader.GetInt32(2),
                     reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                    reader.GetBoolean(4),
-                    Databases: null,
-                    RunAtMinute: reader.IsDBNull(5) ? null : reader.GetInt16(5)));
+                    reader.GetBoolean(4)));
             }
         }
 
-        if (!overrides.Exists(o => o.RunAtMinute is >= 0))
+        var runTimes = await ReadRunTimesAsync(postgres, serverId, cancellationToken);
+        var layered = StoreConfigProvider.MergeRunTimes(overrides, runTimes);
+
+        if (!layered.Any(o => o.RunAtMinute is >= 0))
         {
             return s_none;
         }
 
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
-        return Compute(serverId, overrides, rows, clock.ToUtc, nowUtc);
+        return Compute(serverId, layered, rows, clock.ToUtc, nowUtc);
+    }
+
+    /// <summary>The fleet's and this server's run-time rows. A store below V160 has no such table, and that is "no run times"
+    /// (every collector had none before the table existed), so the 42P01 is answered with an empty list; any other failure
+    /// propagates. The state code, not the message text, is matched: lc_messages is not always English.</summary>
+    private static async Task<IReadOnlyList<RunTimeOverride>> ReadRunTimesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var runTimes = new List<RunTimeOverride>();
+        try
+        {
+            await using var command = postgres.CreateCommand(RunTimeSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                runTimes.Add(new RunTimeOverride(
+                    reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                    reader.GetString(1),
+                    reader.GetInt16(2)));
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            return Array.Empty<RunTimeOverride>();
+        }
+
+        return runTimes;
     }
 
     /// <summary>

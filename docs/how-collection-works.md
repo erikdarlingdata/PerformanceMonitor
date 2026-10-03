@@ -140,7 +140,7 @@ That table is intentionally seeded empty — an absent row means "use the defaul
 
 ### When the daily collectors run
 
-A collector that runs once a day or less often (1440 minutes, or a multiple of it) can have a **run time**, a fixed time of day such as `02:00`. A heavy collector then runs in a quiet hour instead of whenever the service happened to start. The run time is optional and sits in the same schedule rows as the cadence (`run_at_minute`), per server or fleet-wide, and a server's own row wins. A run time of `-1` on a server's row means "no fixed time" and stops a fleet-wide time from applying there. A collector that runs more often than once a day cannot have one.
+A collector that runs once a day or less often (1440 minutes, or a multiple of it) can have a **run time**, a fixed time of day such as `02:00`. A heavy collector then runs in a quiet hour instead of whenever the service happened to start. The run time is optional and sits in a table of its own (`config.config_collector_run_times`, one row per collector), per server or fleet-wide, and a server's own row wins. A run time of `-1` on a server's row means "no fixed time" and stops a fleet-wide time from applying there. A collector that runs more often than once a day cannot have one.
 
 The run time is on the **monitored server's own clock**, not the service's and not UTC, so a fleet in several time zones runs each server at its own 02:00. The clock comes from the server's newest `server_properties` row. Until that row exists, the run time reads as UTC. Each day's slot is worked out from that day's local date, so it stays at the same local time across a daylight-saving change.
 

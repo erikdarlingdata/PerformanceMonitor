@@ -117,60 +117,61 @@ public sealed class CollectorRunTimeCliVerbTests
         Assert.Equal(viaExecutor.Parameters, viaVerb.Parameters);
     }
 
+    private const string FleetUpsert =
+        "INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute) VALUES (NULL, $1, $2) " +
+        "ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET run_at_minute = EXCLUDED.run_at_minute";
+
+    private const string ServerUpsert =
+        "INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute) VALUES ($1, $2, $3) " +
+        "ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SET run_at_minute = EXCLUDED.run_at_minute";
+
     [Fact]
-    public void AFleetTime_UpsertsTheFleetRow_TouchingOnlyTheRunTime_AndInsertingTheCodeDefaultEnabledState()
+    public void ATimeOrNone_UpsertsOneRunTimeRow_AndTouchesNoScheduleRow()
     {
-        var plan = Plan("index_object_stats", "02:00", serverId: null);
+        var fleet = Plan("index_object_stats", "02:00", serverId: null);
+        Assert.Equal(CommandKind.StoreWrite, fleet.Kind);
+        Assert.Equal(FleetUpsert, fleet.Sql);
+        Assert.Equal(new object?[] { "index_object_stats", (short)120 }, fleet.Parameters);
+        Assert.Equal("collector run time set (fleet-wide)", fleet.SuccessStatus);
 
-        Assert.Equal(CommandKind.StoreWrite, plan.Kind);
-        Assert.Contains("INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled, run_at_minute) VALUES (NULL, $1, $2, $3)", plan.Sql, StringComparison.Ordinal);
-        Assert.Contains("ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET run_at_minute = EXCLUDED.run_at_minute", plan.Sql, StringComparison.Ordinal);
-        Assert.Equal(3, plan.Parameters!.Length);
-        Assert.Equal("index_object_stats", plan.Parameters[0]);
-        Assert.Equal(true, plan.Parameters[1]);
-        Assert.Equal((short)120, plan.Parameters[2]);
-        Assert.Equal("collector run time set (fleet-wide)", plan.SuccessStatus);
+        var server = Plan("index_object_stats", "02:00", serverId: 7);
+        Assert.Equal(ServerUpsert, server.Sql);
+        Assert.Equal(new object?[] { 7, "index_object_stats", (short)120 }, server.Parameters);
+        Assert.Equal("collector run time set", server.SuccessStatus);
 
-        /* A collector that ships OFF is inserted OFF: the verb must not turn it on as a side effect. */
-        var optIn = Plan("long_query_completions", "02:00", serverId: null);
-        Assert.Equal(false, optIn.Parameters![1]);
+        /* None on a server is -1 in the same upsert. */
+        var none = Plan("index_object_stats", "none", serverId: 7);
+        Assert.Equal(ServerUpsert, none.Sql);
+        Assert.Equal(new object?[] { 7, "index_object_stats", (short)-1 }, none.Parameters);
+
+        /* The run time has its own table: no plan names a schedule row or its enabled flag, so a collector that ships OFF
+           is never switched on as a side effect, and the schedule rows are neither read nor written. */
+        foreach (var plan in new[] { fleet, server, none, Plan("long_query_completions", "02:00", serverId: null) })
+        {
+            Assert.DoesNotContain("config_collector_schedules", plan.Sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("enabled", plan.Sql, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
-    public void AServerTime_UpsertsTheServersRow_TouchingOnlyTheRunTime_AndInsertingTheEffectiveEnabledState()
+    public void NoneOnTheFleet_AndDefault_DeleteTheScopesRow_WithoutCreatingOne()
     {
-        var plan = Plan("index_object_stats", "04:30", serverId: 7);
+        const string FleetDelete = "DELETE FROM config.config_collector_run_times WHERE server_id IS NULL AND collector_name = $1";
+        const string ServerDelete = "DELETE FROM config.config_collector_run_times WHERE server_id = $1 AND collector_name = $2";
 
-        Assert.Equal(CommandKind.StoreWrite, plan.Kind);
-        Assert.Contains("INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled, run_at_minute) VALUES ($1, $2, COALESCE((SELECT f.enabled FROM config.config_collector_schedules f WHERE f.server_id IS NULL AND f.collector_name = $2), $3), $4)", plan.Sql, StringComparison.Ordinal);
-        Assert.Contains("ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SET run_at_minute = EXCLUDED.run_at_minute", plan.Sql, StringComparison.Ordinal);
-        Assert.Equal(new object?[] { 7, "index_object_stats", true, (short)270 }, plan.Parameters);
-        Assert.Equal("collector run time set", plan.SuccessStatus);
-    }
+        /* The fleet has no time to stop, so none there is the same as default: the row goes. */
+        foreach (var word in new[] { "none", "default", "Default", "NONE" })
+        {
+            var fleet = Plan("index_object_stats", word, serverId: null);
+            Assert.Equal(FleetDelete, fleet.Sql);
+            Assert.Equal(new object?[] { "index_object_stats" }, fleet.Parameters);
+            Assert.Equal("collector run time cleared (fleet-wide)", fleet.SuccessStatus);
+        }
 
-    [Fact]
-    public void NoneOnAServer_WritesMinusOne_AndOnTheFleet_ClearsTheColumn()
-    {
-        var server = Plan("index_object_stats", "none", serverId: 7);
-        Assert.Contains("ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL", server.Sql, StringComparison.Ordinal);
-        Assert.Equal(new object?[] { 7, "index_object_stats", true, (short)-1 }, server.Parameters);
-
-        var fleet = Plan("index_object_stats", "NONE", serverId: null);
-        Assert.Equal("UPDATE config.config_collector_schedules SET run_at_minute = NULL WHERE server_id IS NULL AND collector_name = $1", fleet.Sql);
-        Assert.Equal(new object?[] { "index_object_stats" }, fleet.Parameters);
-        Assert.Equal("collector run time cleared (fleet-wide)", fleet.SuccessStatus);
-    }
-
-    [Fact]
-    public void Default_ClearsARowToNull_WithoutCreatingOne()
-    {
         var server = Plan("index_object_stats", "default", serverId: 7);
-        Assert.Equal("UPDATE config.config_collector_schedules SET run_at_minute = NULL WHERE server_id = $1 AND collector_name = $2", server.Sql);
+        Assert.Equal(ServerDelete, server.Sql);
         Assert.Equal(new object?[] { 7, "index_object_stats" }, server.Parameters);
         Assert.Equal("collector run time cleared", server.SuccessStatus);
-
-        var fleet = Plan("index_object_stats", "Default", serverId: null);
-        Assert.Equal("UPDATE config.config_collector_schedules SET run_at_minute = NULL WHERE server_id IS NULL AND collector_name = $1", fleet.Sql);
     }
 
     [Theory]
@@ -199,39 +200,52 @@ public sealed class CollectorRunTimeCliVerbTests
     }
 
     [Fact]
-    public void TheReadBack_PrintsTheRunTime_OnlyForARowThatCarriesOne()
+    public void TheReadBack_PrintsTheRunTimeRows_UnderTheirOwnHeading_AndNothingForACollectorWithNone()
     {
-        var rows = new List<DarlingCliCommands.CollectorScheduleReadbackRow>
+        var schedule = new[] { new DarlingCliCommands.CollectorScheduleReadbackRow(null, "index_object_stats", null, null, true, null, null) };
+
+        /* No run times: the read-back is exactly the schedule read-back it always was. */
+        var plain = DarlingCliCommands.FormatCollectorScheduleRows("index_object_stats", schedule);
+        Assert.DoesNotContain(plain, l => l.Contains("run_at=", StringComparison.Ordinal) || l.Contains("Run times", StringComparison.Ordinal));
+        Assert.Equal(plain, DarlingCliCommands.FormatCollectorScheduleRows(
+            "index_object_stats", schedule, Array.Empty<DarlingCliCommands.CollectorRunTimeReadbackRow>()));
+
+        var runTimes = new[]
         {
-            new(null, "index_object_stats", null, null, true, null, null, 120),
-            new(7, "index_object_stats", null, null, true, null, "sql01", -1),
-            new(8, "index_object_stats", 2880, 45, false, null, "sql02", 1439),
-            new(9, "index_object_stats", null, null, true, null, "sql03", null),
+            new DarlingCliCommands.CollectorRunTimeReadbackRow(null, "index_object_stats", 120, null),
+            new DarlingCliCommands.CollectorRunTimeReadbackRow(7, "index_object_stats", -1, "sql01"),
+            new DarlingCliCommands.CollectorRunTimeReadbackRow(8, "index_object_stats", 195, null),
         };
 
-        var lines = DarlingCliCommands.FormatCollectorScheduleRows("index_object_stats", rows);
-
-        Assert.Contains("  fleet-wide: enabled=true  frequency=(default)  retention=(default)  run_at=02:00 server time", lines);
-        Assert.Contains("  sql01 (server_id 7): enabled=true  frequency=(default)  retention=(default)  run_at=none (no fixed time on this server)", lines);
-        Assert.Contains("  sql02 (server_id 8): enabled=false  frequency=every 2880 min  retention=45 days  run_at=23:59 server time", lines);
-        /* A row with no run time prints exactly what the toggle verbs have always printed. */
-        Assert.Contains("  sql03 (server_id 9): enabled=true  frequency=(default)  retention=(default)", lines);
+        /* A run time needs no schedule row, so the run-time lines follow the "no override rows" line as well. */
+        var lines = DarlingCliCommands.FormatCollectorScheduleRows("index_object_stats", Array.Empty<DarlingCliCommands.CollectorScheduleReadbackRow>(), runTimes);
+        Assert.Contains(lines, l => l.Contains("(none", StringComparison.Ordinal));
+        var from = lines.ToList().IndexOf("Run times in the store for index_object_stats:");
+        Assert.True(from >= 0, "no run-time heading");
+        Assert.Equal("  fleet-wide: run_at=02:00 server time", lines[from + 1]);
+        Assert.Equal("  sql01 (server_id 7): run_at=none (no fixed time on this server)", lines[from + 2]);
+        Assert.Equal("  server_id 8 (not in the servers registry): run_at=03:15 server time", lines[from + 3]);
     }
 
-    /// <summary>The read-back for a store that has no run-time column yet is the same read with the column swapped for a
-    /// NULL smallint in the same position, so one reader serves both stores and a row prints no <c>run_at=</c>.</summary>
     [Fact]
-    public void TheReadBackForAStoreWithoutTheColumn_IsTheSameReadWithANullRunTimeInPlace()
+    public void TheScheduleReadBack_NamesNoRunTime_AndTheRunTimeReadBackReadsItsOwnTable()
     {
-        var full = DarlingCliCommands.CollectorScheduleReadbackSql;
-        var older = DarlingCliCommands.CollectorScheduleReadbackWithoutRunAtSql;
+        Assert.DoesNotContain("run_at_minute", DarlingCliCommands.CollectorScheduleReadbackSql, StringComparison.Ordinal);
+        Assert.Contains("FROM config.config_collector_run_times rt", DarlingCliCommands.CollectorRunTimeReadbackSql, StringComparison.Ordinal);
+        Assert.Contains("lower(rt.collector_name) = lower($1)", DarlingCliCommands.CollectorRunTimeReadbackSql, StringComparison.Ordinal);
+        Assert.Contains("run_at_minute", DarlingCliCommands.CollectorRunTimeReadbackSql, StringComparison.Ordinal);
+        foreach (var write in new[] { "INSERT", "UPDATE", "DELETE" })
+        {
+            Assert.DoesNotContain(write, DarlingCliCommands.CollectorRunTimeReadbackSql, StringComparison.OrdinalIgnoreCase);
+        }
+    }
 
-        Assert.Contains("cs.run_at_minute", full, StringComparison.Ordinal);
-        Assert.DoesNotContain("cs.run_at_minute", older, StringComparison.Ordinal);
-        Assert.Equal(full.Replace("cs.run_at_minute", "NULL::smallint AS run_at_minute", StringComparison.Ordinal), older);
-        Assert.DoesNotContain("INSERT", older, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("UPDATE", older, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("DELETE", older, StringComparison.OrdinalIgnoreCase);
+    [Fact]
+    public void TheMissingTableMessage_NamesTheTable_AndSaysToStartTheServiceOnce()
+    {
+        Assert.Equal(
+            "The store has not been upgraded to the run-time table yet. Start the service once to migrate it, then run --set-collector-run-at again.",
+            DarlingCliCommands.RunTimeTableMissingMessage("--set-collector-run-at"));
     }
 }
 
@@ -320,19 +334,16 @@ public sealed class CollectorRunTimeCliVerbLiveTests
 
     private static string Scope(int? serverId) => serverId is int id ? $"server_id = {id}" : "server_id IS NULL";
 
-    private static async Task<long> RowsAsync(NpgsqlConnection connection, int? serverId, string collector, CancellationToken ct) =>
-        Convert.ToInt64(await ScalarAsync(connection,
-            $"SELECT COUNT(*) FROM config.config_collector_schedules WHERE {Scope(serverId)} AND collector_name = '{collector}'", ct));
+    /// <summary>Every stored run time as one text: <c>fleet/collector=minute</c> or <c>serverId/collector=minute</c>.</summary>
+    private static async Task<string> RunTimesAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        (string)(await ScalarAsync(connection,
+            "SELECT COALESCE(string_agg(COALESCE(server_id::text, 'fleet') || '/' || collector_name || '=' || run_at_minute, ',' ORDER BY server_id NULLS FIRST, collector_name), '') FROM config.config_collector_run_times", ct))!;
 
-    private static async Task<int?> RunAtAsync(NpgsqlConnection connection, int? serverId, string collector, CancellationToken ct)
-    {
-        var value = await ScalarAsync(connection,
-            $"SELECT run_at_minute FROM config.config_collector_schedules WHERE {Scope(serverId)} AND collector_name = '{collector}'", ct);
-        return value is null or DBNull ? null : Convert.ToInt32(value);
-    }
+    private static async Task<long> ScheduleRowsAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        Convert.ToInt64(await ScalarAsync(connection, "SELECT COUNT(*) FROM config.config_collector_schedules", ct));
 
     [Fact]
-    public async Task TheFleetRow_IsWritten_TheNameIsCanonicalised_AndTheRowIsReadBack()
+    public async Task TheFleetRunTime_IsWrittenToItsTable_TheNameIsCanonicalised_AndTheRowsAreReadBack()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -342,35 +353,20 @@ public sealed class CollectorRunTimeCliVerbLiveTests
         try
         {
             var (exit, output, error) = await RunAsync(rig, ct, "Index_Object_Stats", "02:00");
-
             Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
             Assert.Equal(string.Empty, error);
-            Assert.Contains("[SET] index_object_stats", output, StringComparison.Ordinal);
-            Assert.Contains("fleet-wide: enabled=true", output, StringComparison.Ordinal);
-            Assert.Contains("run_at=02:00 server time", output, StringComparison.Ordinal);
-            Assert.Contains("no restart is needed", output, StringComparison.OrdinalIgnoreCase);
-            Assert.Equal(120, await RunAtAsync(rig.Connection, null, Daily, ct));
-            /* The dictionary spelling, so it is the row the viewer's editor writes too. */
-            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(rig.Connection,
-                "SELECT COUNT(*) FROM config.config_collector_schedules WHERE server_id IS NULL AND lower(collector_name) = 'index_object_stats'", ct)));
+            Assert.Equal($"fleet/{Daily}=120", await RunTimesAsync(rig.Connection, ct));
+            Assert.Equal(0L, await ScheduleRowsAsync(rig.Connection, ct));
+            Assert.Contains("Run times in the store for index_object_stats:", output, StringComparison.Ordinal);
+            Assert.Contains("fleet-wide: run_at=02:00 server time", output, StringComparison.Ordinal);
 
-            /* A second time replaces the first. */
-            (exit, _, error) = await RunAsync(rig, ct, Daily, "03:15");
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-            Assert.Equal(195, await RunAtAsync(rig.Connection, null, Daily, ct));
-            Assert.Equal(1L, await RowsAsync(rig.Connection, null, Daily, ct));
-
-            /* `none` on the fleet row clears it to NULL: the fleet has no time to stop. */
-            (exit, output, error) = await RunAsync(rig, ct, Daily, "none");
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-            Assert.Contains("[CLEARED] index_object_stats", output, StringComparison.Ordinal);
-            Assert.Null(await RunAtAsync(rig.Connection, null, Daily, ct));
-            Assert.Equal(1L, await RowsAsync(rig.Connection, null, Daily, ct));
-
-            /* `default` on the fleet row does the same, and with no row there is nothing to create. */
-            (exit, _, error) = await RunAsync(rig, ct, "pg_column_stats", "default");
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-            Assert.Equal(0L, await RowsAsync(rig.Connection, null, "pg_column_stats", ct));
+            /* A second time replaces the row; default and none clear it. */
+            Assert.Equal(0, (await RunAsync(rig, ct, Daily, "03:30")).Exit);
+            Assert.Equal($"fleet/{Daily}=210", await RunTimesAsync(rig.Connection, ct));
+            Assert.Equal(0, (await RunAsync(rig, ct, Daily, "default")).Exit);
+            Assert.Equal("", await RunTimesAsync(rig.Connection, ct));
+            Assert.Equal(0, (await RunAsync(rig, ct, Daily, "none")).Exit);
+            Assert.Equal("", await RunTimesAsync(rig.Connection, ct));
 
             bodySucceeded = true;
         }
@@ -381,7 +377,7 @@ public sealed class CollectorRunTimeCliVerbLiveTests
     }
 
     [Fact]
-    public async Task AServerRow_IsWritten_KeepsItsOtherColumns_AndANewOneTakesTheEffectiveEnabledState()
+    public async Task AServerRunTime_IsItsOwnRow_NoneIsMinusOne_DefaultDeletesIt_AndTheServersScheduleRowIsUntouched()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -390,43 +386,22 @@ public sealed class CollectorRunTimeCliVerbLiveTests
         var bodySucceeded = false;
         try
         {
-            /* sql01 already has a row with its own cadence, retention and an OFF flag: the verb writes one column. */
             await ExecAsync(rig.Connection,
-                "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) " +
-                $"VALUES ({Sql01}, '{Daily}', 2880, 45, FALSE)", ct);
+                $"INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ({Sql01}, '{Daily}', 2880, 45, FALSE)", ct);
+            const string Schedule = "SELECT frequency_minutes || '|' || retention_days || '|' || enabled FROM config.config_collector_schedules WHERE server_id = " + "4101";
 
-            var (exit, output, error) = await RunAsync(rig, ct, Daily, "04:30", "--server", "sql01");
+            Assert.Equal(0, (await RunAsync(rig, ct, Daily, "02:00", "--server", "sql01")).Exit);
+            Assert.Equal($"{Sql01}/{Daily}=120", await RunTimesAsync(rig.Connection, ct));
+            Assert.Equal(0, (await RunAsync(rig, ct, Daily, "01:00")).Exit);
+            Assert.Equal(0, (await RunAsync(rig, ct, Daily, "none", "--server", "sql01")).Exit);
+            Assert.Equal($"fleet/{Daily}=60,{Sql01}/{Daily}=-1", await RunTimesAsync(rig.Connection, ct));
 
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-            Assert.Contains("[SET] index_object_stats - sql01", output.Replace('—', '-'), StringComparison.Ordinal);
-            Assert.Contains("sql01 (server_id 4101): enabled=false  frequency=every 2880 min  retention=45 days  run_at=04:30 server time", output, StringComparison.Ordinal);
-            await using (var read = new NpgsqlCommand(
-                $"SELECT run_at_minute, frequency_minutes, retention_days, enabled FROM config.config_collector_schedules WHERE server_id = {Sql01} AND collector_name = '{Daily}'", rig.Connection))
-            await using (var reader = await read.ExecuteReaderAsync(ct))
-            {
-                Assert.True(await reader.ReadAsync(ct));
-                Assert.Equal(270, Convert.ToInt32(reader.GetValue(0)));
-                Assert.Equal(2880, reader.GetInt32(1));
-                Assert.Equal(45, reader.GetInt32(2));
-                Assert.False(reader.GetBoolean(3));
-                Assert.False(await reader.ReadAsync(ct), "exactly one row for the server");
-            }
+            Assert.Equal(0, (await RunAsync(rig, ct, Daily, "default", "--server", "sql01")).Exit);
+            Assert.Equal($"fleet/{Daily}=60", await RunTimesAsync(rig.Connection, ct));
 
-            /* sql02 has no row, and the fleet row says OFF: the row the verb creates must say OFF too. A column default
-               of TRUE would switch the collector back on for that one server. */
-            await ExecAsync(rig.Connection,
-                $"INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled) VALUES (NULL, '{Daily}', FALSE)", ct);
-            (exit, _, error) = await RunAsync(rig, ct, Daily, "01:00", "--server", "sql02");
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-            Assert.Equal(60, await RunAtAsync(rig.Connection, Sql02, Daily, ct));
-            Assert.Equal(false, await ScalarAsync(rig.Connection,
-                $"SELECT enabled FROM config.config_collector_schedules WHERE server_id = {Sql02} AND collector_name = '{Daily}'", ct));
-
-            /* And with no fleet row, the code default (ON for this collector). */
-            (exit, _, error) = await RunAsync(rig, ct, "pg_column_stats", "05:00", "--server", "sql02");
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-            Assert.Equal(true, await ScalarAsync(rig.Connection,
-                $"SELECT enabled FROM config.config_collector_schedules WHERE server_id = {Sql02} AND collector_name = 'pg_column_stats'", ct));
+            /* The schedule row the server already had is exactly as it was: the verb never wrote it. */
+            Assert.Equal("2880|45|false",(string)(await ScalarAsync(rig.Connection, Schedule, ct))!);
+            Assert.Equal(1L, await ScheduleRowsAsync(rig.Connection, ct));
 
             bodySucceeded = true;
         }
@@ -437,7 +412,7 @@ public sealed class CollectorRunTimeCliVerbLiveTests
     }
 
     [Fact]
-    public async Task NoneOnAServer_WritesMinusOneOverAFleetTime_AndDefaultClearsTheServerRowToNull()
+    public async Task ABadTimeAnHourlyCollectorAnUnknownNameOrServer_AreRefused_WithANonZeroExit_AndNothingWritten()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -446,98 +421,20 @@ public sealed class CollectorRunTimeCliVerbLiveTests
         var bodySucceeded = false;
         try
         {
-            var (exit, _, error) = await RunAsync(rig, ct, Daily, "02:00");
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-
-            /* none on a server: -1, the fleet's time stays and the service resolves no time for that server only. */
-            string output;
-            (exit, output, error) = await RunAsync(rig, ct, Daily, "none", "--server", "sql01");
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-            Assert.Equal(-1, await RunAtAsync(rig.Connection, Sql01, Daily, ct));
-            Assert.Equal(120, await RunAtAsync(rig.Connection, null, Daily, ct));
-            Assert.Contains("run_at=none (no fixed time on this server)", output, StringComparison.Ordinal);
-            Assert.Contains("run_at=02:00 server time", output, StringComparison.Ordinal);
-
-            var overrides = new List<ScheduleOverride>
-            {
-                new(null, Daily, null, null, true, null, 120),
-                new(Sql01, Daily, null, null, true, null, -1),
-            };
-            Assert.Null(StoreConfigProvider.ResolveSchedule(Daily, Sql01, overrides).RunAtMinute);
-            Assert.Equal(120, StoreConfigProvider.ResolveSchedule(Daily, Sql02, overrides).RunAtMinute);
-
-            /* default on the server's row: NULL, so it falls through to the fleet's time again. The row stays. */
-            (exit, output, error) = await RunAsync(rig, ct, Daily, "default", "--server", "sql01");
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-            Assert.Contains("[CLEARED] index_object_stats", output, StringComparison.Ordinal);
-            Assert.Null(await RunAtAsync(rig.Connection, Sql01, Daily, ct));
-            Assert.Equal(1L, await RowsAsync(rig.Connection, Sql01, Daily, ct));
-
-            /* default on a server with no row creates none. */
-            (exit, _, error) = await RunAsync(rig, ct, Daily, "default", "--server", "sql02");
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-            Assert.Equal(0L, await RowsAsync(rig.Connection, Sql02, Daily, ct));
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, async (_, _) => { });
-        }
-    }
-
-    [Fact]
-    public async Task ABadTime_AndAnHourlyCollector_AreRefusedWithTheSharedText_ANonZeroExit_AndNothingWritten()
-    {
-        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
-        var ct = TestContext.Current.CancellationToken;
-        await using var rig = await OpenAsync(ct);
-
-        var bodySucceeded = false;
-        try
-        {
-            /* A time that is not a 24-hour HH:MM time. */
-            foreach (var bad in new[] { "25:00", "2:5", "noon" })
-            {
-                var (exit, output, error) = await RunAsync(rig, ct, Daily, bad);
-                Assert.Equal(1, exit);
-                Assert.Contains("Run at must be a 24-hour time from 00:00 to 23:59, such as 02:00.", error, StringComparison.Ordinal);
-                Assert.Contains("HH:MM|none|default", output, StringComparison.Ordinal);
-            }
-
-            /* A collector that runs more often than once a day. */
-            var (hourlyExit, _, hourlyError) = await RunAsync(rig, ct, "wait_stats", "02:00");
-            Assert.Equal(1, hourlyExit);
-            Assert.Contains(CollectorRunTime.IntervalRefusalMessage("wait_stats", 1), hourlyError, StringComparison.Ordinal);
-
-            /* The interval judged is the target's own: a daily collector that the server runs every hour is refused for
-               that server, and the fleet-wide time on the same collector is still fine. */
             await ExecAsync(rig.Connection,
-                $"INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes) VALUES ({Sql01}, '{Daily}', 60)", ct);
-            var (serverExit, _, serverError) = await RunAsync(rig, ct, Daily, "02:00", "--server", "sql01");
-            Assert.Equal(1, serverExit);
-            Assert.Contains(CollectorRunTime.IntervalRefusalMessage(Daily, 60), serverError, StringComparison.Ordinal);
-            var (fleetExit, _, fleetError) = await RunAsync(rig, ct, Daily, "02:00");
-            Assert.True(fleetExit == 0, $"exit {fleetExit}; stderr: {fleetError}");
+                $"INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes) VALUES (NULL, '{Daily}', 60)", ct);
 
-            /* And a fleet row that makes the collector hourly is refused for the fleet. */
-            await ExecAsync(rig.Connection,
-                "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes) VALUES (NULL, 'pg_column_stats', 90)", ct);
-            var (fleetHourlyExit, _, fleetHourlyError) = await RunAsync(rig, ct, "pg_column_stats", "02:00");
-            Assert.Equal(1, fleetHourlyExit);
-            Assert.Contains(CollectorRunTime.IntervalRefusalMessage("pg_column_stats", 90), fleetHourlyError, StringComparison.Ordinal);
+            var bad = await RunAsync(rig, ct, Daily, "25:00");
+            Assert.Equal(1, bad.Exit);
+            Assert.Contains(CollectorRunTime.InvalidRunAtMessage, bad.Error, StringComparison.Ordinal);
 
-            /* Nothing was written by any refusal: only the one accepted fleet time exists. */
-            Assert.Equal(0L, await RowsAsync(rig.Connection, null, "wait_stats", ct));
-            Assert.Null(await RunAtAsync(rig.Connection, Sql01, Daily, ct));
-            Assert.Null(await RunAtAsync(rig.Connection, null, "pg_column_stats", ct));
-            Assert.Equal(120, await RunAtAsync(rig.Connection, null, Daily, ct));
+            var hourly = await RunAsync(rig, ct, Daily, "02:00");
+            Assert.Equal(1, hourly.Exit);
+            Assert.Contains(CollectorRunTime.IntervalRefusalMessage(Daily, 60), hourly.Error, StringComparison.Ordinal);
 
-            /* Clearing is the remedy the refusal names, so it is never refused: none and default on an hourly collector. */
-            var (noneExit, _, noneError) = await RunAsync(rig, ct, "wait_stats", "none");
-            Assert.True(noneExit == 0, $"exit {noneExit}; stderr: {noneError}");
-            var (defaultExit, _, defaultError) = await RunAsync(rig, ct, Daily, "default", "--server", "sql01");
-            Assert.True(defaultExit == 0, $"exit {defaultExit}; stderr: {defaultError}");
+            Assert.Equal(1, (await RunAsync(rig, ct, "no_such_collector", "02:00")).Exit);
+            Assert.Equal(1, (await RunAsync(rig, ct, "server_properties", "02:00", "--server", "no_such_server")).Exit);
+            Assert.Equal("", await RunTimesAsync(rig.Connection, ct));
 
             bodySucceeded = true;
         }
@@ -547,97 +444,14 @@ public sealed class CollectorRunTimeCliVerbLiveTests
         }
     }
 
-    [Fact]
-    public async Task AnUnknownServerOrCollector_IsRefused_AndNothingIsWritten()
-    {
-        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
-        var ct = TestContext.Current.CancellationToken;
-        await using var rig = await OpenAsync(ct);
-
-        var bodySucceeded = false;
-        try
-        {
-            var (exit, _, error) = await RunAsync(rig, ct, Daily, "02:00", "--server", "no-such-server");
-            Assert.Equal(1, exit);
-            Assert.Contains("Could not resolve server", error, StringComparison.Ordinal);
-            Assert.Contains("Nothing was changed.", error, StringComparison.Ordinal);
-
-            (exit, _, error) = await RunAsync(rig, ct, "not_a_collector", "02:00");
-            Assert.Equal(1, exit);
-            Assert.Contains("unknown collector", error, StringComparison.Ordinal);
-
-            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(rig.Connection,
-                "SELECT COUNT(*) FROM config.config_collector_schedules", ct)));
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, async (_, _) => { });
-        }
-    }
-
-    /// <summary>The toggle verbs share the read-back, which now selects the run time. A store the service has not migrated to
-    /// the run-time column yet must still read back after the write (the CLI works against a store older than its binary), and
-    /// the rows print without a <c>run_at=</c>: the column is gone here, with its check, as it is on such a store.</summary>
-    [Fact]
-    public async Task TheToggleVerbs_ReadBackOnAStoreWithoutTheRunTimeColumn_AndPrintNoRunAt()
-    {
-        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
-        var ct = TestContext.Current.CancellationToken;
-        await using var rig = await OpenAsync(ct);
-
-        var bodySucceeded = false;
-        try
-        {
-            await ExecAsync(rig.Connection, "ALTER TABLE config.config_collector_schedules DROP COLUMN run_at_minute", ct);
-            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(rig.Connection,
-                "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_collector_schedules' AND column_name = 'run_at_minute'", ct)));
-            await ExecAsync(rig.Connection,
-                $"INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled) VALUES ({Sql01}, '{Daily}', FALSE)", ct);
-
-            /* --enable-collector, fleet-wide: the write commits and the read-back prints the row. */
-            var output = new StringWriter();
-            var error = new StringWriter();
-            var exit = await DarlingCliCommands.ToggleCollectorAsync(
-                enable: true, new[] { "long_query_completions", "--config", rig.ConfigPath }, output, error, ct);
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-            Assert.Equal(string.Empty, error.ToString());
-            Assert.Contains("[ENABLED] long_query_completions", output.ToString(), StringComparison.Ordinal);
-            Assert.Contains("  fleet-wide: enabled=true  frequency=(default)  retention=(default)", output.ToString(), StringComparison.Ordinal);
-            Assert.DoesNotContain("run_at=", output.ToString(), StringComparison.Ordinal);
-            Assert.Contains("no restart is needed", output.ToString(), StringComparison.OrdinalIgnoreCase);
-
-            /* --disable-collector for one server's row, beside a fleet row the same collector does not have. */
-            output = new StringWriter();
-            error = new StringWriter();
-            exit = await DarlingCliCommands.ToggleCollectorAsync(
-                enable: false, new[] { Daily, "--server", "sql01", "--config", rig.ConfigPath }, output, error, ct);
-            Assert.True(exit == 0, $"exit {exit}; stderr: {error}");
-            Assert.Equal(string.Empty, error.ToString());
-            Assert.Contains($"  sql01 (server_id {Sql01}): enabled=false  frequency=(default)  retention=(default)", output.ToString(), StringComparison.Ordinal);
-            Assert.DoesNotContain("run_at=", output.ToString(), StringComparison.Ordinal);
-
-            Assert.Equal(true, await ScalarAsync(rig.Connection,
-                "SELECT enabled FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = 'long_query_completions'", ct));
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, async (_, _) => { });
-        }
-    }
-
-    /// <summary>A store the service has not migrated to the run-time column yet cannot take a run time. The verb refuses with a
-    /// plain message that says to start the service once, instead of the store's raw "column does not exist" error; it exits
-    /// <c>1</c> like its other refusals, not the store-unavailable <c>2</c>; and nothing is written. The time, <c>none</c> and
-    /// <c>default</c> each reach the store through their own statement, so each is held to it.</summary>
+    /// <summary>A store the service has not migrated to the run-time table yet (below V160). The verb says so in plain words,
+    /// exits 1 and writes nothing, for a time, none and default alike; and the toggle verbs' read-back reads such a store as having
+    /// no run times, so it does not fail after a write that committed.</summary>
     [Theory]
-    [InlineData("04:30", null)]
+    [InlineData("02:00", null)]
     [InlineData("none", "sql01")]
     [InlineData("default", null)]
-    public async Task OnAStoreWithoutTheRunTimeColumn_TheVerbRefusesWithAPlainMessage_ExitsOne_AndWritesNothing(string runAt, string? server)
+    public async Task OnAStoreWithoutTheRunTimeTable_TheVerbRefusesWithAPlainMessage_ExitsOne_AndWritesNothing(string runAt, string? server)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -646,24 +460,20 @@ public sealed class CollectorRunTimeCliVerbLiveTests
         var bodySucceeded = false;
         try
         {
-            await ExecAsync(rig.Connection, "ALTER TABLE config.config_collector_schedules DROP COLUMN run_at_minute", ct);
-            var before = Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT COUNT(*) FROM config.config_collector_schedules", ct));
+            await ExecAsync(rig.Connection, "DROP TABLE config.config_collector_run_times", ct);
+            var scheduleRowsBefore = await ScheduleRowsAsync(rig.Connection, ct);
 
             var args = server is null ? new[] { Daily, runAt } : new[] { Daily, runAt, "--server", server };
-            var (exit, output, error) = await RunAsync(rig, ct, args);
+            var (exit, _, error) = await RunAsync(rig, ct, args);
 
-            Assert.Equal(DarlingCliCommands.CollectorToggleExitCode.UsageOrConfig, exit);
-            Assert.Contains("has not been upgraded to the run-time column yet", error, StringComparison.Ordinal);
-            Assert.Contains("Start the service once to migrate it, then run --set-collector-run-at again.", error, StringComparison.Ordinal);
+            Assert.Equal(1, exit);
+            Assert.Contains(DarlingCliCommands.RunTimeTableMissingMessage("--set-collector-run-at"), error, StringComparison.Ordinal);
             Assert.Contains("Nothing was changed.", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("relation", error, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(scheduleRowsBefore, await ScheduleRowsAsync(rig.Connection, ct));
 
-            /* The store's own error, with the column's name in it, is not what the operator is shown. */
-            Assert.DoesNotContain("run_at_minute", error, StringComparison.Ordinal);
-            Assert.DoesNotContain("Could not update the control-plane store", error, StringComparison.Ordinal);
-            Assert.DoesNotContain("[SET]", output, StringComparison.Ordinal);
-            Assert.DoesNotContain("[CLEARED]", output, StringComparison.Ordinal);
-
-            Assert.Equal(before, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT COUNT(*) FROM config.config_collector_schedules", ct)));
+            await using var dataSource = NpgsqlDataSource.Create(rig.Scratch.ConnectionString);
+            Assert.Empty(await DarlingCliCommands.ReadCollectorRunTimeRowsAsync(dataSource, Daily, ct));
 
             bodySucceeded = true;
         }
