@@ -422,8 +422,9 @@ public sealed class CollectionHealthRunTimeFieldsLiveTests
             var rows = await ReadRowsAsync(postgres, server, ct, fullDetail: false);
 
             /* Lite's partial row carries the run time only for a collector that has one, so a partial row stays as
-               small as the rest of its keys and the two apps give a caller the same shape. The note keeps its rule:
-               every partial row carries it, and it is null unless a day was skipped. */
+               small as the rest of its keys and the two apps give a caller the same shape. The note rides under the same
+               condition: a partial row for a collector with a run time carries it (null unless a day was skipped), and a
+               partial row for a collector with none has no run_time_note key at all. */
             var daily = rows[DailyCollector];
             Assert.True(daily.GetProperty("partial_detail").GetBoolean());
             Assert.Equal(CollectorRunTime.Format(runAt), daily.GetProperty("run_at").GetString());
@@ -434,7 +435,7 @@ public sealed class CollectionHealthRunTimeFieldsLiveTests
             Assert.True(minute.GetProperty("partial_detail").GetBoolean());
             Assert.False(minute.TryGetProperty("run_at", out _));
             Assert.False(minute.TryGetProperty("next_run_utc", out _));
-            Assert.Equal(JsonValueKind.Null, minute.GetProperty("run_time_note").ValueKind);
+            Assert.False(minute.TryGetProperty("run_time_note", out _));
 
             bodySucceeded = true;
         }

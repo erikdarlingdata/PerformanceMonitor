@@ -88,6 +88,13 @@ public sealed class WebCollectionHealthRunAtColumnTests
         }
 
         Assert.Equal(1, tools.Split("run_time_note = runTime.SkippedDayNote,", StringSplitOptions.None).Length - 1);
+
+        /* The note is the full row's always, and the partial row's only for a collector that has a run time, the same
+           condition as its run_at and next_run_utc. So the key is written in exactly those two places: the partial row
+           built for a collector with no run time has no run_time_note at all, not a null one, and a compact row never has
+           one. */
+        Assert.Equal(2, tools.Split("run_time_note = ", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("run_time_note = (string?)null", tools, StringComparison.Ordinal);
     }
 
     [Fact]
