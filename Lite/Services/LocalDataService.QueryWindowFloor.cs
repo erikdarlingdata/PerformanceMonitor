@@ -26,6 +26,8 @@ namespace PerformanceMonitorLite.Services;
 public enum QueryWindowRelation
 {
     QueryStats,
+    // Group A (Queries tab: Plan Corrections)
+    PlanCorrection,
     ProcedureStats,
     QueryStoreStats,
     QuerySnapshots,
@@ -37,6 +39,8 @@ public partial class LocalDataService
     internal static string QueryWindowRelationView(QueryWindowRelation relation) => relation switch
     {
         QueryWindowRelation.QueryStats => "v_query_stats",
+        // Group A (Queries tab: Plan Corrections)
+        QueryWindowRelation.PlanCorrection => "v_plan_correction",
         QueryWindowRelation.ProcedureStats => "v_procedure_stats",
         QueryWindowRelation.QueryStoreStats => "v_query_store_stats",
         QueryWindowRelation.QuerySnapshots => "v_query_snapshots",
@@ -52,6 +56,8 @@ public partial class LocalDataService
     /// </summary>
     internal static string? QueryWindowRelationCollector(QueryWindowRelation relation) => relation switch
     {
+        // Group A (Queries tab: Plan Corrections)
+        QueryWindowRelation.PlanCorrection => "plan_correction",
         QueryWindowRelation.QuerySnapshots => "query_snapshots",
         QueryWindowRelation.WaitingTasks => "waiting_tasks",
         _ => null

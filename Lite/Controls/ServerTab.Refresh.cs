@@ -395,12 +395,16 @@ public partial class ServerTab : UserControl
                         var planCorrections = await Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
                         _planCorrectionFilterMgr!.UpdateData(planCorrections);
                         SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
+                        /* #4966: where the stored plan corrections start, over the SAME UTC window the grid read. */
+                        await RefreshPlanCorrectionsBannerAsync(hoursBack, fromDate, toDate);
                         break;
                     case 6: // Query Heatmap
                         var hmMetric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
                         var hmData = await Task.Run(() => _dataService.GetQueryHeatmapAsync(_serverId, hmMetric, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
                         AppLogger.Info("ServerTab", $"[{_server.DisplayName}] Heatmap: {hmData.TimeBuckets.Length} time buckets, {hmData.Intensities.GetLength(0)}x{hmData.Intensities.GetLength(1)} grid");
                         UpdateQueryHeatmapChart(hmData);
+                        /* #4966: where the stored query_stats rows start, over the SAME UTC window the heatmap read. */
+                        await RefreshQueryHeatmapBannerAsync(hoursBack, fromDate, toDate);
                         break;
                 }
                 return;
@@ -472,12 +476,16 @@ public partial class ServerTab : UserControl
             }
             _planCorrectionFilterMgr!.UpdateData(planCorrectionTask.Result);
             SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
+            /* #4966: see the Plan Corrections case of the sub-tab switch above. */
+            await RefreshPlanCorrectionsBannerAsync(hoursBack, fromDate, toDate);
 
             UpdateQueryDurationTrendChart(queryDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
             UpdateProcDurationTrendChart(procDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
             UpdateQueryStoreDurationTrendChart(queryStoreDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
             UpdateExecutionCountTrendChart(executionCountTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
             UpdateQueryHeatmapChart(heatmapTask.Result);
+            /* #4966: see the Query Heatmap case of the sub-tab switch above. */
+            await RefreshQueryHeatmapBannerAsync(hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
