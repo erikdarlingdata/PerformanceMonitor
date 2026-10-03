@@ -318,6 +318,11 @@ public sealed class CollectorRunTimeViewerLiveTests
             Assert.Contains("Update or restart the Darling service", oneTransaction.Message, StringComparison.Ordinal);
             Assert.Equal(720, await FleetFrequencyAsync(connection, ct));
 
+            /* A schedule Reset's Save on such a store has no run-time table to clear: the clear is skipped and the schedules are saved. */
+            await viewer.SaveCollectorScheduleAsync(
+                null, new[] { new CollectorScheduleRow(null, Daily, 480, 30, true) }, Array.Empty<CollectorRunTimeChange>(), true, ct);
+            Assert.Equal(480, await FleetFrequencyAsync(connection, ct));
+
             bodySucceeded = true;
         }
         finally
