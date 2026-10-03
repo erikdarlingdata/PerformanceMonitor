@@ -19,52 +19,79 @@ namespace PerformanceMonitorLite.Services;
 /// relations (<see cref="QueryStats"/>, <see cref="ProcedureStats"/>, <see cref="QueryStoreStats"/>): every
 /// Queries-tab grid and MCP tool that reads one has no rollup underneath it to fall back on when the requested
 /// window reaches past what the raw table actually retains. The Lite twin of Darling's Active Queries and Current
-/// Waits data-start banners adds <see cref="QuerySnapshots"/> and <see cref="WaitingTasks"/>. A further surface adds
-/// its own member and its arm in <c>QueryWindowRelationView</c>; <c>QueryWindowTruncationTests</c> pins that every
-/// member names a real archive view.
+/// Waits data-start banners adds <see cref="QuerySnapshots"/> and <see cref="WaitingTasks"/>, and #4966 adds
+/// <see cref="PlanCorrection"/> (Plan Corrections) and <see cref="MemoryPressureEvents"/> (Memory Pressure Events); the
+/// Query Heatmap reads <c>v_query_stats</c> and asks the <see cref="QueryStats"/> question. A further surface adds its
+/// own member and its arm in <c>QueryWindowRelationView</c>; <c>DataStartBannerTests</c> pins that every member names a
+/// real archive view with the column the probe windows on.
 /// </summary>
 public enum QueryWindowRelation
 {
     QueryStats,
+    // Group A (Queries tab: Plan Corrections)
+    PlanCorrection,
     ProcedureStats,
     QueryStoreStats,
     QuerySnapshots,
-    WaitingTasks
+    WaitingTasks,
+    MemoryPressureEvents
 }
 
 public partial class LocalDataService
 {
+    /// <summary>
+    /// The column the probe windows a relation's view on: <c>collection_time</c> for every relation but Memory
+    /// Pressure Events, whose chart filters on <c>sample_time</c> (the ring-buffer event's own time, which can sit long
+    /// before the first collection that stored it), so the probe asks the question the chart's own read asks. The
+    /// coverage side (<c>v_collection_log</c>) always reads <c>collection_time</c>. A closed map, so nothing a caller
+    /// passes reaches the probe's SQL.
+    /// </summary>
+    internal static string QueryWindowRelationTimeColumn(QueryWindowRelation relation) => relation switch
+    {
+        QueryWindowRelation.MemoryPressureEvents => "sample_time",
+        _ => "collection_time"
+    };
+
     internal static string QueryWindowRelationView(QueryWindowRelation relation) => relation switch
     {
         QueryWindowRelation.QueryStats => "v_query_stats",
+        // Group A (Queries tab: Plan Corrections)
+        QueryWindowRelation.PlanCorrection => "v_plan_correction",
         QueryWindowRelation.ProcedureStats => "v_procedure_stats",
         QueryWindowRelation.QueryStoreStats => "v_query_store_stats",
         QueryWindowRelation.QuerySnapshots => "v_query_snapshots",
         QueryWindowRelation.WaitingTasks => "v_waiting_tasks",
+        QueryWindowRelation.MemoryPressureEvents => "v_memory_pressure_events",
         _ => throw new ArgumentOutOfRangeException(nameof(relation), relation, "unknown QueryWindowRelation")
     };
 
     /// <summary>
     /// The collector whose runs <c>collection_log</c> records for a relation the probe reads by coverage
-    /// (<see cref="QueryWindowRelation.QuerySnapshots"/>, <see cref="QueryWindowRelation.WaitingTasks"/>), or null for
-    /// the three Queries-tab relations, which keep the row-only probe. A closed map, so nothing a caller passes
+    /// (<see cref="QueryWindowRelation.QuerySnapshots"/>, <see cref="QueryWindowRelation.WaitingTasks"/>,
+    /// <see cref="QueryWindowRelation.PlanCorrection"/> and <see cref="QueryWindowRelation.MemoryPressureEvents"/>), or
+    /// null for the three Queries-tab relations (the Query Heatmap reads the first of them), which keep the row-only
+    /// probe. A closed map, so nothing a caller passes
     /// reaches the probe's SQL.
     /// </summary>
     internal static string? QueryWindowRelationCollector(QueryWindowRelation relation) => relation switch
     {
+        // Group A (Queries tab: Plan Corrections)
+        QueryWindowRelation.PlanCorrection => "plan_correction",
         QueryWindowRelation.QuerySnapshots => "query_snapshots",
         QueryWindowRelation.WaitingTasks => "waiting_tasks",
+        QueryWindowRelation.MemoryPressureEvents => "memory_pressure_events",
         _ => null
     };
 
     /// <summary>
     /// Where this server's data starts for the requested window, as far as any caller needs to know it. NULL when
     /// the server holds no row inside [<paramref name="startUtc"/>, <paramref name="endUtc"/>] at all (nothing was
-    /// read; for Active Queries and Current Waits, no row and no logged run of the collector either).
+    /// read; for the coverage surfaces, Active Queries, Current Waits, Plan Corrections and Memory Pressure Events, no
+    /// row and no logged run of the collector either).
     /// <paramref name="startUtc"/> itself when the server also holds a row BEFORE the window (the window was
     /// served whole). Otherwise the server's first row inside the window (the data starts late). ONE probe shared by
-    /// every Queries-tab grid (<c>Lite/Controls/ServerTab.*</c>), the Active Queries and Current Waits banners and
-    /// every MCP tool that reads one of the <see cref="QueryWindowRelation"/> relations
+    /// every Queries-tab grid (<c>Lite/Controls/ServerTab.*</c>), the Active Queries, Current Waits, Plan Corrections,
+    /// Query Heatmap and Memory Pressure Events banners and every MCP tool that reads one of the <see cref="QueryWindowRelation"/> relations
     /// (<c>get_top_queries_by_cpu</c>, <c>get_top_procedures_by_cpu</c>, <c>get_query_store_top</c>), so there is
     /// one place that computes the floor rather than near-identical copies that can drift apart. Twin of Darling's
     /// <c>DarlingDataReader.GetQueryStoreWindowFloorAsync</c> (#2364) and of #4953's <c>DataWindowFloor</c>: Lite's
@@ -89,15 +116,17 @@ public partial class LocalDataService
     /// quiet first stretch puts the window's own first row far past its start while older rows are stored, and a
     /// probe that read only the window would raise a false banner).</para>
     ///
-    /// <para><b>Active Queries and Current Waits read coverage, not rows.</b> query_snapshots and waiting_tasks hold
-    /// a row only while something runs or waits, so a server idle overnight, or one whose first waiting task came
-    /// days after it was added, has no row near the window's start though the store covered it. For these two the
-    /// collector's runs in <c>v_collection_log</c> count as well as rows: a run proves the collector was collecting
+    /// <para><b>Active Queries, Current Waits, Plan Corrections and Memory Pressure Events read coverage, not
+    /// rows.</b> query_snapshots and waiting_tasks hold a row only while something runs or waits, plan_correction only
+    /// while the engine has a recommendation, and memory_pressure_events only where the ring buffer logged an event
+    /// (windowed on <c>sample_time</c>, see <see cref="QueryWindowRelationTimeColumn"/>), so a server idle overnight, or
+    /// one whose first waiting task came days after it was added, has no row near the window's start though the store
+    /// covered it. For these four the collector's runs in <c>v_collection_log</c> count as well as rows: a run proves the collector was collecting
     /// then. The log survives exactly as long as the table: it is archived and deleted by the same single horizon
     /// (<see cref="RetentionService.ArchiveRetentionMonths"/>, the same monthly files), so a run older than the
     /// window means the table's rows from then on are still held, and the first run inside the window is where
     /// coverage starts, whether that is the server's first collection or the retention edge, whichever is later.
-    /// For these two the probe answers NULL when the window holds no row and no run, the window's start when a
+    /// For these four the probe answers NULL when the window holds no row and no run, the window's start when a
     /// row or run sits at or before it, and otherwise the first row or run inside the window, whichever is
     /// earlier. A covered window that holds no row (the collector ran, nothing waited) answers the start, so it
     /// shows no banner.</para>
@@ -115,6 +144,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
 
         var collector = QueryWindowRelationCollector(relation);
+        var timeColumn = QueryWindowRelationTimeColumn(relation);
         DateTime? firstInWindow;
         using (var windowCommand = connection.CreateCommand())
         {
@@ -122,14 +152,14 @@ public partial class LocalDataService
                LEAST skips a NULL, so either one alone answers. */
             windowCommand.CommandText = collector is null
                 ? $@"
-SELECT MIN(collection_time)
+SELECT MIN({timeColumn})
 FROM {view}
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3"
+AND   {timeColumn} >= $2
+AND   {timeColumn} <= $3"
                 : $@"
 SELECT LEAST(
-    (SELECT MIN(collection_time) FROM {view} WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3),
+    (SELECT MIN({timeColumn}) FROM {view} WHERE server_id = $1 AND {timeColumn} >= $2 AND {timeColumn} <= $3),
     (SELECT MIN(collection_time) FROM v_collection_log WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time >= $2 AND collection_time <= $3))";
             windowCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
@@ -148,7 +178,7 @@ SELECT LEAST(
 SELECT 1
 FROM {view}
 WHERE server_id = $1
-AND   collection_time < $2
+AND   {timeColumn} < $2
 LIMIT 1";
             olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             olderCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
