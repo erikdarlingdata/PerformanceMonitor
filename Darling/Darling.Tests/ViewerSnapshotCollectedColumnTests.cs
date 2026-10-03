@@ -11,6 +11,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -61,12 +62,15 @@ public sealed class ViewerSnapshotCollectedColumnTests
     public void TheDisplayText_IsTheDisplayZonesWallTime_ToTheSecond_OnTheInvariantCulture()
     {
         var saved = CultureInfo.CurrentCulture;
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
         try
         {
             CultureInfo.CurrentCulture = new CultureInfo("th-TH");
-            var at = new DateTime(2026, 3, 4, 15, 6, 7, DateTimeKind.Unspecified);
-            var expected = ViewerTimeHelper.FormatForDisplay(at, "yyyy-MM-dd HH:mm:ss");
-            Assert.Matches(@"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d( \S+)?$", expected);
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+            var at = new DateTime(2026, 10, 3, 14, 5, 9, DateTimeKind.Unspecified);
+            // A literal: the Thai calendar would print 2569, so only a Gregorian year passes.
+            var expected = "2026-10-03 14:05:09";
+            Assert.Equal(expected, HistoryTime.CollectionLocal(at));
             Assert.Equal(expected, new RunningJobRow { CollectionTime = at }.CollectionTimeLocal);
             Assert.Equal(expected, new LatchStatsSnapshotRow("L", 0, 0, 0, null, null, null, at).CollectionTimeLocal);
             Assert.Equal(expected, new SpinlockStatsSnapshotRow("S", 0, 0, 0, 0, 0, null, null, null, at).CollectionTimeLocal);
@@ -74,6 +78,7 @@ public sealed class ViewerSnapshotCollectedColumnTests
         }
         finally
         {
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
             CultureInfo.CurrentCulture = saved;
         }
     }

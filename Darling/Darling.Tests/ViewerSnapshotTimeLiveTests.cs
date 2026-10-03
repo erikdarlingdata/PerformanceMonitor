@@ -17,6 +17,8 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>The latch and spinlock snapshot reads against a real store return the collection time of the snapshot they rendered (#4966).</summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to CREATE
+   and DROP its own scratch database. */
 [Collection("viewer-time-statics")]
 public sealed class ViewerSnapshotTimeLiveTests
 {

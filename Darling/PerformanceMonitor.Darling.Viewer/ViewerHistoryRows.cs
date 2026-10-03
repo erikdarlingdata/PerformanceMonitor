@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -30,9 +31,15 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 internal static class HistoryTime
 {
-    /// <summary>Formats a naive-UTC collection timestamp in the current display mode (Server / Local / UTC).</summary>
+    /// <summary>Formats a naive-UTC collection timestamp in the current display mode (Server / Local / UTC), to the second.
+    /// The digits are Gregorian on every machine: a Thai or Arabic thread culture would otherwise print its own calendar's year.</summary>
     public static string CollectionLocal(DateTime collectionTimeUtc)
-        => ViewerTimeHelper.FormatForDisplay(collectionTimeUtc, "yyyy-MM-dd HH:mm:ss");
+    {
+        var zone = ViewerTimeHelper.CurrentDisplayZone();
+        var text = DisplayZone.ToDisplay(collectionTimeUtc, zone).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+        var suffix = DisplayZone.AmbiguousOffsetSuffix(collectionTimeUtc, zone);
+        return suffix is null ? text : text + " " + suffix;
+    }
 }
 
 /// <summary>One collected query_stats snapshot for a single (database, query_hash) — Lite's
