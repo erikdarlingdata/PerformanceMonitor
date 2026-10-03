@@ -115,9 +115,9 @@ public sealed class BoundedDdlBusyStreakLiveTests
         await PgMigrations.MigrateAsync(connection, ct);
         Assert.True(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB must be available");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
-        TimescaleSupport.BusyStreaks.Reset();
 
-        const string What = "compression settings on collect.wait_stats";
+        // A key no other test records into, so the process-wide streaks stay untouched.
+        var What = $"compression settings on collect.wait_stats (busy-streak test {Guid.NewGuid():N})";
         var statements = new[] { "ALTER TABLE collect.wait_stats SET (timescaledb.compress)" };
         var log = new CapturingTestLogger();
 
