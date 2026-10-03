@@ -49,11 +49,13 @@
 
   <ItemGroup>
     <!-- system_health event samples for SystemHealthParser (one per feeder event; shapes per sp_HealthParser xpath). -->
+    <None Include="Fixtures\FinOpsIndexAnalysis\golden.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- real, scrubbed system_health event captures for SystemHealthParserRealEventTests -->
     <None Include="Fixtures\SystemHealth\real\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- Deadlock graph parser/layout golden samples (real sql2025 captures + synthetic edge cases). -->
     <None Include="Fixtures\Deadlocks\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\FinOpsInventory\golden.json" CopyToOutputDirectory="PreserveNewest" />
     <!-- #4534: PerformanceStudio's own .sqlplan fixtures for the warning-origin decider, copied from its
          public repo (table_variable_plan, convert_implicit_plan, udf_plan). Real captures rather than a
          synthetic plan, so the "every operator warning knows its operator" pin runs against the same
@@ -64,6 +66,7 @@
          shape - the tab-indented continuation, the %Q query id in the prefix, the JSON body - and a
          fixture I typed would agree with whatever I believed that shape was. 
          Named .txt rather than .log because *.log is gitignored - correctly, and a fixture is not a log. -->
+    <None Include="Fixtures\FinOpsUtilization\golden.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\auto_explain_real_block.txt" CopyToOutputDirectory="PreserveNewest" />
     <!-- The SHIPPED bring-your-own-Postgres provisioning script, copied beside the test binary so
          ProvisionRolesAclDriftTests can parse the REAL file (never a stale second copy) from

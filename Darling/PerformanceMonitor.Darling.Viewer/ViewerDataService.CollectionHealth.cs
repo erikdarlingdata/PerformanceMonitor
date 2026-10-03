@@ -365,9 +365,15 @@ public sealed partial class ViewerDataService
     /// GetHealthSummary(null)). Scoped to enabled servers so a removed server's aged-out rows don't read as
     /// erroring. $1 window start (naive UTC).
     /// <para>
+    /// #4999: no production read runs this statement now. The status bar and the Overview cards take their counts
+    /// from <see cref="FleetCollectionHealthByServerSql"/>, whose rows are stamped with the interval each collector
+    /// is scheduled at on its server; the unstamped viewer read that ran this one was removed. The text stays as the
+    /// pinned shape of the fleet-cumulative aggregate.
+    /// </para>
+    /// <para>
     /// The two exemplar MESSAGE columns are deliberately NULL here rather than ranked as the per-server
-    /// read ranks them (#1855). This query's only caller is <c>UpdateCollectorHealthTextAsync</c>, which
-    /// reads <see cref="CollectorHealthRow.HealthStatus"/> and the collector NAME — no surface renders a
+    /// read ranks them (#1855). This query's one caller, the status bar's <c>UpdateCollectorHealthTextAsync</c>,
+    /// read <see cref="CollectorHealthRow.HealthStatus"/> and the collector NAME — no surface renders a
     /// fleet row's message, and the per-server read behind the Collection Health grid is where the note
     /// and the last error are actually shown. Ranking them costs more than the whole rest of the query:
     /// PostgreSQL cannot parallelize above a WindowAgg, so adding the ranks turned this from a parallel
@@ -543,6 +549,8 @@ public sealed partial class ViewerDataService
     {
         var items = new List<CollectorHealthRow>();
 
+        /* #4999: read before the health statement's reader opens, so one call never holds two. */
+        var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
         await using var command = _dataSource.CreateCommand(CollectionHealthSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
@@ -557,34 +565,45 @@ public sealed partial class ViewerDataService
             items.Add(MapHealthRow(reader));
         }
 
+        ApplyScheduledFrequencies(items, serverId, scheduleOverrides);
         return items;
     }
 
     /// <summary>
-    /// Fleet-cumulative per-collector health across ALL enabled monitored servers over the trailing 7 days —
-    /// the status bar's aggregate-view total (Overview / Alert History / FinOps / Recommendations), where Lite
-    /// shows a cumulative count rather than one server's. ONE query (<see cref="FleetCollectionHealthSql"/>)
-    /// regardless of fleet size; each row is a (server, collector) pair carrying its own
-    /// <see cref="CollectorHealthRow.HealthStatus"/>, so the caller counts total + FAILING exactly as per-server.
+    /// #4999: every collector schedule override row, the fleet-wide ones and every server's own, for the
+    /// collection-health reads, which band a collector against the interval it is scheduled at. The same rows the
+    /// schedule editor reads (<see cref="GetCollectorSchedulesAsync"/>); the table is sparse. A failure to read costs
+    /// the health view nothing but the overrides: every row then keeps the shipped cadence it was judged by before,
+    /// and the view still answers. A cancellation is not swallowed.
     /// </summary>
-    public async Task<List<CollectorHealthRow>> GetFleetCollectionHealthAsync(CancellationToken cancellationToken = default)
+    private async Task<IReadOnlyList<CollectorScheduleRow>> ReadScheduleOverridesForHealthAsync(CancellationToken cancellationToken)
     {
-        var items = new List<CollectorHealthRow>();
-
-        await using var command = _dataSource.CreateCommand(FleetCollectionHealthSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        try
         {
-            TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
-        });
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(MapHealthRow(reader));
+            return await GetCollectorSchedulesAsync(cancellationToken);
         }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#4999 collection health could not read the collector schedule overrides; its collectors are judged by their shipped cadences: {ex.GetType().Name}: {ex.Message}");
+            return Array.Empty<CollectorScheduleRow>();
+        }
+    }
 
-        return items;
+    /// <summary>
+    /// #4999: stamps each catalog collector's row with the interval it is scheduled at on
+    /// <paramref name="serverId"/>: the per-server override, else the fleet-wide one, else the shipped default, through
+    /// <see cref="CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes{T}"/>, the rule the service's own schedule
+    /// resolution is built on (the viewer cannot reach the service's resolver, so the rule lives in
+    /// <c>PerformanceMonitor.Collectors</c>, which both reference). A name the catalog does not know is left
+    /// unstamped. Pure, so a test applies a set of overrides without a store.
+    /// </summary>
+    internal static void ApplyScheduledFrequencies(
+        IEnumerable<CollectorHealthRow> rows, int serverId, IReadOnlyList<CollectorScheduleRow> overrides)
+    {
+        foreach (var row in rows)
+        {
+            row.EffectiveFrequencyMinutes = CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(row.CollectorName, serverId, overrides);
+        }
     }
 
     /// <summary>
@@ -684,6 +703,10 @@ public sealed partial class ViewerDataService
     /// the others still waiting on it.</summary>
     private async Task<Dictionary<int, List<CollectorHealthRow>>> FetchFleetCollectionHealthByServerAsync()
     {
+        /* #4999: the fleet's schedule rows, read once before the health statement's reader opens; each server's
+           rows are stamped with the interval its collectors are scheduled at on THAT server, so the Overview cards
+           and the status bar band them as the server's own Collection Health tab does. */
+        var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(CancellationToken.None);
         var now = DateTime.UtcNow;
         var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
         var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
@@ -723,6 +746,11 @@ public sealed partial class ViewerDataService
             rows.Add(MapFleetByServerRow(reader));
         }
 
+        foreach (var (serverId, rows) in byServer)
+        {
+            ApplyScheduledFrequencies(rows, serverId, scheduleOverrides.Where(o => o.ServerId is null || o.ServerId == serverId).ToList());
+        }
+
         return byServer;
     }
 
@@ -751,7 +779,8 @@ public sealed partial class ViewerDataService
         LatestRunNote = reader.IsDBNull(13) ? null : reader.GetString(13),
     };
 
-    /// <summary>Maps one row of the shared 19-column health projection (per-server or fleet, ordinals 0-18) to a
+    /// <summary>Maps one row of the shared 19-column health projection (per-server, and the fleet-cumulative
+    /// <see cref="FleetCollectionHealthSql"/>, which no production read runs now, ordinals 0-18) to a
     /// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY
     /// through this one mapper, so it must match them exactly (19 since #4748 appended latest_run_note at
     /// ordinal 18; #3819's last_non_skip_time and last_productive_time sit at ordinals 16-17,
@@ -1177,14 +1206,27 @@ public class CollectorHealthRow
     /// on-load collector's catalog 0 reads as the daily recapture interval, which is what lets
     /// <see cref="CollectorHealthClassifier.Classify"/> band it on the SAME ladder as any other. A name the
     /// catalog doesn't know keeps 0 and the classifier's floor thresholds, as before #4000: resolving it to
-    /// daily too would leave a collector that went dark HEALTHY for a day and a half. The banding uses the
-    /// shipped default, not any per-install override: the viewer has no cheap per-collector effective
-    /// frequency at the row level, and using the same default across all three surfaces keeps them in
-    /// parity.</summary>
+    /// daily too would leave a collector that went dark HEALTHY for a day and a half.
+    ///
+    /// <para>#4999: the cadence the collector RUNS at on this server, when the read that built the row stamped it
+    /// (<see cref="EffectiveFrequencyMinutes"/>): the per-server schedule override, else the fleet-wide one, else
+    /// the shipped default, resolved by <c>CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes</c>, the
+    /// rule the service's own schedule resolution is built on, so this band, the fleet roll-up's and
+    /// get_collection_health's judge a collector against the same interval. A row nothing stamped keeps the
+    /// shipped default.</para></summary>
     private int FrequencyMinutes =>
-        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
+        EffectiveFrequencyMinutes
+        ?? (CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
             ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
-            : 0;
+            : 0);
+
+    /// <summary>
+    /// #4999: the interval, in minutes, this collector is scheduled at on the server the row was read for, as
+    /// <see cref="ViewerDataService.ApplyScheduledFrequencies"/> resolves it, or null when nothing resolved one (an
+    /// unknown collector name, a row built outside the health reads). Set once, inside the read that builds the row,
+    /// because the fleet read is cached and its rows are shared between callers.
+    /// </summary>
+    internal int? EffectiveFrequencyMinutes { get; set; }
 
     /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —

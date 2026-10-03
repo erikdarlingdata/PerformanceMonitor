@@ -146,6 +146,11 @@ public partial class MainWindow : Window
         _profileManager = new ProfileManager(_serverManager, new AppLoggerAdapter<ProfileManager>());
         _serverManager.ProfileLookup = _profileManager;
         _scheduleManager = new ScheduleManager(App.ConfigDirectory);
+        /* #4999: every LocalDataService judges a collector by the interval it is scheduled at on that server, whoever
+           builds it (the Collection Health tab builds its own, as do five other places), not only the MCP host's
+           instance. Wired once here, beside the managers it answers from, and read by each instance where it is used. */
+        LocalDataService.DefaultCollectorFrequencyMinutes = (serverId, collector) =>
+            _scheduleManager.GetFrequencyForStorageServer(_serverManager, serverId, collector);
 
         // Status bar update timer
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };

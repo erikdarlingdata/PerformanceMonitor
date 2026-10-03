@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Linq;
+using System.Reflection;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -17,8 +19,9 @@ namespace Darling.Tests;
 /// #4226: the Overview loader's per-server cards, the status bar's collector-health text, and the per-server
 /// tab's permission-denied badge must all read the fleet-wide rollup-backed
 /// <see cref="ViewerDataService.GetFleetCollectionHealthByServerAsync"/>, not a raw <c>collection_log</c> scan
-/// per server (<c>ViewerDataService.GetCollectionHealthAsync</c>), a second raw fleet scan
-/// (<c>ViewerDataService.GetFleetCollectionHealthAsync</c>) every 30 s tick, or the badge's own raw
+/// per server (<c>ViewerDataService.GetCollectionHealthAsync</c>), a second raw fleet scan every 30 s tick
+/// (the viewer has no other fleet read now, see <see cref="TheViewerHasOneFleetHealthRead_TheStampedByServerRollup"/>),
+/// or the badge's own raw
 /// per-server-tab scan (<see cref="ViewerDataService.PermissionDeniedCollectorCountSql"/>) on every 1 min
 /// auto-refresh plus every tab activation. Source-text pins, deliberately: the regression this guards against
 /// COMPILES (the old reads still exist, for the Collection Health tab and for Lite's parity twin), so only
@@ -53,7 +56,31 @@ public sealed class OverviewCollectionHealthRollupRoutingTests
 
         Assert.Contains("GetFleetCollectionHealthByServerAsync", methodBody, StringComparison.Ordinal);
         Assert.DoesNotContain("GetCollectionHealthAsync(serverId.Value)", methodBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("GetFleetCollectionHealthAsync()", methodBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4999: every fleet health read stamps each row with the interval its collector is scheduled at on its
+    /// server, so a collector an operator moved off its shipped cadence is banded the way its own tab bands it. The
+    /// viewer once had a second fleet read that skipped the stamp and that nothing called; it was removed, and this
+    /// keeps it removed. The one fleet read the viewer has is the by-server rollup, which stamps its rows.
+    /// </summary>
+    [Fact]
+    public void TheViewerHasOneFleetHealthRead_TheStampedByServerRollup()
+    {
+        var fleetReads = typeof(ViewerDataService)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Where(m => m.Name.StartsWith("GetFleetCollectionHealth", StringComparison.Ordinal))
+            .Select(m => m.Name)
+            .ToList();
+
+        Assert.Equal(new[] { "GetFleetCollectionHealthByServerAsync" }, fleetReads);
+
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectionHealth.cs");
+        var fetchStart = source.IndexOf("Task<Dictionary<int, List<CollectorHealthRow>>> FetchFleetCollectionHealthByServerAsync()", StringComparison.Ordinal);
+        Assert.True(fetchStart >= 0, "FetchFleetCollectionHealthByServerAsync has moved or been renamed — update this pin's anchor.");
+
+        var fetchEnd = source.IndexOf("\n    }", fetchStart, StringComparison.Ordinal);
+        Assert.Contains("ApplyScheduledFrequencies(", source.Substring(fetchStart, fetchEnd - fetchStart), StringComparison.Ordinal);
     }
 
     /// <summary>
