@@ -292,7 +292,8 @@ public sealed class DarlingWorker : BackgroundService
         string Name,
         StoreObjectConvergenceStage Stage,
         StoreObjectChangeSignal Signal,
-        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> EnsureAsync);
+        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>> EnsureAsync,
+        Func<NpgsqlConnection, ILogger, CancellationToken, Task<int>>? HourlyEnsureAsync = null);
 
     /// <summary>
     /// THE list: every idempotent store-object ensure, in the one order both the start path and the hourly
@@ -346,7 +347,8 @@ public sealed class DarlingWorker : BackgroundService
         /* The compression ENABLE is unconditional DDL (see the class remark); add_compression_policy's
            if_not_exists returns -1 for a policy that exists. */
         new("compression policies", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
-            (connection, logger, ct) => TimescaleSupport.ApplyCompressionPolicyAsync(connection, logger, ct)),
+            (connection, logger, ct) => TimescaleSupport.ApplyCompressionPolicyAsync(connection, logger, ct),
+            (connection, logger, ct) => TimescaleSupport.ApplyCompressionPolicyAsync(connection, logger, hourly: true, ct)),
 
         /* collection_log is outside the collector catalog, so the two steps above never reach it; same three
            idempotent statements. */
@@ -8654,7 +8656,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                     continue;
                 }
 
-                await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token);
+                await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token, hourly: true);
             }
 
             LogStoreObjectConvergence(tally, passClock.ElapsedMilliseconds, startup: false);
@@ -8738,11 +8740,13 @@ AND   j.hypertable_name = '{relation}'", connection))
         StoreObjectConvergenceStep step,
         StoreObjectConvergenceTally tally,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool hourly = false)
     {
         try
         {
-            var count = await step.EnsureAsync(connection, logger, cancellationToken);
+            var ensure = hourly && step.HourlyEnsureAsync is not null ? step.HourlyEnsureAsync : step.EnsureAsync;
+            var count = await ensure(connection, logger, cancellationToken);
             tally.Steps++;
             if (step.Signal == StoreObjectChangeSignal.Delta && count > 0)
             {
