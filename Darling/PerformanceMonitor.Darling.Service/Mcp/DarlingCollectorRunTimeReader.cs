@@ -8,10 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -19,8 +21,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// #4938: what <c>get_collection_health</c> shows for a collector that has a run time. <see cref="RunAt"/> is the
 /// run time as 24-hour <c>HH:MM</c> on the monitored server's clock. <see cref="NextRunUtc"/> is when the collector
 /// is next due, UTC, or null when the collector is disabled (it has a run time but nothing is scheduled).
+/// <see cref="SkippedDayNote"/> is set only when a day was skipped: the collector has not run for longer than its
+/// stale line allows, and its next slot is still ahead (see <see cref="DarlingCollectorRunTimeReader.SkippedDayNoteFor"/>).
 /// </summary>
-internal sealed record CollectorRunTimeReading(string RunAt, DateTime? NextRunUtc)
+internal sealed record CollectorRunTimeReading(string RunAt, DateTime? NextRunUtc, string? SkippedDayNote = null)
 {
     /// <summary>The next due time as the round-trip text every other stamp on the health payload uses, or null.</summary>
     public string? NextRunUtcText => NextRunUtc?.ToString("o");
@@ -88,13 +92,7 @@ internal static class DarlingCollectorRunTimeReader
         }
 
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
-        var collectors = new List<(string Collector, DateTime? LastRun)>(rows.Count);
-        foreach (var row in rows)
-        {
-            collectors.Add((row.CollectorName, row.LastRunTime));
-        }
-
-        return Compute(serverId, overrides, collectors, clock.ToUtc, nowUtc);
+        return Compute(serverId, overrides, rows, clock.ToUtc, nowUtc);
     }
 
     /// <summary>
@@ -103,12 +101,13 @@ internal static class DarlingCollectorRunTimeReader
     /// server clock's conversion, or <see cref="CollectorRunTime.LocalIsUtc"/> while no clock is known.
     /// </summary>
     internal static IReadOnlyDictionary<string, CollectorRunTimeReading> Compute(
-        int serverId, IReadOnlyList<ScheduleOverride> overrides, IEnumerable<(string Collector, DateTime? LastRun)> collectors,
+        int serverId, IReadOnlyList<ScheduleOverride> overrides, IEnumerable<CollectorHealth> rows,
         Func<DateTime, DateTime> localToUtc, DateTime nowUtc)
     {
         var result = new Dictionary<string, CollectorRunTimeReading>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (collector, lastRun) in collectors)
+        foreach (var row in rows)
         {
+            var collector = row.CollectorName;
             if (!CollectorScheduleDefaults.All.ContainsKey(collector))
             {
                 continue;
@@ -121,20 +120,54 @@ internal static class DarlingCollectorRunTimeReader
             }
 
             DateTime? next = null;
+            string? note = null;
             if (schedule.Enabled)
             {
+                var interval = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes);
+
                 /* The worker's floor: a last run older than it counts as never run. The health row's stamp is naive UTC. */
-                DateTime? last = lastRun is DateTime stamp && stamp >= nowUtc - DarlingWorker.WatermarkFloorLookback
+                DateTime? last = row.LastRunTime is DateTime stamp && stamp >= nowUtc - DarlingWorker.WatermarkFloorLookback
                     ? DateTime.SpecifyKind(stamp, DateTimeKind.Utc)
                     : null;
-                next = CollectorRunTime.NextDue(
-                    nowUtc, last, minute, CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes),
-                    serverId, localToUtc);
+                next = CollectorRunTime.NextDue(nowUtc, last, minute, interval, serverId, localToUtc);
+                note = SkippedDayNoteFor(row, interval, next.Value, nowUtc);
             }
 
-            result[collector] = new CollectorRunTimeReading(CollectorRunTime.Format(minute), next);
+            result[collector] = new CollectorRunTimeReading(CollectorRunTime.Format(minute), next, note);
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// The note a row carries when a day was skipped (#4938). A run time skips a day that could not start inside its
+    /// 60-minute grace and never replays it, so the gap to the next slot can be longer than the shipped cadence allows,
+    /// and the collector crosses its stale line before that slot arrives. The band is right to say so, because a day WAS
+    /// missed; the note says why the band reads that way and when the next run is.
+    ///
+    /// <para>It needs all of: a last run (any status, as the worker counts it) older than the stale line the band reads
+    /// from the shipped cadence; older than the longest gap between two on-time runs, one interval plus the grace and an
+    /// hour for a daylight-saving change, so a collector whose shipped cadence is shorter than its run-time interval does
+    /// not read as skipped on an ordinary day; and a next run that is still ahead. A collector that is due now will run
+    /// in a moment, so it has no note. The note is never a band input: <see cref="CollectorHealth.HealthStatus"/> does
+    /// not see it.</para>
+    /// </summary>
+    internal static string? SkippedDayNoteFor(CollectorHealth row, int intervalMinutes, DateTime nextRunUtc, DateTime nowUtc)
+    {
+        if (row.LastRunTime is not DateTime lastRun || nextRunUtc <= nowUtc)
+        {
+            return null;
+        }
+
+        var hoursSinceLastRun = (nowUtc - DateTime.SpecifyKind(lastRun, DateTimeKind.Utc)).TotalHours;
+        var staleLineHours = CollectorHealthClassifier.StaleThresholdHours(row.FrequencyMinutes);
+        var longestOnTimeGapHours = (intervalMinutes + CollectorRunTime.GraceMinutes + 60) / 60.0;
+        if (hoursSinceLastRun <= staleLineHours || hoursSinceLastRun <= longestOnTimeGapHours)
+        {
+            return null;
+        }
+
+        return string.Create(CultureInfo.InvariantCulture,
+            $"Skipped day: no run for {hoursSinceLastRun:0.#} hours, past this collector's {staleLineHours:0.#}-hour stale line, and its next run is not due until {nextRunUtc:u}. With a run time, a day that could not start within {CollectorRunTime.GraceMinutes} minutes of its slot is skipped, not replayed.");
     }
 }
