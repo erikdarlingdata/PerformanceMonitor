@@ -295,7 +295,7 @@ ORDER BY worker_ratio DESC";
     internal const int PlanRegressionSkewMarginDays = 1;
 
     /* PG port: any_value() below is standard SQL:2023, in Postgres since 16 — the product's
-       minimum supported PG is 17, so it stays verbatim (DuckDB and PG agree on its semantics:
+       minimum supported PG is 16, so it stays verbatim (DuckDB and PG agree on its semantics:
        an arbitrary non-null value from the group). */
     public const string PlanRegressionSql = PlanRegressionRawPrefix + PlanRegressionSuffix;
 
