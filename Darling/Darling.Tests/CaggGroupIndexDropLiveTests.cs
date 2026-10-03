@@ -345,9 +345,9 @@ public sealed class CaggGroupIndexDropLiveTests
 
         if (simulatedVersion < CollectorRunTimeRungTests.RungVersion)
         {
-            /* V160 (#4938) - the collector run time; the column is the probe's sentinel (its CHECK goes with it). */
+            /* V160 (#4938) - the collector run time, in a table of its own; the table is the probe's sentinel. */
             await using var dropRunAt = new NpgsqlCommand(
-                "ALTER TABLE config.config_collector_schedules DROP COLUMN IF EXISTS run_at_minute", connection);
+                "DROP TABLE IF EXISTS config.config_collector_run_times", connection);
             await dropRunAt.ExecuteNonQueryAsync(ct);
         }
 

@@ -381,24 +381,51 @@ ALTER TABLE config.config_install_id
     ADD COLUMN IF NOT EXISTS server_major integer;";
 
     /// <summary>
-    /// V160 (#4938) — <c>config.config_collector_schedules.run_at_minute</c>: an optional run time for a collector
-    /// that runs once a day or less often, so a heavy daily collector can run in a quiet hour instead of whenever the
-    /// service happened to start.
+    /// V160 (#4938) — <c>config.config_collector_run_times</c>: an optional run time for a collector that runs once a day
+    /// or less often, so a heavy daily collector can run in a quiet hour instead of whenever the service happened to
+    /// start.
     ///
-    /// <para>The value is minutes after midnight on the monitored server's own clock, from 0 to 1439. It follows the
-    /// V125 <c>databases</c> convention on this sparse table: <b>NULL falls through</b> (server row, then fleet row,
-    /// then no fixed time), and <b>-1 means "no fixed time on this server"</b>, which stops a fleet-wide time the way
-    /// an empty array stops a fleet-wide database scope. The CHECK holds the range, -1 to 1439. Whether a run time
-    /// applies at all depends on the collector's effective interval (a whole number of days), which is not a property
-    /// of the row, so the service judges that when it resolves the schedule, not the CHECK.</para>
+    /// <para><b>Its own table, because released viewers rewrite the schedules table.</b> The viewer's schedule Save
+    /// deletes a scope's rows in <c>config_collector_schedules</c> and inserts them again with a fixed column list, and
+    /// every released viewer connects to a store that is newer than it is (the connect check refuses only an older one).
+    /// A run time kept as a column on that table would be set back to NULL by each Save. A table those Saves never write
+    /// keeps it. No row means no run time, so a store that never sets one reads exactly as it did before.</para>
     ///
-    /// <para>Nullable, no DEFAULT, one catalog-only <c>ADD COLUMN</c>: every existing row and every untouched install
-    /// reads NULL and runs exactly as it does today. The CHECK is written inline on the column, so it is part of the
-    /// same idempotent statement and adds no constraint-validation pass. Needs no GRANT (this table carries
-    /// table-level grants with no column carve) and no trigger (V17's <c>trg_bump_collector_schedules</c> already
-    /// bumps the reload beacon on any write here). No Lite twin: Lite keeps its schedules in a JSON file.</para>
+    /// <para>The value is minutes after midnight on the monitored server's own clock, from 0 to 1439. The table mirrors the
+    /// schedules table: <c>server_id</c> NULL is fleet-wide, there is one fleet row and one server row per collector (two
+    /// partial unique indexes, because a primary key cannot span a nullable column), and the layering is the same (the
+    /// server row, else the fleet row, else no fixed time). <b>-1 is allowed on a server row only.</b> It means "no fixed
+    /// time on this server" and stops a fleet-wide time, the way an empty array stops a fleet-wide database scope; a fleet
+    /// row has no level above it to stop, so the CHECK refuses -1 there. Whether a run time applies at all depends on the
+    /// collector's effective interval (a whole number of days), which is not a property of the row, so the service judges
+    /// that when it resolves the schedule, not the CHECK.</para>
+    ///
+    /// <para><b>DDL only, and a second run changes nothing.</b> Every statement is <c>IF NOT EXISTS</c> or a drop and
+    /// create, so running the rung again keeps the table, its indexes and its rows. Needs no GRANT: provisioning's blanket
+    /// grants on the config schema re-run on every service start and cover a table a migration introduces. It does carry
+    /// the one trigger the schedules table has, V17's reload beacon, so a write here bumps
+    /// <c>config_service.config_version</c> and a running service reloads the run times. No foreign key to the server
+    /// registry, as the schedules table has none: removing a server deletes its definition only and leaves its schedule
+    /// rows, so a removed server's run time stays as well, harmlessly. No Lite twin: Lite keeps its schedules in a JSON
+    /// file.</para>
     /// </summary>
-    private const string V160Sql = @"ALTER TABLE config.config_collector_schedules ADD COLUMN IF NOT EXISTS run_at_minute smallint CHECK (run_at_minute BETWEEN -1 AND 1439);";
+    private const string V160Sql = @"
+/* V160 (#4938): a collector's optional run time, in its own table. Schema-qualified config.* like every rung. */
+CREATE TABLE IF NOT EXISTS config.config_collector_run_times (
+    server_id integer,
+    collector_name text NOT NULL,
+    run_at_minute smallint NOT NULL,
+    CONSTRAINT ck_config_collector_run_times_range CHECK (run_at_minute BETWEEN 0 AND 1439 OR (run_at_minute = -1 AND server_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_config_collector_run_times_fleet
+    ON config.config_collector_run_times (collector_name) WHERE server_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_config_collector_run_times_server
+    ON config.config_collector_run_times (server_id, collector_name) WHERE server_id IS NOT NULL;
+
+DROP TRIGGER IF EXISTS trg_bump_collector_run_times ON config.config_collector_run_times;
+CREATE TRIGGER trg_bump_collector_run_times
+    AFTER INSERT OR UPDATE OR DELETE ON config.config_collector_run_times
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
 
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
