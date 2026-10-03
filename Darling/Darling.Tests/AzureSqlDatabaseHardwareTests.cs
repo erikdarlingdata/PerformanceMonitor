@@ -235,7 +235,7 @@ public sealed class AzureSqlDatabaseHardwareTests
     {
         var tab = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.Loaders.cs");
         var xaml = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.xaml");
-        var read = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Utilization.cs");
+        var read = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsUtilizationReader.cs");
 
         Assert.Contains("ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition)", tab, StringComparison.Ordinal);
         Assert.Contains("FinOpsPhysicalMemoryCaption.Text = ServerHardwareScope.PhysicalMemoryCaption(data.EngineEdition);", tab, StringComparison.Ordinal);
@@ -246,7 +246,7 @@ public sealed class AzureSqlDatabaseHardwareTests
         /* The CPU count is resolved through the edition (AzureSqlDatabaseHostMathTests pins the CASE): off edition 5 it is still
            COALESCE(vcore_count, cpu_count), and the edition still rides along for the card. */
         Assert.Contains("ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition", read, StringComparison.Ordinal);
-        Assert.Contains("EngineEdition = reader.IsDBNull(16)", read, StringComparison.Ordinal);
+        Assert.Contains("EngineEdition: reader.IsDBNull(16)", read, StringComparison.Ordinal);
     }
 
     [Fact]
