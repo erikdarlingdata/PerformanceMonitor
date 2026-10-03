@@ -38,6 +38,8 @@ public sealed class TuningIndexReaderPairingTests
             ["idx_query_store_stats_server_db_query_plan_time"] = ("server_id", DarlingStoredPlanReader.QueryStorePlanTextSql),
             ["idx_query_store_stats_server_time_forcing"] = ("server_id", DarlingAlertReadAdapter.ForcePlanFailuresSql),
             [PgTableTuning.LegacyRowIndexName] = ("server_id", QueryStoreIntervalWide.HasLegacyRowSql),
+            [PgTableTuning.QueryStatsRestartRowIndexName] = ("collection_time", IntervalRollupRestartRows.QueryStatsRestartRowsSql),
+            [PgTableTuning.ProcedureStatsRestartRowIndexName] = ("collection_time", IntervalRollupRestartRows.ProcedureStatsRestartRowsSql),
             ["idx_store_metrics_kind_name_time"] = ("object_kind", DarlingStoreMetricsReader.StoreMetricsLatestSql),
         };
 
@@ -71,14 +73,29 @@ public sealed class TuningIndexReaderPairingTests
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>Both restart-row indexes are partial, so each reader must carry the predicate and the half-open time bounds.</summary>
+    [Fact]
+    public void TheRestartRowReads_CarryThePartialIndexPredicate_BesideTheirTimeBounds()
+    {
+        foreach (var sql in new[] { IntervalRollupRestartRows.QueryStatsRestartRowsSql, IntervalRollupRestartRows.ProcedureStatsRestartRowsSql })
+        {
+            Assert.Contains("sample_interval_seconds = 0", sql, StringComparison.Ordinal);
+            Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
+            Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("FROM collect.query_stats", IntervalRollupRestartRows.QueryStatsRestartRowsSql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.procedure_stats", IntervalRollupRestartRows.ProcedureStatsRestartRowsSql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void EveryCreatedIndex_HasANamedReader_ThatReferencesItsLeadingColumn()
     {
         var created = CreatedIndexes().ToList();
 
-        /* Sanity: this must actually see the five indexes the list ships today (#4247 dropped five others),
+        /* Sanity: this must actually see the seven indexes the list ships today (#4247 dropped five others),
            or the regex/list drifted and the pairing check below would be vacuously true. */
-        Assert.Equal(5, created.Count);
+        Assert.Equal(7, created.Count);
 
         foreach (var (indexName, leadingColumn) in created)
         {

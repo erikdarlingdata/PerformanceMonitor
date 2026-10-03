@@ -636,6 +636,15 @@ public sealed class IdleDatabaseRow
     public decimal TotalSizeMb { get; set; }
     public int FileCount { get; set; }
     public DateTime? LastExecutionTime { get; set; }
+
+    /// <summary>Maps the storage read's plain result onto the display row.</summary>
+    public static IdleDatabaseRow From(IdleDatabase d) => new()
+    {
+        DatabaseName = d.DatabaseName,
+        TotalSizeMb = d.TotalSizeMb,
+        FileCount = d.FileCount,
+        LastExecutionTime = d.LastExecutionTime
+    };
 }
 
 /// <summary>tempdb pressure metric current vs 24h peak (Optimization sub-tab).</summary>
@@ -645,6 +654,15 @@ public sealed class TempdbSummaryRow
     public decimal CurrentMb { get; set; }
     public decimal Peak24hMb { get; set; }
     public string Warning { get; set; } = "";
+
+    /// <summary>Maps the storage read's plain result onto the display row.</summary>
+    public static TempdbSummaryRow From(TempdbSummaryMetric d) => new()
+    {
+        Metric = d.Metric,
+        CurrentMb = d.CurrentMb,
+        Peak24hMb = d.Peak24hMb,
+        Warning = d.Warning
+    };
 }
 
 /// <summary>Wait time grouped by cost category (Optimization sub-tab).</summary>
@@ -659,6 +677,17 @@ public sealed class WaitCategorySummaryRow
 
     /// <summary>FinOps cost — proportional share of the window's budget by wait-time fraction (set by the loader).</summary>
     public decimal MonthlyCostShare { get; set; }
+
+    /// <summary>Maps the storage read's plain result onto the display row.</summary>
+    public static WaitCategorySummaryRow From(WaitCategorySummary d) => new()
+    {
+        Category = d.Category,
+        TotalWaitTimeMs = d.TotalWaitTimeMs,
+        WaitingTasks = d.WaitingTasks,
+        PctOfTotal = d.PctOfTotal,
+        TopWaitType = d.TopWaitType,
+        TopWaitTimeMs = d.TopWaitTimeMs
+    };
 }
 
 /// <summary>Top-20 query by total CPU (Optimization sub-tab).</summary>
@@ -679,6 +708,20 @@ public sealed class ExpensiveQueryRow
     /// <summary>The stored statement-level plan (query_stats.query_plan_xml, captured by Darling); opens in the Plan Viewer.</summary>
     public string? QueryPlanXml { get; set; }
     public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlanXml);
+
+    /// <summary>Maps the storage read's plain result onto the display row.</summary>
+    public static ExpensiveQueryRow From(ExpensiveQuery d) => new()
+    {
+        DatabaseName = d.DatabaseName,
+        TotalCpuMs = d.TotalCpuMs,
+        AvgCpuMsPerExec = d.AvgCpuMsPerExec,
+        TotalReads = d.TotalReads,
+        AvgReadsPerExec = d.AvgReadsPerExec,
+        Executions = d.Executions,
+        QueryPreview = d.QueryPreview,
+        FullQueryText = d.FullQueryText,
+        QueryPlanXml = d.QueryPlanXml
+    };
 }
 
 /// <summary>High-impact query row (High Impact sub-tab) — 80/20 impact score across six dimensions.</summary>
