@@ -14,7 +14,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// What the Overview's blocking lane names as its data start (#4966): the later of its two series' starts, each the earlier of the
+/// What the Overview's blocking chart names as its data start (#4966): the later of its two series' starts, each the earlier of the
 /// series' coverage and its earliest bar drawn. Pure logic, so no store and no WPF object is needed.
 /// </summary>
 public sealed class ViewerOverviewBlockingLaneDataStartTests
@@ -40,7 +40,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartTests
         Assert.Null(await ViewerBlockingLaneDataStart.ChooseAsync(Answer(null), Answer(null), NoBars, NoBars));
     }
 
-    /* The event-time rule: a bar earlier than the series' coverage moves that series' start back; the lane still names the later series. */
+    /* The event-time rule: a bar earlier than the series' coverage moves that series' start back; the chart still names the later series. */
     [Fact]
     public async Task ABarBeforeTheCoverage_MovesThatSeriesStartBack()
     {

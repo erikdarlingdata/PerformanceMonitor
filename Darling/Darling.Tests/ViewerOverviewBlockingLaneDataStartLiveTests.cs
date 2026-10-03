@@ -18,8 +18,8 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The Overview's blocking lane against a real store (#4966): the lane's two coverage probes and its two trend reads, run the way the
-/// control runs them, then the lane's own choice (<c>ViewerBlockingLaneDataStart.ChooseAsync</c>). Own-store: this reaches
+/// The Overview's blocking chart against a real store (#4966): the chart's two coverage probes and its two trend reads, run the way the
+/// control runs them, then the chart's own choice (<c>ViewerBlockingLaneDataStart.ChooseAsync</c>). Own-store: this reaches
 /// DARLING_TEST_PG only to create and drop its own database.
 /// </summary>
 public sealed class ViewerOverviewBlockingLaneDataStartLiveTests
@@ -30,7 +30,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartLiveTests
     private const int NeitherServerId = -496704;
 
     /* Added 2 days ago, its blocking rows start then and its deadlocks reach 3 days back (the first collection stores history): the blocking
-       series starts later, so the lane names it, true of both series. */
+       series starts later, so the chart names it, true of both series. */
     [Fact]
     public async Task TheLane_NamesTheLaterOfTheTwoSeriesStarts_AgainstDevPostgres()
     {
@@ -43,7 +43,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartLiveTests
     }
 
     /* Blocking rows reach 4 days back and deadlocks 3, both before the server's first collection: each series starts at its earliest bar, and the
-       lane names the later, the deadlocks'. */
+       chart names the later, the deadlocks'. */
     [Fact]
     public async Task ABarBeforeTheCoverage_MovesItsSeriesBack_ButTheLaterSeriesIsStillNamed_AgainstDevPostgres()
     {
@@ -53,7 +53,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartLiveTests
         Assert.Equal(store.End.AddDays(-3), await store.LaneStartAsync(EarlyBarServerId, ct));
     }
 
-    /* Added 3 days ago with no blocking and no deadlock row: only the deadlocks collector has run, so the lane names that series' start (the first collection). A server with neither collector names nothing. */
+    /* Added 3 days ago with no blocking and no deadlock row: only the deadlocks collector has run, so the chart names that series' start (the first collection). A server with neither collector names nothing. */
     [Fact]
     public async Task OneSeriesAnswering_IsNamed_AndNeitherNamesNothing_AgainstDevPostgres()
     {
@@ -93,7 +93,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartLiveTests
 
         public DateTime Start => End.AddDays(-7);
 
-        /// <summary>The lane's choice over the viewer's real reads, in the order the control makes them: the trends, then the two probes.</summary>
+        /// <summary>The chart's choice over the viewer's real reads, in the order the control makes them: the trends, then the two probes.</summary>
         public async Task<DateTime?> LaneStartAsync(int serverId, CancellationToken ct, bool deadlockBars = true)
         {
             var blocking = await Viewer.GetBlockingTrendAsync(serverId, Start, End);

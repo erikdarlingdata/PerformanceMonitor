@@ -14,7 +14,7 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// How the Overview's blocking lane is wired to say where its data starts (#4966), read from the source because the control needs a
+/// How the Overview's blocking chart is wired to say where its data starts (#4966), read from the source because the control needs a
 /// window to run: the probes sit outside the lanes' main <c>Task.WhenAll</c>, the note is fed from both series, and the banner is
 /// declared in an Auto row. The choice itself is in <c>ViewerOverviewBlockingLaneDataStartTests</c>.
 /// </summary>
@@ -68,11 +68,11 @@ public sealed class ViewerOverviewBlockingLaneDataStartPinTests
     [Fact]
     public void TheBanner_IsDeclaredInAnAutoRowAboveTheChart_StyledLikeTheTabsNotes()
     {
-        var lane = Between(Xaml(), "<!-- Lane 3: Blocking -->", "<!-- Lane 4");
-        Assert.Contains("<RowDefinition Height=\"Auto\"/>", lane, StringComparison.Ordinal);
-        Assert.Matches(@"x:Name=""BlockingLaneDataStartBanner""\s+Visibility=""Collapsed""", lane);
-        Assert.Contains("Background=\"#22FFAA00\"", lane, StringComparison.Ordinal);
-        Assert.Contains("<ScottPlot:WpfPlot Grid.Row=\"1\" Grid.Column=\"1\" x:Name=\"BlockingChart\"/>", lane, StringComparison.Ordinal);
+        var chart = Between(Xaml(), "<!-- Lane 3: Blocking -->", "<!-- Lane 4");
+        Assert.Contains("<RowDefinition Height=\"Auto\"/>", chart, StringComparison.Ordinal);
+        Assert.Matches(@"x:Name=""BlockingLaneDataStartBanner""\s+Visibility=""Collapsed""", chart);
+        Assert.Contains("Background=\"#22FFAA00\"", chart, StringComparison.Ordinal);
+        Assert.Contains("<ScottPlot:WpfPlot Grid.Row=\"1\" Grid.Column=\"1\" x:Name=\"BlockingChart\"/>", chart, StringComparison.Ordinal);
     }
 
     [Fact]
