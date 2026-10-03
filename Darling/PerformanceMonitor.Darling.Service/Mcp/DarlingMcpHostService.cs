@@ -1028,6 +1028,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             //
             //
             // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+            .WithGeminiCompatibleTools<DarlingMcpFinOpsTools>()
             // FinOps web parity (#4843), set B ends.
             /* Three call-tool filters, each registered ONCE and each covering every tool with no
                per-tool change — the seam that exists precisely so a decision about all ~147 reads
