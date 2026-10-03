@@ -48,7 +48,9 @@ public sealed class McpHostService : BackgroundService
 
         /* #4999: the health read judges each collector by the interval it is scheduled at on that server, the
            same answer the analysis tools bound their reads by (see RegisterAnalysisService below), not by the
-           cadence it shipped with. Null leaves every row on its shipped cadence. */
+           cadence it shipped with. Null leaves this instance on the app-wide answer every LocalDataService reads
+           (LocalDataService.DefaultCollectorFrequencyMinutes), which is none when nothing set one, so every row
+           then keeps its shipped cadence. */
         dataService.CollectorFrequencyMinutes = scheduleManager is null
             ? null
             : (serverId, collector) => scheduleManager.GetFrequencyForStorageServer(serverManager, serverId, collector);

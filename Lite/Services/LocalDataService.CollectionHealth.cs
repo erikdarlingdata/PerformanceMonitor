@@ -408,13 +408,34 @@ ORDER BY collector_name";
         return items;
     }
 
+    private Func<int, string, int?>? _collectorFrequencyMinutes;
+
     /// <summary>
     /// #4999: Lite's schedule store as the health read sees it: a server's EFFECTIVE interval for one collector
     /// (<c>ScheduleManager.GetFrequencyForStorageServer</c>, the per-server override else the global schedule),
     /// keyed by the storage server id this reader takes, or null for an unknown server or collector. Null here
     /// means no schedule store is wired, and every row keeps the shipped cadence it was judged by before.
+    /// <para>An instance's own value wins (the MCP host sets one); an instance that has none reads
+    /// <see cref="DefaultCollectorFrequencyMinutes"/>, the app-wide one, each time it is asked. The Collection
+    /// Health tab builds its own service, and nothing handed that one a resolver, so the tab banded a collector
+    /// moved to every 720 minutes against its shipped five while the MCP tool, on the host's instance, used 720.</para>
     /// </summary>
-    internal Func<int, string, int?>? CollectorFrequencyMinutes { get; set; }
+    internal Func<int, string, int?>? CollectorFrequencyMinutes
+    {
+        get => _collectorFrequencyMinutes ?? DefaultCollectorFrequencyMinutes;
+        set => _collectorFrequencyMinutes = value;
+    }
+
+    /// <summary>
+    /// #4999: the schedule store's answer for EVERY <see cref="LocalDataService"/> in the process, set once at
+    /// startup (the main window wires it next to the schedule manager it builds). It is read where the answer is
+    /// used, not copied when an instance is built, so an instance that exists before it is set, and one a future
+    /// caller builds without knowing it exists, judge a collector by its schedule the same as the rest: no
+    /// caller has to remember to hand a resolver to the service it makes. Null, as in a test, leaves every row on
+    /// its shipped cadence. Process-wide, like <c>AnalysisService.SeparatelyMonitoredDatabasesProvider</c>, so a
+    /// test that sets it runs alone.
+    /// </summary>
+    internal static Func<int, string, int?>? DefaultCollectorFrequencyMinutes { get; set; }
 
     /// <summary>
     /// #4999: stamps each catalog collector's row with the interval it is scheduled at on
