@@ -235,7 +235,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
     public void ARangeThatEndsBeforeTheFirstCollection_RaisesTheNotice_AtTheEarliestEventShown()
     {
         Assert.Equal(
-            "Showing since 2026-09-02 00:00",
+            "Showing since 2026-09-02 00:00:00",
             BannerOf(Task.FromResult<DateTime?>(null), RangeStart, [RangeStart.AddDays(2), RangeStart.AddDays(1)]));
     }
 
@@ -254,7 +254,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
     {
         DateTime?[] shown = [RangeStart.AddDays(1)];
 
-        Assert.Equal("Showing since 2026-09-02 00:00", BannerOf(Task.FromResult<DateTime?>(null), RangeStart, shown));
+        Assert.Equal("Showing since 2026-09-02 00:00:00", BannerOf(Task.FromResult<DateTime?>(null), RangeStart, shown));
         Assert.Null(BannerOf(Task.FromException<DateTime?>(new InvalidOperationException("the store went away")), RangeStart, shown));
     }
 
@@ -312,7 +312,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
         DateTime?[] shown = [RangeStart.AddDays(1), oldest];
 
         Assert.Null(BannerOf(covered, RangeStart, shown, rowCap: 3));
-        Assert.Equal("Showing since 2026-09-04 00:00", BannerOf(covered, RangeStart, shown, rowCap: 3, cappedSourceOldestUtc: oldest));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", BannerOf(covered, RangeStart, shown, rowCap: 3, cappedSourceOldestUtc: oldest));
     }
 
     /* A capped read dropped rows for certain, so its verdict has no slack, as the merged list's own cap has none. */
@@ -322,7 +322,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
         var oldest = RangeStart.AddMinutes(30);
 
         Assert.Equal(
-            "Showing since 2026-09-01 00:30",
+            "Showing since 2026-09-01 00:30:00",
             BannerOf(Task.FromResult<DateTime?>(null), RangeStart, [oldest], rowCap: 3, cappedSourceOldestUtc: oldest));
     }
 

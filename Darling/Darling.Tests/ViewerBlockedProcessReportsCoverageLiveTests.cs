@@ -132,7 +132,7 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
     }
 
     private static string Since(DateTime utc) =>
-        "Showing since " + utc.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+        "Showing since " + utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
     private sealed class Store : IAsyncDisposable
     {
