@@ -175,6 +175,8 @@ Darling runs this same shared collector set across a fleet of servers (latch sta
 
 Each Lite install has an eight-character id. Lite makes it at the first start and keeps it in `install-id.json`, in the data folder `%LOCALAPPDATA%\PerformanceMonitorLite-Data\`. The id appears in the name of each session that belongs to this install alone. Two installs that monitor one server never share such a session, so one install cannot drop or stop the other's.
 
+If Lite cannot read `install-id.json` (another program holds it open, or the read fails), it leaves the file as it is and uses no id until it can read it. If it cannot save a new id, it does not use that id either. With no id, Lite creates, starts and drops no session of its own, and the long-query trace records why as a fault. The next collection cycle tries again, at most once a minute. The log says it once as a Warning with the error, then at Debug until the id is read. A file that holds something other than an id record still gets a new id.
+
 #### The sessions
 
 - `PerformanceMonitor_Lite_<id>_LongQueryCompletions` is this install's long-query trace. Lite creates it while the opt-in `long_query_completions` collector is on. It is created with `STARTUP_STATE = OFF`, so it stays stopped after a server restart. Each check starts it again when it finds it stopped.
@@ -197,7 +199,7 @@ On premises, a registration with the trace off leaves the long-query session in 
 
 #### Read-only intent on Azure SQL Database
 
-A session cannot be created over a read-only connection. For a registration with read-only intent, Lite creates the session definition over a connection without the intent. The definition replicates to the read-only replica. Lite then starts the session over the registration's own connection. A drop stops the session on the replica first, then drops it on the primary. Microsoft describes the method in [Monitor read-only replicas with Extended Events](https://learn.microsoft.com/en-us/azure/azure-sql/database/read-scale-out).
+A session cannot be created over a read-only connection. For a registration with read-only intent, Lite creates the session definition over a connection without the intent. The definition replicates to the read-only replica. Lite then starts the session over the registration's own connection. A drop stops the session on the replica first, then drops it on the primary. Microsoft describes the method in [Monitor read-only replicas with Extended Events](https://learn.microsoft.com/en-us/azure/azure-sql/database/read-scale-out). On Hyperscale with several high-availability replicas, a read-only connection lands on one replica that the app cannot choose, so the stop reaches only that one. Microsoft Learn describes no way to address a single high-availability replica; it says the read-intent workload is distributed arbitrarily across them ([Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica)).
 
 A Managed Instance registration with read-only intent needs the trace started on the primary first. Lite does not do that, so the registration gets the read-only message (error 3906). A registration without the intent can land on a read-only database, such as a geo-secondary. It gets one clear message, and Lite retries the create every hour.
 
@@ -214,6 +216,7 @@ Each install uses one long-query session per database while the trace is on. It 
 - Two registrations of one instance in one install drop the old session twice.
 - A lost record costs one more drop. This happens when you recreate the Lite data folder.
 - On RDS Multi-AZ, the drop reaches the primary only. The copy on the standby stays stopped after a failover, unless an older install starts it.
+- On Hyperscale with several high-availability replicas, the stop reaches only the replica that a read-only connection lands on. A copy of the session that runs on another replica is not stopped. Microsoft Learn describes no way to address one high-availability replica: [Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica).
 - On Azure SQL Database, two registrations of one database with different logins share one session name, as before.
 
 #### Clones
@@ -254,7 +257,7 @@ IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N
     DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_BlockedProcess] ON DATABASE;
 ```
 
-If the registration used read-only intent, first stop the session over a read-only connection with `ALTER EVENT SESSION [name] ON DATABASE STATE = STOP;`. Then run the drop over a connection without the intent, which reaches the primary.
+If the registration used read-only intent, first stop the session over a read-only connection with `ALTER EVENT SESSION [name] ON DATABASE STATE = STOP;`. Then run the drop over a connection without the intent, which reaches the primary. On Hyperscale with several high-availability replicas, the stop reaches only the replica that a read-only connection lands on. A copy of the session that runs on another replica is not stopped. Microsoft Learn describes no way to address one high-availability replica: [Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica).
 
 The shared `PerformanceMonitor_Deadlock` and `PerformanceMonitor_BlockedProcess` sessions need the same statements with those names. Run them only when no other install monitors the server, because every install that monitors it uses them.
 

@@ -95,7 +95,7 @@ public sealed class InstallIdStoreTests : IDisposable
         Directory.GetFiles(dir).Select(f => Path.GetFileName(f)!).OrderBy(f => f, StringComparer.Ordinal).ToArray();
 
     /// <summary>Runs one <c>GetId</c> per caller on its own thread, released together so they genuinely overlap.</summary>
-    private static string[] ResolveTogether(IEnumerable<InstallIdStore> callers)
+    private static string?[] ResolveTogether(IEnumerable<InstallIdStore> callers)
     {
         var all = callers.ToArray();
         using var gate = new Barrier(all.Length);
@@ -208,6 +208,77 @@ public sealed class InstallIdStoreTests : IDisposable
     }
 
     /// <summary>
+    /// Two processes replace the same bad file at the same moment and must end on one id. The two stores here share the
+    /// process-wide resolve lock, so they take turns; the second finds the first's file and keeps its id. One Warning in
+    /// total, and one file left behind.
+    /// </summary>
+    [Fact]
+    public void TwoReplacersOfOneBadFile_EndWithTheSameId_AndOneWarning()
+    {
+        var dir = NewDir();
+        WriteFile(dir, "NOT-AN-ID", MachineA, SidA);
+        AppLogger.DrainBufferedLines();
+
+        var ids = ResolveTogether(new[] { StoreFor(dir), StoreFor(dir) });
+        var warnings = Warnings(AppLogger.DrainBufferedLines());
+
+        var id = Assert.Single(ids.Distinct());
+        Assert.True(InstallId.IsValid(id), $"made '{id}'");
+        AssertFile(dir, id!, MachineA, SidA);
+        Assert.Equal(new[] { InstallIdStore.FileName }, FilesIn(dir));
+        Assert.Single(warnings);
+    }
+
+    /// <summary>
+    /// A replacer that judged the file bad is slow, and another process replaces it first. The slow one must end on that
+    /// process's id and leave its file alone: the file at the path is no longer the one it judged, so an id of its own
+    /// put over it would leave the two processes with different ids.
+    /// </summary>
+    [Fact]
+    public void ASlowReplacer_AdoptsTheIdAnotherReplacerAlreadyMade_AndLeavesItsFileAlone()
+    {
+        var dir = NewDir();
+        WriteFile(dir, "NOT-AN-ID", MachineA, SidA);
+        string? first = null;
+        var slow = StoreFor(dir);
+        slow.BeforeReplace = () => first = StoreFor(dir).GetId();
+        AppLogger.DrainBufferedLines();
+
+        var id = slow.GetId();
+        var warnings = Warnings(AppLogger.DrainBufferedLines());
+
+        Assert.True(InstallId.IsValid(first), $"the other replacer made '{first}'");
+        Assert.Equal(first, id);
+        AssertFile(dir, first!, MachineA, SidA);
+        Assert.Equal(new[] { InstallIdStore.FileName }, FilesIn(dir));
+        var line = Assert.Single(warnings);
+        Assert.Contains(first!, line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Another replacer has already moved the bad file out of the way and has not yet made the new one. This replacer
+    /// finds no file at the path, makes the file itself, and the other replacer's own create then finds it and adopts
+    /// its id.
+    /// </summary>
+    [Fact]
+    public void AReplacerThatFindsTheBadFileAlreadyMovedAside_MakesTheFile_AndALaterReadFindsOneId()
+    {
+        var dir = NewDir();
+        WriteFile(dir, "NOT-AN-ID", MachineA, SidA);
+        var store = StoreFor(dir);
+        store.BeforeReplace = () => File.Move(IdFile(dir), IdFile(dir) + ".other-replacer");
+        AppLogger.DrainBufferedLines();
+
+        var id = store.GetId();
+        var warnings = Warnings(AppLogger.DrainBufferedLines());
+
+        Assert.True(InstallId.IsValid(id), $"made '{id}'");
+        AssertFile(dir, id!, MachineA, SidA);
+        Assert.Equal(id, StoreFor(dir).GetId());
+        Assert.Single(warnings);
+    }
+
+    /// <summary>
     /// Test 3, Lite half, bad id: an id that is not eight lowercase hex digits (wrong case, wrong length, not hex,
     /// missing, or not a string) makes a new id and exactly one Warning. The old value is not an id, so the
     /// Warning names it as "invalid" and does not repeat what the file held.
@@ -225,7 +296,7 @@ public sealed class InstallIdStoreTests : IDisposable
         WriteFile(dir, badId, MachineA, SidA);
         AppLogger.DrainBufferedLines();
 
-        var id = StoreFor(dir).GetId();
+        var id = StoreFor(dir).GetId()!;
         var warnings = Warnings(AppLogger.DrainBufferedLines());
 
         Assert.True(InstallId.IsValid(id), $"made '{id}'");
@@ -245,7 +316,7 @@ public sealed class InstallIdStoreTests : IDisposable
         WriteFile(dir, "0123abcd", MachineA, SidA);
         AppLogger.DrainBufferedLines();
 
-        var id = StoreFor(dir, MachineB, SidA).GetId();
+        var id = StoreFor(dir, MachineB, SidA).GetId()!;
         var warnings = Warnings(AppLogger.DrainBufferedLines());
 
         Assert.True(InstallId.IsValid(id), $"made '{id}'");
@@ -265,7 +336,7 @@ public sealed class InstallIdStoreTests : IDisposable
         WriteFile(dir, "0123abcd", MachineA, SidA);
         AppLogger.DrainBufferedLines();
 
-        var id = StoreFor(dir, MachineA, SidB).GetId();
+        var id = StoreFor(dir, MachineA, SidB).GetId()!;
         var warnings = Warnings(AppLogger.DrainBufferedLines());
 
         Assert.True(InstallId.IsValid(id), $"made '{id}'");
@@ -307,7 +378,7 @@ public sealed class InstallIdStoreTests : IDisposable
         File.WriteAllText(IdFile(dir), content);
         AppLogger.DrainBufferedLines();
 
-        var id = StoreFor(dir).GetId();
+        var id = StoreFor(dir).GetId()!;
         var warnings = Warnings(AppLogger.DrainBufferedLines());
 
         Assert.True(InstallId.IsValid(id), $"made '{id}'");
@@ -358,24 +429,155 @@ public sealed class InstallIdStoreTests : IDisposable
     }
 
     /// <summary>
-    /// A folder the file cannot be made in must not stop collection: the store answers with an id for this run,
-    /// the same one every time, and says so in one Warning.
+    /// An id that cannot be saved is never used: sessions made under it could not be found again after a restart. The
+    /// store answers with no id, says so in one Warning with the error, asks again no sooner than a minute later, and
+    /// logs the repeats below Warning until an id is saved.
     /// </summary>
     [Fact]
-    public void WhenTheFileCannotBeSaved_TheRunStillGetsOneStableId_AndOneWarning()
+    public void WhenTheFileCannotBeSaved_NoIdIsUsed_AndTheNextCycleTriesAgain()
     {
         var blocker = Path.Combine(NewDir(), "not-a-folder");
         File.WriteAllText(blocker, "a file where the data folder should be");
-        var store = StoreFor(Path.Combine(blocker, "data"));
+        var data = Path.Combine(blocker, "data");
+        var clock = new DateTime(2026, 10, 2, 12, 0, 0, DateTimeKind.Utc);
+        var store = StoreFor(data);
+        store.UtcNowForTests = () => clock;
         AppLogger.DrainBufferedLines();
 
-        var first = store.GetId();
-        var second = store.GetId();
-
-        Assert.True(InstallId.IsValid(first), $"made '{first}'");
-        Assert.Equal(first, second);
+        Assert.Null(store.GetId());
         var line = Assert.Single(Warnings(AppLogger.DrainBufferedLines()));
-        Assert.Contains(first, line, StringComparison.Ordinal);
+        Assert.Contains("could not be saved", line, StringComparison.Ordinal);
+        Assert.Contains("next cycle tries again", line, StringComparison.Ordinal);
+        Assert.Contains("could not be saved", store.Failure, StringComparison.Ordinal);
+
+        /* Within the minute: no id, and the disk is not touched. */
+        clock = clock.AddSeconds(59);
+        Assert.Null(store.GetId());
+        Assert.Equal(1, store.ResolveCount);
+
+        /* After it: another try, which fails the same way and does not warn again. */
+        clock = clock.AddSeconds(2);
+        Assert.Null(store.GetId());
+        Assert.Equal(2, store.ResolveCount);
+        Assert.Empty(Warnings(AppLogger.DrainBufferedLines()));
+
+        /* The folder is usable again: the next cycle after a minute saves an id and uses it. */
+        File.Delete(blocker);
+        clock = clock.AddSeconds(61);
+        var id = store.GetId();
+        Assert.True(InstallId.IsValid(id), $"made '{id}'");
+        Assert.Equal(id, ReadFile(data).Id);
+        Assert.Null(store.Failure);
+        Assert.Equal(id, store.GetId());
+        Assert.Equal(3, store.ResolveCount);
+    }
+
+    /// <summary>
+    /// A file that exists but cannot be read (here, held by another process past the wait) is never replaced: an id
+    /// made over it would drop the install's sessions from its own view. No id is used, one Warning says why, and the
+    /// file is left as it was.
+    /// </summary>
+    [Fact]
+    public void AFileLockedPastTheBudget_IsNeverReplaced_AndNoIdIsUsed()
+    {
+        var dir = NewDir();
+        WriteFile(dir, "0123abcd", MachineA, SidA);
+        var before = File.ReadAllText(IdFile(dir));
+        var store = StoreFor(dir);
+        store.LockedReadBudget = TimeSpan.FromMilliseconds(150);
+        AppLogger.DrainBufferedLines();
+
+        string? id;
+        using (new FileStream(IdFile(dir), FileMode.Open, FileAccess.Read, FileShare.Delete))
+        {
+            id = store.GetId();
+        }
+
+        Assert.Null(id);
+        Assert.Equal(before, File.ReadAllText(IdFile(dir)));
+        Assert.Equal(new[] { InstallIdStore.FileName }, FilesIn(dir));
+        var line = Assert.Single(Warnings(AppLogger.DrainBufferedLines()));
+        Assert.Contains("could not be read", line, StringComparison.Ordinal);
+        Assert.Contains("next cycle tries again", line, StringComparison.Ordinal);
+        Assert.Contains("could not be read", store.Failure, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// No id is not cached: calls within a minute answer with none without touching the file, and the first call after
+    /// it reads the file once it can be read, and keeps that id.
+    /// </summary>
+    [Fact]
+    public void AFileThatCouldNotBeRead_IsReadAgainOnTheFirstCallAfterAMinute()
+    {
+        var dir = NewDir();
+        WriteFile(dir, "0123abcd", MachineA, SidA);
+        var clock = new DateTime(2026, 10, 2, 12, 0, 0, DateTimeKind.Utc);
+        var store = StoreFor(dir);
+        store.LockedReadBudget = TimeSpan.FromMilliseconds(100);
+        store.UtcNowForTests = () => clock;
+        var held = new FileStream(IdFile(dir), FileMode.Open, FileAccess.Read, FileShare.Delete);
+        try
+        {
+            Assert.Null(store.GetId());
+        }
+        finally
+        {
+            held.Dispose();
+        }
+
+        /* Readable now, but the minute has not passed: still no id, and the file is not read. */
+        clock = clock.AddSeconds(59);
+        Assert.Null(store.GetId());
+        Assert.Equal(1, store.ResolveCount);
+
+        clock = clock.AddSeconds(2);
+        Assert.Equal("0123abcd", store.GetId());
+        Assert.Equal(2, store.ResolveCount);
+        Assert.Null(store.Failure);
+
+        Assert.Equal("0123abcd", store.GetId());
+        Assert.Equal(2, store.ResolveCount);
+    }
+
+    /// <summary>
+    /// A new id reaches the final path only by a move from a temp file, so a crash between the write and the move leaves
+    /// no file there, and the next start finds a first start rather than a half-written file to replace.
+    /// </summary>
+    [Fact]
+    public void ACrashBetweenTheWriteAndTheMove_LeavesNoFileAtTheFinalPath()
+    {
+        var dir = NewDir();
+        var store = StoreFor(dir);
+        string[] atTheCrash = [];
+        string? folderAtTheCrash = null;
+        store.BeforeMove = () =>
+        {
+            atTheCrash = FilesIn(dir);
+            folderAtTheCrash = NewDir("crash");
+            foreach (var file in Directory.GetFiles(dir))
+            {
+                File.Copy(file, Path.Combine(folderAtTheCrash, Path.GetFileName(file)));
+            }
+
+            throw new IOException("the process ended here");
+        };
+        AppLogger.DrainBufferedLines();
+
+        Assert.Null(store.GetId());
+
+        var temp = Assert.Single(atTheCrash);
+        Assert.StartsWith(InstallIdStore.FileName + ".", temp, StringComparison.Ordinal);
+        Assert.EndsWith(".tmp", temp, StringComparison.Ordinal);
+        Assert.False(File.Exists(IdFile(dir)), "an id was saved");
+
+        /* The next start, from what the crash left on disk: no final file, so a first start, not a replacement. */
+        Assert.NotNull(folderAtTheCrash);
+        Assert.False(File.Exists(IdFile(folderAtTheCrash)));
+        AppLogger.DrainBufferedLines();
+        var next = StoreFor(folderAtTheCrash).GetId();
+        Assert.True(InstallId.IsValid(next), $"made '{next}'");
+        Assert.Equal(next, ReadFile(folderAtTheCrash).Id);
+        Assert.Empty(Warnings(AppLogger.DrainBufferedLines()));
     }
 
     /// <summary>
