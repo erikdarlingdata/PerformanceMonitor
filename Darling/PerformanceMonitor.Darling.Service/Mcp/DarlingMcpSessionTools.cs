@@ -232,7 +232,9 @@ public sealed class DarlingMcpSessionTools
                 snapshots_returned = result.Count,
                 truncated,
                 order = "collection_time_desc",
-                oldest_returned_collection_time = shown[^1].CollectionTime.ToString("o"),
+                /* #4966: where the page's rows stop describes the window the page covers, so it prints like
+                   effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(shown[^1].CollectionTime),
                 newest_returned_collection_time = shown[0].CollectionTime.ToString("o"),
                 queries = result
             }, McpHelpers.JsonOptions);
@@ -320,7 +322,9 @@ public sealed class DarlingMcpSessionTools
                 hours_back,
                 tasks_returned = page.Count,
                 truncated,
-                oldest_returned_collection_time = page.Min(r => r.CollectionTime).ToString("o"),
+                /* #4966: where the page's rows stop describes the window the page covers, so it prints like
+                   effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime)),
                 newest_returned_collection_time = page.Max(r => r.CollectionTime).ToString("o"),
                 order = "collection_time_desc",
                 tasks = result

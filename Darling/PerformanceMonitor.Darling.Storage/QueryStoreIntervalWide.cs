@@ -728,14 +728,20 @@ FROM (
     /// <summary>#4689: the note a table-served Query Store read carries when the interval table started it later than
     /// the window. The MCP top-queries table route (one server) and Compose's panel (the servers in scope) both
     /// take their text from here. <paramref name="settingServer"/> names the server whose history set the common
-    /// start of a many-server read; when null the reason says "these servers".</summary>
-    public static string HistoryNote(DateTime effectiveStart, WideStartBound bound, bool manyServers, string? settingServer = null)
+    /// start of a many-server read; when null the reason says "these servers".
+    ///
+    /// <para>#4966: <paramref name="effectiveStart"/> is the start as its caller already prints it, in the same text
+    /// as its <c>effective_start</c> field (<c>McpHelpers.FormatEffectiveStart</c>: UTC, with the Z), and the note
+    /// names it as given. The page finds the instant in the sentence by the field's exact text to show it in the
+    /// browser's zone, so a note that spelled the instant on its own (a plain "o" of the store's naive floor has no
+    /// Z) was drawn in bare UTC above a grid of local times.</para></summary>
+    public static string HistoryNote(string effectiveStart, WideStartBound bound, bool manyServers, string? settingServer = null)
     {
         var scope = manyServers ? "the servers in scope" : "this server";
         var reason = bound switch
         {
             WideStartBound.FilledSince =>
-                $"The interval table began keeping complete history for {(!manyServers ? "this server" : settingServer ?? "these servers")} at {effectiveStart:o}.",
+                $"The interval table began keeping complete history for {(!manyServers ? "this server" : settingServer ?? "these servers")} at {effectiveStart}.",
             WideStartBound.TablePurgeEdge =>
                 "The interval table keeps 9 days, and intervals that began before its purge edge are not read.",
             WideStartBound.RawFloorSlowCadence =>
@@ -745,7 +751,7 @@ FROM (
             _ =>
                 "The read is clamped at the raw tier's retention floor: nothing older than it can be shown exactly.",
         };
-        return $"The window reaches further back than the Query Store history this store holds for {scope}. Nothing older than {effectiveStart:o} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. "
+        return $"The window reaches further back than the Query Store history this store holds for {scope}. Nothing older than {effectiveStart} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. "
             + reason;
     }
 

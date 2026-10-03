@@ -9,6 +9,9 @@
 using System;
 using System.IO;
 using System.Linq;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -35,9 +38,9 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
     public void HistoryNote_SlowCadence_IsExact()
     {
         var bound = QueryStoreIntervalWide.WideStartBound.RawFloorSlowCadence;
-        Assert.Equal(Lead1 + "this server" + Lead2 + "This server's" + Slow, QueryStoreIntervalWide.HistoryNote(Start, bound, false));
-        Assert.Equal(Lead1 + "the servers in scope" + Lead2 + "alpha's" + Slow, QueryStoreIntervalWide.HistoryNote(Start, bound, true, "alpha"));
-        Assert.Equal(Lead1 + "the servers in scope" + Lead2 + "A server's" + Slow, QueryStoreIntervalWide.HistoryNote(Start, bound, true));
+        Assert.Equal(Lead1 + "this server" + Lead2 + "This server's" + Slow, QueryStoreIntervalWide.HistoryNote(StartText, bound, false));
+        Assert.Equal(Lead1 + "the servers in scope" + Lead2 + "alpha's" + Slow, QueryStoreIntervalWide.HistoryNote(StartText, bound, true, "alpha"));
+        Assert.Equal(Lead1 + "the servers in scope" + Lead2 + "A server's" + Slow, QueryStoreIntervalWide.HistoryNote(StartText, bound, true));
     }
 
     [Fact]
@@ -45,8 +48,8 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
     {
         const string Reason = "The collection log does not yet cover the interval table's purge edge, so older intervals are not read from the interval table.";
         var bound = QueryStoreIntervalWide.WideStartBound.RawFloorLogNotYetCovering;
-        Assert.Equal(Lead1 + "this server" + Lead2 + Reason, QueryStoreIntervalWide.HistoryNote(Start, bound, false));
-        Assert.Equal(Lead1 + "the servers in scope" + Lead2 + Reason, QueryStoreIntervalWide.HistoryNote(Start, bound, true, "alpha"));
+        Assert.Equal(Lead1 + "this server" + Lead2 + Reason, QueryStoreIntervalWide.HistoryNote(StartText, bound, false));
+        Assert.Equal(Lead1 + "the servers in scope" + Lead2 + Reason, QueryStoreIntervalWide.HistoryNote(StartText, bound, true, "alpha"));
     }
 
     [Theory]
@@ -59,21 +62,40 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
     [InlineData(QueryStoreIntervalWide.WideStartBound.Window, false, Lead1 + "this server" + Lead2 + Clamp)]
     [InlineData(QueryStoreIntervalWide.WideStartBound.Window, true, Lead1 + "the servers in scope" + Lead2 + Clamp)]
     public void HistoryNote_IsExact_ForEveryBoundAndScope(QueryStoreIntervalWide.WideStartBound bound, bool manyServers, string expected) =>
-        Assert.Equal(expected, QueryStoreIntervalWide.HistoryNote(Start, bound, manyServers));
+        Assert.Equal(expected, QueryStoreIntervalWide.HistoryNote(StartText, bound, manyServers));
 
     [Fact]
     public void HistoryNote_NamesTheSettingServer_OnlyForManyServers()
     {
         var expected = Lead1 + "the servers in scope" + Lead2 + "The interval table began keeping complete history for alpha at " + StartText + ".";
-        Assert.Equal(expected, QueryStoreIntervalWide.HistoryNote(Start, QueryStoreIntervalWide.WideStartBound.FilledSince, manyServers: true, settingServer: "alpha"));
+        Assert.Equal(expected, QueryStoreIntervalWide.HistoryNote(StartText, QueryStoreIntervalWide.WideStartBound.FilledSince, manyServers: true, settingServer: "alpha"));
         Assert.Equal(
-            QueryStoreIntervalWide.HistoryNote(Start, QueryStoreIntervalWide.WideStartBound.FilledSince, manyServers: false),
-            QueryStoreIntervalWide.HistoryNote(Start, QueryStoreIntervalWide.WideStartBound.FilledSince, manyServers: false, settingServer: "alpha"));
+            QueryStoreIntervalWide.HistoryNote(StartText, QueryStoreIntervalWide.WideStartBound.FilledSince, manyServers: false),
+            QueryStoreIntervalWide.HistoryNote(StartText, QueryStoreIntervalWide.WideStartBound.FilledSince, manyServers: false, settingServer: "alpha"));
         /* The purge-edge and floor reasons name no server: the same text with or without one. */
         Assert.Equal(
-            QueryStoreIntervalWide.HistoryNote(Start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, manyServers: true),
-            QueryStoreIntervalWide.HistoryNote(Start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, manyServers: true, settingServer: "alpha"));
+            QueryStoreIntervalWide.HistoryNote(StartText, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, manyServers: true),
+            QueryStoreIntervalWide.HistoryNote(StartText, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, manyServers: true, settingServer: "alpha"));
     }
+
+    /// <summary>#4966: the sentence names the window's start in the one text <c>effective_start</c> prints (UTC, with
+    /// the Z), for an instant that came in naive, as the interval table's floor does. The web finds the instant in the
+    /// note by the field's exact text to show it in the browser's zone; a plain "o" of a naive instant has no Z, so it
+    /// found nothing and the note stayed in bare UTC above a grid of local times.</summary>
+    [Theory]
+    [MemberData(nameof(EveryBound))]
+    public void TheNote_NamesTheStartInTheTextEffectiveStartPrints_ForEveryBound(QueryStoreIntervalWide.WideStartBound bound)
+    {
+        var naive = new DateTime(2026, 8, 3, 12, 0, 0, DateTimeKind.Unspecified);
+        var printed = McpHelpers.FormatEffectiveStart(naive);
+        Assert.EndsWith("Z", printed, StringComparison.Ordinal);
+        /* Each surface formats the start where it calls the builder: the MCP top-queries table route, and Compose's panel. */
+        Assert.Contains(printed, DarlingMcpDataTools.QueryStoreTableNote(naive, bound), StringComparison.Ordinal);
+        Assert.Contains(printed, DarlingWebEndpoints.QueryStoreHistoryNote(naive, bound), StringComparison.Ordinal);
+    }
+
+    public static System.Collections.Generic.IEnumerable<object[]> EveryBound() =>
+        Enum.GetValues<QueryStoreIntervalWide.WideStartBound>().Select(b => new object[] { b });
 
     [Theory]
     [InlineData(QueryStoreIntervalWide.WideStartBound.Window, null)]
@@ -88,7 +110,7 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
     [Fact]
     public void ComposeForwarder_CarriesTheManyServersText() =>
         Assert.Equal(
-            QueryStoreIntervalWide.HistoryNote(Start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, manyServers: true),
+            QueryStoreIntervalWide.HistoryNote(StartText, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, manyServers: true),
             PerformanceMonitor.Darling.Service.DarlingWebEndpoints.QueryStoreHistoryNote(Start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge));
 
     /// <summary>The reason phrase is built from two halves so this file never matches its own scan, and the scan
