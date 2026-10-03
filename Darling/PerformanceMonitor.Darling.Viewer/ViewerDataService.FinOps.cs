@@ -41,6 +41,17 @@ public sealed class ProvisioningTrendRow
     public decimal P95CpuPct { get; set; }
     public decimal MemoryRatio { get; set; }
     public string Status { get; set; } = "";
+
+    public static ProvisioningTrendRow From(ProvisioningTrendDto dto) => new()
+    {
+        Day = dto.Day,
+        AvgCpuPct = dto.AvgCpuPct,
+        MaxCpuPct = dto.MaxCpuPct,
+        P95CpuPct = dto.P95CpuPct,
+        MemoryRatio = dto.MemoryRatio,
+        Status = dto.Status
+    };
+
     public string DayDisplay => Day.ToString("ddd MM/dd");
     public string StatusDisplay => Status == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : Status.Replace("_", " ");
 }
@@ -57,6 +68,20 @@ public sealed class MemoryGrantEfficiencyRow
     public long TotalWaiters { get; set; }
     public long TimeoutErrors { get; set; }
     public long ForcedGrants { get; set; }
+
+    public static MemoryGrantEfficiencyRow From(MemoryGrantEfficiencyDto dto) => new()
+    {
+        Day = dto.Day,
+        AvgGrantedMb = dto.AvgGrantedMb,
+        AvgUsedMb = dto.AvgUsedMb,
+        EfficiencyPct = dto.EfficiencyPct,
+        PeakGrantedMb = dto.PeakGrantedMb,
+        TotalGrantees = dto.TotalGrantees,
+        TotalWaiters = dto.TotalWaiters,
+        TimeoutErrors = dto.TimeoutErrors,
+        ForcedGrants = dto.ForcedGrants
+    };
+
     public string DayDisplay => Day.ToString("ddd MM/dd");
     public decimal WastedMb => AvgGrantedMb - AvgUsedMb;
 }
@@ -139,6 +164,28 @@ public sealed class UtilizationEfficiencyRow
     /// that is not applicable as n/a.</summary>
     public int EngineEdition { get; set; }
     public string ProvisioningStatus { get; set; } = "";
+
+    public static UtilizationEfficiencyRow From(UtilizationEfficiencyDto dto) => new()
+    {
+        AvgCpuPct = dto.AvgCpuPct,
+        MaxCpuPct = dto.MaxCpuPct,
+        P95CpuPct = dto.P95CpuPct,
+        CpuSamples = dto.CpuSamples,
+        TotalMemoryMb = dto.TotalMemoryMb,
+        TargetMemoryMb = dto.TargetMemoryMb,
+        PhysicalMemoryMb = dto.PhysicalMemoryMb,
+        BufferPoolMb = dto.BufferPoolMb,
+        MemoryRatio = dto.MemoryRatio,
+        ProvisioningStatus = dto.ProvisioningStatus,
+        MaxGrantWaiters = dto.MaxGrantWaiters,
+        GrantTimeouts = dto.GrantTimeouts,
+        ForcedGrants = dto.ForcedGrants,
+        GrantUtilizationPct = dto.GrantUtilizationPct,
+        MaxWorkersCount = dto.MaxWorkersCount,
+        CurrentWorkersCount = dto.CurrentWorkersCount,
+        CpuCount = dto.CpuCount,
+        EngineEdition = dto.EngineEdition
+    };
 
     /// <summary>
     /// False when the 24-hour window held no CPU sample at all. The row's <see cref="ProvisioningStatus"/> is then
@@ -369,6 +416,36 @@ public sealed class ServerPropertyRow
     private int? _coresPerSocket;
     private string? _hardwareUnavailableReason;
     private bool HostHardware => ServerHardwareScope.HardwareIsTheHosts(EngineEdition);
+
+    /// <summary>Builds the grid row from the Storage read; the display conversion (the row's own server clock) happens here.</summary>
+    public static ServerPropertyRow From(ServerInventoryDto dto, ServerClock clock) => new()
+    {
+        ServerId = dto.ServerId,
+        Clock = clock,
+        ServerName = dto.ServerName,
+        Edition = dto.Edition,
+        ProductVersion = dto.ProductVersion,
+        EngineEdition = dto.EngineEdition,
+        CpuCount = dto.CpuCount,
+        PhysicalMemoryMb = dto.PhysicalMemoryMb,
+        HardwareUnavailableReason = dto.HardwareUnavailableReason,
+        SocketCount = dto.SocketCount,
+        CoresPerSocket = dto.CoresPerSocket,
+        IsHadrEnabled = dto.IsHadrEnabled,
+        IsClustered = dto.IsClustered,
+        /* #2359: the CONFIG SNAPSHOT time, not a freshness heartbeat. */
+        InventoryAsOf = dto.InventoryAsOfUtc is DateTime asOf ? ViewerTimeHelper.ConvertToDisplay(asOf, ViewerTimeHelper.CurrentDisplayMode, clock) : null,
+        /* #4766: the UTC instants too, so the columns' text can name the offset in the repeated autumn hour. */
+        InventoryAsOfUtc = dto.InventoryAsOfUtc,
+        /* sqlserver_start_time is the server's LOCAL clock — shown as-is like Lite. */
+        SqlServerStartTime = dto.SqlServerStartTime,
+        HostOsVersion = dto.HostOsVersion,
+        AgReplicaRole = dto.AgReplicaRole,
+        IsEnabled = dto.IsEnabled,
+        MonthlyCost = dto.MonthlyCost,
+        LastCollected = dto.LastCollectedUtc is DateTime last ? ViewerTimeHelper.ConvertToDisplay(last, ViewerTimeHelper.CurrentDisplayMode, clock) : null,
+        LastCollectedUtc = dto.LastCollectedUtc
+    };
 
     public int? CpuCount { get => _cpuCount; set => _cpuCount = value ?? 0; }
     public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }

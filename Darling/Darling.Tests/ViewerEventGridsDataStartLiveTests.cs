@@ -24,12 +24,16 @@ namespace Darling.Tests;
 /// on the event's own time, Long Queries on the collection time while showing the event's, and a server's first collection
 /// stores the server's event history, so the notice names the earlier of the collector's coverage start and the earliest
 /// event the grid shows. Four stores per grid, each read through the same two
-/// calls the server tab makes (the grid's rows, the data-start probe) and the same rule it applies. Default Trace stores
-/// the server's own clock: every server here runs 5 hours behind UTC, so a notice that skipped the per-row conversion
-/// would name the history's start 5 hours early.
+/// calls the server tab makes (the grid's rows, the data-start probe) and then the tab's own banner step
+/// (<see cref="ViewerServerTab.ShowEventDataStartAsync"/>) on a real banner control, with the row cap the tab passes; each case
+/// reads what the banner says. Default Trace stores the server's own clock: every server here runs 5 hours behind UTC, so a
+/// notice that skipped the per-row conversion would name the history's start 5 hours early.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to CREATE
-   and DROP its own database through ScratchPostgres, then works entirely inside it. */
+   and DROP its own database through ScratchPostgres, then works entirely inside it. The banner's time text reads the process-wide
+   display mode, which QueryGridSeed.ReadBanner sets and restores; the viewer-time-statics collection serializes that with every
+   other class that flips the viewer's time statics. */
+[Collection("viewer-time-statics")]
 public sealed class ViewerSystemEventsDataStartLiveTests
 {
     public enum Grid
@@ -58,10 +62,9 @@ public sealed class ViewerSystemEventsDataStartLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var store = await SeededStore.CreateAsync(grid, ct);
 
-        var notice = await store.NoticeAsync(grid, NewServerId, ct);
+        var banner = await store.BannerAsync(grid, NewServerId, ct);
 
-        Assert.Equal(store.End.AddDays(-2), notice);
-        Assert.True(RawWindowFloor.IsTruncated(notice, store.Start));
+        Assert.Equal(QueryGridSeed.Since(store.End.AddDays(-2)), banner);
     }
 
     /* A quiet start: monitored for months, and the store covered the whole range, but the first event of the range came 5
@@ -75,10 +78,11 @@ public sealed class ViewerSystemEventsDataStartLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var store = await SeededStore.CreateAsync(grid, ct);
 
-        var notice = await store.NoticeAsync(grid, QuietServerId, ct);
+        var coverage = await store.CoverageAsync(grid, QuietServerId, ct);
+        var banner = await store.BannerAsync(grid, QuietServerId, ct);
 
-        Assert.NotNull(notice);
-        Assert.False(RawWindowFloor.IsTruncated(notice, store.Start));
+        Assert.NotNull(coverage);
+        Assert.Null(banner);
     }
 
     /* History that reaches before the coverage start: the server was added 2 days ago, and its first collection stored
@@ -94,11 +98,10 @@ public sealed class ViewerSystemEventsDataStartLiveTests
         await using var store = await SeededStore.CreateAsync(grid, ct);
 
         var coverage = await store.CoverageAsync(grid, HistoryServerId, ct);
-        var notice = await store.NoticeAsync(grid, HistoryServerId, ct);
+        var banner = await store.BannerAsync(grid, HistoryServerId, ct);
 
         Assert.Equal(store.End.AddDays(-2), coverage);
-        Assert.Equal(store.End.AddDays(-5), notice);
-        Assert.True(RawWindowFloor.IsTruncated(notice, store.Start));
+        Assert.Equal(QueryGridSeed.Since(store.End.AddDays(-5)), banner);
     }
 
     /* History that reaches the range start: the same recent server, its first collection stored events from 9 days ago,
@@ -113,11 +116,10 @@ public sealed class ViewerSystemEventsDataStartLiveTests
         await using var store = await SeededStore.CreateAsync(grid, ct);
 
         var coverage = await store.CoverageAsync(grid, DeepHistoryServerId, ct);
-        var notice = await store.NoticeAsync(grid, DeepHistoryServerId, ct);
+        var banner = await store.BannerAsync(grid, DeepHistoryServerId, ct);
 
         Assert.Equal(store.End.AddDays(-2), coverage);
-        Assert.NotNull(notice);
-        Assert.False(RawWindowFloor.IsTruncated(notice, store.Start));
+        Assert.Null(banner);
     }
 
     private sealed class SeededStore : IAsyncDisposable
@@ -145,8 +147,12 @@ public sealed class ViewerSystemEventsDataStartLiveTests
             _ => _viewer.GetDefaultTraceDataStartAsync(serverId, Start, End, ct),
         };
 
-        /// <summary>The instant the server tab's notice names: the probe's answer, and the grid's rows, through the tab's rule.</summary>
-        public async Task<DateTime?> NoticeAsync(Grid grid, int serverId, CancellationToken ct)
+        /// <summary>
+        /// The banner the server tab raises for the grid over the range: the probe's answer and the grid's rows, handed to the tab's own
+        /// step (<see cref="ViewerServerTab.ShowEventDataStartAsync"/>) on a real banner control with the cap the tab passes (Long
+        /// Queries only). Null when the banner is hidden.
+        /// </summary>
+        public async Task<string?> BannerAsync(Grid grid, int serverId, CancellationToken ct)
         {
             var coverage = await CoverageAsync(grid, serverId, ct);
             if (grid == Grid.SystemEvents)
@@ -155,7 +161,8 @@ public sealed class ViewerSystemEventsDataStartLiveTests
                    timestamp the shred reads off the event, which the seed keeps equal to the table's event_time. */
                 var errors = await _viewer.GetSevereErrorsAsync(serverId, Start, End, cancellationToken: ct);
                 Assert.NotEmpty(errors);
-                return ViewerEventDataStart.Of(coverage, ViewerEventDataStart.EarliestOf(errors.Select(r => r.EventTime)));
+                return QueryGridSeed.ReadBanner(banner => ViewerServerTab.ShowEventDataStartAsync(
+                    banner, Task.FromResult(coverage), "System Events", Start, errors.Select(r => r.EventTime)));
             }
 
             if (grid == Grid.LongQueries)
@@ -163,13 +170,14 @@ public sealed class ViewerSystemEventsDataStartLiveTests
                 /* The read windows on collection_time and shows event_time; a full page names its oldest row. */
                 var completions = await _viewer.GetRecentLongQueryCompletionsAsync(serverId, Start, End, cancellationToken: ct);
                 Assert.NotEmpty(completions);
-                return ViewerEventDataStart.Of(coverage, ViewerEventDataStart.EarliestOf(completions.Select(r => r.EventTime)),
-                    ViewerEventDataStart.ReadHitCap(completions.Count, ViewerDataService.LongQueriesRowCap));
+                return QueryGridSeed.ReadBanner(banner => ViewerServerTab.ShowEventDataStartAsync(
+                    banner, Task.FromResult(coverage), "Long Queries", Start, completions.Select(r => r.EventTime), ViewerDataService.LongQueriesRowCap));
             }
 
             var trace = await _viewer.GetDefaultTraceEventsAsync(serverId, Start, End, cancellationToken: ct);
             Assert.NotEmpty(trace);
-            return ViewerEventDataStart.Of(coverage, ViewerEventDataStart.EarliestOf(trace.Select(r => r.EventTimeUtc)));
+            return QueryGridSeed.ReadBanner(banner => ViewerServerTab.ShowEventDataStartAsync(
+                banner, Task.FromResult(coverage), "Default Trace", Start, trace.Select(r => r.EventTimeUtc)));
         }
 
         public static async Task<SeededStore> CreateAsync(Grid grid, CancellationToken ct)
@@ -306,10 +314,15 @@ public sealed class ViewerSystemEventsDataStartLiveTests
 /// <summary>
 /// The caps of the desktop viewer's two Blocking grids against a real store (#4966): a read that returns a full page of its
 /// newest rows (200 blocked process reports, 50 deadlocks) names its oldest row in the notice, even where the store covers
-/// the whole range, because the grid reaches back no further than that row. A read under its cap keeps the result it had.
+/// the whole range, because the grid reaches back no further than that row. A read under its cap keeps the result it had. Each
+/// case runs the tab's own banner step (<see cref="ViewerServerTab.ShowEventDataStartAsync"/>) on a real banner control with the
+/// grid's cap, and reads what the banner says.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to CREATE
-   and DROP its own database through ScratchPostgres, then works entirely inside it. */
+   and DROP its own database through ScratchPostgres, then works entirely inside it. The banner's time text reads the process-wide
+   display mode, which QueryGridSeed.ReadBanner sets and restores; the viewer-time-statics collection serializes that with every
+   other class that flips the viewer's time statics. */
+[Collection("viewer-time-statics")]
 public sealed class ViewerEventCapDataStartLiveTests
 {
     public enum Grid
@@ -337,15 +350,17 @@ public sealed class ViewerEventCapDataStartLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var store = await CapStore.CreateAsync(grid, seeded, ct);
 
-        var (coverage, shown) = await store.ReadAsync(grid, ct);
-        var notice = ViewerEventDataStart.Of(coverage, ViewerEventDataStart.EarliestOf(shown), ViewerEventDataStart.ReadHitCap(shown.Count, CapOf(grid)));
+        var read = await store.ReadAsync(grid, ct);
 
-        Assert.Equal(CapOf(grid), shown.Count);
-        Assert.Equal(store.End.AddMinutes(-(CapOf(grid) - 1)), notice);
-        Assert.True(RawWindowFloor.IsTruncated(notice, store.Start));
+        var oldest = store.End.AddMinutes(-(CapOf(grid) - 1));
+
+        Assert.Equal(CapOf(grid), read.Shown.Count);
+        Assert.Equal(QueryGridSeed.Since(oldest), store.Banner(grid, read));
+        /* The full page alone names it: the cap rule over the rows the grid shows, with no capped-source start beside it. */
+        Assert.Equal(QueryGridSeed.Since(oldest), store.Banner(grid, read, withCappedSource: false));
 
         /* The cap is what raises it: without the cap rule the store's coverage reaches the range start, and nothing shows. */
-        Assert.False(RawWindowFloor.IsTruncated(ViewerEventDataStart.Of(coverage, ViewerEventDataStart.EarliestOf(shown)), store.Start));
+        Assert.Null(store.Banner(grid, read, withCapRule: false));
     }
 
     /* One row under the cap: the read returned everything the range holds, so the coverage rule stands and the covered range
@@ -359,14 +374,18 @@ public sealed class ViewerEventCapDataStartLiveTests
         var seeded = CapOf(grid) - 1;
         await using var store = await CapStore.CreateAsync(grid, seeded, ct);
 
-        var (coverage, shown) = await store.ReadAsync(grid, ct);
-        var notice = ViewerEventDataStart.Of(coverage, ViewerEventDataStart.EarliestOf(shown), ViewerEventDataStart.ReadHitCap(shown.Count, CapOf(grid)));
+        var read = await store.ReadAsync(grid, ct);
 
-        Assert.Equal(seeded, shown.Count);
-        Assert.NotNull(notice);
-        Assert.Equal(ViewerEventDataStart.Of(coverage, ViewerEventDataStart.EarliestOf(shown)), notice);
-        Assert.False(RawWindowFloor.IsTruncated(notice, store.Start));
+        Assert.Equal(seeded, read.Shown.Count);
+        Assert.NotNull(read.Coverage);
+        Assert.Null(store.Banner(grid, read));
+        /* The cap rule changes nothing for a read under its cap: the covered range shows no notice with it or without it. */
+        Assert.Null(store.Banner(grid, read, withCapRule: false));
     }
+
+    /// <summary>What the grid's read and the probe returned: the probe's answer, the event time of every row shown, and, for the merged
+    /// Blocked Process Reports read, the oldest row of the source that filled its own cap (null when none did).</summary>
+    private sealed record CapRead(DateTime? Coverage, List<DateTime?> Shown, DateTime? CappedSourceStartUtc);
 
     private sealed class CapStore : IAsyncDisposable
     {
@@ -384,20 +403,31 @@ public sealed class ViewerEventCapDataStartLiveTests
 
         public DateTime Start => End.AddDays(-7);
 
-        /// <summary>The probe's answer and the event time of every row the grid's read returned.</summary>
-        public async Task<(DateTime? Coverage, List<DateTime?> Shown)> ReadAsync(Grid grid, CancellationToken ct)
+        /// <summary>The probe's answer and what the grid's read returned, for the range the viewer's default window draws.</summary>
+        public async Task<CapRead> ReadAsync(Grid grid, CancellationToken ct)
         {
             if (grid == Grid.BlockedProcessReports)
             {
                 var coverage = await _viewer.GetBlockedProcessReportsDataStartAsync(ServerId, Start, End, ct);
-                var rows = await _viewer.GetRecentBlockedProcessReportsAsync(ServerId, Start, End, cancellationToken: ct);
-                return (coverage, rows.Select(r => r.EventTime).ToList());
+                var read = await _viewer.ReadRecentBlockedProcessReportsAsync(ServerId, Start, End, cancellationToken: ct);
+                return new CapRead(coverage, read.Rows.Select(r => r.EventTime).ToList(), read.CappedSourceStartUtc);
             }
 
             var deadlockCoverage = await _viewer.GetDeadlocksDataStartAsync(ServerId, Start, End, ct);
             var deadlocks = await _viewer.GetRecentDeadlocksAsync(ServerId, Start, End, ct);
-            return (deadlockCoverage, deadlocks.Select(r => (DateTime?)r.DeadlockTime).ToList());
+            return new CapRead(deadlockCoverage, deadlocks.Select(r => (DateTime?)r.DeadlockTime).ToList(), null);
         }
+
+        /// <summary>
+        /// The banner the tab's own step (<see cref="ViewerServerTab.ShowEventDataStartAsync"/>) raises for what the read returned, on a real
+        /// banner control: with the cap the tab passes (and, for Blocked Process Reports, where the source that filled its own cap
+        /// starts, unless <paramref name="withCappedSource"/> is false), or with neither when <paramref name="withCapRule"/> is false.
+        /// Null when the banner is hidden.
+        /// </summary>
+        public string? Banner(Grid grid, CapRead read, bool withCapRule = true, bool withCappedSource = true) =>
+            QueryGridSeed.ReadBanner(banner => ViewerServerTab.ShowEventDataStartAsync(
+                banner, Task.FromResult(read.Coverage), grid == Grid.BlockedProcessReports ? "Blocked Process Reports" : "Deadlocks", Start, read.Shown,
+                withCapRule ? CapOf(grid) : null, withCapRule && withCappedSource ? read.CappedSourceStartUtc : null));
 
         public static async Task<CapStore> CreateAsync(Grid grid, int seeded, CancellationToken ct)
         {
