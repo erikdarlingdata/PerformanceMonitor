@@ -46,10 +46,10 @@ name: Claude Auto Review
 # The review posts
 # comments for its findings and ends every run with ONE formal verdict review (the VERDICT
 # PROTOCOL in the prompt below): changes-requested when a finding is substantive, a comment
-# review otherwise. This workflow itself is still deliberately NOT a required status check --
-# enforcement lives in claude-review-guard.yml, whose verdict arm fails while the newest verdict
-# is changes-requested, so a substantive finding becomes a red check instead of a comment that
-# auto-merge outruns (the #3470-#3473 train shipped six findings in one night that way; one was
+# review otherwise. The verdict's color lives in claude-review-guard.yml, not here: its verdict
+# arm fails while the newest verdict is changes-requested, so a substantive finding shows as a
+# failed check, which a branch rule can require, and not only as a comment (the #3470-#3473
+# train shipped six findings in one night as comments that auto-merge outran; one was
 # real). Since #3650 the job also fails ITSELF when the run submitted no verdict, with the cause in
 # its log and the transcript attached -- a green here means a verdict exists, and the guard is the
 # second line. It no-ops cleanly until the CLAUDE_CODE_OAUTH_TOKEN repo secret is set, and on fork

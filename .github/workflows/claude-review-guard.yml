@@ -691,7 +691,7 @@ jobs:
             if [ "$verdict_state" = "CHANGES_REQUESTED" ]; then
               echo "::error title=Review requested changes::The newest verdict by $REVIEW_BOT on"\
                 "PR #$PR is CHANGES_REQUESTED: $verdict_url. A substantive finding is a failed"\
-                "check now, not a comment auto-merge can outrun. Address the findings and push --"\
+                "check now, not only a comment. Address the findings and push --"\
                 "a follow-up reads the new commits and submits a fresh verdict, and"\
                 "newest-verdict-wins clears this check by itself. After a follow-up a push gets no"\
                 "review: add the re-review label for a fresh full review. Or, if the findings are"\
