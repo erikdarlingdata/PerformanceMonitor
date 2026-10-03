@@ -209,9 +209,10 @@ public partial class ServerTab : UserControl
         EngineGapNote(serverName, isAzureSqlDatabase, "system_health_events");
 
     /// <summary>
-    /// #4966: the "Showing since" banner of one grid that reads stored rows over the toolbar's window (the Collection Log,
-    /// the System Events and Default Trace grids, the Config Changes grids and Long Queries). It probes the UTC window the
-    /// grid's read took, the same <see cref="LocalDataService.GetTimeRange"/> pair
+    /// #4966: the "Showing since" banner of one grid that reads stored rows over the toolbar's window (the System Events and
+    /// Default Trace grids and the Config Changes grids: none of them caps its read; the Collection Log and Long Queries
+    /// read a capped page and go through <see cref="RefreshCappedGridBannerAsync{T}"/> over the same window, #4989). It probes
+    /// the UTC window the grid's read took, the same <see cref="LocalDataService.GetTimeRange"/> pair
     /// (<see cref="LocalDataService.GetQueriesTabWindowUtc"/>), through <see cref="RefreshWindowTruncatedBannerAsync"/>, so a
     /// probe that throws hides the banner and the refresh goes on. Each surface calls it after its rows are bound, from the one
     /// method its read runs through, so every read path of the surface (the sub-tab switch, a range change and the Refresh

@@ -170,6 +170,75 @@ FROM generate_series({Literal(firstUtc)}, {Literal(lastUtc)}, INTERVAL {everyMin
         _nextId += await cmd.ExecuteNonQueryAsync() + 1;
     }
 
+    /// <summary>
+    /// A long-query completion every <paramref name="everySeconds"/> seconds from <paramref name="firstEventUtc"/> to
+    /// <paramref name="lastEventUtc"/> (the event's own time, <c>event_time</c>), each stored by a run
+    /// <see cref="CollectedAfterSeconds"/> seconds later (<c>collection_time</c>). The two clocks differ on purpose: the
+    /// grid windows on the run's time and orders and caps on the event's, so a notice worded from the wrong one is
+    /// told apart from the right one.
+    /// </summary>
+    private async Task SeedLongQueriesEverySecondsAsync(DateTime firstEventUtc, DateTime lastEventUtc, int everySeconds)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $@"
+INSERT INTO long_query_completions (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, statement_text, duration_microseconds)
+SELECT {_nextId} + row_number() OVER (), g.t + INTERVAL {CollectedAfterSeconds} SECOND, {ServerId}, '{ServerName}', g.t, 'rpc_completed', 'Db',
+       'SELECT ' || CAST(row_number() OVER () AS VARCHAR), 5000000
+FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL {everySeconds} SECOND) AS g(t)";
+        _nextId += await cmd.ExecuteNonQueryAsync() + 1;
+    }
+
+    /// <summary>How long after a completion the run that stored it stamps its <c>collection_time</c>.</summary>
+    private const int CollectedAfterSeconds = 90;
+
+    private static string Since(DateTime instant) =>
+        "Showing since " + PerformanceMonitor.Ui.DisplayZone.Format(Naive(instant), TimeZoneInfo.Utc, "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary>
+    /// A capped grid's read at its cap, then the capped-grid banner step itself (<see cref="ServerTab.CappedGridBannerAsync{T}"/>,
+    /// the decision inside the tab's <c>RefreshCappedGridBannerAsync</c>): (visible, text, oldest row the grid returned,
+    /// rows it returned, whether the step handed the banner to the probing step). The probing step stands in for the shared
+    /// <c>RefreshWindowTruncatedBannerAsync</c>: it words the banner from the real probe's answer, which is awaited BEFORE the
+    /// STA block, because a continuation after an await runs on another thread and a WPF banner can only be written by the
+    /// thread that made it.
+    /// </summary>
+    private async Task<(bool Visible, string Text, DateTime Oldest, int Rows, bool Probed)> CappedBannerOverTheRealReadAsync<T>(
+        Func<LocalDataService, Task<List<T>>> read, QueryWindowRelation relation, int rowCap, Func<T, DateTime> rowTimeUtc,
+        DateTime startUtc, DateTime endUtc)
+    {
+        var service = new LocalDataService(_duckDb);
+        var rows = await read(service);
+        var probedFloor = await service.GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc, ServerClock.Utc);
+        var (visible, text, probed) = OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock();
+            var probeStepRan = false;
+            ServerTab.CappedGridBannerAsync(rows, rowCap, rowTimeUtc,
+                oldestRowShown => ServerTab.ApplyCappedWindowFloorToBanner(banner, oldestRowShown, startUtc, TimeZoneInfo.Utc),
+                () =>
+                {
+                    probeStepRan = true;
+                    ServerTab.ApplyWindowFloorToBanner(banner, probedFloor, startUtc, TimeZoneInfo.Utc);
+                    return Task.CompletedTask;
+                }).GetAwaiter().GetResult();
+            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text, probeStepRan);
+        });
+        return (visible, text, rows.Count == 0 ? default : rows.Min(rowTimeUtc), rows.Count, probed);
+    }
+
+    private Task<(bool Visible, string Text, DateTime Oldest, int Rows, bool Probed)> CappedLongQueriesBannerAsync(DateTime startUtc, DateTime endUtc) =>
+        CappedBannerOverTheRealReadAsync(
+            service => service.GetRecentLongQueryCompletionsAsync(ServerId, fromDate: startUtc, toDate: endUtc),
+            QueryWindowRelation.LongQueryCompletions, LocalDataService.LongQueryGridCap, ServerTab.LongQueryRowTimeUtc, startUtc, endUtc);
+
+    private Task<(bool Visible, string Text, DateTime Oldest, int Rows, bool Probed)> CappedCollectionLogBannerAsync(DateTime startUtc, DateTime endUtc) =>
+        CappedBannerOverTheRealReadAsync(
+            service => service.GetRecentCollectionLogAsync(ServerId, fromDate: startUtc, toDate: endUtc),
+            QueryWindowRelation.CollectionLog, LocalDataService.CollectionLogGridCap, row => row.CollectionTime, startUtc, endUtc);
+
     /// <summary>The probe, then the banner step the surface runs on the result: (visible, text). The probe reads the Default
     /// Trace through <paramref name="clock"/>, the monitored server's clock (#4989). A test that names none is a UTC server's,
     /// whatever clock the process holds as the active one.</summary>
@@ -569,10 +638,11 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     /// the rows are bound, through the shared helper and over the UTC window the read took. Every read path of these
     /// surfaces goes through that method: the sub-tab switch and the toolbar's range change reach the System Events,
     /// Config Changes and Long Queries loaders through <c>RefreshVisibleTabAsync</c>, and a loader's own Refresh button
-    /// calls the same refresh. Comments are stripped first, so a sentence that names the call cannot satisfy the pin.
+    /// calls the same refresh. Comments are stripped first, so a sentence that names the call cannot satisfy the pin. The
+    /// two grids that read a capped page, the Collection Log and Long Queries, are pinned by
+    /// <see cref="CappedSurfaces_RefreshTheirBanner_ThroughTheCapAwareStep_AfterTheRowsAreBound"/> instead (#4989).
     /// </summary>
     [Theory]
-    [InlineData("private async System.Threading.Tasks.Task RefreshCollectionHealthAsync(", "ServerTab.Refresh.cs", "CollectionLog", "CollectionLogWindowTruncatedBanner")]
     [InlineData("private async System.Threading.Tasks.Task LoadSchedulerIssuesAsync(", "ServerTab.SystemEvents.cs", "SystemHealthEvents", "SchedulerIssuesWindowTruncatedBanner")]
     [InlineData("private async System.Threading.Tasks.Task LoadSevereErrorsAsync(", "ServerTab.SystemEvents.cs", "SystemHealthEvents", "SevereErrorsWindowTruncatedBanner")]
     [InlineData("private async System.Threading.Tasks.Task LoadMemoryConditionsAsync(", "ServerTab.SystemEvents.cs", "SystemHealthEvents", "MemoryConditionsWindowTruncatedBanner")]
@@ -585,7 +655,6 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [InlineData("private async System.Threading.Tasks.Task LoadServerConfigChangesAsync(", "ServerTab.ConfigChanges.cs", "ServerConfig", "ServerConfigChangesWindowTruncatedBanner")]
     [InlineData("private async System.Threading.Tasks.Task LoadDatabaseConfigChangesAsync(", "ServerTab.ConfigChanges.cs", "DatabaseConfig", "DatabaseConfigChangesWindowTruncatedBanner")]
     [InlineData("private async System.Threading.Tasks.Task LoadTraceFlagChangesAsync(", "ServerTab.ConfigChanges.cs", "TraceFlags", "TraceFlagChangesWindowTruncatedBanner")]
-    [InlineData("private async Task RefreshLongQueriesAsync(", "ServerTab.LongQueries.cs", "LongQueryCompletions", "LongQueriesWindowTruncatedBanner")]
     public void EverySurface_HasABanner_RefreshedAfterTheRowsAreBound(string signature, string file, string relation, string banner)
     {
         var xaml = File.ReadAllText(ControlsFile("ServerTab.xaml"));
@@ -618,6 +687,278 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
         var body = code[start..Math.Min(code.Length, start + 600)];
         Assert.Contains("LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate)", body, StringComparison.Ordinal);
         Assert.Contains("RefreshWindowTruncatedBannerAsync(relation, banner, startUtc, endUtc)", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4989: the two grids that read a capped page, the Collection Log (the newest
+    /// <see cref="LocalDataService.CollectionLogGridCap"/> runs) and Long Queries (the newest
+    /// <see cref="LocalDataService.LongQueryGridCap"/> completions), refresh their notice through the cap-aware step
+    /// (<c>RefreshCappedGridBannerAsync</c>), not through the probe-only one: after the rows are bound, over the UTC window
+    /// the read took, handing the step the rows the grid shows, the constant that is the read's cap and the time each
+    /// row is capped on. Comments are stripped first. A grid that goes back to the probe-only step would again say
+    /// nothing about the rows its cap dropped, on a range the store covers.
+    /// </summary>
+    [Theory]
+    [InlineData("private async System.Threading.Tasks.Task RefreshCollectionHealthAsync(", "ServerTab.Refresh.cs", "CollectionLog", "CollectionLogWindowTruncatedBanner",
+        "collectionLogTask.Result, LocalDataService.CollectionLogGridCap, row => row.CollectionTime")]
+    [InlineData("private async Task RefreshLongQueriesAsync(", "ServerTab.LongQueries.cs", "LongQueryCompletions", "LongQueriesWindowTruncatedBanner",
+        "task.Result, LocalDataService.LongQueryGridCap, LongQueryRowTimeUtc")]
+    public void CappedSurfaces_RefreshTheirBanner_ThroughTheCapAwareStep_AfterTheRowsAreBound(
+        string signature, string file, string relation, string banner, string rowsCapAndTime)
+    {
+        var xaml = File.ReadAllText(ControlsFile("ServerTab.xaml"));
+        Assert.Contains($"x:Name=\"{banner}\"", xaml, StringComparison.Ordinal);
+
+        var code = StripComments(File.ReadAllText(ControlsFile(file)).Replace("\r\n", "\n"));
+        var start = code.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{signature} is not in {file}");
+        var next = Regex.Match(code[(start + signature.Length)..], @"\n    (private|internal|public) ");
+        var body = next.Success ? code.Substring(start, signature.Length + next.Index) : code[start..];
+
+        var window = "var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);";
+        var call = $"RefreshCappedGridBannerAsync(QueryWindowRelation.{relation}, {banner}, windowStart, windowEnd, {rowsCapAndTime})";
+        Assert.Contains(window, body, StringComparison.Ordinal);
+        Assert.Contains(call, body, StringComparison.Ordinal);
+        Assert.DoesNotContain("RefreshStoredWindowBannerAsync(", body, StringComparison.Ordinal);
+        var bind = body.IndexOf("UpdateData(", StringComparison.Ordinal);
+        Assert.True(bind >= 0 && bind < body.IndexOf(window, StringComparison.Ordinal) && body.IndexOf(window, StringComparison.Ordinal) < body.IndexOf(call, StringComparison.Ordinal),
+            $"{banner} must be refreshed after the grid's rows are bound, over the read's window");
+    }
+
+    /// <summary>
+    /// The read's <c>LIMIT</c> and the notice's cap are ONE value. The Long Queries read is written with
+    /// <see cref="LocalDataService.LongQueryGridCap"/> and not with a literal, so a read seeded past the cap comes back with
+    /// exactly that many rows, and the tab hands the same constant to the cap-aware step
+    /// (<see cref="CappedSurfaces_RefreshTheirBanner_ThroughTheCapAwareStep_AfterTheRowsAreBound"/>). The Collection Log's
+    /// default <c>maxRows</c> is <see cref="LocalDataService.CollectionLogGridCap"/> the same way. The MCP read that ranks by
+    /// duration, <c>GetSlowestLongQueryCompletionsAsync</c>, caps nothing by time and keeps its own limit.
+    /// </summary>
+    [Fact]
+    public async Task TheGridReads_LimitIsTheSameConstantTheBannerCaps()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedLongQueriesEverySecondsAsync(end.AddMinutes(-LocalDataService.LongQueryGridCap - 40), end.AddMinutes(-2), 60);
+        await SeedLogRunsAsync("wait_stats", end.AddMinutes(-LocalDataService.CollectionLogGridCap - 40), end, 1);
+
+        var service = new LocalDataService(_duckDb);
+        Assert.Equal(LocalDataService.LongQueryGridCap, (await service.GetRecentLongQueryCompletionsAsync(ServerId, fromDate: end.AddDays(-1), toDate: end)).Count);
+        Assert.Equal(LocalDataService.CollectionLogGridCap, (await service.GetRecentCollectionLogAsync(ServerId, fromDate: end.AddDays(-1), toDate: end)).Count);
+
+        var longQueries = File.ReadAllText(RepoFile("Lite", "Services", "LocalDataService.LongQueries.cs")).Replace("\r\n", "\n");
+        var grid = longQueries[longQueries.IndexOf("GetRecentLongQueryCompletionsAsync(int serverId", StringComparison.Ordinal)..longQueries.IndexOf("GetSlowestLongQueryCompletionsAsync(int serverId", StringComparison.Ordinal)];
+        Assert.Contains("LIMIT {LongQueryGridCap}", grid, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"LIMIT \d", grid);
+    }
+
+    /// <summary>
+    /// A Long Queries read that fills its cap names its OLDEST returned completion, worded at its own time
+    /// (<c>event_time</c>, 90 seconds before the run that stored it stamped the row), even over a range the store covers:
+    /// the collector's runs reach 30 days back, so the probe alone shows nothing for a 7-day range, but the grid shows only
+    /// the newest 200 of the 3 days of completions it holds, the oldest about 16.6 hours back. The probing step is not asked.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_AReadThatFillsItsCap_NamesItsOldestRow_AlsoOverARangeTheStoreCovers()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedLogRunsAsync("long_query_completions", end.AddDays(-30), end, 360);
+        await SeedLongQueriesEverySecondsAsync(end.AddDays(-3), end.AddMinutes(-2), 5 * 60);
+
+        Assert.False((await BannerForAsync(QueryWindowRelation.LongQueryCompletions, end.AddDays(-7), end)).Visible);
+
+        var (visible, text, oldest, rows, probed) = await CappedLongQueriesBannerAsync(end.AddDays(-7), end);
+
+        Assert.Equal(LocalDataService.LongQueryGridCap, rows);
+        Assert.InRange((end - oldest).TotalHours, 16, 17);
+        Assert.True(visible);
+        Assert.Equal(Since(oldest), text);
+        Assert.False(probed);
+    }
+
+    /// <summary>
+    /// The notice names the completion's own time, not the time its run stored it: the oldest row's
+    /// <c>collection_time</c> is 90 seconds later, and a notice worded from it would name a time after the oldest row shown.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_TheCappedNotice_IsWordedAtTheEventTime_NotTheTimeTheRunStoredIt()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedLongQueriesEverySecondsAsync(end.AddHours(-30), end.AddMinutes(-2), 5 * 60);
+
+        var rows = await new LocalDataService(_duckDb).GetRecentLongQueryCompletionsAsync(ServerId, fromDate: end.AddDays(-7), toDate: end);
+        var (visible, text, oldest, _, _) = await CappedLongQueriesBannerAsync(end.AddDays(-7), end);
+
+        Assert.True(visible);
+        Assert.Equal(Since(oldest), text);
+        Assert.Equal(oldest, rows.Min(row => row.EventTime));
+        Assert.NotEqual(Since(rows.Min(row => row.CollectionTime)), text);
+    }
+
+    /// <summary>
+    /// The row's time is its event time, and a completion with no event time falls back to the time its run was collected.
+    /// </summary>
+    [Fact]
+    public void LongQueryRowTimeUtc_IsTheEventTime_AndFallsBackToTheCollectionTime()
+    {
+        var collected = new DateTime(2026, 6, 3, 10, 2, 0);
+        var eventTime = new DateTime(2026, 6, 3, 10, 0, 30);
+
+        Assert.Equal(eventTime, ServerTab.LongQueryRowTimeUtc(new LongQueryCompletionRow { CollectionTime = collected, EventTime = eventTime }));
+        Assert.Equal(collected, ServerTab.LongQueryRowTimeUtc(new LongQueryCompletionRow { CollectionTime = collected, EventTime = null }));
+    }
+
+    /// <summary>
+    /// A read under its cap holds everything the store has in the range, so the coverage notice stands as before: a server
+    /// whose trace was added 48 hours ago says it shows since then, and the probing step is the one that words it.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_AReadUnderItsCap_KeepsTheCoverageNotice()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var added = end.AddHours(-48);
+        await SeedLogRunsAsync("long_query_completions", added, end, 5);
+        await SeedLongQueriesEverySecondsAsync(end.AddMinutes(-2 - 5 * 149), end.AddMinutes(-2), 5 * 60);
+
+        var (visible, text, _, rows, probed) = await CappedLongQueriesBannerAsync(end.AddDays(-7), end);
+
+        Assert.Equal(150, rows);
+        Assert.True(probed);
+        Assert.True(visible);
+        Assert.Equal(Since(added), text);
+    }
+
+    /// <summary>A range the store covers, read under the cap, shows no notice: the probing step answers the range's start.</summary>
+    [Fact]
+    public async Task LongQueries_ACoveredRangeUnderTheCap_ShowsNoNotice()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedLogRunsAsync("long_query_completions", end.AddDays(-30), end, 360);
+        await SeedLongQueriesEverySecondsAsync(end.AddHours(-5), end.AddHours(-4), 20 * 60);
+
+        var (visible, text, _, rows, probed) = await CappedLongQueriesBannerAsync(end.AddDays(-7), end);
+
+        Assert.InRange(rows, 1, LocalDataService.LongQueryGridCap - 1);
+        Assert.True(probed);
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>
+    /// A capped Long Queries read on a range of ONE HOUR whose oldest completion is later than the start shows its notice, at
+    /// that completion: a completion every 10 seconds fills the 200-row cap in about 33 minutes, so the grid starts about 25
+    /// minutes after the range does. The capped verdict gets no slack (the 90-minute slack is the coverage probe's, and
+    /// the probe is not asked).
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_AOneHourRange_WhoseGridHitsItsCap_ShowsTheNoticeAtItsOldestRow_WithNoSlack()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedLongQueriesEverySecondsAsync(end.AddMinutes(-40), end.AddMinutes(-2), 10);
+
+        /* What the probe-only step said of this read: nothing, the first row is inside the slack. */
+        Assert.False((await BannerForAsync(QueryWindowRelation.LongQueryCompletions, end.AddHours(-1), end)).Visible);
+
+        var (visible, text, oldest, rows, probed) = await CappedLongQueriesBannerAsync(end.AddHours(-1), end);
+
+        Assert.Equal(LocalDataService.LongQueryGridCap, rows);
+        Assert.InRange((end - oldest).TotalMinutes, 34, 36);
+        Assert.True(visible);
+        Assert.Equal(Since(oldest), text);
+        Assert.False(probed);
+    }
+
+    /// <summary>
+    /// A range of 90 minutes or less makes no probe call for Long Queries, which gets its coverage notice from the shared
+    /// probing step (<see cref="ServerTab.ProbeWindowFloorOrNullAsync"/>): such a window can never get one. A range past the
+    /// slack asks the probe once.
+    /// </summary>
+    [Theory]
+    [InlineData(60, 0)]
+    [InlineData(90, 0)]
+    [InlineData(91, 1)]
+    [InlineData(1440, 1)]
+    public async Task LongQueries_ARangeNoLongerThanTheSlack_MakesNoProbeCall(int rangeMinutes, int expectedProbeCalls)
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedLogRunsAsync("long_query_completions", end.AddDays(-2), end, 5);
+        var service = new LocalDataService(_duckDb);
+        var start = end.AddMinutes(-rangeMinutes);
+        var probeCalls = 0;
+
+        var floor = await ServerTab.ProbeWindowFloorOrNullAsync(
+            () =>
+            {
+                probeCalls++;
+                return service.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, ServerId, start, end, ServerClock.Utc);
+            },
+            "Long Queries", start, end);
+
+        Assert.Equal(expectedProbeCalls, probeCalls);
+        Assert.Equal(expectedProbeCalls == 0, floor is null);
+    }
+
+    /// <summary>
+    /// The Collection Log read fills its cap on a dense log (a run every minute for 12 hours is 720 rows, the cap 500), so
+    /// the notice names the oldest run the grid returned, over a range the store covers (an older run sits 20 days back,
+    /// so the probe alone shows nothing), and the probing step is not asked.
+    /// </summary>
+    [Fact]
+    public async Task CollectionLog_AReadThatFillsItsCap_NamesItsOldestRow_AlsoOverARangeTheStoreCovers()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedLogRunsAsync("wait_stats", end.AddDays(-20), end.AddDays(-20), 1);
+        await SeedLogRunsAsync("wait_stats", end.AddHours(-12), end, 1);
+
+        Assert.False((await BannerForAsync(QueryWindowRelation.CollectionLog, end.AddDays(-7), end)).Visible);
+
+        var (visible, text, oldest, rows, probed) = await CappedCollectionLogBannerAsync(end.AddDays(-7), end);
+
+        Assert.Equal(LocalDataService.CollectionLogGridCap, rows);
+        Assert.InRange((end - oldest).TotalMinutes, 498, 501);
+        Assert.True(visible);
+        Assert.Equal(Since(oldest), text);
+        Assert.False(probed);
+    }
+
+    /// <summary>A Collection Log read under its cap keeps the coverage notice, worded at the first run in the range.</summary>
+    [Fact]
+    public async Task CollectionLog_AReadUnderItsCap_KeepsTheCoverageNotice()
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var added = end.AddHours(-3);
+        await SeedLogRunsAsync("wait_stats", added, end, 5);
+
+        var (visible, text, _, rows, probed) = await CappedCollectionLogBannerAsync(end.AddDays(-7), end);
+
+        Assert.InRange(rows, 1, LocalDataService.CollectionLogGridCap - 1);
+        Assert.True(probed);
+        Assert.True(visible);
+        Assert.Equal(Since(added), text);
+    }
+
+    /// <summary>
+    /// The other twelve banners (the eight system_health grids, Default Trace and the three Config Changes grids) read
+    /// their whole window: none of their reads carries a row cap, so the probe alone words their notice. A <c>LIMIT</c>
+    /// added to one of these reads would need the cap-aware step the Collection Log and Long Queries use, and fails here
+    /// until it has it.
+    /// </summary>
+    [Theory]
+    [InlineData("LocalDataService.SystemEvents.cs")]
+    [InlineData("LocalDataService.ConfigChanges.cs")]
+    public void TheUncappedSurfaces_ReadNoRowCap(string file)
+    {
+        var code = StripComments(File.ReadAllText(RepoFile("Lite", "Services", file)).Replace("\r\n", "\n"));
+
+        Assert.DoesNotMatch(@"\bLIMIT\b", code);
+        Assert.DoesNotMatch(@"\bTOP\s*\(?\s*\d", code);
     }
 
     /// <summary>

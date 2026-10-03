@@ -501,7 +501,10 @@ public partial class ServerTab : UserControl
     /// matching MCP tool uses, so the grid and the tool never disagree about whether a window was cut short.
     /// Every surface that carries the banner reaches it here: the three Queries grids, Active Queries, Current Waits,
     /// the Query Heatmap, Memory Pressure Events and Plan Corrections (the last one through
-    /// <see cref="RefreshCappedGridBannerAsync{T}"/>, when its read is under its cap). Called from the sub-tab switch
+    /// <see cref="RefreshCappedGridBannerAsync{T}"/>, when its read is under its cap), and, over the toolbar's window, the
+    /// System Events, Default Trace and Config Changes grids (through <c>RefreshStoredWindowBannerAsync</c>) and the two
+    /// grids that read a capped page, the Collection Log and Long Queries (through the cap-aware step, like Plan
+    /// Corrections). Called from the sub-tab switch
     /// and full-refresh paths below, from the slicer handlers in ServerTab.Slicers.cs, from the Active Queries
     /// drill-downs in ServerTab.DrillDown.cs and from the helpers in ServerTab.QueriesDataStart.cs — a slicer drag
     /// re-reads the same grid over a narrower window, which
@@ -568,8 +571,8 @@ public partial class ServerTab : UserControl
     /// than the window's start), while a probed floor keeps <see cref="ApplyWindowFloorToBanner"/>'s 90-minute slack,
     /// which absorbs a first collection that lands a little after the window starts. The ONE
     /// decision for every capped grid: <see cref="RefreshCappedGridBannerAsync{T}"/> calls it, and the grids that read
-    /// the newest N rows (Plan Corrections now; Long Queries, Blocked Process Reports and Deadlocks as they adopt it)
-    /// pass their rows, their cap and the column their rows are windowed on.
+    /// the newest N rows (Plan Corrections, the Collection Log and Long Queries now; Blocked Process Reports and
+    /// Deadlocks as they adopt it) pass their rows, their cap and the time their rows are shown and capped on.
     /// </summary>
     internal static DateTime? CapAwareWindowFloor<T>(DateTime? probedFloor, IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc) =>
         rowCap > 0 && rows.Count >= rowCap ? rows.Min(rowTimeUtc) : probedFloor;
@@ -1076,7 +1079,9 @@ public partial class ServerTab : UserControl
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
             _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
             UpdateCollectorDurationChart(collectionLogTask.Result, hoursBack, fromDate, toDate);
-            await RefreshStoredWindowBannerAsync(QueryWindowRelation.CollectionLog, CollectionLogWindowTruncatedBanner, hoursBack, fromDate, toDate);
+            /* #4989: the grid reads only the newest CollectionLogGridCap runs, so its notice goes through the cap-aware step. */
+            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+            await RefreshCappedGridBannerAsync(QueryWindowRelation.CollectionLog, CollectionLogWindowTruncatedBanner, windowStart, windowEnd, collectionLogTask.Result, LocalDataService.CollectionLogGridCap, row => row.CollectionTime);
         }
         catch (Exception ex)
         {

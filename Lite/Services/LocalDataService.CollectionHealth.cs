@@ -431,6 +431,14 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// The Collection Log grid's row cap (#4989): the default <c>maxRows</c> of <see cref="GetRecentCollectionLogAsync"/>,
+    /// so the grid reads the newest this many runs of the window. The grid's "Showing since" notice reads it too, as the
+    /// cap that says the grid dropped older runs (<c>ServerTab.RefreshCappedGridBannerAsync</c>), so the read's
+    /// <c>LIMIT</c> and the notice's cap are the one value.
+    /// </summary>
+    public const int CollectionLogGridCap = 500;
+
+    /// <summary>
     /// Gets recent collection log entries for a server, most recent first, bounded to the tab's
     /// settable window. A preset ends "now" (<paramref name="hoursBack"/> from now); a custom range
     /// (<paramref name="fromDate"/>/<paramref name="toDate"/>, both naive UTC as the tab holds them, #4766) bounds
@@ -458,7 +466,7 @@ LIMIT 1";
     ///
     /// <para>The desktop Collection Log tab passes neither and is unaffected: no filter, newest first.</para>
     /// </summary>
-    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = 500, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null, string? status = null)
+    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = CollectionLogGridCap, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null, string? status = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
