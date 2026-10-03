@@ -243,6 +243,12 @@ public sealed class DarlingRunTimeSchedulingTests
     {
         var runAt = RunTimeTwelveHoursAway();
         var worker = MakeWorker(FleetRunTime(Collector, runAt));
+        var started = 0;
+        worker.RunOneBodyOverride = (_, _, _) =>
+        {
+            Interlocked.Increment(ref started);
+            return Task.FromResult(1);
+        };
         worker.SkipCreditFloorForTest.Resume(DateTime.UtcNow);
         var server = MakeServer(0);
         server.NextDue[Collector] = DateTime.UtcNow.AddMinutes(-90);
@@ -250,7 +256,10 @@ public sealed class DarlingRunTimeSchedulingTests
 
         await worker.RunDueCollectorsAsync(server, null!, TestContext.Current.CancellationToken);
 
+        /* The day is still not replayed: nothing is handed off, and the loss is not the gate's, so nothing is counted. */
+        Assert.Equal(0, Volatile.Read(ref started));
         Assert.Equal(0, worker.FleetGateStatsForTest!.Snapshot().Skipped);
+        Assert.Equal(0, worker.FleetGateStatsForTest!.Snapshot().Run);
     }
 
     [Fact]
