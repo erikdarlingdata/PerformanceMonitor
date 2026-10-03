@@ -33,6 +33,15 @@ public partial class ServerTab
     internal static DateTime DeadlockRowTimeUtc(DeadlockRow row) => row.DeadlockTime ?? row.CollectionTime;
 
     /// <summary>
+    /// #4966: the earliest time the Query Heatmap shows, the start of the first column it drew
+    /// (<see cref="HeatmapResult.TimeBuckets"/>), or null when it drew none. It is what the heatmap hands the shared banner
+    /// step as the earliest time shown (<see cref="EarlierOfFloorAndRowShown"/>): the same step the Darling viewer's heatmap
+    /// takes its bins' start times through.
+    /// </summary>
+    internal static DateTime? FirstColumnDrawn(HeatmapResult drawn) =>
+        drawn.TimeBuckets.Length == 0 ? null : drawn.TimeBuckets[0];
+
+    /// <summary>
     /// Plan Corrections (<c>v_plan_correction</c>, coverage from the <c>plan_correction</c> collector's runs: the
     /// table holds a row only while the engine has a recommendation, so a quiet first stretch is not a gap in what
     /// was collected). Called after the grid is bound, at the sub-tab switch and at the full refresh.
@@ -52,18 +61,24 @@ public partial class ServerTab
     /// <summary>
     /// The Query Heatmap draws one column per 5-minute bucket (<see cref="LocalDataService.HeatmapColumns"/>) from the
     /// range's start to its end, so a gap in the data is empty columns. When this notice shows, the range starts before
-    /// the data and the columns start at the bucket that holds the notice's time instead (#4991): the span before it is
+    /// the data and the columns start at the bucket that holds the data start instead (#4991): the span before it is
     /// what the notice explains. The read decides that with the same probe and verdict as this step, over the same
     /// window. The notice stays because an empty column cannot tell a server that did
     /// not exist yet from one that ran nothing. It reads <c>v_query_stats</c> like the Top Queries grid, so it asks the
     /// same <see cref="QueryWindowRelation.QueryStats"/> question over the same window. Called after the chart is
     /// drawn, at the sub-tab switch, at the full refresh and when the metric changes (the metric re-reads over the
     /// tab's current window).
+    ///
+    /// <para>#4966: the notice names the START of the first column the chart drew (<paramref name="drawn"/>), not the
+    /// coverage start inside it: it hands the shared step that column (<see cref="FirstColumnDrawn"/>), which words the
+    /// earlier of the two (<see cref="EarlierOfFloorAndRowShown"/>), as the Darling viewer's heatmap does with its bins'
+    /// start times. A coverage start 10:07 inside the 10:05 column names 10:05, the column on screen, and not a time up
+    /// to one column after it. The 90-minute slack and the skipped probe for a range it covers stay as they were.</para>
     /// </summary>
-    private System.Threading.Tasks.Task RefreshQueryHeatmapBannerAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    private System.Threading.Tasks.Task RefreshQueryHeatmapBannerAsync(HeatmapResult drawn, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-        return RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryHeatmapWindowTruncatedBanner, windowStart, windowEnd);
+        return RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryHeatmapWindowTruncatedBanner, windowStart, windowEnd, FirstColumnDrawn(drawn));
     }
 
     /// <summary>

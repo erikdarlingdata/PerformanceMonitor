@@ -403,8 +403,9 @@ public partial class ServerTab : UserControl
                         var hmData = await Task.Run(() => _dataService.GetQueryHeatmapAsync(_serverId, hmMetric, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
                         AppLogger.Info("ServerTab", $"[{_server.DisplayName}] Heatmap: {hmData.TimeBuckets.Length} time buckets, {hmData.Intensities.GetLength(0)}x{hmData.Intensities.GetLength(1)} grid");
                         UpdateQueryHeatmapChart(hmData);
-                        /* #4966: where the stored query_stats rows start, over the SAME UTC window the heatmap read. */
-                        await RefreshQueryHeatmapBannerAsync(hoursBack, fromDate, toDate);
+                        /* #4966: where the stored query_stats rows start, over the SAME UTC window the heatmap read, worded from the
+                           first column of the chart just drawn. */
+                        await RefreshQueryHeatmapBannerAsync(hmData, hoursBack, fromDate, toDate);
                         break;
                 }
                 return;
@@ -485,7 +486,7 @@ public partial class ServerTab : UserControl
             UpdateExecutionCountTrendChart(executionCountTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
             UpdateQueryHeatmapChart(heatmapTask.Result);
             /* #4966: see the Query Heatmap case of the sub-tab switch above. */
-            await RefreshQueryHeatmapBannerAsync(hoursBack, fromDate, toDate);
+            await RefreshQueryHeatmapBannerAsync(heatmapTask.Result, hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
@@ -527,7 +528,9 @@ public partial class ServerTab : UserControl
     /// time each is shown on. The notice then names the earlier of the probe's floor and that row
     /// (<see cref="EarlierOfFloorAndRowShown"/>): the Long Queries grid shows each completion at its event time, which on a
     /// server's first run can be up to <see cref="PerformanceMonitor.Collectors.CollectorContext.EventFallbackWindow"/> before the run that stored it,
-    /// and the probe measures the run's time. Every other caller leaves it out and gets the probe's floor as before.</para>
+    /// and the probe measures the run's time. The Query Heatmap hands the start of the first column it drew
+    /// (<see cref="FirstColumnDrawn"/>, #4966), which holds the data start and so starts up to one column before it.
+    /// Every other caller leaves it out and gets the probe's floor as before.</para>
     /// </summary>
     private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc, DateTime? earliestRowShownUtc = null)
     {
@@ -540,8 +543,9 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// #4989: the floor a capped grid's notice is worded from when its read stayed UNDER its cap: the probe's floor
     /// (<paramref name="probedFloor"/>), or the oldest row the grid shows (<paramref name="earliestRowShownUtc"/>) when that is
-    /// earlier, so a notice never names a time later than a row on the screen. The same rule as the Darling viewer's event
-    /// grids (<c>ViewerEventDataStart.Of</c>). A null floor stays null: the probe found nothing to report on, its failure
+    /// earlier, so a notice never names a time later than a row on the screen. The Query Heatmap passes the start of its
+    /// first column (#4966), so a notice never names a time later than a column on the screen either. The same rule as the
+    /// Darling viewer's event grids and heatmap (<c>ViewerEventDataStart.Of</c>). A null floor stays null: the probe found nothing to report on, its failure
     /// hides the banner, and a window no longer than the slack never gets one, and a row shown does not change any of those.
     /// For a grid whose rows are shown on the probe's own column (the Collection Log and Plan Corrections) the probe's floor is
     /// never later than its oldest row, so this returns the floor unchanged.

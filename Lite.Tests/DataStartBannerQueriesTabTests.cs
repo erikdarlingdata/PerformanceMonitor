@@ -756,13 +756,13 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
 
     /// <summary>
     /// #4991: a range that starts before the data shows the "Showing since" notice, and its columns start at the
-    /// 5-minute bucket that holds the notice's time, not at the range start: the span before the data is what the
+    /// 5-minute bucket that holds the first stored row, not at the range start: the span before the data is what the
     /// notice already explains, and a year-wide range over a few days of data would otherwise draw ~105,000 columns,
     /// nearly all of them empty. The end of the range is still the last column. The first row is at 10:17:40 on the
-    /// 4th, so its bucket is 10:15.
+    /// 4th, so its bucket is 10:15, and the notice names that first column's start (#4966), not the row's own time.
     /// </summary>
     [Fact]
-    public async Task QueryHeatmap_ARangeThatStartsBeforeTheData_StartsItsColumnsAtTheBucketHoldingTheNoticesTime()
+    public async Task QueryHeatmap_ARangeThatStartsBeforeTheData_StartsItsColumnsAtTheTimeTheNoticeNames()
     {
         await _duckDb.InitializeAsync();
         var start = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
@@ -771,9 +771,9 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         await SeedQueryStatsAsync(firstRow);
         await SeedQueryStatsAsync(end.AddHours(-1));
 
-        var (visible, text) = await BannerForAsync(QueryWindowRelation.QueryStats, start, end);
+        var (visible, text, _, _) = await HeatmapNoticeAsync(start, end);
         Assert.True(visible);
-        Assert.Equal("Showing since 2026-06-04 10:17:40", text);
+        Assert.Equal("Showing since 2026-06-04 10:15:00", text);
 
         var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
 
@@ -816,6 +816,153 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         Assert.Equal(buckets, result.TimeBuckets.Length);
         Assert.Equal(start, result.TimeBuckets[0]);
         Assert.Equal(end, result.TimeBuckets[^1]);
+    }
+
+    /// <summary>
+    /// The Query Heatmap's notice for a range, the way the tab words it (#4966): the real read of the heatmap, the real
+    /// probe behind the tab's probe step (<see cref="ServerTab.ProbeWindowFloorOrNullAsync"/>, which skips a window the
+    /// slack covers), then the tab's rule for the time the notice names (<see cref="ServerTab.EarlierOfFloorAndRowShown"/>
+    /// over <see cref="ServerTab.FirstColumnDrawn"/>, the pair <c>RefreshQueryHeatmapBannerAsync</c> hands the shared step)
+    /// and its banner step: (visible, text, the first column the heatmap drew, probe calls).
+    /// </summary>
+    private async Task<(bool Visible, string Text, DateTime? FirstColumn, int ProbeCalls)> HeatmapNoticeAsync(DateTime startUtc, DateTime endUtc)
+    {
+        var service = new LocalDataService(_duckDb);
+        var drawn = await service.GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: startUtc, toDate: endUtc);
+        var probeCalls = 0;
+        var probed = await ServerTab.ProbeWindowFloorOrNullAsync(
+            () =>
+            {
+                probeCalls++;
+                return service.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, ServerId, startUtc, endUtc);
+            },
+            "Query Heatmap", startUtc, endUtc);
+        var floor = ServerTab.EarlierOfFloorAndRowShown(probed, ServerTab.FirstColumnDrawn(drawn));
+        var (visible, text) = OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock();
+            ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
+            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text);
+        });
+        return (visible, text, drawn.TimeBuckets.Length == 0 ? null : drawn.TimeBuckets[0], probeCalls);
+    }
+
+    /// <summary>
+    /// #4966: the heatmap draws its first column from the 5-minute bucket that holds the data start, so a coverage start
+    /// inside that bucket is later than the column on screen. The notice names the earlier of the two, the first column's
+    /// start, as the Darling viewer's does, and not a time up to one bucket after the column. The range starts two days
+    /// before the data; the first row is 10:07 (and, on the bucket's edge, a second before the next bucket, and a second
+    /// before its own), so its column is 10:05 (and 10:05, 10:05, 10:00).
+    /// </summary>
+    [Theory]
+    [InlineData(10, 7, 0, 10, 5)]
+    [InlineData(10, 5, 0, 10, 5)]
+    [InlineData(10, 9, 59, 10, 5)]
+    [InlineData(10, 4, 59, 10, 0)]
+    public async Task QueryHeatmap_ACoverageStartInsideTheFirstColumn_NamesTheColumnsStart(int hour, int minute, int second, int columnHour, int columnMinute)
+    {
+        await _duckDb.InitializeAsync();
+        var end = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Unspecified);
+        var firstRow = new DateTime(2026, 6, 1, hour, minute, second, DateTimeKind.Unspecified);
+        await SeedQueryStatsAsync(firstRow);
+        await SeedQueryStatsAsync(firstRow.AddMinutes(50));
+
+        var (visible, text, firstColumn, probeCalls) = await HeatmapNoticeAsync(end.AddDays(-2), end);
+
+        var column = new DateTime(2026, 6, 1, columnHour, columnMinute, 0, DateTimeKind.Unspecified);
+        Assert.Equal(1, probeCalls);
+        Assert.Equal(column, firstColumn);
+        Assert.True(visible);
+        Assert.Equal(Since(column), text);
+    }
+
+    /// <summary>
+    /// #4966: a range the stored data covers still shows no notice when its start sits inside a column. The first column
+    /// (00:05) starts before the range does (00:07), and a row older than the range proves the store reached back to it.
+    /// </summary>
+    [Fact]
+    public async Task QueryHeatmap_ARangeTheCoverageCovers_ShowsNoNotice_WhateverColumnItStartsIn()
+    {
+        await _duckDb.InitializeAsync();
+        var start = new DateTime(2026, 6, 1, 0, 7, 0, DateTimeKind.Unspecified);
+        await SeedQueryStatsAsync(start.AddDays(-20));
+        await SeedQueryStatsAsync(start.AddDays(3).AddMinutes(17));
+
+        var (visible, text, firstColumn, _) = await HeatmapNoticeAsync(start, start.AddDays(7));
+
+        Assert.Equal(new DateTime(2026, 6, 1, 0, 5, 0, DateTimeKind.Unspecified), firstColumn);
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>
+    /// #4966: a range no longer than the 90-minute slack never gets the notice and makes no probe call, whatever column the
+    /// heatmap draws first. The first row here comes 7 minutes in.
+    /// </summary>
+    [Theory]
+    [InlineData(60)]
+    [InlineData(90)]
+    public async Task QueryHeatmap_ARangeNoLongerThanTheSlack_ShowsNoNotice_AndMakesNoProbeCall(int rangeMinutes)
+    {
+        await _duckDb.InitializeAsync();
+        var start = new DateTime(2026, 6, 1, 10, 0, 0, DateTimeKind.Unspecified);
+        await SeedQueryStatsAsync(start.AddMinutes(7));
+
+        var (visible, text, firstColumn, probeCalls) = await HeatmapNoticeAsync(start, start.AddMinutes(rangeMinutes));
+
+        Assert.Equal(start, firstColumn);
+        Assert.Equal(0, probeCalls);
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>
+    /// #4966: the slack still decides whether a longer range gets the notice at all. A first row 37 minutes into a six-hour
+    /// range is a quiet start, so the notice stays hidden and the columns keep the range start.
+    /// </summary>
+    [Fact]
+    public async Task QueryHeatmap_AFirstRowInsideTheSlackOfALongRange_ShowsNoNotice_AndKeepsTheRangeStart()
+    {
+        await _duckDb.InitializeAsync();
+        var start = new DateTime(2026, 6, 1, 10, 0, 0, DateTimeKind.Unspecified);
+        await SeedQueryStatsAsync(start.AddMinutes(37));
+
+        var (visible, text, firstColumn, probeCalls) = await HeatmapNoticeAsync(start, start.AddHours(6));
+
+        Assert.Equal(1, probeCalls);
+        Assert.Equal(start, firstColumn);
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>The first column of a drawn heatmap is the one the notice may name; a heatmap that drew none names nothing.</summary>
+    [Fact]
+    public void FirstColumnDrawn_IsTheFirstOfTheDrawnColumns_AndNullWhenNoneWasDrawn()
+    {
+        var first = new DateTime(2026, 6, 1, 10, 5, 0, DateTimeKind.Unspecified);
+
+        Assert.Equal(first, ServerTab.FirstColumnDrawn(new HeatmapResult { TimeBuckets = new[] { first, first.AddMinutes(5) } }));
+        Assert.Null(ServerTab.FirstColumnDrawn(new HeatmapResult()));
+    }
+
+    /// <summary>
+    /// #4966: the notice and the columns judge a first row the same way, on the first column's start. A first row 91 minutes
+    /// into a six-hour range is past the 90-minute slack by itself, but its column starts at 11:30, exactly at the slack, so
+    /// the notice stays hidden; the columns then keep the range start. Trimming them to a data start the notice does not
+    /// name would leave 90 minutes of the range off the chart with nothing saying so.
+    /// </summary>
+    [Fact]
+    public async Task QueryHeatmap_AFirstRowPastTheSlack_WhoseColumnStartsAtTheSlack_ShowsNoNotice_AndTrimsNoColumns()
+    {
+        await _duckDb.InitializeAsync();
+        var start = new DateTime(2026, 6, 1, 10, 0, 0, DateTimeKind.Unspecified);
+        await SeedQueryStatsAsync(start.AddMinutes(91));
+
+        var (visible, text, firstColumn, _) = await HeatmapNoticeAsync(start, start.AddHours(6));
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+        Assert.Equal(start, firstColumn);
     }
 
     /// <summary>
@@ -904,7 +1051,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
             @"RefreshPlanCorrectionsBannerAsync\(IReadOnlyCollection<PlanCorrectionRow> planCorrections, int hoursBack, DateTime\? fromDate, DateTime\? toDate\)\s*\{\s*var \(windowStart, windowEnd\) = LocalDataService\.GetQueriesTabWindowUtc\(hoursBack, fromDate, toDate\);\s*return RefreshCappedGridBannerAsync\(QueryWindowRelation\.PlanCorrection, PlanCorrectionsWindowTruncatedBanner, windowStart, windowEnd, planCorrections, LocalDataService\.PlanCorrectionGridCap, row => row\.CollectionTime\);",
             helpers);
         Assert.Matches(
-            @"RefreshQueryHeatmapBannerAsync\(int hoursBack, DateTime\? fromDate, DateTime\? toDate\)\s*\{\s*var \(windowStart, windowEnd\) = LocalDataService\.GetQueriesTabWindowUtc\(hoursBack, fromDate, toDate\);\s*return RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\.QueryStats, QueryHeatmapWindowTruncatedBanner, windowStart, windowEnd\);",
+            @"RefreshQueryHeatmapBannerAsync\(HeatmapResult drawn, int hoursBack, DateTime\? fromDate, DateTime\? toDate\)\s*\{\s*var \(windowStart, windowEnd\) = LocalDataService\.GetQueriesTabWindowUtc\(hoursBack, fromDate, toDate\);\s*return RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\.QueryStats, QueryHeatmapWindowTruncatedBanner, windowStart, windowEnd, FirstColumnDrawn\(drawn\)\);",
             helpers);
         Assert.Matches(
             @"RefreshMemoryPressureEventsBannerAsync\(int hoursBack, DateTime\? fromDate, DateTime\? toDate\)\s*\{\s*var \(windowStart, windowEnd\) = LocalDataService\.GetQueriesTabWindowUtc\(hoursBack, fromDate, toDate\);\s*return RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\.MemoryPressureEvents, MemoryPressureEventsWindowTruncatedBanner, windowStart, windowEnd\);",
@@ -996,13 +1143,19 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     {
         var refresh = Body(CodeOf("ServerTab.Refresh.cs"), "private async System.Threading.Tasks.Task RefreshQueriesAsync(");
         var drawn = Positions(refresh, "UpdateQueryHeatmapChart(");
-        var banner = Positions(refresh, "await RefreshQueryHeatmapBannerAsync(hoursBack, fromDate, toDate);");
+        /* #4966: each banner call is handed the very result its chart was drawn from, so the notice can name the first
+           column that chart draws. */
+        Assert.Contains("UpdateQueryHeatmapChart(hmData);", refresh, StringComparison.Ordinal);
+        Assert.Contains("UpdateQueryHeatmapChart(heatmapTask.Result);", refresh, StringComparison.Ordinal);
+        var banner = Positions(refresh, "await RefreshQueryHeatmapBannerAsync(hmData, hoursBack, fromDate, toDate);")
+            .Concat(Positions(refresh, "await RefreshQueryHeatmapBannerAsync(heatmapTask.Result, hoursBack, fromDate, toDate);"))
+            .OrderBy(position => position).ToList();
         Assert.Equal(2, drawn.Count);
         AssertEachFollowsItsBind(drawn, banner, "Query Heatmap (sub-tab switch and full refresh)");
 
         var picker = Body(CodeOf("ServerTab.Charts.cs"), "private async void HeatmapMetric_SelectionChanged(");
         var pickerDrawn = Positions(picker, "UpdateQueryHeatmapChart(result);");
-        var pickerBanner = Positions(picker, "await RefreshQueryHeatmapBannerAsync(hoursBack, fromDate, toDate);");
+        var pickerBanner = Positions(picker, "await RefreshQueryHeatmapBannerAsync(result, hoursBack, fromDate, toDate);");
         Assert.Single(pickerDrawn);
         AssertEachFollowsItsBind(pickerDrawn, pickerBanner, "Query Heatmap (metric picker)");
 
