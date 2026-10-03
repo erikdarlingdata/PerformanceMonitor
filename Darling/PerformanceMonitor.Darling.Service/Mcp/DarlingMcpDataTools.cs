@@ -1478,10 +1478,15 @@ public sealed class DarlingMcpDataTools
                existed as a service-log warning ("collection body has not completed … skipping relaunch").
                The verdict compares the collectors' combined execution demand (average duration amortized
                by cadence) against the minute the fastest cadence holds; heaviest_collectors names where
-               the budget goes, which is the actionable half of the answer. */
-            var pressure = SweepPressureClassifier.Compute(
-                rows.Select(r => (r.CollectorName, r.AvgDurationMs, r.P95DurationMs, r.FrequencyMinutes)));
-            var heaviest = rows
+               the budget goes, which is the actionable half of the answer.
+
+               #4999: of the collectors that run IN the body only. A collector that runs detached (every
+               daily one, and query_store, plan_correction, pg_wait_sampling) runs beside the body, so its
+               single-run cost is not a cost the body pays: charged to it, index_object_stats read as the
+               collector that owns a body it never ran in. One filter feeds both readings, so the roll-up and
+               the heaviest list describe the same population. */
+            var pressure = SweepPressureClassifier.Compute(SweepBodyCollectors(rows));
+            var heaviest = SweepBodyRows(rows)
                 .Where(r => r.FrequencyMinutes > 0 && r.AvgDurationMs > 0)
                 .OrderByDescending(r => r.AvgDurationMs / r.FrequencyMinutes)
                 .Take(3)
@@ -1718,6 +1723,25 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.FormatError("get_collection_health", ex);
         }
     }
+
+    /// <summary>
+    /// #4999: the collectors whose single-run cost the server's sequential pass pays: every row except those that
+    /// run detached from it. The test is <see cref="DarlingWorker.RunsDetached"/>, the one the worker's dispatch
+    /// uses, so this reading and the pass cannot disagree about what runs in the body. The cadence it is given is
+    /// the row's, which the health read stamped with the interval the collector is scheduled at on this server
+    /// (a per-server override, else the fleet-wide one, else the shipped default: the worker's own resolution),
+    /// so an override that moves a collector across the daily line moves it in this read exactly as it moves it
+    /// in the worker's dispatch.
+    /// </summary>
+    internal static IEnumerable<CollectorHealth> SweepBodyRows(IEnumerable<CollectorHealth> rows) =>
+        rows.Where(r => !DarlingWorker.RunsDetached(r.CollectorName, r.FrequencyMinutes));
+
+    /// <summary>
+    /// #4999: <see cref="SweepBodyRows"/> in the shape <see cref="SweepPressureClassifier.Compute"/> takes.
+    /// </summary>
+    internal static IEnumerable<(string CollectorName, double AvgDurationMs, double P95DurationMs, int FrequencyMinutes)> SweepBodyCollectors(
+        IEnumerable<CollectorHealth> rows) =>
+        SweepBodyRows(rows).Select(r => (r.CollectorName, r.AvgDurationMs, r.P95DurationMs, r.FrequencyMinutes));
 
     /* #4198: the default-argument size cut for get_collection_health, which unlike a row-limited tool has no
        row to drop — every collector on the server is one row, and a health read must never hide one that is
