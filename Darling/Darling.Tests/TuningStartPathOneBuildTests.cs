@@ -120,7 +120,7 @@ public sealed class TuningStartPathOneBuildTests
     [Fact]
     public void TheStartPathCatch_UsesTheTimeoutWarning_OnlyForABuildThatTimedOut()
     {
-        var src = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Storage", "PgTableTuning.cs");
+        var src = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "PgTableTuning.cs").ReplaceLineEndings("\n");
         Assert.Contains("statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal) && IsBuildTimeout(ex)", src, StringComparison.Ordinal);
         Assert.Contains("BuildTimeoutMessage(", src, StringComparison.Ordinal);
         Assert.Contains("Composer performance-tuning statement failed", src, StringComparison.Ordinal);
