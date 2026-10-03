@@ -754,6 +754,10 @@ WHERE des.name = @session_name;", connection))
     /// <summary>Stops the session when it runs on the connection's replica (<see cref="LongQueryCompletionsCollector.BuildStopSessionSql"/>).</summary>
     private static async Task StopLongQueryCompletionsAsync(SqlConnection connection, string sessionName, CancellationToken cancellationToken)
     {
+        /* Hyperscale limit (#4961): with several high-availability replicas, a read-only connection lands on one replica the app
+           cannot choose, so this stop reaches only that one, and a copy of the session that runs on another replica is not stopped.
+           Microsoft Learn describes no way to address one HA replica; it says the read-intent workload is "distributed arbitrarily
+           across all available HA replicas": https://learn.microsoft.com/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica */
         using var cmd = new SqlCommand(LongQueryCompletionsCollector.BuildStopSessionSql(sessionName), connection);
         cmd.CommandTimeout = 60;
         await cmd.ExecuteNonQueryAsync(cancellationToken);

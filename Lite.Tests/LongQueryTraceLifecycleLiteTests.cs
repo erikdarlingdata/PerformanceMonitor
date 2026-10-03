@@ -141,7 +141,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
             traceOn,
             engineEdition: 3);
 
-    private async Task<Rig> BuildRigAsync(ServerConnection server, bool traceOn, int engineEdition = 5, bool withInstallId = true)
+    private async Task<Rig> BuildRigAsync(ServerConnection server, bool traceOn, int engineEdition = 5, bool withInstallId = true, InstallIdStore? idStore = null)
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         await duckDb.InitializeAsync();
@@ -153,7 +153,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         var schedules = new ScheduleManager(_configDir);
         schedules.UpdateSchedule("long_query_completions", enabled: traceOn);
 
-        return WireRig(duckDb, servers, schedules, server, withInstallId);
+        return WireRig(duckDb, servers, schedules, server, withInstallId, idStore);
     }
 
     /// <summary>
@@ -170,13 +170,13 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         return after;
     }
 
-    private Rig WireRig(DuckDbInitializer duckDb, ServerManager servers, ScheduleManager schedules, ServerConnection server, bool withInstallId)
+    private Rig WireRig(DuckDbInitializer duckDb, ServerManager servers, ScheduleManager schedules, ServerConnection server, bool withInstallId, InstallIdStore? idStore = null)
     {
         var rig = new Rig
         {
             Service = new RemoteCollectorService(
                 duckDb, servers, schedules,
-                installIdStore: withInstallId ? new InstallIdStore(_configDir, "test-machine", null) : null),
+                installIdStore: idStore ?? (withInstallId ? new InstallIdStore(_configDir, "test-machine", null) : null)),
             Servers = servers,
             Schedules = schedules,
             Server = server,
@@ -1315,6 +1315,39 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
         /* The one DROP statement in the file is the builder's. */
         Assert.Equal(1, source.Split("DROP EVENT SESSION [", StringSplitOptions.None).Length - 1);
         Assert.True(source.IndexOf("DROP EVENT SESSION [", StringComparison.Ordinal) > builder);
+    }
+
+    /// <summary>
+    /// A store that could not give an id (its folder cannot hold the file) is not the same as a host built without a store: the
+    /// fault says the id could not be saved and that the next cycle tries again, and the cycle after the folder is usable
+    /// creates the session under the id it saved.
+    /// </summary>
+    [Fact]
+    public async Task AnInstallIdThatCouldNotBeSaved_IsSaidInTheFault_AndTheNextCycleCreatesTheSession()
+    {
+        var blocker = Path.Combine(_configDir, "not-a-folder");
+        File.WriteAllText(blocker, "a file where the data folder should be");
+        var idClock = new DateTime(2026, 10, 2, 12, 0, 0, DateTimeKind.Utc);
+        var store = new InstallIdStore(Path.Combine(blocker, "data"), "test-machine", null) { UtcNowForTests = () => idClock };
+        var rig = await BuildRigAsync(
+            new ServerConnection { ServerName = Host, DisplayName = "lqtrace-idsave" }, traceOn: true, engineEdition: 5, withInstallId: false, idStore: store);
+        Assert.Null(rig.InstallId);
+
+        await rig.ReconcileAsync();
+
+        Assert.Empty(rig.Calls);
+        var fault = rig.Service.LongQueryTraceFaultState(rig.Server.Id);
+        Assert.NotNull(fault);
+        Assert.Contains("could not be saved", fault!.Message, StringComparison.Ordinal);
+        Assert.Contains("next cycle tries again", fault.Message, StringComparison.Ordinal);
+
+        File.Delete(blocker);
+        idClock = idClock.AddSeconds(61);
+        await rig.ReconcileAsync();
+
+        Assert.Null(rig.Service.LongQueryTraceFaultState(rig.Server.Id));
+        Assert.NotEmpty(rig.Created);
+        Assert.All(rig.Names, name => Assert.Contains(rig.Service.GetInstallId()!, name, StringComparison.Ordinal));
     }
 
     [Theory]
