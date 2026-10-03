@@ -793,11 +793,21 @@ A **file-only** block (not seeded into the control plane): it describes the depl
 
 There are deliberately **no collection-schedule or retention settings** in `darling.json`. The service consumes the shared per-collector defaults (`CollectorScheduleDefaults`) — the same cadences and retention horizons a fresh Lite install uses, identity-pinned by tests so the two editions cannot drift. If a schedule knob is ever genuinely needed, it will be added then, not speculatively.
 
-The overrides that do exist live in the **store**, not the file: `config.config_collector_schedules` is a sparse table where an absent row means "the code default", and the Viewer's Collector Schedules window is where cadence, retention, database scope, the enabled flag and the run time are edited, per fleet or per server. The two columns an operator *must* be able to change without a desktop are the enabled flag and the run time. The next two sections are those paths.
+The overrides that do exist live in the **store**, not the file. `config.config_collector_schedules` is a sparse table where an absent row means "the code default". The Viewer's Collector Schedules window is where cadence, retention, database scope, the enabled flag and the run time are edited, per fleet or per server. The two columns an operator *must* be able to change without a desktop are the enabled flag and the run time. The next two sections are those paths.
 
 #### What the run time sets
 
-The run time sets one thing: the time of day a collector that runs once a day or less often starts. The `config.config_collector_run_times` table holds it, one row per collector (fleet-wide or for one server), as minutes after midnight on the *monitored server's own clock*; a collector with no row has no run time. The Viewer's Collector Schedules window writes it in the same Save as the schedule rows, and its Reset to Defaults, a server's Use default schedule and Apply Default to All Servers delete the run times of the schedule they reset (the shipped defaults have no fixed time). A Viewer released before the table existed resets the schedule rows only, so a run time set here survives a Reset done in an older one. The Viewer and the CLI take it as a 24-hour `HH:MM` time such as `02:00`.
+The run time sets one thing: the time of day a collector that runs once a day or less often starts. The `config.config_collector_run_times` table holds it, one row per collector (fleet-wide or for one server). The table stores it as minutes after midnight on the *monitored server's own clock*. A collector with no row has no run time.
+
+The Viewer's Collector Schedules window writes the run time in the same Save as the schedule rows. Three actions delete the run times of the schedule they reset (the shipped defaults have no fixed time):
+
+- The window's Reset to Defaults.
+- A server's Use default schedule.
+- Apply Default to All Servers.
+
+A Viewer released before the table existed resets the schedule rows only. A run time set here therefore survives a Reset done in an older Viewer.
+
+The Viewer and the CLI take the run time as a 24-hour `HH:MM` time such as `02:00`.
 
 Without a run time, such a collector starts when the service happened to start. That can be the busiest hour of the server's day. With one, it starts in the hour you chose.
 
@@ -849,7 +859,7 @@ The verb refuses a time that is not a 24-hour `HH:MM` time. It also refuses a ti
 
 After the write the verb reads the collector's rows back from the store and prints them. A row that carries a time prints `run_at=02:00 server time`, so what you see is what the service will resolve. The exit codes, `--config` and the managed-mode rule are those of `--enable-collector`.
 
-The write needs the run-time table, which the service adds when it starts. On a store the service has not migrated yet, the verb says so, tells you to start the service once to migrate it and run the command again, exits `1` and changes nothing. `--enable-collector` and `--disable-collector` read back without the `run_at=` part instead of failing.
+The write needs the run-time table, which the service adds when it starts. If the service has not migrated the store yet, the verb says so. It tells you to start the service once to migrate the store, then run the command again. It exits `1` and changes nothing. `--enable-collector` and `--disable-collector` read back without the `run_at=` part instead of failing.
 
 ### Drop the Extended Events sessions a removed server left behind (`--drop-xe-sessions`)
 
