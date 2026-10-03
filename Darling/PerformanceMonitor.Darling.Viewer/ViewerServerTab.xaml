@@ -3189,7 +3189,19 @@
              shreds it with the Common SystemHealthParser, and shows only the sp_HealthParser-significant
              rows (SystemEventSignificance). Event times render machine-local (the XE @timestamp). -->
         <TabItem Header="System Events">
-            <TabControl x:Name="SystemEventsSubTabControl" Background="Transparent" BorderThickness="0"
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <!-- "Showing since <start>" above the sub-tab control, for the nine grids that read system_health_events and
+                     default_trace_events: the earlier of the collectors' coverage and the earliest event shown (#4966). The two
+                     chart sub-tabs take it down. -->
+                <TextBlock x:Name="SystemEventsTruncationBanner" Grid.Row="0" Visibility="Collapsed"
+                           Padding="8,4" FontWeight="Bold"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Background="#22FFAA00"/>
+            <TabControl Grid.Row="1" x:Name="SystemEventsSubTabControl" Background="Transparent" BorderThickness="0"
                         ItemContainerStyle="{DynamicResource SubTabItemStyle}"
                         SelectionChanged="SystemEventsSubTabs_SelectionChanged">
 
@@ -3561,6 +3573,7 @@
                     </Grid>
                 </TabItem>
             </TabControl>
+            </Grid>
         </TabItem>
 
         <!-- Latches & Spinlocks Tab — the Dashboard-parity port of ResourceMetricsContent's Latch Stats /

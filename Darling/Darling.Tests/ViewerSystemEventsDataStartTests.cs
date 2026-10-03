@@ -96,7 +96,7 @@ public sealed class ViewerSystemEventsDataStartTests
         var body = MethodBody(ViewerFile("ViewerServerTab.SystemEvents.cs"), @"private async Task LoadSystemEventsAsync\(");
 
         Assert.Equal(1, Matches(body,
-            @"case SystemEventsContentionSubTabIndex:\s*default:\s*SystemEventsTruncationBanner\.Visibility = Visibility\.Collapsed;\s*await LoadSystemHealthChartsAsync\(\);"));
+            @"case SystemEventsContentionSubTabIndex:\s*default:\s*(?:/\*.*?\*/\s*)?SystemEventsTruncationBanner\.Visibility = Visibility\.Collapsed;\s*await LoadSystemHealthChartsAsync\(\);"));
     }
 
     [Fact]
@@ -212,6 +212,17 @@ public sealed class ViewerSystemEventsDataStartTests
             Naive(2026, 3, 8, 1, 30), Naive(2026, 3, 8, 3, 30));
 
         Assert.Equal(Naive(2026, 3, 8, 6, 30), notice);
+    }
+
+    /* Rows that start inside the range: the first event came after the coverage began (Sep 6 at 10:00 local, 15:00 UTC, against a
+       coverage on Sep 5), so the notice reads back the coverage start. */
+    [Fact]
+    public async Task WithAClock5HoursBehindUtc_RowsThatStartInsideTheRange_GiveANoticeAtTheCoverageStart()
+    {
+        var notice = await NoticeAsync(ServerClock.Resolve(null, -300), RangeStart, RangeStart.AddDays(9), Naive(2026, 9, 5, 0), Naive(2026, 9, 6, 10));
+
+        Assert.Equal(Naive(2026, 9, 5, 0), notice);
+        Assert.True(RawWindowFloor.IsTruncated(notice, RangeStart));
     }
 
     /* The fall change (Nov 1, 2026, 02:00 local): the event at 00:30 is daylight time, 04:30 UTC. The snapshot says -300. */
