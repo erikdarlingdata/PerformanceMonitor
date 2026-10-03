@@ -1474,7 +1474,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
     private const string QueryStoreWideServerIdsSql =
-        "SELECT server_id, server_name FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1))";
+        "SELECT server_id, server_name FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1)) ORDER BY server_id";
 
     /// <summary>
     /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
@@ -1538,11 +1538,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var wideStart = start;
             var bound = QueryStoreIntervalWide.WideStartBound.Window;
             string? settingServer = null;
+
+            /* The floors are one store-wide answer: the first server to reach that step reads them into this
+               cache and the rest reuse them; a check that refuses before that step never reads them. */
+            var storeWide = new QueryStoreIntervalWide.StoreWideInputsCache();
             foreach (var (serverId, serverName) in wideServers)
             {
                 var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                     connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
-                    McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken);
+                    McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken, storeWide);
                 if (!plan.UseTable)
                 {
                     return default;
