@@ -262,6 +262,135 @@ public sealed class ViewerClutterAndMemoryPressureDataStartTests : IDisposable
         Assert.Contains("lower(o.collector_name) = 'memory_pressure_events'", sql, StringComparison.Ordinal);
         Assert.Contains("c.collector_name = 'memory_pressure_events'", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("AS h WHERE", sql, StringComparison.Ordinal);
+
+        /* #5022: the probe asks only for the first event stamped INSIDE the window (its edge is the schedule's, never a walk to older
+           rows), so its read pairs sample_time with the collection_time floor the chart's own read binds (EventWindowFloor.For($2)):
+           the table is partitioned on collection_time, and a bound on sample_time alone skips no chunk. */
+        Assert.True(source.PairsCollectionTime);
+        Assert.Equal(86400, (int)EventWindowFloor.SkewAllowance.TotalSeconds);
+        Assert.Contains("AND   f.collection_time >= $2 - make_interval(secs => 86400)\n", sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf("f.sample_time >= $2", StringComparison.Ordinal) < sql.IndexOf("f.collection_time >= $2 - make_interval(secs => 86400)", StringComparison.Ordinal),
+            "the floor sits beside the window's bounds in the lateral, not in the count");
+        Assert.True(
+            sql.IndexOf("f.collection_time >= $2 - make_interval(secs => 86400)", StringComparison.Ordinal) < sql.IndexOf("ORDER BY f.sample_time", StringComparison.Ordinal),
+            "the floor bounds the lateral's read");
+
+        /* No other source takes the pairing: a table whose own time column IS its partition column has nothing to pair. */
+        foreach (var other in new[]
+        {
+            DataWindowFloor.Source.ForCollectorTable("waiting_tasks"),
+            DataWindowFloor.Source.ForCollectionLog(),
+            DataWindowFloor.Source.ForCollectorRuns(DarlingQueryStoreClutterReader.CollectorName),
+        })
+        {
+            Assert.False(other.PairsCollectionTime);
+            Assert.DoesNotContain("make_interval(secs =>", DataWindowFloor.FloorSql([other], DataWindowFloor.Scope.ServerId), StringComparison.Ordinal);
+        }
+    }
+
+    // ── The read cost's source ──
+
+    /* #5022: the read cost is the query_store collector's runs in the collection log, so the source counts those and no other
+       collector's. The unscoped log (the Collection Log grid and drill want every collector) keeps its SQL, with no collector filter. */
+    [Fact]
+    public void TheReadCostSource_CountsOnlyTheQueryStoreCollectorsRuns_AndTheWholeLogStaysWhole()
+    {
+        var scoped = DataWindowFloor.Source.ForCollectorRuns(DarlingQueryStoreClutterReader.CollectorName);
+        var whole = DataWindowFloor.Source.ForCollectionLog();
+
+        Assert.Equal("collection_log", scoped.Relation);
+        Assert.Equal("collection_time", scoped.TimeColumn);
+        Assert.Equal(DarlingQueryStoreClutterReader.CollectorName, scoped.LogCollectorName);
+        /* The name the clutter reader binds is the name the catalog gives the table the panel's plan churn reads. */
+        Assert.Equal(DataWindowFloor.Source.ForCollectorTable("query_store_stats").CollectorName, scoped.LogCollectorName, StringComparer.OrdinalIgnoreCase);
+        /* The log's own horizon and edge, the same as the whole log's: no schedule row is asked, and no logged-run count rides along. */
+        Assert.Null(scoped.CollectorName);
+        Assert.Equal(DarlingRetentionHorizons.CollectionLogRetentionDays, scoped.RetentionDefaultDays);
+        Assert.Null(whole.LogCollectorName);
+
+        var scopedSql = DataWindowFloor.FloorSql([scoped], DataWindowFloor.Scope.ServerId);
+        var wholeSql = DataWindowFloor.FloorSql([whole], DataWindowFloor.Scope.ServerId);
+
+        Assert.Contains("FROM collect.collection_log AS f", scopedSql, StringComparison.Ordinal);
+        Assert.Contains("AND   f.collector_name = 'query_store'\n", scopedSql, StringComparison.Ordinal);
+        Assert.True(
+            scopedSql.IndexOf("f.collector_name = 'query_store'", StringComparison.Ordinal) < scopedSql.IndexOf("ORDER BY f.collection_time", StringComparison.Ordinal),
+            "the collector filter bounds the lateral's read, so a server counts only by that collector's runs");
+        Assert.Contains($"GREATEST($3 - make_interval(days => {DarlingRetentionHorizons.CollectionLogRetentionDays}), s.created_date)", scopedSql, StringComparison.Ordinal);
+        Assert.Contains("WHERE (w.t IS NOT NULL)", scopedSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("OR EXISTS", scopedSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("config_collector_schedules", scopedSql, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("collector_name", wholeSql, StringComparison.Ordinal);
+    }
+
+    /* The name is spliced into the probe's SQL, so only a collector the catalog lists is taken, in any case, and the SQL carries the
+       lower-case name the log stores. */
+    [Theory]
+    [InlineData("query_store' OR 'a'='a")]
+    [InlineData("collection_log")]
+    [InlineData("")]
+    public void TheCollectorRunsSource_RefusesAnythingTheCatalogDoesNotList(string name)
+    {
+        Assert.Throws<ArgumentException>(() => DataWindowFloor.Source.ForCollectorRuns(name));
+    }
+
+    [Fact]
+    public void TheCollectorRunsSource_TakesTheCatalogsNameInAnyCase()
+    {
+        var source = DataWindowFloor.Source.ForCollectorRuns("Query_Store");
+
+        Assert.Equal("query_store", source.LogCollectorName);
+    }
+
+    // ── A probe nobody awaits ──
+
+    /* #5022: a load starts its probe beside its read, and awaits the probe only at the banner step. A read that throws skips that step,
+       so a probe that fails LATER would reach App.OnUnobservedTaskException as an Error line. The helper the two loads await their
+       read through hands the probe to DataStartAnswerAsync when the read throws: the probe's failure is a warning, and the read's own
+       exception goes on. */
+    [Fact]
+    public async Task AReadThatThrows_StillWatchesItsProbe_SoALaterProbeFailureIsAWarning()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var probe = new TaskCompletionSource<DateTime?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var warned = new TaskCompletionSource<(string Source, string Message)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var readFailure = new InvalidOperationException("the read failed");
+
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => ViewerServerTab.AwaitReadWatchingProbeAsync(
+            Task.FromException(readFailure), probe.Task, "Query Store Clutter", (source, message) => warned.TrySetResult((source, message))));
+
+        Assert.Same(readFailure, thrown);
+        Assert.False(warned.Task.IsCompleted, "the probe has not failed yet");
+
+        probe.SetException(new InvalidOperationException("the probe failed after the read"));
+
+        var (logSource, logMessage) = await warned.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
+        Assert.Equal("ViewerServerTab", logSource);
+        Assert.Contains("Query Store Clutter", logMessage, StringComparison.Ordinal);
+        Assert.Contains("the probe failed after the read", logMessage, StringComparison.Ordinal);
+    }
+
+    /* A read that succeeds returns at once, with the probe still running and untouched: the banner step awaits it. A join of several
+       reads (the Memory load's) that fails on any one of them is the same read that threw. */
+    [Fact]
+    public async Task AReadThatSucceeds_LeavesTheProbeToTheBannerStep_AndAJoinThatFailsIsAReadThatThrew()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var pending = new TaskCompletionSource<DateTime?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await ViewerServerTab.AwaitReadWatchingProbeAsync(
+            Task.CompletedTask, pending.Task, "Memory Pressure Events", (_, _) => throw new InvalidOperationException("a read that succeeded must not warn"));
+        Assert.False(pending.Task.IsCompleted);
+
+        var warned = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var failing = new InvalidOperationException("one of the six reads failed");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ViewerServerTab.AwaitReadWatchingProbeAsync(
+            Task.WhenAll(Task.CompletedTask, Task.FromException(failing)), pending.Task, "Memory Pressure Events", (_, message) => warned.TrySetResult(message)));
+        pending.SetException(new InvalidOperationException("late probe failure"));
+
+        Assert.Contains("Memory Pressure Events", await warned.Task.WaitAsync(TimeSpan.FromSeconds(5), ct), StringComparison.Ordinal);
     }
 
     // ── The banner, read off the real control ──

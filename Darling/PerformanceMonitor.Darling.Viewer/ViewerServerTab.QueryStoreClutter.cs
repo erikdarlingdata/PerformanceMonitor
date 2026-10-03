@@ -44,9 +44,21 @@ public partial class ViewerServerTab
            sources, the plan churn from query_store_stats and the read cost from the collection log, so the coverage rule applies to each
            and the note names the later of the two starts; the config and memory-clerk sections show the newest snapshot only, and the
            rows are per database and name no time. */
+        /* #5022: two reads in flight, the panel's own (its five arms one after another) and the probe (its two calls one after another).
+           The shell's LoadInnerTabAsync declares no width, so this load does, before either starts. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
+
         var dataStartTask = _dataService.GetQueryStoreClutterDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var result = await _dataService.GetQueryStoreClutterAsync(
+        var readTask = _dataService.GetQueryStoreClutterAsync(
             _server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+
+        /* A read that throws skips the banner step below, so the probe would go unawaited: the helper watches it then, and a probe that
+           fails later is a warning and not an unobserved-exception Error. */
+        await AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Query Store Clutter");
+        var result = readTask.Result;
+
+        /* The read is done: end the declared width here, before the banner step below awaits the probe. */
+        readFanOut.Release();
 
         _queryStoreClutterFilterMgr!.UpdateData(result.Databases);
 

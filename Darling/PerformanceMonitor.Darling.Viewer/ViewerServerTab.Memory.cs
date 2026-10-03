@@ -108,7 +108,10 @@ public partial class ViewerServerTab
         var pressureDataStartTask = _dataService.GetMemoryPressureEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var pressureTask = _dataService.GetMemoryPressureEventsAsync(_server.ServerId, startUtc, endUtc);
 
-        await Task.WhenAll(latestTask, trendTask, grantTrendTask, clerkTypesTask, grantChartTask, pressureTask);
+        /* #5022: a join that throws skips the banner step below, so the probe would go unawaited. The helper watches it then, and a probe
+           that fails later is a warning and not an unobserved-exception Error. */
+        await AwaitReadWatchingProbeAsync(
+            Task.WhenAll(latestTask, trendTask, grantTrendTask, clerkTypesTask, grantChartTask, pressureTask), pressureDataStartTask, "Memory Pressure Events");
 
         /* The six are done, and this method reads the store twice more below — the clerk chart and the
            whole Plan Cache sub-tab, which declares its own fan-out. Release here or those inherit this

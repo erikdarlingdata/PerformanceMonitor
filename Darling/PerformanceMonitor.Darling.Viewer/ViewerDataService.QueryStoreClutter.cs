@@ -165,6 +165,11 @@ public partial class ViewerDataService
     /// shows. Its config and memory-clerk sections show the newest snapshot only and need no note. A source that comes back alone is
     /// named; when neither does the answer is null.
     ///
+    /// <para>The read cost's source counts the <c>query_store</c> collector's runs and no other collector's (#5022): the name is the
+    /// one the panel's read-cost SQL binds (<see cref="DarlingQueryStoreClutterReader.CollectorName"/>). A server that logged other
+    /// collectors' runs but never ran that one has no read cost, so it names nothing above an empty panel, and another collector's
+    /// earlier runs cannot move the note earlier.</para>
+    ///
     /// <para>Two probe calls, not one: <see cref="DataWindowFloor.GetForServerAsync"/> takes one source, and the shared probe's
     /// several-source form (<see cref="DataWindowFloor.GetAsync"/>) answers the EARLIEST start among its sources, which is the rule for
     /// the two halves of a stitched rollup and the opposite of this panel's. The caller works the window out once and hands the same
@@ -176,7 +181,7 @@ public partial class ViewerDataService
         LaterStartAsync(
             () => DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_store_stats"), serverId, startUtc, endUtc,
                 ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken),
-            () => DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectionLog(), serverId, startUtc, endUtc,
+            () => DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorRuns(DarlingQueryStoreClutterReader.CollectorName), serverId, startUtc, endUtc,
                 ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken));
 
     /// <summary>

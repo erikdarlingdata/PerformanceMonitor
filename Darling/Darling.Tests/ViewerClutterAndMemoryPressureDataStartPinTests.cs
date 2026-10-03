@@ -55,7 +55,12 @@ public sealed class ViewerClutterAndMemoryPressureDataStartPinTests
         Assert.NotEmpty(probe);
         Assert.Contains("LaterStartAsync(", probe, StringComparison.Ordinal);
         Assert.Contains("DataWindowFloor.Source.ForCollectorTable(\"query_store_stats\")", probe, StringComparison.Ordinal);
-        Assert.Contains("DataWindowFloor.Source.ForCollectionLog()", probe, StringComparison.Ordinal);
+        /* #5022: the read cost is the query_store collector's runs, so its source is the collection log scoped to that one collector,
+           named by the constant the panel's read-cost SQL binds (collector_name = $4), never by a copy of the string. The whole log
+           (ForCollectionLog(), every collector) is the Collection Log grid's source, and counted any collector's run here. */
+        Assert.Contains("DataWindowFloor.Source.ForCollectorRuns(DarlingQueryStoreClutterReader.CollectorName)", probe, StringComparison.Ordinal);
+        Assert.DoesNotContain("ForCollectionLog()", probe, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"query_store\"", probe, StringComparison.Ordinal);
         Assert.Equal(2, Matches(probe, @"DataWindowFloor\.GetForServerAsync\(_dataSource,[^;]*?serverId,\s*startUtc,\s*endUtc,"));
         Assert.DoesNotContain("DataWindowFloor.GetAsync(", source, StringComparison.Ordinal);
 
@@ -73,14 +78,48 @@ public sealed class ViewerClutterAndMemoryPressureDataStartPinTests
         var load = MethodBody(ViewerFile("ViewerServerTab.QueryStoreClutter.cs"), @"private async Task LoadQueryStoreClutterAsync\(");
 
         Assert.Equal(1, Matches(load, @"var dataStartTask = _dataService\.GetQueryStoreClutterDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
-        Assert.Equal(1, Matches(load, @"await _dataService\.GetQueryStoreClutterAsync\(\s*_server\.ServerId,\s*startUtc,\s*endUtc,"));
+        Assert.Equal(1, Matches(load, @"var readTask = _dataService\.GetQueryStoreClutterAsync\(\s*_server\.ServerId,\s*startUtc,\s*endUtc,"));
         Assert.True(
-            load.IndexOf("GetQueryStoreClutterDataStartAsync", StringComparison.Ordinal) < load.IndexOf("await _dataService.GetQueryStoreClutterAsync", StringComparison.Ordinal),
+            load.IndexOf("GetQueryStoreClutterDataStartAsync", StringComparison.Ordinal) < load.IndexOf("var readTask = _dataService.GetQueryStoreClutterAsync", StringComparison.Ordinal),
             "the probe starts before the read is awaited, so the two run together");
+
+        /* #5022: the read is awaited through the helper that watches the probe when the read throws, so a probe that fails after the
+           read did is logged as a warning and not left unobserved. */
+        Assert.Equal(1, Matches(load, @"await AwaitReadWatchingProbeAsync\(readTask,\s*dataStartTask,\s*""Query Store Clutter""\);"));
+        Assert.True(
+            load.IndexOf("var readTask", StringComparison.Ordinal) < load.IndexOf("await AwaitReadWatchingProbeAsync", StringComparison.Ordinal)
+            && load.IndexOf("await AwaitReadWatchingProbeAsync", StringComparison.Ordinal) < load.IndexOf("await ShowQueryStoreClutterDataStartAsync", StringComparison.Ordinal),
+            "the read is awaited through the helper before the banner step awaits the probe");
         Assert.Equal(1, Matches(load, @"await ShowQueryStoreClutterDataStartAsync\(QueryStoreClutterTruncationBanner,\s*dataStartTask,\s*startUtc\);"));
         /* One computation of the window: the method takes it, and never works out a second one. */
         Assert.DoesNotContain("GetWindowUtc()", load, StringComparison.Ordinal);
         Assert.DoesNotContain("UpdateTruncationBanner(", load, StringComparison.Ordinal);
+    }
+
+    /* #5022: the panel's reads run beside its probe, and the load declares it. Its own read walks five arms one after another and the
+       probe walks its two calls one after another, so two reads are in flight together. ViewerCommandDeadlines prices every command off
+       the width the context declares, so a load that declares none prices both against a lone read. The shell's LoadInnerTabAsync
+       declares none (and a width it declared would multiply with this one), so the load does: before either read starts, and released
+       when its own read is done, so the banner step's wait on the probe is not priced against a read that has finished. */
+    [Fact]
+    public void TheClutterLoad_DeclaresTwoReadsInFlight_BeforeEitherStarts_AndReleasesWhenItsReadIsDone()
+    {
+        var load = MethodBody(ViewerFile("ViewerServerTab.QueryStoreClutter.cs"), @"private async Task LoadQueryStoreClutterAsync\(");
+
+        Assert.Equal(1, Matches(load, @"using var readFanOut = ViewerReadFanOut\.Of\(2\);"));
+        var declared = load.IndexOf("ViewerReadFanOut.Of(2)", StringComparison.Ordinal);
+        Assert.True(
+            declared < load.IndexOf("GetQueryStoreClutterDataStartAsync", StringComparison.Ordinal) && declared < load.IndexOf("var readTask", StringComparison.Ordinal),
+            "the width is declared before the probe and the read start, so both take it");
+        Assert.Equal(1, Matches(load, @"readFanOut\.Release\(\);"));
+        var release = load.IndexOf("readFanOut.Release()", StringComparison.Ordinal);
+        Assert.True(
+            load.IndexOf("await AwaitReadWatchingProbeAsync", StringComparison.Ordinal) < release
+            && release < load.IndexOf("await ShowQueryStoreClutterDataStartAsync", StringComparison.Ordinal),
+            "the width ends when the read is done, before the banner step awaits the probe");
+
+        /* The premise: nothing above the load declares a width, so this is the one the panel's reads are priced by. */
+        Assert.DoesNotContain("ViewerReadFanOut", MethodBody(ViewerFile("ViewerServerTab.xaml.cs"), @"private async Task LoadInnerTabAsync\("), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -171,6 +210,12 @@ public sealed class ViewerClutterAndMemoryPressureDataStartPinTests
         Assert.Equal(1, Matches(load, @"RenderMemoryPressureEventsChart\(pressureTask\.Result,\s*startUtc,\s*endUtc\);"));
         Assert.Equal(1, Matches(load,
             @"await ShowMemoryPressureEventsDataStartAsync\(MemoryPressureEventsTruncationBanner,\s*pressureDataStartTask,\s*startUtc,\s*pressureTask\.Result\);"));
+
+        /* #5022: the six reads are awaited through the helper that watches the probe when the join throws, so a probe that fails after
+           the reads did is logged as a warning and not left unobserved. */
+        Assert.Equal(1, Matches(load,
+            @"await AwaitReadWatchingProbeAsync\(\s*Task\.WhenAll\(latestTask,\s*trendTask,\s*grantTrendTask,\s*clerkTypesTask,\s*grantChartTask,\s*pressureTask\),\s*pressureDataStartTask,\s*""Memory Pressure Events""\);"));
+        Assert.DoesNotContain("await Task.WhenAll(", load, StringComparison.Ordinal);
     }
 
     /* The chart no longer asks for a window of its own: a second GetWindowUtc() moves a relative range's start by the time the reads
