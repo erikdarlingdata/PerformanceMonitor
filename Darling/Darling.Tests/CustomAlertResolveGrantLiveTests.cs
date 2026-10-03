@@ -33,7 +33,16 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class CustomAlertResolveGrantLiveTests
 {
-    private const string LowPrivRole = "sec_resolve_test";
+    /* #4981: a role belongs to the whole cluster, so a constant name made every run, and every parallel batch, on one
+       cluster share one role: the second CREATE ROLE could fail with a duplicate, and the first run's DROP ROLE
+       pulled the role out from under the second. Each instance of the class (xUnit makes one per test) mints its own,
+       a fixed prefix and 8 lowercase hex characters: a valid unquoted identifier, 20 bytes. */
+    private const string LowPrivRolePrefix = "sec_resolve_";
+
+    internal static string NewLowPrivRoleName() => LowPrivRolePrefix + Guid.NewGuid().ToString("N")[..8];
+
+    private readonly string _lowPrivRole = NewLowPrivRoleName();
+
     private const string RolePassword = "ResolveGrantTestPw0123456789abcd"; // alnum, like the real generator
 
     private const string SampleDefinition =
@@ -80,28 +89,28 @@ public sealed class CustomAlertResolveGrantLiveTests
     /// <summary>Creates the SECURITY DEFINER function (from the SHARED builder, so it is the real one) and a
     /// disposable low-privilege role granted the viewer/mcp-shaped subset a rule-delete needs — SELECT, the
     /// narrow custom_alert_rules write, and EXECUTE on the function — but NO direct config_alert_log INSERT.</summary>
-    private static async Task ProvisionFunctionAndLowPrivRoleAsync(NpgsqlDataSource owner, CancellationToken ct)
+    private static async Task ProvisionFunctionAndLowPrivRoleAsync(NpgsqlDataSource owner, string role, CancellationToken ct)
     {
         var ddl = DarlingManagedRoles.BuildCustomAlertResolveFunctionSql("config") + $@"
 DO $do$
 BEGIN
-   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{LowPrivRole}') THEN
-      CREATE ROLE {LowPrivRole} LOGIN NOSUPERUSER PASSWORD '{RolePassword}';
+   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN
+      CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD '{RolePassword}';
    END IF;
 END $do$;
-GRANT USAGE ON SCHEMA collect, config TO {LowPrivRole};
-GRANT SELECT ON ALL TABLES IN SCHEMA collect TO {LowPrivRole};
-GRANT SELECT ON ALL TABLES IN SCHEMA config  TO {LowPrivRole};
-GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO {LowPrivRole};
-GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) TO {LowPrivRole};";
+GRANT USAGE ON SCHEMA collect, config TO {role};
+GRANT SELECT ON ALL TABLES IN SCHEMA collect TO {role};
+GRANT SELECT ON ALL TABLES IN SCHEMA config  TO {role};
+GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO {role};
+GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) TO {role};";
         await using var command = owner.CreateCommand(ddl);
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static NpgsqlDataSource OpenLowPriv(string connectionString) =>
+    private static NpgsqlDataSource OpenLowPriv(string connectionString, string role) =>
         NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(connectionString)
         {
-            Username = LowPrivRole,
+            Username = role,
             Password = RolePassword,
             SearchPath = "collect,config,public",
             Pooling = false,
@@ -144,7 +153,7 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
         var bodySucceeded = false;
         try
         {
-            await ProvisionFunctionAndLowPrivRoleAsync(owner, ct);
+            await ProvisionFunctionAndLowPrivRoleAsync(owner, _lowPrivRole, ct);
 
             /* Set up an OPEN incident as the owner (seeding custom_alert_state needs owner — viewer/mcp cannot
                write it, exactly as in production). */
@@ -153,7 +162,7 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
             var ruleId = created.Rule!.Id;
             await state.SaveAsync(ruleId, serverId, Firing(created.Rule!.Version), ct);
 
-            await using var lowPriv = OpenLowPriv(connectionString);
+            await using var lowPriv = OpenLowPriv(connectionString, _lowPrivRole);
 
             /* The role genuinely CANNOT write config_alert_log directly — 42501 — so a resolve row appearing
                after the delete can only have come through the SECURITY DEFINER function. */
@@ -189,7 +198,7 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
         {
             await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             {
-                await CleanupAsync(cleanup, ruleName, serverId, cleanupCt);
+                await CleanupAsync(cleanup, _lowPrivRole, ruleName, serverId, cleanupCt);
             });
         }
     }
@@ -208,7 +217,7 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
         var bodySucceeded = false;
         try
         {
-            await ProvisionFunctionAndLowPrivRoleAsync(owner, ct);
+            await ProvisionFunctionAndLowPrivRoleAsync(owner, _lowPrivRole, ct);
 
             var created = Assert.IsType<CustomAlertRuleResult.Ok>(
                 await rules.CreateAsync(ruleName, null, SampleDefinition, true, "test", ct));
@@ -226,7 +235,7 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
                and state stores stay on the owner pool (reconcile's state cleanup DELETEs custom_alert_state, an
                owner-only write, exactly as in production). The teardown resolution must still land via the
                definer function. */
-            await using var lowPriv = OpenLowPriv(connectionString);
+            await using var lowPriv = OpenLowPriv(connectionString, _lowPrivRole);
             var evaluator = new CustomAlertEvaluator(
                 rules, state, owner /* viewer: unused by reconcile */, new NoopDeliverer(),
                 isAlertMuted: null, alertsEnabled: static () => true,
@@ -250,12 +259,80 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
         {
             await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             {
-                await CleanupAsync(cleanup, ruleName, serverId, cleanupCt);
+                await CleanupAsync(cleanup, _lowPrivRole, ruleName, serverId, cleanupCt);
             });
         }
     }
 
-    private static async Task CleanupAsync(NpgsqlConnection cleanup, string ruleName, int serverId, CancellationToken ct)
+    /// <summary>#4981: two instances of this class, which stand for two runs or two parallel batches, must not share a role.</summary>
+    [Fact]
+    public void TwoInstances_GetDifferentRoleNames_ThatAreValidUnquotedIdentifiers()
+    {
+        var first = new CustomAlertResolveGrantLiveTests()._lowPrivRole;
+        var second = new CustomAlertResolveGrantLiveTests()._lowPrivRole;
+
+        Assert.NotEqual(first, second);
+        foreach (var name in new[] { first, second })
+        {
+            Assert.StartsWith(LowPrivRolePrefix, name, StringComparison.Ordinal);
+            Assert.Matches("^[a-z_][a-z0-9_]*$", name);
+            Assert.True(System.Text.Encoding.UTF8.GetByteCount(name) <= 63, $"'{name}' is longer than a Postgres identifier");
+        }
+    }
+
+    /// <summary>
+    /// #4981: two setups on one cluster at the same time both succeed, and one finishing (its cleanup drops its role)
+    /// leaves the other's role in place and usable. With one constant name, the second setup found the first's role and
+    /// skipped creating its own, and the first cleanup then dropped the role the second was still using.
+    /// </summary>
+    [Fact]
+    public async Task TwoSetupsOnOneCluster_BothSucceed_AndOnesCleanupLeavesTheOthersRoleUsable()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var owner = await MigrateAndOpenAsync(connectionString, ct);
+
+        var first = new CustomAlertResolveGrantLiveTests()._lowPrivRole;
+        var second = new CustomAlertResolveGrantLiveTests()._lowPrivRole;
+        var bodySucceeded = false;
+        try
+        {
+            await ProvisionFunctionAndLowPrivRoleAsync(owner, first, ct);
+            await ProvisionFunctionAndLowPrivRoleAsync(owner, second, ct);
+
+            await using (var firstSession = OpenLowPriv(connectionString, first))
+            await using (var secondSession = OpenLowPriv(connectionString, second))
+            {
+                await using var one = firstSession.CreateCommand("SELECT count(*) FROM config.custom_alert_rules");
+                await using var two = secondSession.CreateCommand("SELECT count(*) FROM config.custom_alert_rules");
+                await one.ExecuteScalarAsync(ct);
+                await two.ExecuteScalarAsync(ct);
+            }
+
+            /* The first run finishes and cleans up while the second is still mid-test. */
+            await using (var cleanup = new NpgsqlConnection(connectionString))
+            {
+                await cleanup.OpenAsync(ct);
+                await DropLowPrivRoleAsync(cleanup, first, ct);
+            }
+
+            await using var stillThere = OpenLowPriv(connectionString, second);
+            await using var read = stillThere.CreateCommand("SELECT count(*) FROM config.custom_alert_rules");
+            await read.ExecuteScalarAsync(ct);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DropLowPrivRoleAsync(cleanup, first, cleanupCt);
+                await DropLowPrivRoleAsync(cleanup, second, cleanupCt);
+            });
+        }
+    }
+
+    private static async Task CleanupAsync(NpgsqlConnection cleanup, string role, string ruleName, int serverId, CancellationToken ct)
     {
         using (var rule = new NpgsqlCommand("DELETE FROM config.custom_alert_rules WHERE name = $1", cleanup))
         {
@@ -269,10 +346,16 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
             await log.ExecuteNonQueryAsync(ct);
         }
 
+        await DropLowPrivRoleAsync(cleanup, role, ct);
+    }
+
+    /// <summary>Drops exactly the named role, and nothing else the cluster holds.</summary>
+    private static async Task DropLowPrivRoleAsync(NpgsqlConnection cleanup, string role, CancellationToken ct)
+    {
         /* DROP OWNED BY revokes the role's grants (incl. the function EXECUTE) so DROP ROLE has no dependents.
            The function itself is owned by the store owner, not this role, so it is left in place (it is the real
            provisioned object). DROP OWNED BY has no IF EXISTS, so tolerate 42704 when the role never existed. */
-        using (var dropOwned = new NpgsqlCommand($"DROP OWNED BY {LowPrivRole}", cleanup))
+        using (var dropOwned = new NpgsqlCommand($"DROP OWNED BY {role}", cleanup))
         {
             try
             {
@@ -283,7 +366,7 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
             }
         }
 
-        using var dropRole = new NpgsqlCommand($"DROP ROLE IF EXISTS {LowPrivRole}", cleanup);
+        using var dropRole = new NpgsqlCommand($"DROP ROLE IF EXISTS {role}", cleanup);
         await dropRole.ExecuteNonQueryAsync(ct);
     }
 }
