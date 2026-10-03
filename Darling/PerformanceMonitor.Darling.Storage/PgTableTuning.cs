@@ -309,7 +309,8 @@ public static class PgTableTuning
            On a field store it holds none, and with only the (server_id, collection_time) index that "no" costs
            a fetch of every heap tuple the window touches: 4.1 s and 6.8 M blocks per call on the largest store
            measured (#4969). The read stays exact, because the collector can still store a NULL start when the
-           catalog join misses, so the statement is unchanged and this index gives it an index read of a near-empty tree.
+           catalog join misses, so the statement is unchanged and this index gives it an index read of a near-empty
+           tree.
 
            WHAT IT HOLDS: only rows WHERE interval_start_time_utc IS NULL. On a field store that is nothing, so
            the index costs near-zero writes and WAL (contrast the random-key WAL that #4247 removed from the
@@ -333,6 +334,10 @@ public static class PgTableTuning
              24 h:  255-359 ms -> 0.043 ms
              168 h: 1.7-3.0 s (126-138 k buffers) -> 5.9 ms (~7.1 k buffers, all in the compressed chunks'
                     columnar scans, which this index does not change).
+           On the largest production store measured (6-hour chunks, the last ~27 hours uncompressed), the check for the
+           busiest server took 614 ms at 24 h, all of it Bitmap Heap Scans of the five uncompressed chunks that removed
+           667,802 rows by the NULL filter; the index serves that whole window. At 168 h it took 1,723 ms, 1.34 s of it
+           in the twelve compressed chunks' columnar scans, which this index does not reach.
            As a prepared statement, the check's sixth execution switches to a generic plan with no chunk
            pruning: 57-76 s at 168 h without the index, 6.2 ms with it. The product does not prepare it today.
 
@@ -340,8 +345,11 @@ public static class PgTableTuning
            rig, 4.0 GB of uncompressed heap built in 0.59-0.66 s warm with the default 2 parallel maintenance
            workers and 1.33 s with none; a serial scan of the same heaps takes 1.21-1.33 s, so the build costs
            about half a serial scan of the uncompressed heaps. Compressed and empty chunks get an 8 KB index,
-           and NULL-start rows cost about 35 B each. A build that runs out the clock is abandoned and retried
-           at the next start; the hourly pass never builds it. */
+           and NULL-start rows cost about 35 B each. On the largest production store measured, the build's read set (12
+           compressed chunks with empty heaps, 5 uncompressed holding 11.2 GB of heap and 19.7 M rows, none with a NULL
+           start) took 56.1 s as one serial scan, 48.3 s of it reading 1.37 M blocks from disk; at the rig's ratio that
+           is a first-start build of roughly 30-70 s, inside SetupTimeoutSeconds with over 4x headroom. A build that runs
+           out the clock is abandoned and retried at the next start; the hourly pass never builds it. */
         "CREATE INDEX IF NOT EXISTS " + LegacyRowIndexName + " ON collect.query_store_stats (server_id, collection_time) WHERE interval_start_time_utc IS NULL",
         "ALTER TABLE collect.procedure_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_stats SET (" + InsertTuningOptions + ")",

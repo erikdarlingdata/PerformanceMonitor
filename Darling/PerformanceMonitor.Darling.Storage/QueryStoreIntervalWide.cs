@@ -492,8 +492,8 @@ WHERE t.server_id = $1;";
     /// (<c>server_id</c>, <c>collection_time</c>) index this EXISTS finds nothing, so it would have to fetch every
     /// heap tuple the server's window touches to say no. The partial index
     /// <see cref="PgTableTuning.LegacyRowIndexName"/> (built on the start path) holds only the rows with no interval
-    /// start, so the "no" is an index read of that near-empty tree. It stays an exact read, not a cached answer, because the collector
-    /// can still store a NULL start on a catalog join miss.
+    /// start, so the "no" is an index read of that near-empty tree. It stays an exact read, not a cached answer,
+    /// because the collector can still store a NULL start on a catalog join miss.
     /// Bounded to the SAME range the table read would use
     /// (<see cref="ClampedStart"/> through <paramref name="windowEnd"/> in <see cref="ReadsTableAsync"/>), not
     /// the caller's raw windowStart, so a legacy row outside the served range cannot force a needless refusal.
