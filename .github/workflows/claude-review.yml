@@ -752,11 +752,16 @@ jobs:
           # refused a file elsewhere on the runner, by absolute path or by `../`. A Bash read (`cat`,
           # an input redirect) is held to the directory Claude runs in as well. The review reads
           # nothing outside the tree: the traps file is .github/REVIEW-TRAPS.md.
+          #
+          # --disallowedTools also denies `git remote`, `git config`, `git ls-remote` and `git var`, with
+          # any arguments. The review runs none of them, and each reads the repository's git
+          # configuration, which the Read rule above already keeps from the file tools. Claude Code runs
+          # some read-only git commands with no allow rule, so these four need deny rules of their own.
           claude_args: |
             --model "${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }}"
             --max-turns ${{ steps.tier.outputs.max_turns || '120' }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff ${{ github.event.pull_request.number }}),Bash(gh pr diff ${{ github.event.pull_request.number }} --name-only),Bash(gh pr view ${{ github.event.pull_request.number }}),Bash(gh pr view ${{ github.event.pull_request.number }} --json commits),Bash(gh pr view ${{ github.event.pull_request.number }} --comments),Bash(gh pr comment ${{ github.event.pull_request.number }} --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --comment --body-file -),Bash(gh pr review ${{ github.event.pull_request.number }} --request-changes --body-file -),Read(./**)${{ needs.decide.outputs.base && needs.decide.outputs.head && format(',Bash(git diff {0} {1}),Bash(git diff {0} {1} -- *)', needs.decide.outputs.base, needs.decide.outputs.head) || '' }}"
-            --disallowedTools "Read(./.git/**),Read(//proc/**)"
+            --disallowedTools "Read(./.git/**),Read(//proc/**),Bash(git remote *),Bash(git config *),Bash(git ls-remote *),Bash(git var *)"
 
       # #3650: a review that posted nothing used to finish GREEN. The prompt mandates one formal
       # review per run -- changes-requested on a substantive finding, a clean comment review
