@@ -37,15 +37,27 @@ public partial class LocalDataService
     /// no <paramref name="serverId"/> the read aggregates ALL servers (the tab default), one clock read and one
     /// bounded read per server, merged newest first by the real instant of each run and cut to
     /// <paramref name="limit"/>; with one it scopes to that server (the Server filter combo). A server with no
-    /// collected clock yet is windowed on the machine's own (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>),
-    /// which is what this read did for every server before. The Darling viewer's twin converts through the same
+    /// collected clock yet is windowed on its open tab's clock, then on the machine's own
+    /// (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>, <see cref="ReadJobHistoryClockAsync"/>), which is
+    /// what this read did for every server before. The Darling viewer's twin converts through the same
     /// clock and shows the instant in its display zone.
     /// </para>
     /// </summary>
-    public async Task<List<JobHistoryRow>> GetJobHistoryAsync(int hoursBack = 24, int limit = 1000, int? serverId = null)
-    {
-        var windowStartUtc = DateTime.UtcNow.AddHours(-hoursBack);
+    public Task<List<JobHistoryRow>> GetJobHistoryAsync(int hoursBack = 24, int limit = 1000, int? serverId = null) =>
+        GetJobHistoryAsync(DateTime.UtcNow.AddHours(-hoursBack), limit, serverId);
 
+    /// <summary>
+    /// <see cref="GetJobHistoryAsync(int, int, int?)"/> over a window that starts at <paramref name="windowStartUtc"/> (a UTC
+    /// instant) and runs to now, for a caller that works the start out once and hands the same instant to the read and to the
+    /// data-start probe (<see cref="GetJobHistoryDataStartAsync"/>, #4966): the tab's note is worded against the window the rows
+    /// were read over, so the two must not each take their own <c>DateTime.UtcNow</c>.
+    /// <paramref name="openTabClocks"/> is the clock of each open server tab by server id, taken by the tab layer on the UI thread
+    /// (the open tabs are UI objects, so this service never reaches into them): a server with no collected clock yet is windowed
+    /// on its open tab's clock when it has one, then the machine's, the chain the Alert History tab uses.
+    /// </summary>
+    public async Task<List<JobHistoryRow>> GetJobHistoryAsync(
+        DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null)
+    {
         var serverIds = serverId.HasValue
             ? new List<int> { serverId.Value }
             : await ReadJobHistoryServerIdsAsync(windowStartUtc);
@@ -53,7 +65,7 @@ public partial class LocalDataService
         var rows = new List<JobHistoryRow>();
         foreach (var id in serverIds)
         {
-            var clock = await ReadJobHistoryClockAsync(id);
+            var clock = await ReadJobHistoryClockAsync(id, openTabClocks is not null && openTabClocks.TryGetValue(id, out var tabClock) ? tabClock : null);
             rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, limit));
         }
 
@@ -87,12 +99,13 @@ ORDER BY server_id";
 
     /// <summary>
     /// The clock one server's window is worked out on (#4966): its collected clock (<see cref="GetServerClockAsync"/>),
-    /// else the machine's, the end of the chain the Alert History tab uses
-    /// (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>). This read has no open tab to ask, so
-    /// that middle link is empty. A clock read that fails leaves the server on the machine's clock rather than failing
-    /// every server's runs, as <c>AlertsHistoryTab.ReadCollectedClocksAsync</c> does.
+    /// else its open tab's (<paramref name="openTabClock"/>, which the tab layer hands in, since the open tabs are UI objects),
+    /// else the machine's, the chain the Alert History tab uses
+    /// (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>). A clock read that fails leaves the server on
+    /// the next clock in the chain rather than failing every server's runs, as <c>AlertsHistoryTab.ReadCollectedClocksAsync</c>
+    /// does. The tab's note is worded on this same clock for a single server.
     /// </summary>
-    internal async Task<ServerClock> ReadJobHistoryClockAsync(int serverId)
+    internal async Task<ServerClock> ReadJobHistoryClockAsync(int serverId, ServerClock? openTabClock = null)
     {
         ServerClock? collected = null;
         try
@@ -101,10 +114,62 @@ ORDER BY server_id";
         }
         catch (Exception ex)
         {
-            AppLogger.Debug("JobHistory", $"Server clock read failed for server {serverId}, its window takes the machine's clock: {ex.Message}");
+            AppLogger.Debug("JobHistory", $"Server clock read failed for server {serverId}, its window takes its open tab's or the machine's clock: {ex.Message}");
         }
 
-        return ServerTimeHelper.ClockForServer(collected, openTabClock: null);
+        return ServerTimeHelper.ClockForServer(collected, openTabClock);
+    }
+
+    /// <summary>
+    /// Where the job history's coverage starts for the window, over the servers in <paramref name="serverIds"/> (#4966): the
+    /// earlier of the servers' own answers from the shared probe (<see cref="GetQueryWindowFloorAsync"/> over
+    /// <see cref="QueryWindowRelation.JobHistory"/>: the later of a server's first collection and the table's retention edge, or its
+    /// first row or run in the window if that is earlier). Job history is an event surface: the first collection copies the
+    /// history msdb already holds, so a run's own time can sit long before the coverage this names, and the caller words the
+    /// note from the earlier of this and the earliest run it shows (<c>ServerTab.EarlierOfFloorAndRowShown</c>).
+    /// <para>The probe has no all-servers form, so the Job History tab hands this the servers its Server combo lists. The work is
+    /// bounded three ways: only those servers are asked (the servers with a run on screen, never every server the store has ever
+    /// seen); they are asked one after another on the one probe connection, and the loop stops at the first server whose coverage
+    /// reaches the window's start, because the earliest coverage cannot be later than that (<see cref="EarliestCoverageAsync"/>);
+    /// and a window no longer than the 90-minute slack makes no call at all (the tab's guard, <c>ServerTab.ProbeWindowFloorOrNullAsync</c>).
+    /// A probe that throws for any one server fails the whole answer, so the caller shows no note: a floor worked out from some of the
+    /// servers could name a time later than the one a server it never reached covers.</para>
+    /// </summary>
+    /// <param name="serverIds">The servers to ask: the one the tab shows, or the servers its Server combo lists.</param>
+    /// <param name="startUtc">The window's start, the instant the read took (<see cref="GetJobHistoryAsync(DateTime, int, int?, IReadOnlyDictionary{int, ServerClock}?)"/>).</param>
+    /// <param name="endUtc">The window's end.</param>
+    public Task<DateTime?> GetJobHistoryDataStartAsync(IReadOnlyCollection<int> serverIds, DateTime startUtc, DateTime endUtc) =>
+        EarliestCoverageAsync(serverIds, id => GetQueryWindowFloorAsync(QueryWindowRelation.JobHistory, id, startUtc, endUtc), startUtc);
+
+    /// <summary>
+    /// The earliest answer of <paramref name="probe"/> over <paramref name="serverIds"/>: null when no server answers (a server
+    /// with nothing in the window answers null), else the earliest instant any server's coverage starts at. Servers are asked in
+    /// order, and the loop returns <paramref name="startUtc"/> at the first server that answers at or before it: that server
+    /// covers the whole window, so no later one can name an earlier start, and the rest are not asked. A probe that throws
+    /// propagates. <c>internal static</c> with the probe passed in, so the tests count the calls it makes.
+    /// </summary>
+    internal static async Task<DateTime?> EarliestCoverageAsync(IEnumerable<int> serverIds, Func<int, Task<DateTime?>> probe, DateTime startUtc)
+    {
+        DateTime? earliest = null;
+        foreach (var id in serverIds)
+        {
+            if (await probe(id) is not DateTime floor)
+            {
+                continue;
+            }
+
+            if (floor <= startUtc)
+            {
+                return startUtc;
+            }
+
+            if (earliest is null || floor < earliest)
+            {
+                earliest = floor;
+            }
+        }
+
+        return earliest;
     }
 
     /// <summary>

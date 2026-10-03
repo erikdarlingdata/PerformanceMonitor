@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -68,7 +70,7 @@ public sealed class JobHistoryServerClockWindowTests : IClassFixture<SharedDuckD
     }
 
     /// <summary>One collected clock for the server: a fixed offset, no zone id (a SQL Server before 2022).</summary>
-    private async Task SeedClockAsync(int serverId, int offsetMinutes)
+    private async Task SeedClockAsync(int serverId, int offsetMinutes, string? timeZoneId = null)
     {
         var connection = await SeedConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
@@ -77,11 +79,12 @@ public sealed class JobHistoryServerClockWindowTests : IClassFixture<SharedDuckD
             (collection_id, collection_time, server_id, server_name,
              edition, product_version, product_level, engine_edition,
              cpu_count, hyperthread_ratio, physical_memory_mb, utc_offset_minutes, time_zone_id)
-            VALUES ($1, $2, $3, 'TestSrv', 'Developer Edition', '16.0.4150.1', 'RTM', 3, 8, 1, 16384, $4, NULL)";
+            VALUES ($1, $2, $3, 'TestSrv', 'Developer Edition', '16.0.4150.1', 'RTM', 3, 8, 1, 16384, $4, $5)";
         cmd.Parameters.Add(new DuckDBParameter { Value = -_nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = offsetMinutes });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)timeZoneId ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 
@@ -221,5 +224,69 @@ VALUES
 
         Assert.Equal("no_clock_inside", Assert.Single(scoped).JobId);
         Assert.Equal(["b_inside", "no_clock_inside"], fleet.Select(r => r.JobId).ToArray());
+    }
+
+    /// <summary>
+    /// #4966: the link between a server's collected clock and the machine's. A server with no collected clock yet, whose open tab keeps
+    /// the fixed offset its connect probe read (here 5 hours off the machine), is windowed on that tab's clock, the chain the Alert
+    /// History tab uses. The tab layer hands the open tabs' clocks in as a plain dictionary (the open tabs are UI objects). Without the
+    /// link the server fell straight to the machine's clock and kept both runs.
+    /// </summary>
+    [Fact]
+    public async Task ServerWithNoCollectedClock_AndAnOpenTabFiveHoursOffTheMachine_IsWindowedOnTheTabsClock()
+    {
+        var tabOffset = HostOffsetMinutes() + 300;
+        var now = DateTime.UtcNow;
+        await InsertRunAsync(ServerNoClock, "inside_job", Wall(now.AddMinutes(-30), tabOffset));
+        await InsertRunAsync(ServerNoClock, "outside_job", Wall(now.AddHours(-3), tabOffset));
+        var tabs = new Dictionary<int, ServerClock> { [ServerNoClock] = ServerClock.FixedOffset(tabOffset) };
+
+        var rows = await new LocalDataService(_duckDb).GetJobHistoryAsync(now.AddHours(-WindowHours), 100, ServerNoClock, tabs);
+
+        Assert.Equal("inside_job", Assert.Single(rows).JobId);
+    }
+
+    /// <summary>The chain's order: a collected clock beats the open tab's, and another server's tab clock is never borrowed.</summary>
+    [Fact]
+    public async Task ACollectedClock_BeatsTheOpenTabsClock_AndAnotherServersTabIsNotBorrowed()
+    {
+        var host = HostOffsetMinutes();
+        await SeedClockAsync(ServerA, host);
+        var now = DateTime.UtcNow;
+        await InsertRunAsync(ServerA, "a_inside", Wall(now.AddMinutes(-30), host));
+        await InsertRunAsync(ServerA, "a_outside", Wall(now.AddHours(-3), host));
+        await InsertRunAsync(ServerNoClock, "no_clock_inside", Wall(now.AddMinutes(-30), host));
+        await InsertRunAsync(ServerNoClock, "no_clock_outside", Wall(now.AddHours(-3), host));
+        var tabs = new Dictionary<int, ServerClock>
+        {
+            [ServerA] = ServerClock.FixedOffset(host + 300),
+            [ServerB] = ServerClock.FixedOffset(host - 300)
+        };
+
+        var rows = await new LocalDataService(_duckDb).GetJobHistoryAsync(now.AddHours(-WindowHours), 100, null, tabs);
+
+        Assert.Equal(["a_inside", "no_clock_inside"], rows.Select(r => r.JobId).OrderBy(j => j, StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>
+    /// Daylight saving, pinned (#4966): a server whose collected clock is a zone with daylight saving. One window starts in January
+    /// (12:00 Eastern Standard) and one in July (12:00 Eastern Daylight); each has a run 15 minutes after its start (kept) and one 15
+    /// minutes before it (dropped). The read converts each run with the clock at the run's own date, so both seasons come out right;
+    /// any single offset (the one in force today included) gets one of them wrong.
+    /// </summary>
+    [Theory]
+    [InlineData(2026, 1, 15, 17)]
+    [InlineData(2026, 7, 15, 16)]
+    public async Task AWindowStartingInWinterOrSummer_ConvertsEachRunWithTheClockAtItsOwnDate(int year, int month, int day, int startUtcHour)
+    {
+        await SeedClockAsync(ServerA, -300, "Eastern Standard Time");
+        var startUtc = new DateTime(year, month, day, startUtcHour, 0, 0, DateTimeKind.Utc);
+        var wallStart = new DateTime(year, month, day, 12, 0, 0, DateTimeKind.Unspecified);
+        await InsertRunAsync(ServerA, "kept", wallStart.AddMinutes(15));
+        await InsertRunAsync(ServerA, "dropped", wallStart.AddMinutes(-15));
+
+        var rows = await new LocalDataService(_duckDb).GetJobHistoryAsync(startUtc, 100, ServerA);
+
+        Assert.Equal("kept", Assert.Single(rows).JobId);
     }
 }

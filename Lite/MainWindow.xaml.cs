@@ -377,7 +377,7 @@ public partial class MainWindow : Window
                         s.DisplayNameWithIntent;
                 }
                 return map;
-            });
+            }, OpenTabClocks);
 
             // Availability Groups (#991): self-loading, and its tab stays hidden until a load finds AG rows.
             AvailabilityGroupsContent.Initialize(_dataService);
@@ -1418,6 +1418,25 @@ public partial class MainWindow : Window
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The clock of every open server tab, by server id (#4966): the snapshot the Job History tab hands its read, so a server with
+    /// no collected clock yet is windowed on its open tab's clock before the machine's, as <see cref="OpenTabClockFor"/> gives the
+    /// Alerts History list. Taken on the UI thread (the open tabs are UI objects) and read off it as a plain dictionary.
+    /// </summary>
+    private IReadOnlyDictionary<int, ServerClock> OpenTabClocks()
+    {
+        var clocks = new Dictionary<int, ServerClock>();
+        foreach (var tab in _openServerTabs.Values)
+        {
+            if (tab.Content is ServerTab st)
+            {
+                clocks[st.ServerId] = st.ServerClock;
+            }
+        }
+
+        return clocks;
     }
 
     /// <summary>

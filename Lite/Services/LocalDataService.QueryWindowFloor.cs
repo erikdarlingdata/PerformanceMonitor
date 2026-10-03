@@ -27,7 +27,9 @@ namespace PerformanceMonitorLite.Services;
 /// <see cref="PlanCorrection"/> (Plan Corrections) and <see cref="MemoryPressureEvents"/> (Memory Pressure Events); the
 /// Query Heatmap reads <c>v_query_stats</c> and asks the <see cref="QueryStats"/> question. A further surface adds its
 /// own member and its arm in <c>QueryWindowRelationView</c>; <c>DataStartBannerTests</c> pins that every member names a
-/// real archive view with the column the probe windows on.
+/// real archive view with the column the probe windows on. The Job History tab's note adds <see cref="JobHistory"/>
+/// (#4966): its grid lists runs by the time each ran, which is the event time, and the probe measures the collector's
+/// coverage (<c>collection_time</c>, the time a run was copied from msdb).
 /// </summary>
 public enum QueryWindowRelation
 {
@@ -48,7 +50,10 @@ public enum QueryWindowRelation
     LongQueryCompletions,
 
     WaitingTasks,
-    MemoryPressureEvents
+    MemoryPressureEvents,
+
+    /* The Job History tab (#4966): the run history copied from msdb. */
+    JobHistory
 }
 
 public partial class LocalDataService
@@ -71,6 +76,7 @@ public partial class LocalDataService
         QueryWindowRelation.LongQueryCompletions => "v_long_query_completions",
         QueryWindowRelation.WaitingTasks => "v_waiting_tasks",
         QueryWindowRelation.MemoryPressureEvents => "v_memory_pressure_events",
+        QueryWindowRelation.JobHistory => "v_job_history",
         _ => throw new ArgumentOutOfRangeException(nameof(relation), relation, "unknown QueryWindowRelation")
     };
 
@@ -78,7 +84,7 @@ public partial class LocalDataService
     /// The collector whose runs <c>collection_log</c> records for a relation the probe reads by coverage
     /// (<see cref="QueryWindowRelation.QuerySnapshots"/>, <see cref="QueryWindowRelation.WaitingTasks"/>,
     /// <see cref="QueryWindowRelation.PlanCorrection"/>, <see cref="QueryWindowRelation.MemoryPressureEvents"/>, and #4966's
-    /// System Events, Config Changes and Long Queries relations), or null for the three Queries-tab relations (the Query
+    /// System Events, Config Changes, Long Queries and Job History relations), or null for the three Queries-tab relations (the Query
     /// Heatmap reads the first of them) and <see cref="QueryWindowRelation.CollectionLog"/>, which keep the row-only
     /// probe. A closed map, so nothing a caller passes reaches the probe's SQL.
     /// </summary>
@@ -99,6 +105,9 @@ public partial class LocalDataService
         QueryWindowRelation.DatabaseConfig => "database_config",
         QueryWindowRelation.TraceFlags => "trace_flags",
         QueryWindowRelation.LongQueryCompletions => "long_query_completions",
+        /* The Job History tab (#4966). job_history holds a row only when an Agent job ran, and the first collection copies the
+           history msdb already holds, so a quiet start is covered by the collector's runs, not by a row near the window's start. */
+        QueryWindowRelation.JobHistory => "job_history",
         _ => null
     };
 
