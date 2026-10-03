@@ -354,6 +354,32 @@ CREATE TABLE IF NOT EXISTS config.config_install_id (
     created_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC')
 );";
 
+    /// <summary>
+    /// V159 — <c>config.config_install_id.table_oid</c> and <c>server_major</c>: the OID of the install id table and the
+    /// server's major version, two more bindings for the id (#4961).
+    ///
+    /// <para>V158 bound the id to the cluster's <c>system_identifier</c> and the database's OID, and a different cluster
+    /// id made a new id. A managed major upgrade runs <c>pg_upgrade</c>, which makes a new <c>system_identifier</c>, so each
+    /// upgrade made a new id and left the old id's sessions on every monitored server. <c>pg_upgrade</c> keeps the
+    /// database's OID and the OID of each table (<see cref="StoreInstallId.IsSameStore"/> cites the PostgreSQL sources
+    /// for both) and raises the major, and a store made again by dump and restore gets new OIDs, so the two OIDs say
+    /// whether this is the same store where the cluster id cannot. OIDs restart at the same number after every
+    /// <c>initdb</c>, so a copy of the row into a fresh install of the same version can match both; the major tells that
+    /// copy from an upgrade, because an upgrade always raises it. The service keeps the id through a changed cluster id
+    /// only when both OIDs match and the major rose, and rebinds the row to the new cluster id and major.</para>
+    ///
+    /// <para><b>Nullable, DDL only, one statement.</b> A row made by V158's service has neither value. They are not
+    /// backfilled here, because both are facts of the cluster the service reads at start, not something a migration
+    /// should guess: the service writes them on its first start after this rung, and until then a row without a table OID
+    /// is compared by the old rule, which is the rule that made the row. One catalog-only <c>ADD COLUMN</c> for each, in
+    /// one statement, so the two arrive together or not at all, and a second run changes nothing. Needs no GRANT (the
+    /// roles' table-level grants cover a new column) and no trigger (nothing reloads when the id's binding changes).</para>
+    /// </summary>
+    private const string V159Sql = @"
+ALTER TABLE config.config_install_id
+    ADD COLUMN IF NOT EXISTS table_oid bigint,
+    ADD COLUMN IF NOT EXISTS server_major integer;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -550,6 +576,7 @@ CREATE TABLE IF NOT EXISTS config.config_install_id (
         new Migration(156, "checkpoint-longest-sync", V156Sql),
         new Migration(157, "mute-rule-server-id", V157Sql),
         new Migration(158, "install-id", V158Sql),
+        new Migration(159, "install-id-table-oid", V159Sql),
     };
 
     /// <summary>
