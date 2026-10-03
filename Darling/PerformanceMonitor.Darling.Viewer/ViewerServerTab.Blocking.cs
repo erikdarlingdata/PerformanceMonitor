@@ -152,9 +152,9 @@ public partial class ViewerServerTab
                 RenderLockWaitTrendChart(lockWaits);
                 RenderBlockingTrendChart(blocking);
                 RenderDeadlockTrendChart(deadlocks);
-                await ShowEventDataStartAsync(LockWaitTrendTruncationBanner, lockWaitStartTask, "Lock Wait Trend", startUtc, LockWaitTimesDrawn(lockWaits));
-                await ShowEventDataStartAsync(BlockingTrendTruncationBanner, blockingStartTask, "Blocking Trend", startUtc, BlockingTrendTimesDrawn(blocking));
-                await ShowEventDataStartAsync(DeadlockTrendTruncationBanner, deadlockStartTask, "Deadlock Trend", startUtc, BlockingTrendTimesDrawn(deadlocks));
+                await ShowEventDataStartAsync(LockWaitTrendTruncationBanner, lockWaitStartTask, "Lock Wait Trend", startUtc, ViewerBlockingChartsDataStart.LockWaitTimesDrawn(lockWaits));
+                await ShowEventDataStartAsync(BlockingTrendTruncationBanner, blockingStartTask, "Blocking Trend", startUtc, ViewerBlockingChartsDataStart.BlockingTrendTimesDrawn(blocking));
+                await ShowEventDataStartAsync(DeadlockTrendTruncationBanner, deadlockStartTask, "Deadlock Trend", startUtc, ViewerBlockingChartsDataStart.BlockingTrendTimesDrawn(deadlocks));
                 break;
             }
             case BlockingStatsSubTabIndex:
@@ -408,14 +408,6 @@ public partial class ViewerServerTab
         if (FindParentDataGrid(menuItem)?.CurrentItem is not ViewerBlockedProcessRow row || !row.HasBlockingQueryPlan) return;
         _ = OpenPlanTab(row.BlockingQueryPlanXml!, $"Blocking Plan - SPID {row.BlockingSpid}", row.BlockingSqlText);
     }
-
-    /// <summary>The time of each point the Lock Wait Trend draws as data (a rate line; an empty read draws only a flat zero, which is no event).</summary>
-    internal static IEnumerable<DateTime?> LockWaitTimesDrawn(IEnumerable<LockWaitTrendPoint> data) =>
-        data.Select(p => (DateTime?)p.CollectionTime);
-
-    /// <summary>The time of each bucket a count chart draws as an event: only buckets with a non-zero count (a zero bucket is the chart's baseline).</summary>
-    internal static IEnumerable<DateTime?> BlockingTrendTimesDrawn(IEnumerable<BlockingTrendPoint> data) =>
-        data.Where(p => p.Count > 0).Select(p => (DateTime?)p.Time);
 
     private void RenderLockWaitTrendChart(List<LockWaitTrendPoint> data)
     {
