@@ -8,11 +8,13 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Storage.FinOps;
@@ -25,6 +27,7 @@ namespace Darling.Tests;
 /// (A: CPU, memory, grants; B: Azure SQL Database with a week of days; C: Azure SQL Database; D: memory and no CPU;
 /// E: CPU and no memory), plus a monthly cost on A and database sizes on A. Own-store: the seed lives in a scratch database.
 /// </summary>
+/* #1776 own-store: each fact seeds its own scratch database, so nothing here shares rows with another test. */
 public sealed class FinOpsUtilizationViewLiveTests
 {
     private static async Task<ScratchPostgres> SeedScratchAsync(string cs, CancellationToken ct)
@@ -49,10 +52,41 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
                 CollectionIdGenerator.Next(), now.AddHours(-3), FinOpsUtilizationGoldenLiveTests.ServerIdA,
                 FinOpsUtilizationGoldenLiveTests.ServerNameA, file, "f" + file, total, used);
         }
+        await SeedExtraServersAsync(connection, now, ct);
         return scratch;
     }
 
-    private static async Task<JsonDocument> CallAsync(NpgsqlDataSource ds, string name, CancellationToken ct, int hours = 24, int limit = 10) =>
+    internal const string ServerNameVcoreLess = "darling-finops-util-view-g";
+    internal const string ServerNameMaster = "darling-finops-util-view-h";
+    internal const string ServerNameNoProps = "darling-finops-util-view-i";
+
+    /* G: Azure SQL Database whose service objective names no vCores. H: a logical server's master database.
+       I: CPU and memory with no server_properties row. */
+    private static async Task SeedExtraServersAsync(NpgsqlConnection connection, DateTime now, CancellationToken ct)
+    {
+        foreach (var (name, edition, engine) in new (string, string?, int?)[]
+        {
+            (ServerNameVcoreLess, "Standard", 5),
+            (ServerNameMaster, "Azure SQL Database (System)", 5),
+            (ServerNameNoProps, null, null),
+        })
+        {
+            var id = ServerIdHelper.GetDeterministicHashCode(name);
+            await DarlingMcpTestData.RegisterServerAsync(connection, id, name, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, 20, 1)",
+                CollectionIdGenerator.Next(), now.AddHours(-1), id, name, now.AddHours(-1));
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, total_server_memory_mb, target_server_memory_mb, buffer_pool_mb, max_workers_count, current_workers_count) VALUES ($1, $2, $3, $4, 8192, 3000, 4000, 2000, 512, 50)",
+                CollectionIdGenerator.Next(), now.AddHours(-1), id, name);
+            if (engine is { } e)
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, engine_edition, cpu_count, vcore_count) VALUES ($1, $2, $3, $4, $5, $6, 4, NULL)",
+                    CollectionIdGenerator.Next(), now.AddDays(-1), id, name, edition!, e);
+        }
+    }
+
+    private static async Task<JsonDocument> CallAsync(NpgsqlDataSource ds, string name, int hours = 24, int limit = 10, CancellationToken ct = default) =>
         JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "utilization", name, hours, limit, ct));
 
     private static async Task WithStoreAsync(Func<NpgsqlDataSource, CancellationToken, Task> body)
@@ -69,7 +103,7 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
     public Task ServerA_MatchesTheStoragePieces_AndPinsMoneyScoreAndBand() => WithStoreAsync(async (ds, ct) =>
     {
         var id = FinOpsUtilizationGoldenLiveTests.ServerIdA;
-        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameA, ct);
+        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameA, ct: ct);
         var r = doc.RootElement;
         var dto = (await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(ds, id, 30, ct))!;
         var totals = await FinOpsUtilizationFigures.GetLatestStorageTotalsAsync(ds, id, 30, ct);
@@ -94,7 +128,11 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
 
         /* Hand-computed: p95 of 10,20,30,95 is 85.25 -> CPU score 24; buffer pool 6000/16000 -> memory 100; free 40% -> storage 100. */
         Assert.Equal(69, score);
+        Assert.Equal(38.8m, r.GetProperty("cpu").GetProperty("avg_cpu_pct").GetDecimal());
+        Assert.Equal(85.3m, r.GetProperty("cpu").GetProperty("p95_cpu_pct").GetDecimal());
+        Assert.Contains("85.3%", r.GetProperty("verdict_reason").GetString(), StringComparison.Ordinal);
         Assert.Equal("fair", r.GetProperty("health_band").GetString());
+        Assert.Equal(3, r.GetProperty("engine_edition").GetInt32());
         Assert.Equal(1500.00m, r.GetProperty("monthly_cost_usd").GetDecimal());
         Assert.Equal(18000.00m, r.GetProperty("annual_cost_usd").GetDecimal());
         Assert.Equal(FinOpsCost.Annual(1500.00m), r.GetProperty("annual_cost_usd").GetDecimal());
@@ -103,7 +141,7 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
     [Fact]
     public Task ServerWithoutACost_HasNullCostAndAReason_AndEditionFiveFacts() => WithStoreAsync(async (ds, ct) =>
     {
-        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameC, ct);
+        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameC, ct: ct);
         var r = doc.RootElement;
         Assert.Equal(JsonValueKind.Null, r.GetProperty("monthly_cost_usd").ValueKind);
         Assert.Equal(JsonValueKind.Null, r.GetProperty("annual_cost_usd").ValueKind);
@@ -118,25 +156,77 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
     [Fact]
     public Task ServerWithoutCpu_HasNullVerdictAndTheScoreNote() => WithStoreAsync(async (ds, ct) =>
     {
-        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameD, ct);
+        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameD, ct: ct);
         var r = doc.RootElement;
         Assert.Equal(JsonValueKind.Null, r.GetProperty("verdict").ValueKind);
-        Assert.Equal(PerformanceMonitor.Common.ServerHardwareScope.HealthScoreWithoutCpuNote, r.GetProperty("health_score_note").GetString());
+        Assert.Equal(ServerHardwareScope.HealthScoreWithoutCpuNote, r.GetProperty("health_score_note").GetString());
         Assert.Contains("no verdict", r.GetProperty("verdict_reason").GetString(), StringComparison.Ordinal);
+
+        /* Hand-computed: buffer pool 2000/8192 is 0.24 -> memory 60; no database size snapshot -> free 100% -> storage 100;
+           no CPU, so (60 * 30 + 100 * 30) / 60 = 80, which is the good band. */
+        Assert.Equal(80, r.GetProperty("health_score").GetInt32());
+        Assert.Equal("good", r.GetProperty("health_band").GetString());
+        var dto = (await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerIdD, 30, ct))!;
+        Assert.Equal(FinOpsUtilizationFigures.HealthScore(dto, 100m), r.GetProperty("health_score").GetInt32());
     });
 
     [Fact]
-    public Task ServerWithoutMemory_AnswersEmptyOrNotCollected() => WithStoreAsync(async (ds, ct) =>
+    public Task EditionFiveServerWithoutVcores_HasNullCpuCountAndAReason() => WithStoreAsync(async (ds, ct) =>
     {
-        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameE, ct);
-        Assert.Contains(doc.RootElement.GetProperty("status").GetString(), new[] { "empty", "not_collected" });
+        using var doc = await CallAsync(ds, ServerNameVcoreLess, ct: ct);
+        var cpu = doc.RootElement.GetProperty("cpu");
+        Assert.Equal(JsonValueKind.Null, cpu.GetProperty("cpu_count").ValueKind);
+        Assert.Equal("service objective names no vCores", cpu.GetProperty("cpu_count_reason").GetString());
+        Assert.Equal("vcores", cpu.GetProperty("cpu_count_unit").GetString());
+        Assert.Equal(5, doc.RootElement.GetProperty("engine_edition").GetInt32());
+    });
+
+    [Fact]
+    public Task LogicalServerMaster_HasTheNotApplicableVerdict() => WithStoreAsync(async (ds, ct) =>
+    {
+        using var doc = await CallAsync(ds, ServerNameMaster, ct: ct);
+        Assert.Equal("NOT_APPLICABLE", doc.RootElement.GetProperty("verdict").GetString());
+        Assert.Equal(ProvisioningVerdict.NotApplicableExplanation, doc.RootElement.GetProperty("verdict_reason").GetString());
+    });
+
+    [Fact]
+    public Task ServerWithoutAPropertiesRow_HasNullEngineEdition() => WithStoreAsync(async (ds, ct) =>
+    {
+        using var doc = await CallAsync(ds, ServerNameNoProps, ct: ct);
+        Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("engine_edition").ValueKind);
+    });
+
+    [Fact]
+    public Task PayloadKeys_AreExactlyTheDocumentedSets() => WithStoreAsync(async (ds, ct) =>
+    {
+        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameB, ct: ct);
+        var trend = doc.RootElement.GetProperty("provisioning_trend")[0];
+        Assert.Equal(
+            new[] { "avg_cpu_pct", "day", "max_cpu_pct", "memory_ratio", "p95_cpu_pct", "verdict" },
+            trend.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.Equal(
+            new[]
+            {
+                "buffer_pool_mb", "buffer_pool_pct", "forced_grants", "grant_timeouts", "grant_utilization_pct", "max_grant_waiters",
+                "memory_basis", "memory_ratio", "physical_memory_mb", "stolen_memory_pct", "target_memory_mb", "total_memory_mb",
+            },
+            doc.RootElement.GetProperty("memory").EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    });
+
+    [Fact]
+    public Task ServerWithoutMemory_AnswersEmpty() => WithStoreAsync(async (ds, ct) =>
+    {
+        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameE, ct: ct);
+        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal("No memory statistics were collected for this server in the last 24 hours, so there is no utilization summary.",
+            doc.RootElement.GetProperty("message").GetString());
     });
 
     [Fact]
     public Task Trend_IsInReaderOrder_WithIsoDays() => WithStoreAsync(async (ds, ct) =>
     {
         var expected = await DarlingFinOpsUtilizationReader.GetProvisioningTrendAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerIdB, 30, ct);
-        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameB, ct);
+        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameB, ct: ct);
         var trend = doc.RootElement.GetProperty("provisioning_trend");
         Assert.Equal(expected.Count, trend.GetArrayLength());
         Assert.True(expected.Count > 0);
@@ -152,21 +242,21 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
     public Task FixedWindowParameters_AreRefused_AndExplicitDefaultsAccepted() => WithStoreAsync(async (ds, ct) =>
     {
         var name = FinOpsUtilizationGoldenLiveTests.ServerNameA;
-        using (var hours = await CallAsync(ds, name, ct, hours: 48))
+        using (var hours = await CallAsync(ds, name, hours: 48, ct: ct))
         {
             Assert.Equal("invalid", hours.RootElement.GetProperty("status").GetString());
             Assert.Equal("hours_back", hours.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
             Assert.Contains("utilization", hours.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
         }
-        using (var limit = await CallAsync(ds, name, ct, limit: 5))
+        using (var limit = await CallAsync(ds, name, limit: 5, ct: ct))
         {
             Assert.Equal("invalid", limit.RootElement.GetProperty("status").GetString());
             Assert.Equal("limit", limit.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
             Assert.Contains("utilization", limit.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
         }
-        using (var ok = await CallAsync(ds, name, ct, 24, 10))
+        using (var ok = await CallAsync(ds, name, 24, 10, ct))
             Assert.Equal("utilization", ok.RootElement.GetProperty("view").GetString());
-        using var unknown = await CallAsync(ds, "no-such-server-zz", ct);
+        using var unknown = await CallAsync(ds, "no-such-server-zz", ct: ct);
         Assert.Equal("invalid", unknown.RootElement.GetProperty("status").GetString());
     });
 
@@ -178,9 +268,9 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
         try
         {
             CultureInfo.CurrentCulture = new CultureInfo("en-US");
-            using var en = await CallAsync(ds, name, ct);
+            using var en = await CallAsync(ds, name, ct: ct);
             CultureInfo.CurrentCulture = new CultureInfo("de-DE");
-            using var de = await CallAsync(ds, name, ct);
+            using var de = await CallAsync(ds, name, ct: ct);
             var enText = en.RootElement.GetProperty("verdict_reason").GetString();
             Assert.False(string.IsNullOrEmpty(enText));
             Assert.Equal(enText, de.RootElement.GetProperty("verdict_reason").GetString());
