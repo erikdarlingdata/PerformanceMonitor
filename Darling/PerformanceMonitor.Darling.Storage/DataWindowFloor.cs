@@ -173,6 +173,10 @@ public static class DataWindowFloor
                 ? source
                 : throw new ArgumentException($"'{table}' is not a collector table the data-start probe can read.", nameof(table));
 
+        /// <summary>The probe has no source for the collection log yet.</summary>
+        public static Source ForCollectionLog() =>
+            throw new ArgumentException("the data-start probe has no source for collection_log.");
+
         /// <summary>
         /// The continuous aggregate <paramref name="view"/>, or false when <see cref="RollupAvailability"/> does not
         /// know the name. Every rollup a panel reads keeps a <c>(server_id, bucket)</c> index.
