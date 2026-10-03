@@ -917,7 +917,11 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsPlansAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsPlans ??= new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name));
+        /* #5003: one ingestor is published even when two targets' first runs get here together. A plain ??= let each
+           build its own and keep it, and the ingestor holds the positions the other target's run was using. */
+        var rdsPlans = LazyInitializer.EnsureInitialized(
+            ref _rdsPlans,
+            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name)));
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
@@ -928,7 +932,7 @@ public sealed class DarlingCollectorRunner
 
         var started = Stopwatch.GetTimestamp();
 
-        var outcome = await _rdsPlans.IngestAsync(
+        var outcome = await rdsPlans.IngestAsync(
             server.ServerId, server.StorageName, host, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
@@ -953,7 +957,10 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsDeadlocksAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsDeadlocks ??= new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name));
+        /* #5003: published once, as in IngestRdsPlansAsync. */
+        var rdsDeadlocks = LazyInitializer.EnsureInitialized(
+            ref _rdsDeadlocks,
+            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name)));
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
@@ -968,7 +975,7 @@ public sealed class DarlingCollectorRunner
 
         var started = Stopwatch.GetTimestamp();
 
-        var outcome = await _rdsDeadlocks.IngestAsync(
+        var outcome = await rdsDeadlocks.IngestAsync(
             server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
@@ -1144,7 +1151,10 @@ public sealed class DarlingCollectorRunner
     {
         /* #4004: no key, no hashing - the same refusal the pg_read_file route's BuildQuery makes. */
         var logHashKey = _logHashKey ?? throw new InvalidOperationException(PgLogHashKey.UnavailableMessage);
-        _rdsLogEvents ??= new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name));
+        /* #5003: published once, as in IngestRdsPlansAsync. */
+        var rdsLogEvents = LazyInitializer.EnsureInitialized(
+            ref _rdsLogEvents,
+            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name)));
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
@@ -1162,7 +1172,7 @@ public sealed class DarlingCollectorRunner
 
         var started = Stopwatch.GetTimestamp();
 
-        var outcome = await _rdsLogEvents.IngestAsync(
+        var outcome = await rdsLogEvents.IngestAsync(
             server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
@@ -1241,13 +1251,14 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestPgCpuAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsCpu ??= new RdsCpuIngestor(_postgres, logger: _logger);
+        /* #5003: published once, as in IngestRdsPlansAsync. */
+        var rdsCpu = LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger));
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
         var started = Stopwatch.GetTimestamp();
 
-        var outcome = await _rdsCpu.IngestAsync(
+        var outcome = await rdsCpu.IngestAsync(
             server.ServerId, server.StorageName, host, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;

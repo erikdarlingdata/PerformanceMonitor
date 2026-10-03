@@ -4971,6 +4971,10 @@ LIMIT 1";
     /// </summary>
     private readonly ConcurrentDictionary<int, QueryStoreServerGate> _queryStoreGates = new();
 
+    /// <summary>#5003: which collector failures have already had their stack written to the service log since this
+    /// process started. Read and written by every concurrent collector run, so it is a concurrent table inside.</summary>
+    private readonly CollectorFaultStackLog _collectorFaultStacks = new();
+
     /// <summary>
     /// #2717: one <see cref="DetachedCollectorGate"/> per (server, collector) for every collector fired
     /// detached from <see cref="RunDueCollectorsAsync"/>'s sequential body other than query_store (which
@@ -13259,6 +13263,28 @@ LIMIT 1";
 
             _logger.LogError("  [{Server}] {Collector} => ERROR: {Message}",
                 server.Config.DisplayName, collectorName, message);
+
+            /* #5003: the first failure of each kind from a collector since the service started is written once more
+               with its full text, so the next "Collection was modified" (or any other fault in our own code) names the
+               frame that threw. The line above stays as it is for every failure, and so does the collection_log row.
+
+               The text goes into the message rather than only onto the exception object: the file log renders an
+               exception it is handed as "Type: Message" and drops the stack (DarlingFileLoggerProvider.Log), and the
+               file is the log an operator reads. An OutOfMemoryException is never given one - this arm is its landing
+               pad, and building the text allocates.
+
+               The ERROR (timeout) arm above is deliberately left alone. Its filter admits only an NpgsqlException that
+               the provider classifies as a command timeout, so its cause is a deadline by construction, the authored
+               sentence already names the collector, the database, the elapsed time and the side whose deadline fired,
+               and a stack there would be Npgsql's read frames. A bug in our own code cannot reach it. */
+            if (_collectorFaultStacks.TakeFirst(collectorName, ex) is { } faultText)
+            {
+                _logger.LogError(ex,
+                    "  [{Server}] {Collector} => ERROR detail: first {ExceptionType} from this collector since the service "
+                    + "started, with its full text so the frame that threw is on record. Later failures of this kind log "
+                    + "the one line only.{FullText}",
+                    server.Config.DisplayName, collectorName, ex.GetType().Name, Environment.NewLine + faultText);
+            }
 
             /* A dead connection poisons every collector — force a reconnect + reprobe. The Postgres arm
                matters as much as the SQL Server one and is deliberately NARROWER than "any
