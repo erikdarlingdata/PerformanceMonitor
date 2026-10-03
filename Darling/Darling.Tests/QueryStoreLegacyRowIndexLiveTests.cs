@@ -136,7 +136,7 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
         await using var body = new NpgsqlConnection(scratch.ConnectionString);
         await body.OpenAsync(ct);
         await PgMigrations.MigrateAsync(body, ct);
-        await PgTableTuning.ApplyAsync(body, NullLogger.Instance, ct);
+        await TuningStartPasses.ConvergeAsync(body, ct);
 
         await using (var def = new NpgsqlCommand(
             "SELECT i.indisvalid, pg_get_indexdef(i.indexrelid) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "

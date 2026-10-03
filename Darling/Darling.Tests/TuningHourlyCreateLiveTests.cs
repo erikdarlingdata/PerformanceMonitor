@@ -33,6 +33,8 @@ public sealed class TuningHourlyCreateLiveTests
         "idx_query_store_stats_server_db_query_plan_time",
         PgTableTuning.ForcePlanFailuresIndexName,
         PgTableTuning.LegacyRowIndexName,
+        PgTableTuning.QueryStatsRestartRowIndexName,
+        PgTableTuning.ProcedureStatsRestartRowIndexName,
         "idx_store_metrics_kind_name_time",
     };
 
@@ -55,7 +57,7 @@ public sealed class TuningHourlyCreateLiveTests
         await using var body = new NpgsqlConnection(scratch.ConnectionString);
         await body.OpenAsync(ct);
         await PgMigrations.MigrateAsync(body, ct);
-        await PgTableTuning.ApplyAsync(body, NullLogger.Instance, ct);
+        await TuningStartPasses.ConvergeAsync(body, ct);
         foreach (var name in TunedIndexes)
         {
             Assert.True(await IndexExistsAsync(body, name, ct), name + " should exist after the first pass");
@@ -66,7 +68,7 @@ public sealed class TuningHourlyCreateLiveTests
         await Exec(holder, "BEGIN", ct);
         try
         {
-            await Exec(holder, "LOCK TABLE collect.query_stats, collect.query_store_stats, collect.store_metrics IN ROW EXCLUSIVE MODE", ct);
+            await Exec(holder, "LOCK TABLE collect.query_stats, collect.procedure_stats, collect.query_store_stats, collect.store_metrics IN ROW EXCLUSIVE MODE", ct);
             await Exec(body, "SET lock_timeout = '2s'", ct);
 
             var applied = await PgTableTuning.ApplyAsync(body, NullLogger.Instance, ct);
@@ -91,7 +93,7 @@ public sealed class TuningHourlyCreateLiveTests
         await using var body = new NpgsqlConnection(scratch.ConnectionString);
         await body.OpenAsync(ct);
         await PgMigrations.MigrateAsync(body, ct);
-        await PgTableTuning.ApplyAsync(body, NullLogger.Instance, ct);
+        await TuningStartPasses.ConvergeAsync(body, ct);
 
         await Exec(body, "DROP INDEX collect.idx_store_metrics_kind_name_time", ct);
         Assert.False(await IndexExistsAsync(body, "idx_store_metrics_kind_name_time", ct));
@@ -113,7 +115,7 @@ public sealed class TuningHourlyCreateLiveTests
         await using var body = new NpgsqlConnection(scratch.ConnectionString);
         await body.OpenAsync(ct);
         await PgMigrations.MigrateAsync(body, ct);
-        await PgTableTuning.ApplyAsync(body, NullLogger.Instance, ct);
+        await TuningStartPasses.ConvergeAsync(body, ct);
 
         await Exec(body, "DROP INDEX collect.idx_store_metrics_kind_name_time", ct);
         var logger = new CapturingTestLogger();
@@ -144,7 +146,7 @@ public sealed class TuningHourlyCreateLiveTests
         await using var body = new NpgsqlConnection(scratch.ConnectionString);
         await body.OpenAsync(ct);
         await PgMigrations.MigrateAsync(body, ct);
-        await PgTableTuning.ApplyAsync(body, NullLogger.Instance, ct);
+        await TuningStartPasses.ConvergeAsync(body, ct);
         await Exec(body, "DROP INDEX collect.idx_query_stats_server_hash_time", ct);
 
         await using var holder = new NpgsqlConnection(scratch.ConnectionString);
