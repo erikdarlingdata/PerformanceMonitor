@@ -386,6 +386,62 @@ WHERE {alias}.name IN ({literals});";
     }
 
     /// <summary>
+    /// The STOP of one session in a database, for a session that runs on a read-only replica (#4961). Run state is per replica,
+    /// so a registration with read-only intent stops the session over its own connection, which reaches that replica, and only
+    /// then drops it over a connection without the intent. It takes exactly the names <see cref="DropStatement"/> takes, spelled
+    /// exactly, and throws <see cref="ArgumentException"/> for any other. The text is guarded on
+    /// <c>sys.dm_xe_database_sessions</c>, which lists the sessions that run there, so a replica where the session does not run
+    /// is a clean no-op.
+    /// </summary>
+    public static string StopStatement(string sessionName, string? installId = null)
+    {
+        var canonical = Canonical(sessionName, installId)
+            ?? throw new ArgumentException("Only Darling's own session names can be stopped by this verb.", nameof(sessionName));
+        if (!string.Equals(canonical, sessionName, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The session name is not spelled exactly as Darling creates it.", nameof(sessionName));
+        }
+
+        return ComposeStopStatement(canonical);
+    }
+
+    /// <summary>
+    /// The STOP for a name the caller has already limited to a list it owns, as <see cref="ComposeDropStatement"/> is for the
+    /// drop. A long-query name (this install's own, or the old shared one) and this install's own deadlock or blocked-process
+    /// fallback are stopped by the builders the collectors use
+    /// (<see cref="LongQueryCompletionsCollector.BuildStopSessionSql"/>, <see cref="AlwaysOnXeSessions.BuildAzureStopSql"/>). The
+    /// two shared names are ones no builder takes, so they get the long-query builder's guard around one STOP.
+    /// </summary>
+    internal static string ComposeStopStatement(string sessionName)
+    {
+        if (string.Equals(sessionName, LongQueryCompletionsCollector.LegacyXeSessionName, StringComparison.Ordinal)
+            || LongQueryCompletionsCollector.IsInstallSessionName(sessionName))
+        {
+            return LongQueryCompletionsCollector.BuildStopSessionSql(sessionName);
+        }
+
+        foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess })
+        {
+            if (AlwaysOnXeSessions.IsOwnName(sessionName, kind))
+            {
+                return AlwaysOnXeSessions.BuildAzureStopSql(kind, sessionName);
+            }
+        }
+
+        return $@"
+IF EXISTS
+(
+    SELECT
+        1/0
+    FROM sys.dm_xe_database_sessions
+    WHERE name = N'{sessionName.Replace("'", "''", StringComparison.Ordinal)}'
+)
+BEGIN
+    ALTER EVENT SESSION {BracketQuote(sessionName)} ON DATABASE STATE = STOP;
+END;";
+    }
+
+    /// <summary>
     /// <c>DROP EVENT SESSION [name] ON SERVER;</c> or <c>... ON DATABASE;</c>, with no check on the name: the caller has
     /// already limited it to a list it owns. <see cref="DropStatement"/> limits it to <see cref="SessionNames"/> and the plan
     /// builds its statements through that; a cleanup target limits it to the names it was given. Both compose here, so the
@@ -981,6 +1037,40 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         return await ReadNamesAsync(connection, FindOthersDatabaseSql!, cancellationToken);
     }
 
+    /// <summary>A test's stand-in for the connection a drop opens: called with the connection string it would open, it answers
+    /// the database the drop's statements run through. Null in production, which opens a SQL connection.</summary>
+    internal Func<string, CancellationToken, Task<IAlwaysOnXeDatabase>>? OpenDatabaseForTests { get; set; }
+
+    /// <summary>The STOP that goes before the DROP of one found session over a registration with read-only intent (#4961). It is
+    /// refused unless the name is one of the names this target was given, spelled exactly, as <see cref="StatementFor"/> is, and
+    /// it is for a database-scoped session only: the stop exists for the read-only replicas of Azure SQL Database. Otherwise it is
+    /// the statement <see cref="DarlingXeSessionCleanup.ComposeStopStatement"/> builds, which is also what
+    /// <see cref="DarlingXeSessionCleanup.StopStatement"/> is for Darling's own names.</summary>
+    internal string StopStatementFor(XeSessionDrop drop)
+    {
+        ArgumentNullException.ThrowIfNull(drop);
+
+        var session = drop.Session;
+        if (session.Scope != XeSessionScope.Database)
+        {
+            throw new ArgumentException("Only a database-scoped session is stopped before it is dropped.", nameof(drop));
+        }
+
+        if (!_sessionNames.Contains(session.Name, StringComparer.Ordinal))
+        {
+            throw new ArgumentException("Only the session names this target was given can be stopped by it.", nameof(drop));
+        }
+
+        return DarlingXeSessionCleanup.ComposeStopStatement(session.Name);
+    }
+
+    /// <summary>
+    /// Drops one found session. On Azure SQL Database a session cannot be dropped over a read-only connection, so for a
+    /// registration with read-only intent the drop goes in the order the engine documents for a session that runs on a read-only
+    /// replica (#4961): the session is stopped over the registration's own connection, only when it runs there, and then dropped
+    /// over a connection with the intent forced off, which reaches the primary. Every other target, and every server-scoped one, sends
+    /// the one DROP over its own connection.
+    /// </summary>
     public async Task DropAsync(XeSessionDrop drop, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(drop);
@@ -990,11 +1080,57 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         var connectionString = drop.Session.Scope == XeSessionScope.Database
             ? SqlServerTargetProvider.Instance.WithDatabase(_server.ConnectionString, drop.Session.Database!)
             : _server.ConnectionString;
+        var readOnlyIntent = drop.Session.Scope == XeSessionScope.Database && DarlingXeSessions.HasReadOnlyIntent(connectionString);
+        var stop = readOnlyIntent ? StopStatementFor(drop) : null;
 
-        using var connection = new SqlConnection(connectionString);
-        await connection.OpenAsync(cancellationToken);
-        using var command = new SqlCommand(statement, connection) { CommandTimeout = CommandTimeoutSeconds };
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        var own = await OpenDatabaseAsync(connectionString, cancellationToken);
+        IAlwaysOnXeDatabase database = own;
+        try
+        {
+            if (!readOnlyIntent)
+            {
+                await own.ExecuteAsync(statement, cancellationToken);
+                return;
+            }
+
+            /* The services' own wrapper: reads and the stop go over the own connection, the drop over one without the intent. */
+            database = DarlingAlwaysOnXeSessions.WithReadOnlyIntent(connectionString, own, OpenDatabaseForTests);
+            if (await database.IsStartedAsync(drop.Session.Name, cancellationToken))
+            {
+                await database.ExecuteAsync(stop!, cancellationToken);
+            }
+
+            await database.ExecuteWithoutReadOnlyIntentAsync(statement, cancellationToken);
+        }
+        finally
+        {
+            (database as IDisposable)?.Dispose();
+            if (!ReferenceEquals(database, own))
+            {
+                (own as IDisposable)?.Dispose();
+            }
+        }
+    }
+
+    private async Task<IAlwaysOnXeDatabase> OpenDatabaseAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        if (OpenDatabaseForTests is { } open)
+        {
+            return await open(connectionString, cancellationToken);
+        }
+
+        var connection = new SqlConnection(connectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+
+        return new DarlingAlwaysOnXeSessions.Database(connection, ownsConnection: true);
     }
 
     private static async Task<List<string>> ReadNamesAsync(SqlConnection connection, string sql, CancellationToken cancellationToken)

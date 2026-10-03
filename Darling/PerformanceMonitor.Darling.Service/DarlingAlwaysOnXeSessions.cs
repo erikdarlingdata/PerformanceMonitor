@@ -96,20 +96,33 @@ internal static class DarlingAlwaysOnXeSessions
     /// as before. The caller disposes the result when it is <see cref="IDisposable"/>.
     /// </summary>
     internal static IAlwaysOnXeDatabase WithReadOnlyIntent(
-        DarlingCollectorRunner runner, ServerRuntime server, string databaseName, IAlwaysOnXeDatabase own)
+        DarlingCollectorRunner runner, ServerRuntime server, string databaseName, IAlwaysOnXeDatabase own) =>
+        WithReadOnlyIntent(
+            DarlingXeSessions.LongQueryTraceConnectionString(server, databaseName),
+            own,
+            runner.AlwaysOnXeConnectionForTests is { } open
+                ? (withoutIntent, token) => open(server, databaseName, withoutIntent, token)
+                : null);
+
+    /// <summary>
+    /// The same wrapping for a caller with no runner, such as the drop verb: <paramref name="ownConnectionString"/> is the string
+    /// <paramref name="own"/> was opened with. <paramref name="openForTests"/>, when set, replaces the open of the connection
+    /// without the intent, and is called with the string it would open.
+    /// </summary>
+    internal static IAlwaysOnXeDatabase WithReadOnlyIntent(
+        string ownConnectionString, IAlwaysOnXeDatabase own, Func<string, CancellationToken, Task<IAlwaysOnXeDatabase>>? openForTests = null)
     {
-        var ownConnectionString = DarlingXeSessions.LongQueryTraceConnectionString(server, databaseName);
-        if (new SqlConnectionStringBuilder(ownConnectionString).ApplicationIntent != ApplicationIntent.ReadOnly)
+        if (!DarlingXeSessions.HasReadOnlyIntent(ownConnectionString))
         {
             return own;
         }
 
-        var withoutIntent = new SqlConnectionStringBuilder(ownConnectionString) { ApplicationIntent = ApplicationIntent.ReadWrite }.ConnectionString;
+        var withoutIntent = DarlingXeSessions.WithoutReadOnlyIntent(ownConnectionString);
         return new AlwaysOnXeReadOnlyIntentDatabase(own, async token =>
         {
-            if (runner.AlwaysOnXeConnectionForTests is { } open)
+            if (openForTests is not null)
             {
-                return await open(server, databaseName, withoutIntent, token);
+                return await openForTests(withoutIntent, token);
             }
 
             var connection = new SqlConnection(withoutIntent);

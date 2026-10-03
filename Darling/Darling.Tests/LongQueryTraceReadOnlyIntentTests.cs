@@ -502,6 +502,35 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         Assert.DoesNotContain(AlwaysOnXeSessions.AzureCapsSentence, rig.State.LongQueryTraceFault, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Azure_APartialFailureOfTheCreate_CarriesTheCapsSentenceInTheRunsNote_UnlessItIsAReadOnlyRefusal(bool readOnlyRefusal)
+    {
+        /* One of two databases refuses the create: the run reads the other, and its note says the first is not in it. */
+        var rig = BuildRig("beta", readOnlyIntent: false);
+        rig.Listed = new List<string> { "beta", "gamma" };
+        rig.Runner.LongQueryTraceStepOverrideForTests = (_, databaseName, _, _, _, _) =>
+            databaseName == "beta"
+                ? Task.FromException(readOnlyRefusal ? ReadOnlyDatabaseRefusal() : SqlExceptionFactory.Create(1105, 17, "The statement was refused."))
+                : Task.CompletedTask;
+
+        await rig.ReconcileAsync();
+
+        var note = rig.State.LongQueryTracePartialNote;
+        Assert.NotNull(note);
+        Assert.Contains("beta", note, StringComparison.Ordinal);
+        if (readOnlyRefusal)
+        {
+            Assert.DoesNotContain(AlwaysOnXeSessions.AzureCapsSentence, note, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("The statement was refused.", note, StringComparison.Ordinal);
+            Assert.Contains(AlwaysOnXeSessions.AzureCapsSentence, note, StringComparison.Ordinal);
+        }
+    }
+
     private static SqlException ReadOnlyDatabaseRefusal() =>
         SqlExceptionFactory.Create(LongQueryTraceDatabases.ReadOnlyDatabaseErrorNumber, 16, "Failed to update database because the database is read-only.");
 

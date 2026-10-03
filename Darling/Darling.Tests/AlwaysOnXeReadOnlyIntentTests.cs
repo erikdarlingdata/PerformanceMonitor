@@ -25,8 +25,9 @@ namespace Darling.Tests;
 /// registration with read-only intent and for one without (#4961). A session cannot be created or dropped over a connection
 /// to a read-only replica, and a definition made on the primary replicates to it, so a registration with the intent creates
 /// over a connection without it. The start, the probes and the read stay on the registration's own connection, because run
-/// state is per replica. A session that runs on the replica is stopped there before it is dropped on the primary. Each test
-/// drives the real ensure against a scripted primary and replica, which see the connection string each open would use.
+/// state is per replica. A session that runs on the replica is stopped there before it is dropped on the primary, on the
+/// switch back and when the server is removed. Each test drives the real ensure against a scripted primary and replica, which
+/// see the connection string each open would use.
 /// </summary>
 public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
 {
@@ -180,6 +181,16 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
 
         public Task EnsureAsync() => DarlingXeSessions.EnsureAllAsync(Runtime, Runner, Logger, CancellationToken.None);
 
+        /// <summary>
+        /// The server's removal: its long-query trace was never on (nothing to drop there), and no other registration
+        /// reads a session of its own, so every own fallback the choices hold is dropped.
+        /// </summary>
+        public Task RemoveAsync() =>
+            DarlingRemovedServerSessions.DropAsync(
+                new RemovedLongQueryServer(Runtime.Config, Runtime, LongQueryTraceApplied: false),
+                Runner, remaining: null, traceOn: _ => false,
+                instanceGuard: _ => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers), Logger, CancellationToken.None);
+
         /// <summary>The lines at Warning or above that this routine wrote about a session.</summary>
         public List<string> Loud() => Logger.Entries
             .Where(e => e.Level >= LogLevel.Warning && e.Message.Contains("session", StringComparison.OrdinalIgnoreCase))
@@ -209,8 +220,9 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
         runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "master", "alpha" });
         runner.AlwaysOnXeConnectionForTests = (_, database, connectionString, _) =>
         {
-            Assert.Equal("alpha", database);
-            Assert.Equal("alpha", new SqlConnectionStringBuilder(connectionString).InitialCatalog);
+            /* The removal reads the database name back from the choice's key, which keeps it in upper case. */
+            Assert.Equal("alpha", database, ignoreCase: true);
+            Assert.Equal("alpha", new SqlConnectionStringBuilder(connectionString).InitialCatalog, ignoreCase: true);
             var intent = new SqlConnectionStringBuilder(connectionString).ApplicationIntent;
             rig.OpenedStrings.Add(connectionString);
             rig.Alpha.Opens.Add(intent);
@@ -290,6 +302,39 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
         Assert.DoesNotContain(own, rig.Alpha.Definitions);
         Assert.Equal(shared, rig.Runner.AlwaysOnReadSessionName(rig.Runtime, "alpha", AlwaysOnXeSessionKind.Deadlock));
         Assert.DoesNotContain(rig.Alpha.Statements(shared), s => s.Verb is "CREATE" or "CREATE+START" or "DROP");
+    }
+
+    [Fact]
+    public async Task ReadOnlyIntent_ARemovedServer_StopsItsOwnSessionOverTheOwnConnection_ThenDropsItOverAConnectionWithoutTheIntent()
+    {
+        var rig = BuildRig(readOnlyIntent: true);
+        var own = Own(AlwaysOnXeSessionKind.Deadlock);
+        rig.Alpha.Definitions.Add(own);
+        rig.Alpha.RunningOnReplica.Add(own);
+        rig.Runner.AlwaysOnChoices.Set(DarlingAlwaysOnXeSessions.ServerKey(rig.Runtime), "alpha", AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeChoice.Own);
+
+        await rig.RemoveAsync();
+
+        Assert.Equal(
+            new[] { (ApplicationIntent.ReadOnly, "STOP"), (ApplicationIntent.ReadWrite, "DROP") },
+            rig.Alpha.Statements(own));
+        Assert.DoesNotContain(own, rig.Alpha.Definitions);
+        Assert.Empty(rig.Loud());
+    }
+
+    [Fact]
+    public async Task ReadOnlyIntent_ARemovedServer_WhoseOwnSessionDoesNotRunOnTheReplica_DropsItWithoutAStop()
+    {
+        var rig = BuildRig(readOnlyIntent: true);
+        var own = Own(AlwaysOnXeSessionKind.Deadlock);
+        rig.Alpha.Definitions.Add(own);
+        rig.Runner.AlwaysOnChoices.Set(DarlingAlwaysOnXeSessions.ServerKey(rig.Runtime), "alpha", AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeChoice.Own);
+
+        await rig.RemoveAsync();
+
+        Assert.Equal(new[] { (ApplicationIntent.ReadWrite, "DROP") }, rig.Alpha.Statements(own));
+        Assert.DoesNotContain(own, rig.Alpha.Definitions);
+        Assert.Empty(rig.Loud());
     }
 
     [Fact]
