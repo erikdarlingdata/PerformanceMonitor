@@ -201,6 +201,7 @@ public sealed class McpToolsListBudgetTests
     // get_finops_inventory head says which time is not UTC, with the merged tree re-measured: 178,025 -> 178,170.
     // get_finops application_connections view, with the merged tree re-measured: 178,170 -> 178,258.
     // get_finops optimization view, with the merged tree re-measured: 178,258 -> 178,341.
+    // get_finops optimization guide gains the cost-attribution and mixed-status sentences after the guide marker, re-measured: 178,341 -> 178,341 (the head is unchanged).
     private const int TotalCeilingBytes = 178_341;
 
 
