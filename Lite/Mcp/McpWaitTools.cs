@@ -224,6 +224,17 @@ public sealed class McpWaitTools
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
+            /* #4966: where this server's waiting_tasks start for the window, beside the page cut above — truncated
+               says the window held more than limit, this says the store did not hold the window's head. The page's
+               oldest_returned_collection_time already names where ITS rows stop, so no key is added for that. The
+               probe reads coverage (the collector's logged runs count as well as rows: nothing waits for hours on a
+               quiet server, so its first row can come long after the store began covering the window), from the
+               same view the page was read from. */
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var notice = McpQueryTools.WindowNotice(
+                await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.WaitingTasks, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, "waiting_tasks");
+
             var result = page.Select(r => new
             {
                 session_id = r.SessionId,
@@ -242,6 +253,12 @@ public sealed class McpWaitTools
                    span requested, the page described as a page, and the span the page covers, on Darling's
                    names. */
                 hours_back,
+                /* #4966: the window floor, always present (false and null when the store covered the window). No
+                   effective_hours_back: this payload carries a page `truncated`, and the census holds that key
+                   apart for the window floor (McpPayloadContractCensusTests), so the reach is the instant. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 tasks_returned = page.Count,
                 truncated,
                 oldest_returned_collection_time = page.Min(r => r.CollectionTime).ToString("o"),

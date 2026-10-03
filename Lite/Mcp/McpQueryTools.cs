@@ -467,10 +467,26 @@ public sealed class McpQueryTools
 
             var truncated = rows.Count > limit;
 
+            /* #4966: where this server's query_store_stats start, checked against the EARLIER of the two windows this
+               tool compares — the baseline's start, not the recent window's: a store that began inside the baseline
+               compares against a shorter baseline than baseline_is names, and nothing else on the payload says so.
+               The probe reads v_query_store_stats, the view both sides of the comparison read, and is unfiltered by
+               database_name (the floor is a property of the table). */
+            var notice = WindowNotice(
+                await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, baselineStart, windowEnd),
+                baselineStart, "query_store_stats",
+                "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.");
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* The window floor, always present (false and null when the store covered the baseline). No
+                   effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
+                   for the window floor (McpPayloadContractCensusTests), so the reach is the instant. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 database_name,
                 /* A fixed lookback ending at the recent window's start, not "every capture ever collected
                    before it" - the baseline no longer grows with retention (Lite's twin of Darling's #4195). */
@@ -678,10 +694,26 @@ public sealed class McpQueryTools
 
             var labels = LocalDataService.HeatmapBucketLabelsFor(parsedMetric);
 
+            /* #4966: where this server's query_stats start for the window, beside the cell cap's `truncated` below —
+               that one says the grid held more cells than limit, this one says the store did not hold the window's
+               head, so the grid's empty left edge is a retention cut or a young install rather than a quiet server.
+               The probe reads v_query_stats, the view the cells came from, and is unfiltered by database_name (the
+               floor is a property of the table). */
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var notice = WindowNotice(
+                await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, "query_stats");
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* The window floor, always present (false and null when the store covered the window). No
+                   effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
+                   for the window floor (McpPayloadContractCensusTests), so the reach is the instant. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 metric = LocalDataService.HeatmapMetricName(parsedMetric),
                 metric_unit = LocalDataService.HeatmapMetricUnit(parsedMetric),
                 database_name,
@@ -989,6 +1021,35 @@ public sealed class McpQueryTools
     /// </summary>
     internal static DateTime EffectiveWindowStart(DateTime? floor, DateTime requestedStart) =>
         floor is DateTime f && f > requestedStart ? f : requestedStart;
+
+    /// <summary>
+    /// #4966: the window floor of a tool whose payload also carries a PAGE cut (<c>truncated</c>), in the three keys
+    /// that tool writes after <c>hours_back</c>: <c>effective_start</c>, <c>window_truncated</c> and
+    /// <c>truncation_note</c>, with the Queries tools' verdict (<see cref="IsWindowTruncated"/>), clamp
+    /// (<see cref="EffectiveWindowStart"/>) and wording, and the table the tool read named in the note. Always
+    /// present on the payload: a covered window says <c>window_truncated: false</c> and a null note, as the
+    /// Queries tools do. <c>effective_hours_back</c> is NOT written here: Darling's
+    /// <c>McpPayloadContractCensusTests</c> holds that key apart for the window floor and fails it beside a bare
+    /// <c>truncated</c>, and every tool this serves carries one (a limit, a cell cap), so a caller reads the reach
+    /// off <c>effective_start</c> instead. <paramref name="requestedStart"/> is the start of the EARLIEST window the
+    /// tool compares (a tool that sets two windows against each other passes the older one's start), and
+    /// <paramref name="floor"/> the probe's answer for that start (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>).
+    /// <paramref name="tail"/> is one more sentence for a tool whose reading of the window needs it.
+    /// </summary>
+    internal static McpWindowNotice WindowNotice(DateTime? floor, DateTime requestedStart, string table, string? tail = null)
+    {
+        var truncated = IsWindowTruncated(floor, requestedStart);
+        return new McpWindowNotice(
+            EffectiveWindowStart(floor, requestedStart).ToString("o"),
+            truncated,
+            truncated
+                ? $"The window reaches further back than this server's raw {table} retains (or this server has been monitored for less time than that), so the older part of it was not read."
+                    + (tail is null ? "" : " " + tail)
+                : null);
+    }
+
+    /// <summary>The three window-floor keys <see cref="WindowNotice"/> answers, as the values a tool writes into its payload.</summary>
+    internal readonly record struct McpWindowNotice(string EffectiveStart, bool WindowTruncated, string? TruncationNote);
 
     /// <summary>
     /// The disclosure block every Performance-Trends payload carries (#3541 A2), written in the same key order
