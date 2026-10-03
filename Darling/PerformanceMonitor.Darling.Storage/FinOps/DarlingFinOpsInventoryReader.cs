@@ -261,24 +261,11 @@ WHERE s.server_id <> 0";
         var relationSql = coverage.StitchedRelationSql(
             TimescaleSupport.QueryStatsDbHourlyView, "f", ceilingHour, RollupCoverage.StitchTier.Hourly);
 
-        return RouteOrThrow(
+        return FinOpsRollupRouting.RouteOrThrow(
             ServerMetricsSql,
             IdleActiveDbsRawCte,
             IdleActiveDbsForCagg(relationSql, ceilingHour, watermarkUtc),
             "server inventory idle databases");
-    }
-
-    /* A twin of the viewer's Workload copy of this helper; collapse the two when the Workload reads move to Storage. */
-    private static string RouteOrThrow(string sql, string from, string to, string what)
-    {
-        var routed = sql.Replace(from, to, StringComparison.Ordinal);
-        if (string.Equals(routed, sql, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                $"FinOps {what} CAGG routing found nothing to replace — its raw fragment has drifted from the SQL (#1661).");
-        }
-
-        return routed;
     }
 
     /// <summary>

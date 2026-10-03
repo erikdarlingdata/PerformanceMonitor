@@ -46,6 +46,18 @@ public sealed class McpSessionTools
             var (rows, populationCount) = await dataService.GetActiveQueriesPageAsync(
                 resolved.ServerId, hours_back, limit + 1, filter, blocking_only, asOfUtc: windowEnd);
 
+            /* #4966: where this server's query_snapshots start for the window, beside the page cut below — the two
+               are different facts: truncated says the window held more than limit, this says the store did not hold
+               the window's head. The probe reads coverage (the collector's logged runs count as well as rows: a
+               server idle overnight has no snapshot near the start though the store covered it), from the same
+               view the page was read from, and is deliberately unfiltered by database_name / blocking_only: the
+               floor is a property of the table. Read ahead of the empty answers, which carry it too: an empty
+               answer over a window the store does not reach back to is not a true negative. */
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var notice = await McpQueryTools.WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QuerySnapshots, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "query_snapshots", emptyAnswer: rows.Count == 0);
+
             if (rows.Count == 0)
             {
                 /* A filtered miss is not a collection miss — Darling's twin's words. */
@@ -55,26 +67,16 @@ public sealed class McpSessionTools
                         "empty",
                         $"No active query snapshots on {resolved.ServerName} in the last {hours_back} hour(s) matched "
                         + DescribeActiveQueryFilters(filter, blocking_only)
-                        + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.");
+                        + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
+                        notice.AsHints());
                 }
 
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_snapshots")
-                    ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
+                    ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.", notice.AsHints());
             }
 
             var truncated = rows.Count > limit;
             var shown = truncated ? rows.GetRange(0, limit) : rows;
-
-            /* #4966: where this server's query_snapshots start for the window, beside the page cut above — the two
-               are different facts: truncated says the window held more than limit, this says the store did not hold
-               the window's head. The probe reads coverage (the collector's logged runs count as well as rows: a
-               server idle overnight has no snapshot near the start though the store covered it), from the same
-               view the page was read from, and is deliberately unfiltered by database_name / blocking_only: the
-               floor is a property of the table. */
-            var requestedStart = windowEnd.AddHours(-hours_back);
-            var notice = await McpQueryTools.WindowNoticeAsync(
-                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QuerySnapshots, resolved.ServerId, requestedStart, windowEnd),
-                requestedStart, windowEnd, "query_snapshots");
 
             /* The page's own (capture, session) pairs, so a victim can say whether its blocker made the page. */
             var onPage = new HashSet<(DateTime, int)>(shown.Select(r => (r.CollectionTime, r.SessionId)));
@@ -130,9 +132,9 @@ public sealed class McpSessionTools
                 truncated,
                 order = "collection_time_desc",
                 /* #4966: where the page's rows stop describes the window the page covers, so it prints like
-                   effective_start (UTC, with the Z); the newest row's time stays the row's own. */
+                   effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
                 oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(shown[^1].CollectionTime),
-                newest_returned_collection_time = shown[0].CollectionTime.ToString("o"),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(shown[0].CollectionTime),
                 queries = result
             }, McpHelpers.JsonOptions);
         }

@@ -97,8 +97,8 @@ public sealed class WebExceptionTextCensusTests
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
-            "open.InnerException!.InnerException is TimeoutException",
-            "FromRunException's type-pattern check (#4605): it only decides WHICH fixed sentence an open failure answers with; the exception's text is not read here."
+            "PostgresOpenTimeout.IsTimedOutOpen(open.InnerException!)",
+            "FromRunException's chain check (#4605, #5016): it only decides WHICH fixed sentence an open failure answers with; the exception's text is not read here."
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
@@ -107,7 +107,7 @@ public sealed class WebExceptionTextCensusTests
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
-            "could not get a store connection in time: {open.InnerException.Message}",
+            "could not get a store connection in time: {open.InnerException!.Message}",
             "FromRunException's open-timeout sentence (#4605): a ServerError that names the cause and is logged at Error; ServerErrorResult reclassifies it before a browser sees it."
         ),
         (

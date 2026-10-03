@@ -72,7 +72,7 @@ public sealed class WebDataStartNoteTests
         {
             Assert.True(dispatch.ContainsKey(read), read + " is not a read the web mirror serves");
             Assert.True(
-                DataWindowFloor.Source.TryForCollectorTable(table, out _),
+                WebDataStartNote.TryGetSource(table, out _),
                 read + " names " + table + ", which the data-start probe cannot read by index");
             Assert.Contains("\"" + read + "\"", tabs, StringComparison.Ordinal);
         }
@@ -104,11 +104,17 @@ public sealed class WebDataStartNoteTests
         Assert.Same(Rows, await Run("get_waiting_tasks", "sql01", null, Rows));
         Assert.Same(Rows, await Run("get_waiting_tasks", "sql01", 0, Rows));
 
-        // An envelope, an error, text that is not an object, and a tool that already reports its own floor.
-        const string Empty = "{\"status\":\"empty\",\"message\":\"No waiting tasks in this window.\"}";
+        // An envelope that keeps its own message (unavailable, not_collected), an error, text that is not an object, and a tool that
+        // already reports its own floor. The empty envelope is not here any more (#4966): it says the read looked and found nothing,
+        // so it reaches the store like rows do (WebDataStartNoteConfigAndLogTests holds that, read by read).
+        const string Empty = "{\"status\":\"unavailable\",\"message\":\"No waiting tasks in this window.\"}";
+        const string NotCollected = "{\"status\":\"not_collected\",\"message\":\"This engine has no waiting tasks.\"}";
         const string Failed = "{\"error\":\"the store did not answer\"}";
         const string Own = "{\"window_truncated\":false,\"waiting_tasks\":[]}";
         Assert.Same(Empty, await Run("get_waiting_tasks", "sql01", 168, Empty));
+        Assert.Same(NotCollected, await Run("get_waiting_tasks", "sql01", 168, NotCollected));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => Run("get_waiting_tasks", "sql01", 168, "{\"status\":\"empty\",\"message\":\"No waiting tasks captured in the specified time range.\"}"));
         Assert.Same(Failed, await Run("get_waiting_tasks", "sql01", 168, Failed));
         Assert.Same("[1,2]", await Run("get_waiting_tasks", "sql01", 168, "[1,2]"));
         Assert.Same("not json", await Run("get_waiting_tasks", "sql01", 168, "not json"));
@@ -174,19 +180,23 @@ public sealed class WebDataStartNoteTests
         Assert.Same(NoOldest, await Run("get_waiting_tasks", NoOldest));
         Assert.Same(BadOldest, await Run("get_waiting_tasks", BadOldest));
 
-        // Every other listed read, with the same cap fields on its answer.
-        foreach (var read in WebDataStartNote.TableByRead.Keys.Where(k => k != "get_waiting_tasks"))
+        // Every listed read the cap does not cut (the capped list names its own), with the same cap fields on its answer.
+        foreach (var read in WebDataStartNote.TableByRead.Keys.Where(k => !WebDataStartNote.NewestFirstCappedReads.Contains(k)))
         {
             Assert.Same(CappedTasks, await Run(read, CappedTasks));
         }
     }
 
-    /// <summary>The capped rule's premises, in the source: the list is the one read ordered by time, newest first, and
-    /// the tool answers the two fields the rule reads (the live tests run the real tool).</summary>
+    /// <summary>The capped rule's premises, in the source: each list is a read ordered by time, newest first, and
+    /// the tool answers the two fields the rule reads (the live tests run the real tool). The collection log and the
+    /// PostgreSQL configuration changes join the waiting tasks (#4966): <c>WebDataStartNoteConfigAndLogTests</c> pins
+    /// theirs.</summary>
     [Fact]
-    public void TheCappedRule_IsOneReadOrderedByTime_WhoseToolAnswersTheTwoFieldsItReads()
+    public void TheCappedRule_IsThreeReadsOrderedByTime_WhoseToolsAnswerTheFieldsItReads()
     {
-        Assert.Equal(["get_waiting_tasks"], WebDataStartNote.NewestFirstCappedReads.ToArray());
+        Assert.Equal(
+            ["get_collection_log", "get_pg_server_config_changes", "get_waiting_tasks"],
+            WebDataStartNote.NewestFirstCappedReads.Order(StringComparer.Ordinal).ToArray());
         foreach (var read in WebDataStartNote.NewestFirstCappedReads)
         {
             Assert.Contains(read, WebDataStartNote.TableByRead.Keys);
@@ -250,6 +260,33 @@ public sealed class WebDataStartNoteTests
         Assert.StartsWith("partial window:", Assert.Single(Strings(r, "notices")), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// An empty grid is where a short history misleads most (#4966): "no changes" over a server added two days ago reads as
+    /// quiet when it is only new. The server adds the note to the empty answer, and the page draws it above the empty message,
+    /// composed in the browser's zone like the note over rows. An empty answer without the note fields (unavailable, or a
+    /// covered window) draws only its message.
+    /// </summary>
+    [Fact]
+    public void AnEmptyGrid_ShowsTheNoteAboveItsMessage_InTheBrowsersZone_AndWithoutTheFieldsOnlyTheMessage()
+    {
+        var answer = CoverageAnswer();
+        answer.Remove("tasks");
+        answer["status"] = "empty";
+        answer["message"] = "No waiting tasks were captured in this window.";
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorLocal:" + NewYork, out var r, answer.ToJsonString())) return;
+
+        Assert.NotEqual(0, r.GetProperty("tzOffset").GetInt32());
+        var notice = Assert.Single(Strings(r, "notices"));
+        Assert.Equal(InTheBrowsersZone(answer["truncation_note"]!.GetValue<string>(), r.GetProperty("local")), notice);
+        Assert.DoesNotContain("UTC", notice, StringComparison.Ordinal);
+        Assert.Equal("No waiting tasks were captured in this window.", Assert.Single(Strings(r, "empties")));
+
+        var plain = "{\"status\":\"unavailable\",\"message\":\"No latch statistics available in the requested time range.\"}";
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorLocal:" + NewYork, out var p, plain)) return;
+        Assert.Empty(Strings(p, "notices"));
+        Assert.Equal("No latch statistics available in the requested time range.", Assert.Single(Strings(p, "empties")));
+    }
+
     [Fact]
     public void TheWaitStatsGrid_ShowsTheNoteAboveItsRows()
     {
@@ -273,6 +310,11 @@ public sealed class WebDataStartNoteTests
         Assert.Contains("data.window_truncated !== true", util, StringComparison.Ordinal);
 
         Assert.Contains("const floor = windowFloorStrip(res.data, desc);", panels, StringComparison.Ordinal);
+
+        /* #4966: the empty envelope carries the note too, drawn above its message, and a read's answer is composed in the
+           browser's zone for the envelope as it is for rows. */
+        Assert.Contains("mount(body, [kept, windowFloorStrip(res.data, desc), emptyStrip(res.message)]);", panels, StringComparison.Ordinal);
+        Assert.Contains("res.kind !== \"data\" && res.kind !== \"empty\"", util, StringComparison.Ordinal);
 
         Assert.Contains("windowFloorStrip(res.data, spec)", tabs, StringComparison.Ordinal);
         Assert.Contains("const parts = [keptWindowStrip(res), windowFloorStrip(res.data, { viz: \"table\" }), VIZ.table(res.data, { rowsKey: \"waits\"", tabs, StringComparison.Ordinal);

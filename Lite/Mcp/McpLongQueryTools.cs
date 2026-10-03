@@ -90,8 +90,8 @@ public sealed class McpLongQueryTools
                    two stamps bound the slowest runs, not the reach — the description says so. */
                 completions_returned = page.Count,
                 truncated,
-                oldest_returned_event_time = page.Min(r => r.EventTime)?.ToString("o"),
-                newest_returned_event_time = page.Max(r => r.EventTime)?.ToString("o"),
+                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.EventTime)),
+                newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
                 order = "duration_ms_desc",
                 completions = result
             }, McpHelpers.JsonOptions);

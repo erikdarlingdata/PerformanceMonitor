@@ -97,6 +97,12 @@ public sealed class TopResourceConsumerRow
     public decimal PctIo { get; set; }
     public long TotalCpuTimeMs { get; set; }
     public decimal AvgIoMb { get; set; }
+
+    public static TopResourceConsumerRow From(PerformanceMonitor.Darling.Storage.FinOps.TopResourceConsumer d) => new()
+    {
+        DatabaseName = d.DatabaseName, CpuTimeMs = d.CpuTimeMs, ExecutionCount = d.ExecutionCount, IoTotalMb = d.IoTotalMb,
+        PctCpu = d.PctCpu, PctIo = d.PctIo, TotalCpuTimeMs = d.TotalCpuTimeMs, AvgIoMb = d.AvgIoMb
+    };
 }
 
 /// <summary>Per-database allocated vs used space for the Utilization size chart (with star-width bars).</summary>
@@ -237,6 +243,13 @@ public sealed class DatabaseResourceUsageRow
     public long IoStallMs { get; set; }
     public decimal PctCpuShare { get; set; }
     public decimal PctIoShare { get; set; }
+
+    public static DatabaseResourceUsageRow From(PerformanceMonitor.Darling.Storage.FinOps.DatabaseResourceUsage d) => new()
+    {
+        DatabaseName = d.DatabaseName, CpuTimeMs = d.CpuTimeMs, LogicalReads = d.LogicalReads, PhysicalReads = d.PhysicalReads,
+        LogicalWrites = d.LogicalWrites, ExecutionCount = d.ExecutionCount, IoReadMb = d.IoReadMb, IoWriteMb = d.IoWriteMb,
+        IoStallMs = d.IoStallMs, PctCpuShare = d.PctCpuShare, PctIoShare = d.PctIoShare
+    };
 }
 
 /// <summary>Per-application connection counts plus collected per-app resource + session-status metrics (Application Connections sub-tab). Timestamps are localized in the read.</summary>
