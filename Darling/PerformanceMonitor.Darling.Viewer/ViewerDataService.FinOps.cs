@@ -204,6 +204,12 @@ public sealed class UtilizationEfficiencyRow
     public int HealthScore { get; set; }
     public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
 
+    /// <summary>The read-result form of these figures.</summary>
+    public UtilizationEfficiencyDto ToDto() => new(
+        AvgCpuPct, MaxCpuPct, P95CpuPct, CpuSamples, TotalMemoryMb, TargetMemoryMb, PhysicalMemoryMb, BufferPoolMb,
+        MemoryRatio, MaxGrantWaiters, GrantTimeouts, ForcedGrants, GrantUtilizationPct, MaxWorkersCount,
+        CurrentWorkersCount, CpuCount, EngineEdition, ProvisioningStatus);
+
     /// <summary>
     /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. The memory
     /// term reads <see cref="PhysicalMemoryMb"/> and <see cref="BufferPoolMb"/>, which come from <c>memory_stats</c>. On an Azure
@@ -213,10 +219,7 @@ public sealed class UtilizationEfficiencyRow
     /// </summary>
     public int ComputeHealthScore()
     {
-        var bpRatio = PhysicalMemoryMb > 0 ? (decimal)BufferPoolMb / PhysicalMemoryMb : 0m;
-        int? cpuScore = HasCpuSample ? FinOpsHealthCalculator.CpuScore(P95CpuPct) : null;
-        return FinOpsHealthCalculator.Overall(
-            cpuScore, FinOpsHealthCalculator.MemoryScore(bpRatio), FinOpsHealthCalculator.StorageScore(FreeSpacePct));
+        return FinOpsUtilizationFigures.HealthScore(HasCpuSample, P95CpuPct, PhysicalMemoryMb, BufferPoolMb, FreeSpacePct);
     }
 }
 
