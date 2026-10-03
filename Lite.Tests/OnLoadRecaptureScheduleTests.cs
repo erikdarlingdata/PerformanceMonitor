@@ -23,7 +23,8 @@ namespace Lite.Tests;
 /// worker, so a server tab left open for weeks still re-captures its config snapshot (#3930) and a trace flag
 /// turned off since the last connect eventually clears (#3929) instead of only on the next reconnect. The
 /// tab-open path itself (<see cref="PerformanceMonitorLite.Services.RemoteCollectorService.RunAllCollectorsForServerAsync"/>)
-/// is untouched - it already runs every enabled collector unconditionally, on-load included.
+/// still runs every enabled on-load collector, as its connect capture; since #4938 it leaves a collector that runs
+/// once a day or less often to its due time instead of running it on every tab open.
 /// </summary>
 public sealed class OnLoadRecaptureScheduleTests : IDisposable
 {

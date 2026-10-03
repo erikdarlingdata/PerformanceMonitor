@@ -749,9 +749,14 @@ LIMIT $3";
     }
 
     /// <summary>
-    /// Gets collection log entries for a specific collector on a server.
+    /// Gets collection log entries for a specific collector on a server, over [<paramref name="startUtc"/>,
+    /// <paramref name="endUtc"/>] (UTC, both ends inclusive, the bounds <see cref="GetQueryWindowFloorAsync"/> puts on its
+    /// own read), newest first. The run-history window (#4966) works its week out once and hands the same pair to this
+    /// read and to the probe that words its "Showing since" note, so the rows and the note cannot disagree about the
+    /// window. The read takes the window, not a count of hours back: an hours overload read its own clock, and a second
+    /// clock is how the two came apart.
     /// </summary>
-    public async Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync(int serverId, string collectorName, int hoursBack = 168)
+    public async Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync(int serverId, string collectorName, DateTime startUtc, DateTime endUtc)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -770,11 +775,13 @@ FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = $2
 AND   collection_time >= $3
+AND   collection_time <= $4
 ORDER BY collection_time DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = collectorName });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-hoursBack) });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
 
         var items = new List<CollectionLogRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -806,9 +813,16 @@ ORDER BY collection_time DESC";
 /// </summary>
 internal static class CollectionHealthTime
 {
+    /// <summary>
+    /// The zone a Collection Health row's instants are worded in: the display mode's zone for the row's own server
+    /// (<paramref name="rowClock"/>, else the active tab's). The one place that choice is made, so a note that names a time
+    /// beside these rows (the run-history window's "Showing since", #4966) words it in the zone the rows print theirs in.
+    /// </summary>
+    internal static TimeZoneInfo Zone(ServerClock? rowClock) =>
+        ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, rowClock ?? ServerTimeHelper.ActiveServerClock);
+
     internal static string Format(DateTime utc, ServerClock? rowClock) =>
-        ServerTimeHelper.FormatInstant(
-            utc, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, rowClock ?? ServerTimeHelper.ActiveServerClock), "g");
+        ServerTimeHelper.FormatInstant(utc, Zone(rowClock), "g");
 }
 
 public class CollectionLogRow

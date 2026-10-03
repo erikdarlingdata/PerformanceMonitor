@@ -138,6 +138,24 @@ Effective cadence and retention resolve per collector per server, **per column**
 
 That table is intentionally seeded empty — an absent row means "use the default," so deleting override rows is a clean reset. Any write to the control plane bumps `config_service.config_version` via a trigger, and the worker polls that one integer each sweep and hot-swaps its live config. There is no schedule knob in `darling.json`.
 
+### When the daily collectors run
+
+A collector that runs once a day or less often (1440 minutes, or a multiple of it) can have a **run time**. The run time is a fixed time of day, such as `02:00`. A heavy collector then runs in a quiet hour instead of whenever the service happened to start.
+
+The run time is optional. It sits in a table of its own (`config.config_collector_run_times`, one row per collector), per server or fleet-wide. A server's own row wins. A run time of `-1` on a server's row means "no fixed time" and stops a fleet-wide time from applying there. A collector that runs more often than once a day cannot have one.
+
+The run time is on the **monitored server's own clock**, not the service's and not UTC. A fleet in several time zones therefore runs each server at its own 02:00. The clock comes from the server's newest `server_properties` row. Until that row exists, the run time reads as UTC. Each day's slot is worked out from that day's local date, so it stays at the same local time across a daylight-saving change.
+
+Each server has its own slot: the run time plus a fixed spread of under 60 minutes, taken from the server id. A fleet-wide run time therefore does not start every server in the same minute, and a server keeps its minute across restarts. A run can start from its slot until 60 minutes after it (the grace). Neither number is a setting. A collector that cannot start inside the grace **skips that day** and waits for the next slot. A missed day is never replayed.
+
+In Darling, every daily collector runs detached from its server's pass. A long daily run therefore does not hold the server's place in the sweep, and the server's one-minute collectors keep their cadence. At most 16 detached daily runs go at once across the fleet, and fewer when the store's connection pool is small. The cap is the smaller of 16 and the pool size minus the sweep width minus 8 kept free for reads. It is never below 1. A run past the cap waits for a free place and is never dropped. It starts when a place under the cap frees, which can be after the grace hour.
+
+Lite runs a daily collector only while it is open, one collector at a time per server. With a run time, it does not catch up for a day it was closed. Without one, an overdue daily collector runs once when Lite reopens.
+
+`get_collection_health` shows each collector's run time (`run_at`) and when it is next due (`next_run_utc`). A full row always carries both, empty for a collector with no run time. In both apps, a partial row (a collector that needs a look) carries them only for a collector that has a run time. A compact row (a healthy collector with nothing to report) does the same. The health bands stay on the collector's shipped cadence, and a run time does not change them.
+
+A skipped day crosses the 36-hour stale line before the next slot. In both apps, the row says so in `run_time_note`. A full row always carries it (empty when no day was skipped). A partial row carries it only for a collector that has a run time. A compact row never carries it. Lite's note also says that Lite collects only while it is open.
+
 ### Retention
 
 Three independent mechanisms:

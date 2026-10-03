@@ -196,7 +196,7 @@ public sealed class CollectorHealthClassifierTests
     [InlineData("DarlingDataReader.CollectionHealthSql")]
     [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
     [InlineData("ViewerDataService.CollectionHealthSql")]
-    [InlineData("ViewerDataService.FleetCollectionHealthSql")]
+    [InlineData("ViewerDataService.FleetCollectionHealthByServerSql")]
     public void EveryBandingRead_SelectsTheAbandonedCount_SoNoSurfaceBandsOnADefaultedZero(string which)
     {
         var sql = which switch
@@ -204,7 +204,7 @@ public sealed class CollectorHealthClassifierTests
             "DarlingDataReader.CollectionHealthSql" => DarlingDataReader.CollectionHealthSql,
             "DarlingFleetReader.FleetCollectionHealthSql" => DarlingFleetReader.FleetCollectionHealthSql,
             "ViewerDataService.CollectionHealthSql" => ViewerDataService.CollectionHealthSql,
-            "ViewerDataService.FleetCollectionHealthSql" => ViewerDataService.FleetCollectionHealthSql,
+            "ViewerDataService.FleetCollectionHealthByServerSql" => ViewerDataService.FleetCollectionHealthByServerSql,
             _ => throw new ArgumentOutOfRangeException(nameof(which), which, "unmapped banding read"),
         };
 
@@ -240,7 +240,7 @@ public sealed class CollectorHealthClassifierTests
     [InlineData("DarlingDataReader.CollectionHealthSql")]
     [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
     [InlineData("ViewerDataService.CollectionHealthSql")]
-    [InlineData("ViewerDataService.FleetCollectionHealthSql")]
+    [InlineData("ViewerDataService.FleetCollectionHealthByServerSql")]
     public void EveryBandingRead_SelectsTheExtensionMissingCount_SoNoSurfaceBandsOnADefaultedZero(string which)
     {
         var sql = which switch
@@ -248,7 +248,7 @@ public sealed class CollectorHealthClassifierTests
             "DarlingDataReader.CollectionHealthSql" => DarlingDataReader.CollectionHealthSql,
             "DarlingFleetReader.FleetCollectionHealthSql" => DarlingFleetReader.FleetCollectionHealthSql,
             "ViewerDataService.CollectionHealthSql" => ViewerDataService.CollectionHealthSql,
-            "ViewerDataService.FleetCollectionHealthSql" => ViewerDataService.FleetCollectionHealthSql,
+            "ViewerDataService.FleetCollectionHealthByServerSql" => ViewerDataService.FleetCollectionHealthByServerSql,
             _ => throw new ArgumentOutOfRangeException(nameof(which), which, "unmapped banding read"),
         };
 
@@ -570,9 +570,9 @@ public sealed class CollectorHealthClassifierTests
     {
         Assert.Contains("CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note", DarlingDataReader.CollectionHealthSql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains("AS latest_run_note", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ROW_NUMBER()", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains(CollectionHealthRollupSupport.LatestRunNoteRawSql, ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains("AS latest_run_note", ViewerDataService.FleetCollectionHealthByServerSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER()", ViewerDataService.FleetCollectionHealthByServerSql, StringComparison.Ordinal);
+        Assert.Contains(CollectionHealthRollupSupport.LatestRunNoteRawSql, ViewerDataService.FleetCollectionHealthByServerSql, StringComparison.Ordinal);
         Assert.Contains($"'%{PartialDatabaseFailureNote.Marker}%'", CollectionHealthRollupSupport.LatestRunNoteRawSql, StringComparison.Ordinal);
         Assert.Contains(PartialDatabaseFailureNote.Marker, PartialDatabaseFailureNote.Format, StringComparison.Ordinal);
     }

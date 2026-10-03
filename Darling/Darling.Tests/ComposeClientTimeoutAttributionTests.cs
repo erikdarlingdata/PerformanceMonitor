@@ -106,7 +106,7 @@ public class ComposeClientTimeoutAttributionTests
     [Fact]
     public void OpenFailure_WithoutATimeout_AnswersCouldNotOpen()
     {
-        var ex = new DarlingWebEndpoints.ComposeStoreOpenException(new NpgsqlException("boom", new System.Net.Sockets.SocketException()));
+        var ex = new DarlingWebEndpoints.ComposeStoreOpenException(new NpgsqlException("boom", new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionRefused)));
 
         foreach (var flag in new[] { true, false })
         {
@@ -151,7 +151,7 @@ public class ComposeClientTimeoutAttributionTests
     {
         var call = CallArguments(WebCode(), "await RunComposedPanelAsync(postgres, body, context.RequestAborted");
 
-        Assert.Equal("await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true", call);
+        Assert.Equal("await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true", call);
     }
 
     [Fact]
@@ -210,10 +210,20 @@ public class ComposeClientTimeoutAttributionTests
         var code = WebCode();
 
         Assert.Equal(2, Regex.Matches(code, Regex.Escape("throw new ComposeStatementClientTimeoutException(ex);")).Count);
-        Assert.Single(Regex.Matches(code, Regex.Escape("throw new ComposeStoreOpenException(ex);")));
+        /* #5016: two arms, both inside the one open helper: the driver's NpgsqlException, and the bare TimeoutException it
+           throws when a wait for a data source's first-time setup ends. A cancellation is in neither arm: it is the caller's. */
+        Assert.Equal(2, Regex.Matches(code, Regex.Escape("throw new ComposeStoreOpenException(ex);")).Count);
         Assert.Equal(2, Regex.Matches(code, Regex.Escape("catch (NpgsqlException ex) when (ex.InnerException is TimeoutException)")).Count);
-        Assert.Contains("catch (NpgsqlException ex) when (ex is not PostgresException) { throw new ComposeStoreOpenException(ex); }", code, StringComparison.Ordinal);
-        Assert.Equal(2, Regex.Matches(code, Regex.Escape("await OpenComposeConnectionAsync(postgres, cancellationToken);")).Count);
+        Assert.Contains("catch (NpgsqlException ex) when (ex is not PostgresException) { throw new ComposeStoreOpenException(ex); } catch (TimeoutException ex) { throw new ComposeStoreOpenException(ex); }", code, StringComparison.Ordinal);        Assert.Equal(2, Regex.Matches(code, Regex.Escape("await OpenComposeConnectionAsync(postgres, cancellationToken);")).Count);
+    }
+
+    [Fact]
+    public void TheOpenSentence_AsksTheOneHelper_WhetherTheOpenTimedOut()
+    {
+        var code = WebCode();
+
+        Assert.Contains("PostgresOpenTimeout.IsTimedOutOpen(open.InnerException!)", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("InnerException!.InnerException is TimeoutException", code, StringComparison.Ordinal);
     }
 
     [Fact]

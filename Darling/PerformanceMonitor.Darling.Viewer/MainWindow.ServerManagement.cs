@@ -350,12 +350,12 @@ public partial class MainWindow
             /* #4226: the same fleet-wide rollup-backed, memoized read the Overview cards take their counts
                from — a per-server tab filters it to that server's rows; an aggregate tab concatenates every
                server's rows for the cumulative total, replacing what used to be a second raw fleet scan
-               (FleetCollectionHealthSql) or a raw per-server scan (GetCollectionHealthAsync) every tick.
+               (the fleet-cumulative statement #4999 removed) or a raw per-server scan (GetCollectionHealthAsync) every tick.
                FleetCollectionHealthByServerSql itself carries no config_monitored_servers.is_enabled scope
                (a #4226 regression, fixed below it): a per-server tab must see that EXACT server's rows
                whether or not it is currently enabled or even registered yet, the same as the raw scans it
                replaced. Only the CUMULATIVE branch (no tab scope) still wants "enabled fleet only" — the
-               scope FleetCollectionHealthSql had — so it is applied here, against the registry already in
+               scope that removed statement had — so it is applied here, against the registry already in
                memory, instead of inside the shared SQL. */
             var byServer = await _dataService.GetFleetCollectionHealthByServerAsync();
             if (serverId.HasValue)

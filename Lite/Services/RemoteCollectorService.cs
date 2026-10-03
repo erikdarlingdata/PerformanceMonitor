@@ -576,6 +576,10 @@ public partial class RemoteCollectorService
                changed (state-tracked); creates on enable, drops on disable. */
             await ReconcileLongQueryCompletionsXeSessionAsync(server, cancellationToken);
 
+            /* #4938: the last runs and the server's clock are read once before the first due check, so a restart does not
+               make a daily collector due and a run time reads the server's clock. */
+            await EnsureRunTimeReadyAsync(server, cancellationToken);
+
             var dueCollectors = _scheduleManager.GetDueCollectorsForServer(server.Id, cycleStartUtc);
             foreach (var collector in dueCollectors)
             {
@@ -611,8 +615,11 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
-    /// Runs all enabled collectors for a single server immediately (ignoring schedule).
-    /// Used for initial data population when a server tab is first opened.
+    /// Runs the collectors a newly opened server tab needs, immediately, for initial data population: every enabled
+    /// on-load and sub-daily collector, and a collector that runs once a day or less often only when it is due (#4938).
+    /// A collector with a run time is left to its time, so opening a tab does not run it; an on-load collector with a
+    /// run time still runs, because the run time moves only its daily re-run, not its connect capture. See
+    /// <see cref="ScheduleManager.GetCollectorsForTabOpen"/>.
     /// </summary>
     public async Task RunAllCollectorsForServerAsync(ServerConnection server, CancellationToken cancellationToken = default)
     {
@@ -626,9 +633,11 @@ public partial class RemoteCollectorService
             return;
         }
 
-        var enabledSchedules = _scheduleManager.GetSchedulesForServer(server.Id)
-            .Where(s => s.Enabled)
-            .ToList();
+        /* #4938: the tab-open run does not start a collector that has a run time or a daily collector that is not
+           due; on-load collectors still run (their connect capture). The last runs are read first, so a tab opened
+           at launch sees the same state as the scheduled sweep. */
+        await EnsureRunTimeReadyAsync(server, cancellationToken);
+        var enabledSchedules = _scheduleManager.GetCollectorsForTabOpen(server.Id, DateTime.UtcNow).ToList();
 
         AppLogger.Info("Collector", $"Running {enabledSchedules.Count} collectors for '{server.DisplayName}' (serverId={GetServerId(server)}, initial load)");
 
@@ -798,6 +807,12 @@ public partial class RemoteCollectorService
 
             _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, scheduledAtUtc ?? startTime);
 
+            /* #4938: a new server_properties row is the server's clock arriving or changing; a run time reads it from the next check. */
+            if (string.Equals(collectorName, "server_properties", StringComparison.Ordinal))
+            {
+                await RefreshRunTimeClockAsync(server, cancellationToken);
+            }
+
             /* #3653 A5: the identity-epoch account, if this run's definition saw one — the twin of the drain
                in DarlingWorker.RunOneAsync, for the same reason: the definition composed the sentence (old
                and new start time, old and new @@SERVERNAME, what was forgotten) and has no logger; this is
@@ -961,6 +976,16 @@ public partial class RemoteCollectorService
 
         // Track collector health
         RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable);
+
+        /* #4938: a run that did not succeed still wrote a collection_log row below, and the start-up read counts that
+           row as the last run whatever its status. For a daily-or-longer collector, with or without a run time, the
+           session counts it too, so a failing collector runs once and waits for its next period instead of running on
+           every sweep. A collector with a shorter interval keeps trying on the next sweep. A success was recorded
+           above, right after its collection. An early return that wrote no row never reaches here, so it stays due. */
+        if (status != "SUCCESS")
+        {
+            _scheduleManager.MarkCollectorAttemptForServer(server.Id, collectorName, scheduledAtUtc ?? startTime);
+        }
 
         // Log the collection attempt
         await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs, telemetry.Fanout);

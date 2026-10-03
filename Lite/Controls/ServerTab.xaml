@@ -1550,6 +1550,10 @@
                                         <TextBlock Text="Memory Model" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="SqlMemoryModelText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
+                                    <StackPanel Margin="0,0,24,0">
+                                        <TextBlock Text="Collected" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock x:Name="MemoryCollectedText" Text="--" FontSize="18" FontWeight="SemiBold"/>
+                                    </StackPanel>
                                 </WrapPanel>
                             </Border>
 
@@ -1762,8 +1766,16 @@
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="BlockingSlicer" Grid.Row="0"/>
-                                <TextBlock x:Name="BlockedProcessReportNoteText" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
-                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <StackPanel Grid.Row="1">
+                                    <!-- Where the stored blocked-process coverage starts, when that is after the window's start (the same
+                                         "Showing since <time>" the Queries grids carry). -->
+                                    <TextBlock x:Name="BlockedProcessReportsWindowTruncatedBanner" Visibility="Collapsed"
+                                               Padding="8,4" FontWeight="Bold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Background="#22FFAA00"/>
+                                    <TextBlock x:Name="BlockedProcessReportNoteText" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </StackPanel>
                             <DataGrid x:Name="BlockedProcessReportGrid" Grid.Row="2"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource BlockingRowStyle}"
@@ -1876,8 +1888,16 @@
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="DeadlockSlicer" Grid.Row="0"/>
-                                <TextBlock x:Name="DeadlockNoteText" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
-                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <StackPanel Grid.Row="1">
+                                    <!-- Where the stored deadlock coverage starts, when that is after the window's start (the same
+                                         "Showing since <time>" the Queries grids carry). -->
+                                    <TextBlock x:Name="DeadlocksWindowTruncatedBanner" Visibility="Collapsed"
+                                               Padding="8,4" FontWeight="Bold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Background="#22FFAA00"/>
+                                    <TextBlock x:Name="DeadlockNoteText" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </StackPanel>
                             <DataGrid x:Name="DeadlockGrid" Grid.Row="2"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource DeadlockRowStyle}"
@@ -2121,6 +2141,9 @@
                             <DataGridTextColumn Binding="{Binding SuccessfulRunCount}" ElementStyle="{StaticResource NumericCell}" Width="140">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SuccessfulRunCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Successful Runs (30d)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
+                            <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime">
+                                <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
                         </DataGrid.Columns>
                     </DataGrid>
                     <!-- Shown only where the running_jobs collector does not collect for this server and the grid has no rows. -->
@@ -2153,6 +2176,9 @@
                                         </DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding AdvancedDisplay}" Width="80">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AdvancedDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Advanced" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
@@ -2250,6 +2276,9 @@
                                     <DataGridTextColumn Binding="{Binding OptimizedLockingDisplay}" Width="125">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OptimizedLockingDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Optimized Locking" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                         </TabItem>
@@ -2270,6 +2299,9 @@
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ValueForSecondary}" Width="200">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueForSecondary" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Value for Secondary" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
@@ -2305,6 +2337,9 @@
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding WaitStatsCaptureModeDisplay}" Width="130">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitStatsCaptureModeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Wait Stats Capture" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
@@ -2357,6 +2392,9 @@
                                         </DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding SessionDisplay}" Width="80">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SessionDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Session" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
@@ -2438,6 +2476,9 @@
                                 <DataGridTextColumn Binding="{Binding WaitingRequestsCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitingRequestsCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Waiting Reqs (total)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
                     </Expander>
@@ -2479,6 +2520,9 @@
                                 <DataGridTextColumn Binding="{Binding Backoffs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Backoffs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Backoffs" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
                     </Expander>
@@ -2514,6 +2558,7 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Metric" Binding="{Binding Metric}" Width="2*"/>
                             <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*"/>
+                            <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime"/>
                         </DataGrid.Columns>
                     </DataGrid>
                     <!-- Shown only where the cpu_scheduler_stats collector does not run (Azure SQL Database). -->
@@ -2542,7 +2587,9 @@
                                  report.plan_cache_bloat parity): a client-side CASE on single-use/total plans. -->
                             <TextBlock Text="Bloat Level:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <TextBlock x:Name="PlanCacheBloatLevelText" Text="--" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <TextBlock x:Name="PlanCacheRecommendationText" Text="" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                            <TextBlock x:Name="PlanCacheRecommendationText" Text="" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,20,0"/>
+                            <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock x:Name="PlanCacheCollectedText" Text="--" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -2569,7 +2616,9 @@
                             <TextBlock Text="Top Host:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <TextBlock x:Name="SessionStatsTopHostText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
                             <TextBlock Text="Databases:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="SessionStatsDatabasesText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="SessionStatsDatabasesText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                            <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock x:Name="SessionStatsCollectedText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Border>
                 </Grid>

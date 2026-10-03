@@ -94,16 +94,24 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        using var readFanOut = ViewerReadFanOut.Of(6);
+        /* Seven reads in flight: the six feeds below and the pressure chart's data-start probe (#4966). */
+        using var readFanOut = ViewerReadFanOut.Of(7);
 
         var latestTask = _dataService.GetLatestMemoryStatsAsync(_server.ServerId);
         var trendTask = _dataService.GetMemoryTrendAsync(_server.ServerId, startUtc, endUtc);
         var grantTrendTask = _dataService.GetMemoryGrantTrendAsync(_server.ServerId, startUtc, endUtc);
         var clerkTypesTask = _dataService.GetDistinctMemoryClerkTypesAsync(_server.ServerId, startUtc, endUtc);
         var grantChartTask = _dataService.GetMemoryGrantChartDataAsync(_server.ServerId, startUtc, endUtc);
+        /* #4966: the chart's data-start probe starts beside its read and takes the same window, worked out once above. It stays OUT of
+           the join below, so a probe that throws costs the chart's note (DataStartAnswerAsync catches it at the banner step) and not
+           the chart's rows. */
+        var pressureDataStartTask = _dataService.GetMemoryPressureEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var pressureTask = _dataService.GetMemoryPressureEventsAsync(_server.ServerId, startUtc, endUtc);
 
-        await Task.WhenAll(latestTask, trendTask, grantTrendTask, clerkTypesTask, grantChartTask, pressureTask);
+        /* #5022: a join that throws skips the banner step below, so the probe would go unawaited. The helper watches it then, and a probe
+           that fails later is a warning and not an unobserved-exception Error. */
+        await AwaitReadWatchingProbeAsync(
+            Task.WhenAll(latestTask, trendTask, grantTrendTask, clerkTypesTask, grantChartTask, pressureTask), pressureDataStartTask, "Memory Pressure Events");
 
         /* The six are done, and this method reads the store twice more below — the clerk chart and the
            whole Plan Cache sub-tab, which declares its own fan-out. Release here or those inherit this
@@ -113,7 +121,8 @@ public partial class ViewerServerTab
         RenderMemorySummary(latestTask.Result);
         RenderMemoryChart(trendTask.Result, grantTrendTask.Result, startUtc, endUtc);
         RenderMemoryGrantCharts(grantChartTask.Result, startUtc, endUtc);
-        RenderMemoryPressureEventsChart(pressureTask.Result);
+        RenderMemoryPressureEventsChart(pressureTask.Result, startUtc, endUtc);
+        await ShowMemoryPressureEventsDataStartAsync(MemoryPressureEventsTruncationBanner, pressureDataStartTask, startUtc, pressureTask.Result);
         await ShowEngineGapAsync(MemoryPressureEventsNoDataMessage, "memory_pressure_events", pressureTask.Result.Count);
         PopulateMemoryClerkPicker(clerkTypesTask.Result);
         await UpdateMemoryClerksChartFromPickerAsync();
@@ -390,21 +399,17 @@ public partial class ViewerServerTab
     /// the X range is the toolbar's settable window and every bar/bound is the UTC
     /// instant (see the class remarks on pressure sample_time).
     /// </summary>
-    private void RenderMemoryPressureEventsChart(List<MemoryPressureEventRow> data)
+    private void RenderMemoryPressureEventsChart(List<MemoryPressureEventRow> data, DateTime startUtc, DateTime endUtc)
     {
         ClearChart(MemoryPressureEventsChart);
         _memoryPressureEventsHover?.Clear();
         ApplyTheme(MemoryPressureEventsChart);
 
-        var (startUtc, endUtc) = GetWindowUtc();
+        /* #4966: the window is the load's, worked out once for the read, the probe, this axis and the banner. */
         double xMin = startUtc.ToOADate();
         double xMax = endUtc.ToOADate();
 
-        /* Only count rows where SQL Server reported actual pressure (indicator >= 2 matches sp_pressuredetector). */
-        var pressureRows = data
-            .Where(d => d.MemoryIndicatorsProcess >= 2 || d.MemoryIndicatorsSystem >= 2)
-            .OrderBy(d => d.SampleTime)
-            .ToList();
+        var pressureRows = PressureRowsDrawn(data);
 
         bool hasData = false;
         int maxBarCount = 0;
@@ -497,6 +502,32 @@ public partial class ViewerServerTab
 
         MemoryPressureEventsChart.Refresh();
     }
+
+    /// <summary>
+    /// The samples the pressure chart draws, oldest first: only those where SQL Server reported actual pressure (an indicator of 2 or
+    /// more, which matches sp_pressuredetector). The chart and the "Showing since" note take their events from here, so the note never
+    /// names a sample the chart leaves out.
+    /// </summary>
+    internal static List<MemoryPressureEventRow> PressureRowsDrawn(IEnumerable<MemoryPressureEventRow> data) =>
+        data
+            .Where(d => d.MemoryIndicatorsProcess >= 2 || d.MemoryIndicatorsSystem >= 2)
+            .OrderBy(d => d.SampleTime)
+            .ToList();
+
+    /// <summary>
+    /// Raises or hides the "Showing since" banner of the Memory Pressure Events chart (#4966), as Lite's chart has it. The chart draws
+    /// bars only where pressure was recorded, so a span with no data read as a span with no pressure. The read filters on each event's
+    /// own time, so the event rule applies (<see cref="ShowEventDataStartAsync"/>): the note names the earlier of the coverage start
+    /// the probe found and the earliest event the chart draws (<see cref="PressureRowsDrawn"/>; the read has no row cap). A server's first
+    /// collection stores the ring buffer's history, so an event can come from before the coverage, and the note then names that event. A
+    /// probe that throws costs this note and not the chart.
+    /// </summary>
+    /// <param name="banner">The chart's banner.</param>
+    /// <param name="probe">The chart's data-start probe, started beside its read.</param>
+    /// <param name="startUtc">The start of the window the chart just drew, the same one its read and its probe took.</param>
+    /// <param name="rows">The rows the read returned.</param>
+    internal static Task ShowMemoryPressureEventsDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc, IEnumerable<MemoryPressureEventRow> rows) =>
+        ShowEventDataStartAsync(banner, probe, "Memory Pressure Events", startUtc, PressureRowsDrawn(rows).Select(r => (DateTime?)r.SampleTime));
 
     /* ========== Memory Clerks Picker (mirrors ViewerServerTab.Perfmon.cs) ========== */
 

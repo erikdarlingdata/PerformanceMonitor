@@ -182,6 +182,40 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
+    /// Where the job history's coverage starts for the window, through the shared probe (<see cref="DataWindowFloor"/>) over the
+    /// <c>job_history</c> collector table (#4966): the later of the server's first collection and the table's retention edge, or
+    /// its first row in the window if that is earlier. Job history is an event surface: the first collection copies the server's
+    /// msdb history, so a run's own time (the time the read windows on) can sit long before the collection that stored it, and
+    /// the caller names the earlier of this and the earliest run it shows (<see cref="ViewerEventDataStart.Of"/>). With a
+    /// <paramref name="serverId"/> the answer is that server's; with none it is the earliest coverage among the servers that
+    /// hold a row, or logged a run, in the window (the fleet scope of <see cref="DataWindowFloor.GetAsync"/>), the form the tab's
+    /// All Servers view reads. A window no longer than <see cref="DurationTrendRouting.TruncationSlack"/> can never get a coverage
+    /// note, so it starts no query for either form (<see cref="DataWindowFloor.GetForServerAsync"/> says the same for one server;
+    /// the fleet form has no such guard of its own). Null when no server in scope counts and when the window lies wholly before the
+    /// coverage.
+    /// </summary>
+    /// <param name="serverId">The server the tab shows, or null for every server.</param>
+    /// <param name="startUtc">The window's start, the one the read takes (<see cref="GetJobHistoryAsync"/>).</param>
+    /// <param name="endUtc">The window's end.</param>
+    public async Task<DateTime?> GetJobHistoryDataStartAsync(
+        int? serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        if (endUtc - startUtc <= DurationTrendRouting.TruncationSlack)
+        {
+            return null;
+        }
+
+        /* async, so a failure on the way to the query is a faulted task the tab's note step logs, never a throw out of the
+           tab's load that costs the grid its rows. */
+        var source = DataWindowFloor.Source.ForCollectorTable("job_history");
+        return serverId is int id
+            ? await DataWindowFloor.GetForServerAsync(
+                _dataSource, source, id, startUtc, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            : await DataWindowFloor.GetAsync(
+                _dataSource, [source], null, startUtc, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+    }
+
+    /// <summary>
     /// Each server's clock from its newest <c>server_properties</c> row that has an offset (the time zone id
     /// alongside it where the store has the V134 column, else the offset alone), keyed by server id. A server
     /// with no row is absent, and its stored times are read as UTC — what the old SQL's <c>COALESCE(..., 0)</c>
