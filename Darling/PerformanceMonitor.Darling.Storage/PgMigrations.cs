@@ -2292,7 +2292,7 @@ CREATE INDEX IF NOT EXISTS idx_index_object_stats_server_time ON collect.index_o
     /// <c>ORDER BY collection_time DESC, execution_count DESC</c> would keep. Its columns are exactly what the two reads
     /// consume, and their types and nullability mirror raw's, so the table can never refuse a row raw accepted. One
     /// unique index, <c>NULLS NOT DISTINCT</c> because <c>replica_role</c> is NULL off an availability group and must
-    /// still collapse (PostgreSQL 15+; the product minimum is 17). The column order is the writer's: a batch is one
+    /// still collapse (PostgreSQL 15+; the product minimum is 16). The column order is the writer's: a batch is one
     /// database's rows for one or two interval ids, so each batch's entries form one contiguous run.
     /// <c>fillfactor = 50</c> was measured (99% HOT against 56-59% at 70). The hypertable conversion, compression and
     /// retention are runtime work in <c>collection_log</c>'s shape, not this rung's.</para>

@@ -1098,3 +1098,8 @@ pre.code {
 .liveness-block { max-width: 720px; }
 .liveness-notes { margin: 0.5rem 0 0; padding-left: 1.2rem; font-size: 0.82rem; color: var(--muted); }
 .liveness-notes li { margin: 0.2rem 0; }
+
+/* FinOps page (#4843): tab strip and panel body shared by the sub-tabs. */
+.finops-tabs { flex-wrap: wrap; overflow-x: visible; }
+.finops-body { display: block; }
+.finops-panel { min-width: 0; }
