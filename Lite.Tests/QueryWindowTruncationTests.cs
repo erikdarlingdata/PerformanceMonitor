@@ -187,8 +187,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var root = doc.RootElement;
 
         Assert.True(root.GetProperty("window_truncated").GetBoolean());
-        var effectiveStart = DateTime.Parse(root.GetProperty("effective_start").GetString()!).ToUniversalTime();
-        Assert.True(Math.Abs((effectiveStart - collected.ToUniversalTime()).TotalMinutes) < 2,
+        var effectiveStart = ParseEffectiveStart(root);
+        Assert.True(Math.Abs((effectiveStart - collected).TotalMinutes) < 2,
             $"effective_start {effectiveStart:o} should track the seeded floor {collected:o}");
         Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 46, 50);
         Assert.NotEqual(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
@@ -207,8 +207,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var root = doc.RootElement;
 
         Assert.True(root.GetProperty("window_truncated").GetBoolean());
-        var effectiveStart = DateTime.Parse(root.GetProperty("effective_start").GetString()!).ToUniversalTime();
-        Assert.True(Math.Abs((effectiveStart - collected.ToUniversalTime()).TotalMinutes) < 2,
+        var effectiveStart = ParseEffectiveStart(root);
+        Assert.True(Math.Abs((effectiveStart - collected).TotalMinutes) < 2,
             $"effective_start {effectiveStart:o} should track the seeded floor {collected:o}");
         Assert.NotEqual(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
     }
@@ -226,8 +226,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var root = doc.RootElement;
 
         Assert.True(root.GetProperty("window_truncated").GetBoolean());
-        var effectiveStart = DateTime.Parse(root.GetProperty("effective_start").GetString()!).ToUniversalTime();
-        Assert.True(Math.Abs((effectiveStart - collected.ToUniversalTime()).TotalMinutes) < 2,
+        var effectiveStart = ParseEffectiveStart(root);
+        Assert.True(Math.Abs((effectiveStart - collected).TotalMinutes) < 2,
             $"effective_start {effectiveStart:o} should track the seeded floor {collected:o}");
         Assert.NotEqual(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
     }
@@ -308,6 +308,23 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     private static DateTime NaiveUtc(DateTime instant) => DateTime.SpecifyKind(instant, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// #4966: a Queries tool's effective_start as a UTC instant, asserting its trailing Z on the way. A cut window (the
+    /// floor the store held) and a covered one (the requested start) both name it with the Z, so the seeded naive-UTC
+    /// floors compare against it directly and the answer does not depend on the machine's time zone. These tests used
+    /// to parse the text as local time and shift the seeded floor the same way, which only agreed because the
+    /// payload carried no Z on the cut path.
+    /// </summary>
+    private static DateTime ParseEffectiveStart(JsonElement root)
+    {
+        var text = root.GetProperty("effective_start").GetString()!;
+        Assert.EndsWith("Z", text, StringComparison.Ordinal);
+        return DateTime.Parse(
+            text,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
+    }
 
     /// <summary>
     /// Quiet-start guard (Lite twin of #4953's data-start rule): a server with an old row before the window and
@@ -482,7 +499,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         Assert.False(root.GetProperty("window_truncated").GetBoolean());
         Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
-        var effectiveStart = DateTime.Parse(root.GetProperty("effective_start").GetString()!).ToUniversalTime();
+        var effectiveStart = ParseEffectiveStart(root);
         Assert.True(Math.Abs((effectiveStart - nowUtc.AddHours(-24)).TotalMinutes) < 2,
             $"effective_start {effectiveStart:o} must be the requested start, never earlier ({nowUtc.AddHours(-24):o})");
         Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 23.9, 24.0);
@@ -702,7 +719,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             $"expected all 14 ServerTab.Refresh.cs banner calls to pass a GetQueriesTabWindowUtc result " +
             $"(windowStart/windowEnd) (found {refreshBannerCallsOnHelperOutput}) -- a server-local cStart must " +
             "not feed the banner (#4279/#4284).");
-        Assert.Equal(13, Regex.Matches(refreshSource, @"LocalDataService\.GetQueriesTabWindowUtc\(").Count);
+        /* 10 -> 11: the Collection Log's cap-aware notice (RefreshCappedGridBannerAsync, #4989) takes its window from
+           GetQueriesTabWindowUtc too; it is not one of the RefreshWindowTruncatedBannerAsync calls counted above.
+           11 -> 14: the Blocked Process Reports and Deadlocks banners (#4966) add the three declarations noted above. */
+        Assert.Equal(14, Regex.Matches(refreshSource, @"LocalDataService\.GetQueriesTabWindowUtc\(").Count);
     }
 
     private static string ControlsFile(string name) => Path.Combine(ControlsDir(), name);

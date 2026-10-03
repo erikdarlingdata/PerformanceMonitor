@@ -404,7 +404,67 @@ ORDER BY collector_name";
             });
         }
 
+        ApplyScheduledFrequencies(items, serverId, CollectorFrequencyMinutes);
         return items;
+    }
+
+    private Func<int, string, int?>? _collectorFrequencyMinutes;
+
+    /// <summary>
+    /// #4999: Lite's schedule store as the health read sees it: a server's EFFECTIVE interval for one collector
+    /// (<c>ScheduleManager.GetFrequencyForStorageServer</c>, the per-server override else the global schedule),
+    /// keyed by the storage server id this reader takes, or null for an unknown server or collector. Null here
+    /// means no schedule store is wired, and every row keeps the shipped cadence it was judged by before.
+    /// <para>An instance's own value wins (the MCP host sets one); an instance that has none reads
+    /// <see cref="DefaultCollectorFrequencyMinutes"/>, the app-wide one, each time it is asked. The Collection
+    /// Health tab builds its own service, and nothing handed that one a resolver, so the tab banded a collector
+    /// moved to every 720 minutes against its shipped five while the MCP tool, on the host's instance, used 720.</para>
+    /// </summary>
+    internal Func<int, string, int?>? CollectorFrequencyMinutes
+    {
+        get => _collectorFrequencyMinutes ?? DefaultCollectorFrequencyMinutes;
+        set => _collectorFrequencyMinutes = value;
+    }
+
+    /// <summary>
+    /// #4999: the schedule store's answer for EVERY <see cref="LocalDataService"/> in the process, set once at
+    /// startup (the main window wires it next to the schedule manager it builds). It is read where the answer is
+    /// used, not copied when an instance is built, so an instance that exists before it is set, and one a future
+    /// caller builds without knowing it exists, judge a collector by its schedule the same as the rest: no
+    /// caller has to remember to hand a resolver to the service it makes. Null, as in a test, leaves every row on
+    /// its shipped cadence. Process-wide, like <c>AnalysisService.SeparatelyMonitoredDatabasesProvider</c>, so a
+    /// test that sets it runs alone.
+    /// </summary>
+    internal static Func<int, string, int?>? DefaultCollectorFrequencyMinutes { get; set; }
+
+    /// <summary>
+    /// #4999: stamps each catalog collector's row with the interval it is scheduled at on
+    /// <paramref name="serverId"/>: the schedule store's answer through
+    /// <see cref="CollectorScheduleDefaults.ResolveFrequencyMinutes"/> (an answer that cannot be honoured falls
+    /// back to the shipped default, as the analysis lookback does), then
+    /// <see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/> as the scheduler does, so an
+    /// on-load collector reads as its daily recapture. A name the catalog does not know is left unstamped.
+    /// Pure, so a test applies a set of schedules without a database.
+    /// </summary>
+    internal static void ApplyScheduledFrequencies(
+        IEnumerable<CollectorHealthRow> rows, int serverId, Func<int, string, int?>? collectorFrequencyMinutes)
+    {
+        if (collectorFrequencyMinutes is null)
+        {
+            return;
+        }
+
+        foreach (var row in rows)
+        {
+            if (!CollectorScheduleDefaults.All.ContainsKey(row.CollectorName))
+            {
+                continue;
+            }
+
+            row.EffectiveFrequencyMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+                CollectorScheduleDefaults.ResolveFrequencyMinutes(
+                    row.CollectorName, collectorFrequencyMinutes(serverId, row.CollectorName), fleetOverride: null));
+        }
     }
 
     /// <summary>
@@ -429,6 +489,14 @@ LIMIT 1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         return await command.ExecuteScalarAsync() is not null and not DBNull;
     }
+
+    /// <summary>
+    /// The Collection Log grid's row cap (#4989): the default <c>maxRows</c> of <see cref="GetRecentCollectionLogAsync"/>,
+    /// so the grid reads the newest this many runs of the window. The grid's "Showing since" notice reads it too, as the
+    /// cap that says the grid dropped older runs (<c>ServerTab.RefreshCappedGridBannerAsync</c>), so the read's
+    /// <c>LIMIT</c> and the notice's cap are the one value.
+    /// </summary>
+    public const int CollectionLogGridCap = 500;
 
     /// <summary>
     /// Gets recent collection log entries for a server, most recent first, bounded to the tab's
@@ -458,7 +526,7 @@ LIMIT 1";
     ///
     /// <para>The desktop Collection Log tab passes neither and is unaffected: no filter, newest first.</para>
     /// </summary>
-    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = 500, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null, string? status = null)
+    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = CollectionLogGridCap, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null, string? status = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -516,6 +584,66 @@ LIMIT $4";
                 Status = reader.GetString(6),
                 ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7),
                 ServerName = reader.IsDBNull(8) ? null : reader.GetString(8)
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// The Duration Trends chart's own read (#4989): per collector and time bucket over the WHOLE asked range, the slowest
+    /// run, the average run and the run count, over the successful runs that carry a duration (the runs the chart has always
+    /// drawn). The chart used to be handed the Collection Log grid's page, the newest <see cref="CollectionLogGridCap"/>
+    /// runs, while its X axis is pinned to the asked range: at about twenty runs a minute that page holds the newest
+    /// twenty-five minutes, so "Last 24 hours" drew the newest 25 minutes and left 23 hours and 35 minutes of axis empty
+    /// though the store holds those runs. This read has no row cap and answers at the width the other desktop trend charts
+    /// use for the range (<see cref="AutoChartBucketMinutes"/>, one series' share of <see cref="TrendBudget.Chart"/>, as the
+    /// Performance Trends charts size their buckets), so the number of points is bounded by the range, not by the runs.
+    ///
+    /// <para>Each bucket's start is clamped to the window's start (<c>GREATEST</c>, as the bucketed duration-trend reads
+    /// do), so an unaligned window's first, partial bucket does not draw before it. The chart draws each bucket's MAXIMUM,
+    /// so a slow run still shows as it did when every run was a point; the average and the count ride along for its hover.
+    /// The window is the grid's own (<see cref="GetTimeRange"/>), so the chart and the grid beside it describe one span.</para>
+    /// </summary>
+    public async Task<List<CollectorDurationBucket>> GetCollectorDurationTrendAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        command.CommandText = $@"
+SELECT
+    collector_name,
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    MAX(duration_ms) AS max_duration_ms,
+    AVG(duration_ms) AS average_duration_ms,
+    COUNT(*) AS run_count
+FROM v_collection_log
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   status = 'SUCCESS'
+AND   duration_ms IS NOT NULL
+GROUP BY 1, 2
+ORDER BY 1, 2";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = AutoChartBucketMinutes(startTime, endTime) });
+
+        var items = new List<CollectorDurationBucket>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new CollectorDurationBucket
+            {
+                CollectorName = reader.GetString(0),
+                BucketStart = reader.GetDateTime(1),
+                MaxDurationMs = Convert.ToDouble(reader.GetValue(2)),
+                AverageDurationMs = Convert.ToDouble(reader.GetValue(3)),
+                RunCount = Convert.ToInt64(reader.GetValue(4))
             });
         }
 
@@ -718,6 +846,21 @@ public class CollectionLogRow
     public string SqlDurationFormatted => SqlDurationMs.HasValue ? $"{SqlDurationMs.Value} ms" : "";
 
     public string DuckDbDurationFormatted => DuckDbDurationMs.HasValue ? $"{DuckDbDurationMs.Value} ms" : "";
+}
+
+/// <summary>
+/// One point of the Duration Trends chart (#4989): a collector's successful runs inside one time bucket of the asked
+/// range (<see cref="LocalDataService.GetCollectorDurationTrendAsync"/>). The chart draws <see cref="MaxDurationMs"/>; the
+/// hover also names <see cref="AverageDurationMs"/> and <see cref="RunCount"/>. <see cref="BucketStart"/> is a UTC
+/// instant, clamped to the start of the range.
+/// </summary>
+public class CollectorDurationBucket
+{
+    public string CollectorName { get; set; } = "";
+    public DateTime BucketStart { get; set; }
+    public double MaxDurationMs { get; set; }
+    public double AverageDurationMs { get; set; }
+    public long RunCount { get; set; }
 }
 
 /// <summary>
@@ -1027,13 +1170,26 @@ public class CollectorHealthRow
     /// what lets <see cref="CollectorHealthClassifier.Classify"/> band an on-load collector on the SAME ladder
     /// as any other. A name the catalog doesn't know keeps 0 and the classifier's floor thresholds, as before
     /// #4000: resolving it to daily too would leave a collector that went dark HEALTHY for a day and a half.
-    /// The banding uses the shipped default, not the per-install ScheduleManager override, so all three
-    /// surfaces stay in parity. Internal since #2296: the tool's sweep-pressure roll-up amortizes each
-    /// collector's average duration by this same cadence, so both readers of it share one resolution.</summary>
+    /// Internal since #2296: the tool's sweep-pressure roll-up amortizes each collector's average duration by
+    /// this same cadence, so both readers of it share one resolution.
+    ///
+    /// <para>#4999: the interval the collector is SCHEDULED at on this server, when the read that built the row
+    /// stamped it (<see cref="EffectiveFrequencyMinutes"/>): the per-server schedule override, else the global
+    /// schedule, else the shipped default. The band and the roll-up then judge a collector scheduled every 720
+    /// minutes against 720, not against the cadence it shipped with. A row nothing stamped keeps the shipped
+    /// default.</para></summary>
     internal int FrequencyMinutes =>
-        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
+        EffectiveFrequencyMinutes
+        ?? (CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
             ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
-            : 0;
+            : 0);
+
+    /// <summary>
+    /// #4999: the interval, in minutes, this collector is scheduled at on the server the row was read for, as
+    /// <see cref="LocalDataService.ApplyScheduledFrequencies"/> resolves it from the schedule store, or null
+    /// when nothing resolved one (no schedule store wired, or a collector name the catalog does not know).
+    /// </summary>
+    internal int? EffectiveFrequencyMinutes { get; set; }
 
     /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —

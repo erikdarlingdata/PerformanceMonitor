@@ -369,10 +369,10 @@ public static class CollectorScheduleDefaults
         ["pg_buffer_usage"] = new(60, 30),
         /* #2561 index bloat. DAILY and 90 days, matching pg_index_usage_stats deliberately - the two answer
            halves of one question (is this index earning its keep, and is it wasting space doing it) and a
-           read that joins them wants both grains to line up. Daily is also the affordable grain: pgstatindex
-           reads EVERY PAGE of an index, so the cost scales with the fleet's total btree size rather than
-           with anything that changes minute to minute. Bloat accumulates over days, so a finer grain would
-           pay repeatedly for an answer that had not moved. */
+           read that joins them wants both grains to line up. Daily is also all the question needs: since #3234
+           the collector estimates from pg_stats and the catalog and reads no index pages (it no longer calls
+           pgstatindex), so one run is cheap, but bloat accumulates over days and a finer grain would pay
+           repeatedly for an answer that had not moved. */
         ["pg_index_bloat"] = new(1440, 90),
         /* #2719 instance CPU. FIVE MINUTES, deliberately looser than the 1-minute cadence the SQL Server
            ring-buffer route uses for cpu_utilization. That route reads a local DMV for free; this one is an
@@ -415,6 +415,71 @@ public static class CollectorScheduleDefaults
             && !(CollectorDeltaCalculator.IsDeltaFamily(collectorName) && v > CollectorDeltaCalculator.MaxDeltaFrequencyMinutes)
         ? v
         : null;
+
+    /// <summary>
+    /// #4999: picks the override rows that apply to one collector on one server: the row for that server and the
+    /// fleet-wide one (<see cref="IScheduleFrequencyOverride.ServerId"/> null), matched on the collector name without
+    /// regard to case, as the store's schedule table is. A row for another server never applies, and when a level has
+    /// more than one row for the collector the last one wins. This is the ONE place the rows are picked: the worker's
+    /// <c>StoreConfigProvider.ResolveSchedule</c> picks its per-server and fleet rows through it, and so does every
+    /// collection-health surface, so none of them can pick a different row.
+    /// </summary>
+    /// <param name="collectorName">The collector.</param>
+    /// <param name="serverId">The server the cadence is wanted for.</param>
+    /// <param name="overrides">The override rows to pick from, or null for none.</param>
+    public static (T? PerServer, T? Fleet) SelectScheduleOverrides<T>(string collectorName, int serverId, IEnumerable<T>? overrides)
+        where T : class, IScheduleFrequencyOverride
+    {
+        T? perServer = null;
+        T? fleet = null;
+        if (overrides is not null)
+        {
+            foreach (var o in overrides)
+            {
+                if (!string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (o.ServerId == serverId)
+                {
+                    perServer = o;
+                }
+                else if (o.ServerId is null)
+                {
+                    fleet = o;
+                }
+            }
+        }
+
+        return (perServer, fleet);
+    }
+
+    /// <summary>
+    /// #4999: the interval, in minutes, a collector is scheduled at on one server, which is the interval every
+    /// collection-health surface judges it against: the per-server override, else the fleet-wide one, else the shipped
+    /// default (<see cref="ResolveFrequencyMinutes"/>, with an override that cannot be honoured falling through),
+    /// then <see cref="EffectiveRecurringIntervalMinutes"/>, so an on-load collector reads as its daily recapture
+    /// exactly as the worker's dispatch schedules it. Null for a name the catalog does not know, which has no
+    /// shipped interval to fall back to and keeps the classifier's floor thresholds.
+    /// <para>It lives here, in the project the service and the viewer both reference, because the viewer cannot
+    /// reach the service's <c>StoreConfigProvider</c>. The service's own resolution is the same two steps over the same
+    /// picked rows (<see cref="SelectScheduleOverrides{T}"/>, <see cref="ResolveFrequencyMinutes"/>).</para>
+    /// </summary>
+    /// <param name="collectorName">The collector.</param>
+    /// <param name="serverId">The server the cadence is wanted for.</param>
+    /// <param name="overrides">The override rows to resolve from, or null for none.</param>
+    public static int? ResolveEffectiveIntervalMinutes<T>(string collectorName, int serverId, IEnumerable<T>? overrides)
+        where T : class, IScheduleFrequencyOverride
+    {
+        if (!All.ContainsKey(collectorName))
+        {
+            return null;
+        }
+
+        var (perServer, fleet) = SelectScheduleOverrides(collectorName, serverId, overrides);
+        return EffectiveRecurringIntervalMinutes(ResolveFrequencyMinutes(collectorName, perServer?.FrequencyMinutes, fleet?.FrequencyMinutes));
+    }
 
     /// <summary>
     /// #3929/#3930 (Erik, ruled 2026-09-23): an on-load collector (<see cref="ResolveFrequencyMinutes"/> = 0 -

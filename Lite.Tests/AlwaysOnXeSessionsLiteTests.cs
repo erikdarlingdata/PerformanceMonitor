@@ -429,4 +429,61 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
         Assert.Contains("The create was refused.", raised.Message, StringComparison.Ordinal);
         Assert.Contains(AlwaysOnXeSessions.AzureCapsSentence, raised.Message, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// A pass that cannot use the shared session and has no id to name its own throws one message. A host whose id store
+    /// says why it has no id gets the cause and the retry in it, in the long-query fault's words; a host with no store gets
+    /// the plain sentence.
+    /// </summary>
+    [Theory]
+    [InlineData(AlwaysOnXeSessionKind.Deadlock)]
+    [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    public async Task ASharedSessionThatCannotBeUsed_WithNoId_SaysWhyThereIsNone_AndThatTheNextCycleTriesAgain(AlwaysOnXeSessionKind kind)
+    {
+        var shared = AlwaysOnXeSessions.SharedNameFor(kind);
+        var database = new ScriptedDatabase();
+        database.Started[shared] = false;
+        database.HiddenFromCatalog.Add(shared);
+        database.HiddenFromDmv.Add(shared);
+        database.CreateFailure = new AlreadyThere();
+        const string cause = "the id file C:\\data\\install-id.json could not be read (IOException: in use)";
+
+        var withCause = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => AlwaysOnXeAzureEnsure.RunAsync(database, kind, null, AlwaysOnXeChoice.Shared, CancellationToken.None, cause));
+        var plain = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => AlwaysOnXeAzureEnsure.RunAsync(database, kind, null, AlwaysOnXeChoice.Shared, CancellationToken.None));
+
+        Assert.Equal(
+            $"The shared {shared} session cannot be used in this database, and this install has no id for now to name a session of its own, because {cause}. The next cycle tries again.",
+            withCause.Message);
+        Assert.Equal(
+            $"The shared {shared} session cannot be used in this database, and this install has no id to name a session of its own.",
+            plain.Message);
+        Assert.Equal(plain.Message, AlwaysOnXeAzureEnsure.NoOwnSessionMessage(kind, null));
+    }
+
+    /// <summary>
+    /// The service hands the pass its id store's reason: with the id file unreadable, the fault each database raises names
+    /// the cause and says the next cycle tries again.
+    /// </summary>
+    [Fact]
+    public async Task TheEnsureOfAnInstallWhoseIdFileCannotBeRead_RaisesAnErrorThatNamesTheCause()
+    {
+        var rig = await BuildRigAsync();
+        Directory.CreateDirectory(Path.Combine(_configDir, InstallIdStore.FileName));
+        var shared = AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock);
+        foreach (var database in new[] { rig.Alpha, rig.Beta })
+        {
+            database.Started[shared] = true;
+            database.WrongEvent.Add(shared);
+        }
+
+        var raised = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => rig.Service.EnsureDeadlockXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None));
+
+        Assert.Null(rig.Service.GetInstallId());
+        Assert.Contains("this install has no id for now", raised.Message, StringComparison.Ordinal);
+        Assert.Contains("could not be read", raised.Message, StringComparison.Ordinal);
+        Assert.Contains("The next cycle tries again.", raised.Message, StringComparison.Ordinal);
+    }
 }

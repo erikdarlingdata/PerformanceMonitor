@@ -1270,7 +1270,12 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
             var routes = await ReadNotificationRoutesAsync(connection, cancellationToken);
 
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
-            var schedules = await ReadScheduleOverridesAsync(connection, cancellationToken);
+            var schedules = await ReadScheduleOverridesAsync(connection, _logger, cancellationToken);
+
+            /* #4938: ResolveSchedule drops a run time that cannot apply, and it runs every sweep, so it stays pure and
+               silent. The one warning is raised here instead: once per load of the schedules, which happens only on a
+               config_version bump (the V137 uncorroborated-route warning above is the same shape). */
+            LogDroppedRunTimes(_logger, servers, schedules);
 
             /* Recovery is reported once, and only if something was actually reported broken — otherwise
                every ordinary reload would announce that the store is reachable. */
@@ -1756,7 +1761,21 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         return routes;
     }
 
-    private static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(NpgsqlConnection connection, CancellationToken ct)
+    /// <summary>
+    /// The sparse schedule rows, with the collectors' run times layered onto them (#4938). The run times are read from
+    /// their own table, <c>config.config_collector_run_times</c>, and not from a column here: the viewer's schedule Save
+    /// deletes a scope's rows in <c>config_collector_schedules</c> and inserts them again with a fixed column list, so a
+    /// run time kept on these rows would be cleared by every Save from a viewer that does not know it. The rows are read
+    /// and closed before the run-time read starts, because one connection cannot hold two open readers.
+    /// </summary>
+    private static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
+    {
+        var overrides = await ReadScheduleRowsAsync(connection, ct);
+        var runTimes = await ReadRunTimesAsync(connection, logger, ct);
+        return MergeRunTimes(overrides, runTimes);
+    }
+
+    private static async Task<List<ScheduleOverride>> ReadScheduleRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var overrides = new List<ScheduleOverride>();
         using var command = new NpgsqlCommand(
@@ -1778,6 +1797,79 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         }
 
         return overrides;
+    }
+
+    /// <summary>The run-time SELECT (#4938): one row per fleet-wide or per-server run time, fleet-wide first so the order is
+    /// a statement about the table. Schema-qualified, so a 42P01 from it can only mean the table itself is missing.</summary>
+    public const string RunTimesSelectSql =
+        "SELECT server_id, collector_name, run_at_minute FROM config.config_collector_run_times ORDER BY server_id NULLS FIRST, collector_name";
+
+    /// <summary>
+    /// Reads every run time (#4938). A store still at version 159 has no such table: that is "no run times", which is what
+    /// every collector had before the table existed, and not a failed load, so the 42P01 is answered with an empty list
+    /// and one debug line (the load runs once per configuration change, not per sweep). Any other error is the load's
+    /// to fail on, as for every other read in the view.
+    /// </summary>
+    private static async Task<IReadOnlyList<RunTimeOverride>> ReadRunTimesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
+    {
+        var rows = new List<RunTimeOverride>();
+        try
+        {
+            using var command = new NpgsqlCommand(RunTimesSelectSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                rows.Add(new RunTimeOverride(
+                    reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                    reader.GetString(1),
+                    reader.GetInt16(2)));
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            logger?.LogDebug("The collector run-time table does not exist in this store yet (below schema version 160): no run times are set.");
+            return Array.Empty<RunTimeOverride>();
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Layers the run-time rows onto the schedule rows (#4938), one entry per scope and collector. A run time for a scope
+    /// and collector that has a schedule row is carried on that row. One without a schedule row gets an entry of its own
+    /// that sets nothing else: no frequency, no retention, no database scope, and no enabled state (a null
+    /// <see cref="ScheduleOverride.Enabled"/>), so the collector's enabled state still comes from the other levels or its
+    /// default and the entry cannot switch a collector on or off. Pure. The collector name matches without regard to case,
+    /// as the resolver does.
+    /// </summary>
+    public static IReadOnlyList<ScheduleOverride> MergeRunTimes(IReadOnlyList<ScheduleOverride> schedules, IReadOnlyList<RunTimeOverride> runTimes)
+    {
+        if (runTimes is null || runTimes.Count == 0)
+        {
+            return schedules;
+        }
+
+        var merged = new List<ScheduleOverride>(schedules);
+        foreach (var runTime in runTimes)
+        {
+            var carried = false;
+            for (var i = 0; i < merged.Count; i++)
+            {
+                if (merged[i].ServerId == runTime.ServerId
+                    && string.Equals(merged[i].CollectorName, runTime.CollectorName, StringComparison.OrdinalIgnoreCase))
+                {
+                    merged[i] = merged[i] with { RunAtMinute = runTime.RunAtMinute };
+                    carried = true;
+                }
+            }
+
+            if (!carried)
+            {
+                merged.Add(new ScheduleOverride(runTime.ServerId, runTime.CollectorName, null, null, null, null, runTime.RunAtMinute));
+            }
+        }
+
+        return merged;
     }
 
     /* ---------------- apply (view -> held config, in place) ---------------- */
@@ -1829,36 +1921,124 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
 
     /* ---------------- schedule resolution (pure) ---------------- */
 
-    /// <summary>
-    /// The effective schedule for one collector on one server: a per-server override wins over a fleet-wide
-    /// override (<c>server_id</c> NULL) wins over the <see cref="CollectorScheduleDefaults"/> code default,
-    /// per column (a NULL override column falls through to the next level). Pure — unit-testable without a store.
-    /// </summary>
-    public static EffectiveSchedule ResolveSchedule(string collectorName, int serverId, IReadOnlyList<ScheduleOverride> overrides)
-    {
-        var def = CollectorScheduleDefaults.All[collectorName];
+    /// <summary>The value of a run time that means "no fixed time on this server": it stops a fleet-wide time.</summary>
+    private const int NoFixedRunTime = -1;
 
-        ScheduleOverride? perServer = null;
-        ScheduleOverride? fleet = null;
-        if (overrides is not null)
+    /// <summary>The last minute of the day, the top of the run-time table's CHECK.</summary>
+    private const int LastRunAtMinute = 1439;
+
+    /// <summary>A stored run time, or null when there is none at that level or it holds a value the table's CHECK would
+    /// refuse (a store whose CHECK was dropped by hand): either way it counts as not set at that level and falls through.
+    /// This runs every sweep and stays silent; <see cref="LogDroppedRunTimes"/> names such a value once per load.</summary>
+    private static int? ValidRunAt(int? minute) =>
+        minute is >= NoFixedRunTime and <= LastRunAtMinute ? minute : null;
+
+    /// <summary>
+    /// #4938: every configured run time that resolves to none because the collector's effective interval is not a whole
+    /// number of days, one entry per enabled server it was configured for. Judged per server and not per row, because a
+    /// per-server frequency override changes the effective interval: a fleet-wide run time can be fine on one server and
+    /// refused on another. A collector the server's engine never runs is skipped. Pure.
+    /// </summary>
+    public static IReadOnlyList<DroppedRunTime> FindDroppedRunTimes(IReadOnlyList<MonitoredServer> servers, IReadOnlyList<ScheduleOverride> overrides)
+    {
+        var dropped = new List<DroppedRunTime>();
+        if (servers is null || overrides is null)
         {
-            foreach (var o in overrides)
+            return dropped;
+        }
+
+        var collectors = overrides
+            .Where(o => o.RunAtMinute is >= 0 && CollectorScheduleDefaults.All.ContainsKey(o.CollectorName))
+            .Select(o => o.CollectorName)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var name in collectors)
+        {
+            var definition = CollectorCatalog.Find(name);
+            foreach (var server in servers)
             {
-                if (!string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
+                if (definition is not null && definition.TargetEngine != server.TargetEngine)
                 {
                     continue;
                 }
 
-                if (o.ServerId == serverId)
+                var schedule = ResolveScheduleCore(name, server.ServerId, overrides, out var droppedRunAt, out var fromServerRow);
+                if (droppedRunAt is int minute)
                 {
-                    perServer = o;
-                }
-                else if (o.ServerId is null)
-                {
-                    fleet = o;
+                    dropped.Add(new DroppedRunTime(
+                        name, server.ServerId, server.DisplayName, minute,
+                        CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes), fromServerRow));
                 }
             }
         }
+
+        return dropped;
+    }
+
+    /// <summary>
+    /// #4938: warns once for each run time <see cref="FindDroppedRunTimes"/> finds, naming the collector, the server and
+    /// the reason, and once for each stored value outside the range the table's CHECK allows, naming the collector, the
+    /// scope and the value. The second cannot happen through SQL (the CHECK refuses it), but a store whose CHECK was dropped
+    /// by hand can hold one, and <see cref="ResolveSchedule"/> then treats it as not set, so the operator is told here
+    /// instead of finding the collector on its old schedule with no word why. Called once per load of the schedules (see
+    /// <see cref="LoadViewAsync"/>), never per sweep.
+    /// </summary>
+    public static void LogDroppedRunTimes(ILogger? logger, IReadOnlyList<MonitoredServer> servers, IReadOnlyList<ScheduleOverride> overrides)
+    {
+        if (logger is null)
+        {
+            return;
+        }
+
+        foreach (var d in FindDroppedRunTimes(servers, overrides))
+        {
+            logger.LogWarning(
+                "Collector run time ignored: collector '{Collector}' on server '{Server}' (id {ServerId}), {Scope} run time {RunAt}. {Reason}",
+                d.CollectorName, d.ServerName, d.ServerId, d.FromServerRow ? "server" : "fleet-wide",
+                CollectorRunTime.Format(d.RunAtMinute), CollectorRunTime.IntervalRefusalMessage(d.CollectorName, d.IntervalMinutes));
+        }
+
+        if (overrides is null)
+        {
+            return;
+        }
+
+        foreach (var o in overrides)
+        {
+            if (o.RunAtMinute is int stored && ValidRunAt(stored) is null)
+            {
+                logger.LogWarning(
+                    "Collector run time ignored: collector '{Collector}', {Scope} run time value {Value} is outside 0 to 1439 minutes after midnight (or -1 on a server), so it counts as not set.",
+                    o.CollectorName, o.ServerId is int serverId ? "server id " + serverId.ToString(System.Globalization.CultureInfo.InvariantCulture) : "fleet-wide", stored);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The effective schedule for one collector on one server: a per-server override wins over a fleet-wide
+    /// override (<c>server_id</c> NULL) wins over the <see cref="CollectorScheduleDefaults"/> code default,
+    /// per column (a NULL override column falls through to the next level). Pure — unit-testable without a store.
+    ///
+    /// <para>#4938: the run time layers the same way, with one more rule. It comes from the run-time table, merged onto the
+    /// rows by <see cref="MergeRunTimes"/> when the schedules load. The server's run time wins when it has one, else the
+    /// fleet's, else none; -1 is "no fixed time" and, on the server's, stops the fleet's value. A value then applies only
+    /// if the collector's effective interval is a whole number of days
+    /// (<see cref="CollectorRunTime.AllowsRunAt"/>, on <see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/>
+    /// so an on-load collector counts as daily); otherwise it resolves to none. That refusal is silent here because this
+    /// runs every sweep: the warning is <see cref="LogDroppedRunTimes"/>, raised once per load.</para>
+    /// </summary>
+    public static EffectiveSchedule ResolveSchedule(string collectorName, int serverId, IReadOnlyList<ScheduleOverride> overrides) =>
+        ResolveScheduleCore(collectorName, serverId, overrides, out _, out _);
+
+    private static EffectiveSchedule ResolveScheduleCore(
+        string collectorName, int serverId, IReadOnlyList<ScheduleOverride>? overrides, out int? droppedRunAt, out bool droppedFromServerRow)
+    {
+        var def = CollectorScheduleDefaults.All[collectorName];
+
+        /* #4999: the rows are picked where every collection-health surface picks them, so a surface that judges a
+           collector against its interval cannot pick a different row than the one this schedules it by. */
+        var (perServer, fleet) = CollectorScheduleDefaults.SelectScheduleOverrides(collectorName, serverId, overrides);
 
         /* Sanitize operator-supplied overrides before they drive scheduling / a destructive purge: a
            negative frequency, a retention < 1 (0 would invert the purge cutoff and wipe the table), or a
@@ -1875,7 +2055,21 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
            to def.DefaultEnabled (not a bare true) is what makes "reset to defaults" — which DELETES the
            override rows — return a default-off collector to OFF instead of silently re-enabling it. */
         var enabled = perServer?.Enabled ?? fleet?.Enabled ?? def.DefaultEnabled;
-        return new EffectiveSchedule(frequency, retention, enabled);
+
+        var layered = ValidRunAt(perServer?.RunAtMinute);
+        var fromServerRow = layered is not null;
+        layered ??= ValidRunAt(fleet?.RunAtMinute);
+        int? runAt = layered is >= 0 ? layered : null;
+        droppedRunAt = null;
+        droppedFromServerRow = false;
+        if (runAt is not null && !CollectorRunTime.AllowsRunAt(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(frequency)))
+        {
+            droppedRunAt = runAt;
+            droppedFromServerRow = fromServerRow;
+            runAt = null;
+        }
+
+        return new EffectiveSchedule(frequency, retention, enabled, runAt);
     }
 
     /// <summary>
@@ -2000,11 +2194,27 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
 /// <see cref="Databases"/> is the V125 per-collector allow-list (#3477): null = the column was NULL
 /// (no scope at this level, fall through), an empty list = the EXPLICIT "no scope" that stops the
 /// fall-through; the null/empty distinction is load-bearing and <see cref="StoreConfigProvider.ResolveDatabaseScope"/>
-/// documents it. Defaulted so every pre-V125 construction reads as "no scope column written".</summary>
-public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null);
+/// documents it. Defaulted so every pre-V125 construction reads as "no scope column written". <see cref="RunAtMinute"/>
+/// is the V160 run time (#4938), carried here from <c>config_collector_run_times</c> by
+/// <see cref="StoreConfigProvider.MergeRunTimes"/> and not read from this table: minutes after midnight on the server's
+/// clock, -1 = no fixed time at this level (it stops a fleet-wide time), null = no run time at this level, which falls
+/// through; defaulted for the same reason. <see cref="Enabled"/> is null only on the entry a run time makes for a scope and
+/// collector that has no schedule row: such an entry sets no enabled state, so it falls through like the other nulls.</summary>
+public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool? Enabled, IReadOnlyList<string>? Databases = null, int? RunAtMinute = null) : IScheduleFrequencyOverride;
 
-/// <summary>The resolved per-collector schedule (override layered on <see cref="CollectorScheduleDefaults"/>).</summary>
-public sealed record EffectiveSchedule(int FrequencyMinutes, int RetentionDays, bool Enabled);
+/// <summary>One row of <c>config_collector_run_times</c> (#4938): a run time for a collector, fleet-wide when
+/// <see cref="ServerId"/> is null. <see cref="RunAtMinute"/> is minutes after midnight on the server's clock, or -1 on a
+/// server's row for "no fixed time on this server".</summary>
+public sealed record RunTimeOverride(int? ServerId, string CollectorName, int RunAtMinute);
+
+/// <summary>The resolved per-collector schedule (override layered on <see cref="CollectorScheduleDefaults"/>).
+/// <see cref="RunAtMinute"/> is the collector's run time in minutes after midnight on the server's clock, or null when it
+/// has none (#4938); a value is present only where the effective interval is a whole number of days.</summary>
+public sealed record EffectiveSchedule(int FrequencyMinutes, int RetentionDays, bool Enabled, int? RunAtMinute = null);
+
+/// <summary>One configured run time that resolves to none for a server, because the collector's effective interval there is
+/// not a whole number of days (#4938). <see cref="FromServerRow"/> says which row set it: the server's or the fleet-wide one.</summary>
+public sealed record DroppedRunTime(string CollectorName, int ServerId, string ServerName, int RunAtMinute, int IntervalMinutes, bool FromServerRow);
 
 /// <summary>
 /// The in-memory snapshot of the <c>config.*</c> tables the worker applies on a reload. Sub-configs are

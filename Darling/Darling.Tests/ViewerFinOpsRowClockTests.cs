@@ -8,8 +8,10 @@
 
 using System;
 using System.Globalization;
+using System.IO;
 using System.Runtime.CompilerServices;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
 using Xunit;
@@ -122,6 +124,40 @@ public sealed class ViewerFinOpsRowClockTests : IDisposable
     }
 
     [Fact]
+    public void Inventory_StorageRowMapper_ShiftsEachStoredInstantByTheRowsOffset_AndKeepsNullNull()
+    {
+        var saved = ViewerTimeHelper.CurrentDisplayMode;
+        try
+        {
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+            var offset = TimeSpan.FromHours(-5);
+            var clock = ServerClock.FixedOffset(-300);
+            var asOf = Utc(2026, 7, 1, 14, 30);
+            var collected = Utc(2026, 7, 1, 15, 45);
+
+            var both = ServerPropertyRow.From(Dto(1, asOf, collected), clock);
+            Assert.Equal(asOf + offset, both.InventoryAsOf);
+            Assert.Equal(collected + offset, both.LastCollected);
+
+            var none = ServerPropertyRow.From(Dto(2, null, null), clock);
+            Assert.Null(none.InventoryAsOf);
+            Assert.Null(none.LastCollected);
+
+            var mixed = ServerPropertyRow.From(Dto(3, asOf, null), clock);
+            Assert.Equal(asOf + offset, mixed.InventoryAsOf);
+            Assert.Null(mixed.LastCollected);
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = saved;
+        }
+    }
+
+    private static ServerInventoryDto Dto(int id, DateTime? asOfUtc, DateTime? collectedUtc) => new(
+        id, "SQL" + id, "Standard", "16.0", 2, 4, 8192, null, 1, 4, false, false,
+        asOfUtc, null, "Windows", "", true, 0m, collectedUtc);
+
+    [Fact]
     public void AppConnections_ARowReadsItsOwnServersWallTime_NotTheActiveTabs()
     {
         ViewerTimeHelper.ActiveServerClock = India;
@@ -167,11 +203,21 @@ public sealed class ViewerFinOpsRowClockTests : IDisposable
         var inventorySource = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.ViewerSource("ViewerDataService.FinOps.Inventory.cs", ThisFile()));
         var inventory = ViewerTypedRangeTests.MemberText(inventorySource, "GetServerInventoryAsync");
         Assert.Contains("GetServerClocksAsync(null, cancellationToken)", inventory);
-        Assert.Contains("ClockForServerOrMachine(clocks, serverId, TimeZoneInfo.Local, nowUtc)", inventory);
-        Assert.Contains("Clock = clock", inventory);
-        Assert.Contains("ConvertToDisplay(reader.GetDateTime(13), ViewerTimeHelper.CurrentDisplayMode, clock)", inventory);
-        Assert.Contains("ConvertToDisplay(reader.GetDateTime(19), ViewerTimeHelper.CurrentDisplayMode, clock)", inventory);
+        Assert.Contains("ClockForServerOrMachine(clocks, dto.ServerId, TimeZoneInfo.Local, nowUtc)", inventory);
+        Assert.Contains("ServerPropertyRow.From(dto, clock)", inventory);
         Assert.DoesNotContain("ForDisplay(", inventory);
+
+        /* The display conversion stays in the viewer's row mapper, on the row's own clock. */
+        var rowsSource = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.ViewerSource("ViewerDataService.FinOps.cs", ThisFile()));
+        var start = rowsSource.IndexOf("public static ServerPropertyRow From", StringComparison.Ordinal);
+        Assert.True(start >= 0, "ServerPropertyRow.From was not found in ViewerDataService.FinOps.cs.");
+        var end = rowsSource.IndexOf("};", start, StringComparison.Ordinal);
+        Assert.True(end > start, "The end of the ServerPropertyRow.From initializer was not found.");
+        var mapper = rowsSource[start..end];
+        Assert.Contains("Clock = clock", mapper);
+        Assert.Contains("ConvertToDisplay(asOf, ViewerTimeHelper.CurrentDisplayMode, clock)", mapper);
+        Assert.Contains("ConvertToDisplay(last, ViewerTimeHelper.CurrentDisplayMode, clock)", mapper);
+        Assert.DoesNotContain("ForDisplay(", mapper);
     }
 
     private static string ThisFile([CallerFilePath] string thisFile = "") => thisFile;

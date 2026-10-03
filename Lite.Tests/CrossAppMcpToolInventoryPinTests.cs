@@ -328,6 +328,18 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
         "list_custom_alert_templates",
+        // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+        // FinOps web parity (#4843), set A ends.
+        // Each set belongs to one series of changes. Append to your own set only,
+        // so the two series never edit the same lines of this allow-list.
+        // Entries keep the allow-list's existing order and form.
+        // Set A and set B are separated on purpose: keep this gap.
+        //
+        //
+        //
+        // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+        "get_finops",
+        // FinOps web parity (#4843), set B ends.
     };
 
     [Fact]

@@ -1514,16 +1514,16 @@ public sealed class McpPayloadContractCensusTests
     [
         ("scan_truncated", ["DarlingMcpBlockingTools.cs"],
             "the dedup_key fingerprint scan's ceiling (FingerprintScanCeiling), observed off a ceiling + 1 fetch, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
-        ("window_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs"],
-            "the #2364 / #2353 WINDOW floor (#3653 item 17): the tier that answered did not hold the whole requested window, so the served series begins later than asked — beside effective_start / effective_hours_back, observed off the served head against the shared ninety-minute TruncationSlack, no cap involved; get_query_trend and get_query_store_top write it in their initializers, the duration-trend trio through TrendDisclosure.WriteTo (Darling) and WriteDisclosure (Lite); get_query_store_clutter (#3797) writes it in its initializer for its plan-churn and wait arms, which read the same raw tier get_query_store_top does, off the same window-floor read and the same ninety-minute slack"),
+        ("window_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs", "McpSessionTools.cs", "McpWaitTools.cs"],
+            "the #2364 / #2353 WINDOW floor (#3653 item 17): the tier that answered did not hold the whole requested window, so the served series begins later than asked — beside effective_start / effective_hours_back, observed off the served head against the shared ninety-minute TruncationSlack, no cap involved; get_query_trend and get_query_store_top write it in their initializers, the duration-trend trio through TrendDisclosure.WriteTo (Darling) and WriteDisclosure (Lite); get_query_store_clutter (#3797) writes it in its initializer for its plan-churn and wait arms, which read the same raw tier get_query_store_top does, off the same window-floor read and the same ninety-minute slack; Lite's get_active_queries and get_waiting_tasks (QuerySnapshots / WaitingTasks, read by coverage), get_query_store_regressions (checked against the baseline's start, the earlier of its two windows) and get_query_heatmap (#4966) write it in their initializers through McpQueryTools.WindowNotice, beside a page cut of their own (truncated), so they publish effective_start without effective_hours_back, which the window-floor rule below holds apart for the window floor"),
         ("findings_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: get_analysis_findings' GROUP PAGE cut — limit caps the collapsed per-chain groups returned (default 18), independent of the pre-existing truncated above (the raw WindowCoveringLimit occurrence read, beside truncation_note): truncated warns occurrence stats may under-report, findings_truncated warns other diagnostic chains exist but are not on this page at all"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatItExplains)[] CutNoteKeys =
     [
-        ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpQueryTools.cs"],
-            "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top and get_query_store_clutter beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window (on the clutter view, for the two arms that read the raw tier); on Lite's get_top_queries_by_cpu / get_top_procedures_by_cpu / get_query_store_top (#4231), the same window-floor note, from LocalDataService.GetQueryWindowFloorAsync"),
+        ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpQueryTools.cs", "McpSessionTools.cs", "McpWaitTools.cs"],
+            "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top and get_query_store_clutter beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window (on the clutter view, for the two arms that read the raw tier); on Lite's get_top_queries_by_cpu / get_top_procedures_by_cpu / get_query_store_top (#4231), the same window-floor note, from LocalDataService.GetQueryWindowFloorAsync; and on Lite's get_active_queries, get_waiting_tasks, get_query_store_regressions and get_query_heatmap (#4966), the same note beside window_truncated, built by McpQueryTools.WindowNotice with the table each one read"),
         ("findings_truncated_note", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: the prose beside findings_truncated — how many diagnostic chains were active in the window and that raising limit or narrowing hours_back would show more of them"),
     ];
@@ -2248,11 +2248,14 @@ public sealed class McpPayloadContractCensusTests
 
     /// <summary>
     /// Every literal <c>LIMIT n</c> (<c>n &gt; 1</c>) that ENDS a reader statement on either SKU — the shape
-    /// #3541 A3 and #3659 found behind tools that advertised <c>limit</c>. Seven remain, all in Lite's
-    /// service layer, none behind a tool that takes a <c>limit</c>: six are viewer-only reads and one
+    /// #3541 A3 and #3659 found behind tools that advertised <c>limit</c>. Six remain, all in Lite's
+    /// service layer, none behind a tool that takes a <c>limit</c>: five are viewer-only reads and one
     /// (<c>GetPlanCacheSnapshotAsync</c>, behind <c>get_plan_cache_bloat</c>, which takes no cap) is a
     /// ceiling of 30 over a population of a dozen cache types. <c>LIMIT 1</c> is the latest-row idiom and is
-    /// not a page. Pinned so a new terminal literal has to say what it is, and so the Lite twin of
+    /// not a page. The Long Queries grid's read (<c>GetRecentLongQueryCompletionsAsync</c>) left the roster in
+    /// #4989: its cap is the named constant <c>LongQueryGridCap</c>, written into the statement as
+    /// <c>LIMIT {LongQueryGridCap}</c>, so no literal ends it, and the grid's "Showing since" notice reads the same
+    /// constant. Pinned so a new terminal literal has to say what it is, and so the Lite twin of
     /// <see cref="McpPageContractTests.EveryPagedRead_BindsItsCapAsAParameter_NeverALiteral"/> has a
     /// population to shrink.
     /// </summary>
@@ -2260,7 +2263,6 @@ public sealed class McpPayloadContractCensusTests
     [
         ("LocalDataService.Blocking.cs", "GetBlockingPairRowsAsync", 5000),
         ("LocalDataService.FinOps.Recommendations.cs", "GetRecommendationsAsync", 10),
-        ("LocalDataService.LongQueries.cs", "GetRecentLongQueryCompletionsAsync", 200),
         ("LocalDataService.PlanCache.cs", "GetPlanCacheSnapshotAsync", 30),
         ("LocalDataService.RunningJobs.cs", "GetAnomalousJobsAsync", 5),
         ("LocalDataService.WaitStats.cs", "GetAllQuerySnapshotsInRangeAsync", 2000),

@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -236,6 +237,27 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
+    /// The start of the baseline window of the regressions read whose recent window starts at <paramref name="startUtc"/>:
+    /// <see cref="BaselineLookbackDays"/> days earlier. The read's baseline arm and the data-start probe take it from here, so
+    /// the notice keys on the same earlier window the comparison reads.
+    /// </summary>
+    public static DateTime QueryStoreRegressionsBaselineStart(DateTime startUtc) => startUtc.AddDays(-BaselineLookbackDays);
+
+    /// <summary>
+    /// Where this server's query_store_stats coverage starts for the window the regressions read compares (#4966), through the
+    /// shared probe (<see cref="DataWindowFloor"/>). The read compares a RECENT window with the baseline of the
+    /// <see cref="BaselineLookbackDays"/> days before it, so the probe asks about the EARLIER window: it starts at
+    /// <see cref="QueryStoreRegressionsBaselineStart"/>, not at <paramref name="startUtc"/>. A server added two days ago has a
+    /// recent window it covers whole and a baseline of one day instead of seven; a probe over the recent window alone would say
+    /// nothing. The read reads the raw table in both arms (no rollup route), so the probe is the raw table's. The grid ranks its top
+    /// 50 by added duration, not by time, so the rows say nothing about how far back the comparison reached and the cap rule does
+    /// not apply. Null when the window holds no row and no logged run, and when it lies wholly before the coverage.
+    /// </summary>
+    public Task<DateTime?> GetQueryStoreRegressionsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_store_stats"), serverId,
+            QueryStoreRegressionsBaselineStart(startUtc), endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>
     /// The Query Store regressions for one server over the RECENT window [<paramref name="startUtc"/>,
     /// <paramref name="endUtc"/>] vs. the fixed <see cref="BaselineLookbackDays"/>-day baseline ending at
     /// <paramref name="startUtc"/> (#4217), ranked by execution-count-weighted extra duration descending (the
@@ -250,7 +272,7 @@ public sealed partial class ViewerDataService
         // timestamp parameter — the same reason DarlingQueryStoreRegressionReader takes it as a parameter
         // rather than computing it inside the statement (an in-statement interval costs TimescaleDB its
         // plan-time chunk exclusion).
-        var baselineStartUtc = startUtc.AddDays(-BaselineLookbackDays);
+        var baselineStartUtc = QueryStoreRegressionsBaselineStart(startUtc);
 
         await using var command = _dataSource.CreateCommand(QueryStoreRegressionsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;

@@ -372,6 +372,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 try
                 {
                     result = await handler(context, postgres, analysis);
+
+                    /* #4966: a grid over a window says where its table's data starts when that is after the window's
+                       start. Added to the web mirror only, never to the tool, so the MCP payloads are unchanged. A
+                       failed probe returns the tool's answer as it was. */
+                    var askedHours = QueryInt(context, "hours", "hours_back", 0);
+                    result = await WebDataStartNote.AddAsync(
+                        postgres, name, Server(context), askedHours > 0 ? askedHours : null, AsOf(context), result, logger, context.RequestAborted);
                 }
                 catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                 {
@@ -1430,7 +1437,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                starts and why. Absent when the table did not serve or nothing was cut. */
             if (queryStoreWideEligible && wideResolution.WideStart is DateTime historyStart && historyStart > start)
             {
-                payload["query_store_history_starts"] = historyStart.ToString("o");
+                payload["query_store_history_starts"] = McpHelpers.FormatEffectiveStart(historyStart);
                 payload["query_store_history_note"] = QueryStoreHistoryNote(historyStart, wideResolution.Bound, wideResolution.SettingServer);
                 if (wideResolution.SettingServer is not null)
                 {
@@ -1474,7 +1481,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
     private const string QueryStoreWideServerIdsSql =
-        "SELECT server_id, server_name FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1))";
+        "SELECT server_id, server_name FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1)) ORDER BY server_id";
 
     /// <summary>
     /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
@@ -1538,11 +1545,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var wideStart = start;
             var bound = QueryStoreIntervalWide.WideStartBound.Window;
             string? settingServer = null;
+
+            /* The floors are one store-wide answer: the first server to reach that step reads them into this
+               cache and the rest reuse them; a check that refuses before that step never reads them. */
+            var storeWide = new QueryStoreIntervalWide.StoreWideInputsCache();
             foreach (var (serverId, serverName) in wideServers)
             {
                 var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                     connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
-                    McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken);
+                    McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken, storeWide);
                 if (!plan.UseTable)
                 {
                     return default;
@@ -1569,9 +1580,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>#4689: the note a Compose Query Store panel carries when the interval table served it from a
-    /// start later than the window's. Same wording as the MCP top-queries table route.</summary>
+    /// start later than the window's. Same wording as the MCP top-queries table route, and #4966 the same text for
+    /// the start: the one <c>query_store_history_starts</c> prints beside it, UTC with the Z.</summary>
     internal static string QueryStoreHistoryNote(DateTime historyStart, QueryStoreIntervalWide.WideStartBound bound, string? settingServer = null) =>
-        QueryStoreIntervalWide.HistoryNote(historyStart, bound, manyServers: true, settingServer);
+        QueryStoreIntervalWide.HistoryNote(McpHelpers.FormatEffectiveStart(historyStart), bound, manyServers: true, settingServer);
 
     /// <summary>Maps a failed (non-<see cref="ComposeRunOutcome.Payload"/>) <see cref="ComposeRunOutcome"/> onto
     /// its HTTP answer — factored out of the <c>/api/compose/run</c> route (the <see cref="ToHttpResult"/> /
@@ -2563,6 +2575,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private const string CatPlans = "Plans";
     private const string CatDefaultTrace = "Default Trace";
     private const string CatSystemHealth = "System Health";
+    private const string CatFinOps = "FinOps";
 
     private static CatalogParam PServer() => new("server", TypeServer, false, null);
     private static CatalogParam PHours(int def) => new("hours", TypeInt, false, def);
@@ -2785,6 +2798,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_severe_errors"] = R(CatSystemHealth, "system_health: severe (sev >= 17) errors.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_significant_waits"] = R(CatSystemHealth, "system_health: individual 500 ms+ waits with their statement.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_system_health"] = R(CatSystemHealth, "system_health: the raw parsed session records.", PServer(), PHours(24), PLimit(50), PAsOf()),
+            // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+            // FinOps web parity (#4843), set A ends.
+            // Each set belongs to one series of changes. Append to your own set only,
+            // so the two series never edit the same lines of this catalog.
+            // Entries keep the catalog's existing order and form.
+            // Set A and set B are separated on purpose: keep this gap.
+            //
+            //
+            //
+            // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+            ["get_finops"] = R(CatFinOps, "FinOps views for one server, picked by view. view is one of a closed set (today: " + DarlingMcpFinOpsTools.SetAValid + DarlingMcpFinOpsTools.SetBValid + "); an unknown view is refused with the valid list. Windowed over hours; limit caps rows per list.", PServer(), PText("view"), PHours(24), PInt("limit", 10)),
+            // FinOps web parity (#4843), set B ends.
         };
 
     /// <summary>Builds the <c>/api/catalog</c> body: the reads (names taken from <see cref="BuildReadDispatch"/>,
@@ -3715,6 +3740,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_severe_errors"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSevereErrors(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_health_parser_significant_waits"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSignificantWaits(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+            // FinOps web parity (#4843), set A ends.
+            // Each set belongs to one series of changes. Append to your own set only,
+            // so the two series never edit the same lines of this read list.
+            // Entries keep the read list's existing order and form.
+            // Set A and set B are separated on purpose: keep this gap.
+            //
+            //
+            //
+            // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+            ["get_finops"] = (c, pg, an) => DarlingMcpFinOpsTools.GetFinOps(pg, First(c, "view") ?? "", Server(c), Hours(c, 24), QueryInt(c, "limit", null, 10), c.RequestAborted),
+            // FinOps web parity (#4843), set B ends.
         };
 
         /* #4442: the test-only extra entry, added ONLY when a test set it -- never in a production

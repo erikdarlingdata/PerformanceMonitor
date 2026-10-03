@@ -225,7 +225,9 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
         Assert.Contains(
             "ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode, _serverClock, refreshedUtc)", refresh, StringComparison.Ordinal);
         Assert.Contains("DisplayZone.ToDisplay(refreshedUtc, GetPickerZone())", refresh, StringComparison.Ordinal);
-        Assert.Contains("ApplyWindowFloorToBanner(banner, floor, startUtc, GetPickerZone());", refresh, StringComparison.Ordinal);
+        /* #4989: the shared step words the earlier of the probe's floor and the oldest row a capped grid shows; the zone
+           it is worded in is still the tab's own picker zone. */
+        Assert.Contains("ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestRowShownUtc), startUtc, GetPickerZone());", refresh, StringComparison.Ordinal);
         Assert.Contains(
             "internal static bool ApplyWindowFloorToBanner(TextBlock banner, DateTime? floor, DateTime startUtc, TimeZoneInfo zone)",
             refresh, StringComparison.Ordinal);
@@ -236,7 +238,9 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
     }
 
     /// <summary>
-    /// The shared window-floor step takes the zone as an argument, so a caller could still hand the banner another
+    /// The shared window-floor steps (<c>ApplyWindowFloorToBanner</c> for a probe's answer, and, since #4966,
+    /// <c>ApplyCappedWindowFloorToBanner</c> for a capped read's oldest row) take the zone as an argument, so a caller
+    /// could still hand the banner another
     /// one (the machine's, or the active server's). Every call in the ServerTab files hands it the tab's own picker
     /// zone as its last argument, the zone the tab's other text is worded in. The definition is not a call, and at
     /// least one call must exist, so the check cannot pass by finding nothing.
@@ -249,19 +253,19 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
         foreach (var (name, code) in ServerTabCode())
         {
             /* A definition has its return type right before the name; a call does not. */
-            foreach (Match m in Regex.Matches(code, @"(?<!\bbool\s+)\bApplyWindowFloorToBanner\s*\("))
+            foreach (Match m in Regex.Matches(code, @"(?<!\bbool\s+)\bApply(?:Capped)?WindowFloorToBanner\s*\("))
             {
                 calls++;
                 var arguments = CallArguments(code, m.Index + m.Length - 1);
                 if (!Regex.IsMatch(arguments, @",\s*GetPickerZone\(\)\s*$"))
                 {
                     offenders.Add(
-                        $"{name} (code line {Line(code, m.Index)}): ApplyWindowFloorToBanner({Regex.Replace(arguments.Trim(), @"\s+", " ")})");
+                        $"{name} (code line {Line(code, m.Index)}): {Regex.Replace(m.Value, @"\s*\($", "")}({Regex.Replace(arguments.Trim(), @"\s+", " ")})");
                 }
             }
         }
 
-        Assert.True(calls >= 1, "no ApplyWindowFloorToBanner call is left in the ServerTab files; update this pin.");
+        Assert.True(calls >= 2, "an ApplyWindowFloorToBanner or ApplyCappedWindowFloorToBanner call is gone from the ServerTab files (the probe's step and the capped step each have one); update this pin.");
         Assert.True(
             offenders.Count == 0,
             "These hand the 'Showing since' banner a zone other than the tab's own; pass GetPickerZone() as the last " +

@@ -728,14 +728,20 @@ FROM (
     /// <summary>#4689: the note a table-served Query Store read carries when the interval table started it later than
     /// the window. The MCP top-queries table route (one server) and Compose's panel (the servers in scope) both
     /// take their text from here. <paramref name="settingServer"/> names the server whose history set the common
-    /// start of a many-server read; when null the reason says "these servers".</summary>
-    public static string HistoryNote(DateTime effectiveStart, WideStartBound bound, bool manyServers, string? settingServer = null)
+    /// start of a many-server read; when null the reason says "these servers".
+    ///
+    /// <para>#4966: <paramref name="effectiveStart"/> is the start as its caller already prints it, in the same text
+    /// as its <c>effective_start</c> field (<c>McpHelpers.FormatEffectiveStart</c>: UTC, with the Z), and the note
+    /// names it as given. The page finds the instant in the sentence by the field's exact text to show it in the
+    /// browser's zone, so a note that spelled the instant on its own (a plain "o" of the store's naive floor has no
+    /// Z) was drawn in bare UTC above a grid of local times.</para></summary>
+    public static string HistoryNote(string effectiveStart, WideStartBound bound, bool manyServers, string? settingServer = null)
     {
         var scope = manyServers ? "the servers in scope" : "this server";
         var reason = bound switch
         {
             WideStartBound.FilledSince =>
-                $"The interval table began keeping complete history for {(!manyServers ? "this server" : settingServer ?? "these servers")} at {effectiveStart:o}.",
+                $"The interval table began keeping complete history for {(!manyServers ? "this server" : settingServer ?? "these servers")} at {effectiveStart}.",
             WideStartBound.TablePurgeEdge =>
                 "The interval table keeps 9 days, and intervals that began before its purge edge are not read.",
             WideStartBound.RawFloorSlowCadence =>
@@ -745,7 +751,7 @@ FROM (
             _ =>
                 "The read is clamped at the raw tier's retention floor: nothing older than it can be shown exactly.",
         };
-        return $"The window reaches further back than the Query Store history this store holds for {scope}. Nothing older than {effectiveStart:o} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. "
+        return $"The window reaches further back than the Query Store history this store holds for {scope}. Nothing older than {effectiveStart} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. "
             + reason;
     }
 
@@ -974,6 +980,25 @@ FROM (
     }
 
     /// <summary>
+    /// The inputs <see cref="ResolveReadAsync"/> reads that do not depend on the server: the three floors of
+    /// <see cref="ChunkFloorsSql"/>, which takes no parameter and reads TimescaleDB's catalog for the whole store.
+    /// (<see cref="ReadSourceInputsSql"/>'s coverage and pending columns, <see cref="PlainTableFloorSql"/>,
+    /// <see cref="HasLegacyRowSql"/> and the cadence probe all filter on the server, so they stay per server.)
+    /// A caller that resolves many servers for one window passes one <see cref="StoreWideInputsCache"/> to each call.
+    /// </summary>
+    public sealed record StoreWideInputs(DateTime? RawFloor, bool TableIsHypertable, DateTime? TableFloor);
+
+    /// <summary>
+    /// A per-check holder for <see cref="StoreWideInputs"/>. <see cref="ResolveReadAsync"/> fills it the first
+    /// time a server reaches the floors step and reuses it for every later server, so the floors are read at
+    /// most once per check and not at all when every server refuses before that step.
+    /// </summary>
+    public sealed class StoreWideInputsCache
+    {
+        internal StoreWideInputs? Value;
+    }
+
+    /// <summary>
     /// <see cref="UseTable"/> plus the store round trips it needs, the clamp (<see cref="ClampedStart"/>), and the
     /// lower bound the table read may bind (<see cref="WideReadPlan.ReadStart"/>), which reaches below raw's chunk
     /// floor down to <see cref="ExactBelowFloorStart"/> — all computed from the SAME <c>rawFloor</c> this decision
@@ -988,7 +1013,8 @@ FROM (
         TimeSpan minWindow,
         int commandTimeoutSeconds,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        StoreWideInputsCache? storeWide = null)
     {
         /* The probes bind these as timestamp-without-time-zone, which Npgsql refuses for Kind=Utc; a caller that
            resolves its window from DateTime.UtcNow (the MCP tool) would otherwise fail every decision and read raw. */
@@ -1029,7 +1055,13 @@ FROM (
             DateTime? rawFloor = null;
             DateTime? tableFloor = null;
             var tableIsHypertable = false;
-            if (hasTimescale)
+            if (hasTimescale && storeWide?.Value is StoreWideInputs cached)
+            {
+                rawFloor = cached.RawFloor;
+                tableIsHypertable = cached.TableIsHypertable;
+                tableFloor = cached.TableFloor;
+            }
+            else if (hasTimescale)
             {
                 await using var floors = new NpgsqlCommand(ChunkFloorsSql, connection) { CommandTimeout = commandTimeoutSeconds };
                 await using var reader = await floors.ExecuteReaderAsync(cancellationToken);
@@ -1037,6 +1069,10 @@ FROM (
                 rawFloor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
                 tableIsHypertable = reader.GetBoolean(1);
                 tableFloor = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+                if (storeWide is not null)
+                {
+                    storeWide.Value = new StoreWideInputs(rawFloor, tableIsHypertable, tableFloor);
+                }
             }
 
             /* Clause 2 (filledSince <= max(rawFloor, windowStart)) needs only rawFloor, already in hand from
