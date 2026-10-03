@@ -23,9 +23,11 @@ namespace Darling.Tests;
 /// calls the server tab makes (the surface's read, the data-start probe) and then the tab's own banner step on a real banner
 /// control, and reads what the banner says.
 ///
-/// <para><b>Query Store Clutter</b> reads <c>query_store_stats</c>, a raw relation the gated purge owns, so the probe's coverage is the
-/// oldest row the server holds at or before the window's end (or the server's first collection when it holds none): a range that
-/// reaches before it names it, and a range the store covers names nothing, whenever the first row of the range came.</para>
+/// <para><b>Query Store Clutter</b> draws from two ranged sources: the plan churn from <c>query_store_stats</c>, a raw relation the gated
+/// purge owns, whose coverage is the oldest row the server holds at or before the window's end (or the server's first collection when
+/// it holds none), and the read cost from the collection log, whose coverage is its own horizon or the server's first collection. The
+/// probe asks both and names the LATER start: a range that reaches before it names it, and a range both sources cover names nothing,
+/// whenever the first row of the range came.</para>
 ///
 /// <para><b>Memory Pressure Events</b> is SPARSE (a server goes days with no pressure event), so its edge is the schedule's purge
 /// cutoff, never its oldest row: a quiet week with one event at its end is covered and names nothing, where a walk to the oldest row
@@ -45,11 +47,15 @@ public sealed class ViewerClutterAndMemoryPressureDataStartLiveTests
     private const int MemoryQuietWeekServerId = -496644;
     private const int MemoryNewServerId = -496645;
     private const int MemoryHistoryServerId = -496646;
+    private const int ClutterLogLaterServerId = -496647;
+    private const int ClutterStatsOnlyServerId = -496648;
+    private const int ClutterLogOnlyServerId = -496649;
+    private const int ClutterNeitherServerId = -496650;
 
     // ── Query Store Clutter ──
 
-    /* Added 2 days ago, its first Query Store row came a day later: the range reaches before the oldest row the store holds for it,
-       and the panel still loads its rows. */
+    /* Added 2 days ago, its first Query Store row came a day later: the range reaches before the oldest row the store holds for it, and
+       that start is later than the log's (its first run, 2 days back), so the note names the table's. The panel still loads its rows. */
     [Fact]
     public async Task Clutter_ARangePastTheCoverage_NamesWhereTheCoverageStarts_AndTheRowsStillLoad_AgainstDevPostgres()
     {
@@ -69,8 +75,9 @@ public sealed class ViewerClutterAndMemoryPressureDataStartLiveTests
     }
 
     /* A quiet start: monitored for 120 days, a row 100 days back proves the store covered the range, and the first row of the range
-       came 5 hours in. And a server that has logged its collector's runs but holds no row at all is covered from its first collection.
-       Neither names a note. */
+       came 5 hours in. And a server that has logged its collector's runs but holds no row at all is covered by the table from its first
+       collection (120 days back) and by the log from its own horizon (60 days back, the purge's), so the later start the probe answers
+       is the log's, still before the range. Neither names a note. */
     [Fact]
     public async Task Clutter_AQuietStart_GivesNoNotice_AgainstDevPostgres()
     {
@@ -83,9 +90,68 @@ public sealed class ViewerClutterAndMemoryPressureDataStartLiveTests
         Assert.NotNull(quiet);
         Assert.True(quiet <= store.Start, $"coverage {quiet:O} should reach the range start {store.Start:O}");
         Assert.Null(ClutterBanner(store, Task.FromResult(quiet)));
-        Assert.Equal(store.End.AddDays(-120), noRows);
+        /* The probe's own clock (read when it ran, after the store was built) less the log's horizon, so the bounds leave room for the seeding. */
+        var logHorizon = store.End.AddDays(-DarlingRetentionHorizons.CollectionLogRetentionDays);
+        Assert.NotNull(noRows);
+        Assert.InRange(noRows.Value, logHorizon, logHorizon.AddMinutes(10));
         Assert.Null(ClutterBanner(store, Task.FromResult(noRows)));
         Assert.Empty((await store.Viewer.GetQueryStoreClutterAsync(ClutterNoRowsServerId, store.Start, store.End, cancellationToken: ct)).Databases);
+    }
+
+    /* The panel draws from two ranged sources, the plan churn from query_store_stats and the read cost from the collection log, so the
+       note names the LATER of the two starts and is true of every column. Added 3 days ago, so its runs in the log start there, while
+       its Query Store rows reach 6 days back (a server registered again, its old rows kept): the table alone would name 6 days back, a
+       start the read cost does not reach. The panel still loads its rows. */
+    [Fact]
+    public async Task Clutter_TheLogStartingAfterTheStatsTable_NamesTheLogStart_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+
+        var probe = await FinishedProbeAsync(store, ClutterLogLaterServerId, ct);
+
+        Assert.Equal(store.End.AddDays(-3), await probe);
+        Assert.Equal(QueryGridSeed.Since(store.End.AddDays(-3)), ClutterBanner(store, probe));
+        Assert.NotEmpty((await store.Viewer.GetQueryStoreClutterAsync(ClutterLogLaterServerId, store.Start, store.End, cancellationToken: ct)).Databases);
+    }
+
+    /* When only one of the two comes back, the note names it: a server with Query Store rows from a day ago and no run in the log names the
+       table's start, and a server with runs of another collector in the log and nothing from Query Store names the log's start. A server
+       with neither (no row and no run in the range) names nothing. */
+    [Fact]
+    public async Task Clutter_OnlyOneProbeAnswering_NamesThatStart_AndNeitherNamesNothing_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+
+        var statsOnly = await FinishedProbeAsync(store, ClutterStatsOnlyServerId, ct);
+        var logOnly = await FinishedProbeAsync(store, ClutterLogOnlyServerId, ct);
+        var neither = await FinishedProbeAsync(store, ClutterNeitherServerId, ct);
+
+        Assert.Equal(store.End.AddDays(-1), await statsOnly);
+        Assert.Equal(QueryGridSeed.Since(store.End.AddDays(-1)), ClutterBanner(store, statsOnly));
+        Assert.Equal(store.End.AddDays(-3), await logOnly);
+        Assert.Equal(QueryGridSeed.Since(store.End.AddDays(-3)), ClutterBanner(store, logOnly));
+        Assert.Null(await neither);
+        Assert.Null(ClutterBanner(store, neither));
+    }
+
+    /* Probes that fail against a real store cost the note and never the panel. Renaming the log's table makes the probes fail (the log's
+       own reads it by name, and so does the table's, which counts a server by its logged runs), so the note stays down for a server whose
+       rows begin a day into the range. The panel's read goes through the log's view, which follows the renamed table, so the rows it
+       draws are unchanged. (Which of the two probes failing drops the note is run without a store, in the unit tests.) */
+    [Fact]
+    public async Task Clutter_FailingProbes_ShowNoNote_AndTheRowsStillLoad_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        await store.RenameCollectionLogAsync(ct);
+
+        var probe = await FinishedProbeAsync(store, ClutterNewServerId, ct);
+
+        Assert.Null(ClutterBanner(store, probe));
+        await Assert.ThrowsAnyAsync<Exception>(() => probe);
+        Assert.NotEmpty((await store.Viewer.GetQueryStoreClutterAsync(ClutterNewServerId, store.Start, store.End, cancellationToken: ct)).Databases);
     }
 
     // ── Memory Pressure Events ──
@@ -145,6 +211,15 @@ public sealed class ViewerClutterAndMemoryPressureDataStartLiveTests
         Assert.Equal(2, ViewerServerTab.PressureRowsDrawn(rows).Count);
     }
 
+    /* The clutter probe for one server over the default range, run to its end (an answer or a failure). The banner step runs on a thread of its
+       own with no scheduler, so an answer still in flight would resume on a pool thread and touch a control another thread owns. */
+    private static async Task<Task<DateTime?>> FinishedProbeAsync(Store store, int serverId, CancellationToken ct)
+    {
+        var probe = store.Viewer.GetQueryStoreClutterDataStartAsync(serverId, store.Start, store.End, ct);
+        await Task.WhenAny(probe);
+        return probe;
+    }
+
     private static string? ClutterBanner(Store store, Task<DateTime?> probe) =>
         QueryGridSeed.ReadBanner(banner => ViewerServerTab.ShowQueryStoreClutterDataStartAsync(banner, probe, store.Start));
 
@@ -177,6 +252,15 @@ public sealed class ViewerClutterAndMemoryPressureDataStartLiveTests
             return (coverage, rows);
         }
 
+        /// <summary>Renames the collection log's table, so a probe that reads it by name fails while its view (the clutter read's source) still reads it.</summary>
+        public async Task RenameCollectionLogAsync(CancellationToken ct)
+        {
+            await using var connection = new NpgsqlConnection(_scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await using var rename = new NpgsqlCommand("ALTER TABLE collect.collection_log RENAME TO collection_log_renamed", connection);
+            await rename.ExecuteNonQueryAsync(ct);
+        }
+
         public static async Task<Store> CreateAsync(CancellationToken ct)
         {
             var scratch = await QueryGridSeed.OpenScratchAsync(ct);
@@ -200,6 +284,22 @@ public sealed class ViewerClutterAndMemoryPressureDataStartLiveTests
 
                     /* Monitored for 120 days, the collector has run, and nothing has been written to the table. */
                     await EventGridSeed.AddServerAsync(connection, ClutterNoRowsServerId, "clutter-norows", end.AddDays(-120), queryStoreCollector, end, clockOffsetMinutes: null, ct);
+
+                    /* Added 3 days ago, its Query Store rows reaching 6 days back: the table starts before the log's first run. */
+                    await EventGridSeed.AddServerAsync(connection, ClutterLogLaterServerId, "clutter-loglater", end.AddDays(-3), queryStoreCollector, end, clockOffsetMinutes: null, ct);
+                    await InsertQueryStoreStatsAsync(connection, ClutterLogLaterServerId, "clutter-loglater", end.AddDays(-6), end, 6, ct);
+
+                    /* Query Store rows from a day ago and no run in the log at all. */
+                    await EventGridSeed.AddServerAsync(connection, ClutterStatsOnlyServerId, "clutter-statsonly", end.AddDays(-2), queryStoreCollector, end, clockOffsetMinutes: null, ct);
+                    await DeleteLoggedRunsAsync(connection, ClutterStatsOnlyServerId, ct);
+                    await InsertQueryStoreStatsAsync(connection, ClutterStatsOnlyServerId, "clutter-statsonly", end.AddDays(-1), end, 1, ct);
+
+                    /* Added 3 days ago, runs of another collector in the log and nothing from Query Store. */
+                    await EventGridSeed.AddServerAsync(connection, ClutterLogOnlyServerId, "clutter-logonly", end.AddDays(-3), "wait_stats", end, clockOffsetMinutes: null, ct);
+
+                    /* Registered 3 days ago, with no run in the log and no row in the table. */
+                    await EventGridSeed.AddServerAsync(connection, ClutterNeitherServerId, "clutter-neither", end.AddDays(-3), queryStoreCollector, end, clockOffsetMinutes: null, ct);
+                    await DeleteLoggedRunsAsync(connection, ClutterNeitherServerId, ct);
 
                     /* Monitored for 20 days, one pressure event in the range, 10 minutes before its end. */
                     await EventGridSeed.AddServerAsync(connection, MemoryQuietWeekServerId, "memory-quiet", end.AddDays(-20), "memory_pressure_events", end, clockOffsetMinutes: null, ct);
@@ -250,6 +350,14 @@ public sealed class ViewerClutterAndMemoryPressureDataStartLiveTests
             insert.Parameters.AddWithValue(stepHours);
             insert.Parameters.AddWithValue(Math.Abs((long)serverId) * 100_000L);
             await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        /* The registered server's runs AddServerAsync wrote, removed: a server whose collector has logged nothing in the range. */
+        private static async Task DeleteLoggedRunsAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
+        {
+            await using var delete = new NpgsqlCommand("DELETE FROM collect.collection_log WHERE server_id = $1", connection);
+            delete.Parameters.AddWithValue(serverId);
+            await delete.ExecuteNonQueryAsync(ct);
         }
 
         private static async Task InsertEventAsync(

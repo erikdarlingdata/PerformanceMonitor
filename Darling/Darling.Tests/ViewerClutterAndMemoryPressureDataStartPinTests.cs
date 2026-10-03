@@ -42,16 +42,27 @@ public sealed class ViewerClutterAndMemoryPressureDataStartPinTests
 
     // ── Query Store Clutter ──
 
-    /* The panel's read cost and plan churn are aggregates over the window from query_store_stats, so the coverage rule applies,
-       probed through the shared floor over the raw collector table, from the window's own start. */
+    /* The panel draws from two ranged sources, the plan churn from query_store_stats and the read cost from the collection log, so the
+       coverage rule applies to each: both are probed through the shared floor from the window's own start, one call each (the shared
+       probe's several-source form answers the EARLIEST start, the opposite of this panel's rule), and the later start is the answer. */
     [Fact]
-    public void TheClutterProbe_GoesThroughTheSharedFloor_OverTheRawQueryStoreTable_FromTheWindowsStart()
+    public void TheClutterProbe_GoesThroughTheSharedFloor_OverBothRangedSources_FromTheWindowsStart_AndKeepsTheLaterStart()
     {
         var source = ViewerFile("ViewerDataService.QueryStoreClutter.cs");
 
         Assert.Equal(1, Matches(source, @"public Task<DateTime\?> GetQueryStoreClutterDataStartAsync\(int serverId, DateTime startUtc, DateTime endUtc,"));
-        Assert.Contains("DataWindowFloor.Source.ForCollectorTable(\"query_store_stats\")", source, StringComparison.Ordinal);
-        Assert.Matches(@"DataWindowFloor\.GetForServerAsync\(_dataSource,[^;]*?serverId,\s*startUtc,\s*endUtc,", source);
+        var probe = Regex.Match(source, @"public Task<DateTime\?> GetQueryStoreClutterDataStartAsync\(.*?cancellationToken\)\);\r?\n", RegexOptions.Singleline).Value;
+        Assert.NotEmpty(probe);
+        Assert.Contains("LaterStartAsync(", probe, StringComparison.Ordinal);
+        Assert.Contains("DataWindowFloor.Source.ForCollectorTable(\"query_store_stats\")", probe, StringComparison.Ordinal);
+        Assert.Contains("DataWindowFloor.Source.ForCollectionLog()", probe, StringComparison.Ordinal);
+        Assert.Equal(2, Matches(probe, @"DataWindowFloor\.GetForServerAsync\(_dataSource,[^;]*?serverId,\s*startUtc,\s*endUtc,"));
+        Assert.DoesNotContain("DataWindowFloor.GetAsync(", source, StringComparison.Ordinal);
+
+        /* The choice keeps the later of two starts, and the one that came back when only one did. */
+        var later = MethodBody(source, @"internal static async Task<DateTime\?> LaterStartAsync\(");
+        Assert.Matches(@"churn >= cost \? churn : cost", later);
+        Assert.Contains("?? readCost", later, StringComparison.Ordinal);
     }
 
     /* The probe starts beside the read and both take the window's start the caller worked out once; the banner is raised after the

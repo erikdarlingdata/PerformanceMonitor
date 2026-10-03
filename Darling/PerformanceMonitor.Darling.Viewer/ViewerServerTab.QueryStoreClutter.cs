@@ -40,8 +40,10 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadQueryStoreClutterAsync(DateTime startUtc, DateTime endUtc)
     {
-        /* #4966: the probe starts beside the read, and both take the window the caller worked out once. The verdicts are aggregates
-           over the window from query_store_stats, so the coverage rule applies; the rows are per database and name no time. */
+        /* #4966: the probe starts beside the read, and both take the window the caller worked out once. The panel draws from two ranged
+           sources, the plan churn from query_store_stats and the read cost from the collection log, so the coverage rule applies to each
+           and the note names the later of the two starts; the config and memory-clerk sections show the newest snapshot only, and the
+           rows are per database and name no time. */
         var dataStartTask = _dataService.GetQueryStoreClutterDataStartAsync(_server.ServerId, startUtc, endUtc);
         var result = await _dataService.GetQueryStoreClutterAsync(
             _server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
@@ -75,10 +77,10 @@ public partial class ViewerServerTab
     /// <summary>
     /// Raises or hides the "Showing since" banner of the Query Store Clutter panel (#4966), through the shared step the other server-tab
     /// grids use: the probe's answer (<paramref name="probe"/>, started beside the read:
-    /// <see cref="ViewerDataService.GetQueryStoreClutterDataStartAsync"/>) is compared with the window's start, so a range that
-    /// reaches before the server's coverage names where it starts and a covered range names nothing. The probe is awaited through
-    /// <see cref="DataStartOrNullAsync"/>, so a probe that throws costs this banner and nothing after it. <c>internal static</c> so the
-    /// store-backed tests run the same step as the tab.
+    /// <see cref="ViewerDataService.GetQueryStoreClutterDataStartAsync"/>, the later of the plan churn's and the read cost's starts)
+    /// is compared with the window's start, so a range that reaches before it names where it starts and a covered range names
+    /// nothing. The probe is awaited through <see cref="DataStartOrNullAsync"/>, so a probe that throws costs this banner and nothing
+    /// after it. <c>internal static</c> so the store-backed tests run the same step as the tab.
     /// </summary>
     /// <param name="banner">The panel's banner.</param>
     /// <param name="probe">The panel's data-start probe, started beside its read.</param>

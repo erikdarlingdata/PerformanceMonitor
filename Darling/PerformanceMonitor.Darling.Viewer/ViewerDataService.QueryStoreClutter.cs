@@ -158,16 +158,42 @@ public partial class ViewerDataService
         QueryStoreOverheadSummary Overhead);
 
     /// <summary>
-    /// Where this server's <c>query_store_stats</c> coverage starts for the window the clutter read draws (#4966), through the shared
-    /// probe (<see cref="DataWindowFloor"/>). The read cost and the plan churn are aggregates over the window from that table, so the
-    /// coverage rule applies: a range that reaches before the server's coverage says where it starts, and a covered range whose first
-    /// rows came late says nothing. The caller works the window out once and hands the same start to this probe and to
-    /// <see cref="GetQueryStoreClutterAsync"/>. Null when the window holds no row and no logged run, when it lies wholly before the
-    /// coverage, and for a window of 90 minutes or less, which makes no probe call.
+    /// Where this server's coverage starts for the window the clutter read draws (#4966), through the shared probe
+    /// (<see cref="DataWindowFloor"/>). The panel draws from two ranged sources: the plan churn from <c>query_store_stats</c>, and the
+    /// read cost from the collection log (the runs of the <c>query_store</c> collector). Both are aggregates over the window, so the
+    /// coverage rule applies to each, and the note names the LATER of the two starts, which makes it true of every column the panel
+    /// shows. Its config and memory-clerk sections show the newest snapshot only and need no note. A source that comes back alone is
+    /// named; when neither does the answer is null.
+    ///
+    /// <para>Two probe calls, not one: <see cref="DataWindowFloor.GetForServerAsync"/> takes one source, and the shared probe's
+    /// several-source form (<see cref="DataWindowFloor.GetAsync"/>) answers the EARLIEST start among its sources, which is the rule for
+    /// the two halves of a stitched rollup and the opposite of this panel's. The caller works the window out once and hands the same
+    /// start to this probe and to <see cref="GetQueryStoreClutterAsync"/>. A range that reaches before the later start names it, and a
+    /// covered range whose first rows came late names nothing. Null too when the window lies wholly before the coverage, and for a
+    /// window of 90 minutes or less, which makes no probe call. A probe that throws throws here (see <see cref="LaterStartAsync"/>).</para>
     /// </summary>
     public Task<DateTime?> GetQueryStoreClutterDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_store_stats"), serverId, startUtc, endUtc,
-            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        LaterStartAsync(
+            () => DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_store_stats"), serverId, startUtc, endUtc,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken),
+            () => DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectionLog(), serverId, startUtc, endUtc,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken));
+
+    /// <summary>
+    /// The later of the two coverage starts the clutter panel's sources came back with (#4966): the plan churn's, then the read cost's,
+    /// each probed in turn. A start that came back alone is the answer, and neither is null. A probe that throws throws here, so the
+    /// tab's guard (<c>DataStartOrNullAsync</c>) drops the note and the panel loads without it, and a first probe that failed starts no
+    /// second. <c>internal static</c> so the tests run the choice, and a failing probe, without a store.
+    /// </summary>
+    internal static async Task<DateTime?> LaterStartAsync(Func<Task<DateTime?>> planChurnStart, Func<Task<DateTime?>> readCostStart)
+    {
+        ArgumentNullException.ThrowIfNull(planChurnStart);
+        ArgumentNullException.ThrowIfNull(readCostStart);
+
+        var planChurn = await planChurnStart();
+        var readCost = await readCostStart();
+        return planChurn is { } churn && readCost is { } cost ? (churn >= cost ? churn : cost) : planChurn ?? readCost;
+    }
 
     /// <summary>
     /// The clutter view for one server over the toolbar's window. Runs the four shared arms, composes them

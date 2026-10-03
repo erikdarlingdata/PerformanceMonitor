@@ -77,6 +77,64 @@ public sealed class ViewerClutterAndMemoryPressureDataStartTests : IDisposable
         Assert.Null(ClutterBannerFor(Task.FromException<DateTime?>(new InvalidOperationException("the store went away"))));
     }
 
+    /* The panel draws from two ranged sources, the plan churn from query_store_stats and the read cost from the collection log, so the note
+       names the LATER of their two starts: the banner the tab's step raises for the choice between the two answers, on the range that starts
+       at RangeStart. */
+    private static string? ClutterBannerForStarts(DateTime? planChurnStart, DateTime? readCostStart) =>
+        ClutterBannerFor(ViewerDataService.LaterStartAsync(() => Task.FromResult(planChurnStart), () => Task.FromResult(readCostStart)));
+
+    [Fact]
+    public void Clutter_TheStatsTableStartingAfterTheLog_NamesTheStatsStart()
+    {
+        Assert.Equal("Showing since 2026-09-14 00:00:00", ClutterBannerForStarts(At(4), At(2)));
+    }
+
+    [Fact]
+    public void Clutter_TheLogStartingAfterTheStatsTable_NamesTheLogStart()
+    {
+        Assert.Equal("Showing since 2026-09-14 00:00:00", ClutterBannerForStarts(At(2), At(4)));
+    }
+
+    /* Both sources cover the range, whenever each one's first row came: no note. A start inside the slack after the window starts is
+       absorbed, in either source. */
+    [Fact]
+    public void Clutter_BothSourcesCoveringTheRange_RaiseNoNotice()
+    {
+        Assert.Null(ClutterBannerForStarts(At(-20), At(-3)));
+        Assert.Null(ClutterBannerForStarts(At(-5), At(0, 1, 20)));
+        Assert.Null(ClutterBannerForStarts(At(0, 1, 20), At(-5)));
+    }
+
+    /* A source that comes back alone is named, and neither names nothing. */
+    [Fact]
+    public void Clutter_OneSourceAnsweringAlone_IsNamed_AndNeitherNamesNothing()
+    {
+        Assert.Equal("Showing since 2026-09-12 00:00:00", ClutterBannerForStarts(At(2), null));
+        Assert.Equal("Showing since 2026-09-12 00:00:00", ClutterBannerForStarts(null, At(2)));
+        Assert.Null(ClutterBannerForStarts(null, null));
+    }
+
+    /* One probe that throws costs the note, whichever source it is: the other would name a start by itself, and the step answers a hidden
+       banner (seeded visible) instead of throwing. A first probe that failed starts no second. */
+    [Fact]
+    public async Task Clutter_OneProbeThatThrows_HidesTheBanner_WhicheverSourceItIs()
+    {
+        var gone = new InvalidOperationException("the store went away");
+
+        Assert.Null(ClutterBannerFor(ViewerDataService.LaterStartAsync(() => Task.FromResult<DateTime?>(At(4)), () => Task.FromException<DateTime?>(gone))));
+        Assert.Null(ClutterBannerFor(ViewerDataService.LaterStartAsync(() => Task.FromException<DateTime?>(gone), () => Task.FromResult<DateTime?>(At(4)))));
+
+        var secondStarted = false;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ViewerDataService.LaterStartAsync(
+            () => Task.FromException<DateTime?>(gone),
+            () =>
+            {
+                secondStarted = true;
+                return Task.FromResult<DateTime?>(At(4));
+            }));
+        Assert.False(secondStarted);
+    }
+
     /* A window of an hour or less starts no probe: it returns at once against a store nothing listens on, and a window one minute
        over the 90-minute slack starts the query, which fails there. */
     [Theory]
