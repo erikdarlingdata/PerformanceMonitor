@@ -169,6 +169,7 @@ public sealed class DataWindowFloorTests
     [InlineData("waiting_tasks", true)]
     [InlineData("query_snapshots", true)]
     [InlineData("wait_stats", true)]
+    [InlineData("plan_correction", true)]
     [InlineData("index_object_stats", false)]
     [InlineData("server_config", false)]
     [InlineData("database_config", false)]
