@@ -2315,17 +2315,125 @@ public class EntraDeviceCodeTests
            opening the server by hand.
 
            The discriminating half is the second condition: without !cancellationToken, every
-           shutdown becomes a decline, and no test of the decline path alone would notice. */
+           shutdown becomes a decline, and no test of the decline path alone would notice.
+
+           The decision lives in one helper that both opens call (#4961), so the pin reads the
+           helper's body: both conditions, and the message check the Entra MFA path depends on. */
         var code = CSharpSourceWalker.StripCommentsAndStrings(
             ParitySource.ReadFile("Lite/Services/RemoteCollectorService.cs"));
 
-        var at = code.IndexOf("userDeclined", StringComparison.Ordinal);
-        Assert.True(at >= 0, "the collector must classify a failed interactive sign-in");
+        var at = code.IndexOf("bool UserDeclinedSignIn(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the collector must classify a failed interactive sign-in, in one place");
 
-        var window = code[at..Math.Min(code.Length, at + 500)];
+        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
 
-        Assert.Contains("deviceCode.Token.IsCancellationRequested", window, StringComparison.Ordinal);
-        Assert.Contains("!cancellationToken.IsCancellationRequested", window, StringComparison.Ordinal);
+        Assert.Contains("MfaAuthenticationHelper.IsMfaCancelledException(", body, StringComparison.Ordinal);
+        Assert.Contains("deviceCode.Token.IsCancellationRequested", body, StringComparison.Ordinal);
+        Assert.Contains("!cancellationToken.IsCancellationRequested", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BothOpensDecideADeclineThroughTheOneHelper()
+    {
+        /* #4961: CreateConnectionAsync flagged a declined Entra MFA sign-in by the broker's message and a declined device-code
+           prompt by its token, and the per-database open flagged only the second, so an Entra MFA registration whose user
+           cancelled the browser sign-in during a per-database open left every open queued behind the sign-in lock to raise a
+           prompt of its own. The two opens now ask one helper, so they cannot drift apart again: it is defined once, each open
+           calls it, and neither carries a copy of its conditions. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            ParitySource.ReadFile("Lite/Services/RemoteCollectorService.cs"));
+
+        var first = code.IndexOf("bool UserDeclinedSignIn(", StringComparison.Ordinal);
+        Assert.True(first >= 0, "the shared decision must exist");
+        Assert.Equal(-1, code.IndexOf("bool UserDeclinedSignIn(", first + 1, StringComparison.Ordinal));
+
+        foreach (var open in new[]
+                 {
+                     "Task<SqlConnection> OpenAzureDatabaseConnectionAsync(",
+                     "Task<SqlConnection> CreateConnectionAsync(",
+                 })
+        {
+            var at = code.IndexOf(open, StringComparison.Ordinal);
+            Assert.True(at >= 0, open + " must still exist");
+            var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
+
+            Assert.Contains("UserDeclinedSignIn(", body, StringComparison.Ordinal);
+            Assert.DoesNotContain("IsMfaCancelledException", body, StringComparison.Ordinal);
+            Assert.DoesNotContain("deviceCode.Token.IsCancellationRequested", body, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The decision both opens ask, "did the user decline this sign-in". It is private, so a test reads it by its name.</summary>
+    private static bool UserDeclinedSignIn(Exception ex, EntraDeviceCodeAttempt? deviceCode, CancellationToken cancellationToken)
+    {
+        var method = typeof(RemoteCollectorService).GetMethod("UserDeclinedSignIn", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+        return (bool)method.Invoke(null, [ex, deviceCode, cancellationToken])!;
+    }
+
+    /// <summary>A device-code attempt as an open starts one, for a test to cancel the way the prompt window's Cancel does.</summary>
+    private static EntraDeviceCodeAttempt BeginDeviceCodeAttempt()
+    {
+        var builder = new SqlConnectionStringBuilder();
+        ServerConnection.ApplyAuthentication(builder, AuthenticationTypes.EntraDeviceCode, null, null, null, null);
+        var attempt = EntraDeviceCodeAuth.Begin(builder);
+        Assert.NotNull(attempt);
+        return attempt;
+    }
+
+    [Theory]
+    [InlineData("User canceled authentication.")]
+    [InlineData("The authentication was cancelled by the user.")]
+    public void ASignInTheBrokerReportsAsCancelled_IsADecline(string brokerMessage)
+    {
+        /* Entra MFA reports a declined sign-in in the exception's message and nowhere else, so the message is what decides. */
+        Assert.True(UserDeclinedSignIn(new InvalidOperationException(brokerMessage), deviceCode: null, CancellationToken.None));
+    }
+
+    [Fact]
+    public void AnUnrelatedFailure_IsNotADecline()
+    {
+        EntraDeviceCodeAuth.ResetForTests();
+
+        try
+        {
+            using var attempt = BeginDeviceCodeAttempt();
+
+            Assert.False(UserDeclinedSignIn(new InvalidOperationException("Login failed for user."), deviceCode: null, CancellationToken.None));
+
+            /* A device-code prompt still on screen is no decline either: the open failed for some other reason. */
+            Assert.False(UserDeclinedSignIn(new TimeoutException("The connection timed out."), attempt, CancellationToken.None));
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
+    }
+
+    [Fact]
+    public void ACancelledDeviceCodePrompt_IsADecline_UnlessTheCallersOwnTokenWasCancelled()
+    {
+        /* The prompt's Cancel and the caller's token end the same open, so the token the open waits on cannot say which fired:
+           the prompt's own token can. A cancel from the prompt is the user declining, and one from the caller is a shutdown,
+           which is no decline. */
+        EntraDeviceCodeAuth.ResetForTests();
+
+        try
+        {
+            using var attempt = BeginDeviceCodeAttempt();
+            attempt.Cancel();
+
+            Assert.True(UserDeclinedSignIn(new OperationCanceledException(attempt.Token), attempt, CancellationToken.None));
+
+            using var shutdown = new CancellationTokenSource();
+            shutdown.Cancel();
+
+            Assert.False(UserDeclinedSignIn(new OperationCanceledException(shutdown.Token), attempt, shutdown.Token));
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
     }
 
     // ---- The label ------------------------------------------------------------------------
