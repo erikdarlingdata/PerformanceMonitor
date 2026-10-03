@@ -703,26 +703,24 @@ jobs:
           # --max-turns are the tier's; both are plain claude_args per claude-code-action's
           # docs/configuration.md ("Custom Model", "Limiting Conversation Turns").
           #
-          # The git rules take only the forms the review runs. The old `git diff:*` rule also matched
-          # `git diff --no-index <path> <path>`, which compares two files wherever they are, and
-          # options such as -O<orderfile> that open a file named on the command line. A full review
-          # needs no `git diff` (it reads `gh pr diff` and works from a one-commit checkout), so it gets
-          # none. A follow-up gets two forms, with its range written into them by the expression in
-          # --allowedTools: `git diff BASE HEAD`, which takes no argument after it, and
-          # `git diff BASE HEAD -- *`, where every argument after `--` is a pathspec and git refuses
-          # one outside the repository. The two SHAs fill the first two arguments, so no option can
-          # come before them. Both come from the decide job, which sets them only when each is a
-          # 40-character hex SHA. `git log` and `git show` keep their prefixes. The other two values
-          # interpolated here, the model and the turn limit, are constants the tier step writes.
+          # The git rules take only the forms the review runs. A full review needs no `git diff` (it
+          # reads `gh pr diff` and works from a one-commit checkout), so it gets none. A follow-up gets
+          # two forms, with its range written into them by the expression in --allowedTools:
+          # `git diff BASE HEAD`, which takes no argument after it, and `git diff BASE HEAD -- *`,
+          # where every argument after `--` is a pathspec. The two SHAs fill the first two arguments.
+          # Both come from the decide job, which sets them only when each is a 40-character hex SHA.
+          # `git log` and `git show` keep their prefixes. The other two values interpolated here, the
+          # model and the turn limit, are constants the tier step writes.
           #
           # --disallowedTools: Claude Code's permissions page ("Read and Edit") documents `Read` deny
           # rules with a path: `Read(./secrets/**)`, and `//path` for an absolute one. They apply to
           # the Read tool and, as a best effort, to Grep and Glob, and a deny rule wins over an allow
           # rule. The CLI reference and the settings reference say `--disallowedTools` carries such
           # rules, and the action passes the flag through (base-action/src/parse-sdk-options.ts at
-          # v1 comma-splits the values and merges them into the SDK's disallowedTools). So the file
-          # tools do not read the checkout's .git directory or /proc, though the allowlist grants
-          # Read, Grep and Glob.
+          # v1 comma-splits the values and merges them into the SDK's disallowedTools). `./` is the
+          # directory Claude runs in: the action's run step sets no working directory, so that is the
+          # workspace root, where actions/checkout puts the tree. So the file tools do not read the
+          # checkout's .git directory or /proc, though the allowlist grants Read, Grep and Glob.
           claude_args: |
             --model "${{ steps.tier.outputs.model || 'claude-opus-5[1m]' }}"
             --max-turns ${{ steps.tier.outputs.max_turns || '120' }}
