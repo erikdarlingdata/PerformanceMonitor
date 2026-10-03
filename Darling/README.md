@@ -413,7 +413,9 @@ A physical clone keeps the install id. A VM snapshot is a physical clone, and so
 DELETE FROM config.config_install_id;
 ```
 
-A store restored from a dump is a different store. It gets a new id on its own, because the row records the cluster and database it was made for.
+A managed major upgrade of the store keeps the id. The upgrade gives the store a new cluster identifier but keeps the OIDs of the store's database and of the install id table, which the row records, so the service keeps the id and writes the new cluster identifier on the row (one Information line in the log names both).
+
+A store moved by dump and restore, or by logical replication, is a different store. It gets a new id on its own, because a restore assigns new OIDs. The sessions of the old id stay until you drop them by hand; `--drop-xe-sessions` lists them.
 
 ### Permissions on Monitored Servers
 
