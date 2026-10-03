@@ -8772,8 +8772,14 @@ ORDER BY i.indexname";
             {
                 if (!state.CompressionEnabled)
                 {
-                    using var enable = new NpgsqlCommand(EnableAggregateCompressionSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
-                    await enable.ExecuteNonQueryAsync(cancellationToken);
+                    var outcome = await TryRunBoundedDdlAsync(
+                        connection, new[] { EnableAggregateCompressionSql(view) }, logger,
+                        $"compression on continuous aggregate collect.{view}", cancellationToken);
+                    if (outcome != BoundedDdlOutcome.Applied)
+                    {
+                        continue;
+                    }
+
                     state = state with { CompressionEnabled = true };
                     states[view] = state;
                 }
@@ -9942,13 +9948,93 @@ WHERE ca.view_schema = 'collect'
     }
 
     /// <summary>
+    /// How long a bounded DDL statement waits for its lock on the hourly pass before it gives up (#4970). Set with
+    /// <c>SET LOCAL</c> inside the statement's own transaction, so it never outlives the statement it guards.
+    /// </summary>
+    internal const string HourlyDdlLockTimeout = "3s";
+
+    /// <summary>What <see cref="TryRunBoundedDdlAsync"/> did.</summary>
+    internal enum BoundedDdlOutcome
+    {
+        /// <summary>Every statement ran and the transaction committed.</summary>
+        Applied,
+
+        /// <summary>Another session held the table past <see cref="HourlyDdlLockTimeout"/>; nothing changed.</summary>
+        LockBusy,
+
+        /// <summary>A statement failed for another reason and the transaction rolled back; nothing changed.</summary>
+        Failed,
+    }
+
+    /// <summary>
+    /// Runs DDL that takes an AccessExclusiveLock (the compression-settings ALTER on a hypertable or a continuous
+    /// aggregate) without letting it queue indefinitely. The statements run in ONE explicit transaction behind
+    /// <c>SET LOCAL lock_timeout</c> (<see cref="HourlyDdlLockTimeout"/>), because <c>SET LOCAL</c> outside a
+    /// transaction is a no-op and a waiting AccessExclusiveLock request holds up every collector write to the
+    /// table behind it. A busy lock (<c>55P03</c>) costs one Information line and the next hourly pass tries again;
+    /// any other failure rolls back and costs one Warning. Neither throws, so the caller keeps its per-table
+    /// isolation; cancellation still propagates.
+    /// </summary>
+    internal static async Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
+        NpgsqlConnection connection, IReadOnlyList<string> statements, ILogger? logger, string what, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{HourlyDdlLockTimeout}'", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await timeout.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            foreach (var statement in statements)
+            {
+                using var command = new NpgsqlCommand(statement, connection, transaction) { CommandTimeout = SetupTimeoutSeconds };
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return BoundedDdlOutcome.Applied;
+        }
+        catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.LockNotAvailable, StringComparison.Ordinal))
+        {
+            logger?.LogInformation(
+                "TimescaleDB: {What} not changed this pass: another session held the table for {Timeout}, and waiting longer would hold up every collector's writes to it; the next hourly pass tries again",
+                what, HourlyDdlLockTimeout);
+            return BoundedDdlOutcome.LockBusy;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "TimescaleDB: {What} could not be changed, so the change was rolled back and the table keeps its current settings: {Message}",
+                what, ex.Message);
+            return BoundedDdlOutcome.Failed;
+        }
+    }
+
+    /// <summary>
     /// Enables compression and adds the <see cref="CompressAfterDays"/>-day background policy on
     /// every collector table (both statements per table, failure-isolated per table — a table
     /// that failed hypertable conversion warns here too and stays uncompressed). Compressed
     /// chunks remain fully queryable: this is Darling's archival tier (see
     /// <see cref="CompressAfterDays"/>). Returns the number of tables with a policy in place.
+    ///
+    /// <para>The enable ALTER runs through <see cref="TryRunBoundedDdlAsync"/>: it takes an AccessExclusiveLock,
+    /// so behind a long reader it gives up after <see cref="HourlyDdlLockTimeout"/> instead of queueing every
+    /// collector write to the table. A table whose ALTER was busy or failed is not counted and gets no policy
+    /// call this pass; the next hourly pass retries. The policy call stays outside that transaction: it takes no
+    /// exclusive lock on the hypertable.</para>
+    ///
+    /// <para><paramref name="hourly"/> is true on the hourly store-maintenance pass, which runs beside live
+    /// collection, and false on the start path, where no collection runs. When the settings read fails
+    /// (<see cref="ReadTablesNeedingCompressionEnableAsync"/> returns <c>null</c>) the start path issues every
+    /// enable ALTER, bounded, so a store that cannot answer one catalog query still converges; the hourly pass
+    /// skips the enable ALTERs with one Warning and the next hourly pass reads again.</para>
     /// </summary>
-    public static async Task<int> ApplyCompressionPolicyAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    public static Task<int> ApplyCompressionPolicyAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default) =>
+        ApplyCompressionPolicyAsync(connection, logger, hourly: false, cancellationToken);
+
+    /// <inheritdoc cref="ApplyCompressionPolicyAsync(NpgsqlConnection, ILogger, CancellationToken)"/>
+    public static async Task<int> ApplyCompressionPolicyAsync(NpgsqlConnection connection, ILogger? logger, bool hourly, CancellationToken cancellationToken)
     {
         if (connection is null)
         {
@@ -9959,9 +10045,15 @@ WHERE ca.view_schema = 'collect'
            do not already carry it. The ALTER takes an AccessExclusiveLock even as a no-op (measured — see
            CompressionEnabledStateSql), which was free on the start path and is a lock convoy on the hourly
            tick at :30, in the same minute the collectors are COPYing into these tables. A null answer means
-           the read failed and every ALTER is issued, exactly as before the guard. */
+           the read failed: the start path then issues every ALTER (bounded), and the hourly pass issues none. */
         var converged = await ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);
         var enabledAlready = 0;
+        var skipEnable = hourly && converged is null;
+        if (skipEnable)
+        {
+            logger?.LogWarning(
+                "TimescaleDB: the compression settings read failed; skipping the compression-enable ALTERs this pass; the next hourly pass retries");
+        }
 
         var applied = 0;
         foreach (var schema in HypertableTables)
@@ -9975,10 +10067,15 @@ WHERE ca.view_schema = 'collect'
                 {
                     enabledAlready++;
                 }
-                else
+                else if (!skipEnable)
                 {
-                    using var enable = new NpgsqlCommand(EnableCompressionSql(schema), connection) { CommandTimeout = SetupTimeoutSeconds };
-                    await enable.ExecuteNonQueryAsync(cancellationToken);
+                    var outcome = await TryRunBoundedDdlAsync(
+                        connection, new[] { EnableCompressionSql(schema) }, logger,
+                        $"compression settings on collect.{schema.TargetTable}", cancellationToken);
+                    if (outcome != BoundedDdlOutcome.Applied)
+                    {
+                        continue;
+                    }
                 }
 
                 using (var policy = new NpgsqlCommand(AddCompressionPolicySql(schema), connection) { CommandTimeout = SetupTimeoutSeconds })
