@@ -37,7 +37,11 @@ name: Claude Auto Review
 # when the run started. GitHub stamps a review with the head at the moment it is SUBMITTED (`gh pr
 # review` sends no commit), so a review that runs while a push lands is stamped with the newer
 # head, and a follow-up that started there would skip commits nobody reviewed. A verdict posted
-# before the marker named a head has none, and its commit_id stands in.
+# before the marker named a head has none, and its commit_id stands in. A marker's head is used
+# only when the verdict's commit_id is that head or comes after it (a compare says identical or
+# ahead). A head that is later than, diverged from or unknown beside the verdict's commit, or
+# one that cannot be compared, is not used: the verdict's commit_id is the reviewed commit and
+# the verdict counts as a full review, whatever kind the marker says.
 #
 # The review posts
 # comments for its findings and ends every run with ONE formal verdict review (the VERDICT
@@ -100,7 +104,7 @@ jobs:
   # decision cannot move into a shared script, composite action or reusable workflow either:
   # claude-code-action runs only while THIS file matches the default branch's copy byte for byte, and
   # a file the pull request can edit would sit outside that check while steering the review job,
-  # which holds the OAuth token. The decision is a step of this file for that reason.
+  # whose Claude step uses the OAuth token. The decision is a step of this file for that reason.
   decide:
     # No runner for a draft, or for a label other than re-review. The script below repeats both rules
     # in its first lines, so a dry run of it covers the whole table; this line only saves the runner.
@@ -165,7 +169,7 @@ jobs:
             [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
           }
 
-          pass=''; base=''; reason=''
+          pass=''; base=''; reason=''; marker_note=''
           if [ "$DRAFT" = "true" ]; then
             pass=skip; reason="the pull request is a draft"
           elif [ "$ACTION" = "labeled" ] && [ "$LABEL" != "$RE_REVIEW" ]; then
@@ -203,19 +207,48 @@ jobs:
                 else
                   # The kind the verdict marked itself with, and the head it reviewed. The LAST matching
                   # line wins: the prompt puts it directly above the ledger at the end of the body. The
-                  # reviewed commit is the marker's head when it has one. GitHub stamps a review with the
-                  # pull request's head at the moment it is submitted, so a review that ran while a push
-                  # landed carries a commit_id newer than the head it read, and a follow-up that started
-                  # there would skip commits nobody reviewed. A verdict posted before the marker named a
-                  # head has none, and its commit_id stands in. A verdict with no marker at all (posted
-                  # before the marker existed) counts as full.
+                  # reviewed commit is the marker's head when it has one and the verdict's commit_id
+                  # fits it (below). GitHub stamps a review with the pull request's head at the moment
+                  # it is submitted, so a review that ran while a push landed carries a commit_id newer
+                  # than the head it read, and a follow-up that started there would skip commits nobody
+                  # reviewed. A verdict posted before the marker named a head has none, and its
+                  # commit_id stands in. A verdict with no marker at all (posted before the marker
+                  # existed) counts as full.
+                  #
+                  # The verdict check in the review job fails a run whose marker is wrong, but the
+                  # verdict stays on the pull request, so this step holds the marker's head against the
+                  # one thing it can read: the verdict's own commit_id. The head is used only when that
+                  # commit is the head or a descendant of it (compare says identical or ahead). A head
+                  # later than the verdict's commit (behind) would leave the commits between the two out
+                  # of every follow-up range, and one that diverged, is unknown to the repository, or
+                  # cannot be compared (the read failed) names no commit this verdict can vouch for. For
+                  # each of those the verdict's commit_id is the reviewed commit and the verdict counts
+                  # as a full review, whatever kind the marker says. A head equal to the commit_id needs
+                  # no read, and a marker with no head keeps the handling above.
                   marker=$(printf '%s\n' "$LOOKUP_OUT" | tr -d '\r' \
                     | grep -E '^<!-- review-pass: (full|follow-up)( head=[0-9a-f]{40})? -->[[:space:]]*$' | tail -n 1 || true)
                   kind=''; reviewed=$last_commit
                   marker_re='^<!-- review-pass: (full|follow-up)( head=([0-9a-f]{40}))? -->'
                   if [[ "$marker" =~ $marker_re ]]; then
                     kind=${BASH_REMATCH[1]}
-                    if [ -n "${BASH_REMATCH[3]:-}" ]; then reviewed=${BASH_REMATCH[3]}; fi
+                    marker_head=${BASH_REMATCH[3]:-}
+                    if [ -z "$marker_head" ]; then
+                      : # no head in the marker: the commit_id stands in, and the kind is the marker's
+                    elif [ "$marker_head" = "$last_commit" ]; then
+                      reviewed=$marker_head
+                    elif [ -z "$last_commit" ]; then
+                      # Nothing to hold the head against. The reviewed commit stays empty, and the
+                      # check below answers with a full review.
+                      kind=full
+                    elif ! lookup "repos/$R/compare/$marker_head...$last_commit?per_page=1" --jq '.status'; then
+                      kind=full
+                      marker_note="the marker's head ${marker_head:0:12} cannot be compared with the verdict's commit ${last_commit:0:12} ($LOOKUP_ERR), so the verdict is counted as a full review"
+                    elif [ "$LOOKUP_OUT" = identical ] || [ "$LOOKUP_OUT" = ahead ]; then
+                      reviewed=$marker_head
+                    else
+                      kind=full
+                      marker_note="the marker's head ${marker_head:0:12} is not an ancestor of the verdict's commit ${last_commit:0:12} (compare says $LOOKUP_OUT), so the verdict is counted as a full review"
+                    fi
                   fi
                   # The reviewed commit is compared with this head BEFORE the kind is looked at, so only a
                   # head that is ahead of it is ever skipped or given a follow-up.
@@ -264,6 +297,10 @@ jobs:
               fi
             fi
           fi
+
+          # A marker head that was not used is named in the reason, so the log says why the verdict
+          # counted as a full review.
+          if [ -n "$marker_note" ]; then reason="$reason; $marker_note"; fi
 
           # A push that a newer push has already replaced decides nothing. The newer push has a run of
           # its own, and that run decides; a review job from this run could join the concurrency group
@@ -317,15 +354,25 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      # The Claude step needs this scope. With no `github_token` input, claude-code-action asks the
+      # runner for this run's OIDC token and exchanges it for the app token the review posts with
+      # (claude[bot]); it stops when the token cannot be fetched (src/github/token.ts at v1).
+      # Permissions are set per job, not per step, and this is the only job that has the scope.
       id-token: write
     env:
-      # Mapped to env so the step guard below can skip cleanly when the secret is absent.
-      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      # Only a flag reaches this job's environment. The step guards below use it to skip cleanly when
+      # the repository has no token (a fork pull request gets none either), and the comparison is
+      # made here, so the token's value is in no job-level environment. It reaches only the Claude
+      # step, through that step's `claude_code_oauth_token` input.
+      HAS_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
+      # Both checkouts keep no credentials in .git/config (`persist-credentials: false`). Each fetches
+      # with its own token input, and every later step that talks to GitHub carries a token of its own.
       - uses: actions/checkout@v7
         if: needs.decide.outputs.pass != 'follow-up'
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       # A follow-up diffs two commits and lists the ones between them, which a one-commit clone
       # cannot do. The whole history of the merge ref (the PR head is its second parent) holds both.
@@ -334,6 +381,7 @@ jobs:
         if: needs.decide.outputs.pass == 'follow-up'
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       # #3650: the verdict check at the bottom counts the bot's formal reviews submitted AFTER this
       # instant, so a verdict left by an earlier run on the same PR cannot vouch for this one. Read
@@ -341,7 +389,7 @@ jobs:
       # ISO-8601 UTC shape (2026-09-18T22:00:00Z), so the comparison below is a plain string one.
       - name: Open the verdict window
         id: window
-        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        if: ${{ env.HAS_OAUTH_TOKEN == 'true' }}
         run: echo "start=$(date -u +%FT%TZ)" >> "$GITHUB_OUTPUT"
 
       # #3710: which tier reviews this PR. The FULL set is where the traps file's defects live --
@@ -369,7 +417,7 @@ jobs:
       # the tier step), because it reads a handful of new commits, not the pull request.
       - name: Classify the changed paths
         id: paths
-        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' && needs.decide.outputs.pass == 'full' }}
+        if: ${{ env.HAS_OAUTH_TOKEN == 'true' && needs.decide.outputs.pass == 'full' }}
         continue-on-error: true
         uses: dorny/paths-filter@v4
         with:
@@ -407,7 +455,7 @@ jobs:
       # claude_args (#3710's ruling); the turn ceiling is the cost lever.
       - name: Decide the review tier
         id: tier
-        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        if: ${{ env.HAS_OAUTH_TOKEN == 'true' }}
         env:
           PASS: ${{ needs.decide.outputs.pass }}
           PATHS_OUTCOME: ${{ steps.paths.outcome }}
@@ -456,10 +504,12 @@ jobs:
       # thorough direction the tier step takes -- instead of handing Claude Code `--model ""`.
       - name: Claude review
         id: review
-        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        if: ${{ env.HAS_OAUTH_TOKEN == 'true' }}
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ env.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The one place the token's value is read: no other step, and no job-level environment,
+          # holds it.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # The prompt interpolates the repo, the PR number, the tier and the model -- and NOT the
           # PR body or title. That is what makes the blind read blind: the body arrives only when
           # the reviewer runs `gh pr view` in Phase 2. Do not add the body here (#3710).
@@ -625,9 +675,9 @@ jobs:
       # review per run -- changes-requested on a substantive finding, a clean comment review
       # otherwise -- so on this repo a run that submitted no verdict has broken its contract every
       # time; a clean review is never silent, and a zero here is never legitimate. This step turns
-      # that into the job's own colour, with the diagnosis in the log, so the guard (#2229/#3492,
-      # still the REQUIRED check, still enforcing newest-verdict-wins and the drift arm) becomes the
-      # second line rather than the first. Counted: reviews by the bot, submitted inside this run's
+      # that into the job's own colour, with the diagnosis in the log, so the guard (#2229/#3492, the
+      # check that enforces newest-verdict-wins and the drift arm) becomes the second line rather
+      # than the first. Counted: reviews by the bot, submitted inside this run's
       # window, with a NON-EMPTY body. The body test is load-bearing: the inline-comment tool files
       # each comment inside a review of its own with an empty body (#3647 carried four bot reviews,
       # two of them bodiless carriers), and both verdict shapes must carry one (gh and the API both
@@ -662,7 +712,7 @@ jobs:
       # the log for the record and not graded: a mark that fails on a heading's wording is one
       # people learn to ignore, and the ledger is what the later pass computes from.
       - name: Verify the review posted a verdict
-        if: ${{ always() && env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        if: ${{ always() && env.HAS_OAUTH_TOKEN == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           R: ${{ github.repository }}
@@ -853,7 +903,7 @@ jobs:
       # public; keep the allowlist that way, because this artifact is readable by anyone who can
       # read the repo. Missing file (the action refused to run, or was skipped) is not an error.
       - name: Retain the review transcript
-        if: ${{ always() && env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        if: ${{ always() && env.HAS_OAUTH_TOKEN == 'true' }}
         uses: actions/upload-artifact@v6
         with:
           name: claude-review-transcript
