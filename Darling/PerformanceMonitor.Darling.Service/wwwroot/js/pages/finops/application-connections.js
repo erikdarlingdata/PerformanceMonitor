@@ -41,7 +41,7 @@ const COLUMNS = [
 function noticeText(data) {
   const n = (data.rows || []).length;
   let text = (n === 1 ? "1 application" : n + " applications") + ", last " + (data.hours_back ?? HOURS) + " hours";
-  text += data.truncated ? "; the top " + n + " of " + data.application_count + " applications by peak connections." : ".";
+  text += data.truncated ? "; the top " + n + " of " + (data.application_count ?? "more") + " applications by peak connections." : ".";
   return text;
 }
 

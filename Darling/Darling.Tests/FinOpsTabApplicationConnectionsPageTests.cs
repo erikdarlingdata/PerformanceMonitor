@@ -27,7 +27,7 @@ public sealed class FinOpsTabApplicationConnectionsPageTests
     [Fact]
     public void TheTabReadsGetFinOpsWithTheApplicationConnectionsViewWindow()
     {
-        // The exact call is a no-noise guard: the view refuses a non-default limit.
+        // Pins the exact read: the view refuses a non-default limit, so sending one would turn every load into a refusal.
         const string call = "readTool(\"get_finops\", { server, view: \"application_connections\", hours: HOURS }, ctx && ctx.signal)";
         var tab = Tab();
         Assert.Contains(call, tab);
@@ -66,6 +66,7 @@ public sealed class FinOpsTabApplicationConnectionsPageTests
     [Fact]
     public void TheColumnsAreInTheDesktopGridOrder()
     {
+        // Source of the order: the Application Connections grid in Darling/PerformanceMonitor.Darling.Viewer/FinOpsTab.xaml; this is that grid's column order.
         var keys = Regex.Matches(Tab(), "\\bkey: \"([a-z_]+)\"").Select(m => m.Groups[1].Value);
         Assert.Equal(
             "application_name,avg_connections,max_connections,avg_running,max_running,avg_sleeping,max_sleeping,avg_dormant,max_dormant,avg_cpu_time_ms,max_cpu_time_ms,avg_reads,max_reads,avg_writes,max_writes,avg_logical_reads,max_logical_reads,sample_count,first_seen_utc,last_seen_utc",
@@ -88,7 +89,7 @@ public sealed class FinOpsTabApplicationConnectionsPageTests
     public void TheTruncatedNoticeNamesTheShownCountThenTheTotal()
     {
         Assert.Contains(
-            "text += data.truncated ? \"; the top \" + n + \" of \" + data.application_count + \" applications by peak connections.\" : \".\";",
+            "text += data.truncated ? \"; the top \" + n + \" of \" + (data.application_count ?? \"more\") + \" applications by peak connections.\" : \".\";",
             Tab());
     }
 
