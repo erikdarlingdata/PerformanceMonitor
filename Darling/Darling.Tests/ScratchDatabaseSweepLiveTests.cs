@@ -53,6 +53,13 @@ public sealed class ScratchDatabaseSweepLiveTests
         var planted = new List<string> { abandoned, busy, young };
         planted.AddRange(nearMisses);
 
+        /* The once-per-cluster sweep that ScratchPostgres.CreateAsync waits on runs from whichever test in this process
+           creates a scratch database first, in parallel with this class. A database stamped 2001 with no session is
+           exactly what that sweep drops, so planting one while it is still listing could lose it before the checks
+           below run. Creating and disposing one scratch database here waits for that sweep to finish, and it never
+           runs a second time in the process, so nothing planted below can be taken by it. */
+        await (await ScratchPostgres.CreateAsync(baseConnectionString!, ct)).DisposeAsync();
+
         NpgsqlConnection? busySession = null;
         var bodySucceeded = false;
         try
@@ -60,25 +67,30 @@ public sealed class ScratchDatabaseSweepLiveTests
             await using (var admin = new NpgsqlConnection(baseConnectionString))
             {
                 await admin.OpenAsync(ct);
-                foreach (var name in planted)
+
+                /* A client session on an old database: a run that is still using it, whatever its name says. It is
+                   connected the moment the database exists, because old with no session is what any sweep drops,
+                   including one from another process on the same cluster, which this class cannot wait for. */
+                await CreateDatabaseAsync(admin, busy, ct);
+                var busyBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = busy, Pooling = false };
+                busySession = new NpgsqlConnection(busyBuilder.ConnectionString);
+                await busySession.OpenAsync(ct);
+
+                foreach (var name in planted.Where(name => name != busy))
                 {
-                    await using var create = new NpgsqlCommand($"CREATE DATABASE \"{name}\"", admin);
-                    await create.ExecuteNonQueryAsync(ct);
+                    await CreateDatabaseAsync(admin, name, ct);
                 }
             }
-
-            /* A client session on an old database: a run that is still using it, whatever its name says. */
-            var busyBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = busy, Pooling = false };
-            busySession = new NpgsqlConnection(busyBuilder.ConnectionString);
-            await busySession.OpenAsync(ct);
 
             var log = new List<string>();
             var dropped = await ScratchDatabaseSweep.SweepAsync(
                 baseConnectionString!, now, ScratchDatabaseSweep.AbandonedAfter, log.Add, ct);
 
-            Assert.Contains(abandoned, dropped);
-            Assert.Contains(log, line => line.Contains(abandoned, StringComparison.Ordinal));
+            /* Nothing here depends on THIS sweep being the one that dropped the abandoned database: a sweep from another
+               process on the same cluster may have done it first. What must hold either way is that it is gone, that
+               every drop this sweep made was a factory name and was logged, and that it refused the rest. */
             Assert.All(dropped, name => Assert.True(ScratchDatabaseSweep.IsFactoryName(name), name));
+            Assert.All(dropped, name => Assert.Contains(log, line => line.Contains(name, StringComparison.Ordinal)));
             Assert.DoesNotContain(busy, dropped);
             Assert.DoesNotContain(young, dropped);
             Assert.Empty(dropped.Intersect(nearMisses, StringComparer.Ordinal));
@@ -168,6 +180,14 @@ public sealed class ScratchDatabaseSweepLiveTests
         {
             await DropIfStillThereAsync(baseConnectionString!, name, bodySucceeded);
         }
+    }
+
+    /* The names are built in this class from digits and lowercase hex (or are deliberate near misses of that shape),
+       never from input, so they are safe as quoted identifiers. */
+    private static async Task CreateDatabaseAsync(NpgsqlConnection admin, string name, CancellationToken ct)
+    {
+        await using var create = new NpgsqlCommand($"CREATE DATABASE \"{name}\"", admin);
+        await create.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task<List<string>> ExistingAsync(string connectionString, IEnumerable<string> names, CancellationToken ct)

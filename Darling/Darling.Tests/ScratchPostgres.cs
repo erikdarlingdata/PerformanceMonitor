@@ -26,7 +26,10 @@ namespace Darling.Tests;
 /// when the process exits (a test that failed before it could dispose, a drop that kept failing) is dropped then,
 /// and named on stderr together with the test that created it.</item>
 /// <item>The first create against a cluster sweeps that cluster for databases a killed run left behind
-/// (<see cref="ScratchDatabaseSweep"/>), because a killed process runs neither of the layers above.</item>
+/// (<see cref="ScratchDatabaseSweep"/>), because a killed process runs neither of the layers above. The sweep runs on
+/// whatever cluster <c>DARLING_TEST_PG</c> names, and that is safe because it drops only a database whose name matches
+/// the factory's anchored pattern, that is at least 30 minutes old and idle, and that is not its own, with a plain
+/// <c>DROP DATABASE</c>.</item>
 /// </list></para>
 /// </summary>
 internal sealed class ScratchPostgres : IAsyncDisposable
