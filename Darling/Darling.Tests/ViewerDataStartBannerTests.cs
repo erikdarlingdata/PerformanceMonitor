@@ -114,6 +114,34 @@ public sealed class ViewerDataStartBannerTests : IDisposable
             @"UpdateTruncationBanner\(QuerySnapshotsTruncationBanner,\s*await DataStartOrNullAsync\(dataStartTask,\s*""Active Queries""\),\s*e\.StartUtc\);"));
     }
 
+    /* "Latest Snapshot" swaps the grid for the newest stored batch, so the "Showing since" banner the last range read
+       raised no longer describes it. The handler collapses the banner and clears its text as the batch is bound, and not
+       before, so a read that fails, which leaves the range rows in the grid, keeps the banner that still describes them.
+       It is a direct hide and not a fourth UpdateTruncationBanner call: that call asks a probe about a range, and this
+       read has none (the count pin above stays at three). The next range read raises the banner again through those
+       three calls. */
+    [Fact]
+    public void LatestSnapshot_HidesTheActiveQueriesBanner_AsTheBatchIsBound_AndNotWhenTheReadFails()
+    {
+        var tab = ViewerFile("ViewerServerTab.ActiveQueries.cs");
+        var handler = Regex.Match(tab, @"private async void LatestSnapshot_Click\(.*?\r?\n    \}\r?\n", RegexOptions.Singleline);
+        Assert.True(handler.Success, "LatestSnapshot_Click was not found in ViewerServerTab.ActiveQueries.cs");
+        var body = handler.Value;
+
+        var bound = body.IndexOf("_querySnapshotsFilterMgr!.UpdateData(rows);", StringComparison.Ordinal);
+        var failed = body.IndexOf("catch (Exception ex)", StringComparison.Ordinal);
+        Assert.True(bound >= 0, "LatestSnapshot_Click no longer binds the batch through _querySnapshotsFilterMgr.UpdateData(rows)");
+        Assert.True(failed > bound, "LatestSnapshot_Click no longer has its failure arm after the rows are bound");
+
+        var collapses = Regex.Matches(body, @"QuerySnapshotsTruncationBanner\.Visibility\s*=\s*Visibility\.Collapsed;");
+        var clears = Regex.Matches(body, @"QuerySnapshotsTruncationBanner\.Text\s*=\s*(?:""""|string\.Empty);");
+        Assert.True(collapses.Count == 1 && clears.Count == 1,
+            "LatestSnapshot_Click must collapse the Active Queries banner and clear its text, once each (found " + collapses.Count + " and "
+            + clears.Count + "): the newest batch replaces the range rows the banner described");
+        Assert.True(collapses[0].Index > bound && collapses[0].Index < failed && clears[0].Index > bound && clears[0].Index < failed,
+            "the banner must come down after the batch is bound and before the failure arm, so a failed read keeps it");
+    }
+
     [Fact]
     public void CurrentWaits_AsksAboutTheToolbarWindow_AndComparesWithItsStart()
     {

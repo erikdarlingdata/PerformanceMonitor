@@ -309,6 +309,34 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
             @"RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\.QuerySnapshots,\s*ActiveQueriesWindowTruncatedBanner,\s*e\.StartUtc,\s*e\.EndUtc\)"));
     }
 
+    /// <summary>
+    /// The Live Snapshot button swaps the Active Queries grid for the rows the server returns now, so the "Showing since"
+    /// banner the last range read raised no longer describes the grid. The handler collapses it and clears its text through
+    /// the shared step (<see cref="ServerTab.SetWindowTruncatedBanner"/>, whose not-truncated state
+    /// <c>QueryWindowTruncationTests</c> drives) as the live rows are bound, and not before, so a live read that fails,
+    /// which leaves the range rows in the grid, keeps the banner that still describes them. The next range read raises
+    /// the banner again through the shared helper (the pin above).
+    /// </summary>
+    [Fact]
+    public void LiveSnapshot_HidesTheActiveQueriesBanner_AsTheLiveRowsAreBound_AndNotWhenTheReadFails()
+    {
+        var source = File.ReadAllText(ControlsFile("ServerTab.xaml.cs"));
+        var handler = Regex.Match(source, @"private async void LiveSnapshot_Click\(.*?\r?\n    \}\r?\n", RegexOptions.Singleline);
+        Assert.True(handler.Success, "LiveSnapshot_Click was not found in ServerTab.xaml.cs");
+        var body = handler.Value;
+
+        var bound = body.IndexOf("_querySnapshotsFilterMgr!.UpdateData(results);", StringComparison.Ordinal);
+        var failed = body.IndexOf("catch (Exception ex)", StringComparison.Ordinal);
+        Assert.True(bound >= 0, "LiveSnapshot_Click no longer binds the live rows through _querySnapshotsFilterMgr.UpdateData(results)");
+        Assert.True(failed > bound, "LiveSnapshot_Click no longer has its failure arm after the rows are bound");
+
+        var hides = Regex.Matches(body, @"SetWindowTruncatedBanner\(ActiveQueriesWindowTruncatedBanner,\s*truncated:\s*false,");
+        Assert.True(hides.Count == 1,
+            "LiveSnapshot_Click must hide the Active Queries banner exactly once (found " + hides.Count + "): the live rows replace the range rows the banner described");
+        Assert.True(hides[0].Index > bound && hides[0].Index < failed,
+            "the banner must come down after the live rows are bound and before the failure arm, so a failed live read keeps it");
+    }
+
     /// <summary>WPF objects require STA; same shape as QueryWindowTruncationTests.</summary>
     private static T OnStaThread<T>(Func<T> body)
     {

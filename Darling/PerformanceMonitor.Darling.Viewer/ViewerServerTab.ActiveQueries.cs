@@ -193,6 +193,11 @@ public partial class ViewerServerTab
             LatestSnapshotIndicator.Text = "Loading...";
             var (batchTime, rows) = await _dataService.GetLatestQuerySnapshotBatchAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(rows);
+            /* #4953: the grid now holds the newest stored batch, not the range the "Showing since" banner described, so the
+               banner comes down (collapsed, text cleared). The next range read raises it again through UpdateTruncationBanner.
+               A failed read never reaches this line: the range rows stay in the grid, and so does the banner that describes them. */
+            QuerySnapshotsTruncationBanner.Visibility = Visibility.Collapsed;
+            QuerySnapshotsTruncationBanner.Text = string.Empty;
             LatestSnapshotIndicator.Text = batchTime.HasValue
                 ? $"Latest snapshot: {ViewerTimeHelper.FormatForDisplay(batchTime.Value, "yyyy-MM-dd HH:mm:ss")}"
                 : "No snapshots stored";
