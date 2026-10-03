@@ -71,6 +71,15 @@ public sealed class DataStartBannerSurfaceTests : IDisposable
         QueryWindowRelation.LongQueryCompletions
     };
 
+    /// <summary>The two relations whose grids filter on <c>event_time</c>, the event's own time, and not on
+    /// <c>collection_time</c>, the time a run stored it (#4989): the System Events grids that read system_health
+    /// events, and the Default Trace grid.</summary>
+    public static TheoryData<QueryWindowRelation> EventRelations => new()
+    {
+        QueryWindowRelation.SystemHealthEvents,
+        QueryWindowRelation.DefaultTraceEvents
+    };
+
     private static DateTime Naive(DateTime instant) => DateTime.SpecifyKind(instant, DateTimeKind.Unspecified);
 
     private static string Literal(DateTime instant) =>
@@ -79,12 +88,18 @@ public sealed class DataStartBannerSurfaceTests : IDisposable
     /// <summary>
     /// One row in the relation's table with its time column at <paramref name="at"/>. Every other column the table
     /// requires (NOT NULL without a default) gets a placeholder of its type, found from the table itself, so the test
-    /// does not repeat any collector's column list.
+    /// does not repeat any collector's column list. The two event tables carry two clocks (#4989): <c>event_time</c>, the
+    /// event's own time and nullable, and <c>collection_time</c>, the time a run stored the row. A row there sets BOTH,
+    /// whatever column the probe measures, so a test of one clock cannot lean on the other: <paramref name="at"/> is the
+    /// event's time, and <paramref name="collectedAt"/> (<paramref name="at"/> when not given) the time the run stamped,
+    /// which is later for the history a server's first run stores. Any other relation has the one time column.
     /// </summary>
-    private async Task SeedRowAsync(QueryWindowRelation relation, DateTime at)
+    private async Task SeedRowAsync(QueryWindowRelation relation, DateTime at, DateTime? collectedAt = null)
     {
         var table = LocalDataService.QueryWindowRelationView(relation)[2..];
-        var timeColumn = LocalDataService.QueryWindowRelationTimeColumn(relation);
+        var times = relation is QueryWindowRelation.SystemHealthEvents or QueryWindowRelation.DefaultTraceEvents
+            ? new Dictionary<string, DateTime> { ["event_time"] = at, ["collection_time"] = collectedAt ?? at }
+            : new Dictionary<string, DateTime> { [LocalDataService.QueryWindowRelationTimeColumn(relation)] = at };
 
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
@@ -101,13 +116,13 @@ public sealed class DataStartBannerSurfaceTests : IDisposable
                 var name = reader.GetString(0);
                 var type = reader.GetString(1);
                 var pk = reader.GetBoolean(3);
-                if (!(reader.GetBoolean(2) || pk) || reader.GetBoolean(4))
+                if (!times.ContainsKey(name) && (!(reader.GetBoolean(2) || pk) || reader.GetBoolean(4)))
                 {
                     continue;
                 }
 
                 names.Add(name);
-                values.Add(PlaceholderFor(name, type, pk, timeColumn, at));
+                values.Add(PlaceholderFor(name, type, pk, times, at));
             }
         }
 
@@ -116,9 +131,9 @@ public sealed class DataStartBannerSurfaceTests : IDisposable
         await insert.ExecuteNonQueryAsync();
     }
 
-    private string PlaceholderFor(string name, string type, bool pk, string timeColumn, DateTime at)
+    private string PlaceholderFor(string name, string type, bool pk, Dictionary<string, DateTime> times, DateTime at)
     {
-        if (name == timeColumn) return Literal(at);
+        if (times.TryGetValue(name, out var time)) return Literal(time);
         if (name == "server_id") return ServerId.ToString();
         if (name == "server_name") return $"'{ServerName}'";
         if (pk) return (_nextId++).ToString();
@@ -220,14 +235,94 @@ FROM generate_series({Literal(firstUtc)}, {Literal(lastUtc)}, INTERVAL {everyMin
     }
 
     /// <summary>
-    /// Each relation reads the view its grid reads, by the column that table is purged on, and takes its coverage from
+    /// A server's first run (T0, <paramref name="firstRun"/>): it stores the history the server already holds, each row
+    /// stamped with the run's own <c>collection_time</c> while its <c>event_time</c> goes back to the event's real time
+    /// (<paramref name="historyEventTimes"/>). The collector's runs are then logged hourly to <paramref name="end"/>, and
+    /// the newest one stores an event as it happens, so its two times agree.
+    /// </summary>
+    private async Task SeedFirstRunAsync(QueryWindowRelation relation, DateTime firstRun, DateTime end, params DateTime[] historyEventTimes)
+    {
+        foreach (var eventTime in historyEventTimes)
+        {
+            await SeedRowAsync(relation, eventTime, collectedAt: firstRun);
+        }
+
+        await SeedRowAsync(relation, end.AddHours(-1));
+        await SeedLogRunsAsync(LocalDataService.QueryWindowRelationCollector(relation)!, firstRun, end, 60);
+    }
+
+    /// <summary>
+    /// #4989: a server's first run stores the server's event history, every row stamped with that run's
+    /// <c>collection_time</c> (T0) while its <c>event_time</c> goes back days. The grids filter on <c>event_time</c>, so a
+    /// range that starts before the oldest event (S &lt; H &lt; T0) shows rows from H, and the banner names H, never T0: a
+    /// banner never names a time later than the earliest row its grid shows. RED before the fix: the probe measured
+    /// <c>collection_time</c>, found only T0, and said "Showing since T0" above rows from before T0.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(EventRelations))]
+    public async Task EventRelations_HistoryStoredAtTheFirstRun_NamesTheOldestEvent_NotTheRun(QueryWindowRelation relation)
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var firstRun = end.AddDays(-2);
+        var oldestEvent = end.AddDays(-4);
+        await SeedFirstRunAsync(relation, firstRun, end, oldestEvent, end.AddDays(-3));
+
+        var (visible, text) = await BannerForAsync(relation, end.AddDays(-7), end);
+
+        Assert.True(visible);
+        Assert.Contains(Naive(oldestEvent).ToString("yyyy-MM-dd HH:", CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+        Assert.DoesNotContain(Naive(firstRun).ToString("yyyy-MM-dd HH:", CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same first-run history, with the range starting after its oldest event (H &lt;= S): the grid's rows run back to
+    /// the start of the range, so the window was served whole and there is no banner, though the run that stored the
+    /// history (T0) is later than the start.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(EventRelations))]
+    public async Task EventRelations_HistoryReachesBackToTheRangeStart_ShowsNoNotice(QueryWindowRelation relation)
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        await SeedFirstRunAsync(relation, end.AddDays(-2), end, end.AddDays(-10), end.AddDays(-5));
+
+        var (visible, text) = await BannerForAsync(relation, end.AddDays(-7), end);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>
+    /// A first run that found no history stores nothing older than itself: the store starts at that run (T0), and the
+    /// banner names it.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(EventRelations))]
+    public async Task EventRelations_NoStoredHistory_NamesTheFirstRun(QueryWindowRelation relation)
+    {
+        await _duckDb.InitializeAsync();
+        var end = DateTime.UtcNow;
+        var firstRun = end.AddDays(-2);
+        await SeedFirstRunAsync(relation, firstRun, end);
+
+        var (visible, text) = await BannerForAsync(relation, end.AddDays(-7), end);
+
+        Assert.True(visible);
+        Assert.Contains(Naive(firstRun).ToString("yyyy-MM-dd HH:", CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Each relation reads the view its grid reads, by the column that grid filters on (#4989: <c>event_time</c> for the
+    /// two event relations, <c>collection_time</c> or <c>capture_time</c> for the rest), and takes its coverage from
     /// the collector whose runs the store logs under that name. The Collection Log is the run log, so it keeps the
     /// row-only probe.
     /// </summary>
     [Theory]
     [InlineData(QueryWindowRelation.CollectionLog, "v_collection_log", null, "collection_time")]
-    [InlineData(QueryWindowRelation.SystemHealthEvents, "v_system_health_events", "system_health_events", "collection_time")]
-    [InlineData(QueryWindowRelation.DefaultTraceEvents, "v_default_trace_events", "default_trace_events", "collection_time")]
+    [InlineData(QueryWindowRelation.SystemHealthEvents, "v_system_health_events", "system_health_events", "event_time")]
+    [InlineData(QueryWindowRelation.DefaultTraceEvents, "v_default_trace_events", "default_trace_events", "event_time")]
     [InlineData(QueryWindowRelation.ServerConfig, "v_server_config", "server_config", "capture_time")]
     [InlineData(QueryWindowRelation.DatabaseConfig, "v_database_config", "database_config", "capture_time")]
     [InlineData(QueryWindowRelation.TraceFlags, "v_trace_flags", "trace_flags", "capture_time")]

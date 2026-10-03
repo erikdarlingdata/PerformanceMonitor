@@ -14,8 +14,9 @@ namespace PerformanceMonitorLite.Services;
 
 /// <summary>
 /// The relations a window-floor probe (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>) may read. Each is a
-/// closed member that maps to ONE <c>v_</c> view with <c>server_id</c> and a time column (<c>collection_time</c>, or
-/// <c>capture_time</c> on the three config snapshots, <see cref="LocalDataService.QueryWindowRelationTimeColumn"/>), so no
+/// closed member that maps to ONE <c>v_</c> view with <c>server_id</c> and a time column (<c>collection_time</c>,
+/// <c>capture_time</c> on the three config snapshots, or <c>event_time</c> on the two event tables: the column the
+/// surface's grid filters on, <see cref="LocalDataService.QueryWindowRelationTimeColumn"/>), so no
 /// caller hands a view name, and nothing a user typed, into the probe's SQL. #4231 began with the three RAW-ONLY
 /// relations (<see cref="QueryStats"/>, <see cref="ProcedureStats"/>, <see cref="QueryStoreStats"/>): every
 /// Queries-tab grid and MCP tool that reads one has no rollup underneath it to fall back on when the requested
@@ -88,15 +89,23 @@ public partial class LocalDataService
     };
 
     /// <summary>
-    /// The time column of a relation's view that the probe compares against the window (#4966): <c>collection_time</c>
-    /// for every relation except the three config snapshots, whose collectors stamp <c>capture_time</c> instead
-    /// (<c>ICollectorSchemaInfo.PrefixTimeColumnName</c>, the column the archive purges by too). A closed map, so nothing a
-    /// caller passes reaches the probe's SQL. The collector's own runs in <c>v_collection_log</c> always read
-    /// <c>collection_time</c>.
+    /// The time column of a relation's view that the probe compares against the window (#4966): the column the surface's
+    /// grid filters on, so a banner never names a time later than the earliest row its grid shows. That is
+    /// <c>collection_time</c> for most relations, <c>capture_time</c> for the three config snapshots (their collectors stamp
+    /// it instead, <c>ICollectorSchemaInfo.PrefixTimeColumnName</c>, and the archive purges by it), and <c>event_time</c>
+    /// for the two event relations (#4989): the System Events grids that read system_health events and the Default Trace
+    /// grid filter on the event's own time, not on the time a run stored it. A server's first run stores the history the
+    /// server already holds, every row stamped with that run's <c>collection_time</c> while its <c>event_time</c> goes back
+    /// days, and the probe reading <c>collection_time</c> there named the run above rows from before it. The archive still
+    /// purges those two tables by <c>collection_time</c>. The Default Trace's <c>event_time</c> is the monitored server's
+    /// wall clock as stored (its grid converts each row through the server's clock), so on a server whose clock is not UTC
+    /// the probe compares that wall time with the UTC window as it is. A closed map, so nothing a caller passes reaches the
+    /// probe's SQL. The collector's own runs in <c>v_collection_log</c> always read <c>collection_time</c>.
     /// </summary>
     internal static string QueryWindowRelationTimeColumn(QueryWindowRelation relation) => relation switch
     {
         QueryWindowRelation.ServerConfig or QueryWindowRelation.DatabaseConfig or QueryWindowRelation.TraceFlags => "capture_time",
+        QueryWindowRelation.SystemHealthEvents or QueryWindowRelation.DefaultTraceEvents => "event_time",
         _ => "collection_time"
     };
 
