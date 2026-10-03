@@ -187,11 +187,14 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     }
 
     /// <summary>
-    /// Writes the run-time changes the editor made (#4938), each one a statement of its own against
+    /// Writes run-time changes on their own (#4938), each one a statement of its own against
     /// <c>config.config_collector_run_times</c>: a value upserts the row for its scope and collector, and null deletes it.
     /// Never the schedule rows' delete-and-reinsert Save, so a run time is never carried through (or cleared by) that
     /// statement. The changes share one transaction, so a failure leaves none of them written; the table's own
     /// statement-level trigger bumps <c>config_version</c>, so a running service reloads.
+    ///
+    /// <para>The schedule window's Save does not call this: it calls <see cref="SaveCollectorScheduleAsync"/>, which writes the
+    /// run times and the schedule rows in ONE transaction, so a Save that fails part way leaves neither.</para>
     ///
     /// <para>A read-only seat (42501) throws <see cref="ViewerReadOnlyException"/>. A store below V160 (42P01 undefined_table)
     /// throws <see cref="ViewerSchemaSkewException"/>, the message that says the store is older than this viewer and the
@@ -210,18 +213,49 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-
-            foreach (var change in changes)
-            {
-                await using var command = BuildRunTimeCommand(change, connection, transaction);
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
-
+            await WriteRunTimeChangesAsync(connection, transaction, changes, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {
             throw new ViewerReadOnlyException(ex);
+        }
+    }
+
+    /// <summary>
+    /// The schedule window's Save as ONE transaction on one connection (#4938): the run-time changes first (the statements
+    /// <see cref="SaveCollectorRunTimesAsync"/> runs), then the scope's schedule rows, which are the delete-and-reinsert
+    /// <see cref="ReplaceFleetSchedulesAsync"/> (<paramref name="serverId"/> null) and <see cref="ReplaceServerSchedulesAsync"/>
+    /// run, statement for statement. A schedule write that fails therefore leaves the run times unsaved too, and a run-time
+    /// write that fails leaves the schedule rows as they were: a failed Save leaves neither.
+    ///
+    /// <para>No run-time change means no run-time statement, so a Save that changed no run time still saves its schedules on a
+    /// store below V160, which has no run-time table. Errors map as the two writes always did: a read-only seat (42501) throws
+    /// <see cref="ViewerReadOnlyException"/>, and a run-time statement that finds the table (42P01) or a column (42703) missing
+    /// throws <see cref="ViewerSchemaSkewException"/>. The schedule statements are exactly the ones a released viewer runs, and
+    /// a released viewer never writes a run time, so nothing older is affected.</para>
+    /// </summary>
+    public Task SaveCollectorScheduleAsync(
+        int? serverId, IEnumerable<CollectorScheduleRow> rows, IReadOnlyList<CollectorRunTimeChange> runTimeChanges,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(runTimeChanges);
+        return ReplaceScheduleScopeAsync(serverId, rows, runTimeChanges, cancellationToken);
+    }
+
+    /// <summary>The run-time changes, each one a statement on the caller's connection and transaction (#4938), so the caller
+    /// decides what they commit with. A store below V160 throws <see cref="ViewerSchemaSkewException"/> (42P01 undefined_table, or
+    /// 42703 undefined_column); every other failure, 42501 included, propagates for the caller's own mapping.</summary>
+    private static async Task WriteRunTimeChangesAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, IReadOnlyList<CollectorRunTimeChange> changes, CancellationToken cancellationToken)
+    {
+        try
+        {
+            foreach (var change in changes)
+            {
+                await using var command = BuildRunTimeCommand(change, connection, transaction);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
         }
         catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
         {
@@ -263,14 +297,14 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     /// <see cref="ViewerReadOnlyException"/>.
     /// </summary>
     public Task ReplaceFleetSchedulesAsync(IEnumerable<CollectorScheduleRow> rows, CancellationToken cancellationToken = default) =>
-        ReplaceScheduleScopeAsync(serverId: null, rows, cancellationToken);
+        ReplaceScheduleScopeAsync(serverId: null, rows, Array.Empty<CollectorRunTimeChange>(), cancellationToken);
 
     /// <summary>
     /// Atomically replaces one SERVER's overrides: delete the server's rows, then upsert the supplied ones. Pass
     /// an empty sequence to revert the server to the fleet/default schedule (the "use default" case).
     /// </summary>
     public Task ReplaceServerSchedulesAsync(int serverId, IEnumerable<CollectorScheduleRow> rows, CancellationToken cancellationToken = default) =>
-        ReplaceScheduleScopeAsync(serverId, rows, cancellationToken);
+        ReplaceScheduleScopeAsync(serverId, rows, Array.Empty<CollectorRunTimeChange>(), cancellationToken);
 
     /// <summary>
     /// Reverts EVERY server's per-server schedule override back to the fleet/default schedule in one statement
@@ -315,7 +349,12 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
         }
     }
 
-    private async Task ReplaceScheduleScopeAsync(int? serverId, IEnumerable<CollectorScheduleRow> rows, CancellationToken cancellationToken)
+    /// <summary>One scope's schedule rows, and with <paramref name="runTimeChanges"/> the run times too (#4938), in ONE transaction
+    /// on one connection. The schedule statements are the released viewers' own, unchanged; the run-time statements run first
+    /// and only when there are changes, so a store without the run-time table still saves a Save that changed no run time.</summary>
+    private async Task ReplaceScheduleScopeAsync(
+        int? serverId, IEnumerable<CollectorScheduleRow> rows, IReadOnlyList<CollectorRunTimeChange> runTimeChanges,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(rows);
 
@@ -323,6 +362,11 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
         {
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            if (runTimeChanges.Count > 0)
+            {
+                await WriteRunTimeChangesAsync(connection, transaction, runTimeChanges, cancellationToken);
+            }
 
             /* Clear the scope first so removed overrides don't linger, then re-insert the current set. */
             await using (var delete = new NpgsqlCommand(

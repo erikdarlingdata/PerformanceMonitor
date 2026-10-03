@@ -157,6 +157,33 @@ public sealed class CollectorRunTimeRungTests
         Assert.DoesNotContain(Table, viewer[armProseStart..thisArm], StringComparison.Ordinal);
     }
 
+    /// <summary>The Collector Schedules window's Save is ONE call in ONE transaction (#4938): it never commits the run times as a
+    /// transaction of their own ahead of the schedule rows, because a schedule write that then fails would leave the run time
+    /// saved. The window calls the combined write once and none of the three single writes, and the combined write's scope writer
+    /// runs the run-time statements on the connection and transaction it opened for the schedule rows, ahead of their delete.</summary>
+    [Fact]
+    public void TheWindowsSave_IsOneCallInOneTransaction_AndNeverCommitsTheRunTimesOnItsOwn()
+    {
+        var window = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "CollectorScheduleEditorWindow.xaml.cs"));
+        Assert.Single(Regex.Matches(window, @"\.SaveCollectorScheduleAsync\("));
+        Assert.DoesNotContain(".SaveCollectorRunTimesAsync(", window, StringComparison.Ordinal);
+        Assert.DoesNotContain(".ReplaceFleetSchedulesAsync(", window, StringComparison.Ordinal);
+        Assert.DoesNotContain(".ReplaceServerSchedulesAsync(", window, StringComparison.Ordinal);
+
+        var viewer = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectorSchedules.cs"));
+        var start = viewer.IndexOf("private async Task ReplaceScheduleScopeAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the schedule scope writer is gone");
+        var scope = viewer[start..viewer.IndexOf("private static void AddNullableInt", start, StringComparison.Ordinal)];
+        Assert.Single(Regex.Matches(scope, @"BeginTransactionAsync\("));
+        var runTimeWrite = scope.IndexOf("WriteRunTimeChangesAsync(connection, transaction, runTimeChanges", StringComparison.Ordinal);
+        Assert.True(runTimeWrite >= 0, "the scope writer does not write the run times on its own connection and transaction");
+        Assert.True(
+            runTimeWrite < scope.IndexOf("CollectorScheduleDeleteFleetScopeSql", StringComparison.Ordinal),
+            "the run-time statements must run ahead of the schedule delete, in the same transaction");
+    }
+
     [Fact]
     public void TheServiceReadsTheSchedulesWithoutARunTimeColumn_AndTheRunTimesFromTheirOwnTable()
     {

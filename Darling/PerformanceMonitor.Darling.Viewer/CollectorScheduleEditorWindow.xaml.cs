@@ -23,15 +23,17 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// The viewer's collector-schedule editor — a faithful port of Lite's <c>CollectorScheduleEditorWindow</c>,
 /// rewired onto the control-plane store: it edits the fleet-wide default schedule (<c>server_id</c> NULL) or a
 /// single server's override, overlays the store's sparse <c>config.config_collector_schedules</c> rows on the
-/// shared <see cref="CollectorSchedulePresets.BuildDefaultSchedule"/> baseline, and writes the result back via
-/// <see cref="ViewerDataService.ReplaceFleetSchedulesAsync"/> / <see cref="ViewerDataService.ReplaceServerSchedulesAsync"/>.
+/// shared <see cref="CollectorSchedulePresets.BuildDefaultSchedule"/> baseline, and writes the result back through
+/// <see cref="ViewerDataService.SaveCollectorScheduleAsync"/>.
 /// Presets change frequencies only (enabled + retention untouched), exactly as Lite. A read-only seat shows a
 /// banner and disables the writes.
 ///
 /// <para>The Run at column (#4938) is read from, and written to, <c>config.config_collector_run_times</c>, a table of its
 /// own: the schedule Save deletes a scope's schedule rows and inserts them again, and a run time kept on those rows
-/// would be cleared by it. So Save writes the run-time changes first, each as a statement of its own
-/// (<see cref="ViewerDataService.SaveCollectorRunTimesAsync"/>), then the schedule rows exactly as it always has.</para>
+/// would be cleared by it. So Save writes the run-time changes as statements of their own, then the schedule rows exactly as
+/// <see cref="ViewerDataService.ReplaceFleetSchedulesAsync"/> / <see cref="ViewerDataService.ReplaceServerSchedulesAsync"/>
+/// always have, all in ONE call and ONE transaction (<see cref="ViewerDataService.SaveCollectorScheduleAsync"/>), so a Save
+/// that fails leaves neither the run times nor the schedule rows written.</para>
 /// </summary>
 public partial class CollectorScheduleEditorWindow : Window
 {
@@ -425,26 +427,17 @@ public partial class CollectorScheduleEditorWindow : Window
         try
         {
             /* #4938: the run times go to their own table, each change a statement of its own and never through the
-               schedule rows' delete-and-reinsert below. They go first, so a store that cannot take them (below V160,
-               which the viewer says in its own words) is refused before anything is written, and a Save that did not
-               change a run time writes none. */
+               schedule rows' delete-and-reinsert. ONE call writes both on one connection in one transaction, so a Save
+               whose schedule write fails does not leave the run time saved, and a store that cannot take the run times
+               (below V160, which the viewer says in its own words) is refused with nothing written. A Save that did not
+               change a run time sends none, so it still saves its schedules on such a store. */
             var runTimeChanges = CollectorScheduleOverlay.ToRunTimeChanges(_editing, _runTimes, _scopeServerId, usesDefault);
-            if (runTimeChanges.Count > 0)
-            {
-                await _dataService.SaveCollectorRunTimesAsync(runTimeChanges);
-            }
-
-            if (_scopeServerId is int serverId)
-            {
-                var rows = usesDefault
+            var rows = _scopeServerId is int serverId
+                ? (usesDefault
                     ? new List<CollectorScheduleRow>()
-                    : CollectorScheduleOverlay.ToServerOverrideRows(_editing, serverId);
-                await _dataService.ReplaceServerSchedulesAsync(serverId, rows);
-            }
-            else
-            {
-                await _dataService.ReplaceFleetSchedulesAsync(CollectorScheduleOverlay.ToFleetOverrideRows(_editing));
-            }
+                    : CollectorScheduleOverlay.ToServerOverrideRows(_editing, serverId))
+                : CollectorScheduleOverlay.ToFleetOverrideRows(_editing);
+            await _dataService.SaveCollectorScheduleAsync(_scopeServerId, rows, runTimeChanges);
 
             Saved = true;
             Close();

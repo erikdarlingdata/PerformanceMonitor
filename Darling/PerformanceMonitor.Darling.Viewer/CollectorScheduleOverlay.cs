@@ -325,7 +325,7 @@ public static class CollectorScheduleOverlay
 
     /// <summary>
     /// The run-time table changes that make the store match the edited grid for one scope (#4938), each of them a statement
-    /// of its own (<see cref="ViewerDataService.SaveCollectorRunTimesAsync"/>): only the collectors whose time differs from
+    /// of its own, written in the Save's transaction (<see cref="ViewerDataService.SaveCollectorScheduleAsync"/>): only the collectors whose time differs from
     /// what <paramref name="runTimes"/> holds for the scope, so a Save that did not touch a run time writes none and does not
     /// reload the service for it.
     ///

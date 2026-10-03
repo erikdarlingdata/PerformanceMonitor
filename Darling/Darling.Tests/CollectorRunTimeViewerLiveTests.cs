@@ -22,7 +22,8 @@ namespace Darling.Tests;
 /// <summary>
 /// The Collector Schedules window's "Run at" column against a real store (#4938): the read, the save and the clear,
 /// for the fleet and for a server, driven the way the window drives them (read the schedule rows and the run times,
-/// build the editable schedule, edit a cell, validate, write the run-time changes, then the schedule rows). The run time
+/// build the editable schedule, edit a cell, validate, then write the run-time changes and the schedule rows in ONE
+/// transaction). The run time
 /// lives in <c>config.config_collector_run_times</c>, a table of its own, so a schedule Save never carries it. What the
 /// service then resolves from the stored rows is checked with its own <see cref="StoreConfigProvider.ResolveSchedule"/>,
 /// so "None on a server over a fleet time" is judged by the rule the collectors run on and not by a restatement of it.
@@ -58,7 +59,8 @@ public sealed class CollectorRunTimeViewerLiveTests
         (long)(await ScalarAsync(connection, "SELECT count(*) FROM config.config_collector_schedules", ct))!;
 
     /// <summary>The window's own steps for a scope: read both tables, build the editable schedule, let the caller edit it,
-    /// validate, write the run-time changes (one statement each), then the schedule rows exactly as a released viewer does.</summary>
+    /// validate, then ONE call that writes the run-time changes (one statement each) and the schedule rows, exactly as a
+    /// released viewer writes them, in one transaction.</summary>
     private static async Task SaveAsync(
         ViewerDataService viewer, int? serverId, Action<List<CollectorScheduleEditItem>> edit, CancellationToken ct, bool usesDefault = false)
     {
@@ -73,21 +75,18 @@ public sealed class CollectorRunTimeViewerLiveTests
         }
 
         var changes = CollectorScheduleOverlay.ToRunTimeChanges(editing, runTimes, serverId, usesDefault);
-        if (changes.Count > 0)
-        {
-            await viewer.SaveCollectorRunTimesAsync(changes, ct);
-        }
-
-        if (serverId is int sid)
-        {
-            var rows = usesDefault ? new List<CollectorScheduleRow>() : CollectorScheduleOverlay.ToServerOverrideRows(editing, sid);
-            await viewer.ReplaceServerSchedulesAsync(sid, rows, ct);
-        }
-        else
-        {
-            await viewer.ReplaceFleetSchedulesAsync(CollectorScheduleOverlay.ToFleetOverrideRows(editing), ct);
-        }
+        var rows = serverId is int sid
+            ? (usesDefault ? new List<CollectorScheduleRow>() : CollectorScheduleOverlay.ToServerOverrideRows(editing, sid))
+            : CollectorScheduleOverlay.ToFleetOverrideRows(editing);
+        await viewer.SaveCollectorScheduleAsync(serverId, rows, changes, ct);
     }
+
+    /// <summary>The fleet row's stored frequency for the daily collector, or null when there is no such row (or no frequency on it).</summary>
+    private static async Task<int?> FleetFrequencyAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        await ScalarAsync(connection,
+            $"SELECT frequency_minutes FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = '{Daily}'", ct) is int minutes
+            ? minutes
+            : null;
 
     private static void SetRunAt(List<CollectorScheduleEditItem> editing, string text, string collector = Daily) =>
         editing.Single(i => i.Name == collector).RunAtText = text;
@@ -290,6 +289,76 @@ public sealed class CollectorRunTimeViewerLiveTests
             Assert.Equal(1L, await ScheduleRowCountAsync(connection, ct));
             Assert.Equal(0, await viewer.ResetAllServerSchedulesAsync(ct));
             Assert.Equal(0, await viewer.ResetAllServerRunTimesAsync(ct));
+
+            /* The window's one-transaction Save on such a store: a Save that changed no run time sends no run-time statement and
+               still saves its schedules; one that did says the store is older, and the schedule rows of that same Save are NOT
+               written (they share its transaction). */
+            await viewer.SaveCollectorScheduleAsync(
+                null, new[] { new CollectorScheduleRow(null, Daily, 720, 30, true) }, Array.Empty<CollectorRunTimeChange>(), ct);
+            Assert.Equal(720, await FleetFrequencyAsync(connection, ct));
+            var oneTransaction = await Assert.ThrowsAsync<ViewerSchemaSkewException>(() => viewer.SaveCollectorScheduleAsync(
+                null, new[] { new CollectorScheduleRow(null, Daily, 60, 30, true) }, new[] { new CollectorRunTimeChange(null, Daily, 120) }, ct));
+            Assert.Contains("Update or restart the Darling service", oneTransaction.Message, StringComparison.Ordinal);
+            Assert.Equal(720, await FleetFrequencyAsync(connection, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    /// <summary>The window's Save is ONE transaction on one connection (#4938). The run-time write comes first, so a schedule write
+    /// that fails after it (here a frequency the schedules table's own CHECK refuses) must take the run time back with it, for the
+    /// fleet and for a server; a run-time write that fails (the run-time table's CHECK refuses -1 on a fleet row) must leave the
+    /// schedule rows of that Save as they were; and the same Save with a valid schedule is the control that both halves land
+    /// together.</summary>
+    [Fact]
+    public async Task AScheduleWriteThatFails_LeavesTheRunTimeUnsaved_BecauseTheSaveIsOneTransaction()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+            /* The control: a valid fleet Save lands the run time and the schedule row together. */
+            await viewer.SaveCollectorScheduleAsync(
+                null, new[] { new CollectorScheduleRow(null, Daily, 1440, 30, true) }, new[] { new CollectorRunTimeChange(null, Daily, 120) }, ct);
+            Assert.Equal($"fleet/{Daily}=120", await RunTimesAsync(connection, ct));
+            Assert.Equal(1440, await FleetFrequencyAsync(connection, ct));
+
+            /* FLEET: the run time moves 120 -> 300 and the schedule write then fails (frequency_minutes >= 0 refuses -1). Neither
+               half may stay: the run time is still 120 and the schedule row is still the one the control wrote. */
+            var fleetFailure = await Assert.ThrowsAsync<PostgresException>(() => viewer.SaveCollectorScheduleAsync(
+                null, new[] { new CollectorScheduleRow(null, Daily, -1, 30, true) }, new[] { new CollectorRunTimeChange(null, Daily, 300) }, ct));
+            Assert.Equal("23514", fleetFailure.SqlState);
+            Assert.Equal($"fleet/{Daily}=120", await RunTimesAsync(connection, ct));
+            Assert.Equal(1440, await FleetFrequencyAsync(connection, ct));
+            Assert.Equal(1L, await ScheduleRowCountAsync(connection, ct));
+
+            /* SERVER: a new server run time and a refused server schedule row. No server run time, no server schedule row. */
+            var serverFailure = await Assert.ThrowsAsync<PostgresException>(() => viewer.SaveCollectorScheduleAsync(
+                3, new[] { new CollectorScheduleRow(3, Daily, -1, null, true) }, new[] { new CollectorRunTimeChange(3, Daily, 180) }, ct));
+            Assert.Equal("23514", serverFailure.SqlState);
+            Assert.Equal($"fleet/{Daily}=120", await RunTimesAsync(connection, ct));
+            Assert.Equal(1L, await ScheduleRowCountAsync(connection, ct));
+
+            /* THE OTHER WAY: a run-time write the run-time table refuses (-1 is a server-row value only) leaves the schedule rows of
+               that Save as they were, so the 1440 the control wrote is not replaced by this Save's 720. */
+            var runTimeFailure = await Assert.ThrowsAsync<PostgresException>(() => viewer.SaveCollectorScheduleAsync(
+                null, new[] { new CollectorScheduleRow(null, Daily, 720, 30, true) }, new[] { new CollectorRunTimeChange(null, Daily, -1) }, ct));
+            Assert.Equal("23514", runTimeFailure.SqlState);
+            Assert.Equal($"fleet/{Daily}=120", await RunTimesAsync(connection, ct));
+            Assert.Equal(1440, await FleetFrequencyAsync(connection, ct));
 
             bodySucceeded = true;
         }
