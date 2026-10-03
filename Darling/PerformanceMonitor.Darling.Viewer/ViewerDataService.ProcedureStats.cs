@@ -309,12 +309,23 @@ public sealed partial class ViewerDataService
     /// <paramref name="endUtc"/>] — the shared probe (<see cref="RawWindowFloor"/>), never a second, hand-copied
     /// floor query. The Queries tab's <c>LoadTopProceduresAsync</c> reads
     /// this beside <see cref="GetTopProceduresByCpuAsync"/> so the grid header can disclose a window the raw
-    /// tier no longer fully holds, the same fact <c>get_top_procedures_by_cpu</c> reports over MCP.
+    /// tier no longer fully holds, the same fact <c>get_top_procedures_by_cpu</c> reports over MCP. A window no longer than
+    /// <see cref="DurationTrendRouting.TruncationSlack"/> answers null without a store read (#4966): no banner can show for one.
     /// </summary>
     public Task<DateTime?> GetProcedureStatsWindowFloorAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.ProcedureStats, serverId, startUtc, endUtc,
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        /* #4966: a window no longer than the truncation slack can never get a coverage note, so the probe starts no query for it, as
+           DataWindowFloor.GetForServerAsync's does not (GetQueryStatsWindowFloorAsync says why). The skip is here, in the viewer's
+           methods, and not in RawWindowFloor.GetAsync: Darling's MCP tools share that probe and read its null as "nothing was read". */
+        if (endUtc - startUtc <= DurationTrendRouting.TruncationSlack)
+        {
+            return Task.FromResult<DateTime?>(null);
+        }
+
+        return RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.ProcedureStats, serverId, startUtc, endUtc,
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+    }
 
     /// <summary>
     /// Top-Procedures comparison — Lite's <c>GetProcedureStatsComparisonAsync</c> ported. Same
