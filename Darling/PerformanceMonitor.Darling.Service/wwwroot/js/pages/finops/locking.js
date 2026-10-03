@@ -8,7 +8,8 @@
 
 /* FinOps "Locking & Contention" tab: the per-index lock and latch waits from get_object_locking (latest daily
    snapshot, most contended first, up to 200 rows), with the lock-wait counts and reserved size the server
-   page's Object Contention table leaves out. The read has no database filter, so there is no picker. */
+   page's Object Contention table leaves out. The read has no database filter, so there is no picker. The
+   read's snapshot time (captured_at) is not shown: a table panel has no slot for a top-level field. */
 
 import { renderPanel } from "../../panels.js";
 
@@ -43,7 +44,9 @@ export const tab = {
       columns: LOCKING_COLUMNS,
       emptyText: "No lock-wait rows recorded. Index and object stats are collected daily.",
       noteKey: "optimized_locking_note",
-      moreNoteKeys: ["separately_monitored_note"],
+      /* `note` is the read's truncation sentence ("TRUNCATED: more than N indexes ...") when the 200-row cap
+         cuts the list, and a "Complete: ..." sentence otherwise, so a capped page never looks like the whole. */
+      moreNoteKeys: ["note", "separately_monitored_note"],
       span: 2,
     });
   },
