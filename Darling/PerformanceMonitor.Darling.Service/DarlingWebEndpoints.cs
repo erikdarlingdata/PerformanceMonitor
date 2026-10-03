@@ -1129,19 +1129,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>Raised when a compose runner cannot open its store connection (pool wait, DNS, TCP connect, TLS or
-    /// startup or login exchange). The original <see cref="NpgsqlException"/> rides as the inner exception. No
-    /// statement ran, so this is never a statement timeout.</summary>
+    /// startup or login exchange). The original exception rides as the inner exception: an
+    /// <see cref="NpgsqlException"/>, or the bare <see cref="TimeoutException"/> the driver throws when a first-time
+    /// setup wait ends (#5016). No statement ran, so this is never a statement timeout.</summary>
     internal sealed class ComposeStoreOpenException : Exception
     {
-        internal ComposeStoreOpenException(NpgsqlException inner)
+        internal ComposeStoreOpenException(Exception inner)
             : base(inner.Message, inner)
         {
         }
     }
 
     /// <summary>Opens a compose runner's store connection, before any statement runs. An <see cref="NpgsqlException"/>
-    /// from the open (other than a <see cref="PostgresException"/> the server sent at login) is raised as
-    /// <see cref="ComposeStoreOpenException"/>.</summary>
+    /// from the open (other than a <see cref="PostgresException"/> the server sent at login), or a bare
+    /// <see cref="TimeoutException"/> (the driver's wait for a data source's first-time setup, #5016), is raised as
+    /// <see cref="ComposeStoreOpenException"/>. A cancellation propagates unchanged: it is the caller's.</summary>
     private static async Task<NpgsqlConnection> OpenComposeConnectionAsync(
         NpgsqlDataSource postgres, System.Threading.CancellationToken cancellationToken)
     {
@@ -1150,6 +1152,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return await postgres.OpenConnectionAsync(cancellationToken);
         }
         catch (NpgsqlException ex) when (ex is not PostgresException)
+        {
+            throw new ComposeStoreOpenException(ex);
+        }
+        catch (TimeoutException ex)
         {
             throw new ComposeStoreOpenException(ex);
         }
@@ -1174,8 +1180,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         if (ex is ComposeStoreOpenException open)
         {
-            return open.InnerException!.InnerException is TimeoutException
-                ? ComposeRunOutcome.ServerError($"Error running query: could not get a store connection in time: {open.InnerException.Message}")
+            /* #5016: whether an open timed out is not the driver's one shape (a read timeout, an expired budget, a connect, a
+               pool wait, the GSS step's wrapper and a bare TimeoutException all differ), so the chain is walked in one helper. */
+            return PostgresOpenTimeout.IsTimedOutOpen(open.InnerException!)
+                ? ComposeRunOutcome.ServerError($"Error running query: could not get a store connection in time: {open.InnerException!.Message}")
                 : ComposeRunOutcome.ServerError($"Error running query: could not open a store connection: {open.InnerException!.Message}");
         }
 
