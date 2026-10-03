@@ -44,6 +44,9 @@ public sealed record LatchStatsSnapshotRow(
     /// <c>FileIoStatsRow</c> / resource-semaphore idiom).</summary>
     public bool IsUnknowable => SampleIntervalSeconds == 0;
 
+    /// <summary><see cref="CollectionTime"/> (naive UTC) in the display zone, to the second; the "Collected" column sorts by <see cref="CollectionTime"/>.</summary>
+    public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
+
     /// <summary>The grid's Interval (sec) cell — see <see cref="DeltaSeriesShaping.IntervalDisplay"/>.</summary>
     public string IntervalDisplay => DeltaSeriesShaping.IntervalDisplay(SampleIntervalSeconds);
 }
@@ -70,6 +73,9 @@ public sealed record SpinlockStatsSnapshotRow(
 {
     /// <summary>True when the row's deltas are the unknowable marker — a stored interval of exactly 0.</summary>
     public bool IsUnknowable => SampleIntervalSeconds == 0;
+
+    /// <summary><see cref="CollectionTime"/> (naive UTC) in the display zone, to the second; the "Collected" column sorts by <see cref="CollectionTime"/>.</summary>
+    public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
 
     /// <summary>The grid's Interval (sec) cell — see <see cref="DeltaSeriesShaping.IntervalDisplay"/>.</summary>
     public string IntervalDisplay => DeltaSeriesShaping.IntervalDisplay(SampleIntervalSeconds);

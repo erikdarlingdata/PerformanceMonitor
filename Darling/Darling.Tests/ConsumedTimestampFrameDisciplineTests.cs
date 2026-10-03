@@ -861,10 +861,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "StoredWallClock", "ForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs", "CollectionLocal", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "Timestamp", "FormatForDisplay"),
-        /* #4966: the snapshot label has two overloads (explicit zone, current zone); the scan derives one entry per overload,
-           and both render a naive-UTC stamp, so the frame is UTC like the rest. */
-        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerTimeHelper.cs", "FormatSnapshotLabel", "FormatForDisplay"),
-        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerTimeHelper.cs", "FormatSnapshotLabel", "FormatForDisplay"),
         ("Lite/Services/LocalDataService.ConfigChanges.cs", "Local", "FormatServerTime"),
         ("Lite/Services/LocalDataService.SystemEvents.cs", "Local", "FormatServerTime"),
     ];

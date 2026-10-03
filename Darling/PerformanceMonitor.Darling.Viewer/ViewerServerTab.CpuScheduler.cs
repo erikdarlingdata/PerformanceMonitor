@@ -57,8 +57,7 @@ public partial class ViewerServerTab
         await Task.WhenAll(trendTask, snapshotTask);
 
         RenderCpuSchedulerChart(trendTask.Result);
-        CpuSchedulerGrid.ItemsSource = CpuSchedulerMetrics.BuildMetrics(snapshotTask.Result);
-        ShowSnapshotTime(CpuSchedulerSnapshotTime, snapshotTask.Result?.CollectionTime);
+        CpuSchedulerGrid.ItemsSource = CpuSchedulerGridRow.Build(snapshotTask.Result);
 
         var gap = CpuSchedulerGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind);
         CpuSchedulerNoDataMessage.Text = gap ?? "";

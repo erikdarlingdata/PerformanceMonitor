@@ -77,10 +77,8 @@ public partial class ViewerServerTab
 
         RenderLatchStatsChart(latchTrendTask.Result);
         LatchStatsGrid.ItemsSource = latchSnapshotTask.Result;
-        ShowSnapshotTime(LatchStatsSnapshotTime, latchSnapshotTask.Result.Count == 0 ? null : latchSnapshotTask.Result[0].CollectionTime);
         RenderSpinlockStatsChart(spinlockTrendTask.Result);
         SpinlockStatsGrid.ItemsSource = spinlockSnapshotTask.Result;
-        ShowSnapshotTime(SpinlockStatsSnapshotTime, spinlockSnapshotTask.Result.Count == 0 ? null : spinlockSnapshotTask.Result[0].CollectionTime);
 
         /* #4966: each chart draws a flat zero over an empty stretch, so each says where its collector's coverage starts. The probes stay OUT
            of the join above: a probe that throws costs the chart's note (DataStartOrNullAsync catches it), never the rows. */

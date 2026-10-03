@@ -41,8 +41,6 @@ public partial class ViewerServerTab
         readFanOut.Release();
 
         _runningJobsFilterMgr!.UpdateData(jobs);
-        /* The grid is one collection's rows, so any row's CollectionTime (naive UTC, the display-zone frame, not StartTimeLocal's) names it. */
-        ShowSnapshotTime(RunningJobsSnapshotTime, jobs.Count == 0 ? null : jobs[0].CollectionTime);
         await ShowEngineGapAsync(RunningJobsNoDataMessage, "running_jobs", jobs.Count);
 
         RunningJobsMsdbWarning.Visibility = ShouldShowMsdbBanner(status) ? Visibility.Visible : Visibility.Collapsed;

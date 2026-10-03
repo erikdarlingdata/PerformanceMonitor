@@ -204,6 +204,9 @@ public class RunningJobRow
 
     public string StartTimeLocal => ViewerDataService.FormatServerClock(StartTime);
 
+    /// <summary><see cref="CollectionTime"/> (naive UTC) in the display zone, to the second; the "Collected" column sorts by <see cref="CollectionTime"/>.</summary>
+    public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
+
     public string CurrentDurationFormatted => FormatDuration(CurrentDurationSeconds);
     public string AvgDurationFormatted => FormatDuration(AvgDurationSeconds);
     public string P95DurationFormatted => FormatDuration(P95DurationSeconds);
