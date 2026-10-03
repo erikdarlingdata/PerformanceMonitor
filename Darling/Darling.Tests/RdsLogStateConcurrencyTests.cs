@@ -9,12 +9,15 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Amazon.RDS;
 using Amazon.RDS.Model;
+using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
 
@@ -310,20 +313,165 @@ public class RdsLogStateConcurrencyTests
         }
     }
 
+    /// <summary>Entries each writer adds in the read tests: enough that the book's table is rebuilt several times, up to a
+    /// size where one rebuild takes long enough for a reader to be inside it.</summary>
+    private const int GrowthKeysPerWriter = 20_000;
+
+    /// <summary>Fresh books each read test grows from empty, so every one of them goes through the rebuilds again.</summary>
+    private const int GrowthRepeats = 5;
+
     /// <summary>
-    /// The runner is one object for every target, and it builds each RDS ingestor the first time a target needs it.
-    /// A plain <c>??=</c> lets two targets' first runs each build one and each keep their own, so one of the two
-    /// ingestors (and the positions it holds) is dropped while its run is still going. Each is published once instead.
+    /// One run of the read tests against one book, through the two operations the readers and writers use:
+    /// <paramref name="store"/> holds a value for a target by its resume key, and <paramref name="read"/> returns what the
+    /// book holds for a resume key ("" for nothing). Each of <see cref="Workers"/> readers has an entry stored before the
+    /// run starts and reads it in a loop until every writer is done. The same number of writers add thousands of entries
+    /// for other targets, which grows the table and rebuilds it again and again. A reader's entry is never touched, so
+    /// every read must find it holding what was stored.
+    /// </summary>
+    private static async Task ReadsKeepFindingTheirEntryWhileOthersAddTheirsAsync(
+        Action<string, string> store, Func<string, string> read)
+    {
+        for (var reader = 0; reader < Workers; reader++)
+        {
+            store("reader-" + reader + "|" + FileFor(1), "held-" + reader);
+        }
+
+        var writersLeft = Workers;
+        var failed = 0;
+
+        await RunTogetherAsync(Workers * 2, worker =>
+        {
+            try
+            {
+                if (worker < Workers)
+                {
+                    var resumeKey = "reader-" + worker + "|" + FileFor(1);
+                    var expected = "held-" + worker;
+
+                    while (Volatile.Read(ref writersLeft) > 0 && Volatile.Read(ref failed) == 0)
+                    {
+                        var held = read(resumeKey);
+
+                        if (!string.Equals(held, expected, StringComparison.Ordinal))
+                        {
+                            Assert.Equal(expected, held);
+                        }
+                    }
+                }
+                else
+                {
+                    for (var i = 0; i < GrowthKeysPerWriter && Volatile.Read(ref failed) == 0; i++)
+                    {
+                        store("writer-" + worker + "-" + i + "|" + FileFor(1), "added");
+                    }
+                }
+            }
+            catch
+            {
+                Volatile.Write(ref failed, 1);
+                throw;
+            }
+            finally
+            {
+                if (worker >= Workers)
+                {
+                    Interlocked.Decrement(ref writersLeft);
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// A read of the csvlog carry book takes the book's lock like a write does. A read that does not can walk the table
+    /// while another thread is rebuilding it larger and answer "nothing held" for an entry that has been there all along
+    /// (or throw), and a carry that is missed is a partial record whose tail is never glued back. The other tests of the
+    /// book read only the entry their own thread writes, in a table that never grows, which a missing lock does not show.
     /// </summary>
     [Fact]
-    public void TheRunnerPublishesOneIngestorForEachRdsCollector()
+    public async Task TargetsReadingCsvlogCarriesWhileOthersAddTheirsStillFindTheirOwn()
     {
-        var runner = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
-
-        foreach (var field in new[] { "_rdsPlans", "_rdsDeadlocks", "_rdsLogEvents", "_rdsCpu" })
+        for (var repeat = 0; repeat < GrowthRepeats; repeat++)
         {
-            Assert.DoesNotContain(field + " ??=", runner, StringComparison.Ordinal);
-            Assert.Matches(@"LazyInitializer\.EnsureInitialized\(\s*ref " + field + ",", runner);
+            var book = new RdsCsvlogCarryBook();
+
+            await ReadsKeepFindingTheirEntryWhileOthersAddTheirsAsync(
+                (resumeKey, held) =>
+                {
+                    var (_, key, dropped, file) = book.CarryFor(resumeKey, startsAtFileStart: false);
+
+                    book.Commit(key, file, new RdsCsvlogCarry.CsvCarry(held, StartKnown: true), dropped);
+                },
+                resumeKey => book.CarryFor(resumeKey, startsAtFileStart: false).Carry.Partial);
         }
     }
+
+    /// <summary>The same as the csvlog book, for the deadlock report held back until the rest of it arrives.</summary>
+    [Fact]
+    public async Task TargetsReadingHeldDeadlockReportsWhileOthersAddTheirsStillFindTheirOwn()
+    {
+        for (var repeat = 0; repeat < GrowthRepeats; repeat++)
+        {
+            var book = new RdsDeadlockCarryBook();
+
+            await ReadsKeepFindingTheirEntryWhileOthersAddTheirsAsync(
+                (resumeKey, held) =>
+                {
+                    var (_, key, file, _) = book.CarryFor(resumeKey);
+
+                    book.Commit(key, file, held);
+                },
+                resumeKey => book.CarryFor(resumeKey).Held);
+        }
+    }
+
+    /// <summary>Threads that ask one runner for its ingestors at once.</summary>
+    private const int PublishThreads = 8;
+
+    /// <summary>
+    /// The runner is one object for every target, and it builds each RDS ingestor the first time a target needs it. Two
+    /// targets' first runs get there together: a plain <c>??=</c> lets each build an ingestor and keep its own, so one of
+    /// the two (and the positions and carries it holds) is dropped while its run is still going. Eight threads ask a fresh
+    /// runner for every ingestor at the same moment, over and over for a second, and all eight must be handed the same
+    /// object of each kind every time.
+    /// </summary>
+    [Fact]
+    public async Task TheRunnerHandsEveryTargetTheSameIngestorForEachRdsCollector()
+    {
+        await using var store = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=unused;Username=unused");
+        var logHashKey = new PgLogHashKey(Enumerable.Repeat((byte)7, PgLogHashKey.KeyLength).ToArray());
+        var clock = Stopwatch.StartNew();
+        var rounds = 0;
+
+        while (clock.Elapsed < TimeSpan.FromSeconds(1))
+        {
+            var runner = new DarlingCollectorRunner(store, new CollectorDeltaCalculator());
+            var plans = new object[PublishThreads];
+            var deadlocks = new object[PublishThreads];
+            var logEvents = new object[PublishThreads];
+            var cpus = new object[PublishThreads];
+
+            await RunTogetherAsync(PublishThreads, worker =>
+            {
+                plans[worker] = runner.PublishedRdsPlanIngestor();
+                deadlocks[worker] = runner.PublishedRdsDeadlockIngestor();
+                logEvents[worker] = runner.PublishedRdsLogEventIngestor(logHashKey);
+                cpus[worker] = runner.PublishedRdsCpuIngestor();
+            });
+
+            AssertOneInstance("plan", plans);
+            AssertOneInstance("deadlock", deadlocks);
+            AssertOneInstance("log event", logEvents);
+            AssertOneInstance("cpu", cpus);
+
+            rounds++;
+        }
+
+        Assert.True(rounds > 0);
+    }
+
+    private static void AssertOneInstance(string collector, object[] handed)
+        => Assert.True(
+            handed.All(item => ReferenceEquals(item, handed[0])),
+            "The " + collector + " ingestor: the threads of one runner were handed "
+            + handed.Distinct(ReferenceEqualityComparer.Instance).Count() + " different objects.");
 }
