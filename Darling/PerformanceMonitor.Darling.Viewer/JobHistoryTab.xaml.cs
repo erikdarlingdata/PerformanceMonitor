@@ -60,7 +60,26 @@ public partial class JobHistoryTab : UserControl
 
     /// <summary>The read's row cap (#4478) — the 2,000 <see cref="LoadJobsAsync"/> passes to
     /// <see cref="ViewerDataService.GetJobHistoryAsync"/>.</summary>
-    private const int RowCap = 2000;
+    internal const int RowCap = 2000;
+
+    /// <summary>
+    /// The "Showing since" note of the grid (#4966), through the event-surface step the server tab's grids share
+    /// (<see cref="ViewerServerTab.ShowEventDataStartAsync"/>). Job history is an event surface: the read windows on the run's
+    /// own time, and a server's first collection copies the history msdb already holds, so a run can sit long before the
+    /// coverage the probe found. The note names the earlier of the coverage start and the earliest run in <paramref name="read"/>.
+    /// The read lists the newest <see cref="RowCap"/> runs, so a full page names its oldest run whatever the store covers, with
+    /// no slack. <paramref name="read"/> is the read's own result, before the Status and Category filters: those narrow the grid
+    /// on the client and say nothing about where the data starts. The time prints in the zone the Run Time column does (the
+    /// display zone, see <see cref="ViewerJobHistoryRow.RunTimeLocal"/>). A step of its own so the tests run the tab's banner call.
+    /// The cap label beside the count (<see cref="PerformanceMonitor.Common.JobHistoryCap"/>) stays: it says how many runs the
+    /// page is cut to, and this note says the time that page reaches back to, so the tab says one thing about the cap.
+    /// </summary>
+    /// <param name="banner">The grid's banner.</param>
+    /// <param name="probe">The data-start probe the tab started beside its read.</param>
+    /// <param name="startUtc">The window's start: the one the read and the probe took.</param>
+    /// <param name="read">The runs the read returned.</param>
+    internal static Task ShowJobHistoryDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc, IEnumerable<ViewerJobHistoryRow> read) =>
+        ViewerServerTab.ShowEventDataStartAsync(banner, probe, "Job History", startUtc, read.Select(r => r.RunDateTimeUtc), RowCap);
 
     private async Task LoadJobsAsync()
     {
@@ -78,7 +97,12 @@ public partial class JobHistoryTab : UserControl
         {
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
-            var sinceUtc = DateTime.UtcNow.AddHours(-hoursBack);
+            /* #4966: the window's start is worked out once, and the read and the data-start probe both take it. The probe starts
+               beside the read; its answer is awaited only after the rows are on screen, so a probe that fails costs the note and
+               never the grid. */
+            var nowUtc = DateTime.UtcNow;
+            var sinceUtc = nowUtc.AddHours(-hoursBack);
+            var dataStartTask = _dataService.GetJobHistoryDataStartAsync(serverId, sinceUtc, nowUtc);
 
             var all = await _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap);
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
@@ -125,6 +149,14 @@ public partial class JobHistoryTab : UserControl
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             LoadingMessage.Visibility = Visibility.Collapsed;
+
+            /* #4966: the rows are bound and the loading note is down; the probe is awaited last. WhenAny settles it whether it
+               succeeded or faulted, so the supersede check lands before the note is written and the step below awaits a finished
+               task. A probe that threw is logged by the step and hides the note. */
+            await Task.WhenAny(dataStartTask);
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+
+            await ShowJobHistoryDataStartAsync(JobHistoryTruncationBanner, dataStartTask, sinceUtc, all);
         }
         catch (Exception ex)
         {
