@@ -44,7 +44,7 @@ internal static class ViewerBlockingLaneDataStart
 
     /// <summary>The later of two series' starts; the one that answered when only one did; null when neither did.</summary>
     internal static DateTime? Later(DateTime? blocking, DateTime? deadlock) =>
-        blocking is { } b && deadlock is { } d ? (b >= d ? b : d) : blocking ?? deadlock;
+        blocking.HasValue && deadlock.HasValue ? (blocking.Value >= deadlock.Value ? blocking : deadlock) : blocking ?? deadlock;
 
     private static async Task<(bool Failed, DateTime? Start)> AnswerAsync(Task<DateTime?> probe, string series)
     {
