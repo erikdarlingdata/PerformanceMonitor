@@ -135,6 +135,8 @@ public sealed class CollectorMemoryKnobTests
         lockField.SetValue(worker, new object());
         var loggerField = typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!;
         loggerField.SetValue(worker, NullLogger<DarlingWorker>.Instance);
+        typeof(DarlingWorker).GetField("_collectorFaultStacks", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, new CollectorFaultStackLog());
 
         var reconcile = typeof(DarlingWorker).GetMethod("ReconcileSweepGate", BindingFlags.NonPublic | BindingFlags.Instance)!;
         var absorbed = typeof(DarlingWorker).GetField("_gateAbsorbed", BindingFlags.NonPublic | BindingFlags.Instance)!;

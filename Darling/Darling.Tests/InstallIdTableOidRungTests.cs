@@ -32,7 +32,7 @@ public sealed class InstallIdTableOidRungTests
     /// <summary>The rung's registered name - how every test here (and the live reset helpers) finds it.</summary>
     public const string RungName = "install-id-table-oid";
 
-    /// <summary>The probe's newest sentinel, so the last argument; the ordinal is a fact of the probe's shape, not of the
+    /// <summary>This rung's sentinel ordinal in the probe; the ordinal is a fact of the probe's shape, not of the
     /// rung's number, so a renumber leaves it alone.</summary>
     private const int ProbeOrdinal = 134;
 
@@ -42,12 +42,13 @@ public sealed class InstallIdTableOidRungTests
     public static int RungVersion => Rung.Version;
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
+        /* No longer the top rung: V160 (the collector run time) landed above it. */
+        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(PgMigrations.Scripts[^1].Version, Rung.Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
@@ -71,42 +72,41 @@ public sealed class InstallIdTableOidRungTests
     }
 
     /// <summary>
-    /// The viewer probe's sentinel carries this rung and the map treats it as the TOP arm: a missing top arm maps a
-    /// fully-migrated store one rung short, permanently, because
-    /// <see cref="ViewerDataService.RequiredStoreSchemaVersion"/> is <see cref="StorageVersion.SchemaVersion"/>.
+    /// The viewer probe's sentinel carries this rung and the map has an arm for it: a missing arm maps a store that
+    /// reached this rung one rung short, permanently. It is no longer the top rung, so the arm sits below the newer
+    /// rung's and above the previous one's.
     /// </summary>
     [Fact]
-    public void TheProbeCarriesTheColumnAsItsLastArm_AndMapsFullyMigratedToThisTopRung()
+    public void TheProbeCarriesTheColumn_AndMapsAStoreThroughThisRungToIt()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = "table_schema = 'config' AND table_name = 'config_install_id' AND column_name = 'table_oid'";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.LastIndexOf("EXISTS", StringComparison.Ordinal) < probe.IndexOf(arm, StringComparison.Ordinal),
-            "the new arm is the probe's last EXISTS, so it reads at the next ordinal");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        Assert.True(ProbeOrdinal < arity - 1, "a newer rung's sentinel follows this one");
         Assert.Equal("hasInstallIdTableOid", method.GetParameters()[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
+        var all = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
 
         var behind = (object[])all.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(RungVersion - 1, (int)method.Invoke(null, behind)!);
 
+        var nextArm = viewer.IndexOf("if (hasCollectorRunAt)", StringComparison.Ordinal);
         var thisArm = viewer.IndexOf("if (hasInstallIdTableOid)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasInstallId)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no sentinel arm for this rung - a fully-migrated store would map one rung short");
+        Assert.True(thisArm >= 0, "the viewer has no sentinel arm for this rung - a store at this rung would map one rung short");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "this rung's arm sits below the previous rung's, so a current store maps one rung short");
+        Assert.True(nextArm >= 0 && nextArm < thisArm, "the newer rung's arm sits above this one's");
+        Assert.True(thisArm < previousArm, "this rung's arm sits below the newer rung's and above the previous one's");
         Assert.Contains("return " + RungVersion + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the column is named in the probe line and nowhere in the arm's prose - the coverage ratchet
