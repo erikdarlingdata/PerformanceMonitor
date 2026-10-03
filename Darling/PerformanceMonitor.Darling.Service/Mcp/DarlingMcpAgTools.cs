@@ -73,7 +73,7 @@ public sealed class DarlingMcpAgTools
         "with no Availability Groups. Groups come back MOST SEVERE FIRST then by the largest " +
         "secondary_lag_seconds/queue depth in the group, so a cut never hides a problem — an uncapped fleet-wide " +
         "call measured 265,794 characters on a 43-server production fleet with several many-database AGs, well " +
-        "over an MCP client's typical per-result limit. Default: as many groups as fit ~32 KB, most-severe-first, " +
+        "over an MCP client's typical per-result limit. Default: as many views as fit ~32 KB, one view of each AG first, then most-severe-first, " +
         "tracking each group's actual width instead of a fixed count; limit is an upper bound on top of that. " +
         "groups_truncated (with groups_truncated_note) flags when the scope held more than came back — " +
         "groups_total/groups_returned say how many, and the fix is to scope by server_name or raise limit.")]

@@ -27,6 +27,7 @@ import {
   loadingStrip,
   errorStrip,
   emptyStrip,
+  noticeStrip,
   localTime,
   relTime,
   fmtInt,
@@ -89,9 +90,7 @@ export async function renderAg(main) {
    future limit. Returns null (mount skips it) when nothing was cut. */
 function truncationNote(d) {
   if (!d || d.groups_truncated !== true) return null;
-  return el("div", { class: "attention-note warn", role: "status" }, [
-    el("span", { text: d.groups_truncated_note || "Some availability group views are not shown." }),
-  ]);
+  return noticeStrip(d.groups_truncated_note || "Some availability group views are not shown.");
 }
 
 function pageHead(d) {

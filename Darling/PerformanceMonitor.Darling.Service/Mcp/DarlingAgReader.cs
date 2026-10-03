@@ -226,8 +226,12 @@ internal static class DarlingAgReader
             {
                 seedByKey[key] = i;
             }
-            else if (groups[current].PrimaryReplica is null && groups[i].PrimaryReplica is not null)
+            else if (groups[current].PrimaryReplica is null && groups[i].PrimaryReplica is not null
+                && groups[i].Severity == groups[current].Severity)
             {
+                /* The seed is the BEST-RANKED view (groups is already in CompareGroups order, so the first one
+                   seen wins); the visible-primary view replaces it only on a severity tie, so a Healthy primary
+                   view never buries a Critical secondary view. */
                 seedByKey[key] = i;
             }
         }
@@ -280,12 +284,28 @@ internal static class DarlingAgReader
         /* The note names the actual reason: a caller who passed a small explicit limit is not helped by being
            told to raise it if what actually cut the page was the byte budget (or the other way around).
            budgetCut wins the wording when both are true, since raising limit alone would not change the outcome. */
-        string? BuildNote(int returnedCount) =>
-            groupsTruncated
-                ? budgetCut
-                    ? $"TRUNCATED: {totalGroupCount} groups were in scope; only {returnedCount} fit the {responseByteBudget:#,0}-byte response budget (at least one view of each availability group is kept first, then most severe first, then by the largest lag/queue depth). Scope by server_name to see the rest."
-                    : $"TRUNCATED: {totalGroupCount} groups were in scope; only the top {returnedCount} (at least one view of each availability group is kept first, then most severe first, then by the largest lag/queue depth) are returned. Scope by server_name, or raise limit, to see the rest."
-                : null;
+        string? BuildNote(int returnedCount)
+        {
+            if (!groupsTruncated)
+            {
+                return null;
+            }
+
+            /* The AGs (seed keys) with no chosen view at all: the note must not claim a coverage it lacks. */
+            var chosenKeys = new HashSet<string>(chosen.Select(i => GroupKey(groups[i])), StringComparer.Ordinal);
+            var missing = seedByKey.Where(kv => !chosenKeys.Contains(kv.Key)).Select(kv => groups[kv.Value].AgName).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            var order = missing.Count == 0
+                ? "at least one view of each availability group is kept first, then most severe first, then by the largest lag/queue depth"
+                : "most severe first, then by the largest lag/queue depth";
+            var missingSentence = missing.Count == 0
+                ? ""
+                : $" No view of {missing.Count} availability group(s) fit: {string.Join(", ", missing.Take(5))}{(missing.Count > 5 ? ", …" : "")}.";
+            var scope = missing.Count == 0 ? "to see the rest" : "to see them";
+
+            return budgetCut
+                ? $"TRUNCATED: {totalGroupCount} groups were in scope; only {returnedCount} fit the {responseByteBudget:#,0}-byte response budget ({order}).{missingSentence} Scope by server_name {scope}."
+                : $"TRUNCATED: {totalGroupCount} groups were in scope; only the top {returnedCount} ({order}) are returned.{missingSentence} Scope by server_name, or raise limit, {scope}.";
+        }
 
         var result = BuildResult(nowUtc, groups, Page(), totalGroupCount, groupsTruncated, BuildNote(chosen.Count));
 
@@ -307,7 +327,7 @@ internal static class DarlingAgReader
     /// <summary>The identity of the availability group a view belongs to: its group_id (V151) when known, else
     /// its AG name, so the keep-one-view-per-AG rule has something to key on before the column is populated.</summary>
     private static string GroupKey(AvailabilityGroupView group) =>
-        !string.IsNullOrWhiteSpace(group.GroupId) ? "id:" + group.GroupId : "name:" + group.AgName;
+        !string.IsNullOrWhiteSpace(group.GroupId) ? "id:" + group.GroupId : "name:" + Key(group.AgName);
 
     /// <summary>Assembles the <see cref="AgHealthResult"/> envelope around a (possibly paged) group list —
     /// factored out of <see cref="Build"/> so the byte-budget walk above can call it with an EMPTY page to
