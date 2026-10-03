@@ -483,11 +483,11 @@ public sealed class CollectorRunTimeRungLiveTests
             Assert.Equal(150, StoreConfigProvider.ResolveSchedule("server_properties", serverId, first.ScheduleOverrides).RunAtMinute);
             Assert.Null(StoreConfigProvider.ResolveSchedule("index_object_stats", serverId, first.ScheduleOverrides).RunAtMinute);
 
-            Assert.Single(logger.Lines.Where(l => l.Contains("run time", StringComparison.OrdinalIgnoreCase)));
+            Assert.Single(logger.Lines, l => l.Contains("run time", StringComparison.OrdinalIgnoreCase));
 
             /* Each load warns again; a sweep between loads, which only resolves, does not. */
             _ = StoreConfigProvider.ResolveSchedule("index_object_stats", serverId, first.ScheduleOverrides);
-            Assert.Single(logger.Lines.Where(l => l.Contains("run time", StringComparison.OrdinalIgnoreCase)));
+            Assert.Single(logger.Lines, l => l.Contains("run time", StringComparison.OrdinalIgnoreCase));
             await provider.LoadViewAsync(new DarlingConfig(), ct);
             Assert.Equal(2, logger.Lines.Count(l => l.Contains("run time", StringComparison.OrdinalIgnoreCase)));
 
