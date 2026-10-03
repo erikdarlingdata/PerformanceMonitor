@@ -10,6 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -2065,6 +2067,214 @@ public class EntraDeviceCodeTests
             var trace = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile(partial));
             Assert.DoesNotContain("CredentialResolver.GetConnectionString", trace, StringComparison.Ordinal);
             Assert.Contains("RegistrationConnectionString(server)", trace, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheDatabaseOpen_LocksAndChecksTheDeclineForEveryInteractiveMode_NotOnlyDeviceCode()
+    {
+        /* CreateConnectionAsync asks about the mode, AuthenticationTypes.RequiresInteractiveSignIn, for the lock and the declined
+           check, because both interactive modes need the same single-file treatment. The per-database open asks the same
+           question. Reading the connection string's keyword for device code instead would leave Entra MFA out of both. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Services/RemoteCollectorService.cs"));
+        var at = code.IndexOf("Task<SqlConnection> OpenAzureDatabaseConnectionAsync(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the per-database open must still exist");
+        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
+
+        Assert.Contains("AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType)", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("ActiveDirectoryDeviceCodeFlow", body, StringComparison.Ordinal);
+        Assert.Contains("UserCancelledMfa", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A server that accepts a socket and never answers: an open pointed at it connects and then waits for a reply that does not
+    /// come, so a test can tell whether an open reached the network at all, with no tenant and no sign-in.
+    /// </summary>
+    private sealed class DatabaseOpenRig : IDisposable
+    {
+        private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+
+        public DatabaseOpenRig(string authenticationType)
+        {
+            _listener.Start();
+            var configDir = Path.Combine(_tempDir, "config");
+            Directory.CreateDirectory(configDir);
+
+            Servers = new ServerManager(configDir);
+            Server = new ServerConnection
+            {
+                ServerName = "127.0.0.1," + ((IPEndPoint)_listener.LocalEndpoint).Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                DisplayName = "database-open-" + Guid.NewGuid().ToString("N")[..8],
+                DatabaseName = "alpha",
+                AuthenticationType = authenticationType,
+                ReadOnlyIntent = true,
+            };
+            Servers.AddServer(Server);
+            Probe = new DatabaseOpenProbe(
+                new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb")), Servers, new ScheduleManager(configDir));
+        }
+
+        public ServerManager Servers { get; }
+
+        public ServerConnection Server { get; }
+
+        public DatabaseOpenProbe Probe { get; }
+
+        /// <summary>Whether an open connected to the server: its socket is waiting to be accepted.</summary>
+        public bool WasReached => _listener.Pending();
+
+        public void Dispose()
+        {
+            _listener.Stop();
+
+            try
+            {
+                Directory.Delete(_tempDir, recursive: true);
+            }
+            catch (IOException)
+            {
+                /* Best-effort cleanup */
+            }
+        }
+    }
+
+    /// <summary>The lock that lets one interactive sign-in run at a time. It is private, so a test reads it by its name.</summary>
+    private static SemaphoreSlim SignInLock()
+    {
+        var field = typeof(RemoteCollectorService).GetField("s_mfaAuthLock", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(field);
+        return (SemaphoreSlim)field.GetValue(null)!;
+    }
+
+    /// <summary>Ends an open that waits on the server that never answers, and waits for it to finish, so a failed test leaves nothing running.</summary>
+    private static async Task EndAsync(Task? open, CancellationTokenSource bound)
+    {
+        await bound.CancelAsync();
+
+        if (open is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await open.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or SqlException or TimeoutException or InvalidOperationException)
+        {
+            /* The open was cancelled or refused: that is how it ends. */
+        }
+    }
+
+    [Fact]
+    public async Task ADatabaseOpenForAnInteractiveMfaRegistration_RefusesWithoutConnecting_OnceThatServersSignInWasDeclined()
+    {
+        /* #4961: the long-query trace opens a database over a second connection of the registration, so a prompt the user
+           declined on the registration's own connection has to stop these opens as it stops CreateConnectionAsync's. Entra MFA
+           raises a window as device code does, and the flag is the same one. The server these opens point at accepts a socket and
+           never answers: an open that did not refuse would connect to it and wait, which the listener shows. Two refusals in
+           turn, and the second is also the proof that the first gave back the sign-in lock. */
+        using var rig = new DatabaseOpenRig(AuthenticationTypes.EntraMFA);
+        rig.Servers.GetConnectionStatus(rig.Server.Id).UserCancelledMfa = true;
+
+        foreach (var withoutReadOnlyIntent in new[] { true, false })
+        {
+            using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            Task<SqlConnection>? open = null;
+
+            try
+            {
+                var refused = await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => open = rig.Probe.OpenAsync(rig.Server, "alpha", withoutReadOnlyIntent, bound.Token));
+
+                Assert.StartsWith("Interactive authentication cancelled by user", refused.Message, StringComparison.Ordinal);
+            }
+            finally
+            {
+                await EndAsync(open, bound);
+            }
+        }
+
+        Assert.False(rig.WasReached, "an open for a server whose sign-in was declined must refuse before it connects");
+    }
+
+    [Fact]
+    public async Task ADatabaseOpenForAnInteractiveMfaRegistration_WaitsWhileTheSignInLockIsHeld_ThenIsRefusedWithoutConnecting()
+    {
+        /* One window at a time, for both interactive modes: two opens that start together must not raise two prompts. The test
+           holds the lock, as a prompt that is up would, and starts an open of a registration whose sign-in was declined. An open
+           that takes the lock waits behind it and is refused only once the lock is released. One that does not take it goes
+           straight on and connects to the server that never answers. The hold is short, and given back in finally: the lock
+           belongs to the whole process. */
+        using var rig = new DatabaseOpenRig(AuthenticationTypes.EntraMFA);
+        rig.Servers.GetConnectionStatus(rig.Server.Id).UserCancelledMfa = true;
+
+        var signInLock = SignInLock();
+        Assert.True(await signInLock.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None), "the sign-in lock should be free when the test starts");
+        var released = false;
+        using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        Task<SqlConnection>? open = null;
+
+        try
+        {
+            open = rig.Probe.OpenAsync(rig.Server, "alpha", withoutReadOnlyIntent: false, bound.Token);
+            await Task.Delay(TimeSpan.FromSeconds(1), CancellationToken.None);
+
+            Assert.False(open.IsCompleted, "an open must wait while another sign-in holds the lock");
+            Assert.False(rig.WasReached, "an open that waits for the sign-in lock has not connected");
+
+            signInLock.Release();
+            released = true;
+
+            var refused = await Assert.ThrowsAsync<InvalidOperationException>(() => open);
+            Assert.StartsWith("Interactive authentication cancelled by user", refused.Message, StringComparison.Ordinal);
+            Assert.False(rig.WasReached, "the refusal came before any connection");
+        }
+        finally
+        {
+            if (!released)
+            {
+                signInLock.Release();
+            }
+
+            await EndAsync(open, bound);
+        }
+    }
+
+    [Fact]
+    public async Task ADatabaseOpenForASqlLoginRegistration_TakesNoSignInLock()
+    {
+        /* Only a mode that can put a window up is made to queue: a SQL login has no prompt for the lock to serialise, so its opens
+           must not wait behind one. The same hold as above, and this open goes straight to the server that never answers. */
+        using var rig = new DatabaseOpenRig(AuthenticationTypes.SqlServer);
+
+        var signInLock = SignInLock();
+        Assert.True(await signInLock.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None), "the sign-in lock should be free when the test starts");
+        using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        Task<SqlConnection>? open = null;
+
+        try
+        {
+            open = rig.Probe.OpenAsync(rig.Server, "alpha", withoutReadOnlyIntent: true, bound.Token);
+
+            var reached = false;
+            for (var waited = 0; waited < 100 && !reached; waited++)
+            {
+                reached = rig.WasReached;
+
+                if (!reached)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(50), CancellationToken.None);
+                }
+            }
+
+            Assert.True(reached, "an open that takes no lock goes straight on to connect, while another sign-in holds the lock");
+        }
+        finally
+        {
+            signInLock.Release();
+            await EndAsync(open, bound);
         }
     }
 
