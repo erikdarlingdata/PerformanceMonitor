@@ -13,7 +13,6 @@ import { VIZ } from "../../panels.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 
 const HOURS = 24;
-const LIMIT = 50;
 
 const COLUMNS = [
   { key: "database_name", label: "Database" },
@@ -44,7 +43,7 @@ export const tab = {
     const body = el("div", {}, [loadingStrip()]);
     (async () => {
       try {
-        const res = await readTool("get_finops", { server, view: "database_resources", hours: HOURS, limit: LIMIT }, ctx && ctx.signal);
+        const res = await readTool("get_finops", { server, view: "database_resources", hours: HOURS }, ctx && ctx.signal);
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
         if (res.kind === "empty") return mount(body, emptyStrip(res.message));

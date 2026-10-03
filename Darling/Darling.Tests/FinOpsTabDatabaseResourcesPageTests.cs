@@ -25,17 +25,22 @@ public sealed class FinOpsTabDatabaseResourcesPageTests
             .ReplaceLineEndings("\n");
 
     [Fact]
-    public void TheTabReadsGetFinOpsWithTheDatabaseResourcesViewWindowAndLimit()
+    public void TheTabReadsGetFinOpsWithTheDatabaseResourcesViewWindow()
     {
-        Assert.Contains("readTool(\"get_finops\", { server, view: \"database_resources\", hours: HOURS, limit: LIMIT }, ctx && ctx.signal)", Tab());
+        const string call = "readTool(\"get_finops\", { server, view: \"database_resources\", hours: HOURS }, ctx && ctx.signal)";
+        var tab = Tab();
+        Assert.Contains(call, tab);
+        Assert.DoesNotContain("limit", call);
+        var line = tab.Split('\n').First(l => l.Contains("readTool(\"get_finops\""));
+        Assert.DoesNotContain("limit", line);
     }
 
     [Fact]
-    public void TheWindowIs24HoursAndTheLimitIsTheToolMaximumOf50()
+    public void TheWindowIs24HoursAndThereIsNoLimitConstant()
     {
         var tab = Tab();
         Assert.Matches("(?m)^const HOURS = 24;$", tab);
-        Assert.Matches("(?m)^const LIMIT = 50;$", tab);
+        Assert.DoesNotContain("LIMIT", tab);
     }
 
     [Fact]
