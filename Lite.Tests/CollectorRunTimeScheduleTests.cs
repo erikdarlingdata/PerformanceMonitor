@@ -384,6 +384,88 @@ public sealed class CollectorRunTimeScheduleTests : IDisposable
         Assert.Contains(ServerName, warning.Message, StringComparison.Ordinal);
     }
 
+    /* A run_at that is not a JSON string (a hand edit such as "run_at": 120) used to throw while the file was read, so the
+       whole file fell back to the backup or the defaults and every other edit in it was lost. It now costs only that
+       collector's run time: the value reads as its own JSON text, the run-time check refuses it like "25:00" with the same
+       warning, and the collector runs on its interval. */
+    [Theory]
+    [InlineData("120", "120")]
+    [InlineData("1.5", "1.5")]
+    [InlineData("true", "true")]
+    [InlineData("false", "false")]
+    [InlineData("""{ "at": "02:00" }""", """{ "at": "02:00" }""")]
+    [InlineData("""[ "02:00" ]""", """[ "02:00" ]""")]
+    public void ARunTimeThatIsNotAJsonString_CostsOnlyThatCollectorsRunTime_NotTheWholeFile(string token, string expectedText)
+    {
+        File.WriteAllText(SchedulePath, $$"""
+            {
+              "version": 2,
+              "default_schedule": [],
+              "server_overrides": {
+                "{{ServerKey}}": { "collectors": [
+                  { "name": "index_object_stats", "enabled": true, "frequency_minutes": 1440, "retention_days": 30, "run_at": {{token}} },
+                  { "name": "wait_stats", "enabled": true, "frequency_minutes": 7, "retention_days": 11 }
+                ] }
+              }
+            }
+            """);
+        var log = new CapturingLog();
+        var manager = new ScheduleManager(_configDir, log);
+        manager.SetServerRunContext(ServerKey, StorageId, ServerName, clock: null);
+
+        /* The other collector's edits survive: the file did not fall back to the defaults. */
+        var other = manager.GetScheduleForServer(ServerKey, "wait_stats");
+        Assert.Equal(7, other!.FrequencyMinutes);
+        Assert.Equal(11, other.RetentionDays);
+        Assert.DoesNotContain(log.Entries, e => e.Level == LogLevel.Error);
+
+        /* The bad value reads as its own text and is refused like 25:00: the collector runs on its interval. */
+        Assert.Equal(expectedText, manager.GetScheduleForServer(ServerKey, "index_object_stats")!.RunAt);
+        var now = new DateTime(2026, 7, 15, 9, 0, 0, DateTimeKind.Utc);
+        Assert.True(IsDue(manager, "index_object_stats", now));
+        manager.MarkCollectorRunForServer(ServerKey, "index_object_stats", now - TimeSpan.FromHours(23));
+        Assert.False(IsDue(manager, "index_object_stats", now));
+        manager.MarkCollectorRunForServer(ServerKey, "index_object_stats", now - TimeSpan.FromHours(25));
+        Assert.True(IsDue(manager, "index_object_stats", now));
+
+        var warning = Assert.Single(log.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("index_object_stats", StringComparison.Ordinal));
+        Assert.Contains(ServerName, warning.Message, StringComparison.Ordinal);
+        Assert.Contains(expectedText, warning.Message, StringComparison.Ordinal);
+        Assert.Contains(InvalidRunAtText, warning.Message, StringComparison.Ordinal);
+
+        /* It is written back as text, so the next load meets an ordinary string. */
+        var reloadLog = new CapturingLog();
+        var reloaded = new ScheduleManager(_configDir, reloadLog);
+        Assert.Equal(expectedText, reloaded.GetScheduleForServer(ServerKey, "index_object_stats")!.RunAt);
+        Assert.Equal(7, reloaded.GetScheduleForServer(ServerKey, "wait_stats")!.FrequencyMinutes);
+        Assert.DoesNotContain(reloadLog.Entries, e => e.Level == LogLevel.Error);
+    }
+
+    /* The converter changes nothing for the values that always loaded: a time reads as it is written, and null reads as none. */
+    [Theory]
+    [InlineData("\"02:30\"", "02:30")]
+    [InlineData("\"25:00\"", "25:00")]
+    [InlineData("null", null)]
+    public void ARunTimeThatIsAStringOrNull_ReadsAsItAlwaysDid(string token, string? expectedText)
+    {
+        File.WriteAllText(SchedulePath, $$"""
+            {
+              "version": 2,
+              "default_schedule": [],
+              "server_overrides": {
+                "{{ServerKey}}": { "collectors": [
+                  { "name": "index_object_stats", "enabled": true, "frequency_minutes": 1440, "retention_days": 30, "run_at": {{token}} }
+                ] }
+              }
+            }
+            """);
+        var log = new CapturingLog();
+        var manager = new ScheduleManager(_configDir, log);
+
+        Assert.Equal(expectedText, manager.GetScheduleForServer(ServerKey, "index_object_stats")!.RunAt);
+        Assert.DoesNotContain(log.Entries, e => e.Level == LogLevel.Error);
+    }
+
     // ── the editor's checks and its next-run text ───────────────────────────────
 
     private const string InvalidRunAtText = "Run at must be a 24-hour time from 00:00 to 23:59, such as 02:00.";
