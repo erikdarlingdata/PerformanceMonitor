@@ -307,8 +307,8 @@ public static class PgTableTuning
         /* The legacy-row check (QueryStoreIntervalWide.HasLegacyRowSql, clause 6 of ReadsTableAsync, run once
            per server by the fleet panels) asks whether the server's window holds a row with no interval start.
            On a field store it holds none, and with only the (server_id, collection_time) index that "no" costs
-           a fetch of every heap tuple the window touches: 4.1 s and 6.8 M blocks per call on the largest store
-           measured (#4969). The read stays exact, because the collector can still store a NULL start when the
+           a fetch of every heap tuple the window touches: a mean of 4.1 s and 6.8 M blocks per call over a
+           day on the largest store measured (#4969), most of it heap fetches in the uncompressed chunks. The read stays exact, because the collector can still store a NULL start when the
            catalog join misses, so the statement is unchanged and this index gives it an index read of a near-empty
            tree.
 
@@ -324,7 +324,8 @@ public static class PgTableTuning
            COMPRESSED CHUNKS: CREATE INDEX on the hypertable builds one index per chunk from that chunk's own
            heap, so each compressed chunk gets an empty 8 KB index and the compressed relations get none. The
            check reads those chunks through the columnar scan on the compressed chunk's server_id segmentby
-           index, with the NULL test as a vectorized filter (a few buffers). Uncompressed chunks take an index
+           index, with the NULL test as a vectorized filter (a few thousand buffers per chunk; 65-153 ms each on the largest production
+           store measured). Uncompressed chunks take an index
            scan of this index, which is empty on a field store, so 1-2 buffers per chunk. Before, they took a
            scan of the (server_id, collection_time) index with a heap fetch per row to test the NULL filter.
            QueryStoreLegacyRowIndexLiveTests holds the plan. Measured on a local TimescaleDB 2.30.1 rig with

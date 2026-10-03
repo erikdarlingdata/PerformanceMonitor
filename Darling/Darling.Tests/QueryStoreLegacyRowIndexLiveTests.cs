@@ -58,9 +58,9 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
         {
             await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
             await Exec(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+            /* Narrow chunks so the three-day seed spans several, with the older ones compressible. */
+            await Exec(connection, "SELECT set_chunk_time_interval('collect.query_store_stats', INTERVAL '1 day')", ct);
         }
-
-        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
 
         var rawNow = DateTime.UtcNow;
         var utcNow = DateTime.SpecifyKind(new DateTime(rawNow.Ticks - (rawNow.Ticks % 10)), DateTimeKind.Unspecified);
@@ -78,9 +78,24 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
         if (timescaleEnabled)
         {
             compressed = await CompressOlderChunksAsync(connection, ct);
+            Assert.True(compressed > 0, "no chunk was compressed; the compressed-chunk half of the pin did not run");
+            Assert.True(await CountChunksAsync(connection, compressedOnly: false, ct) > 0,
+                "every chunk was compressed; the uncompressed-chunk half of the pin did not run");
         }
 
         await Exec(connection, "ANALYZE collect.query_store_stats", ct);
+
+        /* The production order: the upgraded store already holds data, compressed chunks included, when the
+           start-path tuning pass first builds the index. */
+        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+
+        if (timescaleEnabled)
+        {
+            var sizes = await ChunkIndexSizesAsync(connection, compressedOnly: true, ct);
+            Assert.Equal(compressed, sizes.Count);
+            Assert.All(sizes, size => Assert.Equal(8192L, size));
+            Assert.Equal(0, await CompressedRelationIndexCountAsync(connection, ct));
+        }
 
         var plan = await ExplainShippedCheckAsync(connection, ServerA, windowStart, utcNow, ct);
         AssertPlanUsesThePartialIndex(plan, timescaleEnabled, compressed);
@@ -91,12 +106,22 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
         await InsertNullStartRowAsync(connection, ServerA, utcNow.AddMinutes(-10), ct);
         Assert.True(await RunShippedCheckAsync(connection, ServerA, windowStart, utcNow, ct));
         Assert.False(await RunShippedCheckAsync(connection, ServerB, windowStart, utcNow, ct));
+
+        if (timescaleEnabled)
+        {
+            /* Inheritance: a chunk created after the index existed carries it. */
+            var before = (await ChunkIndexSizesAsync(connection, compressedOnly: false, ct)).Count;
+            var chunksBefore = await CountChunksAsync(connection, compressedOnly: null, ct);
+            await SeedPassAsync(connection, ServerA, utcNow.AddDays(5), 1, ct);
+            Assert.Equal(chunksBefore + 1, await CountChunksAsync(connection, compressedOnly: null, ct));
+            Assert.Equal(before + 1, (await ChunkIndexSizesAsync(connection, compressedOnly: false, ct)).Count);
+        }
     }
 
     /// <summary>
-    /// The first start-path pass leaves the index with its exact definition and valid; a second pass issues
-    /// no CREATE (a writer's ROW EXCLUSIVE would make any CREATE fail under the lock_timeout and drop it
-    /// from the count); and with the index dropped, the hourly pass does not build it.
+    /// The first start-path pass leaves the index with its exact definition and valid; the second-pass
+    /// no-CREATE-under-writers pin lives in <c>TuningHourlyCreateLiveTests</c>; and with the index dropped,
+    /// the hourly pass does not build it and warns once.
     /// </summary>
     [Fact]
     public async Task TheStartPath_BuildsTheIndexOnce_AndTheHourlyPassNeverBuildsIt()
@@ -127,28 +152,14 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
             Assert.Contains("WHERE (interval_start_time_utc IS NULL)", text, StringComparison.Ordinal);
         }
 
-        await using (var holder = new NpgsqlConnection(scratch.ConnectionString))
-        {
-            await holder.OpenAsync(ct);
-            await Exec(holder, "BEGIN", ct);
-            try
-            {
-                await Exec(holder, "LOCK TABLE collect.query_stats, collect.query_store_stats, collect.store_metrics IN ROW EXCLUSIVE MODE", ct);
-                await Exec(body, "SET lock_timeout = '2s'", ct);
-
-                var applied = await PgTableTuning.ApplyAsync(body, NullLogger.Instance, ct);
-
-                Assert.Equal(PgTableTuning.Statements.Count, applied);
-            }
-            finally
-            {
-                await Exec(holder, "ROLLBACK", CancellationToken.None);
-            }
-        }
-
-        await Exec(body, "RESET lock_timeout", ct);
         await Exec(body, "DROP INDEX collect." + PgTableTuning.LegacyRowIndexName, ct);
-        await PgTableTuning.ApplyAsync(body, NullLogger.Instance, hourly: true, ct);
+        var logger = new CapturingTestLogger();
+        var hourly = await PgTableTuning.ApplyAsync(body, logger, hourly: true, ct);
+        Assert.Equal(PgTableTuning.Statements.Count - 1, hourly);
+        var warnings = logger.Lines.Where(l => l.StartsWith("Warning:", StringComparison.Ordinal)
+            && l.Contains(PgTableTuning.LegacyRowIndexName, StringComparison.Ordinal)
+            && l.Contains("collect.query_store_stats", StringComparison.Ordinal)).ToList();
+        Assert.True(warnings.Count == 1, "expected exactly one warning naming the index and its table: " + logger.Joined);
         await using var exists = new NpgsqlCommand("SELECT 1 FROM pg_indexes WHERE schemaname = 'collect' AND indexname = $1", body);
         exists.Parameters.AddWithValue(PgTableTuning.LegacyRowIndexName);
         Assert.Null(await exists.ExecuteScalarAsync(ct));
@@ -214,6 +225,43 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
         return at >= 0 && at + 1 < nodes.Count
             && nodes[at + 1].Label.StartsWith("Bitmap Index Scan on ", StringComparison.Ordinal)
             && nodes[at + 1].Label.Contains(idx, StringComparison.Ordinal);
+    }
+
+    private static async Task<int> CountChunksAsync(NpgsqlConnection connection, bool? compressedOnly, CancellationToken ct)
+    {
+        var filter = compressedOnly switch { true => " AND is_compressed", false => " AND NOT is_compressed", _ => string.Empty };
+        await using var cmd = new NpgsqlCommand(
+            "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats'" + filter, connection);
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>Sizes of the partial index's copy on each chunk (compressed ones only, or all), from the catalog.</summary>
+    private static async Task<List<long>> ChunkIndexSizesAsync(NpgsqlConnection connection, bool compressedOnly, CancellationToken ct)
+    {
+        var sizes = new List<long>();
+        await using var cmd = new NpgsqlCommand(
+            "SELECT pg_relation_size(i.indexrelid) FROM timescaledb_information.chunks ch "
+            + "JOIN pg_class t ON t.relname = ch.chunk_name JOIN pg_namespace tn ON tn.oid = t.relnamespace AND tn.nspname = ch.chunk_schema "
+            + "JOIN pg_index i ON i.indrelid = t.oid "
+            + "WHERE ch.hypertable_schema = 'collect' AND ch.hypertable_name = 'query_store_stats' "
+            + "AND ($1 = false OR ch.is_compressed) "
+            + "AND pg_get_indexdef(i.indexrelid) LIKE '%WHERE (interval_start_time_utc IS NULL)'", connection);
+        cmd.Parameters.AddWithValue(compressedOnly);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            sizes.Add(reader.GetInt64(0));
+        }
+
+        return sizes;
+    }
+
+    private static async Task<int> CompressedRelationIndexCountAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(
+            "SELECT count(*) FROM pg_indexes WHERE (tablename LIKE '%\\_compressed%' OR tablename LIKE 'compress\\_hyper\\_%') "
+            + "AND indexdef LIKE '%interval_start_time_utc IS NULL%'", connection);
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private static async Task<int> CompressOlderChunksAsync(NpgsqlConnection connection, CancellationToken ct)

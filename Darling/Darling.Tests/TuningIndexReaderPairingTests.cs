@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -57,6 +58,17 @@ public sealed class TuningIndexReaderPairingTests
                 yield return (match.Groups["name"].Value, match.Groups["leading"].Value);
             }
         }
+    }
+
+    /// <summary>The index is partial, so the read must carry the same predicate or the planner cannot use it.</summary>
+    [Fact]
+    public void TheLegacyRowRead_CarriesThePartialIndexPredicate_BesideItsServerAndTimeBounds()
+    {
+        var sql = QueryStoreIntervalWide.HasLegacyRowSql;
+        Assert.Contains("interval_start_time_utc IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
     }
 
     [Fact]
