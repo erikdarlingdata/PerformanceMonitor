@@ -20,6 +20,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -62,6 +63,34 @@ public sealed class FinOpsApplicationConnectionsGoldenLiveTests
                 ["b"] = await viewer.GetApplicationConnectionsAsync(ServerIdB, ct),
             });
         });
+
+    [Fact]
+    public Task ApplicationConnections_MatchGoldenFixture_ThroughTheStorageReaderAndRowMapper() =>
+        RunAsync(async (connectionString, anchor, ct) =>
+        {
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            var clock = PerformanceMonitor.Analysis.Baselines.ServerClock.FixedOffset(0);
+            var cutoff = DateTime.UtcNow.AddHours(-24);
+            async Task<List<ApplicationConnectionRow>> Read(int id) =>
+                (await DarlingFinOpsApplicationConnectionsReader.GetApplicationConnectionsAsync(dataSource, id, cutoff, 30, ct))
+                    .ConvertAll(d => ApplicationConnectionRow.From(d, clock));
+            return Serialize(anchor, new Dictionary<string, object?> { ["a"] = await Read(ServerIdA), ["b"] = await Read(ServerIdB) });
+        });
+
+    /// <summary>The mapper converts both times on the clock it is given and keeps the UTC instants and the clock.</summary>
+    [Fact]
+    public void RowMapper_ConvertsOnTheGivenClock_AndKeepsTheUtcInstants()
+    {
+        var clock = PerformanceMonitor.Analysis.Baselines.ServerClock.FixedOffset(120);
+        var first = new DateTime(2026, 5, 1, 10, 0, 0, DateTimeKind.Unspecified);
+        var last = first.AddHours(1);
+        var row = ApplicationConnectionRow.From(new ApplicationConnectionUsage("x", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, first, last), clock);
+        Assert.Equal(first, row.FirstSeenUtc);
+        Assert.Equal(last, row.LastSeenUtc);
+        Assert.Same(clock, row.Clock);
+        Assert.Equal(ViewerTimeHelper.ConvertToDisplay(first, ViewerTimeHelper.CurrentDisplayMode, clock), row.FirstSeenLocal);
+        Assert.Equal(ViewerTimeHelper.ConvertToDisplay(last, ViewerTimeHelper.CurrentDisplayMode, clock), row.LastSeenLocal);
+    }
 
     internal static async Task RunAsync(Func<string, DateTime, CancellationToken, Task<string>> read)
     {
