@@ -3043,6 +3043,10 @@ LIMIT 1";
             _gateDesiredAbsorb = _gateAbsorbed;
         }
 
+        /* #4999: the daily-run cap comes from this store's pool and the sweep width just set, and says what it is
+           once, here. No daily run can be going yet, so nothing has to give a permit back. */
+        ApplyDailyRunCap(StorePoolMaxSize(postgres), initialSweepWidth);
+
         _logger.LogInformation("PerformanceMonitor Darling collection loop started");
         /* #2953: the one publish that clears the failure phases. Set HERE — the last statement before the
            sweep loop's first iteration — and not re-published per cycle: this seam answers "did collection
@@ -3313,6 +3317,12 @@ LIMIT 1";
                 server.InFlightSweep = ProcessServerSweepAsync(
                     server, engine, runner, planFetcher, notificationService, config, serverSweepGate, stoppingToken);
             }
+
+            /* #4999: the hang watchdog above reads only the per-server bodies, and a daily run no longer runs in
+               one: it is detached and can go for hours, so a stuck one showed up only as stale data. Same tick,
+               same threshold, same Warning, one per run, naming the server and collector. After the launch loop
+               and outside it, because a daily run belongs to no single body and the loop may leave early. */
+            WatchDailyRuns(DateTime.UtcNow);
 
             /* #4130: fire-and-track, exactly like the per-server sweeps just above and the oversized-plan
                backlog just below — see TryStartScheduledPurge's doc for why the inline await was the
@@ -4747,6 +4757,10 @@ LIMIT 1";
     /// </summary>
     private void ReconcileSweepGate(SemaphoreSlim gate, int target, CancellationToken stoppingToken)
     {
+        /* #4999: the daily-run cap is derived from the sweep width, so every width the knob moves to recomputes
+           it, here where the width is applied. A width that changes nothing leaves the cap and the log alone. */
+        ApplyDailyRunCap(StorePoolMaxSize(_postgres), target);
+
         int toRelease;
         bool startAbsorber;
         lock (_gateLock)
@@ -4997,30 +5011,187 @@ LIMIT 1";
     internal const int DailyCollectorIntervalMinutes = 1440;
 
     /// <summary>
-    /// #4938: how many detached daily runs may be going at once across the whole fleet. Each holds a connection to
-    /// its monitored server and one to the store for as long as it runs (index_object_stats took 43 minutes across
-    /// 72 databases in a field case), so the cap is what bounds the load that daily work can add beside the sweep.
-    /// A run over the cap waits for a permit and is never dropped.
+    /// #4938: the most detached daily runs that may be going at once across the whole fleet. Each holds a connection
+    /// to its monitored server and one to the store for as long as it runs (index_object_stats took 43 minutes
+    /// across 72 databases in a field case), so the cap is what bounds the load that daily work can add beside the
+    /// sweep. A run over the cap waits for a permit and is never dropped.
+    ///
+    /// <para>#4999: this is the ceiling, and the cap in force is never above it. The store's connection pool bounds
+    /// it too, because a daily run holds a store connection for its whole run: see <see cref="DailyRunCapFor"/>.</para>
     /// </summary>
     internal const int MaxConcurrentDailyRuns = 16;
 
     /// <summary>
-    /// #4938: the permits behind <see cref="MaxConcurrentDailyRuns"/>. An instance field and a semaphore of its
-    /// own, never a waiting mode on <see cref="DetachedCollectorGate"/>, whose try-only contract is what makes a
-    /// held single-flight slot mean "skip this tick". A daily run takes its (server, collector) slot first and
-    /// waits here second, so a run that is still queued for a permit counts as unfinished and the next tick skips.
+    /// #4999: how many connections of the store pool the daily-run cap leaves free for everything that is neither a
+    /// sweep body nor a daily run: the MCP tools, the web viewer's reads and the alert reads each borrow one for the
+    /// length of a query. Eight is a ruled round number, room for a handful of those reads at once, and not a
+    /// measured peak. The point of it is which side waits: a daily run that waits for a permit costs nothing, and
+    /// a read that waits for a connection is a stall someone sees. It is a constant and not a setting, so the cap
+    /// has one rule to explain.
     /// </summary>
-    private readonly SemaphoreSlim _dailyRunPermits = new(MaxConcurrentDailyRuns, MaxConcurrentDailyRuns);
+    internal const int DailyRunPoolReserve = 8;
 
     /// <summary>
-    /// #4938: the detached daily runs that have not finished, so a shutdown can wait for them the way it waits for
+    /// #4999: how many detached daily runs may go at once, given the store connection pool's size and the sweep
+    /// width. Every daily run holds a store connection for its whole run and so does every sweep body, so the runs
+    /// get what the pool has left after the sweep and <see cref="DailyRunPoolReserve"/>: the smaller of
+    /// <see cref="MaxConcurrentDailyRuns"/> and (pool size - sweep width - reserve), and never below one so daily
+    /// collection still happens on a pool that is too small. A pool of 24 and a sweep width of 9 gives 7; a pool of
+    /// 100 gives 16. A null pool size means the pool bounds nothing (pooling is off), so the ceiling applies.
+    /// </summary>
+    internal static int DailyRunCapFor(int? poolMaxSize, int sweepWidth)
+    {
+        if (poolMaxSize is not { } poolMax)
+        {
+            return MaxConcurrentDailyRuns;
+        }
+
+        return (int)Math.Clamp((long)poolMax - sweepWidth - DailyRunPoolReserve, 1, MaxConcurrentDailyRuns);
+    }
+
+    /// <summary>
+    /// #4999: the largest number of connections the store's data source will hold open, read from the connection
+    /// string the data source was built with, so it is the operator's <c>Maximum Pool Size</c> and not the managed
+    /// default. A string that names none gets Npgsql's own default (100). Null when the data source is null or
+    /// pooling is off, which leaves the pool bounding nothing.
+    /// </summary>
+    internal static int? StorePoolMaxSize(NpgsqlDataSource? dataSource)
+    {
+        if (dataSource is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var builder = new NpgsqlConnectionStringBuilder(dataSource.ConnectionString);
+            return builder.Pooling ? builder.MaxPoolSize : null;
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// #4938, #4999: the permits behind the daily-run cap. An instance field and a limiter of its own, never a
+    /// waiting mode on <see cref="DetachedCollectorGate"/>, whose try-only contract is what makes a held
+    /// single-flight slot mean "skip this tick". A daily run takes its (server, collector) slot first and waits
+    /// here second, so a run that is still queued for a permit counts as unfinished and the next tick skips. It
+    /// starts at <see cref="MaxConcurrentDailyRuns"/> and <see cref="ApplyDailyRunCap"/> moves it to the cap the
+    /// store pool allows once the collection loop knows both.
+    /// </summary>
+    private readonly DailyRunLimiter _dailyRunPermits = new(MaxConcurrentDailyRuns);
+
+    /// <summary>Test hook (#4999): how many detached daily runs may go at once right now.</summary>
+    internal int DailyRunCap => _dailyRunPermits.Cap;
+
+    /// <summary>Test hook (#4999): how many detached daily runs hold a permit right now.</summary>
+    internal int DailyRunsHoldingPermits => _dailyRunPermits.InUse;
+
+    /// <summary>
+    /// #4999: whether <see cref="ApplyDailyRunCap"/> has logged the cap yet. The first call says what the cap is
+    /// at start, every later one only when it moved.
+    /// </summary>
+    private bool _dailyRunCapLogged;
+
+    /// <summary>
+    /// #4999: sets the daily-run cap from the store pool and the sweep width (<see cref="DailyRunCapFor"/>) and
+    /// logs the effective cap, once at start and again each time it changes. Called when the collection loop
+    /// starts and every time the sweep width moves, so the cap follows the knob. Runs already going keep their
+    /// permits when the cap narrows, and a widening starts the runs that were waiting.
+    /// </summary>
+    internal void ApplyDailyRunCap(int? poolMaxSize, int sweepWidth)
+    {
+        var cap = DailyRunCapFor(poolMaxSize, sweepWidth);
+        var changed = _dailyRunPermits.SetCap(cap);
+        if (_dailyRunCapLogged && !changed)
+        {
+            return;
+        }
+
+        _dailyRunCapLogged = true;
+        _logger.LogInformation(
+            "Daily collectors run at most {Cap} at a time: the smaller of {Ceiling} and the store's connection pool " +
+            "({Pool}) minus the sweep width ({Width}) minus {Reserve} kept free for reads, and at least 1 (#4999)",
+            cap, MaxConcurrentDailyRuns, poolMaxSize?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unbounded", sweepWidth, DailyRunPoolReserve);
+    }
+
+    /// <summary>
+    /// #4938, #4999: the detached runs that have not finished, so a shutdown can wait for them the way it waits for
     /// the per-server bodies. They used to run inside those bodies and so inside that wait; detached, nothing else
-    /// holds on to them. A run removes itself when it ends.
+    /// holds on to them. That is every daily run and, since #4999, the three collectors detached by name. A run
+    /// removes itself when it ends. The names say "daily" because the daily runs came first.
     /// </summary>
     private readonly ConcurrentDictionary<Task, byte> _dailyRuns = new();
 
-    /// <summary>Test hook and shutdown-drain input (#4938): the detached daily runs that have not finished.</summary>
+    /// <summary>Test hook and shutdown-drain input (#4938, #4999): the detached runs that have not finished, daily and by name.</summary>
     internal IReadOnlyCollection<Task> InFlightDailyRuns => _dailyRuns.Keys.ToArray();
+
+    /// <summary>
+    /// #4999: the daily runs that are executing right now, one per (server, collector), which the hang watchdog
+    /// (<see cref="WatchDailyRuns"/>) reads each sweep tick. A run is added once it holds its permit, so a run that
+    /// is only waiting for one is never in it: queue time is capacity pressure, not a hang, the same split the
+    /// sweep watchdog makes (<see cref="ClassifySweepEpisode"/>). The single-flight slot keeps it to one run per key.
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string CollectorName), DailyRunWatch> _dailyRunWatches = new();
+
+    /// <summary>
+    /// #4999: starts watching one daily run that has just taken its permit. Dispose the result when the run ends
+    /// and the run is no longer watched.
+    /// </summary>
+    private DailyRunWatch BeginDailyRunWatch(string serverName, int serverId, string collectorName)
+    {
+        var watch = new DailyRunWatch(serverId, serverName, collectorName, DateTime.UtcNow, EndDailyRunWatch);
+        _dailyRunWatches[(serverId, collectorName)] = watch;
+        return watch;
+    }
+
+    /// <summary>
+    /// #4999: stops watching a daily run that ended, removing only that run's own entry, and says so when the
+    /// watchdog had already warned about it, the way a sweep body's resolution is logged.
+    /// </summary>
+    private void EndDailyRunWatch(DailyRunWatch watch)
+    {
+        _dailyRunWatches.TryRemove(new KeyValuePair<(int ServerId, string CollectorName), DailyRunWatch>(
+            (watch.ServerId, watch.CollectorName), watch));
+        if (watch.Warned)
+        {
+            _logger.LogInformation(
+                "[{Server}] {Collector} daily run completed after {Elapsed:F0}s of execution",
+                watch.ServerName, watch.CollectorName, (DateTime.UtcNow - watch.StartedUtc).TotalSeconds);
+        }
+    }
+
+    /// <summary>
+    /// #4999: the hang watchdog for detached daily runs, called once per sweep tick with the current time. A run
+    /// that has been executing for <see cref="SweepWatchdogSeconds"/> or more gets ONE Warning that names its server
+    /// and collector, the same threshold and the same action the sweep watchdog uses for a body that has not
+    /// finished (<see cref="ClassifySweepEpisode"/> decides both). Before this a stuck daily run showed only as
+    /// stale data, hours later. A run waiting for a permit is not executing and is not reported here. Returns how
+    /// many runs it warned about, for the test.
+    /// </summary>
+    internal int WatchDailyRuns(DateTime nowUtc)
+    {
+        var warned = 0;
+        foreach (var watch in _dailyRunWatches.Values)
+        {
+            var runningSeconds = (nowUtc - watch.StartedUtc).TotalSeconds;
+            if (ClassifySweepEpisode(runningSeconds, running: true, runningSeconds, watch.Warned, alreadyQueuedInfo: true)
+                != SweepEpisodeSignal.Hang)
+            {
+                continue;
+            }
+
+            watch.MarkWarned();
+            warned++;
+            _logger.LogWarning(
+                "[{Server}] {Collector} daily run has not completed after {Elapsed:F0}s of execution - it keeps one of the {Cap} daily-run permits and its next run is skipped until it ends (#4999)",
+                watch.ServerName, watch.CollectorName, runningSeconds, _dailyRunPermits.Cap);
+        }
+
+        return warned;
+    }
 
     /// <summary>
     /// #4938: whether a collector whose effective interval is <paramref name="effectiveIntervalMinutes"/> is a
@@ -5086,7 +5257,8 @@ LIMIT 1";
     /// <summary>
     /// The shutdown wait for the work that is still going when the sweep loop ends (#1553): the per-server bodies and
     /// the store ticks the caller collected (<paramref name="inFlight"/>) and, since #4938, the detached daily runs,
-    /// which used to run inside those bodies and so inside this wait. The stopping token has already cancelled them,
+    /// which used to run inside those bodies and so inside this wait, and, since #4999, the three collectors that
+    /// are detached by name. The stopping token has already cancelled them,
     /// and a run still queued for a daily-run permit ends at once on it. None of them faults (RunDetachedAsync
     /// contains the cancel), so the wait completes cleanly. Bounded by the drain budget, so a run that is genuinely
     /// hung cannot hold shutdown open. A method of its own (#4938) so a test can call it; the shutdown calls it once.
@@ -5110,12 +5282,13 @@ LIMIT 1";
     /// </summary>
     private async Task<IDisposable> AcquireDailyRunPermitAsync(ServerLoopState server, string collectorName, CancellationToken cancellationToken)
     {
-        if (!await _dailyRunPermits.WaitAsync(0, cancellationToken))
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_dailyRunPermits.TryAcquire())
         {
             _logger.LogDebug(
                 "  [{Server}] {Collector} is waiting for one of {Cap} daily-run permits (#4938)",
-                server.Config.DisplayName, collectorName, MaxConcurrentDailyRuns);
-            await _dailyRunPermits.WaitAsync(cancellationToken);
+                server.Config.DisplayName, collectorName, _dailyRunPermits.Cap);
+            await _dailyRunPermits.AcquireAsync(cancellationToken);
         }
 
         return new DailyRunPermit(_dailyRunPermits);
@@ -5127,9 +5300,9 @@ LIMIT 1";
     /// </summary>
     private sealed class DailyRunPermit : IDisposable
     {
-        private SemaphoreSlim? _permits;
+        private DailyRunLimiter? _permits;
 
-        public DailyRunPermit(SemaphoreSlim permits) => _permits = permits;
+        public DailyRunPermit(DailyRunLimiter permits) => _permits = permits;
 
         public void Dispose() => Interlocked.Exchange(ref _permits, null)?.Release();
     }
@@ -11446,7 +11619,10 @@ AND   j.hypertable_name = '{relation}'", connection))
                 }
                 else if (IsDetachedByName(name))
                 {
-                    _ = RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
+                    /* #4999: tracked like the daily runs below, so the shutdown drain waits for a run that is still
+                       going. Dropped on the floor, as these three used to be, nothing held them once the pass that
+                       dispatched them ended. */
+                    TrackDailyRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken));
                 }
                 /* #4938: and every DAILY collector, by cadence rather than by name. index_object_stats took 43
                    minutes across 72 databases in a field case, and awaited here that stalled the server's
@@ -12849,6 +13025,15 @@ LIMIT 1";
 
             runtime = currentRuntime;
         }
+
+        /* #4999: from here a daily run is executing, so the hang watchdog watches it (WatchDailyRuns), from the
+           moment it holds its permit and re-read its runtime until it ends: the watch is disposed with this scope.
+           It starts after the wait for a permit on purpose, because a run that is queued behind the cap is
+           capacity pressure and is not stuck. It sits before the test seam below so a run a test holds open is
+           watched the way a real one is. */
+        using var dailyRunWatch = detachedDaily
+            ? BeginDailyRunWatch(server.Config.DisplayName, runtime.ServerId, collectorName)
+            : null;
 
         if (RunOneBodyOverride is { } bodyOverride)
         {
