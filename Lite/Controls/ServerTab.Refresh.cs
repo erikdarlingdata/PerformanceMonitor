@@ -973,6 +973,7 @@ public partial class ServerTab : UserControl
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
             _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
             UpdateCollectorDurationChart(collectionLogTask.Result, hoursBack, fromDate, toDate);
+            await RefreshStoredWindowBannerAsync(QueryWindowRelation.CollectionLog, CollectionLogWindowTruncatedBanner, hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {

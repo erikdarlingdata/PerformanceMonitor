@@ -51,6 +51,7 @@ public partial class ServerTab
 
             /* View-only DESCENDING-by-duration sort — never flips the reader's chronological ORDER BY. */
             SetDefaultSortIfNone(LongQueryCompletionsGrid, "DurationMicroseconds", ListSortDirection.Descending);
+            await RefreshStoredWindowBannerAsync(QueryWindowRelation.LongQueryCompletions, LongQueriesWindowTruncatedBanner, hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
