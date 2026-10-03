@@ -14,6 +14,11 @@ import { pathToFileURL } from "node:url";
 const [jsDir, scenarioArg] = process.argv.slice(-2);
 /* A scenario may carry one argument after a colon: "offeredRanges:168" is the offeredRanges scenario at 168 hours. */
 const [scenario, scenarioValue] = scenarioArg.split(":");
+/* A scenario whose name ends in "Local" draws a window note in the browser's zone (#4966): the zone follows the colon
+   ("floorLocal:America/New_York"), and the answer the page reads is HARNESS_INPUT, the JSON the server sent. The zone
+   is set before anything formats a date, so the page's own localTime renders in it. */
+if (scenario.endsWith("Local") && scenarioValue) process.env.TZ = scenarioValue;
+const INPUT = process.env.HARNESS_INPUT ? JSON.parse(process.env.HARNESS_INPUT) : null;
 
 class FakeNode {
   constructor(tag, text) {
@@ -187,6 +192,18 @@ const waitingTasksPanel = {
   emptyText: "No waiting tasks in this window.",
 };
 
+/* The Queries tab's Query Store grid: it names `truncation_note` as its own note (#4231), so the loader draws it. */
+const queryStorePanel = {
+  title: "Query Store",
+  read: "get_query_store_top",
+  params: { server: "SRV1", hours: 168, top: 20 },
+  viz: "table",
+  rowsKey: "queries",
+  columns: [{ key: "query_id", label: "Query" }],
+  emptyText: "No Query Store rows in this window.",
+  noteKey: "truncation_note",
+};
+
 /* A body for the reads whose rows start a second read (the wait, counter and query pickers), so the trend reads
    behind them are fetched too. Every other read answers an empty object. */
 const PICKER_ROWS = {
@@ -254,6 +271,21 @@ const scenarios = {
   floorOwnNoteOnce: () => {
     answer = () => data(WAITING_TASKS_FLOOR);
     return [modules.panels.renderPanel({ ...waitingTasksPanel, noteKey: "truncation_note" })];
+  },
+  // #4966: the window notes in the browser's zone. Each draws the answer the server sent (HARNESS_INPUT) through a panel
+  // that shows its `truncation_note`: a grid that has none of its own (the Waiting Tasks grid), a descriptor grid that
+  // names the note as its own (the Query Store grid on the Queries tab), and the hand-built Top Queries composite.
+  floorLocal: () => {
+    answer = () => data(INPUT);
+    return [modules.panels.renderPanel(waitingTasksPanel)];
+  },
+  queryStoreLocal: () => {
+    answer = () => data(INPUT);
+    return [modules.panels.renderPanel(queryStorePanel)];
+  },
+  topQueriesLocal: () => {
+    answer = (url) => (tool(url) === "get_top_queries_by_cpu" ? data(INPUT) : data({}));
+    return [modules.tabs.topQueriesPanel("SRV1", RANGE)];
   },
   // The Wait Stats composite draws the note above its grid.
   floorWaitStats: () => {
@@ -370,7 +402,23 @@ const strips = (kind) => {
   return found;
 };
 
+/* What the page's own localTime makes of each instant the answer carries (#4966), keyed by the instant as sent and by
+   its UTC minute ("2026-01-02 00:00", the form the server's sentence uses), and the zone's offset at the first one, so a
+   test can tell the browser's clock from UTC. Empty without an input. */
+const local = {};
+let tzOffset = null;
+for (const key of ["data_start_utc", "window_start_utc", "window_end_utc", "oldest_shown_utc", "effective_start"]) {
+  const value = INPUT && INPUT[key];
+  if (typeof value !== "string") continue;
+  local[value] = modules.util.localTime(value);
+  local[value.slice(0, 16).replace("T", " ")] = local[value];
+  const instant = modules.util.parseUtc(value);
+  if (tzOffset === null && instant) tzOffset = instant.getTimezoneOffset();
+}
+
 console.log(JSON.stringify({
+  local,
+  tzOffset,
   fetches,
   notices: strips("notice"),
   errors: strips("error"),

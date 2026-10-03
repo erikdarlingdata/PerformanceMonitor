@@ -10,7 +10,10 @@ using System;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -44,6 +47,20 @@ public sealed class WebDataStartNoteTests
     private static string[] Strings(JsonElement node, string name) =>
         node.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
 
+    /// <summary>A data source that never connects (nothing listens on port 9) and a token that is already cancelled: the
+    /// instrument for "this answer never asked the store". A read that does reach the store throws
+    /// <see cref="OperationCanceledException"/>, because neither the resolver's fault sentence nor <c>AddAsync</c>'s
+    /// own catch folds a cancellation (#4203). A null source cannot show that: its throw becomes a fault sentence, and
+    /// the answer comes back untouched whether or not a guard held. Every use pairs with a control that does reach
+    /// the store, so an instrument that stopped seeing a reach would fail loudly rather than pass every case.</summary>
+    private static NpgsqlDataSource NeverConnects() =>
+        NpgsqlDataSource.Create("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=1;Pooling=false");
+
+    private static readonly CancellationToken Cancelled = new(canceled: true);
+
+    private static DateTime Utc(int year, int month, int day, int hour = 0, int minute = 0) =>
+        new(year, month, day, hour, minute, 0, DateTimeKind.Utc);
+
     [Fact]
     public void EveryListedRead_IsServedByTheWebMirror_AsAGridThePageAsksAWindowOf_OverATableTheProbeCanRead()
     {
@@ -64,13 +81,18 @@ public sealed class WebDataStartNoteTests
     }
 
     [Fact]
-    public async Task AnyAnswerThatIsNotAGridReadOverAWindow_ComesBackUntouched()
+    public async Task AnyAnswerThatIsNotAGridReadOverAWindow_ComesBackUntouched_WithoutAskingTheStore()
     {
-        var ct = TestContext.Current.CancellationToken;
+        await using var store = NeverConnects();
 
-        /* None of these reach the store: the null data source would throw if one did. */
+        /* None of these reach the store, and each one would if its guard were gone: that would throw
+           OperationCanceledException here (NeverConnects), where a null source folded the throw into a fault
+           sentence and handed back the same answer with or without the guard. */
         async Task<string> Run(string tool, string? server, int? hours, string payload) =>
-            await WebDataStartNote.AddAsync(null!, tool, server, hours, null, payload, null, ct);
+            await WebDataStartNote.AddAsync(store, tool, server, hours, null, payload, null, Cancelled);
+
+        // The control: a listed read with a server and a window does reach the store, and the instrument sees it.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Run("get_waiting_tasks", "sql01", 168, Rows));
 
         // A read that is not on the list: a chart, a newest-snapshot read, an event surface.
         Assert.Same(Rows, await Run("get_cpu_utilization", "sql01", 168, Rows));
@@ -113,6 +135,13 @@ public sealed class WebDataStartNoteTests
             "partial window: this grid shows only the newest rows, back to 2026-01-02 12:30 UTC, because it stops at its row limit. "
             + "The window started at 2026-01-01 00:00 UTC. The grid covers 2026-01-02 12:30 to 2026-01-03 00:00 UTC.",
             answer["truncation_note"]?.GetValue<string>());
+
+        /* The same instants as fields (#4966): the page composes the note from these in the browser's zone, and the
+           sentence above stays for any other reader. A capped list names the oldest row it shows, never a data start. */
+        Assert.Equal("2026-01-02T12:30:00.0000000Z", answer["oldest_shown_utc"]?.GetValue<string>());
+        Assert.Equal("2026-01-01T00:00:00.0000000Z", answer["window_start_utc"]?.GetValue<string>());
+        Assert.Equal("2026-01-03T00:00:00.0000000Z", answer["window_end_utc"]?.GetValue<string>());
+        Assert.Null(answer["data_start_utc"]);
 
         /* The tool's own fields and rows come through as they were. */
         Assert.True(answer["truncated"]?.GetValue<bool>());
@@ -249,6 +278,167 @@ public sealed class WebDataStartNoteTests
 
         /* The strip is a grid's. No line path asks for it. */
         Assert.DoesNotContain("windowFloorStrip(trend", tabs, StringComparison.Ordinal);
-        Assert.NotEmpty(FloorNote);
+
+        /* The coverage sentence the server builds opens the way the page's composer keeps it. (This line used to assert
+           that the FloorNote constant was not empty: a constant, so it could not fail.) */
+        Assert.StartsWith(FloorNote, ComposeStoreAvailability.BuildDataStartNotice(Utc(2026, 1, 2), Utc(2025, 12, 26), Utc(2026, 1, 3)), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A window no longer than the 90-minute slack can never be called cut by the store: the coverage rule needs a start
+    /// more than the slack after the window's start, and the probe reports none at or after the window's end. So such an
+    /// answer comes back without the registry read or the floor read (<see cref="NeverConnects"/>: asking would throw).
+    /// The capped list does not use the probe, so a capped read over the same hour still gets its note.
+    /// </summary>
+    [Fact]
+    public async Task AWindowNoLongerThanTheSlack_NeverAsksTheStoreForCoverage_ButACappedListStillGetsItsNote()
+    {
+        await using var store = NeverConnects();
+        Task<string> Run(string tool, int hours, string payload) =>
+            WebDataStartNote.AddAsync(store, tool, "sql01", hours, WindowEnd, payload, null, Cancelled);
+
+        Assert.True(
+            TimeSpan.FromHours(1) <= DurationTrendRouting.TruncationSlack && TimeSpan.FromHours(2) > DurationTrendRouting.TruncationSlack,
+            "one hour is inside the slack, two hours is past it");
+
+        // The control: two hours is past the slack, so the coverage read happens and the instrument sees it.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Run("get_latch_stats", 2, Rows));
+        // One hour is inside it: no read, the same answer back.
+        Assert.Same(Rows, await Run("get_latch_stats", 1, Rows));
+
+        // A capped list over that hour: its oldest row is inside the window, and the note names it.
+        var capped = CappedTasks
+            .Replace("\"hours_back\":48", "\"hours_back\":1", StringComparison.Ordinal)
+            .Replace("2026-01-02T12:30:00.0000000", "2026-01-02T23:30:00.0000000", StringComparison.Ordinal);
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(await Run("get_waiting_tasks", 1, capped)));
+        Assert.True(answer["window_truncated"]?.GetValue<bool>());
+        Assert.Equal(
+            "partial window: this grid shows only the newest rows, back to 2026-01-02 23:30 UTC, because it stops at its row limit. "
+            + "The window started at 2026-01-02 23:00 UTC. The grid covers 2026-01-02 23:30 to 2026-01-03 00:00 UTC.",
+            answer["truncation_note"]?.GetValue<string>());
+    }
+
+    private const string NewYork = "America/New_York";
+
+    /// <summary>The server's sentence with each UTC instant it names swapped for what the page's own <c>localTime</c>
+    /// makes of that instant (the harness reports it per instant): what the page must draw when it composes the note in
+    /// the browser's zone, with the wording the server's sentence has.</summary>
+    private static string InTheBrowsersZone(string sentence, JsonElement local) =>
+        Regex.Replace(sentence, @"\d{4}-\d{2}-\d{2} \d{2}:\d{2}( UTC)?", m => local.GetProperty(m.Value[..16]).GetString()!);
+
+    /// <summary>What a coverage note's answer carries: the sentence the server builds, and the three instants as fields.</summary>
+    private static JsonObject CoverageAnswer() => new()
+    {
+        ["tasks"] = new JsonArray(new JsonObject { ["wait_type"] = "LCK_M_X" }),
+        ["window_truncated"] = true,
+        ["effective_start"] = "2026-01-02T00:00:00.0000000",
+        ["truncation_note"] = ComposeStoreAvailability.BuildDataStartNotice(Utc(2026, 1, 2), Utc(2025, 12, 26), Utc(2026, 1, 3)),
+        ["data_start_utc"] = "2026-01-02T00:00:00.0000000Z",
+        ["window_start_utc"] = "2025-12-26T00:00:00.0000000Z",
+        ["window_end_utc"] = "2026-01-03T00:00:00.0000000Z",
+    };
+
+    /// <summary>
+    /// The grids print their times in the browser's zone (<c>localTime</c>), so a note above one that named its instants
+    /// in UTC mixed two clocks on one page. The page composes the note again from the instants the answer carries, with
+    /// <c>localTime</c>, in the zone the browser is in (the harness runs it in New York): the same wording, the
+    /// instants the grid's own times show, no "UTC" left in it.
+    /// </summary>
+    [Fact]
+    public void ACoverageNote_IsComposedInTheBrowsersZone_FromTheFields_NotNamedInUtc()
+    {
+        var answer = CoverageAnswer();
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorLocal:" + NewYork, out var r, answer.ToJsonString())) return;
+
+        Assert.NotEqual(0, r.GetProperty("tzOffset").GetInt32());
+        var notice = Assert.Single(Strings(r, "notices"));
+        Assert.Equal(InTheBrowsersZone(answer["truncation_note"]!.GetValue<string>(), r.GetProperty("local")), notice);
+        Assert.DoesNotContain("UTC", notice, StringComparison.Ordinal);
+        Assert.Empty(Strings(r, "errors"));
+    }
+
+    [Fact]
+    public async Task ACappedListNote_IsComposedInTheBrowsersZone_FromTheFields_NotNamedInUtc()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var answered = await WebDataStartNote.AddAsync(null!, "get_waiting_tasks", "sql01", 48, WindowEnd, CappedTasks, null, ct);
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorLocal:" + NewYork, out var r, answered)) return;
+
+        var sentence = JsonNode.Parse(answered)!["truncation_note"]!.GetValue<string>();
+        Assert.NotEqual(0, r.GetProperty("tzOffset").GetInt32());
+        var notice = Assert.Single(Strings(r, "notices"));
+        Assert.Equal(InTheBrowsersZone(sentence, r.GetProperty("local")), notice);
+        Assert.DoesNotContain("UTC", notice, StringComparison.Ordinal);
+    }
+
+    /// <summary>A note whose answer lacks an instant (an older server, another reader), or carries one the page cannot
+    /// read, is drawn as the server sent it: the sentence, in UTC. Better a note in UTC than none.</summary>
+    [Fact]
+    public void ANoteWithoutAllItsFields_IsDrawnAsTheServerSentIt()
+    {
+        var none = CoverageAnswer();
+        none.Remove("data_start_utc");
+        none.Remove("window_start_utc");
+        none.Remove("window_end_utc");
+        var partial = CoverageAnswer();
+        partial.Remove("window_end_utc");
+        var unreadable = CoverageAnswer();
+        unreadable["data_start_utc"] = "not a time";
+
+        foreach (var answer in new[] { none, partial, unreadable })
+        {
+            if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorLocal:" + NewYork, out var r, answer.ToJsonString())) return;
+            Assert.Equal(answer["truncation_note"]!.GetValue<string>(), Assert.Single(Strings(r, "notices")));
+        }
+    }
+
+    /// <summary>
+    /// The Queries tab's window notes (#4231) get the same clock. Two of the Queries reads word their note with no time in
+    /// it; the Query Store note names the instant its history starts when the interval table served it, as the
+    /// <c>effective_start</c> the answer carries. The page shows that instant in the browser's zone, on the descriptor grid
+    /// and on the Top Queries composite, and the MCP answer's own text (in UTC) is not touched.
+    /// </summary>
+    [Fact]
+    public void TheQueryStoreNote_NamesItsInstantInTheBrowsersZone_OnTheGridAndOnTheTopQueriesComposite()
+    {
+        var effectiveStart = new DateTime(2026, 1, 2, 0, 0, 0, DateTimeKind.Unspecified);
+        var stamp = effectiveStart.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        var note = QueryStoreIntervalWide.HistoryNote(effectiveStart, QueryStoreIntervalWide.WideStartBound.FilledSince, manyServers: false);
+        Assert.Contains(stamp, note, StringComparison.Ordinal);
+        var answer = new JsonObject
+        {
+            ["queries"] = new JsonArray(new JsonObject { ["query_id"] = 1, ["query_text"] = "select 1" }),
+            ["window_truncated"] = true,
+            ["effective_start"] = stamp,
+            ["truncation_note"] = note,
+        };
+
+        foreach (var scenario in new[] { "queryStoreLocal", "topQueriesLocal" })
+        {
+            if (!WebRangeKeptHistoryBehaviourTests.TryRun(scenario + ":" + NewYork, out var r, answer.ToJsonString())) return;
+
+            var notice = Assert.Single(Strings(r, "notices"));
+            Assert.Equal(note.Replace(stamp, r.GetProperty("local").GetProperty(stamp).GetString()!, StringComparison.Ordinal), notice);
+            Assert.DoesNotContain(stamp, notice, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void AQueriesNoteThatNamesNoInstant_IsDrawnAsSent()
+    {
+        const string Note = "The window reaches further back than this server's raw query_stats retains (or this server has been monitored for less time than that), so the older part of it was not read.";
+        var answer = new JsonObject
+        {
+            ["queries"] = new JsonArray(new JsonObject { ["query_id"] = 1, ["query_text"] = "select 1" }),
+            ["window_truncated"] = true,
+            ["effective_start"] = "2026-01-02T00:00:00.0000000",
+            ["truncation_note"] = Note,
+        };
+
+        foreach (var scenario in new[] { "queryStoreLocal", "topQueriesLocal" })
+        {
+            if (!WebRangeKeptHistoryBehaviourTests.TryRun(scenario + ":" + NewYork, out var r, answer.ToJsonString())) return;
+            Assert.Equal(Note, Assert.Single(Strings(r, "notices")));
+        }
     }
 }

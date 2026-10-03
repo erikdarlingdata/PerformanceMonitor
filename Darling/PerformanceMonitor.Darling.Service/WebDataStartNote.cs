@@ -46,10 +46,16 @@ namespace PerformanceMonitor.Darling.Service;
 /// are aggregates over the whole window, whose cap keeps the top rows and hides no time range, and
 /// <c>get_pg_predicate_stats</c> is a list ranked by something other than time.</para>
 ///
+/// <para><b>The instants as fields.</b> The note's sentence names its times in UTC. The page prints every time in the
+/// browser's zone, so the answer also carries the instants (<see cref="DataStartField"/> or
+/// <see cref="OldestShownField"/>, <see cref="WindowStartField"/>, <see cref="WindowEndField"/>) and the page composes
+/// the note from them in its own clock. The sentence stays for any other reader.</para>
+///
 /// <para><b>When it says nothing.</b> The window is covered (whether or not it holds rows: a quiet start is not a
 /// cut) and the read did not hit a row cap that cuts by time, nothing in scope holds a row or logged a run in it, the
-/// answer is an envelope (empty, unavailable, invalid) or an error rather than rows, the read cannot be resolved, or
-/// the probe fails. A failed probe costs the grid its notice, never its rows.</para>
+/// answer is an envelope (empty, unavailable, invalid) or an error rather than rows, the read cannot be resolved, the
+/// window is no longer than the 90-minute slack (a window that short can never be cut by the store's coverage, so the
+/// probe is not asked), or the probe fails. A failed probe costs the grid its notice, never its rows.</para>
 /// </summary>
 internal static class WebDataStartNote
 {
@@ -138,7 +144,17 @@ internal static class WebDataStartNote
             payload["window_truncated"] = true;
             payload["effective_start"] = oldestText;
             payload["truncation_note"] = ComposeStoreAvailability.BuildCappedListNotice(oldestShown, cappedEnd.AddHours(-hours), cappedEnd);
+            AddInstants(payload, OldestShownField, oldestShown, cappedEnd.AddHours(-hours), cappedEnd);
             return payload.ToJsonString();
+        }
+
+        /* A window no longer than the slack can never be called cut by the store: the coverage rule needs a start more
+           than RawWindowFloor's 90 minutes after the window's own, and the probe reports none at or after the window's
+           end, so a window of an hour or less always comes back covered. Skip the registry read and the floor read that
+           would say so (the capped list above does not use the probe and keeps its note at any length). */
+        if (TimeSpan.FromHours(hours) <= DurationTrendRouting.TruncationSlack)
+        {
+            return result;
         }
 
         try
@@ -160,6 +176,7 @@ internal static class WebDataStartNote
             payload["window_truncated"] = true;
             payload["effective_start"] = dataStart!.Value.ToString("o", CultureInfo.InvariantCulture);
             payload["truncation_note"] = ComposeStoreAvailability.BuildDataStartNotice(dataStart.Value, windowStart, windowEnd);
+            AddInstants(payload, DataStartField, dataStart.Value, windowStart, windowEnd);
             return payload.ToJsonString();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -170,6 +187,37 @@ internal static class WebDataStartNote
             return result;
         }
     }
+
+    /// <summary>Where the data starts, as a UTC instant: the coverage note's first field (<see cref="AddAsync"/>).</summary>
+    internal const string DataStartField = "data_start_utc";
+
+    /// <summary>The oldest row a capped list shows, as a UTC instant: the capped note's first field.</summary>
+    internal const string OldestShownField = "oldest_shown_utc";
+
+    /// <summary>The window's start, as a UTC instant: on both notes.</summary>
+    internal const string WindowStartField = "window_start_utc";
+
+    /// <summary>The window's end, as a UTC instant: on both notes.</summary>
+    internal const string WindowEndField = "window_end_utc";
+
+    /// <summary>
+    /// The note's instants as fields beside its sentence (#4966). The sentence names them in UTC, which is all an
+    /// MCP client or any other reader of the tool's answer can use; the page prints every time in the browser's zone
+    /// (<c>localTime</c>) and so composes the note again from these (<c>util.js</c>, the way <c>keptWindowStrip</c>
+    /// composes its strip from <c>keptHours</c>), so a note above a grid reads in the grid's own clock. Each is an
+    /// ISO instant with an explicit <c>Z</c>. A page that finds one missing draws the sentence as sent.
+    /// </summary>
+    private static void AddInstants(JsonObject payload, string startField, DateTime start, DateTime windowStart, DateTime windowEnd)
+    {
+        payload[startField] = Instant(start);
+        payload[WindowStartField] = Instant(windowStart);
+        payload[WindowEndField] = Instant(windowEnd);
+    }
+
+    /* Every instant here is UTC: the store's times carry no zone, and the window comes from DateTime.UtcNow or the
+       request's as_of. Stamped Utc, so the "o" form ends in Z. */
+    private static string Instant(DateTime utc) =>
+        DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
 
     /// <summary>
     /// Whether a newest-first list's answer says its row cap cut it (<c>truncated: true</c>), and the time of the

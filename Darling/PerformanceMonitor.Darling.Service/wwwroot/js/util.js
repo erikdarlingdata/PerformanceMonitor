@@ -204,7 +204,8 @@ export function keptWindowStrip(res) {
 
 /**
  * The notice for a grid whose table starts covering the server after the window does (#4966): the response says so with
- * `window_truncated: true` and a `truncation_note` naming where the data starts, in UTC. Null for any other response,
+ * `window_truncated: true` and a `truncation_note` naming where the data starts (in the browser's zone by the time a
+ * read reaches here: readTool composes it with windowNoteText). Null for any other response,
  * which is every window the table covered, a quiet start included. `desc` is the panel's descriptor: a grid draws the
  * note, a chart does not (its time axis already spans the asked range and shows the empty span), and a grid that names
  * `truncation_note` as its own note (the Queries tab's grids, #4231) draws it there, not twice. The note is text,
@@ -216,6 +217,57 @@ export function windowFloorStrip(data, desc) {
   if (!data || data.window_truncated !== true) return null;
   const note = data.truncation_note;
   return typeof note === "string" && note.trim() ? noticeStrip(note) : null;
+}
+
+/**
+ * A read's window note (`truncation_note`) in the page's own clock (#4966). The server writes the sentence with its
+ * instants in UTC, which is all an MCP client can use, but every time this page prints is in the browser's zone
+ * (localTime): a note above a grid that said "2026-01-02 00:00 UTC" mixed two clocks. So the answer also carries the
+ * instants as fields (`data_start_utc` or `oldest_shown_utc`, with `window_start_utc` and `window_end_utc`), and this
+ * composes the sentence again from them with localTime, the way keptWindowStrip composes its strip from `keptHours`.
+ * The Queries tab's notes (#4231) carry no such fields: the Query Store note names an instant only as the
+ * `effective_start` the answer already carries, so that instant is shown in the browser's zone inside the sentence.
+ * A field that is missing or unreadable, or a note that names no instant, draws the sentence as sent. Null when the
+ * answer carries no note.
+ */
+export function windowNoteText(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const sent = data.truncation_note;
+  if (typeof sent !== "string" || !sent.trim()) return null;
+  if (data.window_truncated !== true) return sent;
+
+  const at = (value) => (typeof value === "string" && parseUtc(value) ? localTime(value) : null);
+  const start = at(data.window_start_utc);
+  const end = at(data.window_end_utc);
+  const oldest = at(data.oldest_shown_utc);
+  const first = at(data.data_start_utc);
+  if (start && end && oldest) {
+    return (
+      "partial window: this grid shows only the newest rows, back to " + oldest + ", because it stops at its row limit. " +
+      "The window started at " + start + ". The grid covers " + oldest + " to " + end + "."
+    );
+  }
+  if (start && end && first) {
+    return (
+      "partial window: this panel's data starts at " + first + ", after the window's start at " + start + ". " +
+      "The panel covers " + first + " to " + end + "."
+    );
+  }
+
+  const effective = data.effective_start;
+  if (typeof effective === "string" && effective && parseUtc(effective) && sent.includes(effective)) {
+    return sent.split(effective).join(localTime(effective));
+  }
+  return sent;
+}
+
+/* A read's answer with its window note composed in the browser's zone (windowNoteText), so every strip that draws
+   `truncation_note` (the grids' floor note, the Queries tab's noteKey notes, the hand-built composites) shows one
+   clock. Anything but a data answer, and a data answer whose note is already as it should be, comes back as it is. */
+function localizeWindowNote(res) {
+  if (!res || res.kind !== "data") return res;
+  const note = windowNoteText(res.data);
+  return note === null || note === res.data.truncation_note ? res : { ...res, data: { ...res.data, truncation_note: note } };
 }
 
 export function loadingStrip(label) {
@@ -653,5 +705,5 @@ export function alertDeliveryState(a) {
 
 /** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). */
 export function readTool(tool, params, signal) {
-  return apiGet("/api/read/" + tool + buildQuery(params), signal);
+  return apiGet("/api/read/" + tool + buildQuery(params), signal).then(localizeWindowNote);
 }

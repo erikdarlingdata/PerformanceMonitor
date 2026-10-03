@@ -72,6 +72,16 @@ public sealed class WebDataStartNoteLiveTests
         Assert.StartsWith("partial window:", note, StringComparison.Ordinal);
         Assert.Contains(added.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC", note, StringComparison.Ordinal);
         Assert.NotNull(answer["tasks"]);
+
+        /* The same instants as fields (#4966): the page composes the note from them in the browser's zone. The data start
+           is the one effective_start names, the window is the 168 hours asked for, and none of them is a capped list's. */
+        Assert.Equal(effectiveStart.Ticks, ParseUtc(answer["data_start_utc"]).Ticks);
+        var windowStart = ParseUtc(answer["window_start_utc"]);
+        var windowEnd = ParseUtc(answer["window_end_utc"]);
+        Assert.Equal(TimeSpan.FromHours(168), windowEnd - windowStart);
+        Assert.True(Math.Abs((windowEnd - DateTime.UtcNow).TotalSeconds) < 120, "the window ends when the grid was asked");
+        Assert.EndsWith("Z", answer["data_start_utc"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Null(answer["oldest_shown_utc"]);
     }
 
     [Fact]
@@ -113,6 +123,11 @@ public sealed class WebDataStartNoteLiveTests
         Assert.StartsWith("partial window: this grid shows only the newest rows, back to " + oldestShown.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC", note, StringComparison.Ordinal);
         Assert.DoesNotContain(added.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture), note, StringComparison.Ordinal);
         Assert.Equal(PageCap, answer["tasks"]!.AsArray().Count);
+
+        /* The capped note's instants as fields (#4966): the oldest row shown, never where the table starts. */
+        Assert.True(Math.Abs((ParseUtc(answer["oldest_shown_utc"]) - oldestShown).TotalSeconds) < 1);
+        Assert.Equal(TimeSpan.FromHours(168), ParseUtc(answer["window_end_utc"]) - ParseUtc(answer["window_start_utc"]));
+        Assert.Null(answer["data_start_utc"]);
     }
 
     /// <summary>The same cap over a range the store covered: the server has been collected for a month and its rows
