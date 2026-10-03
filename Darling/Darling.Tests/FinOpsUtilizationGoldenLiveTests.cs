@@ -43,16 +43,16 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class FinOpsUtilizationGoldenLiveTests
 {
-    private const string ServerNameA = "darling-finops-util-golden-a";
-    private const string ServerNameB = "darling-finops-util-golden-b";
-    private const string ServerNameC = "darling-finops-util-golden-c";
-    private const string ServerNameD = "darling-finops-util-golden-d";
-    private const string ServerNameE = "darling-finops-util-golden-e";
-    private static readonly int ServerIdA = ServerIdHelper.GetDeterministicHashCode(ServerNameA);
-    private static readonly int ServerIdB = ServerIdHelper.GetDeterministicHashCode(ServerNameB);
-    private static readonly int ServerIdC = ServerIdHelper.GetDeterministicHashCode(ServerNameC);
-    private static readonly int ServerIdD = ServerIdHelper.GetDeterministicHashCode(ServerNameD);
-    private static readonly int ServerIdE = ServerIdHelper.GetDeterministicHashCode(ServerNameE);
+    internal const string ServerNameA = "darling-finops-util-golden-a";
+    internal const string ServerNameB = "darling-finops-util-golden-b";
+    internal const string ServerNameC = "darling-finops-util-golden-c";
+    internal const string ServerNameD = "darling-finops-util-golden-d";
+    internal const string ServerNameE = "darling-finops-util-golden-e";
+    internal static readonly int ServerIdA = ServerIdHelper.GetDeterministicHashCode(ServerNameA);
+    internal static readonly int ServerIdB = ServerIdHelper.GetDeterministicHashCode(ServerNameB);
+    internal static readonly int ServerIdC = ServerIdHelper.GetDeterministicHashCode(ServerNameC);
+    internal static readonly int ServerIdD = ServerIdHelper.GetDeterministicHashCode(ServerNameD);
+    internal static readonly int ServerIdE = ServerIdHelper.GetDeterministicHashCode(ServerNameE);
 
     [Fact]
     public Task UtilizationReads_MatchGoldenFixture_ThroughTheViewer() =>
@@ -118,7 +118,7 @@ public sealed class FinOpsUtilizationGoldenLiveTests
         }
     }
 
-    private static async Task SeedAsync(NpgsqlConnection connection, DateTime anchor, CancellationToken ct)
+    internal static async Task SeedAsync(NpgsqlConnection connection, DateTime anchor, CancellationToken ct)
     {
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdA, ServerNameA, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdB, ServerNameB, ct);
