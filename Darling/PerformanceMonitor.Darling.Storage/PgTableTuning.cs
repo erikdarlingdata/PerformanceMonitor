@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,10 +26,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// store's collector tables are already hypertables when indexed (CREATE INDEX / ALTER TABLE SET propagate to all
 /// existing and future chunks), a plain-PostgreSQL store gets them too, and a first build on a large adopted store
 /// never contends with live inserts. The same pass also runs on the hourly convergence tick beside live
-/// collection, so a CREATE is issued only when the catalog shows the index absent (<c>IF NOT EXISTS</c> takes
-/// its table locks BEFORE it looks, and would stall every writer once an hour) and then under a bounded
-/// <c>lock_timeout</c> (<see cref="GuardedCreate"/>). Idempotent (catalog check / ALTER TABLE SET), so every
-/// run re-converges and a store that already has them (a field box hand-indexed, or a prior run) issues no CREATE.
+/// collection, but there it NEVER builds an index: an index build takes a ShareLock that queues every writer
+/// behind it, so a missing index is logged once per process and left for the next service start. On the start
+/// path a CREATE is issued only when the catalog shows the index absent (<c>IF NOT EXISTS</c> takes its table
+/// locks BEFORE it looks) and then under a bounded <c>lock_timeout</c> (<see cref="GuardedCreate"/>).
+/// Idempotent (catalog check / ALTER TABLE SET), so every run re-converges and a store that already has them
+/// (a field box hand-indexed, or a prior run) issues no CREATE.
 ///
 /// <para>EXPLAIN-backed field fix (2026-07-22): the composer filtered by <c>object_name</c> / <c>query_hash</c>
 /// fell to a Seq Scan and timed out at the 15 s statement_timeout; a PLAIN index still paid a Bitmap Heap Scan
@@ -78,7 +81,7 @@ public static class PgTableTuning
 {
     /* A first CREATE INDEX on a large adopted store can take a while (at startup it runs before collection and
        blocks no live inserts; the build itself is real work) — the same generous budget the TimescaleDB first
-       conversion uses. On the hourly pass a CREATE is bounded by CreateLockTimeoutSeconds first. */
+       conversion uses. A start-path CREATE is bounded by CreateLockTimeoutSeconds first. */
     private const int SetupTimeoutSeconds = 300;
 
     /// <summary>
@@ -93,9 +96,9 @@ public static class PgTableTuning
 
     /// <summary>
     /// The lock_timeout a CREATE INDEX that is still issued runs under. The build takes ShareLock on the table
-    /// (and every chunk), which conflicts with every writer's RowExclusiveLock; on the hourly pass, beside live
-    /// collection, an unbounded wait behind a chunk compression would hold every INSERT for up to
-    /// <see cref="SetupTimeoutSeconds"/>. The CREATE gives up with <c>55P03</c>, and the next pass retries.
+    /// (and every chunk), which conflicts with every writer's RowExclusiveLock; an unbounded wait behind a chunk
+    /// compression or a reader would hold every INSERT for up to <see cref="SetupTimeoutSeconds"/>. The CREATE
+    /// gives up with <c>55P03</c>, and the next start retries. Only the start path issues a CREATE.
     /// </summary>
     private const string CreateLockTimeoutSeconds = "5s";
 
@@ -113,6 +116,15 @@ public static class PgTableTuning
     {
         var rest = statement.Substring(CreateIndexPrefix.Length);
         return rest.Substring(0, rest.IndexOf(' ', StringComparison.Ordinal));
+    }
+
+    /// <summary>The <c>schema.table</c> a <c>CREATE INDEX IF NOT EXISTS &lt;name&gt; ON &lt;table&gt; ...</c> statement indexes.</summary>
+    private static string CreatedIndexTable(string statement)
+    {
+        const string on = " ON ";
+        var rest = statement.Substring(statement.IndexOf(on, StringComparison.Ordinal) + on.Length);
+        var end = rest.IndexOf(' ', StringComparison.Ordinal);
+        return end < 0 ? rest : rest.Substring(0, end);
     }
 
     /// <summary>NULL when no such index exists in <c>collect</c>, otherwise whether it is valid.</summary>
@@ -319,7 +331,7 @@ public static class PgTableTuning
            rows), 225 ms on DARLING01 today (83,355 rows). A RESULTS-INVARIANT covering-shape index, same
            reasoning as every other statement in this list — Erik's ruling on the issue was that this needed
            no migration rung, since the composer's Tuning stage already creates exactly this kind of index
-           idempotently at every start and hourly (#3817, #3913). Paired with the skip-scan rewrite of
+           idempotently at every start and, for the ALTER TABLE settings, hourly (#3817, #3913). Paired with the skip-scan rewrite of
            StoreMetricsLatestSql below, the latest read went from 7,772 ms to 15 ms on the same seed with
            identical rows (251). */
         "CREATE INDEX IF NOT EXISTS idx_store_metrics_kind_name_time ON collect.store_metrics (object_kind, object_name, metric_time DESC)",
@@ -329,9 +341,27 @@ public static class PgTableTuning
     /// Applies every <see cref="Statements"/> statement, each on its own command and FAILURE-ISOLATED: a single
     /// failure (e.g. a column absent on an odd store) warns and the sweep continues — the store keeps working,
     /// just without that one index. Returns the count that applied (or no-op'd) cleanly. Idempotent, so a re-run
-    /// on an already-tuned store no-ops.
+    /// on an already-tuned store no-ops. The start path builds a missing index under a bounded lock_timeout.
     /// </summary>
-    public static async Task<int> ApplyAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    public static Task<int> ApplyAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default) =>
+        ApplyAsync(connection, logger, hourly: false, cancellationToken);
+
+    /// <summary>
+    /// Indexes the hourly pass found absent and has already warned about, so the warning is logged once per
+    /// process rather than every hour.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, byte> s_hourlyMissingWarned = new(StringComparer.Ordinal);
+
+    /// <summary>Clears the once-per-process warned set so a test can observe the first warning again.</summary>
+    internal static void ResetHourlyMissingWarnings() => s_hourlyMissingWarned.Clear();
+
+    /// <summary>
+    /// <see cref="ApplyAsync(NpgsqlConnection, ILogger?, CancellationToken)"/> with a choice of pass. With
+    /// <paramref name="hourly"/> set (the convergence tick, beside live collection) a missing index is NOT
+    /// built: one Warning per index per process says the next service start builds it, and it is not counted
+    /// as applied. Every other statement runs as on the start path.
+    /// </summary>
+    public static async Task<int> ApplyAsync(NpgsqlConnection connection, ILogger? logger, bool hourly, CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {
@@ -360,6 +390,18 @@ public static class PgTableTuning
                         }
 
                         applied++;
+                        continue;
+                    }
+
+                    if (hourly)
+                    {
+                        if (s_hourlyMissingWarned.TryAdd(indexName, 0))
+                        {
+                            logger?.LogWarning(
+                                "Index collect.{Index} on {Table} is missing; the hourly pass does not build indexes beside live collection, so the next service start builds it",
+                                indexName, CreatedIndexTable(statement));
+                        }
+
                         continue;
                     }
 

@@ -432,7 +432,8 @@ public sealed class DarlingWorker : BackgroundService
            at its own call site today, which the issue names: one failure costs every index in the pass — so
            on this cadence the next hour retries it, which is the change. */
         new("composer performance tuning", StoreObjectConvergenceStage.Tuning, StoreObjectChangeSignal.InPlace,
-            (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, ct)),
+            (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, ct),
+            (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, hourly: true, ct)),
     };
 
     /// <summary>What one convergence pass did, accumulated across its segments so the start path's three

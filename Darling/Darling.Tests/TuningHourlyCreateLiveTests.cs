@@ -7,8 +7,11 @@
  */
 
 using System;
+using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
@@ -21,6 +24,7 @@ namespace Darling.Tests;
 /// (<c>IF NOT EXISTS</c> takes its table locks before it looks), a missing index must still be built, and a
 /// CREATE that is issued must be bounded by a lock_timeout. Own scratch database per test.
 /// </summary>
+/* #1776 own-store: each live fact mints its own scratch database through ScratchPostgres. */
 public sealed class TuningHourlyCreateLiveTests
 {
     private static readonly string[] TunedIndexes =
@@ -93,6 +97,79 @@ public sealed class TuningHourlyCreateLiveTests
 
         await PgTableTuning.ApplyAsync(body, NullLogger.Instance, ct);
         Assert.True(await IndexExistsAsync(body, "idx_store_metrics_kind_name_time", ct));
+    }
+
+    [Fact]
+    public async Task OnTheHourlyPass_AMissingIndexIsNotBuilt_AndOneWarningNamesIt()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the hourly tuning live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        PgTableTuning.ResetHourlyMissingWarnings();
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var body = new NpgsqlConnection(scratch.ConnectionString);
+        await body.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(body, ct);
+        await PgTableTuning.ApplyAsync(body, NullLogger.Instance, ct);
+
+        await Exec(body, "DROP INDEX collect.idx_store_metrics_kind_name_time", ct);
+        var logger = new CapturingTestLogger();
+
+        var first = await PgTableTuning.ApplyAsync(body, logger, hourly: true, ct);
+        var second = await PgTableTuning.ApplyAsync(body, logger, hourly: true, ct);
+
+        Assert.False(await IndexExistsAsync(body, "idx_store_metrics_kind_name_time", ct),
+            "the hourly pass must not build a missing index");
+        Assert.Equal(PgTableTuning.Statements.Count - 1, first);
+        Assert.Equal(PgTableTuning.Statements.Count - 1, second);
+        var warnings = logger.Lines.Where(l => l.StartsWith("Warning:", StringComparison.Ordinal)
+            && l.Contains("idx_store_metrics_kind_name_time", StringComparison.Ordinal)
+            && l.Contains("collect.store_metrics", StringComparison.Ordinal)).ToList();
+        Assert.True(warnings.Count == 1, "expected exactly one warning naming the index and its table: " + logger.Joined);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+    }
+
+    [Fact]
+    public async Task AStartPathCreate_ThatFindsTheTableBusy_GivesUpAndTheSweepRecovers()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the lock-busy create live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var body = new NpgsqlConnection(scratch.ConnectionString);
+        await body.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(body, ct);
+        await PgTableTuning.ApplyAsync(body, NullLogger.Instance, ct);
+        await Exec(body, "DROP INDEX collect.idx_query_stats_server_hash_time", ct);
+
+        await using var holder = new NpgsqlConnection(scratch.ConnectionString);
+        await holder.OpenAsync(ct);
+        await Exec(holder, "BEGIN", ct);
+        try
+        {
+            await Exec(holder, "LOCK TABLE collect.query_stats IN ROW EXCLUSIVE MODE", ct);
+            var logger = new CapturingTestLogger();
+            var clock = Stopwatch.StartNew();
+            var applied = await PgTableTuning.ApplyAsync(body, logger, ct);
+            clock.Stop();
+
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"the busy create took {clock.Elapsed.TotalSeconds:F1}s");
+            Assert.Equal(PgTableTuning.Statements.Count - 1, applied);
+            await using var observer = new NpgsqlConnection(scratch.ConnectionString);
+            await observer.OpenAsync(ct);
+            Assert.False(await IndexExistsAsync(observer, "idx_query_stats_server_hash_time", ct));
+            Assert.Single(logger.Lines, l => l.StartsWith("Information:", StringComparison.Ordinal)
+                && l.Contains("idx_query_stats_server_hash_time", StringComparison.Ordinal)
+                && l.Contains("table was busy", StringComparison.Ordinal));
+        }
+        finally
+        {
+            await Exec(holder, "ROLLBACK", CancellationToken.None);
+        }
     }
 
     [Fact]
