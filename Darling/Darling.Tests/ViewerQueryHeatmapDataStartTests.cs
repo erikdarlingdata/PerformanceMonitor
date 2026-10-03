@@ -144,7 +144,7 @@ public sealed class ViewerQueryHeatmapDataStartTests : IDisposable
     [Fact]
     public void ColumnsThatStartInsideTheRange_RaiseTheNotice_AtTheCoverageStart()
     {
-        Assert.Equal("Showing since 2026-09-04 00:00", BannerFor(At(3), At(3), At(3, 6)));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(At(3), At(3), At(3, 6)));
     }
 
     /* A quiet start: the store covered the whole range (coverage 20 days before it), and the first column is 5 hours in. No notice. */
@@ -159,7 +159,7 @@ public sealed class ViewerQueryHeatmapDataStartTests : IDisposable
     [Fact]
     public void AColumnThatStartsBeforeTheCoverage_IsNamedInsteadOfIt()
     {
-        Assert.Equal("Showing since 2026-09-04 00:00", BannerFor(At(3, 0, 3), At(3), At(3, 6)));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(At(3, 0, 3), At(3), At(3, 6)));
     }
 
     /* No column at all (the range holds no row) with the coverage starting inside the range: the chart is empty, and the notice says
@@ -167,7 +167,7 @@ public sealed class ViewerQueryHeatmapDataStartTests : IDisposable
     [Fact]
     public void AnEmptyChart_NamesTheCoverage_AndAFailedProbeNamesNothing()
     {
-        Assert.Equal("Showing since 2026-09-04 00:00", BannerFor(At(3)));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(At(3)));
         Assert.Null(BannerFor(null));
     }
 

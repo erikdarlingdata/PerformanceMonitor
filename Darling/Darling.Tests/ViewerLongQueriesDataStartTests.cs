@@ -136,7 +136,7 @@ public sealed class ViewerLongQueriesDataStartTests : IDisposable
     [Fact]
     public void RowsThatStartInsideTheRange_RaiseTheNotice_AtTheCoverageStart()
     {
-        Assert.Equal("Showing since 2026-09-04 00:00", BannerFor(At(3), [At(3, 6), At(5)]));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(At(3), [At(3, 6), At(5)]));
     }
 
     /* A quiet start: the store covered the whole range, and the first event came 5 hours in. No notice. */
@@ -150,7 +150,7 @@ public sealed class ViewerLongQueriesDataStartTests : IDisposable
     [Fact]
     public void HistoryThatReachesBeforeTheCoverage_RaisesTheNotice_AtTheHistorysStart()
     {
-        Assert.Equal("Showing since 2026-09-02 00:00", BannerFor(At(3), [At(1), At(3, 6)]));
+        Assert.Equal("Showing since 2026-09-02 00:00:00", BannerFor(At(3), [At(1), At(3, 6)]));
     }
 
     /* History that reaches the range start gives no notice, though the coverage starts days later. */
@@ -164,7 +164,7 @@ public sealed class ViewerLongQueriesDataStartTests : IDisposable
     [Fact]
     public void ARowWithNoEventTime_IsIgnored()
     {
-        Assert.Equal("Showing since 2026-09-03 00:00", BannerFor(At(3), [null, At(2)]));
+        Assert.Equal("Showing since 2026-09-03 00:00:00", BannerFor(At(3), [null, At(2)]));
     }
 
     /* A full page of the newest 200 rows whose oldest event came 3 days into the range names that event, though the store covers
@@ -175,10 +175,10 @@ public sealed class ViewerLongQueriesDataStartTests : IDisposable
         var oldest = RangeStart.AddDays(3);
         IEnumerable<DateTime?> Page(int count) => Enumerable.Range(0, count).Select(i => (DateTime?)oldest.AddMinutes(i));
 
-        Assert.Equal("Showing since 2026-09-04 00:00", BannerFor(At(-20), Page(ViewerDataService.LongQueriesRowCap)));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(At(-20), Page(ViewerDataService.LongQueriesRowCap)));
         Assert.Null(BannerFor(At(-20), Page(ViewerDataService.LongQueriesRowCap - 1)));
         /* The notice comes from the rows, so a probe with no answer does not hide it. */
-        Assert.Equal("Showing since 2026-09-04 00:00", BannerFor(null, Page(ViewerDataService.LongQueriesRowCap)));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(null, Page(ViewerDataService.LongQueriesRowCap)));
     }
 
     /* WPF objects require STA; same shape as ViewerEventDataStartTests. */

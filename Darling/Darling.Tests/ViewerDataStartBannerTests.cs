@@ -223,12 +223,14 @@ public sealed class ViewerDataStartBannerTests : IDisposable
             Assert.DoesNotContain("await floorTask", source, StringComparison.Ordinal);
         }
 
-        /* Seven banner calls: a range load and a slicer drag on each of the three grids, and the range load of the Query Store
-           Regressions grid (#4966; it has no slicer). The Plan Corrections grid's banner goes through ShowEventDataStartAsync, because
-           it passes the cap rule's inputs rather than the probe's answer alone; ViewerPlanCorrectionsDataStartTests pins that call. */
+        /* Six banner calls: a range load and a slicer drag on each of the three grids. The Plan Corrections grid's banner goes
+           through ShowEventDataStartAsync, because it passes the cap rule's inputs rather than the probe's answer alone;
+           ViewerPlanCorrectionsDataStartTests pins that call. The Query Store Regressions grid's goes through
+           ShowQueryStoreRegressionsDataStartAsync (#4966), because it compares the answer with the baseline window's start rather
+           than the range's; ViewerQueryStoreRegressionsDataStartTests pins that call and the step's own banner call. */
         const string bannerCall = @"UpdateTruncationBanner\(\w+TruncationBanner,";
-        Assert.Equal(7, Matches(queries, bannerCall));
-        Assert.Equal(7, Matches(queries, bannerCall + @"\s*await DataStartOrNullAsync\(floorTask,"));
+        Assert.Equal(6, Matches(queries, bannerCall));
+        Assert.Equal(6, Matches(queries, bannerCall + @"\s*await DataStartOrNullAsync\(floorTask,"));
 
         Assert.Contains("(warn ?? ViewerLogger.Warn)(", queries, StringComparison.Ordinal);
     }
@@ -243,7 +245,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
     {
         OnStaThread(() =>
         {
-            var banner = new TextBlock { Visibility = Visibility.Visible, Text = "Showing since 2026-09-04 00:00" };
+            var banner = new TextBlock { Visibility = Visibility.Visible, Text = "Showing since 2026-09-04 00:00:00" };
             var logged = new List<(string Source, string Message)>();
             var probe = Task.FromException<DateTime?>(new InvalidOperationException("the store went away"));
 
@@ -280,7 +282,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
     }
 
     /* The banner names its instants on the invariant culture whatever the machine's: under a Thai default (Buddhist
-       calendar, 2026 prints as 2569) or a Finnish one (a "." time separator) it still reads Gregorian "yyyy-MM-dd HH:mm",
+       calendar, 2026 prints as 2569) or a Finnish one (a "." time separator) it still reads Gregorian "yyyy-MM-dd HH:mm:ss",
        as Lite's banner and the web's notice do. Every branch of the shared banner is read. */
     [Theory]
     [InlineData("th-TH")]
@@ -295,22 +297,26 @@ public sealed class ViewerDataStartBannerTests : IDisposable
             {
                 CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(cultureName);
                 /* The premise: this culture's own formatting does not give the invariant text, so the pin is not vacuous. */
-                Assert.NotEqual("2026-09-04 00:00", RangeStart.AddDays(3).ToString("yyyy-MM-dd HH:mm"));
+                Assert.NotEqual("2026-09-04 00:00:00", RangeStart.AddDays(3).ToString("yyyy-MM-dd HH:mm:ss"));
 
                 var banner = new TextBlock();
 
                 ViewerServerTab.UpdateTruncationBanner(banner, RangeStart.AddDays(3), RangeStart);
-                Assert.Equal("Showing since 2026-09-04 00:00", banner.Text);
+                Assert.Equal("Showing since 2026-09-04 00:00:00", banner.Text);
+
+                /* The seconds are the instant's own, not a rounded minute. */
+                ViewerServerTab.UpdateTruncationBanner(banner, RangeStart.AddDays(3).AddSeconds(42), RangeStart);
+                Assert.Equal("Showing since 2026-09-04 00:00:42", banner.Text);
 
                 ViewerServerTab.UpdateTruncationBanner(banner, null, RangeStart, " (hourly)");
-                Assert.Equal("Showing 2026-09-01 00:00 (hourly)", banner.Text);
+                Assert.Equal("Showing 2026-09-01 00:00:00 (hourly)", banner.Text);
 
                 var wideStart = RangeStart.AddDays(1);
                 var plan = new QueryStoreIntervalWide.WideReadPlan(
                     true, RangeStart.AddDays(4), wideStart, wideStart, QueryStoreIntervalWide.WideStartBound.FilledSince);
                 ViewerServerTab.UpdateTruncationBanner(banner, RangeStart.AddDays(4), RangeStart, widePlan: plan);
-                Assert.StartsWith("Showing since 2026-09-02 00:00", banner.Text, StringComparison.Ordinal);
-                Assert.Contains(" · slicer since 2026-09-05 00:00", banner.Text, StringComparison.Ordinal);
+                Assert.StartsWith("Showing since 2026-09-02 00:00:00", banner.Text, StringComparison.Ordinal);
+                Assert.Contains(" · slicer since 2026-09-05 00:00:00", banner.Text, StringComparison.Ordinal);
             });
         }
         finally
