@@ -5004,6 +5004,26 @@ LIMIT 1";
     private readonly ConcurrentDictionary<(int ServerId, string CollectorName), DetachedCollectorGate> _detachedCollectorGates = new();
 
     /// <summary>
+    /// #4999: drops every slot in <see cref="_detachedCollectorGates"/> held under this server id, when the server is
+    /// removed from the monitored set. The slots are never pruned otherwise, and the id is the registration's, so a
+    /// server added back has the removed one's id: a slot its removed state's run still holds (going, or queued for
+    /// a permit) would make the new state's first daily run skip, which costs a day. The run that holds the old slot
+    /// keeps the object it took and releases it when it ends, and nothing else refers to it by then. Only this
+    /// server's slots go: another server's run that is still going keeps its slot. A run of the removed state that is
+    /// already past its slot and still going is not stopped, so the added-back server's first run can overlap it once.
+    /// </summary>
+    private void ForgetDetachedRunSlots(int serverId)
+    {
+        foreach (var key in _detachedCollectorGates.Keys)
+        {
+            if (key.ServerId == serverId)
+            {
+                _detachedCollectorGates.TryRemove(key, out _);
+            }
+        }
+    }
+
+    /// <summary>
     /// #4938: the effective interval, in minutes, from which a collector counts as a daily one: it runs detached
     /// from its server's sequential pass instead of inside it. Applied to the interval the schedule resolves for
     /// that server (<see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/>), so it covers the
@@ -5297,6 +5317,44 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// #4938, #4999: what a detached daily run works on once it has its permit, or <c>null</c> when it must not run.
+    /// The wait can last hours behind other daily runs, so the run asks again everything its dispatch asked, against
+    /// the server as it is now: that it is not removed and still connected (the runtime it returns is the current one,
+    /// not the one captured at dispatch), that the collector still applies to that connection's target (the engine
+    /// half and the within-engine half, both in <see cref="CollectorCatalog.AppliesTo(string, CollectorTargetInfo)"/>),
+    /// that its effective schedule still has it enabled, and that collection is not paused (the loop dispatches
+    /// nothing while it is). A run that was dispatched before the change and starts after it would otherwise collect
+    /// from a server the operator had removed, turned the collector off for, or paused.
+    ///
+    /// <para>A run skipped for the pause is put back to due. Its dispatch moved the due time a day on, and nothing
+    /// else moves a due time when collection resumes (a reload never moves one forward), so left alone it would not
+    /// run until tomorrow. The other skips need no such help: a removed server has no schedule, a collector that was
+    /// turned off is seeded again from its last run when it is turned on, and a reconnect seeds every collector that
+    /// applies.</para>
+    /// </summary>
+    private ServerRuntime? ReReadAfterPermitWait(ServerLoopState server, string collectorName)
+    {
+        if (server.Retired || server.Runtime is not { } current)
+        {
+            return null;
+        }
+
+        if (!CollectorCatalog.AppliesTo(collectorName, current.Target)
+            || !StoreConfigProvider.ResolveSchedule(collectorName, current.ServerId, _scheduleOverrides).Enabled)
+        {
+            return null;
+        }
+
+        if (!ShouldRunCollection(_paused))
+        {
+            server.NextDue[collectorName] = DateTime.UtcNow;
+            return null;
+        }
+
+        return current;
+    }
+
+    /// <summary>
     /// #4938: one held daily-run permit. Returns it once and only once, however many times it is disposed, so a
     /// double dispose can never hand a permit back that another run has since taken.
     /// </summary>
@@ -5380,6 +5438,21 @@ LIMIT 1";
     /// </summary>
     internal static bool RunsDetached(string name, int effectiveIntervalMinutes) =>
         IsDetachedByName(name) || IsDailyInterval(effectiveIntervalMinutes);
+
+    /// <summary>
+    /// #4999: the (server, collector) slot an INLINE run of a daily collector takes: the at-connect run of an on-load
+    /// collector (<see cref="RunOnLoadAsync"/>) and an operator snapshot. It is the slot the detached scheduled run
+    /// holds for as long as it is going or queued for a permit, so an inline run never starts beside it. Returns the
+    /// lease; <c>null</c> when the slot is held, which the caller reads as "that collector's scheduled run is already
+    /// going: leave this one out"; and <see cref="DetachedCollectorGate.NotGated"/> for a collector this does not
+    /// cover, which is one that does not run detached and one of the three detached by name, whose slot
+    /// <see cref="RunOneAsync"/> takes itself (taking it here too would make that run find it held).
+    /// </summary>
+    private IDisposable? TryTakeInlineDailySlot(int serverId, string collectorName, EffectiveSchedule effective) =>
+        RunsDetached(collectorName, CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes))
+        && !IsDetachedByName(collectorName)
+            ? _detachedCollectorGates.GetOrAdd((serverId, collectorName), static _ => new DetachedCollectorGate()).TryAcquire()
+            : DetachedCollectorGate.NotGated;
 
     /// <summary>
     /// #2219: refreshes this PostgreSQL server's statement text if it is due, and swallows everything if not.
@@ -5797,6 +5870,12 @@ LIMIT 1";
                    calls after this and re-populate the server's cache for one pass; that is the same window the
                    Forget above tolerates, and a re-add inside it is the A5 epoch question, not this one. */
                 _deltas?.ClearServer(id);
+                /* #4999: and its single-flight slots. The id is the registration's, so a re-add carries the same one, and a
+                   run of this removed state that is still going, or still queued for a permit (hours, behind other daily
+                   runs), would hold the slot the re-added server's first daily run needs. That run would skip, and a
+                   skipped daily run waits a day. The old run keeps the slot object it holds and gives it back harmlessly;
+                   it ends at its own re-read (Retired) when it still waits for a permit. */
+                ForgetDetachedRunSlots(id);
                 servers.RemoveAt(i);
                 continue;
             }
@@ -11315,7 +11394,13 @@ AND   j.hypertable_name = '{relation}'", connection))
                These on-load runs are NOT under the per-server CollectionGate (unlike the scheduled sweep and
                snapshot_now). Safe today: this path only runs while Runtime is null, and a snapshot_now needs
                a non-null Runtime, so the two never overlap for one server. If TryConnect's timing ever changes
-               so a connect can race a snapshot, gate this loop too. */
+               so a connect can race a snapshot, gate this loop too.
+
+               #4999: they ARE under the per-(server, collector) slot a detached daily run holds, which the
+               CollectionGate never covered. The scheduled run of each on-load collector is detached and outlives its
+               pass, so a fault and a reconnect while that run is still going would start a second run beside it.
+               RunOnLoadAsync takes the slot for the run's length and leaves out a collector whose slot is held;
+               the next-due seeding below still happens for it. */
             var now = DateTime.UtcNow;
             /* #1575: seed each scheduled collector's first post-connect due time from its persisted last-run
                watermark so a restart RESUMES the real cadence instead of re-phasing it up to a full interval
@@ -11365,10 +11450,7 @@ AND   j.hypertable_name = '{relation}'", connection))
 
                 if (effective.FrequencyMinutes == 0)
                 {
-                    /* null, not the live mark: the on-load dispatch is not a scheduled sweep body and
-                       never resets it, so folding it in would mix a previous body's bookkeeping
-                       into these rows - the cross-body contamination the reset exists to prevent. */
-                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
+                    await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken);
 
                     /* #3929/#3930: ALSO becomes due again on CollectorScheduleDefaults.OnLoadRecaptureMinutes,
                        seeded from the SAME pre-dispatch watermark used below - the run just above updates it
@@ -11459,6 +11541,38 @@ AND   j.hypertable_name = '{relation}'", connection))
                 server.Config.ServerId,
                 server.Config.DisplayName, online: false, error: ex.Message, cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// #4999: the at-connect run of ONE on-load collector (effective frequency 0), inline in
+    /// <see cref="TryConnectAsync"/>. Each on-load collector's SCHEDULED run is detached (its recapture is daily), and
+    /// a detached run outlives the pass that dispatched it: a fault and a reconnect while it is still going, or still
+    /// queued for a permit, brings this loop to the same collector. So the run takes the (server, collector) slot the
+    /// detached run holds (<see cref="TryTakeInlineDailySlot"/>), for its own length, and a collector whose slot is
+    /// held is left out: the run that holds it is already capturing, and it reads the connection the server has when
+    /// it starts. Left out costs nothing: the caller still seeds the collector's next due time. Internal so a test can
+    /// drive it with <see cref="RunOneBodyOverride"/> standing in for the collector run, because the connect path
+    /// itself needs a store.
+    /// </summary>
+    /// <param name="serverId">The id the connect captured, which stays valid after a run nulls the server's runtime.</param>
+    /// <param name="effective">The collector's effective schedule, resolved by the caller.</param>
+    internal async Task RunOnLoadAsync(
+        ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int serverId, EffectiveSchedule effective,
+        CancellationToken cancellationToken)
+    {
+        using var slot = TryTakeInlineDailySlot(serverId, collectorName, effective);
+        if (slot is null)
+        {
+            _logger.LogInformation(
+                "  [{Server}] {Collector} not run at connect: its scheduled daily run is still going (#4999)",
+                server.Config.DisplayName, collectorName);
+            return;
+        }
+
+        /* null, not the live mark: the on-load dispatch is not a scheduled sweep body and
+           never resets it, so folding it in would mix a previous body's bookkeeping
+           into these rows - the cross-body contamination the reset exists to prevent. */
+        await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs: null, cancellationToken);
     }
 
     /// <summary>
@@ -11724,19 +11838,14 @@ AND   j.hypertable_name = '{relation}'", connection))
                    collector out and says so. Free means the snapshot runs it inline, as before, holds the slot for
                    that run only, and gives it back after, so a snapshot that is over never makes the next scheduled
                    run skip. The three collectors detached by name take their own slot inside RunOneAsync. */
-                IDisposable? snapshotSlot = DetachedCollectorGate.NotGated;
-                if (RunsDetached(name, CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes))
-                    && !IsDetachedByName(name))
+                var snapshotSlot = TryTakeInlineDailySlot(runtime.ServerId, name, effective);
+                if (snapshotSlot is null)
                 {
-                    snapshotSlot = _detachedCollectorGates.GetOrAdd((runtime.ServerId, name), static _ => new DetachedCollectorGate()).TryAcquire();
-                    if (snapshotSlot is null)
-                    {
-                        skippedDaily.Add(name);
-                        _logger.LogInformation(
-                            "  [{Server}] snapshot_now skipped {Collector}: its scheduled daily run is still going (#4999)",
-                            server.Config.DisplayName, name);
-                        continue;
-                    }
+                    skippedDaily.Add(name);
+                    _logger.LogInformation(
+                        "  [{Server}] snapshot_now skipped {Collector}: its scheduled daily run is still going (#4999)",
+                        server.Config.DisplayName, name);
+                    continue;
                 }
 
                 /* null for the same reason as the on-load loop: an operator snapshot is not a body. */
@@ -13016,11 +13125,13 @@ LIMIT 1";
            waits, so a run that has not yet started still counts as unfinished. The permit is held to the end of
            the run, through the store writes. The wait can last hours behind other daily runs, so what the run
            works on is read again after it: a server removed or reconnected in the meantime must not be run
-           against the connection it had when this run was dispatched. */
+           against the connection it had when this run was dispatched. #4999: and everything the dispatch checked
+           is checked again (ReReadAfterPermitWait): a pause, a collector turned off, a target it no longer
+           applies to. */
         using var dailyPermit = detachedDaily ? await AcquireDailyRunPermitAsync(server, collectorName, cancellationToken) : null;
         if (detachedDaily)
         {
-            if (server.Retired || server.Runtime is not { } currentRuntime)
+            if (ReReadAfterPermitWait(server, collectorName) is not { } currentRuntime)
             {
                 return 0;
             }
