@@ -164,6 +164,13 @@ internal static class WebDataStartNote
     /// </summary>
     private static readonly HashSet<string> UncappedWindowReads = new(StringComparer.Ordinal) { "get_collection_log" };
 
+    /// <summary>
+    /// A window end as an <c>as_of</c> anchor the tools parse back to the same instant (to the millisecond): the web route
+    /// takes the end of a newest-first capped read once and hands it to the read and to <see cref="AddAsync"/>.
+    /// </summary>
+    internal static string FormatWindowEnd(DateTime endUtc) =>
+        endUtc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+
     private static string? ValidateWindowFor(string tool, int hours, string? asOf, out DateTime endUtc) =>
         UncappedWindowReads.Contains(tool)
             ? McpHelpers.ValidateUncappedWindow(hours, asOf, out endUtc)

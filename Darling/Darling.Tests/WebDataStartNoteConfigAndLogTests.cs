@@ -27,8 +27,12 @@ namespace Darling.Tests;
 /// the PostgreSQL changes) name their oldest row. These cover what needs no store; the store's side is
 /// <see cref="WebDataStartNoteLiveTests"/>.
 /// </summary>
-public sealed class WebDataStartNoteConfigAndLogTests
+public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndLogNoteStore>
 {
+    private readonly ConfigAndLogNoteStore _store;
+
+    public WebDataStartNoteConfigAndLogTests(ConfigAndLogNoteStore store) => _store = store;
+
     private static readonly IReadOnlyDictionary<string, string> NewReads = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         ["get_server_config_changes"] = "server_config",
@@ -129,7 +133,8 @@ public sealed class WebDataStartNoteConfigAndLogTests
     }
 
     /* A duration floor flips the log to slowest first: the page is a sample of the whole window, so its oldest run names no reach
-       and the coverage rule stands (the null source makes the probe fail, so the answer comes back as it was). */
+       and the coverage rule stands. Without a store the probe fails and the answer comes back as it was; over a store holding a
+       server added two days ago, the same ranked page gets the coverage note and not the capped one. */
     [Fact]
     public async Task ACollectionLogRankedSlowestFirst_KeepsTheCoverageRule()
     {
@@ -137,6 +142,22 @@ public sealed class WebDataStartNoteConfigAndLogTests
         var slowest = CappedLog.Replace("collection_time_desc", "duration_ms_desc", StringComparison.Ordinal);
 
         Assert.Same(slowest, await WebDataStartNote.AddAsync(null!, "get_collection_log", "sql01", 48, WindowEnd, slowest, null, ct));
+
+        Assert.SkipWhen(_store.DataSource is null, "Set DARLING_TEST_PG to a Postgres connection string to run the ranked-page coverage fact.");
+        var end = _store.End;
+        var ranked = "{\"server\":\"x\",\"hours_back\":168,\"run_count\":200,\"truncated\":true,"
+            + "\"oldest_returned_collection_time\":\"" + end.AddHours(-12).ToString("o", System.Globalization.CultureInfo.InvariantCulture) + "\","
+            + "\"order\":\"duration_ms_desc\",\"runs\":[{\"collector\":\"wait_stats\"}]}";
+        var server = ConfigAndLogNoteStore.ServerName(ConfigAndLogNoteStore.CollectionLogRead, "new");
+
+        var answered = await WebDataStartNote.AddAsync(
+            _store.DataSource!, "get_collection_log", server, 168, end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture), ranked, null, ct);
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+
+        Assert.True(answer["window_truncated"]?.GetValue<bool>());
+        Assert.NotNull(answer["data_start_utc"]);
+        Assert.Null(answer["oldest_shown_utc"]);
+        Assert.StartsWith("partial window:", answer["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
     }
 
     /* The PostgreSQL changes page names no oldest-returned field: its oldest row is the earliest changed_at it carries. Its status
