@@ -411,7 +411,11 @@ FROM batch_rows AS b;";
        table is the only record left, and ResolveReadAsync extends the bound down to
        ExactBelowFloorStart = max(window start, filled_since, table floor + one day) and no further: those are the
        three bounds under which the table provably holds what raw held before its purge.
-       There is no per-server probe on this table: its only secondary index leads with first_execution_time. */
+       There is no per-server probe on this table: of its two secondary btrees, idx_query_store_interval_wide_first_exec
+       leads with first_execution_time, and the wide btree on (server_id, first_execution_time) (#4952,
+       QueryStoreBackgroundIndexes.WideServerFirstExec) leads with server_id but is built in the background by the
+       service, not by a migration, so a store can lack it. The per-server reads' bound on first_execution_time is
+       served by that wide btree where it exists. */
 
     /// <summary>
     /// This table's store-shape inputs for one server: its coverage row's <c>filled_since</c> and
@@ -483,9 +487,12 @@ WHERE t.server_id = $1;";
     /// their own identity — keeps only its LATEST snapshot in the table; every caller that places these rows at
     /// <c>collection_time</c> (both duration-trend arm 2's) needs every one of them, not the running maximum. A
     /// field store carries zero such rows once raw retention (days) has aged the post-upgrade window out, so
-    /// this scan is a bounded, indexed (<c>server_id</c>, <c>collection_time</c>) read on the common path and
-    /// costs nothing extra there; it is what lets clause 6 answer TRUE only on the rare upgraded-recently store
-    /// this table cannot yet serve correctly. Bounded to the SAME range the table read would use
+    /// the answer is "none" on the common path, and it is what lets clause 6 answer TRUE only on the rare
+    /// upgraded-recently store this table cannot yet serve correctly. <b>The cost (#4952):</b> with only the
+    /// (<c>server_id</c>, <c>collection_time</c>) index this EXISTS finds nothing, so it has to fetch every heap page
+    /// the server's window touches (855 k raw rows and 56 k blocks at 24 h on a large store) to say no. It is an
+    /// exact read, not a cached answer, because the collector can still store a NULL start on a catalog join miss.
+    /// Bounded to the SAME range the table read would use
     /// (<see cref="ClampedStart"/> through <paramref name="windowEnd"/> in <see cref="ReadsTableAsync"/>), not
     /// the caller's raw windowStart, so a legacy row outside the served range cannot force a needless refusal.
     /// </summary>
@@ -534,12 +541,14 @@ SELECT EXISTS
     /// <summary>
     /// <see cref="PurgeEdgeMargin"/> as a Postgres interval literal (rounded UP to whole minutes, so the SQL form
     /// can never be shorter than the margin), for the <c>first_execution_time &gt;= &lt;window start&gt; -
-    /// PurgeEdgeMarginSql</c> floor the per-server reads of this table carry (#4605). Among the table's indexes are the
-    /// unique key, which leads with <c>server_id</c> and holds <c>first_execution_time</c> as a key column, and
-    /// <c>idx_query_store_interval_wide_first_exec</c>. A read that filters only by <c>collection_time</c> (or
-    /// <c>interval_start_time_utc</c>) is served by neither, so a per-server read walked all of the server's rows;
-    /// the floor filters the unique key's entries before the heap. The Custom Views route, for all servers or some,
-    /// does not carry the floor (see <c>ComposeCompiler.BuildFactRelation</c>).
+    /// PurgeEdgeMarginSql</c> floor the per-server reads of this table carry (#4605). Among the table's btrees are the
+    /// unique key, which leads with <c>server_id</c> and holds <c>first_execution_time</c> as a key column,
+    /// <c>idx_query_store_interval_wide_first_exec</c>, and, where the service has built it, the wide btree on
+    /// <c>(server_id, first_execution_time)</c> (#4952), which the service builds in the background rather than a
+    /// migration. A read that filters only by <c>collection_time</c> (or <c>interval_start_time_utc</c>) is served by
+    /// none of them, so a per-server read walked all of the server's rows; the floor filters the unique key's entries
+    /// before the heap and, where the wide btree exists, is the range that btree scans. The Custom Views route, for all
+    /// servers or some, does not carry the floor (see <c>ComposeCompiler.BuildFactRelation</c>).
     /// <para><b>Why no row is lost.</b> The collector keeps only intervals with <c>end_time &gt; @cutoff_time</c>,
     /// and the cutoff is never more than <see cref="WatermarkPolicy.MaxCatchup"/> before the row's
     /// <c>collection_time</c> (<c>WatermarkPolicy.ClampCatchup</c>: <c>C - MaxCatchup</c> with no watermark).

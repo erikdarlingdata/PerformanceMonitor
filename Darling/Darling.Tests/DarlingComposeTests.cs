@@ -3485,11 +3485,19 @@ public sealed class DarlingComposeTests
 [Collection("live-postgres")]
 public sealed class DarlingComposeLivePostgresTests
 {
+    private const int ServerId = -973405;
+    private const string ServerName = "compose-old-window-no-rows";
+
     /// <summary>
     /// The live #1665 repro, end-to-end through the ONE shared runner: a >3-day window against a plain
     /// PostgreSQL store (the darling-pg CI service container — no TimescaleDB, so no rollups exist). Before
     /// the availability gate this compiled <c>collect.query_stats_hourly</c> and failed 42P01 at run time;
-    /// now it routes raw, runs clean, and carries NO notice (raw is complete on this store shape).
+    /// now it routes raw, runs clean, and carries NO notice. The panel is scoped to a server that holds no rows:
+    /// a fleet-wide panel would start at the oldest row any other test left in this shared store, and a store
+    /// whose rows start after the window's start now says so. That server is REGISTERED (a sentinel registry
+    /// row, removed afterwards), because the data-start probe reads through <c>collect.servers</c>: a name the
+    /// registry does not hold asks the probe nothing, and the no-notice assertion would pass whatever the
+    /// store held (#4953).
     /// </summary>
     [Fact]
     public async Task RunComposedPanel_OldWindow_AgainstPlainPostgres_RunsCleanOnRaw()
@@ -3500,30 +3508,43 @@ public sealed class DarlingComposeLivePostgresTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using (var connection = new NpgsqlConnection(connectionString))
+        var bodySucceeded = false;
+        try
         {
-            await connection.OpenAsync(ct);
-            await PgMigrations.MigrateAsync(connection, ct);
+            await using (var connection = new NpgsqlConnection(connectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+                await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+            var body = new JsonObject
+            {
+                ["panel"] = JsonNode.Parse(
+                    "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}"),
+                ["hours"] = 240, /* 10 days — far past the 3-day raw route horizon */
+                ["server"] = ServerName,
+            };
+
+            var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, ct);
+
+            Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
+            Assert.NotNull(outcome.Payload);
+            var sql = (string)outcome.Payload!["sql"]!;
+            Assert.Contains("collect.query_stats", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("_hourly", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("_daily", sql, StringComparison.Ordinal);
+            Assert.Null(outcome.Payload["notice"]);
+
+            bodySucceeded = true;
         }
-
-        await using var postgres = NpgsqlDataSource.Create(connectionString!);
-
-        var body = new JsonObject
+        finally
         {
-            ["panel"] = JsonNode.Parse(
-                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}"),
-            ["hours"] = 240, /* 10 days — far past the 3-day raw route horizon */
-        };
-
-        var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, ct);
-
-        Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
-        Assert.NotNull(outcome.Payload);
-        var sql = (string)outcome.Payload!["sql"]!;
-        Assert.Contains("collect.query_stats", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("_hourly", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("_daily", sql, StringComparison.Ordinal);
-        Assert.Null(outcome.Payload["notice"]);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM servers WHERE server_id = $1", ServerId));
+        }
     }
 }
 

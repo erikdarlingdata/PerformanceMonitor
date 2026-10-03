@@ -30,8 +30,13 @@ public enum ComposeSourceTier
 /// The routing decision for one panel: which tier to read and the relation/time-column that implies. The raw tier
 /// carries no relation (the compiler keeps its existing <c>SourceTable</c> + prefix-time-column path); a CAGG tier
 /// names the rollup view, whose time column is always the <c>bucket</c> the CAGG produced.
+///
+/// <para><paramref name="StitchBoundaryUtc"/> is the instant a stitched <paramref name="CaggFromClause"/> splits at
+/// (<see cref="RollupCoverage.StitchFloor"/>): the superseded rollup is read below it and its successor from it up. It
+/// is null when the clause names one relation. It is carried as a value, set where the router builds the clause, so
+/// the data-start probe reads the successor over the same range the panel does.</para>
 /// </summary>
-public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation, string? CaggFromClause = null)
+public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation, string? CaggFromClause = null, DateTime? StitchBoundaryUtc = null)
 {
     /// <summary>The raw route — the compiler's unchanged behaviour.</summary>
     public static readonly ComposeRoute Raw = new(ComposeSourceTier.Raw, null);
@@ -294,7 +299,13 @@ public static class ComposeSourceRouter
             return resolved;
         }
 
-        var dayGrain = (Route: new ComposeRoute(ComposeSourceTier.Daily, cagg.DayGrainDailyView),
+        /* The day-grain daily has no successor to stitch to, so its FROM clause is the one relation. It is set here,
+           like every other rollup route's, because the data-start probe reads the relations a panel read off that
+           clause; compiled, it is the same text the compiler built from the name alone (" AS f" appended). */
+        var dayGrain = (Route: new ComposeRoute(
+                            ComposeSourceTier.Daily,
+                            cagg.DayGrainDailyView,
+                            $"{PgSchemaGenerator.CollectSchema}.{cagg.DayGrainDailyView} AS {ComposeRoute.FactAlias}"),
                         FloorUtc: coverage.FloorOf(cagg.DayGrainDailyView));
 
         if (TierCoverage.Covers(dayGrain.FloorUtc, windowStartUtc))
@@ -346,11 +357,14 @@ public static class ComposeSourceRouter
                the FROM-clause item the compiler actually splices in, which may stitch the legacy hourly to its
                interval-honest successor. With no successor this is byte-identical to
                "collect.<hourlyView> AS f" — the same text the old CaggRelation-only path produced once the
-               compiler appended " AS f" itself. */
+               compiler appended " AS f" itself. The route also carries the stitch boundary as a value
+               (RollupCoverage.StitchFloor, the F the clause splits at, null when the clause names one relation),
+               so the data-start probe reads the successor from that boundary up, as the panel does. */
             RetentionTier.Hourly => (new ComposeRoute(
                 ComposeSourceTier.Hourly,
                 coverage.HourlyRelationNameFor(hourlyView, windowStartUtc),
-                coverage.StitchedRelationSql(hourlyView, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Hourly)),
+                coverage.StitchedRelationSql(hourlyView, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Hourly),
+                coverage.StitchFloor(hourlyView, RollupCoverage.StitchTier.Hourly, windowStartUtc)),
                 tierCoverage.HourlyFloorUtc),
             /* #3653 A6: same shape as the hourly arm above, but StitchTier.Daily — the successor daily's own
                floor and its successor hourly's ceiling-of-day decide F_d (RollupCoverage.StitchedRelationSql).
@@ -358,7 +372,8 @@ public static class ComposeSourceRouter
             _ => (new ComposeRoute(
                 ComposeSourceTier.Daily,
                 dailyView!,
-                coverage.StitchedRelationSql(dailyView!, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Daily)),
+                coverage.StitchedRelationSql(dailyView!, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Daily),
+                coverage.StitchFloor(dailyView!, RollupCoverage.StitchTier.Daily, windowStartUtc)),
                 tierCoverage.DailyFloorUtc),
         };
     }

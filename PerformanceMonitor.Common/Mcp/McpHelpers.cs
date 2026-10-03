@@ -87,7 +87,9 @@ internal static class McpHelpers
     /// <para>The walk starts at the last position at or before the limit whose two neighbours are both ASCII and are
     /// not CR then LF. No ASCII character extends, joins or prefixes the character next to it, so such a position is a
     /// text-element boundary however the text before it segments. Most values are ASCII at the cut, so most calls
-    /// return without segmenting anything, and a 512,000-unit limit costs no more than a 40-unit one.</para>
+    /// return without segmenting anything, and when the text is ASCII at the cut a 512,000-unit limit costs no more
+    /// than a 40-unit one. When it is not (a non-ASCII character or a CR LF pair at the cut), the walk goes back toward
+    /// the start of the text and segments forward from there, so the cost then grows with the limit.</para>
     /// </summary>
     internal static int TextElementCutLength(ReadOnlySpan<char> text, int limit)
     {

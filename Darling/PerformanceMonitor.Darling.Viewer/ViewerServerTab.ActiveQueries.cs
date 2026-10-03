@@ -73,18 +73,25 @@ public partial class ViewerServerTab
         if (_pendingActiveQueriesWindow is { } pending)
         {
             _pendingActiveQueriesWindow = null;
+            var pendingDataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, pending.FromUtc, pending.ToUtc);
             var (pendingTotalCount, pendingSnapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, pending.FromUtc, pending.ToUtc, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(pendingSnapshots);
             LatestSnapshotIndicator.Text = pendingSnapshots.Count < pendingTotalCount
                 ? $"{pending.Indicator} — Showing the newest 1,000 of {pendingTotalCount:N0}"
                 : pending.Indicator;
+            UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(pendingDataStartTask, "Active Queries"), pending.FromUtc);
             await LoadActiveQueriesSlicerAsync(pending.FromUtc.AddHours(-1), pending.ToUtc.AddHours(1));
             return;
         }
 
+        /* query_snapshots keeps 7 days by default, and a custom range can reach past it, or past a server added
+           since: say where coverage starts (the Queries tab's "Showing since" banner) rather than draw a shorter
+           range as if it were the whole. */
+        var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
+        UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), startUtc);
         await LoadActiveQueriesSlicerAsync(startUtc, endUtc);
     }
 
@@ -101,9 +108,11 @@ public partial class ViewerServerTab
     {
         try
         {
+            var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
             LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
+            UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), e.StartUtc);
         }
         catch (Exception ex)
         {
@@ -184,6 +193,11 @@ public partial class ViewerServerTab
             LatestSnapshotIndicator.Text = "Loading...";
             var (batchTime, rows) = await _dataService.GetLatestQuerySnapshotBatchAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
             _querySnapshotsFilterMgr!.UpdateData(rows);
+            /* #4953: the grid now holds the newest stored batch, not the range the "Showing since" banner described, so the
+               banner comes down (collapsed, text cleared). The next range read raises it again through UpdateTruncationBanner.
+               A failed read never reaches this line: the range rows stay in the grid, and so does the banner that describes them. */
+            QuerySnapshotsTruncationBanner.Visibility = Visibility.Collapsed;
+            QuerySnapshotsTruncationBanner.Text = string.Empty;
             LatestSnapshotIndicator.Text = batchTime.HasValue
                 ? $"Latest snapshot: {ViewerTimeHelper.FormatForDisplay(batchTime.Value, "yyyy-MM-dd HH:mm:ss")}"
                 : "No snapshots stored";
@@ -327,7 +341,9 @@ public partial class ViewerServerTab
     /// Switches to the Active Queries sub-tab and loads the grid + slicer for a narrow window — the target
     /// of the heatmap drill-down. The suppress flag skips the sub-tab auto-refresh so it doesn't clobber
     /// this filtered read (Lite's SelectActiveQueriesForDrillDown). The slicer window is padded ±1h so the
-    /// hourly buckets still overlap a narrow drill window (Lite's LoadActiveQueriesSlicerAsync padding).
+    /// hourly buckets still overlap a narrow drill window (Lite's LoadActiveQueriesSlicerAsync padding). The
+    /// "Showing since" banner is set for the drill window too, as every other read of this grid sets it for the
+    /// window it draws (#4953); left alone it would keep describing the last range read.
     /// </summary>
     private async Task NavigateToActiveQueriesForWindowAsync(DateTime fromUtc, DateTime toUtc, string indicator)
     {
@@ -346,11 +362,18 @@ public partial class ViewerServerTab
             _suppressDrillDownAutoRefresh = false;
         }
 
+        /* The drill window can start before what query_snapshots still holds (retention, or a server added since), and
+           the banner the last range read raised describes THAT range, so it could claim a cut this window does not have
+           or miss one it does: ask the probe about the window drawn here (fromUtc, not the toolbar's start), beside the
+           rows read, and set the banner once they are bound, as the deep-link branch of LoadActiveQueriesAsync does for
+           the same window (a deep link reaches both, and the two writes agree). */
+        var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, fromUtc, toUtc);
         var (totalCount, snapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter);
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LatestSnapshotIndicator.Text = snapshots.Count < totalCount
             ? $"{indicator} — Showing the newest 1,000 of {totalCount:N0}"
             : indicator;
+        UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), fromUtc);
 
         await LoadActiveQueriesSlicerAsync(fromUtc.AddHours(-1), toUtc.AddHours(1));
     }

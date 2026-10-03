@@ -7,11 +7,14 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
@@ -241,7 +244,9 @@ internal static class ComposeStoreAvailability
     /// without the extension no retention policy ever drops raw, so raw holds the complete answer (#1665).
     /// Scoped to the TIERED tables (<see cref="ComposeCaggCatalog"/>): every other source reaches Raw via
     /// the no-CAGG early return and lives on the 30-day collector purge, not the 4-day tier — a 7-day
-    /// wait_stats panel is complete on raw, and a notice there would be a false alarm.
+    /// wait_stats panel is complete on raw, and a notice there would be a false alarm. When this returns null,
+    /// the runner asks where the panel's own rows start instead (<see cref="BuildDataStartNoticeAsync"/>), which
+    /// covers those sources, a store with no rollups, and one server whose rows start later than the rest.
     ///
     /// <para><b>MEASURED beats assumed (#1759).</b> The retention SPAN is only a proxy for how far a tier
     /// reaches, and on the stores #1759 is about it is the wrong proxy in the dangerous direction: their raw
@@ -313,6 +318,110 @@ internal static class ComposeStoreAvailability
             CultureInfo.InvariantCulture,
             $"partial window: this panel read the {tierName} tier, which on this store reaches back about {heldText} day{(heldText == "1" ? "" : "s")}, but the requested window starts {windowText} day{(windowText == "1" ? "" : "s")} back — older points are not included.");
     }
+
+    /// <summary>
+    /// The "partial window" notice for a panel whose coverage starts after its window does, or null when coverage
+    /// reaches the window's start (whether or not the window holds rows), when no server in scope holds a row or
+    /// logged a run in the window, when the window lies wholly before the coverage (the run log outlives the table,
+    /// so a logged run makes a server count in a window whose rows are purged; its coverage then starts after the
+    /// window ends and there is none to report), or when the probe fails (a failed probe costs the panel its notice,
+    /// never its chart; a caller that cancelled still sees the cancellation). Coverage is read per server for the relations
+    /// the panel read (<see cref="DataStartSources"/>): the later of the server's first collection and the table's
+    /// retention edge, moved earlier by any row it holds in the window; for a source the schedule gives no edge
+    /// (a rollup, the raw relations the gated purge owns, a baseline-floored collector) the oldest row the server
+    /// holds at or before the window's end (<see cref="DataWindowFloor"/>). It names no cause: retention and a
+    /// server added last week truncate the same way.
+    /// The same <see cref="RawWindowFloor.IsTruncated"/> slack the Queries tab's "Showing since" banner uses
+    /// decides, so the two surfaces call the same window cut.
+    ///
+    /// <para>A probe that fails is reported through <paramref name="logger"/> at Debug, with the exception: the panel
+    /// is still answered (only its notice is lost), and this runs once per panel run, so a standing fault at Warning
+    /// would put a line in the service log on every refresh of every panel. That is also the level, and the logger,
+    /// the runner's read-latency recording uses for a failure that never fails the request. Null reports nothing.</para>
+    /// </summary>
+    internal static async Task<string?> BuildDataStartNoticeAsync(
+        NpgsqlDataSource postgres, string sourceTable, ComposeRoute route, IReadOnlyList<string>? servers,
+        DateTime windowStartUtc, DateTime windowEndUtc, int commandTimeoutSeconds, CancellationToken cancellationToken,
+        ILogger? logger = null)
+    {
+        var sources = DataStartSources(sourceTable, route);
+        if (sources.Count == 0)
+        {
+            return null;
+        }
+
+        DateTime? dataStart;
+        try
+        {
+            dataStart = await DataWindowFloor.GetAsync(postgres, sources, servers, windowStartUtc, windowEndUtc, commandTimeoutSeconds, cancellationToken);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger?.LogDebug(ex, "The data-start probe for a composed panel over {SourceTable} failed; the panel is answered without a partial-window notice.", sourceTable);
+            return null;
+        }
+
+        return RawWindowFloor.IsTruncated(dataStart, windowStartUtc)
+            ? BuildDataStartNotice(dataStart!.Value, windowStartUtc, windowEndUtc)
+            : null;
+    }
+
+    /// <summary>The text of <see cref="BuildDataStartNoticeAsync"/>'s notice: where the data starts, where the
+    /// window started, and the window the panel really covers, all in UTC.</summary>
+    internal static string BuildDataStartNotice(DateTime dataStartUtc, DateTime windowStartUtc, DateTime windowEndUtc) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"partial window: this panel's data starts at {dataStartUtc:yyyy-MM-dd HH:mm} UTC, after the window's start at {windowStartUtc:yyyy-MM-dd HH:mm} UTC. The panel covers {dataStartUtc:yyyy-MM-dd HH:mm} to {windowEndUtc:yyyy-MM-dd HH:mm} UTC.");
+
+    /// <summary>
+    /// The relations a compiled panel read, as data-start probe sources: the raw table on a raw route (none when
+    /// the probe cannot read it by index, <see cref="DataWindowFloor.Source.TryForCollectorTable"/>), or each rollup
+    /// a rollup route's FROM clause names, both halves when the route stitches a superseded rollup to its
+    /// successor. Read off the FROM clause the router built (<see cref="ComposeRoute.CaggFromClause"/>, set on every
+    /// rollup route, the day-grain daily included), so the probe asks about exactly what the panel read, and each
+    /// name is checked against the rollup registry (<see cref="DataWindowFloor.Source.TryForRollup"/>) before the
+    /// probe splices it. Each half is probed within the bounds the route reads it. The superseded half is probed
+    /// whole: the route reads it below the stitch boundary, and its oldest bucket is where the stitched read starts.
+    /// The successor is probed from the boundary up (<see cref="ComposeRoute.StitchBoundaryUtc"/>, the value the
+    /// router carried, never read out of the clause text), because that is all the route reads of it: a bucket it
+    /// holds below the boundary (a wide refresh after the boundary was measured) cannot move the start earlier.
+    /// The successor is the clause's relation the registry names as another one's successor, so the bound does not
+    /// depend on the order the clause lists them in. A rollup route without a FROM clause is a router defect, and
+    /// throws: there is no relation name to fall back to that is known to be the one the panel read.
+    /// </summary>
+    internal static IReadOnlyList<DataWindowFloor.Source> DataStartSources(string sourceTable, ComposeRoute route)
+    {
+        if (!route.IsCagg)
+        {
+            return DataWindowFloor.Source.TryForCollectorTable(sourceTable, out var raw) ? [raw] : [];
+        }
+
+        var fromClause = route.CaggFromClause
+            ?? throw new ArgumentException("a rollup route carries the FROM clause the router built; the data-start probe reads the relations it names off that clause.", nameof(route));
+        var relations = s_collectRelation.Matches(fromClause).Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal).ToList();
+        var sources = new List<DataWindowFloor.Source>();
+        foreach (var relation in relations)
+        {
+            DateTime? lowerBound = route.StitchBoundaryUtc is { } boundary && IsSuccessorOfAnother(relation, relations) ? boundary : null;
+            if (DataWindowFloor.Source.TryForRollup(relation, out var rollup, lowerBound))
+            {
+                sources.Add(rollup);
+            }
+        }
+
+        return sources;
+    }
+
+    /* The registry's pairs: an hourly legacy and its successor (TimescaleSupport.SuccessorOf), a daily legacy and its
+       successor daily (TimescaleSupport.SupersededDailyRollups). */
+    private static bool IsSuccessorOfAnother(string relation, IReadOnlyList<string> clauseRelations) =>
+        clauseRelations.Any(other =>
+            string.Equals(TimescaleSupport.SuccessorOf(other), relation, StringComparison.Ordinal)
+            || TimescaleSupport.SupersededDailyRollups.Any(p =>
+                string.Equals(p.LegacyDaily, other, StringComparison.Ordinal) && string.Equals(p.SuccessorDaily, relation, StringComparison.Ordinal)));
+
+    private static readonly Regex s_collectRelation =
+        new(@"\b" + Regex.Escape(PgSchemaGenerator.CollectSchema) + @"\.([a-z_][a-z0-9_]*)\b", RegexOptions.CultureInvariant);
 
     /// <summary>
     /// The row-cap sibling of <see cref="BuildRetentionNotice"/> (#1687): a time-series panel whose
