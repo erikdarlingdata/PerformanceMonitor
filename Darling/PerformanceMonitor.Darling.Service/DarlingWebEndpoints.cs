@@ -1476,6 +1476,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private const string QueryStoreWideServerIdsSql =
         "SELECT server_id, server_name FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1))";
 
+    /// <summary>#4605: how many servers' eligibility probes run at once in a fleet check.</summary>
+    private const int QueryStoreWideEligibilityConcurrency = 4;
+
     /// <summary>
     /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
     /// may read <c>collect.query_store_interval_wide</c> (V145) instead of deduping raw — decided here, in the
@@ -1538,21 +1541,63 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var wideStart = start;
             var bound = QueryStoreIntervalWide.WideStartBound.Window;
             string? settingServer = null;
-            foreach (var (serverId, serverName) in wideServers)
+
+            /* The floors are one store-wide answer: read once here, not once per server. Servers are then
+               checked QueryStoreWideEligibilityConcurrency at a time, each on its own pooled connection; the
+               first refusal cancels the rest. The reduction below walks wideServers in order, so ties for the
+               latest read start go to the earliest server exactly as a serial loop would. */
+            var storeWide = await QueryStoreIntervalWide.ReadStoreWideInputsAsync(connection, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            using var refused = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var gate = new System.Threading.SemaphoreSlim(QueryStoreWideEligibilityConcurrency);
+            var checks = wideServers.Select(async server =>
             {
-                var plan = await QueryStoreIntervalWide.ResolveReadAsync(
-                    connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
-                    McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken);
-                if (!plan.UseTable)
+                try
                 {
-                    return default;
+                    await gate.WaitAsync(refused.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    return (QueryStoreIntervalWide.WideReadPlan?)null;
                 }
 
+                try
+                {
+                    await using var serverConnection = await postgres.OpenConnectionAsync(refused.Token);
+                    var plan = await QueryStoreIntervalWide.ResolveReadAsync(
+                        serverConnection, server.Id, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
+                        McpCommandDeadlines.ReadSeconds, logger: null, refused.Token, storeWide);
+                    if (!plan.UseTable)
+                    {
+                        refused.Cancel();
+                    }
+
+                    return (QueryStoreIntervalWide.WideReadPlan?)plan;
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    return null;
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }).ToList();
+            var plans = await Task.WhenAll(checks);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (refused.IsCancellationRequested)
+            {
+                return default;
+            }
+
+            for (var i = 0; i < wideServers.Count; i++)
+            {
+                var plan = plans[i]!.Value;
                 if (plan.ReadStart > wideStart)
                 {
                     wideStart = plan.ReadStart;
                     bound = plan.StartBound;
-                    settingServer = serverName;
+                    settingServer = wideServers[i].Name;
                 }
             }
 

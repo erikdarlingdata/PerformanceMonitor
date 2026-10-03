@@ -974,6 +974,40 @@ FROM (
     }
 
     /// <summary>
+    /// The inputs <see cref="ResolveReadAsync"/> reads that do not depend on the server: the three floors of
+    /// <see cref="ChunkFloorsSql"/>, which takes no parameter and reads TimescaleDB's catalog for the whole store.
+    /// (<see cref="ReadSourceInputsSql"/>'s coverage and pending columns, <see cref="PlainTableFloorSql"/>,
+    /// <see cref="HasLegacyRowSql"/> and the cadence probe all filter on the server, so they stay per server.)
+    /// A caller that resolves many servers for one window reads this once and passes it to each call.
+    /// </summary>
+    public sealed record StoreWideInputs(DateTime? RawFloor, bool TableIsHypertable, DateTime? TableFloor);
+
+    /// <summary>Reads <see cref="StoreWideInputs"/> once. Null when TimescaleDB's catalog is absent, which
+    /// is the answer <see cref="ResolveReadAsync"/> would reach itself (it never reads the floors then).</summary>
+    public static async Task<StoreWideInputs?> ReadStoreWideInputsAsync(
+        NpgsqlConnection connection, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        bool hasTimescale;
+        await using (var probe = new NpgsqlCommand("SELECT to_regclass('timescaledb_information.chunks') IS NOT NULL;", connection) { CommandTimeout = commandTimeoutSeconds })
+        {
+            hasTimescale = (bool)(await probe.ExecuteScalarAsync(cancellationToken))!;
+        }
+
+        if (!hasTimescale)
+        {
+            return null;
+        }
+
+        await using var floors = new NpgsqlCommand(ChunkFloorsSql, connection) { CommandTimeout = commandTimeoutSeconds };
+        await using var reader = await floors.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return new StoreWideInputs(
+            reader.IsDBNull(0) ? null : reader.GetDateTime(0),
+            reader.GetBoolean(1),
+            reader.IsDBNull(2) ? null : reader.GetDateTime(2));
+    }
+
+    /// <summary>
     /// <see cref="UseTable"/> plus the store round trips it needs, the clamp (<see cref="ClampedStart"/>), and the
     /// lower bound the table read may bind (<see cref="WideReadPlan.ReadStart"/>), which reaches below raw's chunk
     /// floor down to <see cref="ExactBelowFloorStart"/> — all computed from the SAME <c>rawFloor</c> this decision
@@ -988,7 +1022,8 @@ FROM (
         TimeSpan minWindow,
         int commandTimeoutSeconds,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        StoreWideInputs? storeWide = null)
     {
         /* The probes bind these as timestamp-without-time-zone, which Npgsql refuses for Kind=Utc; a caller that
            resolves its window from DateTime.UtcNow (the MCP tool) would otherwise fail every decision and read raw. */
@@ -1029,7 +1064,13 @@ FROM (
             DateTime? rawFloor = null;
             DateTime? tableFloor = null;
             var tableIsHypertable = false;
-            if (hasTimescale)
+            if (hasTimescale && storeWide is not null)
+            {
+                rawFloor = storeWide.RawFloor;
+                tableIsHypertable = storeWide.TableIsHypertable;
+                tableFloor = storeWide.TableFloor;
+            }
+            else if (hasTimescale)
             {
                 await using var floors = new NpgsqlCommand(ChunkFloorsSql, connection) { CommandTimeout = commandTimeoutSeconds };
                 await using var reader = await floors.ExecuteReaderAsync(cancellationToken);
