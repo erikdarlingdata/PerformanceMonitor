@@ -176,7 +176,7 @@ public static class ComposeCompiler
     /// </summary>
     private static string BuildFactRelation(
         string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null,
-        IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null)
+        IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null, bool restrictDedupe = false)
     {
         if (route.IsCagg)
         {
@@ -218,17 +218,17 @@ public static class ComposeCompiler
             + $" ORDER BY {timeColumn} DESC, execution_count DESC) AS qs_rn "
             + $"FROM {PgSchemaGenerator.CollectSchema}.{QueryStoreTable} "
             + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}"
-            + QueryStorePartitionRestriction(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql)
+            + QueryStorePartitionRestriction(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe)
             + ") AS qs_ranked WHERE qs_rn = 1)";
     }
 
-    private const string QueryStorePartitionColumns =
-        "server_id, server_name, database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role";
-
-    private static readonly string[] s_queryStoreNullablePartitionColumns =
+    /* The ONE partition key: the dedupe's PARTITION BY text and the restriction's join keys both come from it. */
+    private static readonly string[] s_queryStorePartitionKey =
     {
-        "database_name", "query_id", "plan_id", "runtime_stats_interval_id", "first_execution_time", "execution_type_desc", "replica_role",
+        "server_id", "server_name", "database_name", "query_id", "plan_id", "runtime_stats_interval_id", "first_execution_time", "execution_type_desc", "replica_role",
     };
+
+    private static readonly string QueryStorePartitionColumns = string.Join(", ", s_queryStorePartitionKey);
 
     /// <summary>
     /// The raw dedupe's input restriction when the panel carries dimension filters (#4605): only the partitions
@@ -247,12 +247,16 @@ public static class ComposeCompiler
     /// exact even when a real value equals a sentinel (<c>''</c>, <c>-1</c>, <c>-infinity</c>).</para>
     ///
     /// <para>Only filters on the fact's own columns reach here; a module-joined dimension is not a column of this
-    /// table. With no such filter the text is empty and the dedupe is unchanged.</para>
+    /// table. The restriction is added only when at least one filter is on a NON-partition column
+    /// (<c>module_name</c>, <c>query_hash</c>): a filter on <c>server_name</c> or <c>database_name</c> is a
+    /// partition column and Postgres already pushes it through the window subquery, so restricting on it would add
+    /// a second scan, a DISTINCT and a semi-join for no change in the ranked rows. With no such filter the text is
+    /// empty and the dedupe is unchanged. When it is added, the inner WHERE still carries every pushable filter.</para>
     /// </summary>
     private static string QueryStorePartitionRestriction(
-        string timeColumn, string startParam, string endParam, IReadOnlyList<string>? dimensionFilters, string? serverScopeSql)
+        string timeColumn, string startParam, string endParam, IReadOnlyList<string>? dimensionFilters, string? serverScopeSql, bool restrictDedupe)
     {
-        if (dimensionFilters is not { Count: > 0 })
+        if (!restrictDedupe || dimensionFilters is not { Count: > 0 })
         {
             return string.Empty;
         }
@@ -261,10 +265,10 @@ public static class ComposeCompiler
         var window = $"{FactAlias}.{timeColumn} >= {startParam} AND {FactAlias}.{timeColumn} <= {endParam}"
             + (serverScopeSql is null ? string.Empty : " AND " + serverScopeSql)
             + string.Concat(dimensionFilters.Select(c => " AND " + c));
-        var keys = new[] { "server_id" }.Concat(new[] { "server_name" }).Concat(s_queryStoreNullablePartitionColumns).ToArray();
+        var keys = s_queryStorePartitionKey;
         string Sentinel(string c) => c switch
         {
-            "server_id" => null!,
+            "server_id" => throw new InvalidOperationException("server_id is never NULL and is compared directly; it has no sentinel."),
             "query_id" or "plan_id" or "runtime_stats_interval_id" => "-1",
             "first_execution_time" => "'-infinity'::timestamp",
             _ => "''",
@@ -360,6 +364,7 @@ public static class ComposeCompiler
            placeholders rather than double-binding each value. */
         var filterClauses = new List<string>(plan.Filters.Count);
         var pushableFilterClauses = new List<string>();
+        var restrictDedupe = false;
         foreach (var filter in plan.Filters)
         {
             var clause = BuildFilterClause(filter, context, p);
@@ -368,6 +373,7 @@ public static class ComposeCompiler
                 && string.Equals(filter.Dimension.SourceTable, QueryStoreTable, StringComparison.Ordinal))
             {
                 pushableFilterClauses.Add(clause);
+                restrictDedupe |= !s_queryStorePartitionKey.Contains(filter.Dimension.Column, StringComparer.Ordinal);
             }
         }
 
@@ -380,7 +386,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? $"{FactAlias}.server_name = ANY({serverScopeParam})" : null));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? $"{FactAlias}.server_name = ANY({serverScopeParam})" : null, restrictDedupe));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a

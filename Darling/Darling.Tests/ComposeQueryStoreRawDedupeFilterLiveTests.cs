@@ -13,9 +13,13 @@ using Xunit;
 
 namespace Darling.Tests;
 
-/* #4605: a filtered raw Query Store panel ranks only the partitions that hold a matching row. Every pin runs
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only
+   to CREATE and DROP its own database through ScratchPostgres, then works entirely inside it, so it cannot race
+   live collection.
+
+   #4605: a filtered raw Query Store panel ranks only the partitions that hold a matching row. Every pin runs
    the product's compiler and compares the rows with the same panel computed the unrestricted way (today's
-   dedupe text, run on the same seed). Own scratch database, so it cannot race live collection. */
+   dedupe text, run on the same seed). */
 public sealed class ComposeQueryStoreRawDedupeFilterLiveTests
 {
     private const int ServerId1 = -46061;
@@ -46,6 +50,35 @@ public sealed class ComposeQueryStoreRawDedupeFilterLiveTests
             + "FROM collect.query_store_stats WHERE collection_time >= $1 AND collection_time <= $2) AS qs_ranked WHERE qs_rn = 1)",
             unfiltered, StringComparison.Ordinal);
         Assert.DoesNotContain("IS NOT DISTINCT FROM", unfiltered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PartitionColumnOnlyFilters_CompileByteIdenticalToTheUnrestrictedDedupe()
+    {
+        var context = new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.None, WindowEnd, RollupCoverage.Unknown, QueryStoreWideEligible: false);
+        const string relationStart = "(SELECT * FROM (SELECT *, ROW_NUMBER";
+        const string relationEnd = ") AS qs_ranked WHERE qs_rn = 1)";
+        string Relation(string sql)
+        {
+            var a = sql.IndexOf(relationStart, StringComparison.Ordinal);
+            var b = sql.IndexOf(relationEnd, a, StringComparison.Ordinal);
+            return sql.Substring(a, b + relationEnd.Length - a);
+        }
+
+        var baseline = Relation(CompileSql(Plan(null), context));
+        foreach (var filter in new[]
+        {
+            "[{\"dimension\":\"database_name\",\"op\":\"eq\",\"value\":\"qsA\"}]",
+            "[{\"dimension\":\"server\",\"op\":\"eq\",\"value\":\"qsrawfilter-1\"}]",
+        })
+        {
+            var sql = CompileSql(Plan(filter), context);
+            Assert.Equal(baseline, Relation(sql));
+            Assert.DoesNotContain("IS NOT DISTINCT FROM", sql, StringComparison.Ordinal);
+        }
+
+        /* a non-partition filter alongside a partition one still restricts */
+        Assert.Contains(Marker, CompileSql(Plan("[{\"dimension\":\"database_name\",\"op\":\"eq\",\"value\":\"qsA\"},{\"dimension\":\"query_hash\",\"op\":\"eq\",\"value\":\"0x1\"}]"), context), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -101,6 +134,10 @@ public sealed class ComposeQueryStoreRawDedupeFilterLiveTests
             ("NULL key partition", "[{\"dimension\":\"module_name\",\"op\":\"eq\",\"value\":\"usp_NullRole\"}]"),
             ("IN filter", "[{\"dimension\":\"module_name\",\"op\":\"eq\",\"value\":[\"usp_Orders\",\"usp_Old\"]}]"),
             ("database filter", "[{\"dimension\":\"database_name\",\"op\":\"eq\",\"value\":\"qsB\"}]"),
+            ("neq filter", "[{\"dimension\":\"module_name\",\"op\":\"neq\",\"value\":\"usp_Orders\"}]"),
+            ("like filter", "[{\"dimension\":\"module_name\",\"op\":\"like\",\"value\":\"usp_Em%\"}]"),
+            ("empty-string role key", "[{\"dimension\":\"module_name\",\"op\":\"eq\",\"value\":\"usp_Empty\"}]"),
+            ("out-of-window row", "[{\"dimension\":\"module_name\",\"op\":\"eq\",\"value\":\"usp_Early\"}]"),
         };
 
         foreach (var (name, filters) in cases)
@@ -108,6 +145,7 @@ public sealed class ComposeQueryStoreRawDedupeFilterLiveTests
             foreach (var groupBy in new[] { "module_name", "query_hash" })
             {
                 var plan = Plan(filters, groupBy);
+                Assert.Equal(!name.StartsWith("database", StringComparison.Ordinal), CompileSql(plan, context).Contains(Marker, StringComparison.Ordinal));
                 var pushed = await RunAsync(connection, CompileSql(plan, context), plan, context, strip: false, ct);
                 var unrestricted = await RunAsync(connection, CompileSql(plan, context), plan, context, strip: true, ct);
                 Assert.True(pushed.SequenceEqual(unrestricted, StringComparer.Ordinal),
@@ -119,7 +157,65 @@ public sealed class ComposeQueryStoreRawDedupeFilterLiveTests
         var oldPlan = Plan(cases[1].Filters, "module_name");
         Assert.Empty(await RunAsync(connection, CompileSql(oldPlan, context), oldPlan, context, strip: true, ct));
 
+        /* Over-inclusion is invisible in the panel's rows (the outer filter drops a survivor that does not match),
+           so the TIGHTNESS of the restriction is pinned on the dedupe relation's own survivors: exactly the
+           partitions holding an in-window, in-scope matching row. */
+        var unscoped = Plan("[{\"dimension\":\"module_name\",\"op\":\"eq\",\"value\":\"usp_Empty\"}]");
+        Assert.Equal(new[] { $"{ServerId1}|40|" }.Concat(new[] { $"{ServerId2}|40|" }).OrderBy(x => x, StringComparer.Ordinal),
+            await SurvivorsAsync(connection, unscoped, context, ct));
+
+        Assert.Empty(await SurvivorsAsync(connection, Plan("[{\"dimension\":\"module_name\",\"op\":\"eq\",\"value\":\"usp_Early\"}]"), context, ct));
+
+        Assert.Equal(new[] { $"{ServerId1}|61|primary" },
+            await SurvivorsAsync(connection, Plan("[{\"dimension\":\"module_name\",\"op\":\"eq\",\"value\":\"usp_Dual\"}]"), context, ct));
+
+        /* neq / like: the restriction must carry those operators too. usp_Orders is the ONLY module of queries
+           10 and 12, so a neq panel must not rank them; a like panel must rank only the usp_Em* partitions. */
+        var neqSurvivors = await SurvivorsAsync(connection, Plan(cases[6].Filters), context, ct);
+        Assert.DoesNotContain(neqSurvivors, x => x.Contains("|10|", StringComparison.Ordinal) || x.Contains("|12|", StringComparison.Ordinal));
+        Assert.Contains(neqSurvivors, x => x.Contains("|11|", StringComparison.Ordinal));
+        var likeSurvivors = await SurvivorsAsync(connection, Plan(cases[7].Filters), context, ct);
+        Assert.DoesNotContain(likeSurvivors, x => x.Contains("|11|", StringComparison.Ordinal));
+        Assert.Contains(likeSurvivors, x => x.Contains("|40|", StringComparison.Ordinal));
+
+        var scoped = context with { Servers = new[] { ServerName1 } };
+        var scopedPlan = Plan("[{\"dimension\":\"module_name\",\"op\":\"eq\",\"value\":\"usp_Scoped\"}]");
+        Assert.Empty(await SurvivorsAsync(connection, scopedPlan, scoped, ct));
+        Assert.Equal(new[] { $"{ServerId2}|60|primary" }, await SurvivorsAsync(connection, scopedPlan, context, ct));
+        var scopedRun = await RunAsync(connection, CompileSql(scopedPlan, scoped), scopedPlan, scoped, strip: false, ct);
+        Assert.True(scopedRun.SequenceEqual(await RunAsync(connection, CompileSql(scopedPlan, scoped), scopedPlan, scoped, strip: true, ct), StringComparer.Ordinal));
+
         /* a measure filter is not part of the catalog's filter model (dimensions only), so none can be pushed */
+    }
+
+    /* The dedupe relation's survivors as "server_id|query_id|replica_role", parameters kept referenced. */
+    private static async Task<List<string>> SurvivorsAsync(NpgsqlConnection connection, PanelPlan plan, ComposeRunContext context, CancellationToken ct)
+    {
+        var (compiled, error) = ComposeCompiler.Compile(plan, context);
+        Assert.True(error is null, error);
+        var sql = compiled!.Sql;
+        var start = sql.IndexOf("(SELECT * FROM (SELECT *, ROW_NUMBER", StringComparison.Ordinal);
+        const string tail = ") AS qs_ranked WHERE qs_rn = 1)";
+        var end = sql.IndexOf(tail, start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start, "the compiled SQL must carry the dedupe relation");
+        var relation = sql.Substring(start, end + tail.Length - start);
+        var text = "SELECT r.server_id, r.query_id, r.replica_role FROM " + relation + " AS r WHERE true"
+            + string.Concat(Enumerable.Range(1, compiled.Parameters.Count).Select(n => $" AND (${n} IS NULL OR true)"));
+        var rows = new List<string>();
+        await using var command = new NpgsqlCommand(text, connection);
+        foreach (var p in compiled.Parameters)
+        {
+            command.Parameters.Add(p);
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add($"{reader.GetInt32(0)}|{reader.GetInt64(1)}|{(reader.IsDBNull(2) ? "<null>" : reader.GetString(2))}");
+        }
+
+        rows.Sort(StringComparer.Ordinal);
+        return rows;
     }
 
     private static string CompileSql(PanelPlan plan, ComposeRunContext context)
@@ -146,8 +242,10 @@ public sealed class ComposeQueryStoreRawDedupeFilterLiveTests
         {
             var start = sql.IndexOf(Marker, StringComparison.Ordinal);
             var end = sql.IndexOf(") AS qs_ranked", StringComparison.Ordinal);
-            Assert.True(start > 0 && end > start, "the compiled SQL must carry the restriction to strip");
-            sql = sql.Remove(start, end - start);
+            if (start > 0)
+            {
+                sql = sql.Remove(start, end - start);
+            }
         }
 
         var (compiled, _) = ComposeCompiler.Compile(plan, context);
@@ -231,5 +329,14 @@ public sealed class ComposeQueryStoreRawDedupeFilterLiveTests
         /* a partition whose role key is NULL, re-fetched */
         await WriteAsync(t0.AddMinutes(5), Row("qsA", 30, 300, t0, 2, "usp_NullRole", null));
         await WriteAsync(t0.AddMinutes(25), Row("qsA", 30, 300, t0, 8, "usp_NullRole", null));
+        /* one key family, role '' vs NULL: only the '' partition matches usp_Empty (a coalesce collision, not equality) */
+        await WriteAsync(t0.AddMinutes(5), Row("qsA", 40, 400, t0, 2, "usp_Empty", ""));
+        await WriteAsync(t0.AddMinutes(6), Row("qsA", 40, 400, t0, 3, "usp_Blank", null));
+        /* a matching row BEFORE the window, in a partition whose in-window survivor has another module */
+        await WriteAsync(WindowStart.AddHours(-2), Row("qsA", 50, 500, t0, 1, "usp_Early", "primary"));
+        await WriteAsync(t0.AddMinutes(10), Row("qsA", 50, 500, t0, 5, "usp_Late", "primary"));
+        /* the same key on both servers, the module differing: server scope and server_id must both narrow */
+        await WriteAsync(t0.AddMinutes(10), Row("qsA", 60, 600, t0, 4, serverId == ServerId2 ? "usp_Scoped" : "usp_Plain", "primary"));
+        await WriteAsync(t0.AddMinutes(10), Row("qsA", 61, 610, t0, 4, serverId == ServerId1 ? "usp_Dual" : "usp_Plain2", "primary"));
     }
 }
