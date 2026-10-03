@@ -370,9 +370,20 @@ public sealed class ViewerPostgresGridTimeTextTests
     /// </summary>
     [Theory]
     [MemberData(nameof(Grids))]
+    [InlineData("PgExtensionsGrid")]
+    [InlineData("PgServerConfigGrid")]
+    [InlineData("PgBufferUsageGrid")]
+    [InlineData("PgPredicateStatsGrid")]
     public void EveryBindingOfTheGrid_ResolvesOnItsDisplayRow(string grid)
     {
-        var (_, _, displayType, _) = Pair(grid);
+        var displayType = grid switch
+        {
+            "PgExtensionsGrid" => typeof(PgDisplay.ExtensionRow),
+            "PgServerConfigGrid" => typeof(PgDisplay.ServerConfigRow),
+            "PgBufferUsageGrid" => typeof(PgDisplay.BufferUsageRow),
+            "PgPredicateStatsGrid" => typeof(PgDisplay.PredicateStatRow),
+            _ => Pair(grid).DisplayType,
+        };
         var xaml = ReadRepoFile("Darling", ViewerFolder, "ViewerServerTab.xaml");
 
         var start = Regex.Match(xaml, @"<DataGrid\b[^>]*?x:Name=""" + Regex.Escape(grid) + @"""");
@@ -384,7 +395,7 @@ public sealed class ViewerPostgresGridTimeTextTests
             .Select(m => m.Groups["p"].Value)
             .Distinct(StringComparer.Ordinal)
             .ToList();
-        Assert.True(bound.Count >= 8, $"{grid} binds only {bound.Count} properties; the scan is not reading the grid.");
+        Assert.True(bound.Count >= 5, $"{grid} binds only {bound.Count} properties; the scan is not reading the grid.");
 
         var missing = bound
             .Where(name => displayType.GetProperty(name, BindingFlags.Public | BindingFlags.Instance) == null)

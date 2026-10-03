@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Text.RegularExpressions;
 using System.Globalization;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
@@ -157,5 +158,11 @@ public sealed class ViewerPgSnapshotGridTimeTests
         var block = xaml[start..end];
         Assert.Contains("Header=\"Collected\"", block, StringComparison.Ordinal);
         Assert.DoesNotContain("Header=\"Captured\"", block, StringComparison.Ordinal);
+
+        /* Last: the house form puts the snapshot time at the end of the grid, after any fill column. */
+        var columns = block[..block.IndexOf("</DataGrid.Columns>", StringComparison.Ordinal)];
+        var headers = Regex.Matches(columns, @"<DataGrid(?:Text|Template)Column\b[^>]*?Header=""(?<h>[^""]*)""");
+        var lastColumn = headers[headers.Count - 1].Groups["h"].Value;
+        Assert.Equal("Collected", lastColumn);
     }
 }
