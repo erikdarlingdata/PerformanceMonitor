@@ -123,6 +123,18 @@ public sealed partial class ViewerDataService
         LIMIT 50
         """;
 
+    /// <summary>
+    /// Where this server's deadlocks coverage starts for the window, through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its first
+    /// row in the window if that is earlier (#4966). The grid windows on <c>deadlock_time</c>, the graph's own time,
+    /// which can reach before the coverage (the server's first collection stores its history), so the caller names the
+    /// earlier of this and the earliest deadlock it shows (<see cref="ViewerEventDataStart.Of"/>). Null when the window
+    /// holds no row and no logged run, and when it lies wholly before the coverage.
+    /// </summary>
+    public Task<DateTime?> GetDeadlocksDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("deadlocks"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
     /// <summary>The raw deadlock rows for the window; the grid parses them into per-process detail rows.</summary>
     public async Task<List<ViewerDeadlockRow>> GetRecentDeadlocksAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)

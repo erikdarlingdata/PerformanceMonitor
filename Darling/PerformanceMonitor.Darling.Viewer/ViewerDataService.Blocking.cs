@@ -247,6 +247,20 @@ public sealed partial class ViewerDataService
         return items;
     }
 
+    /// <summary>
+    /// Where this server's blocked_process_reports coverage starts for the window, through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its first
+    /// row in the window if that is earlier (#4966). The coverage is read from the XE collector, the table the grid is
+    /// named for; the always-on DMV snapshots beside it fill gaps in the same range. The grid windows on the report's
+    /// own event time, which can reach before the coverage (the server's first collection stores its history), so the
+    /// caller names the earlier of this and the earliest report it shows
+    /// (<see cref="ViewerEventDataStart.Of"/>). Null when the window holds no row and no logged run, and when it lies
+    /// wholly before the coverage.
+    /// </summary>
+    public Task<DateTime?> GetBlockedProcessReportsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("blocked_process_reports"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
     /// <summary>Maps the full 37-column blocked-process-report read into the widened grid row.</summary>
     private async Task<List<ViewerBlockedProcessRow>> ReadBlockedProcessRowsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
