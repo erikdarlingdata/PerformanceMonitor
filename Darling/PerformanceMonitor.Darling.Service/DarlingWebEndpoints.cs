@@ -372,6 +372,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 try
                 {
                     result = await handler(context, postgres, analysis);
+
+                    /* #4966: a grid over a window says where its table's data starts when that is after the window's
+                       start. Added to the web mirror only, never to the tool, so the MCP payloads are unchanged. A
+                       failed probe returns the tool's answer as it was. */
+                    var askedHours = QueryInt(context, "hours", "hours_back", 0);
+                    result = await WebDataStartNote.AddAsync(
+                        postgres, name, Server(context), askedHours > 0 ? askedHours : null, AsOf(context), result, logger, context.RequestAborted);
                 }
                 catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                 {
