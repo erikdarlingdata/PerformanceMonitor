@@ -56,6 +56,27 @@ public sealed class CollectorRunTimeScheduleTests : IDisposable
         return manager;
     }
 
+    /* A hand-edited collection_schedule.json can carry a run time the editor and the write APIs would have refused. The
+       load keeps only collectors the dispatch knows, so the name is a real one; the load also adds the rest of the defaults. */
+    private ScheduleManager ManagerFromFile(string collector, string runAt, int frequency, ILogger<ScheduleManager>? log = null)
+    {
+        File.WriteAllText(SchedulePath, $$"""
+            {
+              "version": 2,
+              "default_schedule": [],
+              "server_overrides": {
+                "{{ServerKey}}": { "collectors": [ { "name": "{{collector}}", "enabled": true, "frequency_minutes": {{frequency}}, "retention_days": 30, "run_at": "{{runAt}}" } ] }
+              }
+            }
+            """);
+        var manager = new ScheduleManager(_configDir, log);
+        manager.SetServerRunContext(ServerKey, StorageId, ServerName, clock: null);
+        return manager;
+    }
+
+    private static bool IsDue(ScheduleManager manager, string collector, DateTime atUtc) =>
+        manager.GetDueCollectorsForServer(ServerKey, atUtc).Any(s => s.Name == collector);
+
     private static List<string> Due(ScheduleManager manager, DateTime atUtc) =>
         manager.GetDueCollectorsForServer(ServerKey, atUtc).Select(s => s.Name).ToList();
 
@@ -199,19 +220,17 @@ public sealed class CollectorRunTimeScheduleTests : IDisposable
     public void ARunTimeOnAnHourlyCollector_IsIgnored_WithOneWarningThatNamesTheCollectorAndTheServer()
     {
         var log = new CapturingLog();
-        var manager = Manager(runAt: "02:00", frequency: 60, log: log);
+        var manager = ManagerFromFile("server_config", runAt: "02:00", frequency: 60, log);
         var now = new DateTime(2026, 7, 15, 9, 0, 0, DateTimeKind.Utc);
 
         /* The plain interval rule, as if no run time were set. */
-        Assert.Equal(new[] { Daily }, Due(manager, now));
-        manager.MarkCollectorRunForServer(ServerKey, Daily, now - TimeSpan.FromMinutes(30));
-        Assert.Empty(Due(manager, now));
-        manager.MarkCollectorRunForServer(ServerKey, Daily, now - TimeSpan.FromMinutes(61));
-        Assert.Equal(new[] { Daily }, Due(manager, now));
+        Assert.True(IsDue(manager, "server_config", now));
+        manager.MarkCollectorRunForServer(ServerKey, "server_config", now - TimeSpan.FromMinutes(30));
+        Assert.False(IsDue(manager, "server_config", now));
+        manager.MarkCollectorRunForServer(ServerKey, "server_config", now - TimeSpan.FromMinutes(61));
+        Assert.True(IsDue(manager, "server_config", now));
 
-        var warnings = log.Entries.Where(e => e.Level == LogLevel.Warning).ToList();
-        var warning = Assert.Single(warnings);
-        Assert.Contains(Daily, warning.Message, StringComparison.Ordinal);
+        var warning = Assert.Single(log.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("server_config", StringComparison.Ordinal));
         Assert.Contains(ServerName, warning.Message, StringComparison.Ordinal);
         Assert.Contains("60 minutes", warning.Message, StringComparison.Ordinal);
     }
@@ -220,15 +239,231 @@ public sealed class CollectorRunTimeScheduleTests : IDisposable
     public void ARunTimeThatIsNotAnHHMMTime_IsIgnored_WithOneWarning()
     {
         var log = new CapturingLog();
-        var manager = Manager(runAt: "25:00", log: log);
+        var manager = ManagerFromFile("index_object_stats", runAt: "25:00", frequency: 1440, log);
         var now = new DateTime(2026, 7, 15, 9, 0, 0, DateTimeKind.Utc);
 
-        Assert.Equal(new[] { Daily }, Due(manager, now));
-        Assert.Equal(new[] { Daily }, Due(manager, now.AddMinutes(1)));
+        Assert.True(IsDue(manager, "index_object_stats", now));
+        Assert.True(IsDue(manager, "index_object_stats", now.AddMinutes(1)));
 
-        var warning = Assert.Single(log.Entries, e => e.Level == LogLevel.Warning);
-        Assert.Contains(Daily, warning.Message, StringComparison.Ordinal);
+        var warning = Assert.Single(log.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("index_object_stats", StringComparison.Ordinal));
         Assert.Contains(ServerName, warning.Message, StringComparison.Ordinal);
+    }
+
+    // ── the editor's checks and its next-run text ───────────────────────────────
+
+    private const string InvalidRunAtText = "Run at must be a 24-hour time from 00:00 to 23:59, such as 02:00.";
+
+    [Theory]
+    [InlineData("24:00")]
+    [InlineData("25:00")]
+    [InlineData("02:60")]
+    [InlineData("2:00")]
+    [InlineData("0200")]
+    [InlineData("abc")]
+    [InlineData("-1:00")]
+    public void TheEditorCheck_RefusesATimeThatIsNot24HourHHMM_WithTheShippedText(string runAt)
+    {
+        Assert.Equal(InvalidRunAtText, ScheduleManager.RunAtError(Daily, 1440, runAt));
+    }
+
+    [Theory]
+    [InlineData("00:00")]
+    [InlineData("02:00")]
+    [InlineData("23:59")]
+    [InlineData(" 04:30 ")]
+    public void TheEditorCheck_AcceptsA24HourTime_OnAWholeDayInterval(string runAt)
+    {
+        Assert.Null(ScheduleManager.RunAtError(Daily, 1440, runAt));
+        Assert.Null(ScheduleManager.RunAtError(Daily, 2880, runAt));
+    }
+
+    [Fact]
+    public void TheEditorCheck_RefusesARunTimeOnAnIntervalThatIsNotWholeDays_WithTheShippedText()
+    {
+        Assert.Equal(
+            "'wait_stats' runs every 60 minutes. A run time works only for a collector that runs once a day or less often (1440 minutes, or a multiple of 1440). Change the frequency or clear the run time.",
+            ScheduleManager.RunAtError("wait_stats", 60, "02:00"));
+        Assert.Contains("every 720 minutes", ScheduleManager.RunAtError(Daily, 720, "02:00"), StringComparison.Ordinal);
+        Assert.Contains("every 1500 minutes", ScheduleManager.RunAtError(Daily, 1500, "02:00"), StringComparison.Ordinal);
+        Assert.Contains("every 1 minutes", ScheduleManager.RunAtError(Daily, 1, "02:00"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheEditorCheck_JudgesAnOnLoadCollectorOnItsDailyRecapture_AndABlankTimeIsNone()
+    {
+        /* The 5 on-load collectors (frequency 0) re-capture daily, so they may have a run time. */
+        Assert.Null(ScheduleManager.RunAtError("trace_flags", 0, "02:00"));
+
+        Assert.Null(ScheduleManager.RunAtError("wait_stats", 1, null));
+        Assert.Null(ScheduleManager.RunAtError("wait_stats", 1, ""));
+        Assert.Null(ScheduleManager.RunAtError("wait_stats", 1, "   "));
+        Assert.Null(ScheduleManager.NormalizeRunAt("  "));
+        Assert.Equal("02:00", ScheduleManager.NormalizeRunAt(" 02:00 "));
+    }
+
+    [Fact]
+    public void TheEditorNote_SaysLiteRunsTheCollectorOnlyWhileItIsOpen()
+    {
+        Assert.Equal(
+            "Lite collects only while it is open. If Lite is closed at this time, that day's run is skipped.",
+            ScheduleManager.RunAtLiteClosedNote);
+    }
+
+    [Fact]
+    public void TheEditorWindow_UsesTheChecksTheNoteAndTheDefaultPathsRunTime()
+    {
+        /* The window needs a desktop to open, so its wiring is read from the source: the check, the note, and the
+           default-schedule save passing the run time (UpdateSchedule keeps the one it has unless told to change it). */
+        var editor = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Windows", "CollectorScheduleEditorWindow.xaml.cs"))
+            .Replace("\r\n", "\n");
+        Assert.Contains("ScheduleManager.RunAtError(item.Name, item.FrequencyMinutes, item.RunAt)", editor, StringComparison.Ordinal);
+        Assert.Contains("ScheduleManager.RunAtLiteClosedNote", editor, StringComparison.Ordinal);
+        Assert.Contains("changeRunAt: true", editor, StringComparison.Ordinal);
+
+        var xaml = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Windows", "CollectorScheduleEditorWindow.xaml"));
+        Assert.Contains("Binding=\"{Binding RunAt, UpdateSourceTrigger=LostFocus}\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheDefaultScheduleUpdate_SetsAndClearsARunTime_AndKeepsItWhenOnlyOtherFieldsChange()
+    {
+        var manager = new ScheduleManager(_configDir);
+        string? RunAt() => manager.GetDefaultSchedule().First(s => s.Name == "index_object_stats").RunAt;
+
+        manager.UpdateSchedule("index_object_stats", runAt: " 02:00 ", changeRunAt: true);
+        Assert.Equal("02:00", RunAt());
+        Assert.Contains("\"run_at\": \"02:00\"", File.ReadAllText(SchedulePath), StringComparison.Ordinal);
+
+        /* Other fields change and the run time stays. */
+        manager.UpdateSchedule("index_object_stats", retentionDays: 45);
+        Assert.Equal("02:00", RunAt());
+
+        manager.UpdateSchedule("index_object_stats", runAt: "", changeRunAt: true);
+        Assert.Null(RunAt());
+        Assert.DoesNotContain("run_at", File.ReadAllText(SchedulePath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheDefaultScheduleUpdate_RefusesABadRunTime_AndAFrequencyThatLeavesARunTimeOnAnHourlyCollector_ChangingNothing()
+    {
+        var manager = new ScheduleManager(_configDir);
+        string? RunAt() => manager.GetDefaultSchedule().First(s => s.Name == "index_object_stats").RunAt;
+        int Frequency() => manager.GetDefaultSchedule().First(s => s.Name == "index_object_stats").FrequencyMinutes;
+        manager.UpdateSchedule("index_object_stats", runAt: "02:00", changeRunAt: true);
+        var frequency = Frequency();
+
+        var bad = Assert.Throws<InvalidOperationException>(() =>
+            manager.UpdateSchedule("index_object_stats", retentionDays: 99, runAt: "25:00", changeRunAt: true));
+        Assert.Equal(InvalidRunAtText, bad.Message);
+
+        var hourly = Assert.Throws<InvalidOperationException>(() =>
+            manager.UpdateSchedule("index_object_stats", frequencyMinutes: 60));
+        Assert.StartsWith("'index_object_stats' runs every 60 minutes. A run time works only", hourly.Message, StringComparison.Ordinal);
+
+        Assert.Equal("02:00", RunAt());
+        Assert.Equal(frequency, Frequency());
+        Assert.NotEqual(99, manager.GetDefaultSchedule().First(s => s.Name == "index_object_stats").RetentionDays);
+
+        /* Clearing the run time and moving to hourly in one update is fine. */
+        manager.UpdateSchedule("index_object_stats", frequencyMinutes: 60, runAt: null, changeRunAt: true);
+        Assert.Null(RunAt());
+        Assert.Equal(60, Frequency());
+    }
+
+    [Fact]
+    public void AServerScheduleSave_RefusesABadRunTime_AndStoresABlankOneAsNone()
+    {
+        var manager = new ScheduleManager(_configDir);
+
+        var bad = Assert.Throws<InvalidOperationException>(() => manager.SetScheduleForServer(ServerKey, new List<CollectorSchedule>
+        {
+            new() { Name = "wait_stats", Enabled = true, FrequencyMinutes = 1, RunAt = "02:00" },
+        }));
+        Assert.StartsWith("'wait_stats' runs every 1 minutes.", bad.Message, StringComparison.Ordinal);
+        Assert.False(manager.HasServerOverride(ServerKey));
+
+        manager.SetScheduleForServer(ServerKey, new List<CollectorSchedule>
+        {
+            new() { Name = Daily, Enabled = true, FrequencyMinutes = 1440, RunAt = "  " },
+        });
+        Assert.Null(manager.GetScheduleForServer(ServerKey, Daily)!.RunAt);
+        Assert.DoesNotContain("run_at", File.ReadAllText(SchedulePath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheNextRunText_GivesTheExactMinuteOnAServer_InTheServersClockAndUtc()
+    {
+        var manager = Manager(clock: Eastern);
+        var slot = Slot(Day.AddDays(1), 120, Eastern);
+        manager.MarkCollectorRunForServer(ServerKey, Daily, Slot(Day, 120, Eastern) + TimeSpan.FromMinutes(3));
+        var now = Slot(Day, 120, Eastern) + TimeSpan.FromHours(5);
+
+        var line = Assert.Single(manager.DescribeRunTimes(ServerKey, manager.GetSchedulesForServer(ServerKey), now));
+
+        Assert.Equal(
+            $"{Daily}: next run {Eastern.ToServerLocal(slot):yyyy-MM-dd HH:mm} server time ({slot:yyyy-MM-dd HH:mm} UTC).",
+            line);
+        Assert.Contains("02:", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheNextRunText_SaysDueNowInsideTheHour_AndIsEmptyWhereNoRunTimeApplies()
+    {
+        var manager = Manager(clock: Eastern);
+        var slot = Slot(Day, 120, Eastern);
+
+        Assert.Equal($"{Daily}: due now, inside today's hour.",
+            Assert.Single(manager.DescribeRunTimes(ServerKey, manager.GetSchedulesForServer(ServerKey), slot + TimeSpan.FromMinutes(5))));
+
+        var schedules = new List<CollectorSchedule>
+        {
+            new() { Name = "no_run_time", Enabled = true, FrequencyMinutes = 1440 },
+            new() { Name = "hourly", Enabled = true, FrequencyMinutes = 60, RunAt = "02:00" },
+            new() { Name = "bad_time", Enabled = true, FrequencyMinutes = 1440, RunAt = "99:99" },
+            new() { Name = "disabled", Enabled = false, FrequencyMinutes = 1440, RunAt = "02:00" },
+        };
+        Assert.Empty(manager.DescribeRunTimes(ServerKey, schedules, slot));
+    }
+
+    [Fact]
+    public void TheNextRunText_ForTheDefaultSchedule_GivesTheHourTheServersSpreadAcross_AndWrapsPastMidnight()
+    {
+        var manager = new ScheduleManager(_configDir);
+        var schedules = new List<CollectorSchedule>
+        {
+            new() { Name = "early", Enabled = true, FrequencyMinutes = 1440, RunAt = "02:00" },
+            new() { Name = "late", Enabled = true, FrequencyMinutes = 1440, RunAt = "23:30" },
+        };
+
+        Assert.Equal(
+            new[]
+            {
+                "early: runs between 02:00 and 03:00 on each server's clock, each server at its own minute.",
+                "late: runs between 23:30 and 00:30 on each server's clock, each server at its own minute.",
+            },
+            manager.DescribeRunTimes(null, schedules, Slot(Day, 120)));
+    }
+
+    [Fact]
+    public void TheNextRunText_WaitsForTheFirstCollection_AndSaysWhenTheClockIsNotKnown()
+    {
+        var manager = new ScheduleManager(_configDir);
+        manager.SetScheduleForServer(ServerKey, new List<CollectorSchedule>
+        {
+            new() { Name = Daily, Enabled = true, FrequencyMinutes = 1440, RunAt = "02:00" },
+        });
+
+        /* Nothing has been read for this server yet: no clock, no run history. */
+        Assert.Equal($"{Daily}: the next run shows once Lite has collected from this server.",
+            Assert.Single(manager.DescribeRunTimes(ServerKey, manager.GetSchedulesForServer(ServerKey), Slot(Day, 120))));
+
+        manager.SetServerRunContext(ServerKey, StorageId, ServerName, clock: null);
+        manager.MarkCollectorRunForServer(ServerKey, Daily, Slot(Day, 120) + TimeSpan.FromMinutes(2));
+        var tomorrow = Slot(Day.AddDays(1), 120);
+
+        Assert.Equal(
+            $"{Daily}: next run {tomorrow:yyyy-MM-dd HH:mm} UTC (the server's clock is not known yet, so the run time is read as UTC).",
+            Assert.Single(manager.DescribeRunTimes(ServerKey, manager.GetSchedulesForServer(ServerKey), Slot(Day, 120) + TimeSpan.FromHours(3))));
     }
 
     // ── the tab-open run ─────────────────────────────────────────────────────────
@@ -247,7 +482,6 @@ public sealed class CollectorRunTimeScheduleTests : IDisposable
             new() { Name = "daily_due", Enabled = true, FrequencyMinutes = 1440 },
             new() { Name = "daily_never_run", Enabled = true, FrequencyMinutes = 1440 },
             new() { Name = "hourly", Enabled = true, FrequencyMinutes = 60 },
-            new() { Name = "hourly_with_run_time", Enabled = true, FrequencyMinutes = 60, RunAt = "03:00" },
             new() { Name = "daily_disabled", Enabled = false, FrequencyMinutes = 1440 },
         });
         manager.SetServerRunContext(ServerKey, StorageId, ServerName, clock: null);
@@ -258,28 +492,19 @@ public sealed class CollectorRunTimeScheduleTests : IDisposable
         var names = manager.GetCollectorsForTabOpen(ServerKey, now).Select(s => s.Name).ToList();
 
         Assert.Equal(
-            new[] { "on_load", "on_load_with_run_time", "daily_due", "daily_never_run", "hourly", "hourly_with_run_time" },
+            new[] { "on_load", "on_load_with_run_time", "daily_due", "daily_never_run", "hourly" },
             names);
     }
 
     [Fact]
-    public void TheTabOpenRun_IsWiredThroughTheSelection_AndTheScheduledSweepSeedsFirst()
+    public void ARunOfServerProperties_RefreshesTheClockTheRunTimeReads()
     {
+        /* The new server_properties row is the server's clock arriving or changing. A run needs a live server, so the
+           wiring is read from the source; the refresh itself is pinned by TheClock_IsTheNewestServerPropertiesRow below. */
         var source = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Services", "RemoteCollectorService.cs"));
-
-        var tabOpen = MethodBody(source, "public async Task RunAllCollectorsForServerAsync(");
-        Assert.Contains("EnsureRunTimeReadyAsync(", tabOpen, StringComparison.Ordinal);
-        Assert.Contains("GetCollectorsForTabOpen(", tabOpen, StringComparison.Ordinal);
-
-        var sweep = MethodBody(source, "public async Task RunDueCollectorsAsync(DateTime cycleStartUtc");
-        Assert.Contains("EnsureRunTimeReadyAsync(", sweep, StringComparison.Ordinal);
-        Assert.True(
-            sweep.IndexOf("EnsureRunTimeReadyAsync(", StringComparison.Ordinal)
-                < sweep.IndexOf("GetDueCollectorsForServer(", StringComparison.Ordinal),
-            "the sweep reads the last runs and the clock before it asks which collectors are due");
-
-        /* A new server_properties row is the clock changing: the run time reads the new clock from the next check on. */
         var run = MethodBody(source, "public async Task RunCollectorAsync(ServerConnection server, string collectorName, DateTime? scheduledAtUtc");
+
+        Assert.Contains("\"server_properties\"", run, StringComparison.Ordinal);
         Assert.Contains("RefreshRunTimeClockAsync(", run, StringComparison.Ordinal);
     }
 
