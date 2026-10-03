@@ -768,4 +768,31 @@ public sealed partial class ViewerDataService
         /* OrderByDescending is a stable sort (List.Sort is not), so ties keep the reader's order. */
         return rows.OrderByDescending(static r => r.EventTimeUtc).ToList();
     }
+
+    // ── Where the System Events data starts (#4966) ──
+
+    /// <summary>
+    /// Where this server's system_health_events coverage starts for the window, through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its first
+    /// row in the window if that is earlier. One table feeds all eight System Events grids, so one probe serves them. The
+    /// column the probe reads is <c>collection_time</c>, the collector's own UTC clock. The grids window on the event's
+    /// <c>event_time</c> (the XE <c>@timestamp</c>, UTC), and a server's first collection stores the ring buffer's history,
+    /// so a row can carry an event time from before the coverage: the caller names the earlier of this and the earliest
+    /// event the grid shows (<see cref="ViewerEventDataStart.Of"/>). Null when the window holds no row and no logged run,
+    /// and when it lies wholly before the coverage.
+    /// </summary>
+    public Task<DateTime?> GetSystemHealthEventsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("system_health_events"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>
+    /// The same for the Default Trace grid (default_trace_events). Its event time is the server's LOCAL wall clock,
+    /// converted to UTC in <see cref="GetDefaultTraceEventsAsync"/> with the server's clock, but the probe never reads
+    /// that column: it reads <c>collection_time</c>, UTC, so the coverage needs no conversion and no clock. The grid's
+    /// earliest event is measured on the rows the read returns, already converted per row (the offset at that row's own
+    /// date) and trimmed to the window in UTC, so the notice compares UTC with UTC.
+    /// </summary>
+    public Task<DateTime?> GetDefaultTraceDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("default_trace_events"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 }

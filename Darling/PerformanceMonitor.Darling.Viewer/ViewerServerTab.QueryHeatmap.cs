@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -123,9 +124,21 @@ public partial class ViewerServerTab
     /// <summary>Loads the Query Heatmap sub-tab for the combo's current metric over the window.</summary>
     private async Task LoadQueryHeatmapAsync(DateTime startUtc, DateTime endUtc)
     {
-        var metric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
+        await ReadAndDrawQueryHeatmapAsync((HeatmapMetric)HeatmapMetricCombo.SelectedIndex, startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// Reads the heatmap for <paramref name="metric"/> over the window, draws it, and raises the "Showing since" banner (#4966):
+    /// the one read of the heatmap, behind the range load and the metric change. The chart draws one column per 5-minute bin that
+    /// holds a row, so a stretch with no row has no column and cannot tell a server that did not exist yet from a quiet one; the
+    /// banner names the earlier of the coverage start and the first column drawn. The read has no row cap, so only that rule applies.
+    /// </summary>
+    private async Task ReadAndDrawQueryHeatmapAsync(HeatmapMetric metric, DateTime startUtc, DateTime endUtc)
+    {
+        var dataStartTask = _dataService.GetQueryHeatmapDataStartAsync(_server.ServerId, startUtc, endUtc);
         var result = await _dataService.GetQueryHeatmapAsync(_server.ServerId, metric, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         UpdateQueryHeatmapChart(result);
+        await ShowEventDataStartAsync(QueryHeatmapTruncationBanner, dataStartTask, "Query Heatmap", startUtc, result.TimeBuckets.Select(t => (DateTime?)t));
     }
 
     private async void HeatmapMetric_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -135,8 +148,7 @@ public partial class ViewerServerTab
         {
             var (startUtc, endUtc) = GetWindowUtc();
             var metric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
-            var result = await _dataService.GetQueryHeatmapAsync(_server.ServerId, metric, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
-            UpdateQueryHeatmapChart(result);
+            await ReadAndDrawQueryHeatmapAsync(metric, startUtc, endUtc);
         }
         catch (Exception ex)
         {

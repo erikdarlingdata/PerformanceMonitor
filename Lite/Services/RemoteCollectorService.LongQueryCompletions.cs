@@ -184,7 +184,10 @@ public partial class RemoteCollectorService
                    no session of this install's to drop. */
                 if (enabled)
                 {
-                    var noId = new InvalidOperationException("The long-query trace was not created: this install has no id to name its Extended Events session.");
+                    /* A store that could not read or save the id says so, and that the next cycle tries again; a host with no store has nothing to retry. */
+                    var noId = new InvalidOperationException(InstallIdFailure() is { } idFailure
+                        ? $"The long-query trace was not created: this install has no id for now, because {idFailure}. The next cycle tries again."
+                        : "The long-query trace was not created: this install has no id to name its Extended Events session.");
                     var noIdLine = $"[{server.DisplayName}] {noId.Message}";
                     if (createRepeats)
                     {
@@ -480,6 +483,10 @@ public partial class RemoteCollectorService
     /// </summary>
     private async Task DropAzureSessionInDatabaseAsync(ServerConnection server, string databaseName, string sessionName, CancellationToken cancellationToken)
     {
+        /* Hyperscale limit (#4961): with several high-availability replicas, a read-only connection lands on one replica the app
+           cannot choose, so this stop reaches only that one, and a copy of the session that runs on another replica is not stopped.
+           Microsoft Learn describes no way to address one HA replica; it says the read-intent workload is "distributed arbitrarily
+           across all available HA replicas": https://learn.microsoft.com/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica */
         foreach (var (step, connectionString) in LongQueryTraceDropStepsFor(AzureDatabaseConnectionString(server, databaseName)))
         {
             if (LongQueryTraceStepOverrideForTests is { } stepOverride)
@@ -1135,7 +1142,8 @@ END;", connection);
         }
 
         /* #4961: a registration with read-only intent stops the session over its own connection, then drops it over one
-           without the intent. Every other registration takes one drop. */
+           without the intent. Every other registration takes one drop. On Hyperscale with several high-availability replicas the
+           stop reaches only the replica the connection lands on (see the stop step in DropAzureSessionInDatabaseAsync). */
         await DropAzureSessionInDatabaseAsync(server, databaseName, sessionName, cancellationToken);
     }
 

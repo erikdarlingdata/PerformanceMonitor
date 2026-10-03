@@ -695,7 +695,9 @@ public sealed class WorkerLoopTimerClockStepTests
     {
         var code = WorkerCode();
 
-        Assert.Contains(field + " = NextGridStamp(" + field + ", DateTime.UtcNow, " + interval + ");", code, StringComparison.Ordinal);
+        /* The store-metrics stamp advances inside TryStartStoreMetricsTick (#4970), which is handed the clock as nowUtc. */
+        var now = field == "_nextStoreMetricsUtc" ? "nowUtc" : "DateTime.UtcNow";
+        Assert.Contains(field + " = NextGridStamp(" + field + ", " + now + ", " + interval + ");", code, StringComparison.Ordinal);
         Assert.Contains("StampIsDue(" + field + ", " + interval + ", DateTime.UtcNow)", code, StringComparison.Ordinal);
     }
 

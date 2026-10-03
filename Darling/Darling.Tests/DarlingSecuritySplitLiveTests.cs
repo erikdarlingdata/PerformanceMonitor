@@ -27,7 +27,7 @@ namespace Darling.Tests;
 /// already-COMPRESSED TimescaleDB hypertable survives ALTER TABLE ... SET SCHEMA and stays readable
 /// by the least-privilege role.
 ///
-/// <para>Uses distinct <c>sec_admin_test</c>/<c>sec_viewer_test</c> roles (not the real
+/// <para>Uses distinct <c>sec_admin_</c>/<c>sec_viewer_</c> roles, each with a suffix unique to the run (not the real
 /// admin/viewer) so a shared dev store running an actual service is never clobbered, and grants on
 /// the schemas only (no REVOKE on a named database), so the test does not depend on the store's
 /// database name. Every object it creates is cleaned up.</para>
@@ -35,9 +35,13 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class DarlingSecuritySplitLiveTests
 {
-    private const string AdminRole = "sec_admin_test";
-    private const string ViewerRole = "sec_viewer_test";
-    private const string McpRole = "sec_mcp_test";
+    /* #4981: a role belongs to the whole cluster, so a constant name made two runs on one cluster share a role: the
+       second CREATE ROLE could fail with a duplicate, and the first run's DROP ROLE removed the role the second was
+       using. One suffix per run (8 lowercase hex characters) keeps each name a valid unquoted identifier. */
+    private static readonly string RunSuffix = Guid.NewGuid().ToString("N")[..8];
+    private static readonly string AdminRole = "sec_admin_" + RunSuffix;
+    private static readonly string ViewerRole = "sec_viewer_" + RunSuffix;
+    private static readonly string McpRole = "sec_mcp_" + RunSuffix;
     private const string RolePassword = "SecSplitTestPw0123456789abcdef01"; // alnum, like the real generator
 
     private static string RequireLivePostgres()
@@ -504,7 +508,7 @@ public sealed class DarlingSecuritySplitLiveTests
         /* A throwaway role name (NOT admin/viewer) so this exercises the guard MECHANISM with zero
            side effects on the shared store — the DarlingManagedRoles.BuildProvisioningSql string that
            applies this same pattern to admin/viewer is pinned separately by the ungated shape test. */
-        const string role = "darling_marker_probe";
+        var role = "darling_marker_probe_" + Guid.NewGuid().ToString("N")[..8]; // #4981: unique to the run, roles are cluster-wide
         string Guard() => $@"
 DO $$
 BEGIN
