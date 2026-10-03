@@ -37,7 +37,25 @@ public sealed class FinOpsTabHighImpactPageTests
         Assert.NotEmpty(keys);
         var source = ToolSource();
         foreach (var key in keys)
-            Assert.Contains(key + " =", source);
+            Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", source);
+    }
+
+    [Fact]
+    public void TheNoticeCountsTheRowsReturnedAndTakesTheWindowFromTheAnswer()
+    {
+        var tab = Tab();
+        Assert.DoesNotContain("\"Top \" + LIMIT", tab);
+        Assert.Contains("queries in the top ", tab);
+        Assert.Contains("data.hours_back", tab);
+        Assert.Contains("(data.rows || []).length", tab);
+    }
+
+    [Fact]
+    public void TheReadStatesAreHandledAbortedAndAuthReturnAndEmptyShowsItsMessage()
+    {
+        var tab = Tab();
+        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"aborted\" \\|\\| res\\.kind === \"auth\"\\) return;$", tab);
+        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"empty\"\\) return mount\\(body, emptyStrip\\(res\\.message\\)\\);$", tab);
     }
 
     [Fact]

@@ -17,7 +17,7 @@ const HOURS = 24;
 const LIMIT = 10;
 
 const COLUMNS = [
-  { key: "impact_score", label: "Score", format: "num1" },
+  { key: "impact_score", label: "Score", format: "int" },
   { key: "impact_band", label: "Band" },
   { key: "database_name", label: "Database" },
   { key: "query_hash", label: "Query hash", mono: true },
@@ -31,11 +31,18 @@ const COLUMNS = [
   { key: "reads_share_pct", label: "Reads %", format: "num1" },
   { key: "total_writes", label: "Writes", format: "int" },
   { key: "writes_share_pct", label: "Writes %", format: "num1" },
-  { key: "total_memory_mb", label: "Memory", format: "mb" },
+  { key: "total_memory_mb", label: "Memory MB", format: "num1" },
   { key: "memory_share_pct", label: "Memory %", format: "num1" },
   { key: "executions_share_pct", label: "Executions %", format: "num1" },
   { key: "has_plan", label: "Plan", format: "bool" },
 ];
+
+// The read returns the union of the top LIMIT hashes on each of six measures, so the count and the window come from the answer.
+function noticeText(data) {
+  const n = (data.rows || []).length;
+  const lead = n === 1 ? "1 query in the top " : n + " queries in the top ";
+  return lead + LIMIT + " on CPU, duration, reads, writes, memory or executions, ranked by impact score, last " + (data.hours_back ?? HOURS) + " hours.";
+}
 
 export const tab = {
   id: "high-impact",
@@ -50,11 +57,11 @@ export const tab = {
         if (res.kind === "empty") return mount(body, emptyStrip(res.message));
         const data = res.data || {};
         mount(body, [
-          noticeStrip("Top " + LIMIT + " queries by impact score, last " + HOURS + " hours."),
+          noticeStrip(noticeText(data)),
           VIZ.table(data, { rowsKey: "rows", columns: COLUMNS, emptyText: "No queries were ranked for this server." }),
         ]);
       } catch (e) {
-        if (e?.name !== "AbortError") mount(body, errorStrip(String(e)));
+        if (e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
       }
     })();
     return body;
