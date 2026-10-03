@@ -14,11 +14,15 @@
    so one failing never blanks the other. The sizes table's snapshot time is not shown (a table panel has no slot for
    a top-level field); a second panel would read get_database_sizes twice. A known gap. */
 
-import { VIZ } from "../../panels.js";
+import { renderPanel, VIZ } from "../../panels.js";
+import { READ_FIELDS } from "../../read-fields.js";
 import { el, mount, loadingStrip, emptyStrip, readErrorStrip, errorStrip, readTool, fmtInt } from "../../util.js";
 const CPU_HOURS = 24;
 const TOP_HOURS = 24;
 const TOP_LIMIT = 5;
+/* The summary tiles are a 24-hour aggregate; the Memory panel below shows the latest snapshot under some of the same labels. */
+const SUMMARY_TITLE = "Summary";
+const SUMMARY_SUBTITLE = "Last 24 hours";
 
 /* The service names the verdict and the band; the browser only picks a colour for the label it was sent. */
 const VERDICT_SEV = { RIGHT_SIZED: "Healthy", OVER_PROVISIONED: "Warning", UNDER_PROVISIONED: "Critical" };
@@ -59,7 +63,7 @@ const SUMMARY_STATS = [
   { key: "annual_cost_text", label: "Annual", format: "text" },
   { key: "cpu.avg_cpu_pct", label: "Avg CPU %", format: "num1" },
   { key: "cpu.p95_cpu_pct", label: "P95 CPU %", format: "num1" },
-  { key: "cpu.max_cpu_pct", label: "Max CPU %", format: "num1" },
+  { key: "cpu.max_cpu_pct", label: "Max CPU %", format: "int" },
   { key: "cpu.cpu_count", label: "vCores", format: "int", nullKey: "cpu.cpu_count_reason", showWhen: { key: "cpu.cpu_count_unit", equals: "vcores" } },
   { key: "cpu.cpu_count", label: "CPUs", format: "int", nullKey: "cpu.cpu_count_reason", hideWhen: { key: "cpu.cpu_count_unit", equals: "vcores" } },
   { key: "cpu.max_workers", label: "Max workers", format: "int" },
@@ -140,6 +144,7 @@ function loadUtilization(body, server, ctx) {
         verdict_sev: VERDICT_SEV[r.verdict],
       }));
       mount(body, [
+        el("h3", {}, [SUMMARY_TITLE, el("span", { class: "panel-sub", text: " " + SUMMARY_SUBTITLE })]),
         VIZ.stat(view, { stats }),
         data.health_score_note ? el("p", { class: "finops-note", title: data.health_score_note, text: data.health_score_note }) : null,
         el("p", { class: "finops-reason", text: data.verdict_reason }),

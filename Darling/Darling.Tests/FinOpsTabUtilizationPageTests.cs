@@ -62,18 +62,52 @@ public sealed class FinOpsTabUtilizationPageTests
         Assert.Contains("const DERIVED_KEYS = [\"verdict_label\", \"verdict_sev\", \"day_label\", \"monthly_cost_text\", \"annual_cost_text\", \"workers_in_use\"];", tab);
         var derived = new[] { "verdict_label", "verdict_sev", "day_label", "monthly_cost_text", "annual_cost_text", "workers_in_use" };
         var block = Between(tab, "/* utilization-keys:begin */", "/* utilization-keys:end */");
-        var keys = KeysIn(block).Concat(
-            Regex.Matches(block, "(?:showWhen|hideWhen): \\{ key: \"([a-z_.]+)\"").Select(m => m.Groups[1].Value))
-            .Where(k => !derived.Contains(k)).Select(k => k.Split('.').Last()).Distinct().ToList();
-        Assert.NotEmpty(keys);
+        var summary = Between(block, "const SUMMARY_STATS", "const TREND_COLUMNS");
+        var trendCols = Between(block, "const TREND_COLUMNS", null);
         var source = UtilizationSource();
-        foreach (var key in keys)
-            Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", source);
+        // Each key is checked inside the object that emits it, so a leaf name that two objects share (avg_cpu_pct in
+        // cpu and in the trend, memory_ratio in memory and in the trend) cannot be satisfied by the wrong one.
+        var cpu = Between(source, "cpu = new", "memory = new");
+        var memory = Between(source, "memory = new", "monthly_cost_usd = ");
+        var trend = source.Substring(source.IndexOf("provisioning_trend = ", System.StringComparison.Ordinal));
+        var topLevel = string.Join("\n", source.Split('\n').Where(l => Regex.IsMatch(l, "^ {12}[a-z_0-9]+ = ")));
+        var checkedCount = 0;
+        void Emitted(string key, string slice)
+        {
+            Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", slice);
+            checkedCount++;
+        }
+        var summaryKeys = KeysIn(summary).Concat(
+            Regex.Matches(summary, "(?:showWhen|hideWhen): \\{ key: \"([a-z_.]+)\"").Select(m => m.Groups[1].Value))
+            .Where(k => !derived.Contains(k)).Distinct().ToList();
+        Assert.NotEmpty(summaryKeys);
+        foreach (var key in summaryKeys)
+        {
+            var parts = key.Split('.');
+            if (parts.Length == 1) Emitted(key, topLevel);
+            else if (parts[0] == "cpu") Emitted(parts[1], cpu);
+            else if (parts[0] == "memory") Emitted(parts[1], memory);
+            else Assert.Fail("unmapped summary key " + key);
+        }
+        var trendKeys = KeysIn(trendCols).Where(k => !derived.Contains(k)).Distinct().ToList();
+        Assert.Equal(new[] { "avg_cpu_pct", "max_cpu_pct", "memory_ratio", "p95_cpu_pct" }, trendKeys.OrderBy(k => k, System.StringComparer.Ordinal));
+        foreach (var key in trendKeys) Emitted(key, trend);
+        Assert.True(checkedCount > 10);
         foreach (var key in new[] { "provisioning_trend", "verdict_reason", "health_score_note", "monthly_cost_usd", "annual_cost_usd", "current_workers", "health_band" })
         {
             Assert.Contains(key, tab);
             Assert.Matches("(?m)^\\s+" + key + " = ", source);
         }
+    }
+
+    [Fact]
+    public void TheSummaryNamesItsWindowAndFormatsMaxCpuAsAnInteger()
+    {
+        var tab = Tab();
+        Assert.Contains("const SUMMARY_SUBTITLE = \"Last 24 hours\";", tab);
+        Assert.Contains("el(\"span\", { class: \"panel-sub\", text: \" \" + SUMMARY_SUBTITLE })", tab);
+        Assert.Contains("{ key: \"cpu.max_cpu_pct\", label: \"Max CPU %\", format: \"int\" }", tab);
+        Assert.True(tab.IndexOf("SUMMARY_SUBTITLE })", System.StringComparison.Ordinal) < tab.IndexOf("VIZ.stat(view", System.StringComparison.Ordinal));
     }
 
     [Fact]
