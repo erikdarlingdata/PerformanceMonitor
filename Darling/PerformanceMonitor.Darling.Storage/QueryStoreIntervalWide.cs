@@ -978,33 +978,18 @@ FROM (
     /// <see cref="ChunkFloorsSql"/>, which takes no parameter and reads TimescaleDB's catalog for the whole store.
     /// (<see cref="ReadSourceInputsSql"/>'s coverage and pending columns, <see cref="PlainTableFloorSql"/>,
     /// <see cref="HasLegacyRowSql"/> and the cadence probe all filter on the server, so they stay per server.)
-    /// A caller that resolves many servers for one window reads this once and passes it to each call.
+    /// A caller that resolves many servers for one window passes one <see cref="StoreWideInputsCache"/> to each call.
     /// </summary>
     public sealed record StoreWideInputs(DateTime? RawFloor, bool TableIsHypertable, DateTime? TableFloor);
 
-    /// <summary>Reads <see cref="StoreWideInputs"/> once. Null when TimescaleDB's catalog is absent, which
-    /// is the answer <see cref="ResolveReadAsync"/> would reach itself (it never reads the floors then).</summary>
-    public static async Task<StoreWideInputs?> ReadStoreWideInputsAsync(
-        NpgsqlConnection connection, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    /// <summary>
+    /// A per-check holder for <see cref="StoreWideInputs"/>. <see cref="ResolveReadAsync"/> fills it the first
+    /// time a server reaches the floors step and reuses it for every later server, so the floors are read at
+    /// most once per check and not at all when every server refuses before that step.
+    /// </summary>
+    public sealed class StoreWideInputsCache
     {
-        bool hasTimescale;
-        await using (var probe = new NpgsqlCommand("SELECT to_regclass('timescaledb_information.chunks') IS NOT NULL;", connection) { CommandTimeout = commandTimeoutSeconds })
-        {
-            hasTimescale = (bool)(await probe.ExecuteScalarAsync(cancellationToken))!;
-        }
-
-        if (!hasTimescale)
-        {
-            return null;
-        }
-
-        await using var floors = new NpgsqlCommand(ChunkFloorsSql, connection) { CommandTimeout = commandTimeoutSeconds };
-        await using var reader = await floors.ExecuteReaderAsync(cancellationToken);
-        await reader.ReadAsync(cancellationToken);
-        return new StoreWideInputs(
-            reader.IsDBNull(0) ? null : reader.GetDateTime(0),
-            reader.GetBoolean(1),
-            reader.IsDBNull(2) ? null : reader.GetDateTime(2));
+        internal StoreWideInputs? Value;
     }
 
     /// <summary>
@@ -1023,7 +1008,7 @@ FROM (
         int commandTimeoutSeconds,
         ILogger? logger,
         CancellationToken cancellationToken,
-        StoreWideInputs? storeWide = null)
+        StoreWideInputsCache? storeWide = null)
     {
         /* The probes bind these as timestamp-without-time-zone, which Npgsql refuses for Kind=Utc; a caller that
            resolves its window from DateTime.UtcNow (the MCP tool) would otherwise fail every decision and read raw. */
@@ -1064,11 +1049,11 @@ FROM (
             DateTime? rawFloor = null;
             DateTime? tableFloor = null;
             var tableIsHypertable = false;
-            if (hasTimescale && storeWide is not null)
+            if (hasTimescale && storeWide?.Value is StoreWideInputs cached)
             {
-                rawFloor = storeWide.RawFloor;
-                tableIsHypertable = storeWide.TableIsHypertable;
-                tableFloor = storeWide.TableFloor;
+                rawFloor = cached.RawFloor;
+                tableIsHypertable = cached.TableIsHypertable;
+                tableFloor = cached.TableFloor;
             }
             else if (hasTimescale)
             {
@@ -1078,6 +1063,10 @@ FROM (
                 rawFloor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
                 tableIsHypertable = reader.GetBoolean(1);
                 tableFloor = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+                if (storeWide is not null)
+                {
+                    storeWide.Value = new StoreWideInputs(rawFloor, tableIsHypertable, tableFloor);
+                }
             }
 
             /* Clause 2 (filledSince <= max(rawFloor, windowStart)) needs only rawFloor, already in hand from

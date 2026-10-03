@@ -1539,8 +1539,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var bound = QueryStoreIntervalWide.WideStartBound.Window;
             string? settingServer = null;
 
-            /* The floors are one store-wide answer: read once here, not once per server. */
-            var storeWide = await QueryStoreIntervalWide.ReadStoreWideInputsAsync(connection, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            /* The floors are one store-wide answer: the first server to reach that step reads them into this
+               cache and the rest reuse them; a check that refuses before that step never reads them. */
+            var storeWide = new QueryStoreIntervalWide.StoreWideInputsCache();
             foreach (var (serverId, serverName) in wideServers)
             {
                 var plan = await QueryStoreIntervalWide.ResolveReadAsync(

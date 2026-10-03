@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -34,12 +33,16 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         string baseCs, int[] eligibleIds, int? legacyId, CancellationToken ct)
     {
         var scratch = await ScratchPostgres.CreateAsync(baseCs, ct);
-        var connection = new NpgsqlConnection(scratch.ConnectionString);
+        NpgsqlConnection? connection = null;
+        NpgsqlDataSource? postgres = null;
+        try
+        {
+        connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "TimescaleDB must be enabled on the test cluster");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
-        var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
         var all = eligibleIds.Concat(legacyId is int l ? new[] { l } : Array.Empty<int>()).ToArray();
         for (var i = 0; i < all.Length; i++)
@@ -74,11 +77,27 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
             $"SELECT drop_chunks('collect.query_store_stats', older_than => TIMESTAMP '{S.AddDays(1):yyyy-MM-dd HH:mm:ss}')", connection);
         await drop.ExecuteNonQueryAsync(ct);
         return (scratch, postgres, connection);
+        }
+        catch
+        {
+            if (postgres is not null)
+            {
+                await postgres.DisposeAsync();
+            }
+
+            if (connection is not null)
+            {
+                await connection.DisposeAsync();
+            }
+
+            await scratch.DisposeAsync();
+            throw;
+        }
     }
 
-    private static async Task<DateTime> EndAsync(NpgsqlConnection connection, int id, CancellationToken ct)
+    private static async Task<DateTime> EndAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        await using var cmd = new NpgsqlCommand($"SELECT MAX(applied_through) FROM collect.query_store_interval_wide_coverage", connection);
+        await using var cmd = new NpgsqlCommand("SELECT MAX(applied_through) FROM collect.query_store_interval_wide_coverage", connection);
         return (DateTime)(await cmd.ExecuteScalarAsync(ct))!;
     }
 
@@ -125,46 +144,66 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4605 live test.");
         var ct = TestContext.Current.CancellationToken;
         var ids = new[] { -4605101, -4605102, -4605103, -4605104, -4605105, -4605106 };
-        var (scratch, _, connection) = await SeedAsync(baseCs!, ids, null, ct);
+        var (scratch, postgres, connection) = await SeedAsync(baseCs!, ids, null, ct);
         await using var _s = scratch;
         await using var _c = connection;
-        var end = await EndAsync(connection, ids[0], ct);
+        await using var _p = postgres;
+        var end = await EndAsync(connection, ct);
 
         var expected = await SerialAsync(connection, end, ct);
         Assert.True(expected.Eligible);
         Assert.Equal(S.AddHours(14), expected.WideStart);
         Assert.Equal("qsiw-fleet-03", expected.SettingServer);
 
-        var floorReads = 0;
-        var scratchDb = new NpgsqlConnectionStringBuilder(scratch.ConnectionString).Database;
-        using var listener = new ActivityListener
+        /* Scoped to this scratch database by name, so a class running in parallel against another database is
+           invisible to the count. */
+        using var floorReads = new NpgsqlCommandCounter(scratch.DatabaseName, "table_is_hypertable", "raw_floor");
+        using var controlReads = new NpgsqlCommandCounter(scratch.DatabaseName, "fleet_floor_count_control");
+        await using (var control = postgres.CreateCommand("SELECT 1 AS fleet_floor_count_control"))
         {
-            ShouldListenTo = src => src.Name == "Npgsql",
-            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
-            ActivityStopped = a =>
-            {
-                if (!string.Equals(a.GetTagItem("db.namespace") as string, scratchDb, StringComparison.Ordinal))
-                {
-                    return;
-                }
+            await control.ExecuteScalarAsync(ct);
+        }
 
-                var text = (a.GetTagItem("db.query.text") ?? a.GetTagItem("db.statement")) as string;
-                if (text is not null && text.Contains("table_is_hypertable", StringComparison.Ordinal) && text.Contains("raw_floor", StringComparison.Ordinal))
-                {
-                    Interlocked.Increment(ref floorReads);
-                }
-            },
-        };
-        ActivitySource.AddActivityListener(listener);
+        Assert.True(controlReads.Count == 1,
+            $"The Npgsql activity listener counted {controlReads.Count} control commands on '{scratch.DatabaseName}' instead of 1, so its floors count would be meaningless.");
 
-        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         for (var run = 0; run < 20; run++)
         {
-            floorReads = 0;
+            var before = floorReads.Count;
             var got = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
             Assert.Equal(expected, got);
-            Assert.Equal(1, floorReads);
+            Assert.Equal(1, floorReads.Count - before);
         }
+    }
+
+    [Fact]
+    public async Task FleetCheck_WhenTheFirstServerRefusesBeforeTheFloors_ReadsNoFloors_AndAnswersRaw()
+    {
+        var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4605 live test.");
+        var ct = TestContext.Current.CancellationToken;
+        var ids = new[] { -4605301, -4605302, -4605303 };
+        var (scratch, postgres, connection) = await SeedAsync(baseCs!, ids, null, ct);
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var _p = postgres;
+        var end = await EndAsync(connection, ct);
+
+        /* A literal end before applied_through refuses at the step ahead of the floors read. */
+        var literalEnd = S.AddHours(13);
+        using var floorReads = new NpgsqlCommandCounter(scratch.DatabaseName, "table_is_hypertable", "raw_floor");
+        using var controlReads = new NpgsqlCommandCounter(scratch.DatabaseName, "fleet_floor_count_control");
+        await using (var control = postgres.CreateCommand("SELECT 1 AS fleet_floor_count_control"))
+        {
+            await control.ExecuteScalarAsync(ct);
+        }
+
+        Assert.True(controlReads.Count == 1,
+            $"The Npgsql activity listener counted {controlReads.Count} control commands on '{scratch.DatabaseName}' instead of 1, so its floors count would be meaningless.");
+
+        var got = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, literalEnd, ct);
+        Assert.False(got.Eligible);
+        Assert.Equal(0, floorReads.Count);
     }
 
     [Fact]
@@ -178,7 +217,7 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         await using var _s = scratch;
         await using var _c = connection;
         await using var _p = postgres;
-        var end = await EndAsync(connection, ids[0], ct);
+        var end = await EndAsync(connection, ct);
 
         Assert.Equal(default, await SerialAsync(connection, end, ct));
         var got = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
