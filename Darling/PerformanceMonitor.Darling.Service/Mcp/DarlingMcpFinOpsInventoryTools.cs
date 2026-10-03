@@ -31,7 +31,7 @@ public sealed class DarlingMcpFinOpsInventoryTools
     /// <summary>The views <c>get_finops_inventory</c> accepts.</summary>
     internal static readonly string[] Views = ["server_inventory"];
 
-    internal const int DefaultLimit = 40;
+    internal const int DefaultLimit = 33;
     internal const int MaxLimit = 200;
 
     private const string InventoryGuide =
@@ -42,7 +42,7 @@ public sealed class DarlingMcpFinOpsInventoryTools
     public static async Task<string> GetFinOpsInventory(
         NpgsqlDataSource postgres,
         [Description("Which view to read. Valid: server_inventory.")] string view,
-        [Description("Most servers returned (1-200, default 40).")] int limit = DefaultLimit,
+        [Description("Most servers returned (1-200, default 33).")] int limit = DefaultLimit,
         CancellationToken cancellationToken = default)
     {
         /* An abandoned request answers nothing, not even a refusal. */

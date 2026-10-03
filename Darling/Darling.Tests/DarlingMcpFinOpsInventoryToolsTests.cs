@@ -53,7 +53,7 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
         Assert.Equal(new[] { "view", "limit" }, described.Select(p => p.Name).ToArray());
         Assert.False(described.Single(p => p.Name == "view").HasDefaultValue, "view is required");
         Assert.Equal(DarlingMcpFinOpsInventoryTools.DefaultLimit, described.Single(p => p.Name == "limit").DefaultValue);
-        Assert.Equal(40, DarlingMcpFinOpsInventoryTools.DefaultLimit);
+        Assert.Equal(33, DarlingMcpFinOpsInventoryTools.DefaultLimit);
         Assert.Equal(200, DarlingMcpFinOpsInventoryTools.MaxLimit);
         Assert.Equal(new[] { "server_inventory" }, DarlingMcpFinOpsInventoryTools.Views);
     }
@@ -151,5 +151,34 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
         var row = Row(Dto(edition: "Standard Edition (64-bit)", cpus: 32, memoryMb: 262144), default);
         Assert.Equal("CPU: 32 cores (Standard limited to 24); RAM: 256GB (Standard limited to 128GB)",
             row.GetProperty("license_warning").GetString());
+    }
+
+    /// <summary>The longest plausible row: every string field long, a two-part license warning, a hardware note.</summary>
+    private static ServerInventoryDto RealisticDto(int n) =>
+        new(n, "prod-sql-cluster-" + n.ToString("D3") + ".corp.example.internal\\INSTANCE_NAME_LONG", "Standard Edition (64-bit)",
+            "16.0.4175.1 - RTM-CU18-GDR (KB5046861)", 3, 48, 524288L, null, 4, 12, true, true,
+            new DateTime(2026, 10, 1, 12, 30, 15, DateTimeKind.Unspecified), new DateTime(2026, 9, 1, 3, 4, 5, DateTimeKind.Unspecified),
+            "Windows Server 2022 Datacenter 10.0 <X64> (Build 20348: ) (Hypervisor)", "SECONDARY", true, 12345.67m,
+            new DateTime(2026, 10, 2, 8, 0, 0, DateTimeKind.Unspecified));
+
+    [Fact]
+    public void DefaultLimit_OfRealisticRows_FitsTheDefaultResponseBudget()
+    {
+        var metrics = new ServerMetricsDto(63.45m, 98765.4m, 12, "RIGHT_SIZED");
+        var rows = Enumerable.Range(1, DarlingMcpFinOpsInventoryTools.DefaultLimit)
+            .Select(n => DarlingMcpFinOpsInventoryTools.InventoryRow(RealisticDto(n), metrics)).ToList();
+        var body = JsonSerializer.Serialize(new
+        {
+            view = "server_inventory",
+            cpu_window_hours = 24,
+            idle_window_days = 7,
+            total_servers = 999,
+            servers_returned = rows.Count,
+            truncated = true,
+            servers = rows,
+        }, McpHelpers.JsonOptions);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(body) <= 30 * 1024,
+            $"{DarlingMcpFinOpsInventoryTools.DefaultLimit} realistic rows serialize to {body.Length} bytes");
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(body) <= McpResponseBudget.DefaultBytes);
     }
 }

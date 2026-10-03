@@ -2833,7 +2833,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_significant_waits"] = R(CatSystemHealth, "system_health: individual 500 ms+ waits with their statement.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_system_health"] = R(CatSystemHealth, "system_health: the raw parsed session records.", PServer(), PHours(24), PLimit(50), PAsOf()),
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
-            ["get_finops_inventory"] = R(CatFinOps, "FinOps Server Inventory for the whole fleet, one row per server. view is server_inventory; limit caps servers returned.", PText("view"), PInt("limit", 40)),
+            ["get_finops_inventory"] = R(CatFinOps, "FinOps Server Inventory for the whole fleet, one row per server. view is server_inventory; limit caps servers returned.", PText("view"), PInt("limit", 33)),
             // FinOps web parity (#4843), set A ends.
             // Each set belongs to one series of changes. Append to your own set only,
             // so the two series never edit the same lines of this catalog.
