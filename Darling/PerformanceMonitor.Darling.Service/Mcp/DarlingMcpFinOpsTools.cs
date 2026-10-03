@@ -29,6 +29,7 @@ public sealed partial class DarlingMcpFinOpsTools
     internal static readonly string[] Views =
     [
         // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+        UtilizationView,
         // FinOps web parity (#4843), set A ends.
         // Each set belongs to one series of changes. Append to your own set only,
         // so the two series never edit the same lines of this allow-list.
@@ -45,9 +46,9 @@ public sealed partial class DarlingMcpFinOpsTools
     ];
 
     // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
-    internal const string SetAViewLines = "";
-    internal const string SetAValid = "";
-    internal const string SetAGuides = "";
+    internal const string SetAViewLines = " " + UtilizationViewLine;
+    internal const string SetAValid = UtilizationView + ", ";
+    internal const string SetAGuides = " " + UtilizationViewGuide;
     // FinOps web parity (#4843), set A ends.
     // Each set belongs to one series of changes. Append to your own set only,
     // so the two series never edit the same lines of these fragments.
@@ -97,6 +98,8 @@ public sealed partial class DarlingMcpFinOpsTools
             switch (normalized)
             {
                 // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+                case UtilizationView:
+                    return await ReadUtilizationAsync(postgres, resolved, hours_back, limit, cancellationToken);
                 // FinOps web parity (#4843), set A ends.
                 // Each set belongs to one series of changes. Append to your own set only,
                 // so the two series never edit the same lines of this switch.

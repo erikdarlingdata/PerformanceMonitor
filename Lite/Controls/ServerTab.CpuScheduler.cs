@@ -62,7 +62,7 @@ public partial class ServerTab : UserControl
             await System.Threading.Tasks.Task.WhenAll(trendTask, snapshotTask);
 
             UpdateCpuSchedulerChart(trendTask.Result, hoursBack, fromDate, toDate);
-            CpuSchedulerGrid.ItemsSource = CpuSchedulerMetrics.BuildMetrics(snapshotTask.Result);
+            CpuSchedulerGrid.ItemsSource = CpuSchedulerGridRow.Build(snapshotTask.Result);
 
             var gap = CpuSchedulerGapNote(_server.DisplayName, _isAzureSqlDatabase);
             CpuSchedulerNoDataMessage.Text = gap ?? "";

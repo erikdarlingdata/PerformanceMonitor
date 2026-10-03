@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -285,6 +286,26 @@ public sealed class DarlingCommandExecutorTests
         Assert.Contains("ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL", perServer.Sql, StringComparison.Ordinal);
         Assert.Equal(7, perServer.Parameters![0]);
         Assert.Equal("wait_stats", perServer.Parameters![1]);
+    }
+
+    [Fact]
+    public void ResolvePlan_CollectorWrites_BindTheCatalogsSpellingNotTheTypedOne()
+    {
+        /* The store's unique indexes compare collector_name exactly, so a typed 'Wait_Stats' would be a second row beside the
+           viewer's 'wait_stats'. Every collector-scoped write binds the catalog key, scoped or fleet-wide. */
+        var toggle = DarlingCommandExecutor.ResolvePlan(Command("enable_collector", args: "{\"collector_name\":\"Wait_Stats\"}"));
+        Assert.Equal("wait_stats", toggle.Parameters![0]);
+        var toggleServer = DarlingCommandExecutor.ResolvePlan(Command("disable_collector", target: 7, args: "{\"collector_name\":\"WAIT_STATS\"}"));
+        Assert.Equal("wait_stats", toggleServer.Parameters![1]);
+
+        foreach (var (target, runAt) in new (int?, string)[] { (null, "02:00"), (7, "02:00"), (null, "default"), (7, "default"), (7, "none") })
+        {
+            var plan = DarlingCommandExecutor.ResolvePlan(Command(
+                "set_collector_run_at", target, "{\"collector_name\":\"Index_Object_Stats\",\"run_at\":\"" + runAt + "\"}"));
+            Assert.Equal(CommandKind.StoreWrite, plan.Kind);
+            Assert.Contains("index_object_stats", plan.Parameters!.OfType<string>());
+            Assert.DoesNotContain("Index_Object_Stats", plan.Parameters!.OfType<string>());
+        }
     }
 
     [Fact]

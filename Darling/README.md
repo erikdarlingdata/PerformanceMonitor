@@ -793,7 +793,38 @@ A **file-only** block (not seeded into the control plane): it describes the depl
 
 There are deliberately **no collection-schedule or retention settings** in `darling.json`. The service consumes the shared per-collector defaults (`CollectorScheduleDefaults`) — the same cadences and retention horizons a fresh Lite install uses, identity-pinned by tests so the two editions cannot drift. If a schedule knob is ever genuinely needed, it will be added then, not speculatively.
 
-The overrides that do exist live in the **store**, not the file: `config.config_collector_schedules` is a sparse table where an absent row means "the code default", and the Viewer's Collector Schedules window is where cadence, retention, database scope and the enabled flag are edited, per fleet or per server. The one column an operator *must* be able to change without a desktop is the enabled flag — the next section is that path.
+The overrides that do exist live in the **store**, not the file. `config.config_collector_schedules` is a sparse table where an absent row means "the code default". The Viewer's Collector Schedules window is where cadence, retention, database scope, the enabled flag and the run time are edited, per fleet or per server. The two columns an operator *must* be able to change without a desktop are the enabled flag and the run time. The next two sections are those paths.
+
+#### What the run time sets
+
+The run time sets one thing: the time of day a collector that runs once a day or less often starts. The `config.config_collector_run_times` table holds it, one row per collector (fleet-wide or for one server). The table stores it as minutes after midnight on the *monitored server's own clock*. A collector with no row has no run time.
+
+The Viewer's Collector Schedules window writes the run time in the same Save as the schedule rows. Three actions delete the run times of the schedule they reset (the shipped defaults have no fixed time):
+
+- The window's Reset to Defaults.
+- A server's Use default schedule.
+- Apply Default to All Servers.
+
+A Viewer released before the table existed resets the schedule rows only. A run time set here therefore survives a Reset done in an older Viewer.
+
+The Viewer and the CLI take the run time as a 24-hour `HH:MM` time such as `02:00`.
+
+Without a run time, such a collector starts when the service happened to start. That can be the busiest hour of the server's day. With one, it starts in the hour you chose.
+
+A run time layers like the other columns: the server's own value, then the fleet-wide one, then no fixed time. On a server's row, `None` (stored as `-1`) stops a fleet-wide time on that server only. `Use default` (NULL) lets the next level apply.
+
+A run time works only when the collector's effective interval is a whole number of days (1440 minutes or a multiple of it). On an hourly collector a time only picks the minute past the hour. The Viewer and the CLI refuse it and tell you to change the frequency or clear the time.
+
+The Viewer's editor shows what the time means in server time and in UTC. A fleet row shows the spread, and a server row shows its next run. For an Azure SQL Database, which always reports UTC, it says so.
+
+#### What stays fixed
+
+Two numbers around the run time are not settings.
+
+- Each server starts at the run time plus a fixed offset of under 60 minutes. The offset depends only on the server id, so it is the same after every restart. A fleet-wide `02:00` spreads the fleet across 02:00 to 03:00 instead of starting every server in the same minute.
+- A run can start from that slot until 60 minutes after it. A collector that starts inside that hour runs at once. One that cannot (the service was down or busy) waits for the next day's slot. A missed day is skipped, not replayed. A run held by the concurrency cap starts when a slot frees, which can be after the hour.
+
+The time follows the server's clock through a daylight-saving change, so it stays at the same local time.
 
 ### Enable or disable a collector headlessly (`--enable-collector` / `--disable-collector`)
 
@@ -806,6 +837,29 @@ PerformanceMonitor.Darling.Service.exe --enable-collector long_query_completions
 ```
 
 Without `--server` the change is **fleet-wide** — the schedule row with no server, which every server inherits unless it has a row of its own. `--server <name>` writes that one server's row instead; the name is the display name or storage name the Viewer's sidebar and the MCP tools show, matched exactly first and as a partial name only when the partial is unique — an ambiguous fragment is refused with the candidates listed rather than guessed at, since a toggle landing on the wrong sibling is the same coin flip `remove_server` refuses to make. Only the `enabled` flag is written: a cadence or retention override already on the row survives. The verb owns no SQL of its own — it hands the same `enable_collector` / `disable_collector` command the store's command plane carries to the service's own command executor and runs the executor's plan, so an unknown collector name is refused with the executor's message and the full list of known collectors, and the upsert is one implementation rather than two. After the write it reads the collector's rows **back from the store** and prints them — scope, enabled, cadence, retention, database scope — so what you see is what the service will resolve, not an echo of what you typed. The write bumps the config version the running service polls every sweep, so it takes effect within one sweep with no restart. Add `--config <path>` if `darling.json` is not next to the exe and `DARLING_CONFIG` is not set. Exit `0` only when the row was written and read back, so it works as a step in a provisioning script. A failure exits `1` for a usage or configuration problem and `2` when the store cannot be reached, refuses the login, or refuses the change (a wrong password exits `2`, not `1`), so a script can tell a problem with its own arguments or config from a problem at the store. Managed mode needs Windows (the store credential is DPAPI); a bring-your-own store works on any platform, exactly as `--add-server` does. There is deliberately **no MCP tool** for this: the MCP surface has config writers (`add_servers`, alert tuning, custom views) but no collector-schedule writer, and adding one is a product decision the verb does not take — the CLI was the smallest surface that closes the headless gap.
+
+### Set the time of day a daily collector runs (`--set-collector-run-at`)
+
+A collector that runs once a day or less often, such as `index_object_stats`, can start at a time you choose. The verb writes the same row as the Viewer's Collector Schedules window. It takes a collector name and one of three values:
+
+```
+PerformanceMonitor.Darling.Service.exe --set-collector-run-at index_object_stats 02:00
+PerformanceMonitor.Darling.Service.exe --set-collector-run-at index_object_stats 03:30 --server sql01
+PerformanceMonitor.Darling.Service.exe --set-collector-run-at index_object_stats none --server sql01
+PerformanceMonitor.Darling.Service.exe --set-collector-run-at index_object_stats default --server sql01
+```
+
+- `HH:MM` is a 24-hour time from `00:00` to `23:59` on the monitored server's own clock.
+- `none` on a server's row keeps the fleet-wide time from applying to that server. On the fleet-wide row it clears the time.
+- `default` clears the row's time so the next level applies again. A server's row falls back to the fleet-wide time. It creates no row.
+
+Without `--server` the change is **fleet-wide**. `--server <name>` writes that server's own row, with the name matched as `--enable-collector` matches it. Only the run time is written. The enabled flag, cadence and retention already on the row are kept.
+
+The verb refuses a time that is not a 24-hour `HH:MM` time. It also refuses a time on a collector whose cadence, for the row being written, is more often than once a day. In both cases it prints the text the Viewer shows, exits `1` and changes nothing. `none` and `default` are never refused, because clearing is the remedy that refusal names.
+
+After the write the verb reads the collector's rows back from the store and prints them. A row that carries a time prints `run_at=02:00 server time`, so what you see is what the service will resolve. The exit codes, `--config` and the managed-mode rule are those of `--enable-collector`.
+
+The write needs the run-time table, which the service adds when it starts. If the service has not migrated the store yet, the verb says so. It tells you to start the service once to migrate the store, then run the command again. It exits `1` and changes nothing. `--enable-collector` and `--disable-collector` read back without the `run_at=` part instead of failing.
 
 ### Drop the Extended Events sessions a removed server left behind (`--drop-xe-sessions`)
 

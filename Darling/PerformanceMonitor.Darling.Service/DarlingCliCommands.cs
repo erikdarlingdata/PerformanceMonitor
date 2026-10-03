@@ -167,6 +167,12 @@ public static class DarlingCliCommands
     public static bool IsDisableCollectorVerb(string arg) =>
         string.Equals(arg, "--disable-collector", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="SetCollectorRunAtAsync"/> handles: set, stop or clear the time of day a collector that runs once
+    /// a day starts, fleet-wide or for one server (#4938). A heavy daily collector otherwise runs whenever the service happened to
+    /// start, which is often a busy hour; this names a quiet one, on the monitored server's own clock.</summary>
+    public static bool IsSetCollectorRunAtVerb(string arg) =>
+        string.Equals(arg, "--set-collector-run-at", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="DropXeSessionsAsync(string[], TextWriter, TextWriter, CancellationToken)"/> handles — drop the
     /// Extended Events sessions Darling created on a server this service still monitors (run it just before the server is
     /// removed), or with <c>--print-sql</c> print the guarded DROP statements for a server that is no longer configured (#4732).
@@ -213,6 +219,7 @@ public static class DarlingCliCommands
         || IsAddServerVerb(arg)
         || IsEnableCollectorVerb(arg)
         || IsDisableCollectorVerb(arg)
+        || IsSetCollectorRunAtVerb(arg)
         || IsDropXeSessionsVerb(arg);
 
     /// <summary>
@@ -293,6 +300,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path>]   Set the time of day (the monitored server's own clock) a collector that runs once a day or less often starts; none stops a fixed time, default clears the row's time so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the run time changes. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", and this install's own, whichever exist). Removing a server drops only this install's own sessions, so run this just before you remove the server to drop the shared ones too. It also lists the sessions of other installs and never drops them. --dry-run lists them and drops nothing." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes. It connects to nothing, so use it for a server that is no longer configured or that a removal could not reach." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
@@ -5394,9 +5402,16 @@ public static class DarlingCliCommands
     /// spaces in, wrapped so a 60-name list is a paragraph rather than a screen. The opt-in ones are tagged,
     /// because they are the reason the verb exists. Pure, so the listing pins.
     /// </summary>
-    internal static string KnownCollectorsText()
+    internal static string KnownCollectorsText() => KnownCollectorsText(null);
+
+    /// <summary>
+    /// <see cref="KnownCollectorsText()"/> over the collectors <paramref name="include"/> keeps (all of them when it is null), so
+    /// <see cref="CollectorRunAtUsageText"/> lists only the ones a run time can be set on. Pure.
+    /// </summary>
+    internal static string KnownCollectorsText(Func<CollectorScheduleDefaults.Entry, bool>? include)
     {
         var names = CollectorScheduleDefaults.All
+            .Where(kv => include is null || include(kv.Value))
             .OrderBy(kv => kv.Key, StringComparer.Ordinal)
             .Select(kv => kv.Value.DefaultEnabled ? kv.Key : kv.Key + " (ships OFF)")
             .ToList();
@@ -5593,11 +5608,65 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     }
 
     /// <summary>
+    /// The read-back of the collector's run times (#4938): the rows of <c>config.config_collector_run_times</c> for the
+    /// collector, both scopes, each per-server row labelled from the registry the way <see cref="CollectorScheduleReadbackSql"/>
+    /// labels it. Its own read, because a run time is not a column of the schedule rows (the viewer's schedule Save deletes and
+    /// re-inserts those rows). Matched on <c>lower()</c> like the schedule read-back, and schema-qualified, so a 42P01 from it can
+    /// only mean this table is missing. $1 collector_name. Internal const so Darling.Tests can pin the dialect.
+    /// </summary>
+    internal const string CollectorRunTimeReadbackSql = @"
+SELECT rt.server_id, rt.collector_name, rt.run_at_minute, COALESCE(s.display_name, s.server_name) AS server_label
+FROM config.config_collector_run_times rt
+LEFT JOIN collect.servers s ON s.server_id = rt.server_id
+WHERE lower(rt.collector_name) = lower($1)
+ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
+
+    /// <summary>One <c>config_collector_run_times</c> row as the verb reads it back, with the registry label the operator knows
+    /// the server by. <see cref="RunAtMinute"/> is minutes after midnight on the server's clock, or -1 on a server row for
+    /// "no fixed time on this server".</summary>
+    internal sealed record CollectorRunTimeReadbackRow(int? ServerId, string CollectorName, int RunAtMinute, string? ServerLabel);
+
+    /// <summary>
+    /// Reads the collector's run-time rows (#4938). A store the service has not migrated to V160 yet has no such table, which is
+    /// "no run times" (what every collector had before it existed) and not a failure: the toggle verbs work against a store older
+    /// than the binary, so their read-back must not fail on a store whose write succeeded. The state code, not the message text,
+    /// is what is matched: lc_messages is not always English. Any other failure propagates.
+    /// </summary>
+    internal static async Task<List<CollectorRunTimeReadbackRow>> ReadCollectorRunTimeRowsAsync(
+        NpgsqlDataSource postgres, string collectorName, CancellationToken cancellationToken)
+    {
+        var rows = new List<CollectorRunTimeReadbackRow>();
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var command = new NpgsqlCommand(CollectorRunTimeReadbackSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(new CollectorRunTimeReadbackRow(
+                    reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                    reader.GetString(1),
+                    reader.GetInt16(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3)));
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            return new List<CollectorRunTimeReadbackRow>();
+        }
+
+        return rows;
+    }
+
+    /// <summary>
     /// Renders the read-back as operator lines: the code default first (so "(default)" in a row has a number
     /// beside it), then one line per override row — scope, enabled, frequency, retention, and the database scope
-    /// when the row carries one. PURE, so the layout pins without a store (the <see cref="FormatProbeLine"/> split).
+    /// when the row carries one — then, when the collector has run times (#4938), one line per run-time row. PURE, so the
+    /// layout pins without a store (the <see cref="FormatProbeLine"/> split).
     /// </summary>
-    internal static IReadOnlyList<string> FormatCollectorScheduleRows(string collectorName, IReadOnlyList<CollectorScheduleReadbackRow> rows)
+    internal static IReadOnlyList<string> FormatCollectorScheduleRows(
+        string collectorName, IReadOnlyList<CollectorScheduleReadbackRow> rows, IReadOnlyList<CollectorRunTimeReadbackRow>? runTimes = null)
     {
         var lines = new List<string>();
         var entry = CollectorScheduleDefaults.All.TryGetValue(collectorName, out var e) ? e : null;
@@ -5614,16 +5683,13 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         if (rows.Count == 0)
         {
             lines.Add("  (none — the code default applies everywhere)");
+            AppendRunTimeLines(lines, collectorName, runTimes);
             return lines;
         }
 
         foreach (var row in rows)
         {
-            var scope = row.ServerId is null
-                ? "fleet-wide"
-                : string.IsNullOrEmpty(row.ServerLabel)
-                    ? string.Format(CultureInfo.InvariantCulture, "server_id {0} (not in the servers registry)", row.ServerId)
-                    : string.Format(CultureInfo.InvariantCulture, "{0} (server_id {1})", row.ServerLabel, row.ServerId);
+            var scope = DescribeReadbackScope(row.ServerId, row.ServerLabel);
             var frequency = row.FrequencyMinutes is int f ? DescribeFrequency(f) : "(default)";
             var retention = row.RetentionDays is int r ? string.Format(CultureInfo.InvariantCulture, "{0} days", r) : "(default)";
             var line = string.Format(
@@ -5645,11 +5711,53 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             lines.Add("  (a server's own row wins over the fleet-wide row for that server, column by column)");
         }
 
+        AppendRunTimeLines(lines, collectorName, runTimes);
         return lines;
+    }
+
+    /// <summary>The scope a read-back row is printed under: <c>fleet-wide</c>, or the server's registry label with its id, or the
+    /// id alone for a server with no registry row (one that has never connected).</summary>
+    private static string DescribeReadbackScope(int? serverId, string? serverLabel) =>
+        serverId is null
+            ? "fleet-wide"
+            : string.IsNullOrEmpty(serverLabel)
+                ? string.Format(CultureInfo.InvariantCulture, "server_id {0} (not in the servers registry)", serverId)
+                : string.Format(CultureInfo.InvariantCulture, "{0} (server_id {1})", serverLabel, serverId);
+
+    /// <summary>
+    /// The run-time lines of the read-back (#4938): a heading and one line per run-time row (scope, then the time on the
+    /// server's clock, or "none" for a server that is opted out of the fleet's time). Nothing is printed for a collector with no run
+    /// time, so every other read-back reads exactly as it always has.
+    /// </summary>
+    private static void AppendRunTimeLines(List<string> lines, string collectorName, IReadOnlyList<CollectorRunTimeReadbackRow>? runTimes)
+    {
+        if (runTimes is null || runTimes.Count == 0)
+        {
+            return;
+        }
+
+        lines.Add($"Run times in the store for {collectorName}:");
+        foreach (var runTime in runTimes)
+        {
+            lines.Add("  " + DescribeReadbackScope(runTime.ServerId, runTime.ServerLabel)
+                + ": run_at=" + DescribeRunAt(runTime.RunAtMinute, runTime.ServerId is null));
+        }
     }
 
     private static string DescribeFrequency(int minutes) =>
         minutes == 0 ? "on load only" : string.Format(CultureInfo.InvariantCulture, "every {0} min", minutes);
+
+    /// <summary>
+    /// A stored run time as the read-back prints it (#4938): <c>HH:MM server time</c> for a minute after midnight, and for -1 the
+    /// "no fixed time" reading, which on a server's own row also says it stops the fleet's time for that server. A value outside
+    /// the column's own range (a CHECK keeps it from ever being stored) prints as what it is rather than failing the read-back.
+    /// </summary>
+    private static string DescribeRunAt(int runAtMinute, bool fleetRow) =>
+        runAtMinute == -1
+            ? (fleetRow ? "none (no fixed time)" : "none (no fixed time on this server)")
+            : runAtMinute is >= 0 and < 1440
+                ? CollectorRunTime.Format(runAtMinute) + " server time"
+                : string.Format(CultureInfo.InvariantCulture, "{0} (not a valid run time)", runAtMinute);
 
     /// <summary>Exit codes <see cref="ToggleCollectorAsync"/> returns for <c>--enable-collector</c> and
     /// <c>--disable-collector</c> (#4744): one code for a usage or configuration problem and another for a store that
@@ -5661,8 +5769,9 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         public const int Success = 0;
 
         /// <summary>Bad arguments, a config that is missing or invalid, a connection string that cannot be used, a
-        /// managed store's credential that is not stored or cannot be read, an unknown collector, or a
-        /// <c>--server</c> that names no server or more than one.</summary>
+        /// managed store's credential that is not stored or cannot be read, an unknown collector, a
+        /// <c>--server</c> that names no server or more than one, or (<c>--set-collector-run-at</c> only) a store that has not
+        /// been upgraded to the run-time table yet.</summary>
         public const int UsageOrConfig = 1;
 
         /// <summary>The store cannot be reached, or it refuses the write (or the read-back after it).</summary>
@@ -5732,112 +5841,26 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             return CollectorToggleExitCode.UsageOrConfig;
         }
 
-        DarlingConfig config;
-        try
+        var created = TryCreateCollectorStoreDataSource(verb, configPath, error);
+        if (created is null)
         {
-            config = DarlingConfig.Load(configPath);
-        }
-        catch (Exception ex)
-        {
-            error.WriteLine($"Could not load configuration: {ex.Message}");
             return CollectorToggleExitCode.UsageOrConfig;
         }
 
-        var postgres = config.Postgres;
-        if (postgres is null)
-        {
-            error.WriteLine("postgres section is required.");
-            return CollectorToggleExitCode.UsageOrConfig;
-        }
-
-        /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no such
-           guard, which is why this is scoped to the managed store rather than the whole verb — the --add-server
-           shape, for the --add-server reason. */
-        if (postgres.Managed && !OperatingSystem.IsWindows())
-        {
-            error.WriteLine($"A managed Postgres store keeps its credential in DPAPI, so {verb} needs Windows. "
-                + "A bring-your-own store (postgres.connectionString) works on any platform.");
-            return CollectorToggleExitCode.UsageOrConfig;
-        }
-
-        /* Building the store connection is where a string Npgsql cannot parse (sslmode=NotARealSslMode, say) and a
-           managed credential file that cannot be read or unprotected both throw. That is a problem with the
-           setting, not a crash: say so and exit with the usage-or-config code (#4744). The worker's own
-           normalization goes with it: a bring-your-own string usually omits the collect/config search path, and the
-           registry read below (--server) names the servers table bare, as every MCP read does. */
-        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable, ensureStoreSearchPath: true))
-        {
-            error.WriteLine(unusable);
-            return CollectorToggleExitCode.UsageOrConfig;
-        }
-
-        if (string.IsNullOrWhiteSpace(connectionString))
-        {
-            /* Written where Windows is provable in the condition itself, for the reason --add-server documents: a
-               bool is not something the platform analyzer can correlate with an earlier OS guard. */
-            error.WriteLine(postgres.Managed && OperatingSystem.IsWindows()
-                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
-                : "postgres.connectionString is empty, so there is no store to write a schedule to.");
-            return CollectorToggleExitCode.UsageOrConfig;
-        }
-
-        await using var dataSource = NpgsqlDataSource.Create(
-            DarlingStoreConnection.PinSessionTimeZoneUtc(
-                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
+        await using var dataSource = created;
 
         output.WriteLine();
         output.WriteLine($"PerformanceMonitor Darling — {(enable ? "enable" : "disable")} a collector ({verb})");
         output.WriteLine();
 
-        int? serverId = null;
-        var scopeLabel = "fleet-wide";
-        if (serverName is not null)
+        var scope = await ResolveCollectorScopeAsync(dataSource, serverName, error);
+        if (scope.FailureExitCode is int scopeFailure)
         {
-            List<DarlingServerResolver.RegisteredServer> servers;
-            try
-            {
-                servers = await DarlingServerResolver.LoadEnabledAsync(dataSource, CancellationToken.None);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                error.WriteLine($"Could not read the servers registry from the store: {ex.Message}");
-                return CollectorToggleExitCode.StoreUnavailable;
-            }
-
-            var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName);
-            if (target.Candidates.Count == 0)
-            {
-                /* The read resolver's miss message: the local listing (a typo is the commonest miss) plus the
-                   #2339 peer disclosure when another store declares coverage of the name. The resolver hands it
-                   back as the `invalid` envelope since #3739; stderr is TEXT, so the sentence is read out of it. */
-                var (_, missMessage) = DarlingServerResolver.ResolveOrError(servers, serverName);
-                error.WriteLine(missMessage is null ? $"Could not resolve server '{serverName}'." : McpHelpers.ErrorMessageOf(missMessage));
-                error.WriteLine("Nothing was changed.");
-                return CollectorToggleExitCode.UsageOrConfig;
-            }
-
-            if (target.Candidates.Count > 1)
-            {
-                error.WriteLine(
-                    $"'{serverName}' matches {target.Candidates.Count} servers " +
-                    $"({(target.MatchedBy == "exact" ? "the same name on more than one registration" : "as a partial name")}); nothing was changed. " +
-                    "Re-run with ONE candidate's full storage name:");
-                foreach (var candidate in target.Candidates)
-                {
-                    error.WriteLine(string.IsNullOrEmpty(candidate.DisplayName) || candidate.DisplayName == candidate.ServerName
-                        ? $"  {candidate.ServerName}"
-                        : $"  {candidate.DisplayName} ({candidate.ServerName})");
-                }
-
-                return CollectorToggleExitCode.UsageOrConfig;
-            }
-
-            var resolved = target.Candidates[0];
-            serverId = resolved.ServerId;
-            scopeLabel = string.IsNullOrEmpty(resolved.DisplayName) || resolved.DisplayName == resolved.ServerName
-                ? resolved.ServerName
-                : $"{resolved.DisplayName} ({resolved.ServerName})";
+            return scopeFailure;
         }
+
+        var serverId = scope.ServerId;
+        var scopeLabel = scope.Label;
 
         /* The executor's plan for the FINAL scope — the same call the pre-flight made, now with the server
            resolved — executed through the executor's own store-write path. */
@@ -5855,13 +5878,160 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         output.WriteLine($"  [{(enable ? "ENABLED" : "DISABLED")}] {collectorName} — {scopeLabel} ({plan.SuccessStatus}).");
         output.WriteLine();
 
+        return await PrintCollectorScheduleReadbackAsync(dataSource, collectorName, output, error, cancellationToken);
+    }
+
+    /// <summary>
+    /// The store connection the collector schedule verbs open, <see cref="ToggleCollectorAsync"/> and
+    /// <see cref="SetCollectorRunAtAsync"/>: load darling.json, check the platform for a managed store's credential, build the
+    /// connection string and create the data source. One body for both, so a refusal reads the same from either verb and the
+    /// store-opening call sites stay the ones <c>DarlingCliUnusableStoreConnectionTests</c> counts. Returns null after writing the
+    /// reason to <paramref name="error"/>; every refusal here is <see cref="CollectorToggleExitCode.UsageOrConfig"/>. The caller
+    /// disposes the data source.
+    /// </summary>
+    private static NpgsqlDataSource? TryCreateCollectorStoreDataSource(string verb, string? configPath, TextWriter error)
+    {
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return null;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return null;
+        }
+
+        /* The managed store credential is DPAPI, so it can only be read on Windows. Bring-your-own needs no such
+           guard, which is why this is scoped to the managed store rather than the whole verb — the --add-server
+           shape, for the --add-server reason. */
+        if (postgres.Managed && !OperatingSystem.IsWindows())
+        {
+            error.WriteLine($"A managed Postgres store keeps its credential in DPAPI, so {verb} needs Windows. "
+                + "A bring-your-own store (postgres.connectionString) works on any platform.");
+            return null;
+        }
+
+        /* Building the store connection is where a string Npgsql cannot parse (sslmode=NotARealSslMode, say) and a
+           managed credential file that cannot be read or unprotected both throw. That is a problem with the
+           setting, not a crash: say so and exit with the usage-or-config code (#4744). The worker's own
+           normalization goes with it: a bring-your-own string usually omits the collect/config search path, and the
+           registry read below (--server) names the servers table bare, as every MCP read does. */
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable, ensureStoreSearchPath: true))
+        {
+            error.WriteLine(unusable);
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            /* Written where Windows is provable in the condition itself, for the reason --add-server documents: a
+               bool is not something the platform analyzer can correlate with an earlier OS guard. */
+            error.WriteLine(postgres.Managed && OperatingSystem.IsWindows()
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
+                : "postgres.connectionString is empty, so there is no store to write a schedule to.");
+            return null;
+        }
+
+        return NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
+    }
+
+    /// <summary>What <see cref="ResolveCollectorScopeAsync"/> decided: the schedule row a verb writes, or the exit code it stops with.</summary>
+    private readonly record struct CollectorScope(int? ServerId, string Label, int? FailureExitCode)
+    {
+        /// <summary>No <c>--server</c>: the fleet-wide row (<c>server_id</c> NULL).</summary>
+        public static CollectorScope Fleet { get; } = new(null, "fleet-wide", null);
+
+        /// <summary>The server could not be resolved, so nothing is written and the verb returns <paramref name="exitCode"/>.</summary>
+        public static CollectorScope Failed(int exitCode) => new(null, string.Empty, exitCode);
+    }
+
+    /// <summary>
+    /// The scope of a collector schedule write, shared by <see cref="ToggleCollectorAsync"/> and <see cref="SetCollectorRunAtAsync"/>:
+    /// no <c>--server</c> is the fleet-wide row; a name is resolved against the enabled <c>servers</c> registry by the WRITE rule,
+    /// <see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/> (#3541 A14), and a miss or an ambiguous partial name is refused
+    /// with the candidates named and "Nothing was changed." The one place either verb resolves a server, so the two cannot learn
+    /// different rules.
+    /// </summary>
+    private static async Task<CollectorScope> ResolveCollectorScopeAsync(NpgsqlDataSource dataSource, string? serverName, TextWriter error)
+    {
+        if (serverName is null)
+        {
+            return CollectorScope.Fleet;
+        }
+
+        List<DarlingServerResolver.RegisteredServer> servers;
+        try
+        {
+            servers = await DarlingServerResolver.LoadEnabledAsync(dataSource, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not read the servers registry from the store: {ex.Message}");
+            return CollectorScope.Failed(CollectorToggleExitCode.StoreUnavailable);
+        }
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName);
+        if (target.Candidates.Count == 0)
+        {
+            /* The read resolver's miss message: the local listing (a typo is the commonest miss) plus the
+               #2339 peer disclosure when another store declares coverage of the name. The resolver hands it
+               back as the `invalid` envelope since #3739; stderr is TEXT, so the sentence is read out of it. */
+            var (_, missMessage) = DarlingServerResolver.ResolveOrError(servers, serverName);
+            error.WriteLine(missMessage is null ? $"Could not resolve server '{serverName}'." : McpHelpers.ErrorMessageOf(missMessage));
+            error.WriteLine("Nothing was changed.");
+            return CollectorScope.Failed(CollectorToggleExitCode.UsageOrConfig);
+        }
+
+        if (target.Candidates.Count > 1)
+        {
+            error.WriteLine(
+                $"'{serverName}' matches {target.Candidates.Count} servers " +
+                $"({(target.MatchedBy == "exact" ? "the same name on more than one registration" : "as a partial name")}); nothing was changed. " +
+                "Re-run with ONE candidate's full storage name:");
+            foreach (var candidate in target.Candidates)
+            {
+                error.WriteLine(string.IsNullOrEmpty(candidate.DisplayName) || candidate.DisplayName == candidate.ServerName
+                    ? $"  {candidate.ServerName}"
+                    : $"  {candidate.DisplayName} ({candidate.ServerName})");
+            }
+
+            return CollectorScope.Failed(CollectorToggleExitCode.UsageOrConfig);
+        }
+
+        var resolved = target.Candidates[0];
+        var scopeLabel = string.IsNullOrEmpty(resolved.DisplayName) || resolved.DisplayName == resolved.ServerName
+            ? resolved.ServerName
+            : $"{resolved.DisplayName} ({resolved.ServerName})";
+        return new CollectorScope(resolved.ServerId, scopeLabel, null);
+    }
+
+    /// <summary>
+    /// The read-back both collector schedule verbs end with: every override row for the collector, printed, then the line that says
+    /// no restart is needed. Returns <see cref="CollectorToggleExitCode.Success"/>, or
+    /// <see cref="CollectorToggleExitCode.StoreUnavailable"/> when the rows cannot be read back (the write is already committed).
+    /// </summary>
+    private static async Task<int> PrintCollectorScheduleReadbackAsync(
+        NpgsqlDataSource dataSource, string collectorName, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
         /* Read back rather than echo: the rows are what the service will resolve, and printing the input would
            say nothing about a frequency override the write preserved or a per-server row the fleet row does not
            govern. A failure HERE is reported as what it is — the write is already committed. */
         List<CollectorScheduleReadbackRow> rows;
+        List<CollectorRunTimeReadbackRow> runTimes;
         try
         {
             rows = await ReadCollectorScheduleRowsAsync(dataSource, collectorName, cancellationToken);
+            runTimes = await ReadCollectorRunTimeRowsAsync(dataSource, collectorName, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -5869,7 +6039,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             return CollectorToggleExitCode.StoreUnavailable;
         }
 
-        foreach (var line in FormatCollectorScheduleRows(collectorName, rows))
+        foreach (var line in FormatCollectorScheduleRows(collectorName, rows, runTimes))
         {
             output.WriteLine(line);
         }
@@ -5880,6 +6050,282 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         output.WriteLine("The running service re-resolves its schedules on its next config poll; no restart is needed.");
         return CollectorToggleExitCode.Success;
     }
+
+    /* ───────────────────── --set-collector-run-at (#4938) ───────────────────── */
+
+    /// <summary>
+    /// What <c>--set-collector-run-at</c> prints when its arguments do not parse, name no known collector or carry a time that is not
+    /// <c>HH:MM</c>, <c>none</c> or <c>default</c>: to STDOUT, as <see cref="CollectorToggleUsageText"/> does, with the one-line refusal
+    /// itself on STDERR. It lists the collectors that run once a day or less often by default, because those are the ones the verb
+    /// accepts (a frequency override can make another one daily, and the verb judges that against the store).
+    /// </summary>
+    public static string CollectorRunAtUsageText() =>
+        "Usage:" + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path to darling.json>]" + Environment.NewLine +
+        Environment.NewLine +
+        "<collector> is a collector name as collection health reports it, one that runs once a day or less often." + Environment.NewLine +
+        "HH:MM is a 24-hour time of day, 00:00 to 23:59, on the monitored server's own clock (server time): the collector starts in" + Environment.NewLine +
+        "that hour instead of whenever the service happened to start. Each server starts at its own minute inside the hour, so a" + Environment.NewLine +
+        "fleet-wide time does not start every server at once." + Environment.NewLine +
+        "none stops a fixed time: on a server's own row it keeps the fleet's time from applying to that server, and on the fleet-wide" + Environment.NewLine +
+        "row it clears the time." + Environment.NewLine +
+        "default clears the row's time, so the next level applies again (a server's row falls back to the fleet-wide time)." + Environment.NewLine +
+        "Without --server the change is FLEET-WIDE (the schedule row with no server); --server <server> writes that server's own row" + Environment.NewLine +
+        "instead (its display name or storage name, as the Viewer and the MCP tools show it)." + Environment.NewLine +
+        "Only the run time is written; the enabled flag, frequency and retention already on the row are kept. A time on a collector that" + Environment.NewLine +
+        "runs more often than once a day is refused: change its frequency, or clear the time." + Environment.NewLine +
+        Environment.NewLine +
+        "Collectors that run once a day or less often by default (\"ships OFF\" = opt-in):" + Environment.NewLine +
+        KnownCollectorsText(entry => CollectorRunTime.AllowsRunAt(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(entry.FrequencyMinutes)));
+
+    /// <summary>
+    /// Parses <c>--set-collector-run-at</c>'s trailing arguments STRICTLY, the posture <see cref="TryParseCollectorToggleArgs"/> takes:
+    /// exactly two bare arguments, the collector name and then the time (<c>HH:MM</c>, <c>none</c> or <c>default</c>, which the plan
+    /// checks, not this grammar), plus <c>--server &lt;name&gt;</c> and <c>--config &lt;path&gt;</c>, each taking a value, in any order.
+    /// Anything else starting with '-' is refused rather than taken as a name or a time. Pure, so the grammar pins. Returns false with
+    /// a ready-to-print <paramref name="errorMessage"/> that names <paramref name="verb"/>.
+    /// </summary>
+    /// <param name="verb">The verb as typed (for the messages).</param>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static bool TryParseCollectorRunAtArgs(
+        string verb, string[] rest, out string? collectorName, out string? runAt, out string? serverName, out string? configPath, out string? errorMessage)
+    {
+        collectorName = null;
+        runAt = null;
+        serverName = null;
+        configPath = null;
+        errorMessage = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (string.Equals(arg, "--server", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--server needs a server name: {verb} <collector> <HH:MM|none|default> --server <display name or storage name>";
+                    return false;
+                }
+
+                serverName = rest[++i];
+                continue;
+            }
+
+            if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--config needs a path: {verb} <collector> <HH:MM|none|default> --config <path to darling.json>";
+                    return false;
+                }
+
+                configPath = rest[++i];
+                continue;
+            }
+
+            if (arg.StartsWith('-'))
+            {
+                errorMessage = $"Unknown option for {verb}: {arg}";
+                return false;
+            }
+
+            if (collectorName is null)
+            {
+                collectorName = arg;
+                continue;
+            }
+
+            if (runAt is null)
+            {
+                runAt = arg;
+                continue;
+            }
+
+            errorMessage = $"{verb} takes ONE collector name and ONE time; got '{collectorName}', '{runAt}' and '{arg}'.";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(collectorName))
+        {
+            errorMessage = $"{verb} needs a collector name and a time.";
+            return false;
+        }
+
+        if (runAt is null)
+        {
+            errorMessage = $"{verb} needs a time: HH:MM, none or default.";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The store command this verb stands in for: the <c>set_collector_run_at</c> row the command plane carries for the same request,
+    /// minus the queue (<see cref="BuildCollectorToggleCommand"/>'s shape). <c>CommandId</c> 0 because no row exists, <c>RequestedBy</c>
+    /// names the surface, and <paramref name="runAt"/> is the text as typed, which the plan reads.
+    /// </summary>
+    internal static ClaimedCommand BuildCollectorRunAtCommand(string collectorName, string runAt, int? serverId) =>
+        new(
+            CommandId: 0,
+            CommandType: "set_collector_run_at",
+            TargetServerId: serverId,
+            ArgsJson: JsonSerializer.Serialize(new { collector_name = collectorName, run_at = runAt }),
+            RequestedBy: "cli");
+
+    /// <summary>
+    /// The plan the verb executes: <see cref="DarlingCommandExecutor.ResolvePlan"/> over <see cref="BuildCollectorRunAtCommand"/>,
+    /// nothing else, so the verb owns no SQL and the refusals ("unknown collector", a time that is not <c>HH:MM</c>) are the
+    /// executor's. A test holds this equal to the executor's plan for the same inputs. Pure.
+    /// </summary>
+    internal static CommandPlan PlanCollectorRunAt(string collectorName, string runAt, int? serverId) =>
+        DarlingCommandExecutor.ResolvePlan(BuildCollectorRunAtCommand(collectorName, runAt, serverId));
+
+    /// <summary>
+    /// The interval, in minutes, a run time would be judged against for the row the verb writes: the target row's frequency, else
+    /// (for a server) the fleet row's, else the code default, by <see cref="CollectorScheduleDefaults.ResolveFrequencyMinutes"/>, the
+    /// rule the service schedules by, then <see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/> so an on-load
+    /// collector counts as a daily one. Pure over the rows <see cref="ReadCollectorScheduleRowsAsync"/> read.
+    /// </summary>
+    internal static int ResolveRunAtInterval(string collectorName, int? serverId, IReadOnlyList<CollectorScheduleReadbackRow> rows)
+    {
+        var fleet = rows.FirstOrDefault(r => r.ServerId is null);
+        var server = serverId is int id ? rows.FirstOrDefault(r => r.ServerId == id) : null;
+        var frequency = CollectorScheduleDefaults.ResolveFrequencyMinutes(collectorName, server?.FrequencyMinutes, fleet?.FrequencyMinutes);
+        return CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(frequency);
+    }
+
+    /// <summary>
+    /// <c>--set-collector-run-at</c> (#4938): sets, stops or clears the time of day a once-a-day collector runs, in
+    /// <c>config.config_collector_run_times</c>, fleet-wide or for one server with <c>--server</c>, and prints the rows
+    /// read back from the store.
+    ///
+    /// <para><b>Same shape as the toggle verbs.</b> It parses strictly, checks the collector name and the time through the executor's
+    /// own plan before it touches config or the store, opens the store through the one shared body
+    /// (<see cref="TryCreateCollectorStoreDataSource"/>), resolves <c>--server</c> through the one shared resolver
+    /// (<see cref="ResolveCollectorScopeAsync"/>), writes the executor's plan through
+    /// <see cref="DarlingCommandExecutor.ExecuteStoreWriteAsync(NpgsqlDataSource, CommandPlan, CancellationToken)"/>, and reads the rows back.
+    /// The verb owns no SQL. The run time has a table of its own, so the plan never touches a schedule row (the enabled flag, frequency
+    /// and retention are neither read nor written), and the table's <c>trg_bump_collector_run_times</c> trigger bumps <c>config_version</c>
+    /// so the running service re-resolves within one sweep.</para>
+    ///
+    /// <para><b>The interval check.</b> A time is accepted only when the collector's interval, for the row being written, is a whole
+    /// number of days (<see cref="CollectorRunTime.AllowsRunAt"/>): the target row's frequency, else the fleet row's, else the code
+    /// default (<see cref="ResolveRunAtInterval"/>). Otherwise it is refused with <see cref="CollectorRunTime.IntervalRefusalMessage"/>,
+    /// the text the Viewer shows, and exit code 1; nothing is written. <c>none</c> and <c>default</c> are never refused, because clearing
+    /// is the remedy that refusal names.</para>
+    ///
+    /// <para>Exit codes are <see cref="CollectorToggleExitCode"/>'s: 0 when the row was written and read back; 1 on an argument, config,
+    /// time, interval, credential or server-resolution problem, or when the store has not been upgraded to the run-time table yet
+    /// (<see cref="RunTimeTableMissingMessage"/>: nothing is written, and the service migrates the store when it starts); 2 when the
+    /// store cannot be reached or refuses the change for any other reason.</para>
+    /// </summary>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static async Task<int> SetCollectorRunAtAsync(
+        string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        const string Verb = "--set-collector-run-at";
+
+        if (!TryParseCollectorRunAtArgs(Verb, rest, out var typedName, out var runAtText, out var serverName, out var configPath, out var argError))
+        {
+            error.WriteLine(argError);
+            output.WriteLine(CollectorRunAtUsageText());
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        /* Validate the name and the time BEFORE touching config or the store, through the executor itself: a fleet-scoped plan either
+           resolves (StoreWrite) or fails with the executor's own reason, so a typo or a bad time never opens a connection. The
+           canonical spelling of the name is what gets written (see CanonicalCollectorName). */
+        var collectorName = CanonicalCollectorName(typedName) ?? typedName!;
+        var preflight = PlanCollectorRunAt(collectorName, runAtText!, serverId: null);
+        if (preflight.Kind != CommandKind.StoreWrite)
+        {
+            error.WriteLine(preflight.FailReason ?? $"{Verb}: the executor refused the request.");
+            output.WriteLine(CollectorRunAtUsageText());
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        var created = TryCreateCollectorStoreDataSource(Verb, configPath, error);
+        if (created is null)
+        {
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        await using var dataSource = created;
+
+        output.WriteLine();
+        output.WriteLine($"PerformanceMonitor Darling — set a collector's run time ({Verb})");
+        output.WriteLine();
+
+        var scope = await ResolveCollectorScopeAsync(dataSource, serverName, error);
+        if (scope.FailureExitCode is int scopeFailure)
+        {
+            return scopeFailure;
+        }
+
+        /* The interval check, for a time only. It reads the rows through the toggle verbs' own read-back, before anything is written. */
+        var isTime = CollectorRunTime.TryParse(runAtText, out var minuteOfDay);
+        if (isTime)
+        {
+            List<CollectorScheduleReadbackRow> existing;
+            try
+            {
+                existing = await ReadCollectorScheduleRowsAsync(dataSource, collectorName, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"Could not read the schedule rows from the store: {ex.Message}");
+                return CollectorToggleExitCode.StoreUnavailable;
+            }
+
+            var interval = ResolveRunAtInterval(collectorName, scope.ServerId, existing);
+            if (!CollectorRunTime.AllowsRunAt(interval))
+            {
+                error.WriteLine(CollectorRunTime.IntervalRefusalMessage(collectorName, interval));
+                error.WriteLine("Nothing was changed.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            }
+        }
+
+        /* The executor's plan for the FINAL scope, executed through the executor's own store-write path. */
+        var plan = PlanCollectorRunAt(collectorName, runAtText!, scope.ServerId);
+        try
+        {
+            await DarlingCommandExecutor.ExecuteStoreWriteAsync(dataSource, plan, cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            /* The plan names the run-time table and no other table a store can lack, so an undefined table here is a store
+               the service has not migrated to it yet (V160), and the one statement wrote nothing. The toggle verbs read such a
+               store back without it; this verb cannot write without it, so it says why in plain words and exits with the code
+               of its other refusals of a store that is not ready. The state code, not the message text, is what is matched:
+               lc_messages is not always English. */
+            error.WriteLine(RunTimeTableMissingMessage(Verb));
+            error.WriteLine("Nothing was changed.");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not update the control-plane store: {ex.Message}");
+            return CollectorToggleExitCode.StoreUnavailable;
+        }
+
+        var cleared = plan.SuccessStatus.Contains("cleared", StringComparison.Ordinal);
+        var detail = cleared
+            ? "run time cleared"
+            : isTime
+                ? $"run at {CollectorRunTime.Format(minuteOfDay)} server time"
+                : "no fixed run time on this server";
+        output.WriteLine($"  [{(cleared ? "CLEARED" : "SET")}] {collectorName} — {scope.Label} ({detail}).");
+        output.WriteLine();
+
+        return await PrintCollectorScheduleReadbackAsync(dataSource, collectorName, output, error, cancellationToken);
+    }
+
+    /// <summary>What <c>--set-collector-run-at</c> says on a store that has no run-time table yet (<paramref name="verb"/> is the
+    /// verb as typed). Plain words, no store error text. Pure, so the sentence pins.</summary>
+    internal static string RunTimeTableMissingMessage(string verb) =>
+        $"The store has not been upgraded to the run-time table yet. Start the service once to migrate it, then run {verb} again.";
 
     /// <summary>Exit codes <see cref="DropXeSessionsAsync(string[], TextWriter, TextWriter, CancellationToken)"/> returns for
     /// <c>--drop-xe-sessions</c> (#4732), in the two-failure-kind shape <see cref="CollectorToggleExitCode"/> uses, so a script
