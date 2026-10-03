@@ -258,6 +258,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
     private const int ServerId = -949556;
     private const string ServerName = "query-store-regressions";
     private const string Db = "AppDb";
+    private const string OtherDb = "OtherDb";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -438,11 +439,103 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
         }
     }
 
+    /// <summary>
+    /// #5015: a filter whose database has captures in the baseline and none in the window is a missing recent side FOR THAT
+    /// DATABASE, not the all-clear: the server-wide probe saw both sides (another database wrote the window), and no query of
+    /// the filtered database was compared. It words the server-wide "nothing collected IN the last N hour(s)" answer,
+    /// naming the database.
+    /// </summary>
+    [Fact]
+    public async Task AFilteredDatabase_WithBaselineCapturesOnly_SaysItsWindowIsMissing_NotTheAllClear_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live regressions test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var baseNow = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 1, queryId: 2, database: OtherDb);
+
+            var noRecent = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, Db));
+            Assert.Equal("empty", noRecent.GetProperty("status").GetString());
+            var noRecentText = noRecent.GetProperty("message").GetString()!;
+            Assert.Contains("database_name 'AppDb'", noRecentText, StringComparison.Ordinal);
+            Assert.Contains("nothing of it collected IN the last 24 hour(s)", noRecentText, StringComparison.Ordinal);
+            Assert.Contains("NOT the all-clear", noRecentText, StringComparison.Ordinal);
+            Assert.DoesNotContain("this IS the all-clear", noRecentText, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #5015: a filter whose database has captures in the window and none in the baseline has nothing to compare against FOR
+    /// THAT DATABASE: <c>unavailable</c>, worded like the server-wide no-baseline answer and naming the database, not the
+    /// all-clear.
+    /// </summary>
+    [Fact]
+    public async Task AFilteredDatabase_WithWindowCapturesOnly_SaysItHasNoBaseline_NotTheAllClear_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live regressions test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var baseNow = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2, queryId: 2, database: OtherDb);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 100, avgDurationUs: 3000, avgCpuUs: 3000, intervalId: 1);
+
+            var noBaseline = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, Db));
+            Assert.Equal("unavailable", noBaseline.GetProperty("status").GetString());
+            var noBaselineText = noBaseline.GetProperty("message").GetString()!;
+            Assert.Contains("database_name 'AppDb'", noBaselineText, StringComparison.Ordinal);
+            Assert.Contains("no baseline", noBaselineText, StringComparison.Ordinal);
+            Assert.Contains("NOT a clean bill of health", noBaselineText, StringComparison.Ordinal);
+            Assert.DoesNotContain("this IS the all-clear", noBaselineText, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
+    /// <summary>One Query Store interval of a query in <paramref name="database"/> (<see cref="Db"/> unless a test needs a second database to filter on).</summary>
     private static async Task SeedAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTime, long executions,
-        long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1) =>
+        long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1, string database = Db) =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
@@ -450,7 +543,7 @@ INSERT INTO query_store_stats
      runtime_stats_interval_id, query_text, last_execution_time)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTime), ServerId, ServerName,
-            Db, queryId, 9L, "Regular", executions, avgDurationUs, avgCpuUs, 100L, intervalId,
+            database, queryId, 9L, "Regular", executions, avgDurationUs, avgCpuUs, 100L, intervalId,
             "SELECT * FROM dbo.Widgets", DarlingMcpTestData.Naive(collectionTime));
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)

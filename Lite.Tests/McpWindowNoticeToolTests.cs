@@ -711,6 +711,54 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         Assert.Contains("this IS the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #5015: a filter whose database has captures in the baseline and none in the window is a missing recent side FOR THAT
+    /// DATABASE, not the all-clear: the server-wide probe saw both sides (another database wrote the window), and no query of
+    /// the filtered database was compared. The answer is the server-wide "nothing collected IN the last N hour(s)" one, with
+    /// the window hints, naming the database.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreRegressions_AFilteredDatabase_WithBaselineCapturesOnly_SaysItsWindowIsMissing_NotTheAllClear()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        var floor = now.AddDays(-3);
+        await SeedRegressionAsync(floor, queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddHours(-1), queryId: 2, avgUs: 1000, intervalId: 2, database: "Other");
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, database_name: "Db"));
+
+        AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("database_name 'Db'", message, StringComparison.Ordinal);
+        Assert.Contains("nothing of it collected IN the last 24 hour(s)", message, StringComparison.Ordinal);
+        Assert.Contains("NOT the all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5015: a filter whose database has captures in the window and none in the baseline has nothing to compare against FOR
+    /// THAT DATABASE: <c>unavailable</c>, worded like the server-wide no-baseline answer and naming the database, not the
+    /// all-clear.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreRegressions_AFilteredDatabase_WithWindowCapturesOnly_SaysItHasNoBaseline_NotTheAllClear()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedRegressionAsync(now.AddDays(-3), queryId: 2, avgUs: 1000, intervalId: 1, database: "Other");
+        await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 3000, intervalId: 2);
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, database_name: "Db"));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("database_name 'Db'", message, StringComparison.Ordinal);
+        Assert.Contains("no baseline", message, StringComparison.Ordinal);
+        Assert.Contains("NOT a clean bill of health", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task GetQueryStoreRegressions_AnEmptyRecentSide_CarriesTheSameKeys()
     {
@@ -917,14 +965,17 @@ INSERT INTO query_stats
 VALUES ($1, $2, $3, $4, 'Db', $5, $6, $2, 10, 5000, 5000, $7)",
         _nextId++, Naive(at), _serverId, ServerName, queryHash, "0xS" + queryHash, "SELECT " + queryHash);
 
-    /// <summary>One Query Store interval of a query at <paramref name="avgUs"/> CPU and duration: a baseline row or a regressed one.</summary>
-    private Task SeedRegressionAsync(DateTime at, long queryId, long avgUs, long intervalId) => ExecuteAsync(@"
+    /// <summary>
+    /// One Query Store interval of a query at <paramref name="avgUs"/> CPU and duration: a baseline row or a regressed one.
+    /// <paramref name="database"/> is the database it belongs to ("Db" unless a test needs a second one to filter on).
+    /// </summary>
+    private Task SeedRegressionAsync(DateTime at, long queryId, long avgUs, long intervalId, string database = "Db") => ExecuteAsync(@"
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
      execution_type_desc, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads,
      runtime_stats_interval_id, query_text, last_execution_time)
-VALUES ($1, $2, $3, $4, 'Db', $5, 9, 'Regular', 100, $6, $6, 100, $7, 'SELECT * FROM dbo.Widgets', $2)",
-        _nextId++, Naive(at), _serverId, ServerName, queryId, avgUs, intervalId);
+VALUES ($1, $2, $3, $4, $8, $5, 9, 'Regular', 100, $6, $6, 100, $7, 'SELECT * FROM dbo.Widgets', $2)",
+        _nextId++, Naive(at), _serverId, ServerName, queryId, avgUs, intervalId, database);
 
     /// <summary>The collector's runs in collection_log, every <paramref name="everyMinutes"/> minutes, whether or not anything ran or waited.</summary>
     private async Task SeedLogRunsAsync(string collector, DateTime firstUtc, DateTime lastUtc, int everyMinutes)

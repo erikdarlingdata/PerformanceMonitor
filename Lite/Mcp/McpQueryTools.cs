@@ -576,6 +576,9 @@ public sealed class McpQueryTools
     /// The dangerous one is a server whose entire collected history sits INSIDE the requested window: it has
     /// no BEFORE, so it can never show a regression however badly it regressed, and answering "no
     /// regressions" there is a confident wrong answer rather than a missing one.</para>
+    /// <para>#5015: with a <c>database_name</c> filter, the server passing those questions is not enough. The same two
+    /// questions are then asked of the filtered database alone, so a database with only one side collected gets the
+    /// matching no-baseline or missing-window answer, naming it, and only a database with both sides is the all-clear.</para>
     /// </summary>
     private static async Task<string> EmptyRegressionsAsync(
         LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
@@ -608,19 +611,37 @@ public sealed class McpQueryTools
                 notice.AsHints());
         }
 
-        /* #5015: the probe above is the SERVER's, so it answers a database_name filter that matched nothing the same as
-           one that matched and found nothing wrong, and the second is the only one that is the all-clear. The filter
-           reads the same databases the read was asked for: no capture of them in the baseline or in the window means
-           no query of theirs was compared. Darling's twin words it the same. */
+        /* #5015: the probe above is the SERVER's, so it answers a database_name filter the same whether the database was
+           compared or not, and only a database with BOTH sides collected can be the all-clear. The filter reads the same
+           databases the read was asked for, and the answer is decided from that pair with the server-wide answers' own
+           statuses: neither side means the filter matched nothing, no baseline is the server-wide no-baseline answer and
+           no capture in the window the server-wide missing-window answer, each naming the database. Darling's twin words
+           it the same. */
         if (databases is not null)
         {
             var (filteredBaseline, filteredRecent) = await dataService.GetQueryStoreRegressionCoverageAsync(
                 serverId, hours_back, asOfUtc: windowEnd, databaseNames: databases);
+
             if (!filteredBaseline && !filteredRecent)
             {
                 return McpHelpers.Status(
                     "empty",
                     $"No Query Store capture on {serverName} in the last {hours_back} hour(s) or in the {LocalDataService.BaselineLookbackDays}-day baseline before it matched database_name '{databases[0]}', so the filter matched nothing and this is NOT the all-clear: no query in that database was compared. Check the database name, or drop the filter to read every database.",
+                    notice.AsHints());
+            }
+
+            if (!filteredBaseline)
+            {
+                return McpHelpers.Status(
+                    "unavailable",
+                    $"{serverName} has no Query Store capture of database_name '{databases[0]}' in the {LocalDataService.BaselineLookbackDays}-day baseline window before this window, so there is no baseline for that database to compare against and no regression of its queries can be detected however badly one regressed. This is NOT a clean bill of health: no query in that database was compared. Either that database's whole collected history falls inside the last {hours_back} hour(s), or it has none older than the baseline lookback yet.");
+            }
+
+            if (!filteredRecent)
+            {
+                return McpHelpers.Status(
+                    "empty",
+                    $"{serverName} has Query Store history of database_name '{databases[0]}' from before this window but nothing of it collected IN the last {hours_back} hour(s), so that database's recent side is missing rather than nothing to report, and this is NOT the all-clear: no query in that database was compared. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
                     notice.AsHints());
             }
         }
