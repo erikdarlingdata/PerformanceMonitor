@@ -360,6 +360,15 @@ public sealed partial class ViewerDataService
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>
+    /// Where this server's wait_stats coverage starts for the window, through the shared probe (<see cref="DataWindowFloor"/>), for the
+    /// Lock Wait Trend's "Showing since" note (#4966): the chart draws a flat zero where the store holds no wait_stats rows. Null when the
+    /// window holds no row and no logged run, and when it lies wholly before the coverage.
+    /// </summary>
+    public Task<DateTime?> GetLockWaitTrendDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("wait_stats"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>
     /// Waiting-task total duration by wait type for one server over the window (Current Waits).
     /// <para>#4349: bucketed the same way as <see cref="GetLockWaitTrendAsync"/> — see its remarks for
     /// the width and singleton-stamping rules, which this read shares verbatim.</para>

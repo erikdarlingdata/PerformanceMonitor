@@ -1035,6 +1035,16 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string File, string Tool)[] InlineDaysBackRefusals = [];
 
+    /// <summary>The tools whose only bounded parameter is a <c>limit</c> they refuse inline with the shared sentence
+    /// (<c>if (limit &lt; 1 || limit &gt; Max…)</c>), because the tool has no window to validate beside it.</summary>
+    public static readonly (string File, string Tool)[] InlineLimitRefusals =
+    [
+        ("DarlingMcpFinOpsInventoryTools.cs", "get_finops_inventory"),
+    ];
+
+    private static readonly Regex InlineLimitRefusal = new(
+        @"if \(limit < 1 \|\| limit > [\w.]+\)", RegexOptions.Compiled);
+
     private static readonly Regex SharedValidatorCall = new(
         @"\bMcpHelpers\.(ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate)\(",
         RegexOptions.Compiled);
@@ -1078,6 +1088,12 @@ public sealed class McpPayloadContractCensusTests
             if (inline)
             {
                 inlineSeen.Add((file, tool));
+            }
+
+            if (declared.SequenceEqual(["limit"]) && InlineLimitRefusal.IsMatch(code)
+                && InlineLimitRefusals.Contains((file, tool)))
+            {
+                continue;
             }
 
             if (inline || SharedValidatorCall.IsMatch(code) || CallsAValidatingHelper(code, source))
