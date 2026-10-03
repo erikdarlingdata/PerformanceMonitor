@@ -173,14 +173,20 @@ public partial class ViewerServerTab
             }
             case BlockingCurrentWaitsSubTabIndex:
             {
-                using var readFanOut = ViewerReadFanOut.Of(2);
+                using var readFanOut = ViewerReadFanOut.Of(3);
 
+                /* waiting_tasks keeps 7 days by default, and a custom range can reach past it, or past a server
+                   added since: say where coverage starts (the Queries tab's "Showing since" banner) rather than
+                   draw a shorter range as if it were the whole. Both charts read waiting_tasks, so one banner
+                   covers them. */
+                var dataStartTask = _dataService.GetWaitingTasksDataStartAsync(_server.ServerId, startUtc, endUtc);
                 var durationTask = _dataService.GetWaitingTaskTrendAsync(_server.ServerId, startUtc, endUtc);
                 var blockedTask = _dataService.GetBlockedSessionTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
                 var duration = await durationTask;
                 var blocked = await blockedTask;
                 RenderCurrentWaitsDurationChart(duration);
                 RenderCurrentWaitsBlockedChart(blocked);
+                UpdateTruncationBanner(CurrentWaitsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Current Waits"), startUtc);
                 break;
             }
             case BlockedProcessReportsSubTabIndex:

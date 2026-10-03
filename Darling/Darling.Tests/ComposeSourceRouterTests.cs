@@ -446,4 +446,102 @@ public sealed class ComposeSourceRouterTests
         Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
         Assert.Equal("query_stats_hourly", route.CaggRelation);
     }
+
+    /* ─────────────── the FROM clause and stitch boundary a route carries ─────────────── */
+
+    private static RollupCoverage QueryStatsHourlyStore(DateTime successorFloor) => new(
+        new Dictionary<string, DateTime>(StringComparer.Ordinal)
+        {
+            [TimescaleSupport.QueryStatsHourlyView] = Now.AddDays(-80),
+            [TimescaleSupport.QueryStatsIntervalHourlyView] = successorFloor,
+            [TimescaleSupport.QueryStatsDailyView] = Now.AddDays(-110),
+        },
+        new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_stats"] = Now.AddDays(-4) },
+        RollupAvailability.All);
+
+    /// <summary>The route carries the instant its stitched clause splits at, as a value, so the data-start probe
+    /// reads the successor over the range the panel does. A route that reads one relation carries none.</summary>
+    [Fact]
+    public void AStitchedHourlyRoute_CarriesTheBoundaryItSplitsAt_AndAnUnstitchedOneCarriesNone()
+    {
+        var windowStart = Now.AddDays(-10);
+
+        var stitched = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, windowStart, RollupAvailability.All, QueryStatsHourlyStore(Now.AddDays(-1)));
+        Assert.Equal(ComposeSourceTier.Hourly, stitched.Tier);
+        Assert.Equal(Now.AddDays(-1), stitched.StitchBoundaryUtc);
+        Assert.Contains("UNION ALL", stitched.CaggFromClause, StringComparison.Ordinal);
+
+        var covered = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, windowStart, RollupAvailability.All, QueryStatsHourlyStore(Now.AddDays(-80)));
+        Assert.Equal(ComposeSourceTier.Hourly, covered.Tier);
+        Assert.Null(covered.StitchBoundaryUtc);
+        Assert.DoesNotContain("UNION ALL", covered.CaggFromClause, StringComparison.Ordinal);
+    }
+
+    /// <summary>The daily boundary is the first whole day after the successor hourly's first bucket, so the successor
+    /// daily can hold the day before it, which the stitched read leaves to the superseded daily.</summary>
+    [Fact]
+    public void AStitchedDailyRoute_CarriesTheBoundaryItSplitsAt()
+    {
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStatsHourlyView] = Now.AddDays(-400),
+                [TimescaleSupport.QueryStatsDailyView] = Now.AddDays(-400),
+                [TimescaleSupport.QueryStatsIntervalHourlyView] = Now.Date.AddDays(-100).AddHours(5),
+                [TimescaleSupport.QueryStatsIntervalDailyView] = Now.Date.AddDays(-110),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_stats"] = Now.AddDays(-4) },
+            RollupAvailability.All);
+
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-150), RollupAvailability.All, coverage);
+
+        Assert.Equal(ComposeSourceTier.Daily, route.Tier);
+        Assert.Equal(Now.Date.AddDays(-99), route.StitchBoundaryUtc);
+        Assert.Contains("UNION ALL", route.CaggFromClause, StringComparison.Ordinal);
+    }
+
+    /// <summary>The day-grain daily has no successor, so its clause names the one relation. The data-start probe reads
+    /// the relations a panel read off the clause, so it must carry one like every other rollup route.</summary>
+    [Fact]
+    public void TheDayGrainDailyRoute_CarriesItsFromClause_SoTheDataStartProbeReadsIt()
+    {
+        var route = ComposeSourceRouter.Resolve(
+            Plan("qs_executions"), Now, Now.AddDays(-100), RollupAvailability.All, QueryStoreLadder(dayGrainDays: 120));
+
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, route.CaggRelation);
+        Assert.Equal($"collect.{TimescaleSupport.QueryStoreStatsDayGrainDailyView} AS f", route.CaggFromClause);
+        Assert.Null(route.StitchBoundaryUtc);
+
+        var source = Assert.Single(ComposeStoreAvailability.DataStartSources("query_store_stats", route));
+        Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, source.Relation);
+        Assert.Null(source.LowerBoundUtc);
+    }
+
+    [Fact]
+    public void EveryRollupRoute_CarriesTheFromClauseItReads()
+    {
+        var coverages = new[]
+        {
+            RollupCoverage.Unknown,
+            QueryStoreLadder(dayGrainDays: 120),
+            QueryStatsHourlyStore(Now.AddDays(-1)),
+            QueryStatsHourlyStore(Now.AddDays(-80)),
+        };
+
+        foreach (var plan in new[] { Plan("query_worker_us"), Plan("qs_executions") })
+        {
+            foreach (var coverage in coverages)
+            {
+                foreach (var age in new[] { 10, 40, 100, 150, 300 })
+                {
+                    var route = ComposeSourceRouter.Resolve(plan, Now, Now.AddDays(-age), RollupAvailability.All, coverage);
+
+                    if (route.IsCagg)
+                    {
+                        Assert.False(string.IsNullOrEmpty(route.CaggFromClause), $"a {age}-day window routed to {route.CaggRelation} with no FROM clause");
+                    }
+                }
+            }
+        }
+    }
 }

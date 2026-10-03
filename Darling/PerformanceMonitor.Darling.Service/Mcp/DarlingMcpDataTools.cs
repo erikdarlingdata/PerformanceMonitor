@@ -1044,7 +1044,9 @@ public sealed class DarlingMcpDataTools
             else
             {
                 var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
-                effectiveStart = floor ?? requestedStart;
+                /* The floor can sit before the requested start when the rows reach back past the window; the
+                   shared helper never reports a served start earlier than the one asked for. */
+                effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
                 /* #4231: the shared helper's own boundary, not a bare 90-minute literal restated here. */
                 truncated = RawWindowFloor.IsTruncated(floor, requestedStart);
             }

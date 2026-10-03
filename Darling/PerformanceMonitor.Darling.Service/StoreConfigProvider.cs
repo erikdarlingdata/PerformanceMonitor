@@ -1780,7 +1780,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                    is "no scope at this level" and stops it. Collapsing them at read time would make
                    a server's opt-out of a fleet scope silently re-inherit that scope. */
                 reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5),
-                /* V158 (#4938): minutes after midnight on the server's clock, -1 = no fixed time here. NULL stays
+                /* V160 (#4938): minutes after midnight on the server's clock, -1 = no fixed time here. NULL stays
                    null so it falls through the layering exactly like the scope above. */
                 reader.IsDBNull(6) ? null : reader.GetInt16(6)));
         }
@@ -1840,10 +1840,10 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// <summary>The value of a run time that means "no fixed time on this server": it stops a fleet-wide time.</summary>
     private const int NoFixedRunTime = -1;
 
-    /// <summary>The last minute of the day, the top of the V158 CHECK.</summary>
+    /// <summary>The last minute of the day, the top of the V160 CHECK.</summary>
     private const int LastRunAtMinute = 1439;
 
-    /// <summary>A stored run time, or null when the column is NULL or holds a value the V158 CHECK would refuse (a
+    /// <summary>A stored run time, or null when the column is NULL or holds a value the V160 CHECK would refuse (a
     /// store whose CHECK was dropped by hand): either way it counts as not set at that level and falls through.</summary>
     private static int? ValidRunAt(int? minute) =>
         minute is >= NoFixedRunTime and <= LastRunAtMinute ? minute : null;
@@ -2108,7 +2108,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
 /// (no scope at this level, fall through), an empty list = the EXPLICIT "no scope" that stops the
 /// fall-through; the null/empty distinction is load-bearing and <see cref="StoreConfigProvider.ResolveDatabaseScope"/>
 /// documents it. Defaulted so every pre-V125 construction reads as "no scope column written". <see cref="RunAtMinute"/>
-/// is the V158 run time (#4938): minutes after midnight on the server's clock, -1 = no fixed time at this level (it stops
+/// is the V160 run time (#4938): minutes after midnight on the server's clock, -1 = no fixed time at this level (it stops
 /// a fleet-wide time), null = the column was NULL and falls through; defaulted for the same reason.</summary>
 public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null, int? RunAtMinute = null);
 

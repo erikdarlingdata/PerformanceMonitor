@@ -257,8 +257,10 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
        `scope`, so it is resolved here (where scope + zoom both live) and threaded through opts. */
     const chartWindow = resolveChartWindow(panelSpec, scope, opts.zoom);
     const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, chartWindow })];
-    /* The run endpoint's partial-window notice (#1665): the chosen tier could not retain the whole
-       requested window on this store — good data, honestly caveated, above the chart. */
+    /* The run endpoint's partial-window notice (#1665, #4953): a caveat that the panel did not cover the whole
+       requested window. The chosen tier's retention could not cover it, OR the panel's own data starts after
+       the window does, OR the row cap truncated the result. Good data, honestly caveated, above the chart.
+       No notice means the window was served whole. */
     if (typeof data.notice === "string" && data.notice) nodes.unshift(noticeStrip(data.notice));
     mount(body, nodes);
   } catch (e) {

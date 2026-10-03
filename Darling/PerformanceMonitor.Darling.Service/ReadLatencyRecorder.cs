@@ -34,6 +34,8 @@ public sealed class ReadLatencyRecorder
     /// <summary>Where a sample goes; null records nothing.</summary>
     internal ReadLatencyAccumulator? Accumulator { get; }
 
-    /// <summary>Where a recording failure is reported, at Debug; null reports nothing.</summary>
+    /// <summary>Where a recording failure is reported, at Debug; null reports nothing. The composed-panel runner
+    /// reports through it too, at the same level, a data-start probe it swallows (the panel is answered without
+    /// its notice).</summary>
     internal ILogger? Logger { get; }
 }

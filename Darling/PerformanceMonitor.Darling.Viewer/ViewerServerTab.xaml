@@ -690,10 +690,17 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <local:TimeRangeSlicerControl x:Name="ActiveQueriesSlicer" Grid.Row="0"/>
-                            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+                            <!-- "Showing since <start>" when this server's query_snapshots rows start after the range
+                                 does (DataWindowFloor via LoadActiveQueriesAsync). -->
+                            <TextBlock Grid.Row="1" x:Name="QuerySnapshotsTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
                                 <TextBlock Text="Currently Running Queries" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0"/>
                                 <Button x:Name="LatestSnapshotButton" Content="Latest Snapshot"
                                         Click="LatestSnapshot_Click" Padding="12,4" Margin="16,0,8,0"
@@ -701,7 +708,7 @@
                                 <TextBlock x:Name="LatestSnapshotIndicator" Text="" FontSize="12"
                                            Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
                             </StackPanel>
-                            <DataGrid Grid.Row="2" x:Name="QuerySnapshotsGrid" Style="{StaticResource DarkGrid}"
+                            <DataGrid Grid.Row="3" x:Name="QuerySnapshotsGrid" Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource QuerySnapshotGridRowStyle}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                                       Sorting="QuerySnapshotsGrid_Sorting">
@@ -2463,13 +2470,20 @@
                     <TabItem Header="Current Waits">
                         <Grid>
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            <Border Grid.Row="0" Margin="0,0,0,4">
+                            <!-- "Showing since <start>" when this server's waiting_tasks rows start after the range
+                                 does (DataWindowFloor via LoadBlockingAsync). Both charts read waiting_tasks. -->
+                            <TextBlock Grid.Row="0" x:Name="CurrentWaitsTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="1" Margin="0,0,0,4">
                                 <scottplot:WpfPlot x:Name="CurrentWaitsDurationChart"/>
                             </Border>
-                            <Border Grid.Row="1" Margin="0,4,0,0">
+                            <Border Grid.Row="2" Margin="0,4,0,0">
                                 <scottplot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
                             </Border>
                         </Grid>
@@ -3737,8 +3751,9 @@
         </TabItem>
 
         <!-- Long Queries Tab (#1496) — completed long-running queries + attentions (cancels/timeouts) from
-             the opt-in PerformanceMonitor_LongQueryCompletions XE session. Default OFF; the banner points to
-             where the switch lives when the collector is disabled. MUST remain the last inner tab (index 18). -->
+             the opt-in XE session the service makes (PerformanceMonitor_Darling_{id}_LongQueryCompletions).
+             Default OFF; the banner points to where the switch lives when the collector is disabled. MUST remain
+             the last inner tab (index 18). -->
         <TabItem Header="Long Queries">
             <Grid Margin="8">
                 <Grid.RowDefinitions>

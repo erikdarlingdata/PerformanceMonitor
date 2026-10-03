@@ -42,44 +42,20 @@ public partial class RemoteCollectorService
             /* Azure SQL DB: one database-scoped session per monitored database, matching the
                per-database ring-buffer read (BlockedProcessReportCollector.RunsPerDatabase). The
                shared driver skips master, honors ExcludedDatabases via the shared database list,
-               self-heals sessions the reader can't see, and only surfaces unhealthy when NO
-               database could be ensured. */
+               and only surfaces unhealthy when NO database could be ensured. The per-database
+               routine passed here never drops a shared session (#4961): it starts a stopped one,
+               and falls back to this install's own session when the shared one stays unusable. */
             await EnsureDatabaseScopedXeSessionsAsync(
                 server, "blocked process", BlockedProcessXeSessionName,
-                EnsureBlockedProcessXeSessionAzureSqlDbAsync, cancellationToken);
+                AlwaysOnArmEnsureNotUsed, cancellationToken,
+                (databaseName, token) => EnsureAlwaysOnXeSessionInDatabaseAsync(server, AlwaysOnXeSessionKind.BlockedProcess, "blocked process", databaseName, token));
             return;
         }
 
-        try
-        {
-            using var connection = await CreateConnectionAsync(server, cancellationToken);
-
-            /* On-prem and Azure MI: create server-scoped session with ring_buffer */
-            await EnsureBlockedProcessXeSessionOnPremAsync(connection, server, cancellationToken);
-        }
-        catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
-        {
-            /* The session is already present + running -- see IsBenignXeSessionAlreadyPresent (#1251). */
-            AppLogger.Info("XeSession", $"[{server.DisplayName}] Blocked process XE session already present (benign, #1251)");
-        }
-        catch (SqlException ex)
-        {
-            /* Warn rather than Error when the server simply said no: a denied XE session is a least-privilege
-               posture (#1823), classified as PERMISSIONS upstream and retried no further this session.
-               Genuine failures still log at Error. */
-            if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
-            {
-                AppLogger.Warn("XeSession", $"[{server.DisplayName}] Failed to ensure blocked process XE session: {ex.Message}");
-            }
-            else
-            {
-                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to ensure blocked process XE session: {ex.Message}");
-            }
-
-            /* Propagate so RunCollectorAsync marks the collector unhealthy instead
-               of letting a zero-row ring-buffer read record SUCCESS (#1086) */
-            throw new XeSessionEnsureException("blocked process", ex);
-        }
+        /* On-prem and Azure MI: create server-scoped session with ring_buffer */
+        await EnsureServerScopedXeSessionAsync(
+            server, "blocked process", BlockedProcessXeSessionName,
+            (connection, token) => EnsureBlockedProcessXeSessionOnPremAsync(connection, server, token), cancellationToken);
     }
 
     /// <summary>
@@ -216,72 +192,6 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
     }
 
     /// <summary>
-    /// Azure SQL DB: creates database-scoped XE session with ring_buffer target.
-    /// File targets are not supported in Azure SQL DB.
-    /// </summary>
-    private async Task EnsureBlockedProcessXeSessionAzureSqlDbAsync(SqlConnection connection, CancellationToken cancellationToken)
-    {
-        /* Check if database-scoped session already exists */
-        using (var cmd = new SqlCommand(@"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-
-SELECT /* PerformanceMonitorLite */
-    session_state = des.name
-FROM sys.database_event_sessions AS des
-WHERE des.name = @session_name;", connection))
-        {
-            cmd.CommandTimeout = CommandTimeoutSeconds;
-            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = BlockedProcessXeSessionName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-
-            if (result != null)
-            {
-                /* Session exists - ensure it's started (database-scoped sessions can stop on reconnect) */
-                using var startCmd = new SqlCommand($@"
-IF NOT EXISTS
-(
-    SELECT
-        1/0
-    FROM sys.dm_xe_database_sessions AS xes
-    WHERE xes.name = N'{BlockedProcessXeSessionName}'
-)
-BEGIN
-    ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;
-END;", connection);
-                startCmd.CommandTimeout = CommandTimeoutSeconds;
-                await startCmd.ExecuteNonQueryAsync(cancellationToken);
-
-                /* Debug, not Info: this fires once per monitored database per cycle (#1535). */
-                AppLogger.Debug("XeSession", $"[Azure SQL DB:{connection.Database}] Blocked process XE session verified (database-scoped)");
-                return;
-            }
-        }
-
-        /* Create and start database-scoped session */
-        using (var cmd = new SqlCommand($@"
-CREATE EVENT SESSION [{BlockedProcessXeSessionName}]
-ON DATABASE
-ADD EVENT sqlserver.blocked_process_report
-ADD TARGET package0.ring_buffer
-(
-    SET max_memory = 4096
-)
-WITH
-(
-    MAX_DISPATCH_LATENCY = 5 SECONDS,
-    STARTUP_STATE = ON
-);
-
-ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;", connection))
-        {
-            cmd.CommandTimeout = CommandTimeoutSeconds;
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        AppLogger.Info("XeSession", $"[Azure SQL DB:{connection.Database}] Created and started blocked process XE session (database-scoped)");
-    }
-
-    /// <summary>
     /// True when every error is a benign "the session is already there" extended-events error:
     /// 25631 (event session already exists) or 25705 (already started). On Azure SQL DB the XE
     /// existence catalogs (sys.database_event_sessions / sys.dm_xe_database_sessions) are visibility-
@@ -312,15 +222,19 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /// Azure SQL DB ensure driver, shared by the deadlock and blocked-process paths (#1535): one
     /// database-scoped XE session per monitored database, matching the collectors' per-database
     /// ring-buffer reads. Master is skipped (database-scoped sessions can't be created in logical
-    /// master); ExcludedDatabases is honored by <see cref="GetAzureDatabaseListAsync"/>.
+    /// master); ExcludedDatabases is honored by <see cref="GetAzureDatabaseListAsync(ServerConnection, CancellationToken)"/>.
     ///
-    /// <para><b>The #1251 benign path grew a read-back check.</b> A benign "already exists"/"already
-    /// started" from the engine proves the session is there, but NOT that this principal can see it:
-    /// the ring-buffer reader joins <c>sys.dm_xe_database_sessions</c>, and a session that is
-    /// invisible there (created by another principal, or present-but-stopped) reads zero rows forever
-    /// while the collector records SUCCESS — the exact silent-empty shape of #1346/#1535. So after a
-    /// benign error the session is probed in the reader's own DMV, and an invisible one is dropped
-    /// and recreated under this principal. On-prem keeps the plain benign log: its server-scoped
+    /// <para><b>The #1251 benign path grew a read-back check, and it is the long-query trace's own session
+    /// only.</b> A benign "already exists"/"already started" from the engine proves the session is there,
+    /// but NOT that this principal can see it: the ring-buffer reader joins
+    /// <c>sys.dm_xe_database_sessions</c>, and a session that is invisible there (created by another
+    /// principal, or present-but-stopped) reads zero rows forever while the collector records SUCCESS —
+    /// the exact silent-empty shape of #1346/#1535. So after a benign error the session is probed in the
+    /// reader's own DMV, and an invisible one is dropped and recreated under this principal. That read-back
+    /// and drop-and-recreate now apply only to the long-query trace's own session (the inner overload,
+    /// <see cref="BuildRecreateDropSql"/>): the deadlock and blocked-process ensures hand the driver their
+    /// own per-database routine, which never drops a shared session, and the driver moves on to the next
+    /// database after it, before the benign path. On-prem keeps the plain benign log: its server-scoped
     /// catalogs need the same VIEW SERVER STATE every collector already requires.</para>
     ///
     /// <para><b>Failure isolation:</b> one database failing to ensure must not kill capture for the
@@ -329,13 +243,141 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /// <see cref="XeSessionEnsureException"/> for the #1086 health surface) instead of letting a
     /// zero-row read record SUCCESS.</para>
     /// </summary>
-    private Task EnsureDatabaseScopedXeSessionsAsync(
+    private async Task EnsureDatabaseScopedXeSessionsAsync(
         ServerConnection server,
         string captureName,
         string sessionName,
         Func<SqlConnection, CancellationToken, Task> ensureAsync,
-        CancellationToken cancellationToken) =>
-        EnsureDatabaseScopedXeSessionsAsync(server, captureName, sessionName, ensureAsync, plannedDatabases: null, cancellationToken);
+        CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task>? alwaysOnInDatabase = null)
+    {
+        /* A test replaces the open and the ensure in each database. Null in production. */
+        var ensureInDatabase = XeSessionDatabaseEnsureOverrideForTests;
+
+        /* #4964: this ensure runs on every collector cycle, so a server that refuses it refuses it on every cycle. The first
+           failing cycle logs at Warning and Error; the cycles after it log the same lines at Debug, until a cycle of this
+           session on this server succeeds. The retry and the exception are the same on every cycle, so every run still records
+           the failure. A cancellation stops the cycle and says nothing about the server, so it changes neither. */
+        var warnedKey = XeSessionEnsureWarnedKey(server, sessionName);
+        var repeatsAtDebug = _databaseScopedXeSessionEnsureWarned.ContainsKey(warnedKey);
+
+        try
+        {
+            await EnsureDatabaseScopedXeSessionsAsync(
+                server, captureName, sessionName, ensureAsync, plannedDatabases: null, cancellationToken,
+                repeatsAtDebug,
+                ensureInDatabase is null
+                    ? alwaysOnInDatabase
+                    : (databaseName, token) => ensureInDatabase(server, sessionName, databaseName, token));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _databaseScopedXeSessionEnsureWarned[warnedKey] = true;
+
+            /* The raise carries whether this cycle repeated, so the collector's own line follows the ensure's lines. */
+            if (ex is XeSessionEnsureException ensureFailure)
+            {
+                ensureFailure.RepeatsAtDebug = repeatsAtDebug;
+            }
+
+            throw;
+        }
+
+        _databaseScopedXeSessionEnsureWarned.TryRemove(warnedKey, out _);
+    }
+
+    /// <summary>
+    /// A test replaces the always-on sessions' listing of the databases to ensure, which the shared ensure otherwise reads
+    /// from the server. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, CancellationToken, Task<List<string>>>? XeSessionDatabaseListOverrideForTests { get; set; }
+
+    /// <summary>
+    /// A test replaces the open and the ensure in one database for the always-on sessions: the server, the session name and
+    /// the database. A failure from it reaches the shared ensure's per-database catch like a refusal from the server. Null in
+    /// production.
+    /// </summary>
+    internal Func<ServerConnection, string, string, CancellationToken, Task>? XeSessionDatabaseEnsureOverrideForTests { get; set; }
+
+    /// <summary>
+    /// A test replaces the open and the ensure on the server-scoped arm of the always-on sessions: the server and the session
+    /// name. A failure from it reaches the arm's catch like a refusal from the server. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, string, CancellationToken, Task>? XeSessionServerEnsureOverrideForTests { get; set; }
+
+    /// <summary>
+    /// The server-scoped arm of the deadlock and blocked-process ensures (on-prem, Azure Managed Instance, AWS RDS): one
+    /// connection, and the session's own ensure on it. A server that refuses raises <see cref="XeSessionEnsureException"/>, so
+    /// the run records the failure (#1086) instead of a zero-row read recording SUCCESS.
+    /// </summary>
+    private async Task EnsureServerScopedXeSessionAsync(
+        ServerConnection server,
+        string captureName,
+        string sessionName,
+        Func<SqlConnection, CancellationToken, Task> ensureAsync,
+        CancellationToken cancellationToken)
+    {
+        /* #4964: the same rule as the Azure ensure, from the same per-server, per-session state. The first failing cycle logs at
+           Warning or Error; the cycles after it log the same line at Debug, until a cycle of this session on this server
+           succeeds. The retry and the exception are the same on every cycle, so every run still records the failure. A
+           cancellation says nothing about the server, so it changes neither. */
+        var warnedKey = XeSessionEnsureWarnedKey(server, sessionName);
+        var repeatsAtDebug = _databaseScopedXeSessionEnsureWarned.ContainsKey(warnedKey);
+
+        try
+        {
+            /* A test replaces the open and the ensure. Null in production. */
+            if (XeSessionServerEnsureOverrideForTests is { } ensureOnServer)
+            {
+                await ensureOnServer(server, sessionName, cancellationToken);
+            }
+            else
+            {
+                using var connection = await CreateConnectionAsync(server, cancellationToken);
+                await ensureAsync(connection, cancellationToken);
+            }
+        }
+        catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
+        {
+            /* The session is already present + running -- see IsBenignXeSessionAlreadyPresent (#1251). */
+            AppLogger.Info("XeSession", $"[{server.DisplayName}] {char.ToUpperInvariant(captureName[0])}{captureName[1..]} XE session already present (benign, #1251)");
+        }
+        catch (SqlException ex)
+        {
+            /* Warn rather than Error when the server simply said no: a denied XE session is a least-privilege
+               posture (#1823), classified as PERMISSIONS upstream and retried no further this session.
+               Genuine failures still log at Error. */
+            var failure = $"[{server.DisplayName}] Failed to ensure {captureName} XE session: {ex.Message}";
+            if (repeatsAtDebug)
+            {
+                AppLogger.Debug("XeSession", failure);
+            }
+            else if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
+            {
+                AppLogger.Warn("XeSession", failure);
+            }
+            else
+            {
+                AppLogger.Error("XeSession", failure);
+            }
+
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                _databaseScopedXeSessionEnsureWarned[warnedKey] = true;
+            }
+
+            /* Propagate so RunCollectorAsync marks the collector unhealthy instead
+               of letting a zero-row ring-buffer read record SUCCESS (#1086). The raise carries whether this cycle
+               repeated, so the collector's own line follows the ensure's. */
+            throw new XeSessionEnsureException(captureName, ex) { RepeatsAtDebug = repeatsAtDebug };
+        }
+
+        /* Succeeded, or the engine said the session is already there: the run of failures is over. */
+        _databaseScopedXeSessionEnsureWarned.TryRemove(warnedKey, out _);
+    }
+
+    /// <summary>The key of the always-on sessions' ensure state (<see cref="_databaseScopedXeSessionEnsureWarned"/>): the server id, then the session name.</summary>
+    private static string XeSessionEnsureWarnedKey(ServerConnection server, string sessionName) => $"{server.Id}:{sessionName}";
 
     /// <summary>
     /// <see cref="EnsureDatabaseScopedXeSessionsAsync(ServerConnection, string, string, Func{SqlConnection, CancellationToken, Task}, CancellationToken)"/>
@@ -343,6 +385,18 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /// follow the inventory, as before. The long-query trace passes its plan's create list
     /// (<see cref="LongQueryTraceDatabases.Plan"/>): the monitored databases, minus those monitored as their own
     /// servers. An empty plan ensures nothing and does not throw.
+    ///
+    /// <para><paramref name="repeatsAtDebug"/>: true once a create has warned for this server and session (#4964). The
+    /// long-query trace passes the flag its reconcile keeps, and the always-on deadlock and blocked-process ensures pass
+    /// the one their entry point keeps. The per-database failure lines and the all-refused line then log at Debug instead
+    /// of Warning and Error, and so does the listing failure. The retry and the exception are the same either way, so the
+    /// run still records the failure.</para>
+    ///
+    /// <para><paramref name="ensureInDatabase"/>: the work in one database, in place of the open and the ensure below
+    /// (<paramref name="ensureAsync"/>, the read-back, the drop-and-recreate). The deadlock and blocked-process ensures
+    /// pass their per-database routine in production, and a test passes one for the long-query trace. A failure from it
+    /// reaches the per-database catch like a refusal from the server. Null for the long-query trace in production, whose
+    /// own session goes through the open and the ensure.</para>
     /// </summary>
     private async Task EnsureDatabaseScopedXeSessionsAsync(
         ServerConnection server,
@@ -350,7 +404,10 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         string sessionName,
         Func<SqlConnection, CancellationToken, Task> ensureAsync,
         IReadOnlyList<string>? plannedDatabases,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool repeatsAtDebug = false,
+        Func<string, CancellationToken, Task>? ensureInDatabase = null,
+        Func<Exception, string?>? explainRefusal = null)
     {
         IReadOnlyList<string> databases;
         if (plannedDatabases is not null)
@@ -361,11 +418,28 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
         {
             try
             {
-                databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+                /* A test replaces the listing. Null in production. */
+                if (XeSessionDatabaseListOverrideForTests is { } listOverride)
+                {
+                    databases = await listOverride(server, cancellationToken);
+                }
+                else
+                {
+                    databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+                }
             }
             catch (SqlException ex)
             {
-                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to enumerate databases for {captureName} XE sessions: {ex.Message}");
+                var listingFailure = $"[{server.DisplayName}] Failed to enumerate databases for {captureName} XE sessions: {ex.Message}";
+                if (repeatsAtDebug)
+                {
+                    AppLogger.Debug("XeSession", listingFailure);
+                }
+                else
+                {
+                    AppLogger.Error("XeSession", listingFailure);
+                }
+
                 throw new XeSessionEnsureException(captureName, ex);
             }
         }
@@ -388,6 +462,18 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
 
             try
             {
+                /* The caller's own routine replaces the open and the ensure in one database: the deadlock and
+                   blocked-process ensures pass theirs in production (it starts a stopped session, falls back to this
+                   install's own, and never drops a shared one), and a test passes one for the long-query trace. A failure
+                   from it reaches the catch below like a refusal from the server. Null for the long-query trace in
+                   production, which takes the open and the ensure below. */
+                if (ensureInDatabase is not null)
+                {
+                    await ensureInDatabase(databaseName, cancellationToken);
+                    healthy++;
+                    continue;
+                }
+
                 using var connection = await OpenAzureDatabaseConnectionAsync(server, databaseName, cancellationToken);
                 var readable = true;
 
@@ -452,13 +538,33 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 firstFailure ??= ex;
-                AppLogger.Warn("XeSession", $"[{server.DisplayName}] [{databaseName}] Failed to ensure {captureName} XE session: {ex.Message}");
+                /* #4961: a caller that can say why a refusal happened and what to change (a read-only database) has that line
+                   logged here instead of the server's own message. */
+                var refusal = explainRefusal?.Invoke(ex) is { } explanation
+                    ? $"[{server.DisplayName}] [{databaseName}] {explanation}"
+                    : $"[{server.DisplayName}] [{databaseName}] Failed to ensure {captureName} XE session: {AlwaysOnXeSessions.DescribeFailure(ex)}";
+                if (repeatsAtDebug)
+                {
+                    AppLogger.Debug("XeSession", refusal);
+                }
+                else
+                {
+                    AppLogger.Warn("XeSession", refusal);
+                }
             }
         }
 
         if (attempted > 0 && healthy == 0 && firstFailure is not null)
         {
-            AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to ensure the {captureName} XE session in all {attempted} database(s)");
+            var allRefused = $"[{server.DisplayName}] Failed to ensure the {captureName} XE session in all {attempted} database(s)";
+            if (repeatsAtDebug || explainRefusal?.Invoke(firstFailure) is not null)
+            {
+                AppLogger.Debug("XeSession", allRefused);
+            }
+            else
+            {
+                AppLogger.Error("XeSession", allRefused);
+            }
 
             if (firstFailure is SqlException sqlFailure)
             {
@@ -475,7 +581,9 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON DATABASE STATE = START;",
     /* Databases where a drop+recreate demonstrably did NOT make the session visible to the reader
        (see the give-up branch above): keyed server:database:session, in-memory so an app restart
        retries once. Prevents a per-cycle DROP/CREATE ping-pong that would wipe captured-but-unread
-       ring-buffer events every cycle in a pathological-permissions database.
+       ring-buffer events every cycle in a pathological-permissions database. Since #4961 it covers
+       only the long-query trace's own session: the deadlock and blocked-process sessions are no
+       longer dropped and recreated, so nothing of theirs is written here.
 
        Value is the UTC time the recreate was abandoned, NOT a bare flag (#2677). The invisibility this
        guards is usually a TRANSIENT Azure condition - a failover or scale operation leaves the session in
@@ -526,19 +634,37 @@ SELECT /* PerformanceMonitorLite */
     /// recreated under this principal, visible to the reader. The DROP works by name even when the
     /// catalogs hide the session — the same store the CREATE collided with resolves it.
     /// </summary>
-    private static async Task RecreateDatabaseScopedXeSessionAsync(
+    private async Task RecreateDatabaseScopedXeSessionAsync(
         SqlConnection connection,
         string sessionName,
         Func<SqlConnection, CancellationToken, Task> ensureAsync,
         CancellationToken cancellationToken)
     {
-        using (var dropCmd = new SqlCommand($"DROP EVENT SESSION [{sessionName}] ON DATABASE;", connection))
+        using (var dropCmd = new SqlCommand(BuildRecreateDropSql(sessionName), connection))
         {
             dropCmd.CommandTimeout = CommandTimeoutSeconds;
             await dropCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await ensureAsync(connection, cancellationToken);
+    }
+
+    /// <summary>
+    /// The drop that comes before a recreate: one statement, for this install's own long-query session in the connected
+    /// database, and for no other name (#4961). Any other name throws, a shared session's included: the deadlock and
+    /// blocked-process ensures hand the driver their own per-database routine and never reach the recreate, and another
+    /// install may be reading a shared session, so a drop of it is never this install's to make. An install with no id owns
+    /// no session, so it refuses every name. The name it takes is made from a validated hex id, so it is safe to put in the
+    /// statement.
+    /// </summary>
+    internal string BuildRecreateDropSql(string sessionName)
+    {
+        if (LongQuerySessionName() is not { } own || !string.Equals(sessionName, own, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Only this install's own long-query session is dropped and recreated, never a shared one.", nameof(sessionName));
+        }
+
+        return $"DROP EVENT SESSION [{own}] ON DATABASE;";
     }
 
     /// <summary>

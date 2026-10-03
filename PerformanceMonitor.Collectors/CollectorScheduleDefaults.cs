@@ -74,9 +74,9 @@ public static class CollectorScheduleDefaults
         /* #1496 long-running query completion trace: seeded DISABLED (DefaultEnabled: false). A
            completion trace (rpc_completed/sql_batch_completed) fires per statement/batch even though
            the duration predicate discards most of them, so it is opt-in per fleet; enabling it creates
-           the XE session on the monitored servers (in each monitored database on Azure SQL Database)
-           and disabling it DROPS the session there. Cadence +
-           retention mirror the sibling XE collectors. */
+           this install's own XE session on the monitored servers (in each monitored database on Azure
+           SQL Database) and disabling it DROPS that session there, unless another registration of this
+           install still keeps it (#4961). Cadence + retention mirror the sibling XE collectors. */
         ["long_query_completions"] = new(1, 30, DefaultEnabled: false),
         ["database_scoped_config"] = new(0, 30),
         /* #2319: hourly, NOT the config family's on-load cadence — actual_state, readonly_reason and

@@ -293,8 +293,8 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist; run it just before you remove the server, because the service never drops them then); --dry-run lists them and drops nothing." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", and this install's own, whichever exist). Removing a server drops only this install's own sessions, so run this just before you remove the server to drop the shared ones too. It also lists the sessions of other installs and never drops them. --dry-run lists them and drops nothing." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes. It connects to nothing, so use it for a server that is no longer configured or that a removal could not reach." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -5903,13 +5903,15 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         "Usage:" + Environment.NewLine +
         "  --drop-xe-sessions <server-name> [--dry-run] [--config <path>]" + Environment.NewLine +
         "      Connect to the named server (resolved from the configuration exactly as --validate-config resolves it) and drop the" + Environment.NewLine +
-        $"      Darling Extended Events sessions on it: {DarlingXeSessionCleanup.SessionNamesPhrase()}, server scope, and on" + Environment.NewLine +
+        $"      Darling Extended Events sessions on it: {DarlingXeSessionCleanup.SessionNamesPhrase()}, and this install's own, server scope, and on" + Environment.NewLine +
         "      Azure SQL Database the database-scoped copies in each monitored database, and for the long query completions session in the" + Environment.NewLine +
-        "      databases the server excludes too (not in a database another registration of the server keeps it in). --dry-run lists them and drops nothing." + Environment.NewLine +
+        "      databases the server excludes too (not in a database another registration of the server keeps it in, by that registration's long query setting). --dry-run lists them and drops nothing." + Environment.NewLine +
+        "      Elsewhere it leaves this install's long query session in place, with a note, when another registration of this install on the same instance keeps it." + Environment.NewLine +
+        "      It lists the sessions of other installs with a guarded DROP statement and never drops them." + Environment.NewLine +
         "      An excluded database that cannot be opened is reported as a note and does not change the exit code (a session left in it needs a manual drop); a monitored database that cannot be opened exits 2." + Environment.NewLine +
-        "      Run it just before you remove the server (it finds only a server this service still monitors, and stops that server's deadlock and blocked-process capture until this service reconnects); after the removal, use --print-sql." + Environment.NewLine +
+        "      Removing a server drops only this install's own sessions. Run it just before you remove the server to drop the shared ones too (it finds only a server this service still monitors, and stops that server's deadlock and blocked-process capture until this service reconnects); after the removal, use --print-sql." + Environment.NewLine +
         "  --drop-xe-sessions --print-sql" + Environment.NewLine +
-        "      Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
+        "      Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes, and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
         "Credentials come only from the configuration, never from arguments.";
 
     /// <summary>
@@ -6057,19 +6059,20 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     /// the verb resolved the target in so the target knows the other registrations of an Azure SQL Database server. Throws when
     /// the server cannot be reached.</summary>
     private static async Task<IXeSessionCleanupTarget> ConnectXeSessionCleanupTargetAsync(
-        MonitoredServer server, IReadOnlyList<MonitoredServer> registry, CancellationToken cancellationToken)
+        MonitoredServer server, IReadOnlyList<MonitoredServer> registry, XeCleanupStoreFacts facts, CancellationToken cancellationToken)
     {
         var runtime = await DarlingServerConnector.ConnectAsync(server, logger: null, cancellationToken);
-        return new SqlServerXeSessionCleanupTarget(runtime, sessionNames: null, registry);
+        return new SqlServerXeSessionCleanupTarget(runtime, sessionNames: null, registry, facts);
     }
 
     /// <summary>The verb with the connection injected, so a test drives the connect-and-drop path without a SQL Server.</summary>
     internal static async Task<int> DropXeSessionsAsync(
         string[] rest,
-        Func<MonitoredServer, IReadOnlyList<MonitoredServer>, CancellationToken, Task<IXeSessionCleanupTarget>> connect,
+        Func<MonitoredServer, IReadOnlyList<MonitoredServer>, XeCleanupStoreFacts, CancellationToken, Task<IXeSessionCleanupTarget>> connect,
         TextWriter output,
         TextWriter error,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<DarlingConfig, CancellationToken, Task<XeCleanupStoreFacts>>? readStoreFacts = null)
     {
         if (!TryParseDropXeSessionsArgs(rest, out var serverName, out var dryRun, out var printSql, out var configPath, out var argError))
         {
@@ -6150,10 +6153,12 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             return DropXeSessionsExitCode.Success;
         }
 
+        var facts = await (readStoreFacts ?? ReadXeCleanupStoreFactsAsync)(config, cancellationToken);
+
         IXeSessionCleanupTarget target;
         try
         {
-            target = await connect(server, targets, cancellationToken);
+            target = await connect(server, targets, facts, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -6162,7 +6167,112 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             return DropXeSessionsExitCode.TargetUnavailable;
         }
 
-        return await DarlingXeSessionCleanup.RunAsync(server.DisplayName, dryRun, target, output, error, cancellationToken);
+        return await DarlingXeSessionCleanup.RunAsync(server.DisplayName, dryRun, target, output, error, cancellationToken, facts.InstallId);
+    }
+
+    /// <summary>
+    /// What <c>--drop-xe-sessions</c> reads from the store before it connects to the server (#4961): this install's id
+    /// (<see cref="StoreInstallId.TryReadAsync(NpgsqlConnection, CancellationToken)"/>, which only reads: the service makes the row),
+    /// the long-query schedule rows, so another registration's setting is its effective one, and each registration's last-known
+    /// instance name. A store that cannot be reached, or holds no id, gives no id and the verb handles no install's sessions. A
+    /// store that gives the id but not the schedules or names gives them as unknown, which the guards read as "kept".
+    /// </summary>
+    private static async Task<XeCleanupStoreFacts> ReadXeCleanupStoreFactsAsync(DarlingConfig config, CancellationToken cancellationToken)
+    {
+        if (!TryBuildStoreConnectionString(config.Postgres, out var connectionString, out _) || string.IsNullOrWhiteSpace(connectionString))
+        {
+            return new XeCleanupStoreFacts(null, Note: "no store connection is configured");
+        }
+
+        try
+        {
+            await using var connection = new NpgsqlConnection(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
+            await connection.OpenAsync(cancellationToken);
+            var installId = await StoreInstallId.TryReadAsync(connection, cancellationToken);
+
+            IReadOnlyList<ScheduleOverride>? overrides = null;
+            IReadOnlyDictionary<int, string>? names = null;
+            try
+            {
+                overrides = await ReadLongQueryScheduleRowsAsync(connection, cancellationToken);
+                names = await ReadInstanceNamesAsync(connection, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                overrides = null;
+                names = null;
+            }
+
+            return new XeCleanupStoreFacts(installId, overrides, names, installId is null ? "the store holds no install id" : null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new XeCleanupStoreFacts(null, Note: ex.Message);
+        }
+    }
+
+    private static async Task<IReadOnlyList<ScheduleOverride>> ReadLongQueryScheduleRowsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        var rows = new List<ScheduleOverride>();
+        await using var command = new NpgsqlCommand(@"
+SELECT cs.server_id, cs.collector_name, cs.frequency_minutes, cs.retention_days, cs.enabled, cs.databases
+FROM config.config_collector_schedules AS cs
+WHERE cs.collector_name = 'long_query_completions'", connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new ScheduleOverride(
+                reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetInt32(2),
+                reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                reader.GetBoolean(4),
+                reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5)));
+        }
+
+        return rows;
+    }
+
+    private static async Task<IReadOnlyDictionary<int, string>> ReadInstanceNamesAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        var carriers = new Dictionary<int, Dictionary<string, string>>();
+        await using var command = new NpgsqlCommand(@"
+SELECT cst.server_id, cst.collector_name, cst.state_value
+FROM collect.collector_state AS cst
+WHERE cst.state_key = $1
+AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+        command.Parameters.Add(new NpgsqlParameter { Value = ServerEpoch.IdentityStateKey });
+        command.Parameters.Add(new NpgsqlParameter { Value = ServerEpoch.IdentityCarrierCollectors.ToArray() });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var serverId = reader.GetInt32(0);
+            if (!carriers.TryGetValue(serverId, out var byCarrier))
+            {
+                carriers[serverId] = byCarrier = new Dictionary<string, string>(StringComparer.Ordinal);
+            }
+
+            byCarrier[reader.GetString(1)] = reader.GetString(2);
+        }
+
+        var names = new Dictionary<int, string>();
+        foreach (var (serverId, byCarrier) in carriers)
+        {
+            /* The carriers in the order a reader tries them: the first whose state holds a name decides. */
+            foreach (var carrier in ServerEpoch.IdentityCarrierCollectors)
+            {
+                if (byCarrier.TryGetValue(carrier, out var text)
+                    && ServerEpoch.LastKnownName(new Dictionary<string, string> { [ServerEpoch.IdentityStateKey] = text }) is { } name)
+                {
+                    names[serverId] = name;
+                    break;
+                }
+            }
+        }
+
+        return names;
     }
 
     /// <summary>

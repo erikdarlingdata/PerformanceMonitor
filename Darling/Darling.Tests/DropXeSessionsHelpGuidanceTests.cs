@@ -34,6 +34,11 @@ public sealed class DropXeSessionsHelpGuidanceTests
         Assert.DoesNotContain("no longer monitored", line, StringComparison.Ordinal);
         Assert.Contains("still monitors", line, StringComparison.Ordinal);
         Assert.Contains(BeforeRemoval, line, StringComparison.Ordinal);
+
+        /* #4961: removing a server drops this install's own sessions, so the line must not say the service never drops any. */
+        Assert.DoesNotContain("because the service never drops them", line, StringComparison.Ordinal);
+        Assert.Contains("Removing a server drops only this install's own sessions", line, StringComparison.Ordinal);
+        Assert.Contains("lists the sessions of other installs and never drops them", line, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -44,6 +49,8 @@ public sealed class DropXeSessionsHelpGuidanceTests
         Assert.DoesNotContain("no longer monitored", usage, StringComparison.Ordinal);
         Assert.Contains(BeforeRemoval, usage, StringComparison.Ordinal);
         Assert.Contains("after the removal, use --print-sql", usage, StringComparison.Ordinal);
+        Assert.Contains("Removing a server drops only this install's own sessions", usage, StringComparison.Ordinal);
+        Assert.Contains("leaves this install's long query session in place, with a note", usage, StringComparison.Ordinal);
         Assert.All(usage, ch => Assert.True(ch < 128, $"usage text must be ASCII; found U+{(int)ch:X4}"));
     }
 }

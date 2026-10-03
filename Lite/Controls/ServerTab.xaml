@@ -364,13 +364,21 @@
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="ActiveQueriesSlicer" Grid.Row="0"/>
-                                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
-                                    <TextBlock Text="Currently Running Queries" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                                    <Button x:Name="LiveSnapshotButton" Content="Live Snapshot"
-                                            Click="LiveSnapshot_Click" Padding="12,4" Margin="16,0,8,0"
-                                            VerticalAlignment="Center"/>
-                                    <TextBlock x:Name="LiveSnapshotIndicator" Text="" FontSize="12"
-                                               Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <StackPanel Grid.Row="1">
+                                    <!-- Where the stored snapshots start, when that is after the window's start (the same
+                                         "Showing since <time>" the Queries grids carry; Lite twin of Darling's Active Queries notice). -->
+                                    <TextBlock x:Name="ActiveQueriesWindowTruncatedBanner" Visibility="Collapsed"
+                                               Padding="8,4" FontWeight="Bold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Background="#22FFAA00"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                        <TextBlock Text="Currently Running Queries" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                        <Button x:Name="LiveSnapshotButton" Content="Live Snapshot"
+                                                Click="LiveSnapshot_Click" Padding="12,4" Margin="16,0,8,0"
+                                                VerticalAlignment="Center"/>
+                                        <TextBlock x:Name="LiveSnapshotIndicator" Text="" FontSize="12"
+                                                   Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                    </StackPanel>
                                 </StackPanel>
                                 <DataGrid Grid.Row="2" x:Name="QuerySnapshotsGrid"
                                           AutoGenerateColumns="False" IsReadOnly="True"
@@ -1707,13 +1715,20 @@
                         <TabItem Header="Current Waits">
                             <Grid>
                                 <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <Border Grid.Row="0" Margin="0,0,0,4">
+                                <!-- Where the stored waiting-task rows start, when that is after the window's start (the same
+                                     "Showing since <time>" the Queries grids carry; Lite twin of Darling's Current Waits notice). -->
+                                <TextBlock Grid.Row="0" x:Name="CurrentWaitsWindowTruncatedBanner" Visibility="Collapsed"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                                <Border Grid.Row="1" Margin="0,0,0,4">
                                     <ScottPlot:WpfPlot x:Name="CurrentWaitsDurationChart"/>
                                 </Border>
-                                <Border Grid.Row="1" Margin="0,4,0,0">
+                                <Border Grid.Row="2" Margin="0,4,0,0">
                                     <ScottPlot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
                                 </Border>
                             </Grid>
@@ -3106,8 +3121,8 @@
             </TabItem>
 
             <!-- Long Queries Tab (#1496) — completed long-running queries + attentions (cancels/timeouts) from
-                 the opt-in PerformanceMonitor_LongQueryCompletions XE session. Default OFF; the banner points to
-                 where the switch lives when the collector is disabled. -->
+                 the opt-in XE session this install makes (PerformanceMonitor_Lite_{id}_LongQueryCompletions).
+                 Default OFF; the banner points to where the switch lives when the collector is disabled. -->
             <TabItem Header="Long Queries">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
