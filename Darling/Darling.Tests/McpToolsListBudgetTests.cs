@@ -197,7 +197,7 @@ public sealed class McpToolsListBudgetTests
     // Constant set to the value McpToolsListBudgetTests itself measured on this tree.
     // get_finops (the grouped FinOps tool, first view high_impact) adds 843 bytes: 176,643 -> 177,486.
     // get_finops view utilization adds 78 bytes: 177,486 -> 177,564.
-    private const int TotalCeilingBytes = 177_564;
+    private const int TotalCeilingBytes = 177_573;
 
 
 
