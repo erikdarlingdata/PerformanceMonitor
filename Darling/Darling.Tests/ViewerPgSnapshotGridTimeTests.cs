@@ -195,9 +195,7 @@ public sealed class ViewerPgSnapshotGridTimeTests
     [InlineData("PgServerConfigGrid")]
     [InlineData("PgBufferUsageGrid")]
     [InlineData("PgPredicateStatsGrid")]
-    [InlineData("PgWraparoundGrid")]
     [InlineData("PgPlanCaptureGrid")]
-    [InlineData("PgColumnStatsGrid")]
     public void TheSnapshotTimeColumnIsHeadedCollected(string grid)
     {
         var xaml = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.xaml").ReplaceLineEndings("\n");
@@ -213,5 +211,19 @@ public sealed class ViewerPgSnapshotGridTimeTests
         var headers = Regex.Matches(columns, @"<DataGrid(?:Text|Template)Column\b[^>]*?Header=""(?<h>[^""]*)""");
         var lastColumn = headers[headers.Count - 1].Groups["h"].Value;
         Assert.Equal("Collected", lastColumn);
+    }
+
+    /* The time columns that predate this change keep the header users already know; they gained seconds and a UTC sort. */
+    [Theory]
+    [InlineData("PgWraparoundGrid", "Measured", "MeasuredAt", "MeasuredAtUtc")]
+    [InlineData("PgColumnStatsGrid", "Captured", "CaptureTime", "CaptureTimeUtc")]
+    public void ThePreExistingSnapshotTimeColumnKeepsItsHeader_WithTheSecondAndTheUtcSort(string grid, string header, string binding, string sort)
+    {
+        var xaml = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.xaml").ReplaceLineEndings("\n");
+        var start = xaml.IndexOf("x:Name=\"" + grid + "\"", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var block = xaml[start..xaml.IndexOf("</DataGrid>", start, StringComparison.Ordinal)];
+        Assert.Contains($"Header=\"{header}\" Binding=\"{{Binding {binding}}}\" Width=\"*\" SortMemberPath=\"{sort}\"", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("Header=\"Collected\"", block, StringComparison.Ordinal);
     }
 }

@@ -4602,7 +4602,7 @@
                         <DataGridTextColumn Header="Peak XID Age" Binding="{Binding WindowPeakFrozenXidAge}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="Peak MultiXID Age" Binding="{Binding WindowPeakMinMultiXidAge}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
                         <DataGridTextColumn Header="Connections" Binding="{Binding ConnectionsAllowed}" Width="120"/>
-                        <DataGridTextColumn Header="Collected" Binding="{Binding MeasuredAt}" Width="*" SortMemberPath="MeasuredAtUtc"/>
+                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="*" SortMemberPath="MeasuredAtUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
             
@@ -4956,7 +4956,7 @@
                         <DataGridTextColumn Header="Null Frac" Binding="{Binding NullFrac}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <DataGridTextColumn Header="Avg Width" Binding="{Binding AvgWidth}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <DataGridTextColumn Header="Common Values" Binding="{Binding CommonValueCount}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
-                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>
+                        <DataGridTextColumn Header="Captured" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
 
