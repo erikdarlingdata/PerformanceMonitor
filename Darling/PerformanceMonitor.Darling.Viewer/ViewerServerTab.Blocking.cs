@@ -135,22 +135,46 @@ public partial class ViewerServerTab
         {
             case BlockingTrendsSubTabIndex:
             {
-                using var readFanOut = ViewerReadFanOut.Of(3);
+                /* Six reads in flight: the three trend series and the three charts' data-start probes (#4966). */
+                using var readFanOut = ViewerReadFanOut.Of(6);
 
                 var lockWaitTask = _dataService.GetLockWaitTrendAsync(_server.ServerId, startUtc, endUtc);
                 var blockingTask = _dataService.GetBlockingTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
                 var deadlockTask = _dataService.GetDeadlockTrendAsync(_server.ServerId, startUtc, endUtc);
-                var lockWaits = await lockWaitTask;
-                var blocking = await blockingTask;
-                var deadlocks = await deadlockTask;
+                /* #4966: each chart has its own floor (wait_stats, the blocked-process-report sources, deadlocks), so each has its own probe
+                   and banner. The probes start beside the reads and stay OUT of any join, so one that throws costs only its chart's note. */
+                var lockWaitStartTask = _dataService.GetLockWaitTrendDataStartAsync(_server.ServerId, startUtc, endUtc);
+                var blockingStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, startUtc, endUtc);
+                var deadlockStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, startUtc, endUtc);
+
+                /* #5022: a join that throws skips the banner steps below, so the probes would go unawaited. Each call watches one probe and
+                   passes the join on, so all three are watched, and a probe that fails later is a warning and not an unobserved Error. */
+                await AwaitReadWatchingProbeAsync(
+                    AwaitReadWatchingProbeAsync(
+                        AwaitReadWatchingProbeAsync(Task.WhenAll(lockWaitTask, blockingTask, deadlockTask), lockWaitStartTask, "Lock Wait Trend"),
+                        blockingStartTask, "Blocking Trend"),
+                    deadlockStartTask, "Deadlock Trend");
+
+                /* The six are done: the banner steps below only await probes already running. */
+                readFanOut.Release();
+
+                var lockWaits = lockWaitTask.Result;
+                var blocking = blockingTask.Result;
+                var deadlocks = deadlockTask.Result;
                 RenderLockWaitTrendChart(lockWaits);
                 RenderBlockingTrendChart(blocking);
                 RenderDeadlockTrendChart(deadlocks);
+                /* Lock Wait is a rate series: its points are date_bin bucket starts clamped to the window start, not events, so a point
+                   can sit before the real first collection. Its note names the coverage start alone (the Current Waits pattern). */
+                UpdateTruncationBanner(LockWaitTrendTruncationBanner, await DataStartOrNullAsync(lockWaitStartTask, "Lock Wait Trend"), startUtc);
+                await ShowEventDataStartAsync(BlockingTrendTruncationBanner, blockingStartTask, "Blocking Trend", startUtc, ViewerBlockingChartsDataStart.BlockingTrendTimesDrawn(blocking));
+                await ShowEventDataStartAsync(DeadlockTrendTruncationBanner, deadlockStartTask, "Deadlock Trend", startUtc, ViewerBlockingChartsDataStart.BlockingTrendTimesDrawn(deadlocks));
                 break;
             }
             case BlockingStatsSubTabIndex:
             {
-                using var readFanOut = ViewerReadFanOut.Of(3);
+                /* Five reads in flight: the three below and the two floors' data-start probes (#4966). */
+                using var readFanOut = ViewerReadFanOut.Of(5);
 
                 /* Blocking SEVERITY: the duration aggregate reconciles with the count trend (same XE→DMV
                    source selection); the deadlock COUNT is the cheap sibling of the Trends tab's deadlock
@@ -161,14 +185,33 @@ public partial class ViewerServerTab
                 var durationStatsTask = _dataService.GetBlockingDurationStatsAsync(_server.ServerId, startUtc, endUtc);
                 var deadlockCountTask = _dataService.GetDeadlockTrendAsync(_server.ServerId, startUtc, endUtc);
                 var deadlockSeverityTask = _dataService.GetDeadlockSeverityStatsAsync(_server.ServerId, startUtc, endUtc);
-                var durationStats = await durationStatsTask;
-                var deadlockCounts = await deadlockCountTask;
-                var deadlockSeverity = await deadlockSeverityTask;
+                /* #4966: the blocking pair draws from the blocked-process-report sources and the deadlock pair from deadlocks, so each pair has its
+                   own probe and banner. The probes stay OUT of any join: one that throws costs only its pair's note. */
+                var blockingStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, startUtc, endUtc);
+                var deadlockStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, startUtc, endUtc);
+
+                /* #5022: as in Trends, each call watches one probe and passes the join on. */
+                await AwaitReadWatchingProbeAsync(
+                    AwaitReadWatchingProbeAsync(Task.WhenAll(durationStatsTask, deadlockCountTask, deadlockSeverityTask), blockingStartTask, "Blocking Stats (blocking)"),
+                    deadlockStartTask, "Blocking Stats (deadlocks)");
+
+                /* The five are done: the banner steps below only await probes already running. */
+                readFanOut.Release();
+
+                var durationStats = durationStatsTask.Result;
+                var deadlockCounts = deadlockCountTask.Result;
+                var deadlockSeverity = deadlockSeverityTask.Result;
                 RenderBlockingDurationChart(durationStats);
                 RenderBlockingTotalDurationChart(durationStats);
                 RenderDeadlockWaitChart(deadlockSeverity);
                 RenderDeadlockTotalWaitChart(deadlockSeverity);
                 UpdateBlockingStatsSummary(durationStats, deadlockCounts, deadlockSeverity);
+                await ShowEventDataStartAsync(
+                    BlockingStatsBlockingTruncationBanner, blockingStartTask, "Blocking Stats (blocking)", startUtc,
+                    durationStats.Where(p => p.EventCount > 0).Select(p => (DateTime?)p.Time));
+                await ShowEventDataStartAsync(
+                    BlockingStatsDeadlockTruncationBanner, deadlockStartTask, "Blocking Stats (deadlocks)", startUtc,
+                    deadlockSeverity.Select(p => (DateTime?)p.Time));
                 break;
             }
             case BlockingCurrentWaitsSubTabIndex:
@@ -182,6 +225,11 @@ public partial class ViewerServerTab
                 var dataStartTask = _dataService.GetWaitingTasksDataStartAsync(_server.ServerId, startUtc, endUtc);
                 var durationTask = _dataService.GetWaitingTaskTrendAsync(_server.ServerId, startUtc, endUtc);
                 var blockedTask = _dataService.GetBlockedSessionTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+                await AwaitReadWatchingProbeAsync(Task.WhenAll(durationTask, blockedTask), dataStartTask, "Current Waits");
+
+                /* The three are done; the banner step below awaits the probe alone, so it is not priced against the width of reads that finished. */
+                readFanOut.Release();
+
                 var duration = await durationTask;
                 var blocked = await blockedTask;
                 RenderCurrentWaitsDurationChart(duration);
@@ -211,7 +259,9 @@ public partial class ViewerServerTab
         /* #4966: say where the reports start (the Queries tab's "Showing since" banner), the earlier of the collector's
            coverage and the earliest report shown (an event time can reach before the server was added). */
         var dataStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var read = await _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Blocked Process Reports");
+        var read = dataReadTask.Result;
         var rows = read.Rows;
         _blockedProcessFilterMgr!.UpdateData(rows);
         await ShowEventDataStartAsync(BlockedProcessReportsTruncationBanner, dataStartTask, "Blocked Process Reports", startUtc, rows.Select(r => r.EventTime), ViewerDataService.BlockedProcessReportsRowCap, read.CappedSourceStartUtc);
@@ -242,7 +292,9 @@ public partial class ViewerServerTab
     {
         /* #4966: the same banner as Blocked Process Reports, over the deadlocks' own time. */
         var dataStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var rows = await _dataService.GetRecentDeadlocksAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetRecentDeadlocksAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Deadlocks");
+        var rows = dataReadTask.Result;
         var details = await ParseDeadlocksOffUiThreadAsync(rows);
         _deadlockFilterMgr!.UpdateData(details);
         await ShowEventDataStartAsync(DeadlocksTruncationBanner, dataStartTask, "Deadlocks", startUtc, rows.Select(r => r.DeadlockTime), ViewerDataService.DeadlocksRowCap);
@@ -279,7 +331,9 @@ public partial class ViewerServerTab
         try
         {
             var dataStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var read = await _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = _dataService.ReadRecentBlockedProcessReportsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Blocked Process Reports");
+            var read = dataReadTask.Result;
             var rows = read.Rows;
             _blockedProcessFilterMgr!.UpdateData(rows);
             await ShowEventDataStartAsync(BlockedProcessReportsTruncationBanner, dataStartTask, "Blocked Process Reports", e.StartUtc, rows.Select(r => r.EventTime), ViewerDataService.BlockedProcessReportsRowCap, read.CappedSourceStartUtc);
@@ -295,7 +349,9 @@ public partial class ViewerServerTab
         try
         {
             var dataStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var rows = await _dataService.GetRecentDeadlocksAsync(_server.ServerId, e.StartUtc, e.EndUtc);
+            var dataReadTask = _dataService.GetRecentDeadlocksAsync(_server.ServerId, e.StartUtc, e.EndUtc);
+            await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Deadlocks");
+            var rows = dataReadTask.Result;
             _deadlockFilterMgr!.UpdateData(await ParseDeadlocksOffUiThreadAsync(rows));
             await ShowEventDataStartAsync(DeadlocksTruncationBanner, dataStartTask, "Deadlocks", e.StartUtc, rows.Select(r => r.DeadlockTime), ViewerDataService.DeadlocksRowCap);
         }

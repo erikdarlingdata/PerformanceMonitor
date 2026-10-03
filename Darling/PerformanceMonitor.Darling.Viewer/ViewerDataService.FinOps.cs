@@ -291,6 +291,20 @@ public sealed class ApplicationConnectionRow
     /// </summary>
     public ServerClock? Clock { get; set; }
 
+    /// <summary>Maps the Storage reader's naive-UTC record: the display times convert in the current display mode on <paramref name="clock"/>, and the UTC instants and the clock are kept.</summary>
+    public static ApplicationConnectionRow From(PerformanceMonitor.Darling.Storage.FinOps.ApplicationConnectionUsage d, ServerClock clock) => new()
+    {
+        ApplicationName = d.ApplicationName, AvgConnections = d.AvgConnections, MaxConnections = d.MaxConnections,
+        AvgRunning = d.AvgRunning, MaxRunning = d.MaxRunning, AvgSleeping = d.AvgSleeping, MaxSleeping = d.MaxSleeping,
+        AvgDormant = d.AvgDormant, MaxDormant = d.MaxDormant, AvgCpuTimeMs = d.AvgCpuTimeMs, MaxCpuTimeMs = d.MaxCpuTimeMs,
+        AvgReads = d.AvgReads, MaxReads = d.MaxReads, AvgWrites = d.AvgWrites, MaxWrites = d.MaxWrites,
+        AvgLogicalReads = d.AvgLogicalReads, MaxLogicalReads = d.MaxLogicalReads, SampleCount = d.SampleCount,
+        FirstSeenLocal = ViewerTimeHelper.ConvertToDisplay(d.FirstSeenUtc, ViewerTimeHelper.CurrentDisplayMode, clock),
+        LastSeenLocal = ViewerTimeHelper.ConvertToDisplay(d.LastSeenUtc, ViewerTimeHelper.CurrentDisplayMode, clock),
+        /* #4766: the UTC instants too, so the columns' text can name the offset in the repeated autumn hour. */
+        FirstSeenUtc = d.FirstSeenUtc, LastSeenUtc = d.LastSeenUtc, Clock = clock
+    };
+
     /// <summary>
     /// What the First Seen and Last Seen columns show (#4766): the instant in the display mode on the row's server's clock,
     /// with its UTC offset added in the repeated autumn hour
@@ -431,8 +445,7 @@ public sealed class ServerPropertyRow
     private int? _socketCount;
     private int? _coresPerSocket;
     private string? _hardwareUnavailableReason;
-    private bool HostHardware => ServerHardwareScope.HardwareIsTheHosts(EngineEdition);
-
+    
     /// <summary>Builds the grid row from the Storage read; the display conversion (the row's own server clock) happens here.</summary>
     public static ServerPropertyRow From(ServerInventoryDto dto, ServerClock clock) => new()
     {
@@ -464,9 +477,9 @@ public sealed class ServerPropertyRow
     };
 
     public int? CpuCount { get => _cpuCount; set => _cpuCount = value ?? 0; }
-    public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }
-    public int? SocketCount { get => HostHardware ? null : _socketCount; set => _socketCount = value; }
-    public int? CoresPerSocket { get => HostHardware ? null : _coresPerSocket; set => _coresPerSocket = value; }
+    public long? PhysicalMemoryMb { get => FinOpsInventoryFigures.PhysicalMemoryMb(EngineEdition, _physicalMemoryMb); set => _physicalMemoryMb = value ?? 0L; }
+    public int? SocketCount { get => FinOpsInventoryFigures.SocketCount(EngineEdition, _socketCount); set => _socketCount = value; }
+    public int? CoresPerSocket { get => FinOpsInventoryFigures.CoresPerSocket(EngineEdition, _coresPerSocket); set => _coresPerSocket = value; }
     /// <summary>The server's LOCAL start clock (sys.dm_os_sys_info) — stored verbatim, shown as-is like Lite.</summary>
     public DateTime? SqlServerStartTime { get; set; }
     /// <summary>
@@ -558,7 +571,7 @@ public sealed class ServerPropertyRow
     public string? HardwareUnavailableReason
     {
         /* An Azure SQL Database's blank hardware cells say why, in the column that already carries a read's own reason. */
-        get => _hardwareUnavailableReason ?? (HostHardware ? ServerHardwareScope.InventoryHardwareNote : null);
+        get => FinOpsInventoryFigures.HardwareNote(EngineEdition, _hardwareUnavailableReason);
         set => _hardwareUnavailableReason = value;
     }
 
@@ -581,17 +594,7 @@ public sealed class ServerPropertyRow
     public string ProvisioningDisplay => ProvisioningStatus == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : ProvisioningStatus?.Replace("_", " ") ?? "";
 
     /// <summary>License-limit warning for Standard edition (CPU/RAM caps). Same math as Lite.</summary>
-    public string? LicenseWarning
-    {
-        get
-        {
-            if (!Edition.Contains("Standard", StringComparison.OrdinalIgnoreCase)) return null;
-            var warnings = new List<string>();
-            if (CpuCount > 24) warnings.Add($"CPU: {CpuCount} cores (Standard limited to 24)");
-            if (PhysicalMemoryMb > 131072) warnings.Add($"RAM: {PhysicalMemoryMb / 1024}GB (Standard limited to 128GB)");
-            return warnings.Count > 0 ? string.Join("; ", warnings) : null;
-        }
-    }
+    public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, EngineEdition, _cpuCount, _physicalMemoryMb);
 
     public int HealthScore { get; set; }
     public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);

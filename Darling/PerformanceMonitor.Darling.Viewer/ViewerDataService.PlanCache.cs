@@ -43,7 +43,7 @@ public sealed record PlanCacheSnapshotRow(
 /// the oldest cached plan's create time — matching the Dashboard, which computes these over the full latest
 /// snapshot. <see cref="SingleUsePlans"/> feeds the derived bloat-level badge
 /// (<see cref="ViewerDataService.ClassifyPlanCacheBloat"/>).</summary>
-public sealed record PlanCacheSummary(long TotalPlans, long SingleUsePlans, DateTime? OldestPlanCreateTime);
+public sealed record PlanCacheSummary(long TotalPlans, long SingleUsePlans, DateTime? OldestPlanCreateTime, DateTime? CollectionTime = null);
 
 /// <summary>The plan-cache bloat classification for the summary badge: the banded severity level plus the
 /// paired recommendation, mirroring install/47's report.plan_cache_bloat.</summary>
@@ -141,7 +141,8 @@ public sealed partial class ViewerDataService
         SELECT
             COALESCE(SUM(total_plans), 0) AS total_plans,
             COALESCE(SUM(single_use_plans), 0) AS single_use_plans,
-            MIN(oldest_plan_create_time) AS oldest_plan_create_time
+            MIN(oldest_plan_create_time) AS oldest_plan_create_time,
+            MAX(collection_time) AS collection_time
         FROM v_plan_cache_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT mx FROM latest)
@@ -266,6 +267,7 @@ public sealed partial class ViewerDataService
         return new PlanCacheSummary(
             reader.IsDBNull(0) ? 0 : reader.GetInt64(0),
             reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-            reader.IsDBNull(2) ? null : reader.GetDateTime(2));
+            reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+            reader.IsDBNull(3) ? null : reader.GetDateTime(3));
     }
 }

@@ -170,8 +170,10 @@ public sealed class ViewerGridTimeTextZoneTests
     /// The readers set the UTC instant beside each converted DateTime, so a row can never show the default 0001-01-01.
     /// </summary>
     [Theory]
-    [InlineData(ViewerFolder, "ViewerDataService.FinOps.Workload.cs", "FirstSeenUtc = reader.GetDateTime(18)")]
-    [InlineData(ViewerFolder, "ViewerDataService.FinOps.Workload.cs", "LastSeenUtc = reader.GetDateTime(19)")]
+    [InlineData("PerformanceMonitor.Darling.Storage", "FinOps/DarlingFinOpsApplicationConnectionsReader.cs", "FirstSeenUtc: reader.GetDateTime(18)")]
+    [InlineData("PerformanceMonitor.Darling.Storage", "FinOps/DarlingFinOpsApplicationConnectionsReader.cs", "LastSeenUtc: reader.GetDateTime(19)")]
+    [InlineData(ViewerFolder, "ViewerDataService.FinOps.cs", "FirstSeenUtc = d.FirstSeenUtc")]
+    [InlineData(ViewerFolder, "ViewerDataService.FinOps.cs", "LastSeenUtc = d.LastSeenUtc")]
     [InlineData("PerformanceMonitor.Darling.Storage", "FinOps/DarlingFinOpsInventoryReader.cs", "InventoryAsOfUtc: reader.IsDBNull(13) ? null : reader.GetDateTime(13)")]
     [InlineData("PerformanceMonitor.Darling.Storage", "FinOps/DarlingFinOpsInventoryReader.cs", "LastCollectedUtc: reader.IsDBNull(19) ? null : reader.GetDateTime(19)")]
     [InlineData(ViewerFolder, "ViewerDataService.FinOps.cs", "InventoryAsOfUtc = dto.InventoryAsOfUtc")]

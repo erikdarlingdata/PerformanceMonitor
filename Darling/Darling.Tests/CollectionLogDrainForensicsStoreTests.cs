@@ -302,7 +302,7 @@ public class CollectionLogDrainForensicsStoreTests
         var worker = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
 
         Assert.Contains("var peerMaxAtDispatchMs = PeerMaxOrNull(server);", worker, StringComparison.Ordinal);
-        Assert.Contains("RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken)", worker, StringComparison.Ordinal);
+        Assert.Contains("RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken", worker, StringComparison.Ordinal);
 
         /* The write uses the captured parameter. Re-reading live server state here is the defect.
 

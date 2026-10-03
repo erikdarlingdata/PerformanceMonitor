@@ -35,11 +35,14 @@ namespace Darling.Tests;
 /// <c>DARLING_WRITE_GOLDEN=1</c> to regenerate it.
 ///
 /// <para>Server A holds: a size snapshot with an idle database that has no query rows at all (no last execution), an idle
-/// database whose only query rows are older than the window (a last execution before the cutoff), a busy database, a
+/// database whose only query rows are older than the window (no last execution inside the window, so it reads null), a busy database, a
 /// database whose rows are inside the window but ran nothing and last ran before the cutoff, and a system database;
 /// tempdb samples with a newer and an older-than-24-hours row; waits stored with and without the trailing space, in
 /// several categories with two categories tied on total time; and query rows that group into more statements than the
-/// top-N of 3, with a tie on CPU and one statement carrying a plan. Server B has no rows at all.</para>
+/// top-N of 4, with a tie on CPU and one statement carrying a plan. Server B has no rows at all.</para>
+///
+/// <para>The tie order is the engine's: the reads sort only by the total. The test therefore compares the two tied pairs
+/// (Locks and Memory in the wait categories, Beta and Gamma in the expensive queries) as a set, ordering them itself.</para>
 /// </summary>
 public sealed class FinOpsOptimizationGoldenLiveTests
 {
@@ -60,8 +63,8 @@ public sealed class FinOpsOptimizationGoldenLiveTests
                 {
                     ["idleDatabases"] = await viewer.GetIdleDatabasesAsync(id, 7, ct),
                     ["tempdbSummary"] = await viewer.GetTempdbSummaryAsync(id, ct),
-                    ["waitCategories"] = await viewer.GetWaitCategorySummaryAsync(id, 24, ct),
-                    ["expensiveQueries"] = await viewer.GetExpensiveQueriesAsync(id, 24, 3, ct),
+                    ["waitCategories"] = TieStable(await viewer.GetWaitCategorySummaryAsync(id, 24, ct)),
+                    ["expensiveQueries"] = TieStable(await viewer.GetExpensiveQueriesAsync(id, 24, 4, ct)),
                 };
             }
             return Serialize(anchor, map);
@@ -83,14 +86,24 @@ public sealed class FinOpsOptimizationGoldenLiveTests
                         dataSource, id, DateTime.UtcNow.AddDays(-7), 30, ct)).ConvertAll(IdleDatabaseRow.From),
                     ["tempdbSummary"] = (await DarlingFinOpsOptimizationReader.GetTempdbSummaryAsync(
                         dataSource, id, DateTime.UtcNow.AddHours(-24), 30, ct)).ConvertAll(TempdbSummaryRow.From),
-                    ["waitCategories"] = (await DarlingFinOpsOptimizationReader.GetWaitCategorySummaryAsync(
-                        dataSource, id, DateTime.UtcNow.AddHours(-24), 30, ct)).ConvertAll(WaitCategorySummaryRow.From),
-                    ["expensiveQueries"] = (await DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(
-                        dataSource, id, textCutoff, 3, 30, ct)).ConvertAll(ExpensiveQueryRow.From),
+                    ["waitCategories"] = TieStable((await DarlingFinOpsOptimizationReader.GetWaitCategorySummaryAsync(
+                        dataSource, id, DateTime.UtcNow.AddHours(-24), 30, ct)).ConvertAll(WaitCategorySummaryRow.From)),
+                    ["expensiveQueries"] = TieStable((await DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(
+                        dataSource, id, textCutoff, 4, 30, ct)).ConvertAll(ExpensiveQueryRow.From)),
                 };
             }
             return Serialize(anchor, map);
         });
+
+    /* The tie order is the engine's (the reads sort only by the total), so tied rows are compared as a set: total desc,
+       then category ordinal. */
+    internal static List<WaitCategorySummaryRow> TieStable(List<WaitCategorySummaryRow> rows) =>
+        rows.OrderByDescending(r => r.TotalWaitTimeMs).ThenBy(r => r.Category, StringComparer.Ordinal).ToList();
+
+    /* Same for the expensive queries: total CPU desc, then database name ordinal (the row carries no query hash; each
+       seeded statement has its own database name). */
+    internal static List<ExpensiveQueryRow> TieStable(List<ExpensiveQueryRow> rows) =>
+        rows.OrderByDescending(r => r.TotalCpuMs).ThenBy(r => r.DatabaseName, StringComparer.Ordinal).ToList();
 
     internal static async Task RunAsync(Func<string, DateTime, CancellationToken, Task<string>> read)
     {
@@ -127,9 +140,9 @@ public sealed class FinOpsOptimizationGoldenLiveTests
         await Size(connection, ct, now.AddHours(-3), "BusyAlpha", 9999m);
         await Size(connection, ct, now.AddHours(-3), "master", 5000m);
 
-        /* Activity. BusyAlpha ran inside the window. IdleOld's only rows are 8 days old (just outside 7), and its last execution
-           is on the server-local clock, read verbatim. IdleZero has rows inside the window that ran nothing, last run before
-           the cutoff. */
+        /* Activity. BusyAlpha ran inside the window. IdleOld's only rows are 8 days old (just outside 7), so it has no row in the
+           window and its last execution reads null. IdleZero has rows inside the window that ran nothing, and its last
+           execution is on the server-local clock, read verbatim. */
         await Query(connection, ct, now.AddDays(-2), "BusyAlpha", "0xBH", "SELECT busy", 2_000_000, 12, 100, 60, anchor.AddDays(-1).AddHours(5), null);
         await Query(connection, ct, now.AddDays(-8), "IdleOld", "0xOH", "SELECT old", 1_000_000, 4, 10, 60, anchor.AddDays(-8).AddHours(7).AddMinutes(30), null);
         await Query(connection, ct, now.AddDays(-2), "IdleZero", "0xZH", "SELECT zero", 0, 0, 0, 60, anchor.AddDays(-9).AddHours(2), null);
@@ -153,8 +166,8 @@ public sealed class FinOpsOptimizationGoldenLiveTests
         await Wait(connection, ct, now.AddHours(-2), "NULL_WAIT", null, 4);
         await Wait(connection, ct, now.AddHours(-30), "OUTSIDE_WAIT", 5000, 50);
 
-        /* Expensive queries: five statements, top-N 3. Two tie on CPU (Beta and Gamma, 4000 ms). One carries a plan, one has
-           a long text, one has a zero sample interval and is dropped, and one has only a tiny CPU figure. */
+        /* Expensive queries: six statements, top-N 4 (Echo is cut by it). Two tie on CPU (Beta and Gamma, 4000 ms). One carries a plan, one has
+           a long text (Delta, 267 characters, so the 200-character preview cut shows), one has a zero sample interval and is dropped, and one has only a tiny CPU figure. */
         await Query(connection, ct, now.AddHours(-2), "Alpha", "0xE1", "SELECT alpha", 9_000_000, 30, 1000, 60, null, "<ShowPlanXML />");
         await Query(connection, ct, now.AddHours(-3), "Alpha", "0xE1", "SELECT alpha", 2_500_000, 7, 400, 60, null, null);
         await Query(connection, ct, now.AddHours(-2), "Beta", "0xE2", "SELECT beta", 4_000_000, 8, 300, 60, null, null);

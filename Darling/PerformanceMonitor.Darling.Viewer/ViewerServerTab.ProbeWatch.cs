@@ -24,6 +24,15 @@ public partial class ViewerServerTab
     /// <param name="probe">The data-start probe the tab started beside the read.</param>
     /// <param name="surface">The surface the probe's warning names.</param>
     /// <param name="warn">Takes the log source and message of a failed probe; <see cref="ViewerLogger.Warn"/> by default.</param>
+    internal static Task AwaitReadWatchingProbeAsync(Task read, Task<DateTime?> probe, string surface, Action<string, string>? warn = null)
+        => ViewerProbeWatch.AwaitReadWatchingProbeAsync(read, probe, surface, warn);
+}
+
+/// <summary>
+/// The body of <see cref="ViewerServerTab.AwaitReadWatchingProbeAsync"/>, outside the tab so a window that is not a server tab (the Collection Log drill) shares it.
+/// </summary>
+internal static class ViewerProbeWatch
+{
     internal static async Task AwaitReadWatchingProbeAsync(Task read, Task<DateTime?> probe, string surface, Action<string, string>? warn = null)
     {
         ArgumentNullException.ThrowIfNull(read);
@@ -36,7 +45,7 @@ public partial class ViewerServerTab
         catch
         {
             /* Not awaited: DataStartAnswerAsync catches the probe's failure and logs it, so the task it returns cannot fault. */
-            _ = DataStartAnswerAsync(probe, surface, warn);
+            _ = ViewerServerTab.DataStartAnswerAsync(probe, surface, warn);
             throw;
         }
     }

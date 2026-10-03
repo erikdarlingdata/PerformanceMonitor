@@ -210,7 +210,7 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgExtensionAvailabilityAsync(_server.ServerId, startUtc, endUtc);
 
-        PgExtensionsGrid.ItemsSource = rows;
+        PgExtensionsGrid.ItemsSource = rows.Select(PgDisplay.Extension).ToList();
 
         var actionable = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "available", StringComparison.Ordinal));
         var outdated = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "outdated", StringComparison.Ordinal));
@@ -257,7 +257,7 @@ public partial class ViewerServerTab
         /* Non-default only in the grid: several hundred parameters sorted alphabetically is a dump, and the
            ones somebody chose are the answer. The full set stays one MCP call away for anyone who wants it. */
         var chosen = rows.Where(r => !r.IsDefault).ToList();
-        PgServerConfigGrid.ItemsSource = chosen;
+        PgServerConfigGrid.ItemsSource = chosen.Select(PgDisplay.ServerConfig).ToList();
 
         var pendingRestart = rows.Where(r => r.PendingRestart).Select(r => r.Name).ToList();
 
@@ -548,7 +548,7 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgPredicateStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        PgPredicateStatsGrid.ItemsSource = rows;
+        PgPredicateStatsGrid.ItemsSource = rows.Select(PgDisplay.PredicateStat).ToList();
 
         var sampled = rows.Count == 0 ? 1.0 : rows[0].SampleRate;
         var misestimated = rows.Count(r => r.WorstEstimateErrorRatio >= 10);
@@ -818,7 +818,7 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgBufferUsageAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        PgBufferUsageGrid.ItemsSource = rows;
+        PgBufferUsageGrid.ItemsSource = rows.Select(PgDisplay.BufferUsage).ToList();
 
         var total = rows.Count == 0 ? 0L : rows[0].PoolBuffersTotal;
         var used = rows.Count == 0 ? 0L : rows[0].PoolBuffersUsed;

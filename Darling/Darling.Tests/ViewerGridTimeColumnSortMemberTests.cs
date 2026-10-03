@@ -78,6 +78,11 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "ViewerServerTab.xaml", "BlockedProcessReportGrid", "EventTimeLocal", Name(typeof(ViewerBlockedProcessRow)), "EventTime" },
         { "ViewerServerTab.xaml", "DeadlockGrid", "DeadlockTimeLocal", Name(typeof(DeadlockProcessDetail)), "DeadlockTime" },
         { "ViewerServerTab.xaml", "AutomaticTuningGrid", "CollectionTimeLocal", Name(typeof(AutomaticTuningRow)), "CollectionTime" },
+        { "ViewerServerTab.xaml", "ServerConfigGrid", "CaptureTimeLocal", Name(typeof(ServerConfigRow)), "CaptureTime" },
+        { "ViewerServerTab.xaml", "DatabaseConfigGrid", "CaptureTimeLocal", Name(typeof(DatabaseConfigRow)), "CaptureTime" },
+        { "ViewerServerTab.xaml", "DatabaseScopedConfigGrid", "CaptureTimeLocal", Name(typeof(DatabaseScopedConfigRow)), "CaptureTime" },
+        { "ViewerServerTab.xaml", "QueryStoreHealthGrid", "CaptureTimeLocal", Name(typeof(QueryStoreHealthRow)), "CaptureTime" },
+        { "ViewerServerTab.xaml", "TraceFlagsGrid", "CaptureTimeLocal", Name(typeof(TraceFlagRow)), "CaptureTime" },
         { "ViewerServerTab.xaml", "ServerConfigChangesGrid", "ChangeTimeDisplay", Name(typeof(ServerConfigChangeRow)), "ChangeTime" },
         { "ViewerServerTab.xaml", "DatabaseConfigChangesGrid", "ChangeTimeDisplay", Name(typeof(DatabaseConfigChangeRow)), "ChangeTime" },
         { "ViewerServerTab.xaml", "TraceFlagChangesGrid", "ChangeTimeDisplay", Name(typeof(TraceFlagChangeRow)), "ChangeTime" },
@@ -127,6 +132,12 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "ViewerServerTab.xaml", "ProcedureStatsGrid", "LastExecutionTimeLocal", Name(typeof(ViewerProcedureStatsRow)), "LastExecutionTime" },
         { "ViewerServerTab.xaml", "ProcedureStatsGrid", "CachedTimeFormatted", Name(typeof(ViewerProcedureStatsRow)), "CachedTime" },
         { "ViewerServerTab.xaml", "RunningJobsGrid", "StartTimeLocal", Name(typeof(RunningJobRow)), "StartTime" },
+
+        /* The last "Collected" column of the four newest-snapshot grids (#4966): naive-UTC CollectionTime, shown in the display zone. */
+        { "ViewerServerTab.xaml", "RunningJobsGrid", "CollectionTimeLocal", Name(typeof(RunningJobRow)), "CollectionTime" },
+        { "ViewerServerTab.xaml", "CpuSchedulerGrid", "CollectionTimeLocal", Name(typeof(CpuSchedulerGridRow)), "CollectionTime" },
+        { "ViewerServerTab.xaml", "LatchStatsGrid", "CollectionTimeLocal", Name(typeof(LatchStatsSnapshotRow)), "CollectionTime" },
+        { "ViewerServerTab.xaml", "SpinlockStatsGrid", "CollectionTimeLocal", Name(typeof(SpinlockStatsSnapshotRow)), "CollectionTime" },
         { "ProcedureHistoryWindow.xaml", "HistoryDataGrid", "LastExecutionTimeLocal", Name(typeof(ViewerProcedureStatsHistoryRow)), "LastExecutionTime" },
         { "ProcedureHistoryWindow.xaml", "HistoryDataGrid", "CachedTimeLocal", Name(typeof(ViewerProcedureStatsHistoryRow)), "CachedTime" },
         { "QueryStatsHistoryWindow.xaml", "HistoryDataGrid", "LastExecutionTimeLocal", Name(typeof(ViewerQueryStatsHistoryRow)), "LastExecutionTime" },
@@ -166,6 +177,12 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "ViewerServerTab.xaml", "PgReplicationStatsGrid", "BackendStart", Name(typeof(PgDisplay.ReplicationStatRow)), "BackendStartUtc" },
         { "ViewerServerTab.xaml", "PgIndexBloatGrid", "MeasuredAt", Name(typeof(PgDisplay.IndexBloatRow)), "MeasuredAtUtc" },
         { "ViewerServerTab.xaml", "PgIndexBloatGrid", "EstimatedAt", Name(typeof(PgDisplay.IndexBloatRow)), "EstimatedAtUtc" },
+
+        /* #4966: the latest-state grids show their snapshot time as a column. */
+        { "ViewerServerTab.xaml", "PgExtensionsGrid", "CaptureTime", Name(typeof(PgDisplay.ExtensionRow)), "CaptureTimeUtc" },
+        { "ViewerServerTab.xaml", "PgServerConfigGrid", "CollectionTime", Name(typeof(PgDisplay.ServerConfigRow)), "CollectionTimeUtc" },
+        { "ViewerServerTab.xaml", "PgBufferUsageGrid", "CaptureTime", Name(typeof(PgDisplay.BufferUsageRow)), "CaptureTimeUtc" },
+        { "ViewerServerTab.xaml", "PgPredicateStatsGrid", "CaptureTime", Name(typeof(PgDisplay.PredicateStatRow)), "CaptureTimeUtc" },
     };
 
     /// <summary>
