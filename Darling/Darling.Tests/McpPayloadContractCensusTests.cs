@@ -1529,7 +1529,7 @@ public sealed class McpPayloadContractCensusTests
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SecondBoundCutKeys =
     [
         ("databases_truncated", ["DarlingMcpFinOpsTools.IndexAnalysis.cs"],
-            "get_finops index_analysis' per-database roll-up list is capped at MaxIndexAnalysisDatabases (50), beside the recommendation list's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
+            "get_finops index_analysis' per-database roll-up list is capped at MaxIndexAnalysisDatabases (13), beside the recommendation list's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("scan_truncated", ["DarlingMcpBlockingTools.cs"],
             "the dedup_key fingerprint scan's ceiling (FingerprintScanCeiling), observed off a ceiling + 1 fetch, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("window_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs", "McpSessionTools.cs", "McpWaitTools.cs"],

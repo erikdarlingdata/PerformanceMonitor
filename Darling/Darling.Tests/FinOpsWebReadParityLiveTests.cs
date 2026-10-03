@@ -116,4 +116,26 @@ public sealed class FinOpsWebReadParityLiveTests
         Assert.Equal("invalid", actual.RootElement.GetProperty("status").GetString());
         Assert.Contains("Invalid view value 'nope'", actual.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task IndexAnalysisView_ThroughTheReadRoute_ReturnsTheToolsBody()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the live get_finops route test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await FinOpsIndexAnalysisViewLiveTests.SeedAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var name = FinOpsIndexAnalysisViewLiveTests.ServerNameC;
+        var tool = await DarlingMcpFinOpsTools.GetFinOps(postgres, "index_analysis", name, 24, 3, "tenant_gamma", true, ct);
+        var (status, body) = await GetAsync(postgres, $"/api/read/get_finops?server={name}&view=index_analysis&limit=3&database_name=tenant_gamma&full_text=true", ct);
+
+        Assert.Equal(StatusCodes.Status200OK, status);
+        using var expected = JsonDocument.Parse(tool);
+        using var actual = JsonDocument.Parse(body);
+        Assert.True(JsonElement.DeepEquals(expected.RootElement, actual.RootElement), body);
+        Assert.Equal("index_analysis", actual.RootElement.GetProperty("view").GetString());
+        Assert.True(actual.RootElement.GetProperty("full_text").GetBoolean());
+        Assert.Equal("tenant_gamma", actual.RootElement.GetProperty("database_name").GetString());
+    }
 }

@@ -31,8 +31,8 @@ public sealed partial class DarlingMcpFinOpsTools
     /// <summary>The longest <c>script</c> or <c>original_index_definition</c> text kept when <c>full_text</c> is false.</summary>
     internal const int IndexAnalysisTextCap = 300;
 
-    /// <summary>The fixed ceiling on <c>databases</c>.</summary>
-    internal const int MaxIndexAnalysisDatabases = 50;
+    /// <summary>The fixed ceiling on <c>databases</c>: the largest count whose default response (ten full-length recommendations, every note, maximum-width figures and 60-character names) stays under 30,720 bytes.</summary>
+    internal const int MaxIndexAnalysisDatabases = 13;
 
     private const string IndexAnalysisUptimeNote =
         "Server uptime is under 14 days — index usage data may be incomplete, so some \"Unused Index\" findings could be premature.";
