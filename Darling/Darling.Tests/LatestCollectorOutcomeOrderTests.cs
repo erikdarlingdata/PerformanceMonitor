@@ -10,7 +10,6 @@ using System;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
-using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -22,7 +21,8 @@ namespace Darling.Tests;
 /// <c>idx_collection_log_watermark</c> index serves it from the newest chunk, with <c>log_id DESC</c> as the
 /// tie-break for two runs that share a timestamp. <c>collection_log</c> has no index on <c>log_id</c>, so a
 /// <c>log_id</c>-first order sorts every retained row for the pair. A revert returns the same row on a small
-/// store, so the order is pinned at the source as well as through the product's own read path.
+/// store, so the order is pinned at the source, through the product's own read path, and in the plan
+/// (<see cref="LatestCollectorOutcomePlanTests"/>).
 /// </summary>
 public sealed class LatestCollectorOutcomeOrderShapeTests
 {
@@ -97,10 +97,12 @@ public sealed class LatestCollectorOutcomeOrderLiveTests
             var message = await DarlingRuntimePrecondition.StatusAsync(postgres, ServerId, ServerName, Collector, ct);
             Assert.NotNull(message);
 
-            /* And with the ids swapped the tie resolves the other way. */
+            /* Swap the ids' insertion order, not just the statuses: here the higher id (300) is inserted FIRST,
+               so one half expects the tied row inserted first and the other the one inserted last, and no
+               physical order can pass both without the log_id tiebreak. */
             await DeleteAsync(connection, ct);
-            await SeedAsync(connection, ct, 200, tied, "PERMISSIONS");
             await SeedAsync(connection, ct, 300, tied, "SUCCESS");
+            await SeedAsync(connection, ct, 200, tied, "PERMISSIONS");
             Assert.Null(await DarlingRuntimePrecondition.StatusAsync(postgres, ServerId, ServerName, Collector, ct));
             ok = true;
         }

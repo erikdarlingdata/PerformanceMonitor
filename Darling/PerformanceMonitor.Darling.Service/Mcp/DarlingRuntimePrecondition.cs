@@ -60,7 +60,7 @@ internal static class DarlingRuntimePrecondition
     /// answers first and a collector that ran recently is found there at once. Ordering by <c>log_id</c> instead would read
     /// the server's whole retained history on every call, because <c>collection_log</c> has no primary key and no index on
     /// <c>log_id</c>. Only the timestamp is returned, so two runs that share one give the same answer whichever comes first;
-    /// that is why this read does not need the id order <see cref="LatestCollectorOutcomeSql"/> uses, where the row's status
+    /// that is why this read does not need the <c>log_id</c> tiebreak that <see cref="LatestCollectorOutcomeSql"/> keeps, where the row's status
     /// is the answer. The server half uses <c>idx_collection_log_time (server_id, collection_time)</c>. The collector half
     /// filters with <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>. A collector that
     /// has never run has no row to find, so for it the read still goes through the server's whole retained history.
@@ -89,11 +89,17 @@ SELECT (
        ) AS server_first_collected";
 
     /// <summary>
-    /// The most recent run of one collector for one server. Ordered by <c>collection_time DESC</c>, the
-    /// hypertable's time dimension, so <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>
-    /// serves it from the newest chunk; <c>log_id</c> has no index, so ordering by it first would sort every retained row
-    /// for the pair. <c>log_id DESC</c> breaks the tie between two runs that share a timestamp, since the id is monotonic
-    /// per insert and "the latest run" is the whole claim this makes. $1 server_id, $2 collector.
+    /// The most recent run of one collector for one server. Ordered by <c>collection_time DESC</c> first (#4974):
+    /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c> serves that first key,
+    /// so ChunkAppend walks the chunks newest-first and stops at the first row, where a <c>log_id</c>-first order
+    /// (no index on <c>log_id</c>) read every retained row of the pair. The trade: after the wall clock steps back,
+    /// this read can return a run from before the step, for as long as the step lasts.
+    ///
+    /// <para><c>, log_id DESC</c> only makes the order deterministic; two runs of one server and collector do not
+    /// share a microsecond in practice. It costs a sort of the pair's rows in each chunk the read visits, since
+    /// no index carries <c>log_id</c>. The newest chunk answers a collector that ran recently. A collector with no
+    /// row in the newest chunk (a daily collector, or one that never ran) walks back through older chunks, which
+    /// are compressed. $1 server_id, $2 collector.</para>
     /// </summary>
     public const string LatestCollectorOutcomeSql = @"
 SELECT status, error_message, collection_time
