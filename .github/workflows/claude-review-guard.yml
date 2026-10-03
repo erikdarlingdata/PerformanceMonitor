@@ -18,8 +18,10 @@ name: Claude review guard
 # #3470: posting is not the same as being read. One night's PR train collected six review findings
 # as comments (one real) and auto-merge outran every one, because nothing made a finding cost
 # anything. So when the prompt promises a verdict review (the same sentinel), this guard also reads
-# the bot's newest formal review and fails while it says CHANGES_REQUESTED -- newest-verdict-wins,
-# so the fresh clean verdict a re-review submits clears the gate by itself, no --approve required.
+# the bot's newest VERDICT -- its newest review that carries a body, because the inline-comment
+# tool files each comment in a bodiless review of its own -- and fails while it says
+# CHANGES_REQUESTED. Newest-verdict-wins: the fresh clean verdict a re-review submits clears the
+# check by itself, no --approve required.
 #
 # This guard is a SEPARATE workflow on purpose. Editing claude-review.yml makes this branch's copy
 # differ from the default branch, which triggers cause (1) for EVERY pull request in the repo until
@@ -53,7 +55,9 @@ name: Claude review guard
 # purpose (the decide job succeeded, the review job was skipped) is not a failure here, but it is
 # not a clean bill either: the newest verdict still stands, and a changes-requested one still fails
 # the check until a fresh full review (the `re-review` label) or a human dismissal replaces it. A
-# decide job that FAILED is not a skip on purpose and fails the check.
+# decide job that FAILED is not a skip on purpose and fails the check. A review run that was
+# CANCELLED is not one either: it fails the check unless a newer push has replaced the head it was
+# reviewing, in which case that push's own check judges the new head.
 on:
   pull_request:
     # A draft is skipped, as claude-review.yml skips it: with no review to wait for, a draft run could
@@ -204,6 +208,11 @@ jobs:
           # ends the step either way (exit 0 or 1), like lookup(), so the caller never falls through.
           # Same obligation read as the verdict arm below: with no sentinel on the default branch's
           # copy there is no verdict promise to hold anything to, so nothing is enforced.
+          # Only a review WITH A BODY is a verdict. The inline-comment tool files each comment inside
+          # a review of its own with an EMPTY body, so a run that died after its comments leaves a
+          # bodiless COMMENTED review newest, and reading that as the verdict would clear a standing
+          # CHANGES_REQUESTED. Both verdict shapes carry a body, and a DISMISSED review keeps its
+          # own, so the filter drops only those carriers and a human dismissal still overrides.
           standing_verdict() {
             local encoded must_post newest verdict_state verdict_url
             encoded=$(gh api "repos/$R/contents/$WF?ref=$DEFAULT_BRANCH" --jq '.content' 2>/dev/null \
@@ -212,7 +221,8 @@ jobs:
               | { grep -qF "$MUST_POST_SENTINEL" && echo 1 || true; } || true)
             if [ -z "$must_post" ]; then exit 0; fi
             lookup "verdict scan (standing verdict)" "repos/$R/pulls/$PR/reviews" --paginate \
-              --jq ".[] | select(.user.login == env.REVIEW_BOT) | select(.submitted_at != null) | \"\(.state)\t\(.html_url)\""
+              --jq ".[] | select(.user.login == env.REVIEW_BOT) | select(.submitted_at != null)
+                    | select(((.body // \"\") | length) > 0) | \"\(.state)\t\(.html_url)\""
             newest=$(printf '%s\n' "$LOOKUP_OUT" | tail -n 1)
             if [ -z "$newest" ]; then exit 0; fi
             IFS=$'\t' read -r verdict_state verdict_url <<<"$newest"
@@ -269,7 +279,43 @@ jobs:
             exit 0
           fi
 
-          if [ "$conclusion" = "cancelled" ] || [ "$conclusion" = "skipped" ]; then
+          # A cancelled review run did not review this head unless a newer push replaced it. Once
+          # only a newer push could cancel a review, and that push's own check judged the new head,
+          # so "cancelled" meant "nothing to verify". Now the review job joins its concurrency group
+          # after the decide job, so an older run's review can cancel a newer one, and a manual
+          # cancel does the same: the review meant to cover $SHA never finished, and passing here
+          # would let the pull request through with no review of it. So ask where the head is now.
+          # Still $SHA: nothing replaced the cancelled review, and the check fails. A different head:
+          # a newer push owns the review and its own check judges it. A read that fails (or returns no
+          # head) is neither answer, so it fails CLOSED, as the drift-origin lookups do -- through
+          # gh_capture directly, because lookup() passes on a failure with the review UNCONFIRMED and
+          # lookup_closed() words its error for the drift arm.
+          if [ "$conclusion" = "cancelled" ]; then
+            if ! gh_capture "repos/$R/pulls/$PR" --jq '.head.sha // empty' || [ -z "$LOOKUP_OUT" ]; then
+              echo "::error title=Review cancelled, head unknown::Review run $run_id was cancelled, and"\
+                "this guard could not read the head of PR #$PR to tell whether a newer push replaced"\
+                "it (${LOOKUP_ERR:-no head returned}). A cancelled review is not a pass, so this check"\
+                "fails closed. Re-run this guard."
+              summary "- Review run $run_id was cancelled and the head of PR #$PR could not be read."\
+                "Failing closed."
+              exit 1
+            fi
+            current_head=$LOOKUP_OUT
+            if [ "$current_head" != "$SHA" ]; then
+              echo "::notice title=Review cancelled::run $run_id was cancelled, and the head of PR #$PR"\
+                "has moved on to ${current_head:0:12}; that push's own check judges it."
+              summary "- Review run $run_id was cancelled; the head moved on to ${current_head:0:12},"\
+                "whose own check judges it."
+              exit 0
+            fi
+            echo "::error title=Review cancelled::The review of this head ($SHA, run $run_id) was"\
+              "cancelled and nothing replaced it, so PR #$PR has no review of its current commit."\
+              "Re-run the Claude Auto Review run, then re-run this check."
+            summary '### Claude review was cancelled; this head has no review'
+            summary '- Re-run the Claude Auto Review run, then re-run this check.'
+            exit 1
+          fi
+          if [ "$conclusion" = "skipped" ]; then
             echo "::notice title=Review $conclusion::run $run_id was $conclusion; nothing to verify."
             exit 0
           fi
@@ -499,23 +545,30 @@ jobs:
             # that is the manual override. --approve is no part of the protocol (the review token
             # cannot approve without an org toggle this repo does not enable) and none is needed:
             # a clean COMMENTED verdict clears the gate just as well.
+            # Only a review WITH A BODY is a verdict. The inline-comment tool files each comment
+            # inside a review of its own with an EMPTY body, so a run that dies after its comments
+            # leaves a bodiless COMMENTED review newest, and the scan would read it as a clean
+            # verdict over a standing CHANGES_REQUESTED. The body test is the one claude-review.yml's
+            # decide step and verdict check apply. A DISMISSED review keeps its body, so the manual
+            # override above still works.
             # The API returns reviews oldest-first (documented: chronological order), and --paginate
             # runs the --jq once PER PAGE -- a max_by here would be per-page, not global -- so the
             # newest is the last LINE of the emitted stream, which pagination cannot break.
             lookup "verdict scan (bot reviews)" "repos/$R/pulls/$PR/reviews" --paginate \
-              --jq ".[] | $mine | select(.submitted_at != null) | \"\(.state)\t\(.html_url)\""
+              --jq ".[] | $mine | select(.submitted_at != null)
+                    | select(((.body // \"\") | length) > 0) | \"\(.state)\t\(.html_url)\""
             newest=$(printf '%s\n' "$LOOKUP_OUT" | tail -n 1)
 
             if [ -z "$newest" ]; then
-              # Comments landed but no formal review ever did, and the prompt promises one every
-              # run. The same broken-promise class as "posted nothing" below -- and worse, it is
-              # exactly the pre-verdict failure shape: findings living only in comments, which is
-              # the thing auto-merge outruns.
+              # Comments landed but no verdict review (one with a body) ever did, and the prompt
+              # promises one every run. The same broken-promise class as "posted nothing" below --
+              # and worse, it is exactly the pre-verdict failure shape: findings living only in
+              # comments, which is the thing auto-merge outruns.
               echo "::error title=Review posted no verdict::Review run $run_id posted comments, but"\
-                "$REVIEW_BOT has never submitted a formal review on PR #$PR, and $WF promises one"\
-                "verdict review per run. Findings that live only in comments are what auto-merge"\
-                "outruns (#3470), so do NOT read this PR as verdict-clean. Re-run the review"\
-                "workflow, then re-run this guard."
+                "$REVIEW_BOT has never submitted a verdict review (a review with a body) on PR"\
+                "#$PR, and $WF promises one verdict review per run. Findings that live only in"\
+                "comments are what auto-merge outruns (#3470), so do NOT read this PR as"\
+                "verdict-clean. Re-run the review workflow, then re-run this guard."
               summary '### Claude review posted comments but no verdict review'
               summary '- The prompt promises a verdict every run; none exists. Re-run the review.'
               exit 1
