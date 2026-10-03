@@ -55,6 +55,30 @@ public sealed class WebCollectionHealthRunAtColumnTests
     }
 
     [Fact]
+    public void TheCollectorsTable_ListsTheRunTimeTheNextRunAndTheSkippedDayNote_AndLeavesEachOutWhenNoRowFillsIt()
+    {
+        /* The Heaviest Collectors table ranks by cost per minute, which puts a once-a-day collector last, so the table
+           that lists every collector carries the run time too. */
+        var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var columns = Slice(js, "const COLLECTOR_COLUMNS = [", "];");
+
+        Assert.Contains("{ key: \"run_at\", label: \"Run at\", hideWhenEmpty: true },", columns, StringComparison.Ordinal);
+        Assert.Contains("{ key: \"next_run_utc\", label: \"Next run\", format: \"time\", hideWhenEmpty: true },", columns, StringComparison.Ordinal);
+        Assert.Contains("{ key: \"run_time_note\", label: \"Run time\", wrap: true, hideWhenEmpty: true },", columns, StringComparison.Ordinal);
+        Assert.True(columns.IndexOf("key: \"last_success\"", StringComparison.Ordinal) < columns.IndexOf("key: \"run_at\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheToolsFullAndPartialRows_CarryTheRunTimeNextRunAndNote()
+    {
+        var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
+        foreach (var field in new[] { "run_at = runTime?.RunAt,", "next_run_utc = runTime?.NextRunUtcText", "run_time_note = runTime?.SkippedDayNote" })
+        {
+            Assert.Equal(2, tools.Split(field, StringSplitOptions.None).Length - 1);
+        }
+    }
+
+    [Fact]
     public void TheShippedHeaviestColumns_ShowTheRunTimeWhenARowHasOne_AndNoColumnWhenNoneDoes()
     {
         var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
