@@ -1082,7 +1082,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// both: pooled sessions keep an older, higher <c>statement_timeout</c> after an operator lowers
     /// <c>compose_statement_timeout_seconds</c> (the new value takes effect on each role's next session), and the
     /// owner-login fallback has no server-side <c>statement_timeout</c>, so the client deadline is the only bound.
-    /// The MCP <c>run_custom_view_panel</c> caller passes no headroom and keeps its equal-deadline race.</summary>
+    /// The MCP <c>run_custom_view_panel</c> caller passes no headroom and keeps its equal-deadline race; either
+    /// side's timeout answers the same statement-timeout text there, because it passes the remap flag too.</summary>
     internal const int ComposeClientDeadlineHeadroomSeconds = 5;
 
     /// <summary>The client <c>CommandTimeout</c> for a composed query whose server-side statement_timeout is
@@ -1093,10 +1094,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// 57014 or the client's own timer got there first.</summary>
     internal const string StatementTimeoutText = "Query failed: canceling statement due to statement timeout";
 
-    /// <summary>Raised by the compose runners when Npgsql's own client timer fires WHILE THE STATEMENT EXECUTES
-    /// (<c>ExecuteReaderAsync</c> or the row <c>ReadAsync</c> loop) on an already-open connection. The original
-    /// <see cref="NpgsqlException"/> rides as the inner exception. A pool-wait or connect timeout is raised by
-    /// the same Npgsql exception shape but never becomes this marker, because no statement ran.</summary>
+    /// <summary>Raised by the compose runners when Npgsql's own client timer fires inside
+    /// <c>ExecuteReaderAsync</c> or the row <c>ReadAsync</c> loop of a connection that was already open. The
+    /// original <see cref="NpgsqlException"/> rides as the inner exception. Two cases look the same to the driver
+    /// and both become this marker: a stalled send of the query (the write timeout is the command's
+    /// <c>CommandTimeout</c>), and a pooled connection whose peer went away, whose first I/O happens inside
+    /// <c>ExecuteReaderAsync</c>. A failure to open the connection never becomes this marker (see
+    /// <see cref="ComposeStoreOpenException"/>). One limit: with <c>Multiplexing=true</c> in a bring-your-own
+    /// store connection string, a connect failure surfaces from <c>ExecuteReaderAsync</c> and becomes this
+    /// marker; the managed store's connection string does not set it (Npgsql's default is off).</summary>
     internal sealed class ComposeStatementClientTimeoutException : Exception
     {
         internal ComposeStatementClientTimeoutException(NpgsqlException inner)
@@ -1105,13 +1111,41 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
     }
 
+    /// <summary>Raised when a compose runner cannot open its store connection (pool wait, DNS, TCP connect, TLS or
+    /// startup or login exchange). The original <see cref="NpgsqlException"/> rides as the inner exception. No
+    /// statement ran, so this is never a statement timeout.</summary>
+    internal sealed class ComposeStoreOpenException : Exception
+    {
+        internal ComposeStoreOpenException(NpgsqlException inner)
+            : base(inner.Message, inner)
+        {
+        }
+    }
+
+    /// <summary>Opens a compose runner's store connection, before any statement runs. An <see cref="NpgsqlException"/>
+    /// from the open (other than a <see cref="PostgresException"/> the server sent at login) is raised as
+    /// <see cref="ComposeStoreOpenException"/>.</summary>
+    private static async Task<NpgsqlConnection> OpenComposeConnectionAsync(
+        NpgsqlDataSource postgres, System.Threading.CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await postgres.OpenConnectionAsync(cancellationToken);
+        }
+        catch (NpgsqlException ex) when (ex is not PostgresException)
+        {
+            throw new ComposeStoreOpenException(ex);
+        }
+    }
+
     /// <summary>The generic-exception arm of the compose runner, pulled out so a test runs it. When
-    /// <paramref name="remapClientTimeout"/> is true (the web route), a client timer that fired while the
-    /// statement executed (<see cref="ComposeStatementClientTimeoutException"/>) is the same event as the server's
-    /// 57014, so it records Timeout and answers with the same text; with the flag false (the default, and what
-    /// the MCP <c>run_custom_view_panel</c> caller gets) it stays a server error carrying the original message.
-    /// A pool-wait or connect timeout is never a statement timeout: it answers a server error whose text names
-    /// the cause, and is logged at Error with the original message.</summary>
+    /// <paramref name="remapClientTimeout"/> is true (the web route and the MCP <c>run_custom_view_panel</c>
+    /// caller), a client timer that fired while the statement executed
+    /// (<see cref="ComposeStatementClientTimeoutException"/>) is the same event as the server's 57014, so it
+    /// records Timeout and answers with the same text; with the flag false it stays a server error carrying the
+    /// original message. A failure to open the store connection (<see cref="ComposeStoreOpenException"/>) is
+    /// never a statement timeout: it answers a server error whose text says whether the open timed out, and is
+    /// logged at Error with the original message.</summary>
     internal static ComposeRunOutcome FromRunException(Exception ex, bool remapClientTimeout = false)
     {
         if (ex is ComposeStatementClientTimeoutException marker)
@@ -1121,17 +1155,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : ComposeRunOutcome.ServerError($"Error running query: {marker.InnerException!.Message}");
         }
 
-        if (ex is NpgsqlException { InnerException: TimeoutException })
+        if (ex is ComposeStoreOpenException open)
         {
-            if (ex.Message.StartsWith("The connection pool has been exhausted", StringComparison.Ordinal))
-            {
-                return ComposeRunOutcome.ServerError($"Error running query: the store had no free connection in time: {ex.Message}");
-            }
-
-            if (ex.Message.StartsWith("Failed to connect", StringComparison.Ordinal))
-            {
-                return ComposeRunOutcome.ServerError($"Error running query: could not connect to the store in time: {ex.Message}");
-            }
+            return open.InnerException!.InnerException is TimeoutException
+                ? ComposeRunOutcome.ServerError($"Error running query: could not get a store connection in time: {open.InnerException.Message}")
+                : ComposeRunOutcome.ServerError($"Error running query: could not open a store connection: {open.InnerException!.Message}");
         }
 
         return ComposeRunOutcome.ServerError($"Error running query: {ex.Message}");
@@ -1644,7 +1672,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         /* The connection is opened first and on its own, so a pool-wait or connect timeout (also an
            NpgsqlException over a TimeoutException) is never mistaken for the client timer of a running
            statement. Only a timeout raised below, while the statement executes, becomes the marker. */
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await OpenComposeConnectionAsync(postgres, cancellationToken);
         await using var command = new NpgsqlCommand(compiled.Sql, connection);
         command.CommandTimeout = clientDeadlineSeconds;
         foreach (var parameter in compiled.Parameters)
@@ -1705,7 +1733,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         NpgsqlDataSource postgres, ComposeRunContext runContext, int clientDeadlineSeconds, System.Threading.CancellationToken cancellationToken)
     {
         var compiled = ComposeCompiler.CompileServerClockRead(runContext);
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await OpenComposeConnectionAsync(postgres, cancellationToken);
         await using var command = new NpgsqlCommand(compiled.Sql, connection);
         command.CommandTimeout = clientDeadlineSeconds;
         foreach (var parameter in compiled.Parameters)

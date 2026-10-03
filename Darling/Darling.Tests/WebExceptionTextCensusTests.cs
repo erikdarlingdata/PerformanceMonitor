@@ -88,28 +88,32 @@ public sealed class WebExceptionTextCensusTests
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
             "ex.InnerException is TimeoutException",
-            "FromRunException's type-pattern check (#4605): it only decides WHICH fixed sentence a client-side " +
-            "timeout answers with; the exception's text is never read or returned."
+            "The two statement catch filters (#4605): they only decide whether the runner throws the statement-timeout marker; the exception's text is never read or returned."
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
             "base(inner.Message, inner)",
-            "The statement-phase timeout marker (#4605) carries the original message for the log; ServerErrorResult reclassifies the sentence before a browser sees it."
+            "Both compose markers (#4605) carry the original message for the log. The web route answers the fixed StatementTimeoutText at 400 for the statement marker and never logs or returns its message; the open marker's message reaches the server-error sentence, which ServerErrorResult reclassifies before a browser sees it."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "open.InnerException!.InnerException is TimeoutException",
+            "FromRunException's type-pattern check (#4605): it only decides WHICH fixed sentence an open failure answers with; the exception's text is not read here."
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
             "{marker.InnerException!.Message}",
-            "FromRunException on the MCP path (#4605): the same ServerError sentence shape as above, built from the original timeout message; the web route never reaches this arm."
+            "FromRunException with the remap flag false (#4605): the same ServerError sentence shape as above, built from the original timeout message; no production caller passes false."
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
-            "ex.Message.StartsWith(",
-            "FromRunException (#4605): a type-and-prefix check that only picks WHICH sentence a pool or connect timeout answers with."
+            "could not get a store connection in time: {open.InnerException.Message}",
+            "FromRunException's open-timeout sentence (#4605): a ServerError that names the cause and is logged at Error; ServerErrorResult reclassifies it before a browser sees it."
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
-            "in time: {ex.Message}",
-            "A pool-wait or connect timeout (#4605): the ServerError sentence names the cause and is logged at Error; the web route answers a fixed message through ServerErrorResult, never this text."
+            "could not open a store connection: {open.InnerException!.Message}",
+            "FromRunException's open-failure sentence (#4605): a ServerError carrying the original message for the log; ServerErrorResult reclassifies it before a browser sees it."
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingWebOidc.cs"),

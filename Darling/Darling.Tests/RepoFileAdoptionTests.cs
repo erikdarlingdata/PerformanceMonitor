@@ -127,6 +127,9 @@ public sealed class RepoFileAdoptionTests
            chart counts are told apart from the constant's prose and the function from its callers. */
         "ChartIntegerTicksPinTests.cs",
         "ChartWindowDomainTests.cs",
+        /* #4605: its wiring pins read the endpoint source with comments stripped and whitespace collapsed, so a call 
+           that wraps across lines compares as one spelling. */
+        "ComposeClientTimeoutAttributionTests.cs",
         /* #4887: its StoredEventCopies census takes each helper's table from that class's own source, on an anchor
            that runs from the helper's `=>` across the line break to the `Read("v_` on the next line. */
         "ConsumedTimestampFrameDisciplineTests.cs",
