@@ -27,20 +27,23 @@ namespace PerformanceMonitor.Darling.Storage;
 /// is for everything else (the CLI, the Viewer) and writes nothing: a reader that made an id would make one for a
 /// store nobody started.</para>
 ///
-/// <para><b>The binding.</b> Beside the id the row keeps the store database's OID, the OID of this table, and the
-/// cluster's <c>system_identifier</c>. The two OIDs say which store this is: a physical copy keeps both, and so does
-/// <c>pg_upgrade</c>, which the managed store goes through at each major upgrade (see <see cref="IsSameStore"/>); a
-/// store made again by dump and restore, or by another install's migrations, does not. The cluster id is not part of
-/// that answer, because <c>pg_upgrade</c> makes a new one: a changed cluster id is rebound on the row and the id stays.
-/// None of the three is a host name (a recreated container gets a new host name and is still the same store). When the
-/// stored binding is not this store's, or the stored id is not a valid id, the id is replaced and one Warning names
-/// both ids and which binding differed. The old id's sessions are left alone, because the install it came from may
-/// still run.</para>
+/// <para><b>The binding.</b> Beside the id the row keeps the store database's OID, the OID of this table, the
+/// cluster's <c>system_identifier</c> and the server's major version. The two OIDs say which store this is: a physical
+/// copy keeps both, and so does <c>pg_upgrade</c>, which the managed store goes through at each major upgrade (see
+/// <see cref="IsSameStore"/>); a store made again by dump and restore, or by another install's migrations, does not. The
+/// cluster id decides only when it changed with both OIDs unchanged: <c>pg_upgrade</c> makes a new one and raises the
+/// major, so a changed cluster id keeps the id only when the major rose, and the row is rebound to the new cluster id
+/// and major. A changed cluster id at the same or a lower major (a copy of the row into a fresh install, whose OIDs can
+/// match because a new cluster numbers its objects from the same start) gets a new id. None of these is a host name (a
+/// recreated container gets a new host name and is still the same store). When the stored binding is not this store's,
+/// or the stored id is not a valid id, the id is replaced and one Warning names both ids and which binding differed. The
+/// old id's sessions are left alone, because the install it came from may still run.</para>
 ///
 /// <para><b>A server that refuses the cluster id.</b> A login without superuser rights may call
 /// <c>pg_control_system()</c> by default, but a managed or hardened server can revoke it, and the service has to start
 /// there. A refusal (and only a refusal) of that read leaves the cluster id out of the binding: the row is stored with
-/// a NULL cluster id and one Information line says so. Every login can read the two OIDs. A row made before the table's
+/// a NULL cluster id and one Information line says so. Every login can read the two OIDs and the major version, and an
+/// unknown cluster id on either side is never a changed one, so the two OIDs decide. A row made before the table's
 /// OID was kept (it has none yet) is compared as it was then, by the database's OID and by the cluster id when the row
 /// and the current read both have one, and its table OID is filled in on the next start. So a grant that changes
 /// later, in either direction, never makes a new id on its own.</para>
@@ -53,20 +56,21 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class StoreInstallId
 {
-    /// <summary>The store this connection is on: the cluster's <c>system_identifier</c>, the database's OID and the OID
-    /// of the install id table. A login without superuser rights may call <c>pg_control_system()</c> by default, and a
-    /// server that revokes it refuses with SQLSTATE 42501, which <see cref="EnsureAsync"/> answers with
-    /// <see cref="DatabaseOidSql"/>.</summary>
+    /// <summary>The store this connection is on: the cluster's <c>system_identifier</c>, the database's OID, the OID of the
+    /// install id table and the server's major version (<c>server_version_num / 10000</c>). A login without superuser
+    /// rights may call <c>pg_control_system()</c> by default, and a server that revokes it refuses with SQLSTATE 42501,
+    /// which <see cref="EnsureAsync"/> answers with <see cref="DatabaseOidSql"/>.</summary>
     public const string BindingSql = @"
-SELECT s.system_identifier, d.oid::bigint, 'config.config_install_id'::regclass::oid::bigint
+SELECT s.system_identifier, d.oid::bigint, 'config.config_install_id'::regclass::oid::bigint,
+       current_setting('server_version_num')::int / 10000
 FROM pg_control_system() AS s
 CROSS JOIN pg_database AS d
 WHERE d.datname = current_database()";
 
-    /// <summary>The two OIDs alone, for a store whose server refuses this login the cluster id. Every login can read
-    /// them, so a refusal of this statement is not answered with a fallback.</summary>
+    /// <summary>The two OIDs and the major version, for a store whose server refuses this login the cluster id. Every
+    /// login can read them, so a refusal of this statement is not answered with a fallback.</summary>
     public const string DatabaseOidSql = @"
-SELECT d.oid::bigint, 'config.config_install_id'::regclass::oid::bigint
+SELECT d.oid::bigint, 'config.config_install_id'::regclass::oid::bigint, current_setting('server_version_num')::int / 10000
 FROM pg_database AS d
 WHERE d.datname = current_database()";
 
@@ -78,35 +82,38 @@ SELECT install_id, system_identifier, database_oid
 FROM config.config_install_id
 WHERE id = 1";
 
-    /// <summary>The row with its table OID, for <see cref="EnsureAsync"/> alone: it runs after the migrations, so the
-    /// column is there.</summary>
+    /// <summary>The row with its table OID and major version, for <see cref="EnsureAsync"/> alone: it runs after the
+    /// migrations, so the columns are there.</summary>
     public const string ReadWithTableOidSql = @"
-SELECT install_id, system_identifier, database_oid, table_oid
+SELECT install_id, system_identifier, database_oid, table_oid, server_major
 FROM config.config_install_id
 WHERE id = 1";
 
     /// <summary>Makes the row if no start has yet; a start that loses the race changes nothing.</summary>
     public const string InsertSql = @"
-INSERT INTO config.config_install_id (id, install_id, system_identifier, database_oid, table_oid)
-VALUES (1, $1, $2, $3, $4)
+INSERT INTO config.config_install_id (id, install_id, system_identifier, database_oid, table_oid, server_major)
+VALUES (1, $1, $2, $3, $4, $5)
 ON CONFLICT (id) DO NOTHING";
 
     /// <summary>Replaces the id and its binding, but only while the row still holds the id this start read, so of
     /// several starts that saw the same row exactly one replaces it.</summary>
     public const string ReplaceSql = @"
 UPDATE config.config_install_id
-SET install_id = $1, system_identifier = $2, database_oid = $3, table_oid = $4, created_at = (now() AT TIME ZONE 'UTC')
-WHERE id = 1 AND install_id = $5";
+SET install_id = $1, system_identifier = $2, database_oid = $3, table_oid = $4, server_major = $5, created_at = (now() AT TIME ZONE 'UTC')
+WHERE id = 1 AND install_id = $6";
 
     /// <summary>Writes each binding value of a row that is this store's and is missing or changed, and keeps the id:
-    /// the table OID when the row has none (a row made before it was kept), and the cluster id when the current one is
-    /// known and differs (a stored NULL included, a refusal that has lifted). Guarded by the id this start read and by
-    /// the value still being stale, so of several starts that saw the same row exactly one writes it and logs.</summary>
+    /// the table OID when the row has none (a row made before it was kept), the cluster id when the current one is known
+    /// and differs (a stored NULL included, a refusal that has lifted), and always the current major version. Guarded by
+    /// the id this start read and by a value still being stale, so of several starts that saw the same row exactly one
+    /// writes it and logs.</summary>
     public const string RebindSql = @"
 UPDATE config.config_install_id
-SET table_oid = COALESCE(table_oid, $1), system_identifier = COALESCE($2::bigint, system_identifier)
-WHERE id = 1 AND install_id = $3
-  AND (table_oid IS NULL OR ($2::bigint IS NOT NULL AND system_identifier IS DISTINCT FROM $2::bigint))";
+SET table_oid = COALESCE(table_oid, $1), system_identifier = COALESCE($2::bigint, system_identifier), server_major = $3
+WHERE id = 1 AND install_id = $4
+  AND (table_oid IS NULL
+       OR server_major IS DISTINCT FROM $3
+       OR ($2::bigint IS NOT NULL AND system_identifier IS DISTINCT FROM $2::bigint))";
 
     /// <summary>The deadline on every statement here, in seconds. Each touches one row of a table that holds one row, so
     /// a statement that takes longer than this is waiting on something (a peer holding the row, a store that has
@@ -118,12 +125,13 @@ WHERE id = 1 AND install_id = $3
     private const int MaxAttempts = 5;
 
     /// <summary>What this connection's store is. The cluster id is null when the server refused it (see
-    /// <see cref="DatabaseOidSql"/>); the two OIDs are always known.</summary>
-    private readonly record struct Binding(long? SystemIdentifier, long DatabaseOid, long TableOid);
+    /// <see cref="DatabaseOidSql"/>); the two OIDs and the major version are always known.</summary>
+    private readonly record struct Binding(long? SystemIdentifier, long DatabaseOid, long TableOid, int ServerMajor);
 
     /// <summary>What the row holds. The cluster id is null when the start that made the row could not read it; the table
-    /// OID is null on a row made before it was kept, and on a row a reader read (it does not select it).</summary>
-    private readonly record struct Row(string InstallId, long? SystemIdentifier, long DatabaseOid, long? TableOid);
+    /// OID and the major version are null on a row made before they were kept, and on a row a reader read (it does not
+    /// select them).</summary>
+    private readonly record struct Row(string InstallId, long? SystemIdentifier, long DatabaseOid, long? TableOid, int? ServerMajor);
 
     /// <summary>
     /// The service's: returns this store's install id, making the row when it is absent and replacing the id when it
@@ -148,8 +156,8 @@ WHERE id = 1 AND install_id = $3
 
             var validId = InstallId.IsValid(stored.InstallId);
             var sameStore = IsSameStore(
-                stored.SystemIdentifier, stored.DatabaseOid, stored.TableOid,
-                binding.SystemIdentifier, binding.DatabaseOid, binding.TableOid);
+                stored.SystemIdentifier, stored.DatabaseOid, stored.TableOid, stored.ServerMajor,
+                binding.SystemIdentifier, binding.DatabaseOid, binding.TableOid, binding.ServerMajor);
             if (validId && sameStore)
             {
                 if (!NeedsRebind(stored, binding))
@@ -163,9 +171,10 @@ WHERE id = 1 AND install_id = $3
                     {
                         logger.LogInformation(
                             "The cluster's identifier changed from {StoredClusterId} to {CurrentClusterId} since the install id " +
-                            "'{InstallId}' was made. The store is the same one (its database and the install id table keep their OIDs " +
-                            "through a major upgrade), so the id stays and the row now carries the new cluster id.",
-                            storedCluster, currentCluster, stored.InstallId);
+                            "'{InstallId}' was made, and the server's major version rose from {StoredMajor} to {CurrentMajor}. The store " +
+                            "is the same one (its database and the install id table keep their OIDs through a major upgrade), so the id " +
+                            "stays and the row now carries the new cluster id and major version.",
+                            storedCluster, currentCluster, stored.InstallId, stored.ServerMajor, binding.ServerMajor);
                     }
 
                     return stored.InstallId;
@@ -225,45 +234,59 @@ WHERE id = 1 AND install_id = $3
     }
 
     /// <summary>
-    /// Whether a stored row belongs to this store. The database's OID always counts. When the row has its table's OID
-    /// (every row made since the migration that keeps it) that decides the rest and the cluster id does not count, because
-    /// it is the one binding a major upgrade changes. A row that has no table OID yet is compared as it was before: by the
-    /// cluster id too, when the row and the current read both have one, so a grant that changes later (a refusal lifted,
-    /// or put in place) never makes a new id on its own.
+    /// Whether a stored row belongs to this store. The database's OID always counts, and so does the table's OID once the
+    /// row has it (every row made since the migration that keeps it). With both OIDs matching, a cluster id that did not
+    /// change (or that is unknown on either side) is the same store; a changed one is the same store only when the
+    /// server's major version rose, which a major upgrade always does, and only when the row has a major to compare (a
+    /// row with a table OID and no major must match the cluster id). A row that has no table OID yet is compared as it was
+    /// before: by the cluster id too, when the row and the current read both have one, so a grant that changes later (a
+    /// refusal lifted, or put in place) never makes a new id on its own.
     ///
-    /// <para><b>Why the two OIDs survive what the cluster id does not.</b> <c>pg_upgrade</c> gives the new cluster a new
-    /// <c>system_identifier</c> but keeps the database's OID (PostgreSQL 15 release notes, section pg_upgrade: "Make
-    /// pg_upgrade preserve tablespace and database OIDs, as well as relation relfilenode numbers"; pg_dump's
-    /// <c>--binary-upgrade</c> output creates the database with <c>CREATE DATABASE ... WITH TEMPLATE = template0 OID = ...</c>)
-    /// and the table's (the same output calls <c>binary_upgrade_set_next_heap_pg_class_oid</c> before each table, under the
-    /// comment "For binary upgrade, must preserve pg_class oids and relfilenodes": src/bin/pg_dump/pg_dump.c,
-    /// <c>binary_upgrade_set_pg_class_oids</c>). A dump and restore without that mode, which is how a clone or a move by
-    /// logical copy is made, takes new OIDs from the new cluster's counters.</para>
+    /// <para><b>Why the two OIDs survive what the cluster id does not, and why the major follows.</b>
+    /// <c>pg_upgrade</c> gives the new cluster a new <c>system_identifier</c> but keeps the database's OID (PostgreSQL 15
+    /// release notes, section pg_upgrade: "Make pg_upgrade preserve tablespace and database OIDs, as well as relation
+    /// relfilenode numbers"; pg_dump's <c>--binary-upgrade</c> output creates the database with
+    /// <c>CREATE DATABASE ... WITH TEMPLATE = template0 OID = ...</c>) and the table's (the same output calls
+    /// <c>binary_upgrade_set_next_heap_pg_class_oid</c> before each table, under the comment "For binary upgrade, must
+    /// preserve pg_class oids and relfilenodes": src/bin/pg_dump/pg_dump.c, <c>binary_upgrade_set_pg_class_oids</c>). A
+    /// dump and restore without that mode, which is how a clone or a move by logical copy is made, takes new OIDs from
+    /// the new cluster's counters. Those counters start at the same number after every <c>initdb</c>, so a copy of the row
+    /// into a fresh install of the same version can match both OIDs; it also has a new cluster id and the same major, and
+    /// a major upgrade never has the same or a lower one.</para>
     /// </summary>
     public static bool IsSameStore(
-        long? storedClusterId, long storedDatabaseOid, long? storedTableOid,
-        long? currentClusterId, long currentDatabaseOid, long currentTableOid)
+        long? storedClusterId, long storedDatabaseOid, long? storedTableOid, int? storedMajor,
+        long? currentClusterId, long currentDatabaseOid, long currentTableOid, int currentMajor)
     {
         if (storedDatabaseOid != currentDatabaseOid)
         {
             return false;
         }
 
-        if (storedTableOid is { } storedTable)
+        var clusterChanged = storedClusterId is { } storedCluster
+            && currentClusterId is { } currentCluster
+            && storedCluster != currentCluster;
+
+        if (storedTableOid is not { } storedTable)
         {
-            return storedTable == currentTableOid;
+            return !clusterChanged;
         }
 
-        return storedClusterId is not { } storedCluster
-            || currentClusterId is not { } currentCluster
-            || storedCluster == currentCluster;
+        if (storedTable != currentTableOid)
+        {
+            return false;
+        }
+
+        return !clusterChanged || (storedMajor is { } major && currentMajor > major);
     }
 
-    /// <summary>Whether a row that is this store's still has a binding value to write: its table OID when it has none,
-    /// or the cluster id when the current one is known and the row's differs (or is missing).</summary>
+    /// <summary>Whether a row that is this store's still has a binding value to write: its table OID when it has none, its
+    /// major version when it has none or another, or the cluster id when the current one is known and the row's differs
+    /// (or is missing).</summary>
     private static bool NeedsRebind(Row stored, Binding binding)
     {
         return stored.TableOid is null
+            || stored.ServerMajor != binding.ServerMajor
             || (binding.SystemIdentifier is { } current && stored.SystemIdentifier != current);
     }
 
@@ -281,8 +304,9 @@ WHERE id = 1 AND install_id = $3
     }
 
     /// <summary>Which binding differed, as the Warning names it: each OID that changed, with the value in this store and
-    /// the value in the row. The cluster id is named only for a row that has no table OID yet, the one case in which it
-    /// decides.</summary>
+    /// the value in the row. The cluster id is named for a row that has no table OID yet, and for a row whose OIDs both
+    /// match (the cases in which it decides), with the two major versions, or the lack of a stored one, because the major
+    /// is what separates an upgrade from a copy.</summary>
     private static string DescribeDifference(Row stored, Binding binding)
     {
         var differences = new List<string>();
@@ -296,10 +320,15 @@ WHERE id = 1 AND install_id = $3
             differences.Add($"the install id table's OID is {binding.TableOid} here and {storedTable} in the row");
         }
 
-        if (stored.TableOid is null && stored.SystemIdentifier is { } storedCluster
-            && binding.SystemIdentifier is { } currentCluster && storedCluster != currentCluster)
+        if (stored.SystemIdentifier is { } storedCluster && binding.SystemIdentifier is { } currentCluster && storedCluster != currentCluster
+            && (stored.TableOid is null || (differences.Count == 0 && stored.TableOid == binding.TableOid)))
         {
-            differences.Add($"the cluster id is {currentCluster} here and {storedCluster} in the row");
+            var cluster = $"the cluster id is {currentCluster} here and {storedCluster} in the row";
+            differences.Add(stored.TableOid is null
+                ? cluster
+                : stored.ServerMajor is { } storedMajor
+                    ? $"{cluster}, and the server's major version is {binding.ServerMajor} here and {storedMajor} in the row, which is not an upgrade"
+                    : $"{cluster}, and the row has no major version to show an upgrade");
         }
 
         return string.Join("; ", differences);
@@ -325,7 +354,7 @@ WHERE id = 1 AND install_id = $3
 
         logger.LogInformation(
             "The install id is bound to the store's database alone, because the cluster's identifier can't be read with this login.");
-        return new Binding(null, reader.GetInt64(0), reader.GetInt64(1));
+        return new Binding(null, reader.GetInt64(0), reader.GetInt64(1), reader.GetInt32(2));
     }
 
     /// <summary>The cluster and the database in one statement, or null when the server refused the cluster id.</summary>
@@ -340,7 +369,7 @@ WHERE id = 1 AND install_id = $3
                 throw new InvalidOperationException("The store's cluster and database could not be identified.");
             }
 
-            return new Binding(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
+            return new Binding(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt32(3));
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
@@ -358,7 +387,8 @@ WHERE id = 1 AND install_id = $3
         }
 
         var tableOid = reader.FieldCount > 3 && !reader.IsDBNull(3) ? reader.GetInt64(3) : (long?)null;
-        return new Row(reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetInt64(1), reader.GetInt64(2), tableOid);
+        var serverMajor = reader.FieldCount > 4 && !reader.IsDBNull(4) ? reader.GetInt32(4) : (int?)null;
+        return new Row(reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetInt64(1), reader.GetInt64(2), tableOid, serverMajor);
     }
 
     /// <summary>The cluster id as a statement parameter: typed, so a NULL (a refused read) reaches the server as a
@@ -375,6 +405,7 @@ WHERE id = 1 AND install_id = $3
         command.Parameters.Add(ClusterIdParameter(binding));
         command.Parameters.Add(new NpgsqlParameter { Value = binding.DatabaseOid });
         command.Parameters.Add(new NpgsqlParameter { Value = binding.TableOid });
+        command.Parameters.Add(new NpgsqlParameter { Value = binding.ServerMajor });
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -387,6 +418,7 @@ WHERE id = 1 AND install_id = $3
         command.Parameters.Add(ClusterIdParameter(binding));
         command.Parameters.Add(new NpgsqlParameter { Value = binding.DatabaseOid });
         command.Parameters.Add(new NpgsqlParameter { Value = binding.TableOid });
+        command.Parameters.Add(new NpgsqlParameter { Value = binding.ServerMajor });
         command.Parameters.Add(new NpgsqlParameter { Value = oldInstallId });
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
     }
@@ -398,6 +430,7 @@ WHERE id = 1 AND install_id = $3
         await using var command = new NpgsqlCommand(RebindSql, connection) { CommandTimeout = CommandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { Value = binding.TableOid });
         command.Parameters.Add(ClusterIdParameter(binding));
+        command.Parameters.Add(new NpgsqlParameter { Value = binding.ServerMajor });
         command.Parameters.Add(new NpgsqlParameter { Value = installId });
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
     }

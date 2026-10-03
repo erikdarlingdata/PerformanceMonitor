@@ -603,13 +603,31 @@ public sealed class AlwaysOnXeChoices
 /// </summary>
 public static class AlwaysOnXeAzureEnsure
 {
-    /// <summary>One pass of the ensure in one database. <paramref name="ownName"/> is null for a host with no install id.</summary>
+    /// <summary>
+    /// The fault a pass throws when the shared session cannot be used and the install has no id to name a session of its own.
+    /// A host whose id store says why it has no id right now (<paramref name="idFailure"/>: the id file cannot be read, or a
+    /// new id cannot be saved) gets that cause and the retry in the message, in the long-query fault's words; a host with
+    /// no id store has nothing to retry and gets the plain sentence.
+    /// </summary>
+    public static string NoOwnSessionMessage(AlwaysOnXeSessionKind kind, string? idFailure)
+    {
+        var shared = AlwaysOnXeSessions.SharedNameFor(kind);
+        return idFailure is { } failure
+            ? $"The shared {shared} session cannot be used in this database, and this install has no id for now to name a session of its own, because {failure}. The next cycle tries again."
+            : $"The shared {shared} session cannot be used in this database, and this install has no id to name a session of its own.";
+    }
+
+    /// <summary>
+    /// One pass of the ensure in one database. <paramref name="ownName"/> is null for a host with no install id, and
+    /// <paramref name="idFailure"/> is why, when the host's id store knows (see <see cref="NoOwnSessionMessage"/>).
+    /// </summary>
     public static async Task<AlwaysOnXeAzureResult> RunAsync(
         IAlwaysOnXeDatabase database,
         AlwaysOnXeSessionKind kind,
         string? ownName,
         AlwaysOnXeChoice current,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? idFailure = null)
     {
         ArgumentNullException.ThrowIfNull(database);
 
@@ -644,8 +662,7 @@ public static class AlwaysOnXeAzureEnsure
 
         if (ownName is null)
         {
-            throw new InvalidOperationException(
-                $"The shared {AlwaysOnXeSessions.SharedNameFor(kind)} session cannot be used in this database, and this install has no id to name a session of its own.");
+            throw new InvalidOperationException(NoOwnSessionMessage(kind, idFailure));
         }
 
         await EnsureOwnAsync(database, kind, ownName, cancellationToken);
