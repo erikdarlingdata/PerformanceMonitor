@@ -1204,6 +1204,7 @@ public sealed class McpPayloadContractCensusTests
         ("DarlingMcpHealthParserTools.cs", "get_health_parser_system_health", "total_entries = c.Rows.Count", "every shredded entry in the window; shredded in C# from every XML in the window, the page is Take(limit) beside it as shown"),
         ("DarlingMcpTools.cs", "get_analysis_facts", "total_facts = facts.Count", "every collected fact; shown is the filtered count beside it"),
         ("DarlingMcpTools.cs", "get_analysis_findings", "total_occurrences = findings.Count", "every retained occurrence of the finding; shown beside it"),
+        ("DarlingMcpFinOpsInventoryTools.cs", "get_finops_inventory", "total_servers = ordered.Count", "every server with a collected properties snapshot; the page is Take(limit) beside it as servers_returned"),
         ("McpAlertTools.cs", "get_mute_rules", "total_count = rules.Count", "every mute rule; the read has no cap"),
         ("McpAnalysisTools.cs", "get_analysis_facts", "total_facts = facts.Count", "every collected fact; shown is the filtered count beside it"),
         ("McpAnalysisTools.cs", "get_analysis_findings", "total_occurrences = findings.Count", "every retained occurrence of the finding; shown beside it"),
