@@ -4169,8 +4169,14 @@
                      layer further in: extensions say what this server CAN do, settings say what it was told
                      to do, this says what it is doing right now. Sourced from AWS Performance Insights
                      rather than a database connection. -->
-                <TextBlock Grid.Row="7" x:Name="PgCpuNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="7">
+                    <TextBlock x:Name="PgCpuNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgCpuDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="8" x:Name="PgCpuGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4202,8 +4208,14 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" x:Name="PgBlockingNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="0">
+                                <TextBlock x:Name="PgBlockingNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgBlockingDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="1" x:Name="PgBlockingChainsGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4262,8 +4274,14 @@
 
                                  LoadPgActivityAsync is the only caller of LoadPgDeadlocksAsync, so this panel is filled
                                  by the load that fills the panels above it. -->
-                            <TextBlock Grid.Row="3" x:Name="PgDeadlocksNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="3">
+                                <TextBlock x:Name="PgDeadlocksNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgDeadlocksDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="4" x:Name="PgDeadlocksGrid" Style="{StaticResource DarkGrid}" MaxHeight="220"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4288,8 +4306,14 @@
                                  the family and severity filters live, this shows the window's newest 200.
 
                                  LoadPgActivityAsync is the only caller of LoadPgLogEventsAsync. -->
-                            <TextBlock Grid.Row="5" x:Name="PgLogEventsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="5">
+                                <TextBlock x:Name="PgLogEventsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgLogEventsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="6" x:Name="PgLogEventsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4326,8 +4350,14 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" x:Name="PgLockStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="0">
+                                <TextBlock x:Name="PgLockStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgLockStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="1" x:Name="PgLockStatsGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4372,8 +4402,14 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" x:Name="PgStatementsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="0">
+                                <TextBlock x:Name="PgStatementsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgStatementsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="1" x:Name="PgTopQueriesGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4399,8 +4435,14 @@
                                 </DataGrid.Columns>
                             </DataGrid>
                             <TextBlock Grid.Row="2" Text="Per-database counters — where the spills, the deadlocks and the rollbacks are" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                            <TextBlock Grid.Row="3" x:Name="PgDatabasesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="3">
+                                <TextBlock x:Name="PgDatabasesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgDatabasesDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="4" x:Name="PgDatabaseStatsGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4423,8 +4465,14 @@
                                  time cannot separate a statement that WAITED from one that burned CPU.
                                  Same queryid, so the two rows are the same statement. -->
                             <TextBlock Grid.Row="5" Text="OS CPU and disk per statement - what the kernel actually charged" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                            <TextBlock Grid.Row="6" x:Name="PgKernelStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="6">
+                                <TextBlock x:Name="PgKernelStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgKernelStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="7" x:Name="PgKernelStatsGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4446,8 +4494,14 @@
                                  JSON here is REDACTED at collection - auto_explain emits query text and
                                  filter literals verbatim, and neither reaches the store. -->
                             <TextBlock Grid.Row="8" Text="Captured execution plans - grouped by plan shape" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                            <TextBlock Grid.Row="9" x:Name="PgCapturedPlansNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="9">
+                                <TextBlock x:Name="PgCapturedPlansNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgCapturedPlansDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="10" x:Name="PgCapturedPlansGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4510,8 +4564,14 @@
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
                 <TextBlock Grid.Row="1" Text="1. Which session is holding a transaction open — and whether it pins anything at all" FontWeight="SemiBold" Margin="0,0,0,2"/>
-                <TextBlock Grid.Row="2" x:Name="PgSessionStatesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="2">
+                    <TextBlock x:Name="PgSessionStatesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgSessionStatesDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="3" x:Name="PgSessionStatesGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
@@ -4575,8 +4635,14 @@
                 </DataGrid>
 
                 <TextBlock Grid.Row="4" Text="2. What holds the xmin horizon — vacuum cannot reclaim anything newer than this" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                <TextBlock Grid.Row="5" x:Name="PgXminNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="5">
+                    <TextBlock x:Name="PgXminNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgXminDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="6" x:Name="PgXminHorizonGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4598,8 +4664,14 @@
                 </DataGrid>
 
                 <TextBlock Grid.Row="7" Text="3. Autovacuum backlog — ranked by how far past each table's OWN threshold it is, not by raw dead tuples" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                <TextBlock Grid.Row="8" x:Name="PgAutovacuumNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="8">
+                    <TextBlock x:Name="PgAutovacuumNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgAutovacuumDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="9" x:Name="PgAutovacuumGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
@@ -4685,8 +4757,14 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <TextBlock Grid.Row="0" x:Name="PgWaitsNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="0">
+                    <TextBlock x:Name="PgWaitsNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgWaitStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="1" x:Name="PgWaitStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4702,8 +4780,14 @@
                      pg_wait_sampling and attributes each wait to the QUERY that waited, on any
                      PostgreSQL that loads the module. On most servers exactly one of the two has
                      rows, and which one it is says which instrument the server offers. -->
-                <TextBlock Grid.Row="2" x:Name="PgWaitSamplingNote" FontSize="12" Margin="0,12,0,8" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="2">
+                    <TextBlock x:Name="PgWaitSamplingNote" FontSize="12" Margin="0,12,0,8" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgWaitSamplingDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="3" x:Name="PgWaitSamplingGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4736,8 +4820,14 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <TextBlock Grid.Row="0" x:Name="PgIoNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="0">
+                    <TextBlock x:Name="PgIoNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgIoStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="1" x:Name="PgIoStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4777,8 +4867,14 @@
                      26-column grid one row deep is unreadable and unsortable. Per-row also gives each
                      metric somewhere to carry its own note, which matters here because several are NULL for
                      a version reason rather than an absence-of-activity reason. -->
-                <TextBlock Grid.Row="2" x:Name="PgWriteStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="2">
+                    <TextBlock x:Name="PgWriteStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgWriteStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="3" x:Name="PgWriteStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4870,8 +4966,14 @@
                      WAL and exists with nobody attached; this is who is actually streaming. Worst-in-window
                      rides beside the latest value because a replica that drifts far behind and recovers
                      looks perfect in any single sample. -->
-                <TextBlock Grid.Row="2" x:Name="PgReplicationStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="2">
+                    <TextBlock x:Name="PgReplicationStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgReplicationStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="3" x:Name="PgReplicationStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4916,8 +5018,14 @@
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgStorageNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <TextBlock Grid.Row="1" x:Name="PgTableBloatNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="1">
+                    <TextBlock x:Name="PgTableBloatNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgTableBloatDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="2" x:Name="PgTableBloatGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
@@ -4949,8 +5057,14 @@
                         <DataGridTextColumn Header="Confidence" Binding="{Binding Confidence}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>
-                <TextBlock Grid.Row="3" x:Name="PgIndexUsageNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="3">
+                    <TextBlock x:Name="PgIndexUsageNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgIndexUsageDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="4" x:Name="PgIndexUsageGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
