@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -111,6 +113,21 @@ public static class PgTableTuning
     private static string GuardedCreate(string statement) =>
         "BEGIN; SET LOCAL lock_timeout = '" + CreateLockTimeoutSeconds + "'; " + statement + "; COMMIT;";
 
+    /// <summary>
+    /// The indexes whose first build reads the heap of a large hypertable. A start builds at most one of them:
+    /// once one build has been issued, the rest that are still missing wait for the next start, so each start
+    /// pauses collection for one bounded build, not for the sum of several. Statement order decides which goes first.
+    /// </summary>
+    private static readonly HashSet<string> s_oneBuildPerStart = new(StringComparer.Ordinal)
+    {
+        LegacyRowIndexName,
+        QueryStatsRestartRowIndexName,
+        ProcedureStatsRestartRowIndexName,
+    };
+
+    /// <summary>True for an index that shares the one-build-per-start budget.</summary>
+    internal static bool IsOneBuildPerStart(string indexName) => s_oneBuildPerStart.Contains(indexName);
+
     /// <summary>The index name in a <c>CREATE INDEX IF NOT EXISTS &lt;name&gt; ON ...</c> statement.</summary>
     private static string CreatedIndexName(string statement)
     {
@@ -166,6 +183,18 @@ public static class PgTableTuning
     /// Exposed so the live pin can find it by name in <c>pg_indexes</c> and in the plan.
     /// </summary>
     public const string LegacyRowIndexName = "idx_query_store_stats_server_time_null_start";
+
+    /// <summary>
+    /// The partial index over the restart rows of <c>collect.query_stats</c>:
+    /// <c>(collection_time) WHERE sample_interval_seconds = 0</c>. It serves
+    /// <see cref="IntervalRollupRestartRows.QueryStatsRestartRowsSql"/>. The statement that builds it carries the
+    /// whole account (what it holds, why it builds at start, what the build costs); the procedure_stats twin,
+    /// <see cref="ProcedureStatsRestartRowIndexName"/>, is the same shape on the other table.
+    /// </summary>
+    public const string QueryStatsRestartRowIndexName = "idx_query_stats_restart_rows_time";
+
+    /// <summary>The restart-row partial index on <c>collect.procedure_stats</c>, built and read like <see cref="QueryStatsRestartRowIndexName"/>.</summary>
+    public const string ProcedureStatsRestartRowIndexName = "idx_procedure_stats_restart_rows_time";
 
     public static IReadOnlyList<string> ForcePlanFailuresIndexColumns { get; } = new[]
     {
@@ -352,6 +381,40 @@ public static class PgTableTuning
            is a first-start build of roughly 30-70 s, inside SetupTimeoutSeconds with over 4x headroom. A build that runs
            out the clock is abandoned and retried at the next start; the hourly pass never builds it. */
         "CREATE INDEX IF NOT EXISTS " + LegacyRowIndexName + " ON collect.query_store_stats (server_id, collection_time) WHERE interval_start_time_utc IS NULL",
+        /* The restart rows of query_stats and procedure_stats (#4605). A restart row is a row in which no counter was
+           knowable (sample_interval_seconds = 0): a first sighting, an uncredited counter reset (a restart, a
+           plan-cache eviction) or a gap past the policy (CollectorDeltaCalculator). The hourly interval
+           rollups exclude them, so a read of a long window from the rollups adds the raw restart rows back
+           (IntervalRollupRestartRows). With only the (server_id, collection_time) index that arm walks every raw
+           row in the window to find a few: 109 s and 12 s on the largest production store measured.
+
+           WHAT IT HOLDS: only rows WHERE sample_interval_seconds = 0. On the largest production store measured,
+           a 23-hour window of query_stats held 34,254 of them, a small fraction of its rows, so the index costs few
+           writes and little WAL and its tree stays small.
+
+           WHY THE START PATH: the plain CREATE INDEX takes a ShareLock on the hypertable root, which is safe
+           before collectors start and not while they write. CONCURRENTLY is refused on hypertables, so the build
+           runs only here, under SetupTimeoutSeconds, and the hourly pass never builds it (as for LegacyRowIndexName).
+
+           COMPRESSED CHUNKS: CREATE INDEX on the hypertable builds one index per chunk from that chunk's own
+           heap, so each compressed chunk gets an empty 8 KB index and the compressed relations get none. Those
+           chunks are still read by the columnar scan; the index serves the uncompressed chunks.
+
+           THE BUILD'S COST: one read of every uncompressed chunk's heap. Measured on a local TimescaleDB 2.30.1 rig
+           with the real schema (4 chunks of 12 hours, warm, 2 parallel maintenance workers, median of 3):
+             query_stats:     1.5 M rows, 1,065 MB of heap (740 B per row):  CREATE INDEX 242 ms (213-322 ms);
+                              a serial count(*) of the same heap, 275 ms; with no parallel workers the build took 465 ms.
+             procedure_stats: 3.5 M rows, 1,288 MB of heap (386 B per row):  CREATE INDEX 297 ms (293-321 ms);
+                              a serial count(*) of the same heap, 355 ms; with no parallel workers the build took 630 ms.
+           So the build costs about one serial scan of the heap, and about 1.7 serial scans if the server has no
+           parallel workers free. On the largest production store measured, the read set is 12 GB of uncompressed
+           query_stats heap and 6.5 GB of procedure_stats in three chunks each, and 11.2 GB of heap was read in 56.1 s
+           serially, cold (#5021). At that rate the serial scans take about 60 s and 33 s, so the first-start builds
+           are roughly 60-100 s and 33-56 s, one statement each: at least 3x headroom inside the 300 s
+           SetupTimeoutSeconds per statement. A build that runs out of time is abandoned and retried at the next
+           start; the hourly pass never builds it. RestartRowIndexLiveTests holds the plan and the definitions. */
+        "CREATE INDEX IF NOT EXISTS " + QueryStatsRestartRowIndexName + " ON collect.query_stats (collection_time) WHERE sample_interval_seconds = 0",
+        "CREATE INDEX IF NOT EXISTS " + ProcedureStatsRestartRowIndexName + " ON collect.procedure_stats (collection_time) WHERE sample_interval_seconds = 0",
         "ALTER TABLE collect.procedure_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_store_stats SET (" + InsertTuningOptions + ")",
@@ -424,6 +487,8 @@ public static class PgTableTuning
         }
 
         var applied = 0;
+        var buildIssued = false;
+        var buildStartedAt = 0L;
         foreach (var statement in Statements)
         {
             var sql = statement;
@@ -460,6 +525,17 @@ public static class PgTableTuning
                         continue;
                     }
 
+                    var oneBuildPerStart = IsOneBuildPerStart(indexName);
+                    if (oneBuildPerStart && buildIssued)
+                    {
+                        logger?.LogInformation(
+                            "Index collect.{Index} on {Table} is missing and is built at the next start: this start already issued one index build, and a start builds at most one",
+                            indexName, CreatedIndexTable(statement));
+                        continue;
+                    }
+
+                    buildIssued |= oneBuildPerStart;
+                    buildStartedAt = Stopwatch.GetTimestamp();
                     sql = GuardedCreate(statement);
                 }
 
@@ -477,9 +553,20 @@ public static class PgTableTuning
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger?.LogWarning(
-                    "Composer performance-tuning statement failed — the store keeps working without it ({Statement}): {Message}",
-                    statement, ex.Message);
+                if (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal) && IsBuildTimeout(ex))
+                {
+                    logger?.LogWarning(
+                        "{Message}",
+                        BuildTimeoutMessage(
+                            CreatedIndexName(statement), CreatedIndexTable(statement),
+                            Stopwatch.GetElapsedTime(buildStartedAt).TotalSeconds));
+                }
+                else
+                {
+                    logger?.LogWarning(
+                        "Composer performance-tuning statement failed — the store keeps working without it ({Statement}): {Message}",
+                        statement, ex.Message);
+                }
 
                 /* #4247: a guarded DROP that hits its lock_timeout fails INSIDE its own explicit BEGIN, and
                    Npgsql's simple-query protocol stops at that first error — the trailing COMMIT text in the
@@ -501,6 +588,34 @@ public static class PgTableTuning
         applied += await ApplyHypertableInsertTuningAsync(connection, logger, cancellationToken);
         return applied;
     }
+
+    /// <summary>
+    /// True when a start-path <c>CREATE INDEX</c> failed because it ran out of its <c>CommandTimeout</c>: an
+    /// Npgsql exception with an inner <see cref="TimeoutException"/>, or a server <c>57014</c> (query_canceled).
+    /// Anything else is an ordinary statement failure.
+    /// </summary>
+    internal static bool IsBuildTimeout(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException!)
+        {
+            if (e is TimeoutException || (e is PostgresException pg && pg.SqlState == PostgresErrorCodes.QueryCanceled))
+            {
+                return true;
+            }
+
+            if (e.InnerException is null)
+            {
+                break;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The warning for a start-path index build that timed out.</summary>
+    internal static string BuildTimeoutMessage(string indexName, string table, double elapsedSeconds) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {SetupTimeoutSeconds} s) and was rolled back; it is retried at the next start, and each try pauses collection at start for up to {SetupTimeoutSeconds} s");
 
     /// <summary>Best-effort <c>ROLLBACK</c> that leaves the connection usable after a failed statement.</summary>
     private static async Task RollbackBestEffortAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)

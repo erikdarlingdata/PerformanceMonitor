@@ -38,7 +38,7 @@ public sealed class DarlingMcpAgTools
     /// one AG), the same shape as <c>get_analysis_findings</c>' <c>limit</c>. It no longer decides how many
     /// groups come back on its own: <see cref="DarlingAgReader.Build"/> fills the page most-severe-first while
     /// the SERIALIZED response stays under the shared <see cref="McpResponseBudget.DefaultBytes"/> (32 KB),
-    /// stopping before the group that would cross it (always keeping at least one group, even an oversized one).
+    /// skipping any group that would cross it (always keeping at least one group, even an oversized one, and, #5042, at least one view of each availability group first). Only this MCP path applies the budget; /api/ag passes none.
     /// A fixed count could not do that: #4471 sized 11 from a 2.7 KB/group fixture, and a real 42-group
     /// production fleet (2 replicas plus 6-14 databases per group, ~6 KB/group) measured 63,333 characters at
     /// that cap — about 2x over budget, because real groups ran more than double the fixture's assumed size.
@@ -73,7 +73,7 @@ public sealed class DarlingMcpAgTools
         "with no Availability Groups. Groups come back MOST SEVERE FIRST then by the largest " +
         "secondary_lag_seconds/queue depth in the group, so a cut never hides a problem — an uncapped fleet-wide " +
         "call measured 265,794 characters on a 43-server production fleet with several many-database AGs, well " +
-        "over an MCP client's typical per-result limit. Default: as many groups as fit ~32 KB, most-severe-first, " +
+        "over an MCP client's typical per-result limit. Default: as many views as fit ~32 KB, one view of each AG first, then most-severe-first, " +
         "tracking each group's actual width instead of a fixed count; limit is an upper bound on top of that. " +
         "groups_truncated (with groups_truncated_note) flags when the scope held more than came back — " +
         "groups_total/groups_returned say how many, and the fix is to scope by server_name or raise limit.")]

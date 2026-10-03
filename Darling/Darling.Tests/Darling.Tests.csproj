@@ -57,6 +57,8 @@
     <None Include="Fixtures\Deadlocks\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\FinOpsInventory\golden.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\FinOpsApplicationConnections\golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\FinOpsOptimization\golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\FinOpsStorageGrowth\golden.json" CopyToOutputDirectory="PreserveNewest" />
     <!-- #4534: PerformanceStudio's own .sqlplan fixtures for the warning-origin decider, copied from its
          public repo (table_variable_plan, convert_implicit_plan, udf_plan). Real captures rather than a
          synthetic plan, so the "every operator warning knows its operator" pin runs against the same

@@ -133,9 +133,9 @@ public sealed class FinOpsTabUtilizationRawPageTests
     public void TheTab_IsNoLongerTheShellStub_AndHasOneContainerPerSection()
     {
         var src = Tab();
-        foreach (var id in new[] { "verdict", "cpu", "memory", "sizes" })
+        foreach (var id in new[] { "verdict", "top", "cpu", "memory", "sizes" })
             Assert.Contains("section(\"" + id + "\"", src);
         Assert.DoesNotContain("Coming:", src);
-        Assert.Contains("Not on the web yet: the provisioning verdict, health score, cost cards, 7-day trend and the Top Databases by Total CPU and Top Databases by Avg CPU / Execution grids. The desktop viewer shows them.", src);
+        Assert.DoesNotContain("Not on the web yet", src);
     }
 }

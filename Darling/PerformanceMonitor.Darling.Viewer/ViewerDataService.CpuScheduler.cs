@@ -255,3 +255,36 @@ public sealed partial class ViewerDataService
             OfflineCpuWarning: !reader.IsDBNull(26) && reader.GetBoolean(26));
     }
 }
+
+/// <summary>
+/// One row of the CPU Scheduler latest-snapshot grid (#4966): the shared metric row plus when the snapshot it reads was collected.
+/// The shared <see cref="CpuSchedulerMetricRow"/> leaves the time out on purpose (each app keeps its own time handling), so the
+/// viewer adds it here: every row of one snapshot carries that snapshot's naive-UTC <see cref="CollectionTime"/>, worded in the
+/// display zone to the second as <see cref="CollectionTimeLocal"/>; the column sorts by <see cref="CollectionTime"/>.
+/// </summary>
+public sealed class CpuSchedulerGridRow
+{
+    public string Metric { get; init; } = "";
+    public string Value { get; init; } = "";
+    public bool IsWarning { get; init; }
+    public DateTime CollectionTime { get; init; }
+
+    public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
+
+    /// <summary>The grid's rows for the snapshot; no rows (and so no time) for a window that holds no snapshot.</summary>
+    public static List<CpuSchedulerGridRow> Build(CpuSchedulerSnapshot? snapshot)
+    {
+        var rows = new List<CpuSchedulerGridRow>();
+        if (snapshot is null)
+        {
+            return rows;
+        }
+
+        foreach (var metric in CpuSchedulerMetrics.BuildMetrics(snapshot))
+        {
+            rows.Add(new CpuSchedulerGridRow { Metric = metric.Metric, Value = metric.Value, IsWarning = metric.IsWarning, CollectionTime = snapshot.CollectionTime });
+        }
+
+        return rows;
+    }
+}

@@ -445,8 +445,7 @@ public sealed class ServerPropertyRow
     private int? _socketCount;
     private int? _coresPerSocket;
     private string? _hardwareUnavailableReason;
-    private bool HostHardware => ServerHardwareScope.HardwareIsTheHosts(EngineEdition);
-
+    
     /// <summary>Builds the grid row from the Storage read; the display conversion (the row's own server clock) happens here.</summary>
     public static ServerPropertyRow From(ServerInventoryDto dto, ServerClock clock) => new()
     {
@@ -478,9 +477,9 @@ public sealed class ServerPropertyRow
     };
 
     public int? CpuCount { get => _cpuCount; set => _cpuCount = value ?? 0; }
-    public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }
-    public int? SocketCount { get => HostHardware ? null : _socketCount; set => _socketCount = value; }
-    public int? CoresPerSocket { get => HostHardware ? null : _coresPerSocket; set => _coresPerSocket = value; }
+    public long? PhysicalMemoryMb { get => FinOpsInventoryFigures.PhysicalMemoryMb(EngineEdition, _physicalMemoryMb); set => _physicalMemoryMb = value ?? 0L; }
+    public int? SocketCount { get => FinOpsInventoryFigures.SocketCount(EngineEdition, _socketCount); set => _socketCount = value; }
+    public int? CoresPerSocket { get => FinOpsInventoryFigures.CoresPerSocket(EngineEdition, _coresPerSocket); set => _coresPerSocket = value; }
     /// <summary>The server's LOCAL start clock (sys.dm_os_sys_info) — stored verbatim, shown as-is like Lite.</summary>
     public DateTime? SqlServerStartTime { get; set; }
     /// <summary>
@@ -572,7 +571,7 @@ public sealed class ServerPropertyRow
     public string? HardwareUnavailableReason
     {
         /* An Azure SQL Database's blank hardware cells say why, in the column that already carries a read's own reason. */
-        get => _hardwareUnavailableReason ?? (HostHardware ? ServerHardwareScope.InventoryHardwareNote : null);
+        get => FinOpsInventoryFigures.HardwareNote(EngineEdition, _hardwareUnavailableReason);
         set => _hardwareUnavailableReason = value;
     }
 
@@ -595,17 +594,7 @@ public sealed class ServerPropertyRow
     public string ProvisioningDisplay => ProvisioningStatus == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : ProvisioningStatus?.Replace("_", " ") ?? "";
 
     /// <summary>License-limit warning for Standard edition (CPU/RAM caps). Same math as Lite.</summary>
-    public string? LicenseWarning
-    {
-        get
-        {
-            if (!Edition.Contains("Standard", StringComparison.OrdinalIgnoreCase)) return null;
-            var warnings = new List<string>();
-            if (CpuCount > 24) warnings.Add($"CPU: {CpuCount} cores (Standard limited to 24)");
-            if (PhysicalMemoryMb > 131072) warnings.Add($"RAM: {PhysicalMemoryMb / 1024}GB (Standard limited to 128GB)");
-            return warnings.Count > 0 ? string.Join("; ", warnings) : null;
-        }
-    }
+    public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, EngineEdition, _cpuCount, _physicalMemoryMb);
 
     public int HealthScore { get; set; }
     public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
@@ -632,6 +621,20 @@ public sealed class StorageGrowthRow
     /// the size is data space only. See <see cref="HyperscaleLogSize"/>.</summary>
     public bool HasLogServiceFile { get; set; }
 
+    public static StorageGrowthRow From(PerformanceMonitor.Darling.Storage.FinOps.StorageGrowthDto d) => new()
+    {
+        DatabaseName = d.DatabaseName,
+        CurrentSizeMb = d.CurrentSizeMb,
+        Size7dAgoMb = d.Size7dAgoMb,
+        Size30dAgoMb = d.Size30dAgoMb,
+        Growth7dMb = d.Growth7dMb,
+        Growth30dMb = d.Growth30dMb,
+        DailyGrowthRateMb = d.DailyGrowthRateMb,
+        GrowthPct30d = d.GrowthPct30d,
+        HasSiblingRow = d.HasSiblingRow,
+        HasLogServiceFile = d.HasLogServiceFile
+    };
+
     /// <summary>What the grid's Note column says: the log is not in this size, and why. Null when it is.</summary>
     public string? Note => AzureSiblingDatabaseSize.StorageGrowthNote(HasLogServiceFile, HasSiblingRow);
 }
@@ -647,6 +650,15 @@ public sealed class IdleDatabaseRow
     public decimal TotalSizeMb { get; set; }
     public int FileCount { get; set; }
     public DateTime? LastExecutionTime { get; set; }
+
+    /// <summary>Maps the storage read's plain result onto the display row.</summary>
+    public static IdleDatabaseRow From(IdleDatabase d) => new()
+    {
+        DatabaseName = d.DatabaseName,
+        TotalSizeMb = d.TotalSizeMb,
+        FileCount = d.FileCount,
+        LastExecutionTime = d.LastExecutionTime
+    };
 }
 
 /// <summary>tempdb pressure metric current vs 24h peak (Optimization sub-tab).</summary>
@@ -656,6 +668,15 @@ public sealed class TempdbSummaryRow
     public decimal CurrentMb { get; set; }
     public decimal Peak24hMb { get; set; }
     public string Warning { get; set; } = "";
+
+    /// <summary>Maps the storage read's plain result onto the display row.</summary>
+    public static TempdbSummaryRow From(TempdbSummaryMetric d) => new()
+    {
+        Metric = d.Metric,
+        CurrentMb = d.CurrentMb,
+        Peak24hMb = d.Peak24hMb,
+        Warning = d.Warning
+    };
 }
 
 /// <summary>Wait time grouped by cost category (Optimization sub-tab).</summary>
@@ -670,6 +691,17 @@ public sealed class WaitCategorySummaryRow
 
     /// <summary>FinOps cost — proportional share of the window's budget by wait-time fraction (set by the loader).</summary>
     public decimal MonthlyCostShare { get; set; }
+
+    /// <summary>Maps the storage read's plain result onto the display row.</summary>
+    public static WaitCategorySummaryRow From(WaitCategorySummary d) => new()
+    {
+        Category = d.Category,
+        TotalWaitTimeMs = d.TotalWaitTimeMs,
+        WaitingTasks = d.WaitingTasks,
+        PctOfTotal = d.PctOfTotal,
+        TopWaitType = d.TopWaitType,
+        TopWaitTimeMs = d.TopWaitTimeMs
+    };
 }
 
 /// <summary>Top-20 query by total CPU (Optimization sub-tab).</summary>
@@ -690,6 +722,20 @@ public sealed class ExpensiveQueryRow
     /// <summary>The stored statement-level plan (query_stats.query_plan_xml, captured by Darling); opens in the Plan Viewer.</summary>
     public string? QueryPlanXml { get; set; }
     public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlanXml);
+
+    /// <summary>Maps the storage read's plain result onto the display row.</summary>
+    public static ExpensiveQueryRow From(ExpensiveQuery d) => new()
+    {
+        DatabaseName = d.DatabaseName,
+        TotalCpuMs = d.TotalCpuMs,
+        AvgCpuMsPerExec = d.AvgCpuMsPerExec,
+        TotalReads = d.TotalReads,
+        AvgReadsPerExec = d.AvgReadsPerExec,
+        Executions = d.Executions,
+        QueryPreview = d.QueryPreview,
+        FullQueryText = d.FullQueryText,
+        QueryPlanXml = d.QueryPlanXml
+    };
 }
 
 /// <summary>High-impact query row (High Impact sub-tab) — 80/20 impact score across six dimensions.</summary>
@@ -767,6 +813,20 @@ public sealed class ObjectSizeGrowthRow
     public decimal? Growth30dMb { get; set; }
     public decimal? DailyGrowthRateMb { get; set; }
     public decimal? GrowthPct30d { get; set; }
+
+    public static ObjectSizeGrowthRow From(PerformanceMonitor.Darling.Storage.FinOps.ObjectSizeGrowthDto d, string databaseName) => new()
+    {
+        DatabaseName = databaseName,
+        SchemaName = d.SchemaName,
+        TableName = d.TableName,
+        CurrentReservedMb = d.CurrentReservedMb,
+        CurrentUsedMb = d.CurrentUsedMb,
+        TotalRows = d.TotalRows,
+        IndexCount = d.IndexCount,
+        Growth30dMb = d.Growth30dMb,
+        DailyGrowthRateMb = d.DailyGrowthRateMb,
+        GrowthPct30d = d.GrowthPct30d
+    };
 }
 
 /// <summary>Per-index usage with unused/write-only classification (Storage Growth index drill).
@@ -790,6 +850,25 @@ public sealed class IndexUsageRow
     public long UserUpdates { get; set; }
     public DateTime? LastUserAccess { get; set; }
     public string Classification { get; set; } = "";
+
+    public static IndexUsageRow From(PerformanceMonitor.Darling.Storage.FinOps.IndexUsageDto d) => new()
+    {
+        DatabaseName = d.DatabaseName,
+        SchemaName = d.SchemaName,
+        TableName = d.TableName,
+        IndexName = d.IndexName,
+        IndexTypeDesc = d.IndexTypeDesc,
+        IndexId = d.IndexId,
+        ReservedMb = d.ReservedMb,
+        TotalRows = d.TotalRows,
+        UserSeeks = d.UserSeeks,
+        UserScans = d.UserScans,
+        UserLookups = d.UserLookups,
+        TotalReads = d.TotalReads,
+        UserUpdates = d.UserUpdates,
+        LastUserAccess = d.LastUserAccess,
+        Classification = d.Classification
+    };
 }
 
 /// <summary>Per-index locking/latch contention (Locking &amp; Contention sub-tab).</summary>
