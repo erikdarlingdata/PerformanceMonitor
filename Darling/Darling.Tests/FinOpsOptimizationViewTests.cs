@@ -253,7 +253,7 @@ public sealed class FinOpsOptimizationViewLiveTests
             grantees, waiters, 4L, 2L, timeoutDelta, forcedDelta);
 
     private static async Task<JsonDocument> ToolAsync(NpgsqlDataSource ds, string server, int hours, int limit, CancellationToken ct) =>
-        JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", server, hours, limit, ct));
+        JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", server, hours, limit, cancellationToken: ct));
 
     private static JsonElement Section(JsonDocument doc, string name) => doc.RootElement.GetProperty(name);
 
@@ -436,7 +436,7 @@ public sealed class FinOpsOptimizationViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", EmptyServerName, 24, 10, ct);
+        var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", EmptyServerName, 24, 10, cancellationToken: ct);
         Assert.Equal(
             McpHelpers.Status("empty", "No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show."),
             body);
@@ -449,7 +449,7 @@ public sealed class FinOpsOptimizationViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", PostgresServerName, 24, 10, ct);
+        var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", PostgresServerName, 24, 10, cancellationToken: ct);
         using var doc = JsonDocument.Parse(body);
         Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
         Assert.False(doc.RootElement.TryGetProperty("idle_databases", out _));
@@ -524,7 +524,7 @@ public sealed class FinOpsOptimizationViewLiveTests
         using var reader = new StreamReader(context.Response.Body);
         var body = await reader.ReadToEndAsync(ct);
         /* The tool is read after the route, so a clock tick between the two cannot move a window start past the route's. */
-        var tool = await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", ServerName, 24, 10, ct);
+        var tool = await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", ServerName, 24, 10, cancellationToken: ct);
 
         Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
         using var expected = JsonDocument.Parse(tool);
