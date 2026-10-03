@@ -285,7 +285,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        using var readFanOut = ViewerReadFanOut.Of(6);
+        /* Six reads, and the three data-start probes (#4966) started beside them: priced together. */
+        using var readFanOut = ViewerReadFanOut.Of(9);
 
         var countsTask = _dataService.GetPgBlockingCaptureCountsAsync(_server.ServerId, startUtc, endUtc);
         var chainsTask = _dataService.GetPgBlockingChainsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
@@ -306,6 +307,12 @@ public partial class ViewerServerTab
         var evictionsTask = statementsGatedOff
             ? Task.FromResult(new DarlingPgStatementReader.PgEvictionInfo(false, null, null))
             : _dataService.GetPgStatementEvictionsAsync(_server.ServerId, startUtc, endUtc);
+
+        /* #4966: where each grid's table starts. Started beside the reads and kept OUT of the WhenAll below, so a probe
+           that throws costs only its banner. The blocking chains and cycles read one table and share one banner. */
+        var blockingStartTask = StartPgDataStartProbe("pg_blocking", startUtc, endUtc);
+        var statementsStartTask = statementsGatedOff ? Task.FromResult<DateTime?>(null) : StartPgDataStartProbe("pg_statement_stats", startUtc, endUtc);
+        var databasesStartTask = StartPgDataStartProbe("pg_database_stats", startUtc, endUtc);
 
         await Task.WhenAll(countsTask, chainsTask, cyclesTask, statementsTask, databasesTask, evictionsTask);
 
@@ -347,6 +354,10 @@ public partial class ViewerServerTab
         PgDatabasesNote.Text = PanelNote("pg_database_stats", databasesTask.Result.Count,
             "No database counter moved in this window.");
 
+        UpdateTruncationBanner(PgBlockingDataStartBanner, await DataStartOrNullAsync(blockingStartTask, "PostgreSQL Blocking"), startUtc);
+        UpdateTruncationBanner(PgStatementsDataStartBanner, await DataStartOrNullAsync(statementsStartTask, "PostgreSQL Top Queries"), startUtc);
+        UpdateTruncationBanner(PgDatabasesDataStartBanner, await DataStartOrNullAsync(databasesStartTask, "PostgreSQL Database Stats"), startUtc);
+
         await LoadPgLockStatsAsync(startUtc, endUtc);
         await LoadPgKernelStatsAsync(startUtc, endUtc);
         await LoadPgPlanCaptureAsync(startUtc, endUtc);
@@ -366,12 +377,18 @@ public partial class ViewerServerTab
         {
             PgLogEventsGrid.ItemsSource = null;
             PgLogEventsNote.Text = PanelNote("pg_log_events", 0, string.Empty);
+            PgLogEventsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_log_events", startUtc, endUtc);
         var page = await _dataService.GetPgLogEventsAsync(_server.ServerId, startUtc, endUtc);
+        readFanOut.Release();
 
         PgLogEventsGrid.ItemsSource = page.Rows;
+        await ShowEventDataStartAsync(PgLogEventsDataStartBanner, dataStartTask, "PostgreSQL Log Events", startUtc,
+            page.Rows.Select(r => (DateTime?)r.OccurredAtUtc), ViewerDataService.PgLogEventsRowCap);
 
         PgLogEventsNote.Text = PanelNote("pg_log_events", page.Rows.Count,
             "No classified log event was stored in this window. That is the healthy answer for the error "
@@ -407,14 +424,19 @@ public partial class ViewerServerTab
         {
             PgLockStatsGrid.ItemsSource = null;
             PgLockStatsNote.Text = PanelNote("pg_lock_stats", 0, string.Empty);
+            PgLockStatsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_lock_stats", startUtc, endUtc);
         var rows = await _dataService.GetPgLockStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        readFanOut.Release();
 
         /* The display row, not the reader's: its Last Seen follows the display mode and sorts by its UTC instant
            (#4766). The counts below read the reader rows, which are unchanged. */
         PgLockStatsGrid.ItemsSource = PgDisplay.LockStatRows(rows);
+        UpdateTruncationBanner(PgLockStatsDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Lock Stats"), startUtc);
 
         var queued = rows.Where(r => !r.Granted).ToList();
         var totalCaptures = rows.Count == 0 ? 0 : rows[0].TotalCaptures;
@@ -506,12 +528,17 @@ public partial class ViewerServerTab
         {
             PgKernelStatsGrid.ItemsSource = null;
             PgKernelStatsNote.Text = PanelNote("pg_kernel_stats", 0, string.Empty);
+            PgKernelStatsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_kernel_stats", startUtc, endUtc);
         var rows = await _dataService.GetPgKernelStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        readFanOut.Release();
 
         PgKernelStatsGrid.ItemsSource = rows;
+        UpdateTruncationBanner(PgKernelStatsDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Kernel Stats"), startUtc);
 
         var reset = rows.Any(r => r.CounterReset);
 
@@ -580,12 +607,17 @@ public partial class ViewerServerTab
         {
             PgCapturedPlansGrid.ItemsSource = null;
             PgCapturedPlansNote.Text = PanelNote("pg_plan_capture", 0, string.Empty);
+            PgCapturedPlansDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_plan_capture", startUtc, endUtc);
         var rows = await _dataService.GetPgPlanCaptureAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        readFanOut.Release();
 
         PgCapturedPlansGrid.ItemsSource = rows;
+        UpdateTruncationBanner(PgCapturedPlansDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Captured Plans"), startUtc);
 
         var orphans = rows.Count(r => r.QueryId == 0);
 
@@ -628,12 +660,18 @@ public partial class ViewerServerTab
         {
             PgDeadlocksGrid.ItemsSource = null;
             PgDeadlocksNote.Text = PanelNote("pg_deadlocks", 0, string.Empty);
+            PgDeadlocksDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_deadlocks", startUtc, endUtc);
         var rows = await _dataService.GetPgDeadlocksAsync(_server.ServerId, startUtc, endUtc);
+        readFanOut.Release();
 
         PgDeadlocksGrid.ItemsSource = rows;
+        await ShowEventDataStartAsync(PgDeadlocksDataStartBanner, dataStartTask, "PostgreSQL Deadlocks", startUtc,
+            rows.Select(r => (DateTime?)r.OccurredAtUtc), ViewerDataService.PgDeadlocksRowCap);
 
         PgDeadlocksNote.Text = PanelNote("pg_deadlocks", rows.Count,
             "No deadlock was reported in this window. That is the healthy answer, and it is also what an "
