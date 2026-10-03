@@ -9,6 +9,7 @@
 using System;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -30,6 +31,15 @@ public sealed class WebDataStartNoteTests
     private const string Rows = "{\"server\":\"sql01\",\"hours_back\":168,\"waiting_tasks\":[{\"wait_type\":\"LCK_M_X\"}]}";
 
     private const string FloorNote = "partial window: this panel's data starts at 2026-01-02 00:00 UTC";
+
+    /// <summary>What <c>get_waiting_tasks</c> answers when the window held more than its row cap: the newest rows,
+    /// the page's 30, with the two fields that say the cap cut the list and where the shown rows end.</summary>
+    private const string CappedTasks =
+        "{\"server\":\"sql01\",\"hours_back\":48,\"tasks_returned\":30,\"truncated\":true,"
+        + "\"oldest_returned_collection_time\":\"2026-01-02T12:30:00.0000000\",\"newest_returned_collection_time\":\"2026-01-03T00:00:00.0000000\","
+        + "\"order\":\"collection_time_desc\",\"tasks\":[{\"wait_type\":\"LCK_M_X\"}]}";
+
+    private const string WindowEnd = "2026-01-03T00:00:00Z";
 
     private static string[] Strings(JsonElement node, string name) =>
         node.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
@@ -81,6 +91,85 @@ public sealed class WebDataStartNoteTests
         Assert.Same("[1,2]", await Run("get_waiting_tasks", "sql01", 168, "[1,2]"));
         Assert.Same("not json", await Run("get_waiting_tasks", "sql01", 168, "not json"));
         Assert.Same(Own, await Run("get_waiting_tasks", "sql01", 168, Own));
+    }
+
+    /// <summary>
+    /// A list that reads newest first under a row cap and hit it does not reach back to the window's start, whatever
+    /// the store covers: the grid ends at the oldest row the read returned, so the note names that row. The answer
+    /// already says where that is (<c>oldest_returned_collection_time</c>), so the note needs no probe: the null data
+    /// source here would hand the answer back untouched if the note asked the store.
+    /// </summary>
+    [Fact]
+    public async Task ACappedWaitingTasksRead_NamesTheOldestRowItReturned_WithoutAskingTheStore()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var answered = await WebDataStartNote.AddAsync(null!, "get_waiting_tasks", "sql01", 48, WindowEnd, CappedTasks, null, ct);
+
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        Assert.True(answer["window_truncated"]?.GetValue<bool>());
+        Assert.Equal("2026-01-02T12:30:00.0000000", answer["effective_start"]?.GetValue<string>());
+        Assert.Equal(
+            "partial window: this grid shows only the newest rows, back to 2026-01-02 12:30 UTC, because it stops at its row limit. "
+            + "The window started at 2026-01-01 00:00 UTC. The grid covers 2026-01-02 12:30 to 2026-01-03 00:00 UTC.",
+            answer["truncation_note"]?.GetValue<string>());
+
+        /* The tool's own fields and rows come through as they were. */
+        Assert.True(answer["truncated"]?.GetValue<bool>());
+        Assert.Equal(30, answer["tasks_returned"]?.GetValue<int>());
+        Assert.Single(answer["tasks"]!.AsArray());
+    }
+
+    /// <summary>
+    /// The capped rule is for the one list ordered by time. A read that did not hit its cap, a capped answer with no
+    /// usable oldest row, and every other listed read, whose cap keeps the top rows of an aggregate over the whole
+    /// window (or of a list ranked by something other than time, <c>get_pg_predicate_stats</c>), stay on the
+    /// coverage rule: the answer comes back through the probe, and the null data source makes the probe fail, so it
+    /// is returned as it was. A capped read the old rule rewrote would not be the same instance.
+    /// </summary>
+    [Fact]
+    public async Task OnlyTheNewestFirstListIsCutByItsCap_EveryOtherAnswerKeepsTheCoverageRule()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        async Task<string> Run(string tool, string payload) =>
+            await WebDataStartNote.AddAsync(null!, tool, "sql01", 48, WindowEnd, payload, null, ct);
+
+        // The list's cap was not reached.
+        var uncapped = CappedTasks.Replace("\"truncated\":true", "\"truncated\":false", StringComparison.Ordinal);
+        Assert.Same(uncapped, await Run("get_waiting_tasks", uncapped));
+
+        // Capped, but the answer does not say where its rows end (or says it unreadably): nothing to name.
+        const string NoOldest = "{\"server\":\"sql01\",\"truncated\":true,\"tasks\":[{\"wait_type\":\"LCK_M_X\"}]}";
+        const string BadOldest = "{\"server\":\"sql01\",\"truncated\":true,\"oldest_returned_collection_time\":\"not a time\",\"tasks\":[{\"wait_type\":\"LCK_M_X\"}]}";
+        Assert.Same(NoOldest, await Run("get_waiting_tasks", NoOldest));
+        Assert.Same(BadOldest, await Run("get_waiting_tasks", BadOldest));
+
+        // Every other listed read, with the same cap fields on its answer.
+        foreach (var read in WebDataStartNote.TableByRead.Keys.Where(k => k != "get_waiting_tasks"))
+        {
+            Assert.Same(CappedTasks, await Run(read, CappedTasks));
+        }
+    }
+
+    /// <summary>The capped rule's premises, in the source: the list is the one read ordered by time, newest first, and
+    /// the tool answers the two fields the rule reads (the live tests run the real tool).</summary>
+    [Fact]
+    public void TheCappedRule_IsOneReadOrderedByTime_WhoseToolAnswersTheTwoFieldsItReads()
+    {
+        Assert.Equal(["get_waiting_tasks"], WebDataStartNote.NewestFirstCappedReads.ToArray());
+        foreach (var read in WebDataStartNote.NewestFirstCappedReads)
+        {
+            Assert.Contains(read, WebDataStartNote.TableByRead.Keys);
+        }
+
+        Assert.Contains("ORDER BY collection_time DESC", PerformanceMonitor.Darling.Service.Mcp.DarlingSessionReader.WaitingTasksSql, StringComparison.Ordinal);
+        var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpSessionTools.cs");
+        var tool = tools.IndexOf("public static async Task<string> GetWaitingTasks(", StringComparison.Ordinal);
+        Assert.True(tool > 0);
+        var body = tools[tool..];
+        Assert.Contains("truncated,", body, StringComparison.Ordinal);
+        Assert.Contains("oldest_returned_collection_time = page.Min(r => r.CollectionTime).ToString(\"o\")", body, StringComparison.Ordinal);
     }
 
     [Fact]

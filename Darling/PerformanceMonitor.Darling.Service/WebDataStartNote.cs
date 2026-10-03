@@ -38,10 +38,18 @@ namespace PerformanceMonitor.Darling.Service;
 /// events, the default trace) filters on the event's own time, which can reach before the first collection, so a
 /// coverage start could name a time later than the history it shows. Those are not in this list.</para>
 ///
+/// <para><b>A capped list.</b> One listed read is a LIST over time, newest first, under a row cap:
+/// <c>get_waiting_tasks</c> (<see cref="NewestFirstCappedReads"/>). When it hits its cap the grid ends at the oldest
+/// row the read returned, whatever the store covers, so the note names that row (<c>effective_start</c> is
+/// <c>oldest_returned_collection_time</c>, and the text says the grid shows the newest rows back to it). The answer
+/// already carries the time, so this asks the store nothing. The other eight reads keep the coverage rule: seven
+/// are aggregates over the whole window, whose cap keeps the top rows and hides no time range, and
+/// <c>get_pg_predicate_stats</c> is a list ranked by something other than time.</para>
+///
 /// <para><b>When it says nothing.</b> The window is covered (whether or not it holds rows: a quiet start is not a
-/// cut), nothing in scope holds a row or logged a run in it, the answer is an envelope (empty, unavailable, invalid)
-/// or an error rather than rows, the read cannot be resolved, or the probe fails. A failed probe costs the grid its
-/// notice, never its rows.</para>
+/// cut) and the read did not hit a row cap that cuts by time, nothing in scope holds a row or logged a run in it, the
+/// answer is an envelope (empty, unavailable, invalid) or an error rather than rows, the read cannot be resolved, or
+/// the probe fails. A failed probe costs the grid its notice, never its rows.</para>
 /// </summary>
 internal static class WebDataStartNote
 {
@@ -64,8 +72,22 @@ internal static class WebDataStartNote
     };
 
     /// <summary>
+    /// The listed reads that LIST rows newest first under a row cap, so a capped answer ends at a time inside the
+    /// window (<c>get_waiting_tasks</c>: <c>ORDER BY collection_time DESC</c>, the cap read as <c>truncated</c> and
+    /// the end of the shown rows as <c>oldest_returned_collection_time</c>). Every other listed read is an
+    /// aggregate over the whole window or a list ranked by something other than time, whose cap hides no time range;
+    /// a <c>truncated</c> flag on those answers is about rows kept by rank and does not name a time. A test holds
+    /// the list to one read, each name one <see cref="TableByRead"/> lists.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> NewestFirstCappedReads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_waiting_tasks",
+    };
+
+    /// <summary>
     /// <paramref name="result"/> with the notice fields added when <paramref name="tool"/> is a listed grid read whose
-    /// window starts before its table's coverage; otherwise <paramref name="result"/> itself, untouched.
+    /// window starts before its table's coverage, or is a newest-first list (<see cref="NewestFirstCappedReads"/>) that
+    /// hit its row cap; otherwise <paramref name="result"/> itself, untouched.
     /// <paramref name="hoursBack"/> is the window the page asked for (null or below 1: none was asked), and
     /// <paramref name="asOf"/> the request's window anchor.
     /// </summary>
@@ -102,6 +124,23 @@ internal static class WebDataStartNote
             return result;
         }
 
+        /* A newest-first list that hit its row cap (#4966): the grid ends at the oldest row the read returned, which
+           the store's coverage cannot move, so the note names that row. The answer carries it, so no probe: a store
+           that covers the whole range still gets the note, and a store that does not names the same row, never an
+           earlier one the grid does not show. */
+        if (NewestFirstCappedReads.Contains(tool) && TryReadCappedStart(payload, out var oldestShown, out var oldestText))
+        {
+            if (McpHelpers.ValidateWindow(hours, asOf, out var cappedEnd) is not null)
+            {
+                return result;
+            }
+
+            payload["window_truncated"] = true;
+            payload["effective_start"] = oldestText;
+            payload["truncation_note"] = ComposeStoreAvailability.BuildCappedListNotice(oldestShown, cappedEnd.AddHours(-hours), cappedEnd);
+            return payload.ToJsonString();
+        }
+
         try
         {
             var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server, cancellationToken);
@@ -130,5 +169,31 @@ internal static class WebDataStartNote
             logger?.LogDebug(ex, "The data-start probe for {Tool} failed; the grid is answered without a partial-window notice.", tool);
             return result;
         }
+    }
+
+    /// <summary>
+    /// Whether a newest-first list's answer says its row cap cut it (<c>truncated: true</c>), and the time of the
+    /// oldest row it returned (<c>oldest_returned_collection_time</c>, as the tool wrote it, and read as UTC: the
+    /// store's times carry no zone). False for an answer that did not hit its cap, or that names no readable time:
+    /// those take the coverage rule.
+    /// </summary>
+    private static bool TryReadCappedStart(JsonObject payload, out DateTime oldestShownUtc, out string oldestText)
+    {
+        oldestShownUtc = default;
+        oldestText = string.Empty;
+
+        if (payload["truncated"] is not JsonValue cap
+            || !cap.TryGetValue<bool>(out var hitCap)
+            || !hitCap
+            || payload["oldest_returned_collection_time"] is not JsonValue oldest
+            || !oldest.TryGetValue<string>(out var text)
+            || !DateTime.TryParse(
+                text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out oldestShownUtc))
+        {
+            return false;
+        }
+
+        oldestText = text;
+        return true;
     }
 }

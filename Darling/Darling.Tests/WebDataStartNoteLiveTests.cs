@@ -7,11 +7,14 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -24,6 +27,10 @@ namespace Darling.Tests;
 /// with where its data starts; a server collected for a month whose first waiting task comes late in the window
 /// answers with nothing, because the store covered the whole window. The answer is the tool's own payload, so the
 /// notice is added to rows the tool really returned.
+///
+/// <para>The grid lists the newest 30 rows, so a window with more than that is cut by the row cap, not by the store,
+/// and the note names the oldest row the read returned, covered range or not. The two coverage cases therefore seed
+/// fewer than 30 rows (the read is not capped); the capped cases seed more.</para>
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to CREATE
    and DROP its own database through ScratchPostgres, then works entirely inside it. */
@@ -33,6 +40,18 @@ public sealed class WebDataStartNoteLiveTests
     private const string NewServerName = "web-data-start-added-two-days-ago";
     private const int QuietServerId = -496602;
     private const string QuietServerName = "web-data-start-quiet-start";
+    private const int CappedServerId = -496603;
+    private const string CappedServerName = "web-data-start-capped-list";
+    private const int CoveredServerId = -496604;
+    private const string CoveredServerName = "web-data-start-capped-covered";
+    private const int AggregateServerId = -496605;
+    private const string AggregateServerName = "web-data-start-capped-aggregate";
+
+    /// <summary>The page's row cap for the grid: the newest 30 rows.</summary>
+    private const int PageCap = 30;
+
+    private static DateTime ParseUtc(JsonNode? node) =>
+        DateTime.Parse(node!.GetValue<string>(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
 
     [Fact]
     public async Task AServerAddedTwoDaysAgo_GetsANoteThatNamesItsFirstCollection_AgainstDevPostgres()
@@ -40,10 +59,12 @@ public sealed class WebDataStartNoteLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var store = await Store.CreateAsync(ct);
         var added = store.End.AddDays(-2);
-        await store.SeedAsync(NewServerId, NewServerName, added, firstRow: store.End.AddDays(-1), ct);
+        /* Hourly rows from a day back: 25, under the cap, so the store, not the cap, is what cuts the window. */
+        await store.SeedAsync(NewServerId, NewServerName, added, firstRow: store.End.AddDays(-1), stepMinutes: 60, ct);
 
         var answer = await store.AskAsync(NewServerName, hours: 168, ct);
 
+        Assert.False(answer["truncated"]?.GetValue<bool>());
         Assert.True(answer["window_truncated"]?.GetValue<bool>());
         var effectiveStart = DateTime.Parse(answer["effective_start"]!.GetValue<string>(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
         Assert.True(Math.Abs((effectiveStart - added).TotalSeconds) < 1, "the data starts at the server's first collection, not its first row");
@@ -58,15 +79,145 @@ public sealed class WebDataStartNoteLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         await using var store = await Store.CreateAsync(ct);
-        await store.SeedAsync(QuietServerId, QuietServerName, store.End.AddDays(-30), firstRow: store.End.AddDays(-6), ct);
+        /* One row every six hours from six days back: 25, under the cap. */
+        await store.SeedAsync(QuietServerId, QuietServerName, store.End.AddDays(-30), firstRow: store.End.AddDays(-6), stepMinutes: 360, ct);
 
         var week = await store.AskAsync(QuietServerName, hours: 168, ct);
         var threeDays = await store.AskAsync(QuietServerName, hours: 72, ct);
 
+        Assert.False(week["truncated"]?.GetValue<bool>());
         Assert.Null(week["window_truncated"]);
         Assert.Null(week["truncation_note"]);
         Assert.NotNull(week["tasks"]);
         Assert.Null(threeDays["window_truncated"]);
+    }
+
+    /// <summary>A read that hit its cap lists the newest rows only, so the note names the oldest row it returned, not
+    /// where the table starts (the server was added two days ago, and the rows run a day back at 30 minutes: 49 rows,
+    /// the newest 30 reach 14.5 hours).</summary>
+    [Fact]
+    public async Task ACappedRead_NamesTheOldestRowItReturned_NotWhereTheTableStarts_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+        await store.SeedAsync(CappedServerId, CappedServerName, added, firstRow: store.End.AddDays(-1), stepMinutes: 30, ct);
+
+        var answer = await store.AskAsync(CappedServerName, hours: 168, ct);
+
+        var oldestShown = store.End.AddMinutes(-(PageCap - 1) * 30);
+        Assert.True(answer["truncated"]?.GetValue<bool>());
+        Assert.True(answer["window_truncated"]?.GetValue<bool>());
+        Assert.True(Math.Abs((ParseUtc(answer["effective_start"]) - oldestShown).TotalSeconds) < 1, "the grid starts at the oldest row the read returned");
+        var note = answer["truncation_note"]!.GetValue<string>();
+        Assert.StartsWith("partial window: this grid shows only the newest rows, back to " + oldestShown.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC", note, StringComparison.Ordinal);
+        Assert.DoesNotContain(added.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture), note, StringComparison.Ordinal);
+        Assert.Equal(PageCap, answer["tasks"]!.AsArray().Count);
+    }
+
+    /// <summary>The same cap over a range the store covered: the server has been collected for a month and its rows
+    /// run six days back (289 at 30 minutes). Nothing is missing from the store, and the grid still stops 14.5
+    /// hours back, so the note is there.</summary>
+    [Fact]
+    public async Task ACappedRead_OverARangeTheStoreCovered_StillNamesTheOldestRowItReturned_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        await store.SeedAsync(CoveredServerId, CoveredServerName, store.End.AddDays(-30), firstRow: store.End.AddDays(-6), stepMinutes: 30, ct);
+
+        var week = await store.AskAsync(CoveredServerName, hours: 168, ct);
+
+        var oldestShown = store.End.AddMinutes(-(PageCap - 1) * 30);
+        Assert.True(week["truncated"]?.GetValue<bool>());
+        Assert.True(week["window_truncated"]?.GetValue<bool>());
+        Assert.True(Math.Abs((ParseUtc(week["effective_start"]) - oldestShown).TotalSeconds) < 1);
+        Assert.StartsWith("partial window: this grid shows only the newest rows, back to " + oldestShown.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC", week["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
+    /// <summary>A capped aggregate read keeps today's rule. The latch read keeps its top classes of the whole window,
+    /// so its cap hides no time range: its answer carries the same cap fields, and the note still names where the
+    /// table starts (the server's first collection), not the field's time.</summary>
+    [Fact]
+    public async Task ACappedAggregateRead_KeepsTheCoverageRule_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+        await store.SeedAsync(AggregateServerId, AggregateServerName, added, firstRow: store.End.AddDays(-1), stepMinutes: 60, ct);
+        var oldestShown = store.End.AddMinutes(-(PageCap - 1) * 30);
+        var payload = new JsonObject
+        {
+            ["server"] = AggregateServerName,
+            ["truncated"] = true,
+            ["oldest_returned_collection_time"] = oldestShown.ToString("o", CultureInfo.InvariantCulture),
+            ["latches"] = new JsonArray(new JsonObject { ["latch_class"] = "BUFFER" }),
+        };
+
+        var answered = await WebDataStartNote.AddAsync(
+            store.DataSource, "get_latch_stats", AggregateServerName, 168, null, payload.ToJsonString(), null, ct);
+
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        Assert.True(answer["window_truncated"]?.GetValue<bool>());
+        Assert.True(Math.Abs((ParseUtc(answer["effective_start"]) - added).TotalSeconds) < 1, "the table starts at the server's first collection, not at the cap fields' time");
+        Assert.StartsWith("partial window: this panel's data starts at", answer["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
+    /// <summary>What a PostgreSQL grid's answer looks like to the note: rows, with no status, error or floor of its
+    /// own. The note reads the store, not the rows, so a stand-in keeps these two tests on the table each read lists.</summary>
+    private const string StandInRows = "{\"server\":\"pg01\",\"rows\":[{\"n\":1}]}";
+
+    private static readonly string[] PostgresReads =
+        [.. WebDataStartNote.TableByRead.Keys.Where(k => k.StartsWith("get_pg_", StringComparison.Ordinal)).OrderBy(k => k, StringComparer.Ordinal)];
+
+    /// <summary>Each of the five PostgreSQL reads, over its own table, for a server added two days ago whose rows
+    /// start a day back: the data starts inside the 7-day range, so the note is there and names a start between the
+    /// server's first collection and its first row. Which of the two a table reports depends on whether the schedule
+    /// gives it a purge edge (the first collection) or not (the oldest row it holds), so the test holds the bounds the
+    /// two rules share.</summary>
+    [Fact]
+    public async Task EachPostgresRead_WhoseRowsStartInsideTheRange_GetsANoteNamingWhereItsDataStarts_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        Assert.Equal(5, PostgresReads.Length);
+
+        for (var i = 0; i < PostgresReads.Length; i++)
+        {
+            var read = PostgresReads[i];
+            var name = "web-data-start-" + read.Replace('_', '-');
+            var added = store.End.AddDays(-2);
+            var firstRow = store.End.AddDays(-1);
+            await store.SeedTableAsync(WebDataStartNote.TableByRead[read], -496610 - i, name, added, firstRow, ct);
+
+            var answered = await WebDataStartNote.AddAsync(store.DataSource, read, name, 168, null, StandInRows, null, ct);
+
+            var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+            Assert.True(answer["window_truncated"]?.GetValue<bool>(), read + " gives a note");
+            var start = ParseUtc(answer["effective_start"]);
+            Assert.True(start >= added.AddSeconds(-1) && start <= firstRow.AddSeconds(1), read + " names a start between the server's first collection and its first row, got " + start.ToString("o", CultureInfo.InvariantCulture));
+            Assert.StartsWith("partial window: this panel's data starts at " + start.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC", answer["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The same five reads for a server collected for a month whose rows reach back past the 7-day window's
+    /// start (eight days): the store covered the range, so there is no note, over 7 days and over 3. (A quiet start,
+    /// rows that begin late in a covered range, is the Waiting Tasks test above: a table the schedule gives no purge
+    /// edge reports the oldest row it holds, so for those rows that begin late are a late start.)</summary>
+    [Fact]
+    public async Task EachPostgresRead_WhoseRowsReachBackPastTheRange_GetsNoNote_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+
+        for (var i = 0; i < PostgresReads.Length; i++)
+        {
+            var read = PostgresReads[i];
+            var name = "web-data-start-covered-" + read.Replace('_', '-');
+            await store.SeedTableAsync(WebDataStartNote.TableByRead[read], -496620 - i, name, store.End.AddDays(-30), firstRow: store.End.AddDays(-8), ct);
+
+            Assert.Same(StandInRows, await WebDataStartNote.AddAsync(store.DataSource, read, name, 168, null, StandInRows, null, ct));
+            Assert.Same(StandInRows, await WebDataStartNote.AddAsync(store.DataSource, read, name, 72, null, StandInRows, null, ct));
+        }
     }
 
     private sealed class Store : IAsyncDisposable
@@ -110,9 +261,10 @@ public sealed class WebDataStartNoteLiveTests
         }
 
         /// <summary>A server first collected at <paramref name="added"/> whose waiting tasks run from
-        /// <paramref name="firstRow"/> to the end, one every 30 minutes; the collector's runs are logged from the first
-        /// collection, whether or not anything waited.</summary>
-        public async Task SeedAsync(int serverId, string serverName, DateTime added, DateTime firstRow, CancellationToken ct)
+        /// <paramref name="firstRow"/> to the end, one every <paramref name="stepMinutes"/> minutes; the waiting-task and
+        /// latch collectors' runs are logged every 30 minutes from the first collection, whether or not anything
+        /// waited.</summary>
+        public async Task SeedAsync(int serverId, string serverName, DateTime added, DateTime firstRow, int stepMinutes, CancellationToken ct)
         {
             await using var connection = await DataSource.OpenConnectionAsync(ct);
             await DarlingMcpTestData.RegisterServerAsync(connection, serverId, serverName, ct);
@@ -126,8 +278,9 @@ public sealed class WebDataStartNoteLiveTests
 
             await using (var log = new NpgsqlCommand(@"
 INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
-SELECT row_number() OVER (), $1, $2, 'waiting_tasks', t, 12, 'SUCCESS', 0
-FROM generate_series($3::timestamp, $4::timestamp, interval '30 minutes') AS t", connection))
+SELECT row_number() OVER (), $1, $2, c.name, t, 12, 'SUCCESS', 0
+FROM generate_series($3::timestamp, $4::timestamp, interval '30 minutes') AS t
+CROSS JOIN (VALUES ('waiting_tasks'), ('latch_stats')) AS c(name)", connection))
             {
                 log.Parameters.AddWithValue(serverId);
                 log.Parameters.AddWithValue(serverName);
@@ -139,9 +292,67 @@ FROM generate_series($3::timestamp, $4::timestamp, interval '30 minutes') AS t",
             await using var insert = new NpgsqlCommand(@"
 INSERT INTO collect.waiting_tasks (collection_id, collection_time, server_id, server_name, wait_type, wait_duration_ms, database_name)
 SELECT row_number() OVER (), t, $1, $2, 'LCK_M_X', 250, 'WebDb'
-FROM generate_series($3::timestamp, $4::timestamp, interval '30 minutes') AS t", connection);
+FROM generate_series($3::timestamp, $4::timestamp, make_interval(mins => $5)) AS t", connection);
             insert.Parameters.AddWithValue(serverId);
             insert.Parameters.AddWithValue(serverName);
+            insert.Parameters.AddWithValue(DateTime.SpecifyKind(firstRow, DateTimeKind.Unspecified));
+            insert.Parameters.AddWithValue(DateTime.SpecifyKind(End, DateTimeKind.Unspecified));
+            insert.Parameters.AddWithValue(stepMinutes);
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        /// <summary>A server first collected at <paramref name="added"/> with one row an hour in <paramref name="table"/>
+        /// from <paramref name="firstRow"/> to the end. Each column the table requires is filled with a stand-in by type:
+        /// the note reads only that the server holds a row at a time.</summary>
+        public async Task SeedTableAsync(string table, int serverId, string serverName, DateTime added, DateTime firstRow, CancellationToken ct)
+        {
+            await using var connection = await DataSource.OpenConnectionAsync(ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, serverId, serverName, ct);
+
+            await using (var update = new NpgsqlCommand("UPDATE collect.servers SET created_date = $2 WHERE server_id = $1", connection))
+            {
+                update.Parameters.AddWithValue(serverId);
+                update.Parameters.AddWithValue(DateTime.SpecifyKind(added, DateTimeKind.Unspecified));
+                await update.ExecuteNonQueryAsync(ct);
+            }
+
+            var time = CollectorCatalog.All.First(c => c.TargetTable == table).PrefixTimeColumnName;
+            var columns = new List<string>();
+            var values = new List<string>();
+            await using (var required = new NpgsqlCommand(@"
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_schema = 'collect' AND table_name = $1 AND is_nullable = 'NO' AND column_default IS NULL AND is_generated = 'NEVER'
+ORDER BY ordinal_position", connection))
+            {
+                required.Parameters.AddWithValue(table);
+                await using var reader = await required.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    var column = reader.GetString(0);
+                    var type = reader.GetString(1);
+                    columns.Add(column);
+                    values.Add(column == time ? "t"
+                        : column == "server_id" ? serverId.ToString(CultureInfo.InvariantCulture)
+                        : column == "server_name" ? "'" + serverName + "'"
+                        : column == "collection_id" ? "row_number() OVER ()"
+                        : type switch
+                        {
+                            "integer" or "bigint" or "smallint" or "numeric" or "double precision" or "real" => "1",
+                            "boolean" => "false",
+                            "text" or "character varying" or "character" => "'x'",
+                            "timestamp without time zone" => "t",
+                            "timestamp with time zone" => "t::timestamptz",
+                            "json" or "jsonb" => "'{}'",
+                            "ARRAY" => "'{}'",
+                            _ => throw new NotSupportedException(table + "." + column + " is " + type + ", which this stand-in seed does not fill"),
+                        });
+                }
+            }
+
+            await using var insert = new NpgsqlCommand(
+                "INSERT INTO collect." + table + " (" + string.Join(", ", columns) + ") SELECT " + string.Join(", ", values)
+                + " FROM generate_series($1::timestamp, $2::timestamp, interval '60 minutes') AS t", connection);
             insert.Parameters.AddWithValue(DateTime.SpecifyKind(firstRow, DateTimeKind.Unspecified));
             insert.Parameters.AddWithValue(DateTime.SpecifyKind(End, DateTimeKind.Unspecified));
             await insert.ExecuteNonQueryAsync(ct);
@@ -150,7 +361,7 @@ FROM generate_series($3::timestamp, $4::timestamp, interval '30 minutes') AS t",
         /// <summary>What the web mirror answers for the grid: the tool's own payload, then the data-start note.</summary>
         public async Task<JsonObject> AskAsync(string server, int hours, CancellationToken ct)
         {
-            var payload = await DarlingMcpSessionTools.GetWaitingTasks(DataSource, server, hours, 30, null, ct);
+            var payload = await DarlingMcpSessionTools.GetWaitingTasks(DataSource, server, hours, PageCap, null, ct);
             var answered = await WebDataStartNote.AddAsync(DataSource, "get_waiting_tasks", server, hours, null, payload, null, ct);
             return Assert.IsType<JsonObject>(JsonNode.Parse(answered));
         }
