@@ -27,10 +27,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// window actually reached — the most expensive row in a month may have happened this morning. The floor is a
 /// property of the TIER, not of the result set, and has to be asked for separately.</para>
 ///
-/// <para><b>Why a one-chunk probe.</b> Bounded on both sides ($2 start, $3 end) exactly like the window it is
-/// asked about, so TimescaleDB prunes every chunk outside it and the scan stops at the first row of the oldest
-/// surviving chunk rather than reading the window. Unfiltered by database or module: the floor is the tier's,
-/// so a filter on the caller's real read must not narrow it.</para>
+/// <para><b>Why the floor is not bounded below.</b> A floor found inside the window called a quiet start a cut: a
+/// server with older rows, quiet for the first hours of the window, read as holding less than the window. The
+/// floor is the oldest row at or before the window's end, the same question <see cref="DataWindowFloor"/> asks for
+/// the Custom Views panels. It is one walk of the table's <c>(server_id, collection_time)</c> index in time order,
+/// so TimescaleDB stops at the first row it meets instead of reading the retention window. It is still null when
+/// the window itself holds nothing: a bounded existence check, cheap the same way, keeps that answer for the
+/// callers that report an empty window. Unfiltered by database or module: the floor is the tier's, so a filter on
+/// the caller's real read must not narrow it.</para>
 ///
 /// <para><b>Why this lives in Storage.</b> The desktop viewer's Queries grids (<c>ViewerDataService</c>) and
 /// the MCP tools (<c>DarlingDataReader</c>) both need the identical probe over the identical SQL, and the
@@ -58,22 +62,35 @@ public static class RawWindowFloor
     };
 
     /// <summary>
-    /// The probe SQL for <paramref name="table"/> — #2364's <c>QueryStoreWindowFloorSql</c> shape verbatim,
-    /// the table name the only thing that varies. $1 server_id, $2/$3 window (naive UTC).
+    /// The probe SQL for <paramref name="table"/>, the table name the only thing that varies. $1 server_id,
+    /// $2/$3 window (naive UTC). The window's start bounds only the existence check, never the floor.
     /// </summary>
     public static string FloorSql(Table table) => $"""
-        SELECT MIN(collection_time)
-        FROM {TableName(table)}
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        SELECT o.t
+        FROM
+        (
+            SELECT f.collection_time AS t
+            FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS f
+            WHERE f.server_id = $1
+            AND   f.collection_time <= $3
+            ORDER BY f.collection_time
+            LIMIT 1
+        ) AS o
+        WHERE EXISTS
+        (
+            SELECT 1
+            FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS w
+            WHERE w.server_id = $1
+            AND   w.collection_time >= $2
+            AND   w.collection_time <= $3
+        )
         """;
 
     /// <summary>
-    /// The oldest <c>collection_time</c> <paramref name="table"/> actually has inside
-    /// [<paramref name="startUtc"/>, <paramref name="endUtc"/>] for <paramref name="serverId"/>. Null when the
-    /// window holds nothing at all, which the caller reports as "nothing was read" rather than as an absence
-    /// of activity.
+    /// The oldest <c>collection_time</c> <paramref name="table"/> holds for <paramref name="serverId"/> at or before
+    /// <paramref name="endUtc"/>, so it can sit before <paramref name="startUtc"/> when the rows reach back past the
+    /// window. Null when the window [<paramref name="startUtc"/>, <paramref name="endUtc"/>] holds nothing at all,
+    /// which the caller reports as "nothing was read" rather than as an absence of activity.
     /// </summary>
     /// <param name="commandTimeoutSeconds">The caller's deadline class — the MCP read deadline by default; the
     /// viewer passes its interactive one.</param>
@@ -97,8 +114,11 @@ public static class RawWindowFloor
         return value is DateTime dt ? dt : null;
     }
 
-    /// <summary>The window actually served: the floor when the tier had one, the requested start otherwise.</summary>
-    public static DateTime EffectiveStart(DateTime? floor, DateTime requestedStartUtc) => floor ?? requestedStartUtc;
+    /// <summary>The window actually served: the floor when it sits after the requested start, the requested start
+    /// otherwise. A floor before the start means the rows reach back past the window, so the window was served
+    /// whole; the served start never precedes the one asked for.</summary>
+    public static DateTime EffectiveStart(DateTime? floor, DateTime requestedStartUtc) =>
+        floor is DateTime f && f > requestedStartUtc ? f : requestedStartUtc;
 
     /// <summary>
     /// Whether the floor sits far enough past the requested start to call the window <c>window_truncated</c> —

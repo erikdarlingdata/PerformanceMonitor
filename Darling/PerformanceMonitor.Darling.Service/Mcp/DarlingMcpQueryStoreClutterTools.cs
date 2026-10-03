@@ -83,11 +83,6 @@ public sealed class DarlingMcpQueryStoreClutterTools
     /// so the default page is usually the whole list; <c>truncated</c> says when it is not.</summary>
     public const int DefaultLimit = 50;
 
-    /// <summary>The window floor's tolerance: the raw tier's first row inside the window is allowed to sit
-    /// this far after the requested start before the window is called truncated — <c>get_query_store_top</c>'s
-    /// 90 minutes, the cadence slack between a request and the first collection that could have served it.</summary>
-    private static readonly TimeSpan WindowFloorTolerance = TimeSpan.FromMinutes(90);
-
     /// <summary>The sentence beside <c>query_capture_mode</c>, naming what a null there means. A null is a
     /// health row captured before the V137 rung (#3796) created the column — the mode was never asked for —
     /// and a reader must not read it as <c>NONE</c>, which is a mode the engine really can be in.</summary>
@@ -143,8 +138,10 @@ public sealed class DarlingMcpQueryStoreClutterTools
             /* #2364 / #3653 item 17: what the raw tier actually held, beside what was asked for. The
                plan-churn arm is raw-only (the rollups carry no plan_id), so its floor is the window's. */
             var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
-            var effectiveStart = floor ?? requestedStart;
-            var windowTruncated = floor is DateTime f && f > requestedStart + WindowFloorTolerance;
+            /* The floor can sit before the requested start when the rows reach back past the window; the shared
+               helper never reports a served start earlier than the one asked for. */
+            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
+            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
 
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
 

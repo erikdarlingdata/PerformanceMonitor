@@ -574,6 +574,11 @@ public partial class ServerTab : UserControl
             }
 
             _querySnapshotsFilterMgr!.UpdateData(results);
+            /* #4953: the grid now holds the live rows, not the range the "Showing since" banner described, so the banner
+               comes down (collapsed, text cleared) through the same step that hides it for a window nothing cuts short.
+               The next range read raises it again through RefreshWindowTruncatedBannerAsync. A failed live read never
+               reaches this line: the range rows stay in the grid, and so does the banner that describes them. */
+            SetWindowTruncatedBanner(ActiveQueriesWindowTruncatedBanner, truncated: false, DateTime.UtcNow, GetPickerZone());
             /* #4766: the refresh instant is UTC now, worded in the tab's own display zone; the machine clock is
                neither the server's nor the mode's. */
             LiveSnapshotIndicator.Text = $"LIVE at {DisplayZone.Format(DateTime.UtcNow, GetPickerZone(), "HH:mm:ss")} ({results.Count} queries)";

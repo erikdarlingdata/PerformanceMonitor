@@ -719,7 +719,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     public void QueryStoreWindowFloor_RemainsACheapUnfilteredRetentionProbe()
     {
         var sql = DarlingDataReader.QueryStoreWindowFloorSql;
-        Assert.Contains("SELECT MIN(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ROW_NUMBER", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("module_name", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("database_name", sql, StringComparison.Ordinal);

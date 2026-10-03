@@ -243,13 +243,15 @@ public sealed class DarlingMcpCustomViewTools
     [McpServerTool(Name = "run_custom_view_panel"), Description(
         "Runs one composed (v2) panel and returns DATA: {sql, rows, annotations, notice?}, with no 'status' " +
         "field on success. Failures return {status, message}: \"invalid\" for a bad spec or panel, or a " +
-        "failed or timed-out query; \"error\" for an internal fault. notice means retention covered only " +
-        "part of the window, or the row cap truncated the result; absent means neither happened. Window ends " +
-        "now: 'hours' (default 24), unless ISO-8601 'windowStart'+'windowEnd' win instead (max 90 days; old " +
-        "windows read rollups). 'server' omitted or \"All\" runs the whole fleet. Only 'panel' is " +
-        "required. <<GUIDE>> " +
+        "failed or timed-out query; \"error\" for an internal fault. notice is a partial-window caveat: the " +
+        "tier's retention could not cover the window, or the panel's own data starts after the window does, " +
+        "or the row cap truncated the result; absent means the window was served whole. Window ends now: " +
+        "'hours' (default 24), unless ISO-8601 'windowStart'+'windowEnd' win. Only 'panel' is required. " +
+        "<<GUIDE>> " +
         "Runs a single composed (v2) panel and returns the DATA it produces — {sql, rows, annotations, notice?} " +
-        "(notice = a partial-window caveat when the store's retention cannot cover the whole requested range) — " +
+        "(notice is a partial-window caveat: the tier's retention could not cover the window, or the panel's own " +
+        "data starts after the window does, or the row cap truncated the result; absent means the window was " +
+        "served whole) — " +
         "so a generated view can be checked end-to-end without saving it. This is the SAME compile-and-run the " +
         "web composer's live preview uses: the panel is validated, compiled to catalog-only bound SQL, and " +
         "executed against the collected store under a statement_timeout. The spec is a JSON object " +

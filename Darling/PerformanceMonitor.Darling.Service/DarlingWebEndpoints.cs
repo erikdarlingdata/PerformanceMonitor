@@ -1204,7 +1204,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            a bucket update is the only work in the try, and any failure there is swallowed and logged at
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
-        var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, cancellationToken);
+        var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, cancellationToken, readLatency?.Logger);
         RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken);
         return outcome;
     }
@@ -1269,9 +1269,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>The compile-and-run body <see cref="RunComposedPanelAsync"/> wraps with latency recording --
-    /// unchanged from before #4442 scope 2 added the wrapper.</summary>
+    /// unchanged from before #4442 scope 2 added the wrapper. <paramref name="logger"/> is the one the host's
+    /// read-latency recorder carries (<see cref="ReadLatencyRecorder.Logger"/>), where the data-start probe reports
+    /// a failure it swallows.</summary>
     private static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
-        NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, System.Threading.CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, System.Threading.CancellationToken cancellationToken,
+        ILogger? logger = null)
     {
         if (body["panel"] is not JsonObject panel)
         {
@@ -1404,8 +1407,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                ends — retention loses the oldest points, the row cap now drops them too by keeping the
                newest buckets — and a panel can genuinely hit both at once. Showing one and swallowing
                the other would under-report exactly the panel that is worst off. */
+            var retentionNotice = ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups, coverage);
+
+            /* The tier notice judges a tier by the store-wide floors, so it is silent for a source with no rollups,
+               a store with no TimescaleDB, and one server whose rows start later than the rest. When it is silent,
+               ask where this panel's own rows start. The Query Store wide table reports its own start in the
+               history note below, so a panel it served is not asked twice. */
+            if (retentionNotice is null && !queryStoreWideEligible)
+            {
+                retentionNotice = await ComposeStoreAvailability.BuildDataStartNoticeAsync(
+                    postgres, plan.Measure.SourceTable, compiled.Route, serverScope, start, end, composedQuerySeconds, cancellationToken, logger);
+            }
+
             if (ComposeStoreAvailability.CombineNotices(
-                    ComposeStoreAvailability.BuildRetentionNotice(plan!.Measure.SourceTable, compiled.Route, start, now, rollups, coverage),
+                    retentionNotice,
                     ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
             {
                 payload["notice"] = notice;
