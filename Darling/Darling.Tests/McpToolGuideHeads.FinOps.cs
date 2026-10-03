@@ -28,6 +28,7 @@ public sealed class McpToolGuideHeadsFinOpsTests
         ("get_finops", "Windowed over hours_back, UTC; no as_of."),
         ("get_finops", "utilization:"),
         ("get_finops", "high_impact:"),
+        ("get_finops", "index_analysis:"),
         ("get_finops", "An unknown view is refused with the valid list."),
     ];
 

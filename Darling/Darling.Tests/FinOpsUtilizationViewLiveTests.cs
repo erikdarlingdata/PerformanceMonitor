@@ -87,7 +87,7 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
     }
 
     private static async Task<JsonDocument> CallAsync(NpgsqlDataSource ds, string name, int hours = 24, int limit = 10, CancellationToken ct = default) =>
-        JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "utilization", name, hours, limit, ct));
+        JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "utilization", name, hours, limit, cancellationToken: ct));
 
     private static async Task WithStoreAsync(Func<NpgsqlDataSource, CancellationToken, Task> body)
     {
@@ -285,7 +285,7 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
     public Task WebRoute_ReturnsTheToolsBody() => WithStoreAsync(async (ds, ct) =>
     {
         var name = FinOpsUtilizationGoldenLiveTests.ServerNameA;
-        var tool = await DarlingMcpFinOpsTools.GetFinOps(ds, "utilization", name, 24, 10, ct);
+        var tool = await DarlingMcpFinOpsTools.GetFinOps(ds, "utilization", name, 24, 10, cancellationToken: ct);
         var (status, body) = await FinOpsWebReadParityLiveTests.GetAsync(ds, $"/api/read/get_finops?server={name}&view=utilization", ct);
         Assert.Equal(200, status);
         using var expected = JsonDocument.Parse(tool);

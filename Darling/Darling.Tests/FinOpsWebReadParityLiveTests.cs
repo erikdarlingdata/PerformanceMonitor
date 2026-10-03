@@ -63,7 +63,7 @@ public sealed class FinOpsWebReadParityLiveTests
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var name = FinOpsHighImpactReaderLiveTests.ServerName;
-        var tool = await DarlingMcpFinOpsTools.GetFinOps(postgres, "high_impact", name, 96, 10, ct);
+        var tool = await DarlingMcpFinOpsTools.GetFinOps(postgres, "high_impact", name, 96, 10, cancellationToken: ct);
         var (status, body) = await GetAsync(postgres, $"/api/read/get_finops?server={name}&view=high_impact&hours_back=96&limit=10", ct);
 
         Assert.Equal(StatusCodes.Status200OK, status);
@@ -106,7 +106,7 @@ public sealed class FinOpsWebReadParityLiveTests
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var name = FinOpsHighImpactReaderLiveTests.ServerName;
-        var tool = await DarlingMcpFinOpsTools.GetFinOps(postgres, "nope", name, 24, 10, ct);
+        var tool = await DarlingMcpFinOpsTools.GetFinOps(postgres, "nope", name, 24, 10, cancellationToken: ct);
         var (status, body) = await GetAsync(postgres, $"/api/read/get_finops?server={name}&view=nope", ct);
 
         Assert.Equal(StatusCodes.Status400BadRequest, status);
