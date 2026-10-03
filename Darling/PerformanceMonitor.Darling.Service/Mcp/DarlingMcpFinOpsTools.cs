@@ -33,7 +33,9 @@ public sealed partial class DarlingMcpFinOpsTools
         // Each set belongs to one series of changes. Append to your own set only,
         // so the two series never edit the same lines of this allow-list.
         // Entries keep the allow-list's existing order and form.
-        // Set A and set B are separated on purpose: keep this gap.
+        // A view line is the view name plus one short clause, about 60 characters; field lists, units and cut points
+    // go in the view's guide constant.
+    // Set A and set B are separated on purpose: keep this gap.
         //
         //
         //
@@ -51,6 +53,8 @@ public sealed partial class DarlingMcpFinOpsTools
     // so the two series never edit the same lines of these fragments.
     // View lines and guide tails each start with a space; Valid entries in set A each end with ", ",
     // and set B's entries are joined with ", " after the first.
+    // A view line is the view name plus one short clause, about 60 characters; field lists, units and cut points
+    // go in the view's guide constant.
     // Set A and set B are separated on purpose: keep this gap.
     //
     //
@@ -97,7 +101,9 @@ public sealed partial class DarlingMcpFinOpsTools
                 // Each set belongs to one series of changes. Append to your own set only,
                 // so the two series never edit the same lines of this switch.
                 // Entries keep the switch's existing order and form.
-                // Set A and set B are separated on purpose: keep this gap.
+                // A view line is the view name plus one short clause, about 60 characters; field lists, units and cut points
+    // go in the view's guide constant.
+    // Set A and set B are separated on purpose: keep this gap.
                 //
                 //
                 //

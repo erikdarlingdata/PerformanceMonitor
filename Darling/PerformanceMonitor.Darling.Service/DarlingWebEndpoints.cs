@@ -2808,7 +2808,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             //
             //
             // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
-            ["get_finops"] = R(CatFinOps, "FinOps views for one server, picked by view. view is one of a closed set (today: high_impact); an unknown view is refused with the valid list. Windowed over hours_back; limit caps rows per list.", PServer(), PText("view"), PHours(24), PInt("limit", 10)),
+            ["get_finops"] = R(CatFinOps, "FinOps views for one server, picked by view. view is one of a closed set (today: " + DarlingMcpFinOpsTools.SetAValid + DarlingMcpFinOpsTools.SetBValid + "); an unknown view is refused with the valid list. Windowed over hours; limit caps rows per list.", PServer(), PText("view"), PHours(24), PInt("limit", 10)),
             // FinOps web parity (#4843), set B ends.
         };
 

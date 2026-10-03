@@ -27,7 +27,6 @@ public sealed class McpToolGuideHeadsFinOpsTests
     [
         ("get_finops", "Windowed over hours_back, UTC; no as_of."),
         ("get_finops", "high_impact:"),
-        ("get_finops", "impact_band (high >= 80, medium >= 60, else low)"),
         ("get_finops", "An unknown view is refused with the valid list."),
     ];
 
@@ -56,5 +55,10 @@ public sealed class McpToolGuideHeadsFinOpsTests
         Assert.DoesNotContain("percent-rank", served.Served, StringComparison.Ordinal);
         Assert.Contains("percent-rank", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("has_plan only says whether a plan was captured", served.Tail!, StringComparison.Ordinal);
+        Assert.DoesNotContain("impact_band", served.Served, StringComparison.Ordinal);
+        Assert.Contains("impact_band is high at 80 and above, medium at 60 and above, else low", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("impact_score 0-100", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("rounded to 0.1", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("No cost fields", served.Tail!, StringComparison.Ordinal);
     }
 }

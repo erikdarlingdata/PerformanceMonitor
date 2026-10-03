@@ -21,10 +21,10 @@ public sealed partial class DarlingMcpFinOpsTools
     internal const string HighImpactView = "high_impact";
 
     internal const string HighImpactViewLine =
-        "high_impact: top query_hash aggregates by CPU, duration, reads, writes, memory and executions, each with its share of the set, impact_score 0-100 and impact_band (high >= 80, medium >= 60, else low). No cost fields.";
+        "high_impact: top query hashes on six measures, scored and banded.";
 
     internal const string HighImpactViewGuide =
-        "high_impact reads the query-stats window for the server, keeps the top limit query hashes on each of the six measures, and ranks the union by impact_score (the mean percent-rank across the six measures). The *_share_pct fields are each row's share of the kept set's total, rounded to 0.1. sample_query_text is the first 200 characters of the hash's busiest statement; the full text and the plan are not returned, has_plan only says whether a plan was captured.";
+        "high_impact reads the query-stats window for the server, keeps the top limit query hashes on each of the six measures (CPU, duration, reads, writes, memory and executions), and ranks the union by impact_score 0-100 (the mean percent-rank across the six measures). impact_band is high at 80 and above, medium at 60 and above, else low. The *_share_pct fields are each row's share of the kept set's total, rounded to 0.1. sample_query_text is the first 200 characters of the hash's busiest statement; the full text and the plan are not returned, has_plan only says whether a plan was captured. No cost fields.";
 
     private static async Task<string> ReadHighImpactAsync(
         NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit, CancellationToken ct)

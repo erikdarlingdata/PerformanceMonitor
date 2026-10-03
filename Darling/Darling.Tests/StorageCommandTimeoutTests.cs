@@ -300,10 +300,24 @@ public sealed class StorageCommandTimeoutTests
     [Fact]
     public void TheStorageSweep_IncludesTheSubfolders_AndTheFinOpsReader()
     {
+        var dir = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage");
         var swept = StorageSources().Select(p => p.Replace('\\', '/')).ToArray();
 
         Assert.Contains(swept, p => p.EndsWith("/FinOps/DarlingFinOpsHighImpactReader.cs", System.StringComparison.Ordinal));
-        Assert.DoesNotContain(swept, p => p.Contains("/obj/", System.StringComparison.Ordinal) || p.Contains("/bin/", System.StringComparison.Ordinal));
+        Assert.DoesNotContain(StorageSources(), p => IsBuildOutput(dir, p));
+    }
+
+    /// <summary>The bin/obj rule compares whole path segments, relative to the project folder.</summary>
+    [Theory]
+    [InlineData("obj/Debug/x.cs", true)]
+    [InlineData("bin/Release/x.cs", true)]
+    [InlineData("Robj/x.cs", false)]
+    [InlineData("FinOps/objects.cs", false)]
+    public void IsBuildOutput_MatchesWholeSegmentsOnly(string relative, bool expected)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "proj");
+
+        Assert.Equal(expected, IsBuildOutput(dir, Path.Combine(dir, relative)));
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
