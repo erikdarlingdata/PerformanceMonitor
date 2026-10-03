@@ -42,6 +42,7 @@ public sealed partial class DarlingMcpFinOpsTools
         //
         // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
         HighImpactView,
+        DatabaseResourcesView,
         // FinOps web parity (#4843), set B ends.
     ];
 
@@ -61,9 +62,9 @@ public sealed partial class DarlingMcpFinOpsTools
     //
     //
     // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
-    internal const string SetBViewLines = " " + HighImpactViewLine;
-    internal const string SetBValid = HighImpactView;
-    internal const string SetBGuides = " " + HighImpactViewGuide;
+    internal const string SetBViewLines = " " + HighImpactViewLine + " " + DatabaseResourcesViewLine;
+    internal const string SetBValid = HighImpactView + ", " + DatabaseResourcesView;
+    internal const string SetBGuides = " " + HighImpactViewGuide + " " + DatabaseResourcesViewGuide;
     // FinOps web parity (#4843), set B ends.
 
     private const int DefaultLimit = 10;
@@ -113,6 +114,8 @@ public sealed partial class DarlingMcpFinOpsTools
                 // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
                 case HighImpactView:
                     return await ReadHighImpactAsync(postgres, resolved, hours_back, limit, cancellationToken);
+                case DatabaseResourcesView:
+                    return await ReadDatabaseResourcesAsync(postgres, resolved, hours_back, limit, cancellationToken);
                 // FinOps web parity (#4843), set B ends.
                 default:
                     return McpHelpers.Refusal("view", $"Invalid view value '{view}'. Valid views: {string.Join(", ", Views)}.");
