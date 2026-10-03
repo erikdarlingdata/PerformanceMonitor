@@ -324,8 +324,14 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadQueryStoreRegressionsAsync(DateTime startUtc, DateTime endUtc)
     {
+        /* #4966: the read compares the range with the baseline of the 7 days before it, so the notice keys on that EARLIER window:
+           a server added two days ago covers the range whole but has two days of baseline, not seven. The rows are ranked by
+           added duration, not by time, so they name no earlier start and the cap rule does not apply. */
+        var baselineStartUtc = ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc);
+        var floorTask = _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var rows = await _dataService.GetQueryStoreRegressionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStoreRegressionsFilterMgr!.UpdateData(rows);
+        UpdateTruncationBanner(QueryStoreRegressionsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store Regressions"), baselineStartUtc);
         SetDefaultSortIfNone(QueryStoreRegressionsGrid, "DurationRegressionPercent", ListSortDirection.Descending);
     }
 

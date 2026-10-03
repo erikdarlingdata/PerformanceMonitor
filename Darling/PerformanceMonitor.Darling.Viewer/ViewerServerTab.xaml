@@ -1719,12 +1719,19 @@
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Margin="8,4,0,4" FontSize="11"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
                                        Text="Queries whose Query Store performance regressed — recent-window averages vs. the baseline captured before the window, kept when CPU regressed more than 25%, ranked by total added duration. Double-click a row for its execution history."/>
-                            <DataGrid Grid.Row="1" x:Name="QueryStoreRegressionsGrid" Style="{StaticResource DarkGrid}"
+                            <!-- "Showing since <start>" when this server's Query Store history starts after the BASELINE window does: the read
+                                 compares the range with the 7 days before it, so the notice keys on that earlier window (#4966). -->
+                            <TextBlock Grid.Row="1" x:Name="QueryStoreRegressionsTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <DataGrid Grid.Row="2" x:Name="QueryStoreRegressionsGrid" Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource QueryStorePlanGridRowStyle}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
@@ -2030,6 +2037,7 @@
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,4,0,4">
@@ -2042,7 +2050,14 @@
                                     <ComboBoxItem Content="Execution Count"/>
                                 </ComboBox>
                             </StackPanel>
-                            <scottplot:WpfPlot Grid.Row="1" x:Name="QueryHeatmapChart"
+                            <!-- "Showing since <start>" when this server's query stats start after the range does: the earlier of the
+                                 collector's coverage (DataWindowFloor) and the first column drawn. The chart draws only the 5-minute bins
+                                 that hold a row, so a stretch with no row has no column to say it is empty (#4966). -->
+                            <TextBlock Grid.Row="1" x:Name="QueryHeatmapTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <scottplot:WpfPlot Grid.Row="2" x:Name="QueryHeatmapChart"
                                                 MouseMove="HeatmapChart_MouseMove"
                                                 MouseLeave="HeatmapChart_MouseLeave"/>
                         </Grid>

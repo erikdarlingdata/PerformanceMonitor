@@ -223,10 +223,12 @@ public sealed class ViewerDataStartBannerTests : IDisposable
             Assert.DoesNotContain("await floorTask", source, StringComparison.Ordinal);
         }
 
-        /* Six banner calls: a range load and a slicer drag on each of the three grids. */
+        /* Seven banner calls: a range load and a slicer drag on each of the three grids, and the range load of the Query Store
+           Regressions grid (#4966; it has no slicer). The Plan Corrections grid's banner goes through ShowEventDataStartAsync, because
+           it passes the cap rule's inputs rather than the probe's answer alone; ViewerPlanCorrectionsDataStartTests pins that call. */
         const string bannerCall = @"UpdateTruncationBanner\(\w+TruncationBanner,";
-        Assert.Equal(6, Matches(queries, bannerCall));
-        Assert.Equal(6, Matches(queries, bannerCall + @"\s*await DataStartOrNullAsync\(floorTask,"));
+        Assert.Equal(7, Matches(queries, bannerCall));
+        Assert.Equal(7, Matches(queries, bannerCall + @"\s*await DataStartOrNullAsync\(floorTask,"));
 
         Assert.Contains("(warn ?? ViewerLogger.Warn)(", queries, StringComparison.Ordinal);
     }
