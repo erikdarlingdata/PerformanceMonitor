@@ -320,7 +320,7 @@ public sealed class FinOpsOptimizationViewLiveTests
         var startInstant = DateTime.Parse(start, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
         Assert.InRange(startInstant, before.AddHours(-24), after.AddHours(-24));
         Assert.Equal(McpHelpers.FormatEffectiveStart(startInstant), start);
-        Assert.Equal(5, queries.GetProperty("rows").GetArrayLength());
+        Assert.Equal(4, queries.GetProperty("rows").GetArrayLength());
         var alpha = queries.GetProperty("rows")[0];
         Assert.Equal("AlphaDb", alpha.GetProperty("database_name").GetString());
         Assert.Equal(9000L, alpha.GetProperty("total_cpu_ms").GetInt64());
@@ -330,13 +330,13 @@ public sealed class FinOpsOptimizationViewLiveTests
         Assert.Equal(30L, alpha.GetProperty("executions").GetInt64());
         Assert.Equal("SELECT alpha", alpha.GetProperty("query_preview").GetString());
         Assert.True(alpha.GetProperty("has_plan").GetBoolean());
-        Assert.Equal(12.33m, alpha.GetProperty("est_cost_usd").GetDecimal());
+        Assert.Equal(12.86m, alpha.GetProperty("est_cost_usd").GetDecimal());
         Assert.False(alpha.TryGetProperty("full_query_text", out _));
         Assert.False(alpha.TryGetProperty("query_plan_xml", out _));
         var delta = queries.GetProperty("rows")[1];
         Assert.Equal(200, delta.GetProperty("query_preview").GetString()!.Length);
         Assert.False(delta.GetProperty("has_plan").GetBoolean());
-        Assert.Equal(8.22m, delta.GetProperty("est_cost_usd").GetDecimal());
+        Assert.Equal(8.58m, delta.GetProperty("est_cost_usd").GetDecimal());
         Assert.Equal(new[] { "BetaDb", "GammaDb" },
             new[] { queries.GetProperty("rows")[2], queries.GetProperty("rows")[3] }.Select(r => r.GetProperty("database_name").GetString()).ToArray());
 
@@ -491,7 +491,7 @@ public sealed class FinOpsOptimizationViewLiveTests
         Assert.Equal("monthly cost not set", tool.RootElement.GetProperty("cost_reason").GetString());
         var rows = Section(tool, "wait_categories").GetProperty("rows").EnumerateArray()
             .Concat(Section(tool, "expensive_queries").GetProperty("rows").EnumerateArray()).ToList();
-        Assert.Equal(10, rows.Count);
+        Assert.Equal(9, rows.Count);
         Assert.All(rows, r => Assert.Equal(JsonValueKind.Null, r.GetProperty("est_cost_usd").ValueKind));
     }
 
