@@ -107,20 +107,20 @@ FROM generate_series(1, $7) AS n",
     [Fact]
     public void WebEndpoint_PassesNoByteBudget_AndTheMcpToolDoesNot()
     {
-        var web = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs").ReplaceLineEndings("\n");
         var start = web.IndexOf("app.MapGet(\"/api/ag\"", StringComparison.Ordinal);
         Assert.True(start >= 0);
         var call = web.Substring(start, 400);
         Assert.Contains("responseByteBudget: null", call, StringComparison.Ordinal);
 
-        var tool = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAgTools.cs");
+        var tool = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAgTools.cs").ReplaceLineEndings("\n");
         Assert.DoesNotContain("responseByteBudget", tool, StringComparison.Ordinal);
     }
 
     [Fact]
     public void AgPage_ReadsGroupsTruncated_AndRendersTheNote()
     {
-        var js = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "ag.js");
+        var js = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "ag.js").ReplaceLineEndings("\n");
         Assert.Contains("d.groups_truncated", js, StringComparison.Ordinal);
         Assert.Contains("d.groups_truncated_note", js, StringComparison.Ordinal);
         Assert.Contains("truncationNote(d)", js, StringComparison.Ordinal);
