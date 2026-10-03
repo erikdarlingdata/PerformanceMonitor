@@ -301,12 +301,12 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
     /// <summary>
     /// The three grids that render this row grew the same two trailing columns: the web tile's
     /// <c>QS_HEALTH_COLUMNS</c> ends with the two payload keys (formatless, so the renderer prints a null as
-    /// the page's dash), and both WPF Query Store grids end with <c>Capture Mode</c> then <c>Wait Stats
-    /// Capture</c>, bound to the display properties that render a null as the same glyph — and the two XAML
+    /// the page's dash), and both WPF Query Store grids end with <c>Capture Mode</c>, <c>Wait Stats
+    /// Capture</c> then <c>Collected</c> (#4966, bound to <c>CaptureTimeLocal</c>), bound to the display properties that render a null as the same glyph — and the two XAML
     /// grids carry the identical binding sequence, the way every twinned grid in the two front ends does.
     /// </summary>
     [Fact]
-    public void QueryStoreHealth_EveryGrid_EndsWithTheTwoCaptureModeColumns()
+    public void QueryStoreHealth_EveryGrid_EndsWithTheTwoCaptureModeColumnsThenCollected()
     {
         var js = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         var marker = "const QS_HEALTH_COLUMNS = [";
@@ -325,8 +325,9 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
         var viewerBindings = GridBindings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.xaml"));
         var liteBindings = GridBindings(RepoFile.ReadRepoFile("Lite", "Controls", "ServerTab.xaml"));
         Assert.Equal(viewerBindings, liteBindings);
-        Assert.Equal("CaptureModeDisplay", viewerBindings[^2]);
-        Assert.Equal("WaitStatsCaptureModeDisplay", viewerBindings[^1]);
+        Assert.Equal("CaptureModeDisplay", viewerBindings[^3]);
+        Assert.Equal("WaitStatsCaptureModeDisplay", viewerBindings[^2]);
+        Assert.Equal("CaptureTimeLocal", viewerBindings[^1]);
 
         foreach (var xaml in new[] { RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.xaml"), RepoFile.ReadRepoFile("Lite", "Controls", "ServerTab.xaml") })
         {
