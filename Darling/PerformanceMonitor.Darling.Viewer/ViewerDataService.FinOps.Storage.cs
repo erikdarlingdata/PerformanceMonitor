@@ -8,12 +8,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -274,133 +276,28 @@ LIMIT $3";
         return items;
     }
 
-    /// <summary>Databases with zero query executions over the last N days. $1 server_id, $2 cutoff.</summary>
-    public const string IdleDatabasesSql = $@"
-WITH db_sizes AS (
-    SELECT
-        database_name,
-        SUM(total_size_mb) AS total_size_mb,
-        COUNT(*) AS file_count
-    FROM v_database_size_stats
-    WHERE server_id = $1
-    AND   collection_time = (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-    )
-    GROUP BY database_name
-),
-db_activity AS (
-    SELECT
-        database_name,
-        SUM(delta_execution_count) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS total_executions,
-        MAX(last_execution_time) AS last_execution
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   delta_execution_count IS NOT NULL
-    GROUP BY database_name
-)
-SELECT
-    ds.database_name,
-    ds.total_size_mb,
-    ds.file_count,
-    a.last_execution
-FROM db_sizes ds
-LEFT JOIN db_activity a ON a.database_name = ds.database_name
-WHERE COALESCE(a.total_executions, 0) = 0
-AND   (a.last_execution IS NULL OR a.last_execution < $2)
-AND   ds.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
-ORDER BY ds.total_size_mb DESC";
+    /// <summary>The idle-database read's SQL; lives in <see cref="DarlingFinOpsOptimizationReader"/>.</summary>
+    public const string IdleDatabasesSql = DarlingFinOpsOptimizationReader.IdleDatabasesSql;
 
     public async Task<List<IdleDatabaseRow>> GetIdleDatabasesAsync(int serverId, int daysBack = 7, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddDays(-daysBack);
 
-        await using var command = _dataSource.CreateCommand(IdleDatabasesSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-
-        var items = new List<IdleDatabaseRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(new IdleDatabaseRow
-            {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                TotalSizeMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
-                FileCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2)),
-                /* last_execution_time (sys.dm_exec_query_stats) is SERVER-LOCAL in the store, not naive
-                   UTC, so it is read verbatim like Lite — NOT through ViewerTimeHelper.ForDisplay (which
-                   assumes naive UTC and, in Local/Server mode, would shift it). Contrast the
-                   collection_time-derived timestamps in this port, which ARE naive UTC and correctly use ForDisplay. */
-                LastExecutionTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3)
-            });
-        }
-        return items;
+        var rows = await DarlingFinOpsOptimizationReader.GetIdleDatabasesAsync(
+            _dataSource, serverId, cutoff, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return rows.Select(IdleDatabaseRow.From).ToList();
     }
 
-    /// <summary>tempdb pressure summary: latest and 24h peak values. $1 server_id, $2 cutoff.</summary>
-    public const string TempdbSummarySql = @"
-WITH latest AS (
-    SELECT
-        user_object_reserved_mb,
-        internal_object_reserved_mb,
-        version_store_reserved_mb,
-        total_reserved_mb
-    FROM v_tempdb_stats
-    WHERE server_id = $1
-    ORDER BY collection_time DESC
-    LIMIT 1
-),
-peak AS (
-    SELECT
-        MAX(user_object_reserved_mb) AS max_user_mb,
-        MAX(internal_object_reserved_mb) AS max_internal_mb,
-        MAX(version_store_reserved_mb) AS max_version_store_mb,
-        MAX(total_reserved_mb) AS max_total_mb
-    FROM v_tempdb_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-)
-SELECT 'User Objects', l.user_object_reserved_mb, p.max_user_mb,
-    CASE WHEN p.max_user_mb > 1024 THEN 'High user object usage' ELSE '' END
-FROM latest l CROSS JOIN peak p
-UNION ALL
-SELECT 'Internal Objects', l.internal_object_reserved_mb, p.max_internal_mb,
-    CASE WHEN p.max_internal_mb > 1024 THEN 'High internal object usage (sorts/hashes)' ELSE '' END
-FROM latest l CROSS JOIN peak p
-UNION ALL
-SELECT 'Version Store', l.version_store_reserved_mb, p.max_version_store_mb,
-    CASE WHEN p.max_version_store_mb > 2048 THEN 'Version store pressure — check long-running transactions' ELSE '' END
-FROM latest l CROSS JOIN peak p
-UNION ALL
-SELECT 'Total Reserved', l.total_reserved_mb, p.max_total_mb, ''
-FROM latest l CROSS JOIN peak p";
+    /// <summary>The tempdb summary's SQL; lives in <see cref="DarlingFinOpsOptimizationReader"/>.</summary>
+    public const string TempdbSummarySql = DarlingFinOpsOptimizationReader.TempdbSummarySql;
 
     public async Task<List<TempdbSummaryRow>> GetTempdbSummaryAsync(int serverId, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-24);
 
-        await using var command = _dataSource.CreateCommand(TempdbSummarySql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-
-        var items = new List<TempdbSummaryRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(new TempdbSummaryRow
-            {
-                Metric = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                CurrentMb = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
-                Peak24hMb = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2)),
-                Warning = reader.IsDBNull(3) ? "" : reader.GetString(3)
-            });
-        }
-        return items;
+        var rows = await DarlingFinOpsOptimizationReader.GetTempdbSummaryAsync(
+            _dataSource, serverId, cutoff, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return rows.Select(TempdbSummaryRow.From).ToList();
     }
 
     /// <summary>Per-database storage growth vs 7d/30d ago (Storage Growth parent grid). #4245: all three
