@@ -407,8 +407,8 @@ public static class CollectorScheduleOverlay
     /// <summary>Why a Save is refused when the run-time read failed and the Save would have to write a run time (#4938): a time typed
     /// into a Run at cell, or a Reset to Defaults, which also clears every run time.</summary>
     public const string RunTimesUnreadRefusal =
-        "The run times could not be read, so they cannot be changed or cleared now. Nothing was saved. " +
-        "Set every Run at cell back to \"Use default\" and leave Reset to Defaults out to save the rest, or close this window and open it again to read them.";
+        "The run times could not be read, so none can be saved or cleared now (a time typed into a Run at cell, or Reset to Defaults, which clears them). " +
+        "Nothing was saved. Close this window and open it again to read them, then try again.";
 
     /// <summary>
     /// What one Save sends for a scope (#4938), worked out from what the window holds and from which of its reads worked: no
