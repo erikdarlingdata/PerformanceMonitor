@@ -102,7 +102,7 @@ public partial class JobHistoryTab : UserControl
             var startUtc = nowUtc.AddHours(-hoursBack);
             var openTabClocks = _openTabClocks?.Invoke();
 
-            var all = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryAsync(startUtc, RowCap, serverId, openTabClocks));
+            var (all, readClocks) = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks));
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             /* #2126: rows carry the raw collected server name; swap in the operator's alias where the
@@ -159,7 +159,7 @@ public partial class JobHistoryTab : UserControl
             /* #4966: the rows are bound and the loading note is down; the note comes last, from the UNFILTERED read (all): the Status
                and Category filters narrow the grid on the client and say nothing about where the data starts. A probe that fails
                costs the note and never the grid. */
-            await ShowDataStartNoteAsync(serverId, openTabClocks, startUtc, nowUtc, all, gen);
+            await ShowDataStartNoteAsync(serverId, readClocks, startUtc, nowUtc, all, gen);
         }
         catch (Exception ex)
         {
@@ -171,55 +171,32 @@ public partial class JobHistoryTab : UserControl
     }
 
     /// <summary>
-    /// The "Showing since" note of the grid (#4966), worked out for one load: the frame it is worded in, the servers the probe asks,
+    /// The "Showing since" note of the grid (#4966), worked out for one load: the frame it is worded in,
     /// then the step below. For one server the note is worded on that server's wall clock, the clock the read windowed on (the
-    /// server's collected clock, else its open tab's, else the machine's, <see cref="LocalDataService.ReadJobHistoryClockAsync"/>),
+    /// server's collected clock, else its open tab's, else the machine's, <see cref="LocalDataService.ReadJobHistoryClockAsync"/>, handed back by the read),
     /// which is the clock the Run Time column prints in. For the All Servers view the rows sit on different servers' clocks, so
-    /// the note is worded in UTC and says so; the probe has no all-servers form, so it asks the servers the Server combo lists
-    /// (<see cref="LocalDataService.GetJobHistoryDataStartAsync"/> takes the earliest coverage among them and bounds its own work).
+    /// the note is worded in UTC and says so; the probe reads the All Servers set itself
+    /// (<see cref="LocalDataService.GetJobHistoryDataStartAsync"/> takes the earliest coverage among the servers with a run or a logged collector run in the window and bounds its own work).
     /// A load that a newer one has superseded writes nothing.
     /// </summary>
     private async System.Threading.Tasks.Task ShowDataStartNoteAsync(
-        int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks, DateTime startUtc, DateTime endUtc,
+        int? serverId, IReadOnlyDictionary<int, ServerClock> readClocks, DateTime startUtc, DateTime endUtc,
         IReadOnlyCollection<JobHistoryRow> read, int gen)
     {
         if (_dataService == null) return;
         var service = _dataService;
 
-        TimeZoneInfo zone;
-        IReadOnlyCollection<int> asked;
-        if (serverId is int one)
-        {
-            var tabClock = openTabClocks is not null && openTabClocks.TryGetValue(one, out var found) ? found : null;
-            var clock = await System.Threading.Tasks.Task.Run(() => service.ReadJobHistoryClockAsync(one, tabClock));
-            zone = clock.AsTimeZone();
-            asked = [one];
-        }
-        else
-        {
-            zone = TimeZoneInfo.Utc;
-            asked = ListedServerIds();
-        }
+        /* One clock read: for one server the note is worded on the clock the read windowed on, handed back by the read. */
+        var zone = serverId is int one && readClocks.TryGetValue(one, out var clock) ? clock.AsTimeZone() : TimeZoneInfo.Utc;
 
         if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
         await ShowJobHistoryDataStartAsync(
             JobHistoryWindowTruncatedBanner,
-            () => System.Threading.Tasks.Task.Run(() => service.GetJobHistoryDataStartAsync(asked, startUtc, endUtc)),
+            () => System.Threading.Tasks.Task.Run(() => service.GetJobHistoryDataStartAsync(serverId, startUtc, endUtc)),
             startUtc, endUtc, read, zone, inUtc: serverId is null,
             superseded: () => _loads.Superseded(nameof(LoadJobsAsync), gen));
     }
-
-    /// <summary>The server ids the Server combo lists (every item after "All Servers"): the servers with a run in the read just
-    /// bound, which is the set the All Servers note asks (#4966).</summary>
-    private List<int> ListedServerIds() =>
-        ServerFilterComboBox.Items
-            .OfType<ComboBoxItem>()
-            .Skip(1)
-            .Select(i => int.TryParse(i.Tag?.ToString(), out var id) ? id : (int?)null)
-            .Where(id => id.HasValue)
-            .Select(id => id!.Value)
-            .ToList();
 
     /// <summary>
     /// The "Showing since" banner of the grid (#4966), through the steps the server tab's grids share. Job history is an event

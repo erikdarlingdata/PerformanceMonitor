@@ -181,12 +181,14 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
     /// the real probe over <paramref name="asked"/>, then the tab's real banner step in the frame the tab words it in. The note's
     /// text, or null when the banner is hidden, and the number of rows the read returned.
     /// </summary>
-    private async Task<(string? Note, int Rows)> NoteAsync(int? serverId, params int[] asked)
+    private async Task<(string? Note, int Rows)> NoteAsync(int? serverId, params int[] servers)
     {
+        /* The service reads the All Servers set itself; `servers` names who the test expects to be asked and is not passed in. */
+        _ = servers;
         var service = new LocalDataService(_duckDb);
-        var read = await service.GetJobHistoryAsync(Start, JobHistoryTab.RowCap, serverId);
-        var floor = await service.GetJobHistoryDataStartAsync(asked, Start, _end);
-        var zone = serverId is int id ? (await service.ReadJobHistoryClockAsync(id)).AsTimeZone() : TimeZoneInfo.Utc;
+        var (read, clocks) = await service.GetJobHistoryWithClocksAsync(Start, JobHistoryTab.RowCap, serverId);
+        var floor = await service.GetJobHistoryDataStartAsync(serverId, Start, _end);
+        var zone = serverId is int id ? clocks[id].AsTimeZone() : TimeZoneInfo.Utc;
 
         return (BannerText(() => Task.FromResult(floor), Start, _end, read, zone, inUtc: serverId is null), read.Count);
     }
@@ -215,7 +217,7 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
         Assert.Equal(2000, JobHistoryTab.RowCap);
 
         var tab = StripComments(File.ReadAllText(RepoFile("Lite", "Controls", "JobHistoryTab.xaml.cs")).Replace("\r\n", "\n"));
-        Assert.Single(Regex.Matches(tab, @"GetJobHistoryAsync\(startUtc, RowCap, serverId, openTabClocks\)"));
+        Assert.Single(Regex.Matches(tab, @"GetJobHistoryWithClocksAsync\(startUtc, RowCap, serverId, openTabClocks\)"));
         Assert.Single(Regex.Matches(tab, @"ServerTab\.CappedGridBannerAsync\(runTimes, RowCap,"));
     }
 
@@ -453,6 +455,41 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
         Assert.DoesNotContain("UTC", oneA.Note, StringComparison.Ordinal);
     }
 
+    /// <summary>The All Servers note reads the viewer's server set in the service: a covered server with only logged collector runs
+    /// (no job rows) is asked, so its coverage hides the note although the only server with job rows began 2 days ago.</summary>
+    [Fact]
+    public async Task AllServers_ReadsTheServerSetItself_AServerWithOnlyCollectorRuns_HidesTheNote()
+    {
+        await SeedClockAsync(ServerA, OffsetA);
+        await SeedClockAsync(ServerB, OffsetB);
+        await SeedCollectorRunAsync(ServerA, Start.AddDays(-20));
+        await SeedCollectorRunAsync(ServerA, _end.AddHours(-2));
+        await SeedCollectorRunAsync(ServerB, _end.AddDays(-2));
+        await SeedRunAsync(ServerB, OffsetB, _end.AddDays(-1), _end.AddDays(-1).AddMinutes(2));
+
+        var service = new LocalDataService(_duckDb);
+        Assert.Equal(Start, await service.GetJobHistoryDataStartAsync(null, Start, _end));
+        var (note, rows) = await NoteAsync(null);
+
+        Assert.Equal(1, rows);
+        Assert.Null(note);
+    }
+
+    /// <summary>A server with neither a job row nor a logged job_history run in the window is not asked: its old run proves nothing here.</summary>
+    [Fact]
+    public async Task AllServers_AServerWithNothingInTheWindow_IsNotAsked()
+    {
+        await SeedClockAsync(ServerA, OffsetA);
+        await SeedClockAsync(ServerB, OffsetB);
+        await SeedCollectorRunAsync(ServerA, Start.AddDays(-20));
+        await SeedCollectorRunAsync(ServerB, _end.AddDays(-2));
+        await SeedRunAsync(ServerB, OffsetB, _end.AddDays(-1), _end.AddDays(-1).AddMinutes(2));
+
+        var floor = await new LocalDataService(_duckDb).GetJobHistoryDataStartAsync(null, Start, _end);
+
+        Assert.Equal(_end.AddDays(-2), floor);
+    }
+
     /// <summary>One server that covers the whole range is enough: the earliest coverage among the servers reaches the start, so the All
     /// Servers view shows no note, although the other server's collection began late.</summary>
     [Fact]
@@ -525,9 +562,9 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
         Assert.Single(Regex.Matches(load, @"var nowUtc = DateTime\.UtcNow;"));
         Assert.Single(Regex.Matches(load, @"var startUtc = nowUtc\.AddHours\(-hoursBack\);"));
         Assert.Empty(Regex.Matches(load, @"DateTime\.UtcNow\.AddHours"));
-        Assert.Single(Regex.Matches(load, @"_dataService\.GetJobHistoryAsync\(startUtc,\s*RowCap,\s*serverId,\s*openTabClocks\)"));
-        Assert.Single(Regex.Matches(load, @"ShowDataStartNoteAsync\(serverId,\s*openTabClocks,\s*startUtc,\s*nowUtc,\s*all,\s*gen\)"));
-        Assert.Single(Regex.Matches(tab, @"service\.GetJobHistoryDataStartAsync\(asked,\s*startUtc,\s*endUtc\)"));
+        Assert.Single(Regex.Matches(load, @"_dataService\.GetJobHistoryWithClocksAsync\(startUtc,\s*RowCap,\s*serverId,\s*openTabClocks\)"));
+        Assert.Single(Regex.Matches(load, @"ShowDataStartNoteAsync\(serverId,\s*readClocks,\s*startUtc,\s*nowUtc,\s*all,\s*gen\)"));
+        Assert.Single(Regex.Matches(tab, @"service\.GetJobHistoryDataStartAsync\(serverId,\s*startUtc,\s*endUtc\)"));
         Assert.Single(Regex.Matches(tab, @"var openTabClocks = _openTabClocks\?\.Invoke\(\);"));
     }
 
@@ -542,7 +579,7 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
         var loadingDown = load.IndexOf("LoadingMessage.Visibility = Visibility.Collapsed;", Math.Max(bind, 0), StringComparison.Ordinal);
         var note = load.IndexOf("await ShowDataStartNoteAsync(", StringComparison.Ordinal);
         Assert.True(bind >= 0 && loadingDown > bind && note > loadingDown, "the note must come after the rows and the loading note");
-        Assert.DoesNotContain("ShowDataStartNoteAsync(serverId, openTabClocks, startUtc, nowUtc, filtered", load, StringComparison.Ordinal);
+        Assert.DoesNotContain("ShowDataStartNoteAsync(serverId, readClocks, startUtc, nowUtc, filtered", load, StringComparison.Ordinal);
         Assert.Matches(@"JobCountIndicator\.Text = JobHistoryCap\.CountText\(displayCount, all\.Count, RowCap\);", load);
     }
 
@@ -563,10 +600,10 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
         Assert.DoesNotContain("GetQueryWindowFloorAsync(", tab, StringComparison.Ordinal);
 
         var note = tab[tab.IndexOf("private async System.Threading.Tasks.Task ShowDataStartNoteAsync(", StringComparison.Ordinal)..start];
-        Assert.Contains("var clock = await System.Threading.Tasks.Task.Run(() => service.ReadJobHistoryClockAsync(one, tabClock));", note, StringComparison.Ordinal);
-        Assert.Contains("zone = clock.AsTimeZone();", note, StringComparison.Ordinal);
-        Assert.Contains("zone = TimeZoneInfo.Utc;", note, StringComparison.Ordinal);
-        Assert.Contains("asked = ListedServerIds();", note, StringComparison.Ordinal);
+        // One clock read for one server: the note takes the clock the read windowed on, and makes no second clock read.
+        Assert.Contains("readClocks.TryGetValue(one, out var clock) ? clock.AsTimeZone() : TimeZoneInfo.Utc", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("ReadJobHistoryClockAsync", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("ListedServerIds", tab, StringComparison.Ordinal);
         Assert.Contains("inUtc: serverId is null", note, StringComparison.Ordinal);
     }
 

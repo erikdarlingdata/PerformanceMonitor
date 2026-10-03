@@ -56,6 +56,15 @@ public partial class LocalDataService
     /// on its open tab's clock when it has one, then the machine's, the chain the Alert History tab uses.
     /// </summary>
     public async Task<List<JobHistoryRow>> GetJobHistoryAsync(
+        DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null) =>
+        (await GetJobHistoryWithClocksAsync(windowStartUtc, limit, serverId, openTabClocks)).Rows;
+
+    /// <summary>
+    /// <see cref="GetJobHistoryAsync(DateTime, int, int?, IReadOnlyDictionary{int, ServerClock}?)"/> that also returns the clock it
+    /// windowed each server on, by server id (#4966). The tab words the note for one server from <c>Clocks[serverId]</c>, so the note
+    /// and the read share one clock read and cannot disagree on a clock that changed between two reads.
+    /// </summary>
+    internal async Task<(List<JobHistoryRow> Rows, IReadOnlyDictionary<int, ServerClock> Clocks)> GetJobHistoryWithClocksAsync(
         DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null)
     {
         var serverIds = serverId.HasValue
@@ -63,14 +72,20 @@ public partial class LocalDataService
             : await ReadJobHistoryServerIdsAsync(windowStartUtc);
 
         var rows = new List<JobHistoryRow>();
+        var clocks = new Dictionary<int, ServerClock>();
         foreach (var id in serverIds)
         {
             var clock = await ReadJobHistoryClockAsync(id, openTabClocks is not null && openTabClocks.TryGetValue(id, out var tabClock) ? tabClock : null);
+            clocks[id] = clock;
             rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, limit));
         }
 
-        return ApplyJobHistoryWindow(rows, windowStartUtc, limit);
+        return (ApplyJobHistoryWindow(rows, windowStartUtc, limit), clocks);
     }
+
+    /// <summary>This machine's zone, the last clock in the Job History chain. A seam for the tests, which name a fixed zone so a
+    /// fallback to UTC cannot pass on a host that happens to run in UTC; the product never sets it.</summary>
+    internal TimeZoneInfo MachineZone { get; set; } = TimeZoneInfo.Local;
 
     /// <summary>
     /// Every server with a run at or after the earliest server-local instant any server's pre-filter can start at: the
@@ -117,7 +132,7 @@ ORDER BY server_id";
             AppLogger.Debug("JobHistory", $"Server clock read failed for server {serverId}, its window takes its open tab's or the machine's clock: {ex.Message}");
         }
 
-        return ServerTimeHelper.ClockForServer(collected, openTabClock);
+        return ServerTimeHelper.ClockForServer(collected, openTabClock, MachineZone, DateTime.UtcNow);
     }
 
     /// <summary>
@@ -127,19 +142,50 @@ ORDER BY server_id";
     /// first row or run in the window if that is earlier). Job history is an event surface: the first collection copies the
     /// history msdb already holds, so a run's own time can sit long before the coverage this names, and the caller words the
     /// note from the earlier of this and the earliest run it shows (<c>ServerTab.EarlierOfFloorAndRowShown</c>).
-    /// <para>The probe has no all-servers form, so the Job History tab hands this the servers its Server combo lists. The work is
-    /// bounded three ways: only those servers are asked (the servers with a run on screen, never every server the store has ever
-    /// seen); they are asked one after another on the one probe connection, and the loop stops at the first server whose coverage
+    /// <para>The probe has no all-servers form, so with a null <paramref name="serverId"/> this reads the server set itself: the servers
+    /// with a job row or a logged job_history run in the window (<see cref="JobHistoryViewerServersSql"/>). The work is
+    /// bounded three ways: only those servers are asked (never every server the store has ever seen); they are asked one after another on the one probe connection, and the loop stops at the first server whose coverage
     /// reaches the window's start, because the earliest coverage cannot be later than that (<see cref="EarliestCoverageAsync"/>);
     /// and a window no longer than the 90-minute slack makes no call at all (the tab's guard, <c>ServerTab.ProbeWindowFloorOrNullAsync</c>).
     /// A probe that throws for any one server fails the whole answer, so the caller shows no note: a floor worked out from some of the
     /// servers could name a time later than the one a server it never reached covers.</para>
     /// </summary>
-    /// <param name="serverIds">The servers to ask: the one the tab shows, or the servers its Server combo lists.</param>
+    /// <param name="serverId">The one server the tab shows, or null for All Servers.</param>
     /// <param name="startUtc">The window's start, the instant the read took (<see cref="GetJobHistoryAsync(DateTime, int, int?, IReadOnlyDictionary{int, ServerClock}?)"/>).</param>
     /// <param name="endUtc">The window's end.</param>
-    public Task<DateTime?> GetJobHistoryDataStartAsync(IReadOnlyCollection<int> serverIds, DateTime startUtc, DateTime endUtc) =>
-        EarliestCoverageAsync(serverIds, id => GetQueryWindowFloorAsync(QueryWindowRelation.JobHistory, id, startUtc, endUtc), startUtc);
+    public async Task<DateTime?> GetJobHistoryDataStartAsync(int? serverId, DateTime startUtc, DateTime endUtc)
+    {
+        IReadOnlyCollection<int> asked = serverId is int one ? [one] : await ReadJobHistoryViewerServerIdsAsync(startUtc, endUtc);
+        return await EarliestCoverageAsync(asked, id => GetQueryWindowFloorAsync(QueryWindowRelation.JobHistory, id, startUtc, endUtc), startUtc);
+    }
+
+    /// <summary>The servers the All Servers note asks: those with a job row or a logged job_history run in [start, end], the rule the
+    /// Darling viewer's probe counts a server by. Read here and not taken from the Server combo.</summary>
+    private const string JobHistoryViewerServersSql = @"
+SELECT DISTINCT server_id
+FROM
+(
+    SELECT server_id FROM v_job_history WHERE collection_time >= $1 AND collection_time <= $2
+    UNION
+    SELECT server_id FROM v_collection_log WHERE collector_name = 'job_history' AND collection_time >= $1 AND collection_time <= $2
+) AS u
+ORDER BY server_id";
+
+    private async Task<List<int>> ReadJobHistoryViewerServerIdsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = JobHistoryViewerServersSql;
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+
+        var ids = new List<int>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            ids.Add((int)ToInt64(reader.GetValue(0)));
+
+        return ids;
+    }
 
     /// <summary>
     /// The earliest answer of <paramref name="probe"/> over <paramref name="serverIds"/>: null when no server answers (a server

@@ -210,7 +210,9 @@ VALUES
     [Fact]
     public async Task ServerWithNoCollectedClock_IsWindowedOnTheMachinesClock()
     {
-        var host = HostOffsetMinutes();
+        /* A fixed machine zone that is not UTC (+05:30), named through the service's seam: a fallback to UTC fails this on any host. */
+        var machine = TimeZoneInfo.CreateCustomTimeZone("test+0530", TimeSpan.FromMinutes(330), "test+0530", "test+0530");
+        var host = 330;
         var offsetB = host - 300;
         await SeedClockAsync(ServerB, offsetB);
         var now = DateTime.UtcNow;
@@ -218,7 +220,7 @@ VALUES
         await InsertRunAsync(ServerNoClock, "no_clock_outside", Wall(now.AddHours(-3), host));
         await InsertRunAsync(ServerB, "b_inside", Wall(now.AddMinutes(-20), offsetB));
 
-        var service = new LocalDataService(_duckDb);
+        var service = new LocalDataService(_duckDb) { MachineZone = machine };
         var scoped = await service.GetJobHistoryAsync(hoursBack: WindowHours, limit: 100, serverId: ServerNoClock);
         var fleet = await service.GetJobHistoryAsync(hoursBack: WindowHours, limit: 100, serverId: null);
 
