@@ -195,7 +195,8 @@ public sealed class McpToolsListBudgetTests
     // create_mute_rule gains its optional server_id parameter (a mute rule keyed on the server's store id); its
     // reading guidance sits after the tool's <<GUIDE>> marker, so the head grows by the parameter alone.
     // Constant set to the value McpToolsListBudgetTests itself measured on this tree.
-    private const int TotalCeilingBytes = 176_643;
+    // get_finops (the grouped FinOps tool, first view high_impact) adds 843 bytes: 176,643 -> 177,486.
+    private const int TotalCeilingBytes = 177_486;
 
 
 
