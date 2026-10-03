@@ -369,10 +369,10 @@ public static class CollectorScheduleDefaults
         ["pg_buffer_usage"] = new(60, 30),
         /* #2561 index bloat. DAILY and 90 days, matching pg_index_usage_stats deliberately - the two answer
            halves of one question (is this index earning its keep, and is it wasting space doing it) and a
-           read that joins them wants both grains to line up. Daily is also the affordable grain: pgstatindex
-           reads EVERY PAGE of an index, so the cost scales with the fleet's total btree size rather than
-           with anything that changes minute to minute. Bloat accumulates over days, so a finer grain would
-           pay repeatedly for an answer that had not moved. */
+           read that joins them wants both grains to line up. Daily is also all the question needs: since #3234
+           the collector estimates from pg_stats and the catalog and reads no index pages (it no longer calls
+           pgstatindex), so one run is cheap, but bloat accumulates over days and a finer grain would pay
+           repeatedly for an answer that had not moved. */
         ["pg_index_bloat"] = new(1440, 90),
         /* #2719 instance CPU. FIVE MINUTES, deliberately looser than the 1-minute cadence the SQL Server
            ring-buffer route uses for cpu_utilization. That route reads a local DMV for free; this one is an

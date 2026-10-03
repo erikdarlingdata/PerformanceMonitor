@@ -35,7 +35,7 @@ public sealed class MuteRuleServerIdRungTests
 {
     public const string RungName = "mute-rule-server-id";
 
-    /// <summary>The probe's newest sentinel, so the last argument; the ordinal is a fact of the probe's shape.</summary>
+    /// <summary>This rung's sentinel ordinal in the probe. No longer the last argument, since V158 appended its own.</summary>
     private const int ProbeOrdinal = 132;
 
     public static int RungVersion => Rung.Version;
@@ -43,13 +43,14 @@ public sealed class MuteRuleServerIdRungTests
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Name == RungName);
 
     [Fact]
-    public void TheRungIsTheTopOfADenseLadder_AtVersion157()
+    public void TheRungIsRegisteredAtVersion157_InADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
-        Assert.Equal(157, StorageVersion.SchemaVersion);
         Assert.Equal(157, Rung.Version);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
+        /* No longer the top rung: V158 (the collector run time) landed above it. */
+        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
     }
@@ -66,24 +67,21 @@ public sealed class MuteRuleServerIdRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheColumnAsItsLastArm_AndMapsFullyMigratedToTheTopRung()
+    public void TheProbeCarriesTheColumn_AndAStoreThatStopsHereMapsToThisRung()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = "table_schema = 'config' AND table_name = 'config_mute_rules' AND column_name = 'server_id'";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.LastIndexOf("EXISTS", StringComparison.Ordinal) < probe.IndexOf(arm, StringComparison.Ordinal),
-            "the new arm is the probe's last EXISTS, so it reads at the next ordinal");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasMuteRuleServerId", method.GetParameters()[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
+        var all = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(157, (int)method.Invoke(null, all)!);
 
         var behind = (object[])all.Clone();

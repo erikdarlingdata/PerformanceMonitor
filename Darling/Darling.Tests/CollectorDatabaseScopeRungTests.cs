@@ -180,7 +180,7 @@ public sealed class CollectorDatabaseScopeRungTests
            unread column would silently resolve every scope to "unscoped" on the next reload. */
         var service = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "StoreConfigProvider.cs");
         Assert.Contains(
-            "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases FROM config_collector_schedules",
+            "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases, run_at_minute FROM config_collector_schedules",
             service, StringComparison.Ordinal);
         Assert.Contains("reader.GetFieldValue<string[]>(5)", service, StringComparison.Ordinal);
 

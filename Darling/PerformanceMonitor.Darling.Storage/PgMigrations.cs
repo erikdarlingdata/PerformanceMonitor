@@ -315,6 +315,26 @@ ALTER TABLE collect.store_metrics
     /// </summary>
     private const string V157Sql = @"ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS server_id integer;";
 
+    /// <summary>
+    /// V158 (#4938) — <c>config.config_collector_schedules.run_at_minute</c>: an optional run time for a collector
+    /// that runs once a day or less often, so a heavy daily collector can run in a quiet hour instead of whenever the
+    /// service happened to start.
+    ///
+    /// <para>The value is minutes after midnight on the monitored server's own clock, from 0 to 1439. It follows the
+    /// V125 <c>databases</c> convention on this sparse table: <b>NULL falls through</b> (server row, then fleet row,
+    /// then no fixed time), and <b>-1 means "no fixed time on this server"</b>, which stops a fleet-wide time the way
+    /// an empty array stops a fleet-wide database scope. The CHECK holds the range, -1 to 1439. Whether a run time
+    /// applies at all depends on the collector's effective interval (a whole number of days), which is not a property
+    /// of the row, so the service judges that when it resolves the schedule, not the CHECK.</para>
+    ///
+    /// <para>Nullable, no DEFAULT, one catalog-only <c>ADD COLUMN</c>: every existing row and every untouched install
+    /// reads NULL and runs exactly as it does today. The CHECK is written inline on the column, so it is part of the
+    /// same idempotent statement and adds no constraint-validation pass. Needs no GRANT (this table carries
+    /// table-level grants with no column carve) and no trigger (V17's <c>trg_bump_collector_schedules</c> already
+    /// bumps the reload beacon on any write here). No Lite twin: Lite keeps its schedules in a JSON file.</para>
+    /// </summary>
+    private const string V158Sql = @"ALTER TABLE config.config_collector_schedules ADD COLUMN IF NOT EXISTS run_at_minute smallint CHECK (run_at_minute BETWEEN -1 AND 1439);";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -510,6 +530,7 @@ ALTER TABLE collect.store_metrics
         new Migration(155, "query-store-interval-end", V155Sql),
         new Migration(156, "checkpoint-longest-sync", V156Sql),
         new Migration(157, "mute-rule-server-id", V157Sql),
+        new Migration(158, "collector-run-time", V158Sql),
     };
 
     /// <summary>
