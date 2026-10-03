@@ -56,9 +56,9 @@ public sealed class ViewerShortWindowDataStartTests : IDisposable
     [Fact]
     public void ACappedRead_OnAOneHourRange_NamesItsOldestRow_WhenItIsLaterThanTheStart()
     {
-        Assert.Equal("Showing since 2026-09-01 00:20", BannerFor(coverageStartUtc: null, Page(At(20), Cap), Cap));
+        Assert.Equal("Showing since 2026-09-01 00:20:00", BannerFor(coverageStartUtc: null, Page(At(20), Cap), Cap));
         /* The same rows with a coverage answer that reaches the range start: the cap is what names the row. */
-        Assert.Equal("Showing since 2026-09-01 00:20", BannerFor(At(-600), Page(At(20), Cap), Cap));
+        Assert.Equal("Showing since 2026-09-01 00:20:00", BannerFor(At(-600), Page(At(20), Cap), Cap));
     }
 
     /* A capped read whose oldest row is at the window's start reaches the start: no banner. */
@@ -69,13 +69,27 @@ public sealed class ViewerShortWindowDataStartTests : IDisposable
         Assert.Null(BannerFor(At(-600), Page(At(0), Cap), Cap));
     }
 
+    /* The note names its time to the second. A capped read has no slack, so a read whose oldest row came 42 seconds into the range's
+       first minute shows a banner, and a note in whole minutes would print the range's own start minute for it (10:15 for a range from
+       10:15:00), which reads as if the grid started at the range's start. */
+    [Fact]
+    public void ACappedRead_WhoseOldestRowIsSecondsPastTheStart_NamesTheSecond_NotTheStartsMinute()
+    {
+        var rangeStart = new DateTime(2026, 9, 1, 10, 15, 0, DateTimeKind.Utc);
+        var oldest = rangeStart.AddSeconds(42);
+
+        Assert.Equal("Showing since 2026-09-01 10:15:42", BannerFor(coverageStartUtc: null, Page(oldest, Cap), Cap, rangeStart));
+        /* Under a coverage answer that reaches the start, the cap still names the row, to the second. */
+        Assert.Equal("Showing since 2026-09-01 10:15:42", BannerFor(rangeStart.AddHours(-10), Page(oldest, Cap), Cap, rangeStart));
+    }
+
     /* A read under its cap keeps its verdict, and the slack stays on the coverage probe: a first collection 85 minutes in is
        absorbed, one 95 minutes in is named. */
     [Fact]
     public void TheSlack_StaysOnTheCoverageProbe()
     {
         Assert.Null(BannerFor(At(85), Page(At(86), 3), Cap));
-        Assert.Equal("Showing since 2026-09-01 01:35", BannerFor(At(95), Page(At(96), 3), Cap));
+        Assert.Equal("Showing since 2026-09-01 01:35:00", BannerFor(At(95), Page(At(96), 3), Cap));
         /* A page one row under the cap is not capped. */
         Assert.Null(BannerFor(coverageStartUtc: null, Page(At(20), Cap - 1), Cap));
     }
@@ -128,9 +142,9 @@ public sealed class ViewerShortWindowDataStartTests : IDisposable
 
     // ── The banner, read off the real control ──
 
-    /* The banner raised for the probe's answer and the rows the grid shows, read off the control; null when it is hidden. Seeded
-       visible, so a no-op cannot pass as a hidden banner. */
-    private static string? BannerFor(DateTime? coverageStartUtc, IEnumerable<DateTime> shownTimes, int? rowCap)
+    /* The banner raised for the probe's answer and the rows the grid shows on the range that starts at startUtc (RangeStart when
+       omitted), read off the control; null when it is hidden. Seeded visible, so a no-op cannot pass as a hidden banner. */
+    private static string? BannerFor(DateTime? coverageStartUtc, IEnumerable<DateTime> shownTimes, int? rowCap, DateTime? startUtc = null)
     {
         string? text = null;
         OnStaThread(() =>
@@ -139,7 +153,7 @@ public sealed class ViewerShortWindowDataStartTests : IDisposable
             var banner = new TextBlock { Visibility = Visibility.Visible, Text = "stale" };
 
             ViewerServerTab.ShowEventDataStartAsync(
-                banner, Task.FromResult(coverageStartUtc), "Short Window", RangeStart, shownTimes.Select(t => (DateTime?)t), rowCap).GetAwaiter().GetResult();
+                banner, Task.FromResult(coverageStartUtc), "Short Window", startUtc ?? RangeStart, shownTimes.Select(t => (DateTime?)t), rowCap).GetAwaiter().GetResult();
 
             text = banner.Visibility == Visibility.Visible ? banner.Text : null;
         });

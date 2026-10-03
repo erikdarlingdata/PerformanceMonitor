@@ -224,8 +224,8 @@ public partial class ViewerServerTab
     /// <paramref name="floor"/> sits past <see cref="RawWindowFloor.IsTruncated"/>'s slack after
     /// <paramref name="requestedStartUtc"/>, collapsed otherwise. The chart-title idiom
     /// (<see cref="DescribeTrendCoverage"/>) states the same fact on Performance Trends; this is its grid-header
-    /// form, in <c>yyyy-MM-dd HH:mm</c>, the format every trend chart title already uses for a head timestamp, in the
-    /// display zone and on the invariant culture (<see cref="BannerTime"/>).
+    /// form, in <c>yyyy-MM-dd HH:mm:ss</c>, with seconds as Lite's banner has them, in the display zone and on the
+    /// invariant culture (<see cref="BannerTime"/>).
     /// </summary>
     internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null,
         QueryStoreIntervalWide.WideReadPlan? widePlan = null)
@@ -284,10 +284,13 @@ public partial class ViewerServerTab
     /// culture, as Lite's banner (<c>DisplayZone.Format</c>) and the web's notice are. A banner is one line of
     /// disclosure, not a grid cell, and a machine whose default calendar is not the Gregorian one (Thai Buddhist,
     /// Hijri) would otherwise print 2026 as 2569 or 1448. <c>FormatForDisplay</c> stays on the current culture on
-    /// purpose for the grids' own columns.
+    /// purpose for the grids' own columns. The time carries its seconds (Lite's banner does too): a grid that reaches
+    /// back no further than its oldest row names that row, and a note in whole minutes could print the range's own
+    /// start minute for a row some seconds into it, which reads as if the grid started at the range's start.
+    /// This is the one formatter every "Showing since" note on the server tab goes through.
     /// </summary>
     private static string BannerTime(DateTime naiveUtc) =>
-        PerformanceMonitor.Ui.DisplayZone.Format(naiveUtc, ViewerTimeHelper.CurrentDisplayZone(), "yyyy-MM-dd HH:mm");
+        PerformanceMonitor.Ui.DisplayZone.Format(naiveUtc, ViewerTimeHelper.CurrentDisplayZone(), "yyyy-MM-dd HH:mm:ss");
 
     /// <summary>
     /// Where a data-start probe says the data starts (Active Queries, Current Waits, and the Queries tab's Query Stats,
@@ -333,16 +336,33 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadQueryStoreRegressionsAsync(DateTime startUtc, DateTime endUtc)
     {
-        /* #4966: the read compares the range with the baseline of the 7 days before it, so the notice keys on that EARLIER window:
-           a server added two days ago covers the range whole but has two days of baseline, not seven. The rows are ranked by
-           added duration, not by time, so they name no earlier start and the cap rule does not apply. */
-        var baselineStartUtc = ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc);
+        /* #4966: the probe starts beside the read and asks about the baseline window (the data layer keys it there), and the banner
+           step compares its answer with that window's start. The rows are ranked by added duration, not by time, so they name no
+           earlier start and the cap rule does not apply. */
         var floorTask = _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var rows = await _dataService.GetQueryStoreRegressionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStoreRegressionsFilterMgr!.UpdateData(rows);
-        UpdateTruncationBanner(QueryStoreRegressionsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store Regressions"), baselineStartUtc);
+        await ShowQueryStoreRegressionsDataStartAsync(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
         SetDefaultSortIfNone(QueryStoreRegressionsGrid, "DurationRegressionPercent", ListSortDirection.Descending);
     }
+
+    /// <summary>
+    /// Raises or hides the "Showing since" banner of the Query Store Regressions grid (#4966). The read compares the range with
+    /// the baseline of the 7 days before it, so the notice keys on that EARLIER window: a server added two days ago covers the
+    /// range whole but has two days of baseline, not seven, and a note compared with the range's own start would stay silent. The
+    /// probe's answer (<paramref name="probe"/>, started beside the read: <see cref="ViewerDataService.GetQueryStoreRegressionsDataStartAsync"/>)
+    /// is therefore compared with <see cref="ViewerDataService.QueryStoreRegressionsBaselineStart"/> of the range's start, through
+    /// <see cref="UpdateTruncationBanner"/>. The probe is awaited through <see cref="DataStartOrNullAsync"/>, so a probe that
+    /// throws costs this banner and nothing after it. <c>internal static</c> so the store-backed tests run the same step as the tab.
+    /// </summary>
+    /// <param name="banner">The grid's banner.</param>
+    /// <param name="probe">The grid's data-start probe, started beside its read.</param>
+    /// <param name="startUtc">The start of the RANGE the grid just drew (not of its baseline).</param>
+    internal static async Task ShowQueryStoreRegressionsDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc) =>
+        UpdateTruncationBanner(
+            banner,
+            await DataStartOrNullAsync(probe, "Query Store Regressions"),
+            ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc));
 
     /// <summary>
     /// Loads the Plan Corrections grid (#1952) — the engine's own automatic plan correction recommendations

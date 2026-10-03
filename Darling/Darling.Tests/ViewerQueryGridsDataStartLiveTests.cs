@@ -8,12 +8,17 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -24,10 +29,14 @@ namespace Darling.Tests;
 /// first collection (the registry's created date) and the table's retention edge, moved earlier by a row in the range. The
 /// notice names the earlier of that coverage and the earliest row the grid shows, and a read that returned a full page names its
 /// oldest row, since the grid reaches back no further. Each case runs the same two calls the server tab makes (the grid's rows,
-/// the data-start probe) and the same rule it applies.
+/// the data-start probe) and then the tab's own banner step (<see cref="ViewerServerTab.ShowEventDataStartAsync"/>) on a real
+/// banner control, and reads what the banner says.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to CREATE
-   and DROP its own database through ScratchPostgres, then works entirely inside it. */
+   and DROP its own database through ScratchPostgres, then works entirely inside it. The banner's time text reads the process-wide
+   display mode, which QueryGridSeed.ReadBanner sets and restores; the viewer-time-statics collection serializes that with every
+   other class that flips the viewer's time statics. */
+[Collection("viewer-time-statics")]
 public sealed class ViewerPlanCorrectionsDataStartLiveTests
 {
     private const int NewServerId = -496631;
@@ -47,12 +56,10 @@ public sealed class ViewerPlanCorrectionsDataStartLiveTests
         await using var store = await Store.CreateAsync(ct);
 
         var (coverage, shown) = await store.ReadAsync(NewServerId, ct);
-        var notice = Notice(coverage, shown);
 
         Assert.NotEmpty(shown);
         Assert.Equal(store.End.AddDays(-2), coverage);
-        Assert.Equal(store.End.AddDays(-2), notice);
-        Assert.True(RawWindowFloor.IsTruncated(notice, store.Start));
+        Assert.Equal(QueryGridSeed.Since(store.End.AddDays(-2)), Banner(store, coverage, shown));
     }
 
     /* A quiet start: monitored for 120 days, so the store covers the whole range (its retention edge, 30 days back, is the
@@ -64,12 +71,11 @@ public sealed class ViewerPlanCorrectionsDataStartLiveTests
         await using var store = await Store.CreateAsync(ct);
 
         var (coverage, shown) = await store.ReadAsync(QuietServerId, ct);
-        var notice = Notice(coverage, shown);
 
         Assert.NotEmpty(shown);
         Assert.Equal(store.Start.AddHours(5), shown.Min(r => r.CollectionTime));
-        Assert.NotNull(notice);
-        Assert.False(RawWindowFloor.IsTruncated(notice, store.Start));
+        Assert.NotNull(coverage);
+        Assert.Null(Banner(store, coverage, shown));
     }
 
     /* A read that fills the cap (200 rows exactly, and 220 seeded, which returns 200): the grid shows the newest 200 recommendations
@@ -84,14 +90,12 @@ public sealed class ViewerPlanCorrectionsDataStartLiveTests
         await using var store = await Store.CreateAsync(ct);
 
         var (coverage, shown) = await store.ReadAsync(seeded == Cap ? FullPageServerId : PastTheCapServerId, ct);
-        var notice = Notice(coverage, shown);
 
         Assert.Equal(Cap, shown.Count);
-        Assert.Equal(store.End.AddMinutes(-(Cap - 1)), notice);
-        Assert.True(RawWindowFloor.IsTruncated(notice, store.Start));
+        Assert.Equal(QueryGridSeed.Since(store.End.AddMinutes(-(Cap - 1))), Banner(store, coverage, shown));
 
         /* The cap is what raises it: without the cap rule the store's coverage reaches the range start, and nothing shows. */
-        Assert.False(RawWindowFloor.IsTruncated(Notice(coverage, shown, applyCap: false), store.Start));
+        Assert.Null(Banner(store, coverage, shown, rowCap: null));
     }
 
     /* One row under the cap: the read returned everything the range holds, so the coverage rule stands and the covered range
@@ -103,21 +107,19 @@ public sealed class ViewerPlanCorrectionsDataStartLiveTests
         await using var store = await Store.CreateAsync(ct);
 
         var (coverage, shown) = await store.ReadAsync(UnderTheCapServerId, ct);
-        var notice = Notice(coverage, shown);
 
         Assert.Equal(Cap - 1, shown.Count);
-        Assert.NotNull(notice);
-        Assert.Equal(Notice(coverage, shown, applyCap: false), notice);
-        Assert.False(RawWindowFloor.IsTruncated(notice, store.Start));
+        Assert.NotNull(coverage);
+        Assert.Null(Banner(store, coverage, shown));
+        /* The cap rule changes nothing for a read under its cap: the covered range shows no notice with it or without it. */
+        Assert.Null(Banner(store, coverage, shown, rowCap: null));
     }
 
-    /* The rule the tab applies (ViewerServerTab.ShowEventDataStartAsync): the probe's answer, the collection time of each row shown,
-       and the grid's cap. */
-    private static DateTime? Notice(DateTime? coverage, IReadOnlyCollection<PlanCorrectionRow> shown, bool applyCap = true) =>
-        ViewerEventDataStart.Of(
-            coverage,
-            ViewerEventDataStart.EarliestOf(shown.Select(r => (DateTime?)r.CollectionTime)),
-            applyCap && ViewerEventDataStart.ReadHitCap(shown.Count, Cap));
+    /* The banner the tab's own step raises for the probe's answer, the collection time of each row shown and the grid's cap: the call
+       ViewerServerTab.LoadPlanCorrectionsAsync makes, on a real banner control. Null when the banner is hidden. */
+    private static string? Banner(Store store, DateTime? coverage, IReadOnlyCollection<PlanCorrectionRow> shown, int? rowCap = Cap) =>
+        QueryGridSeed.ReadBanner(banner => ViewerServerTab.ShowEventDataStartAsync(
+            banner, Task.FromResult(coverage), "Plan Corrections", store.Start, shown.Select(r => (DateTime?)r.CollectionTime), rowCap));
 
     private sealed class Store : IAsyncDisposable
     {
@@ -222,7 +224,10 @@ public sealed class ViewerPlanCorrectionsDataStartLiveTests
    and the notice names the row's bin. A range the store covered from before it started has an older row before the range, which
    is the case that gives no notice. */
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to CREATE
-   and DROP its own database through ScratchPostgres, then works entirely inside it. */
+   and DROP its own database through ScratchPostgres, then works entirely inside it. The banner's time text reads the process-wide
+   display mode, which QueryGridSeed.ReadBanner sets and restores; the viewer-time-statics collection serializes that with every
+   other class that flips the viewer's time statics. */
+[Collection("viewer-time-statics")]
 public sealed class ViewerQueryHeatmapDataStartLiveTests
 {
     private const int NewServerId = -496641;
@@ -238,12 +243,10 @@ public sealed class ViewerQueryHeatmapDataStartLiveTests
         await using var store = await Store.CreateAsync(ct);
 
         var (coverage, columns) = await store.ReadAsync(NewServerId, ct);
-        var notice = ViewerEventDataStart.Of(coverage, ViewerEventDataStart.EarliestOf(columns.Select(t => (DateTime?)t)));
 
         Assert.Equal(store.FirstRowInTheRange, coverage);
         Assert.Equal(store.FirstRowInTheRange.AddMinutes(-3), columns.Min());
-        Assert.Equal(store.FirstRowInTheRange.AddMinutes(-3), notice);
-        Assert.True(RawWindowFloor.IsTruncated(notice, store.Start));
+        Assert.Equal(QueryGridSeed.Since(store.FirstRowInTheRange.AddMinutes(-3)), Banner(store, coverage, columns));
     }
 
     /* An older row before the range: the server holds a row from 10 days ago, then a gap, then rows from 5 hours into the range. That row
@@ -255,14 +258,18 @@ public sealed class ViewerQueryHeatmapDataStartLiveTests
         await using var store = await Store.CreateAsync(ct);
 
         var (coverage, columns) = await store.ReadAsync(OlderRowServerId, ct);
-        var notice = ViewerEventDataStart.Of(coverage, ViewerEventDataStart.EarliestOf(columns.Select(t => (DateTime?)t)));
 
         Assert.NotEmpty(columns);
         Assert.Equal(store.End.AddDays(-10), coverage);
         Assert.True(columns.Min() > store.Start);
-        Assert.NotNull(notice);
-        Assert.False(RawWindowFloor.IsTruncated(notice, store.Start));
+        Assert.Null(Banner(store, coverage, columns));
     }
+
+    /* The banner the tab's own step raises for the probe's answer and the time of each column drawn: the call
+       ViewerServerTab.LoadQueryHeatmapAsync makes, on a real banner control. Null when the banner is hidden. */
+    private static string? Banner(Store store, DateTime? coverage, DateTime[] columns) =>
+        QueryGridSeed.ReadBanner(banner => ViewerServerTab.ShowEventDataStartAsync(
+            banner, Task.FromResult(coverage), "Query Heatmap", store.Start, columns.Select(t => (DateTime?)t)));
 
     private sealed class Store : IAsyncDisposable
     {
@@ -352,77 +359,102 @@ public sealed class ViewerQueryHeatmapDataStartLiveTests
 /// <summary>
 /// The desktop viewer's Query Store Regressions grid against a real store (#4966). The read compares the range with the
 /// 7 days before it (<see cref="ViewerDataService.QueryStoreRegressionsBaselineStart"/>), so the notice keys on that EARLIER window:
-/// a server added two days before a one-day range covers the range whole but holds two days of baseline, not seven, and a notice
-/// keyed on the range alone stays silent. <c>query_store_stats</c> carries no schedule edge, so coverage is the oldest row.
+/// a server added two days before the range covers the range whole but holds two days of baseline, not seven, and a notice
+/// keyed on the range alone stays silent. <c>query_store_stats</c> carries no schedule edge, so coverage is the oldest row. Each case
+/// runs the probe the tab starts and then the tab's own banner step (<see cref="ViewerServerTab.ShowQueryStoreRegressionsDataStartAsync"/>)
+/// on a real banner control, over a one-day range and over ranges of 90 and 60 minutes.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to CREATE
-   and DROP its own database through ScratchPostgres, then works entirely inside it. */
+   and DROP its own database through ScratchPostgres, then works entirely inside it. The banner's time text reads the process-wide
+   display mode, which QueryGridSeed.ReadBanner sets and restores; the viewer-time-statics collection serializes that with every
+   other class that flips the viewer's time statics. */
+[Collection("viewer-time-statics")]
 public sealed class ViewerQueryStoreRegressionsDataStartLiveTests
 {
     private const int NewServerId = -496651;
     private const int DeepServerId = -496652;
 
-    /* Rows start inside the baseline window: the server was added 2 days before the one-day range, so it holds 2 days of the 7-day
-       baseline and the range itself. The probe asks about the baseline window and names where that window's data starts, the day the
-       server was added; the range-keyed comparison (the range's own start) would say nothing, since the coverage precedes it. */
-    [Fact]
-    public async Task RowsThatStartInsideTheBaselineWindow_GiveANotice_AtTheBaselinesDataStart_AgainstDevPostgres()
+    /* The range lengths each case runs, in minutes: a day, and two ranges no longer than the shared probe's 90-minute slack. The probe
+       asks about the BASELINE window, which starts 7 days before the range, so its window is longer than the slack whatever the range,
+       and it still runs on a short one and names where the baseline's data starts. A probe keyed on the range's own start would be
+       skipped there (the shared probe starts no query for a window no longer than the slack) and answer nothing. */
+    private const int OneDay = 24 * 60;
+
+    /* Rows start inside the baseline window: the server was added 2 days before the range, so it holds 2 days of the 7-day baseline and
+       the range itself. The probe asks about the baseline window and the tab's banner step compares its answer with that window's
+       start, so the banner names where the baseline's data starts, the day the server was added; compared with the range's own start
+       (which the coverage precedes) it would say nothing. */
+    [Theory]
+    [InlineData(OneDay)]
+    [InlineData(90)]
+    [InlineData(60)]
+    public async Task RowsThatStartInsideTheBaselineWindow_GiveANotice_AtTheBaselinesDataStart_AgainstDevPostgres(int rangeMinutes)
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var store = await Store.CreateAsync(ct);
+        await using var store = await Store.CreateAsync(rangeMinutes, ct);
 
         var coverage = await store.ProbeAsync(NewServerId, ct);
-        var baselineStart = ViewerDataService.QueryStoreRegressionsBaselineStart(store.Start);
 
         Assert.Equal(store.Start.AddDays(-2), coverage);
-        Assert.True(RawWindowFloor.IsTruncated(coverage, baselineStart));
-        Assert.Equal(store.Start.AddDays(-2), RawWindowFloor.EffectiveStart(coverage, baselineStart));
+        Assert.Equal(QueryGridSeed.Since(store.Start.AddDays(-2)), Banner(store, coverage));
+        /* The premise: the range-keyed comparison finds the range covered. */
         Assert.False(RawWindowFloor.IsTruncated(coverage, store.Start));
     }
 
     /* Rows reach back before the baseline: the server holds a row from 10 days before the range, a day before the baseline window
        starts. The baseline is whole, so no notice. */
-    [Fact]
-    public async Task RowsThatReachBackBeforeTheBaseline_GiveNoNotice_AgainstDevPostgres()
+    [Theory]
+    [InlineData(OneDay)]
+    [InlineData(90)]
+    [InlineData(60)]
+    public async Task RowsThatReachBackBeforeTheBaseline_GiveNoNotice_AgainstDevPostgres(int rangeMinutes)
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var store = await Store.CreateAsync(ct);
+        await using var store = await Store.CreateAsync(rangeMinutes, ct);
 
         var coverage = await store.ProbeAsync(DeepServerId, ct);
-        var baselineStart = ViewerDataService.QueryStoreRegressionsBaselineStart(store.Start);
 
         Assert.Equal(store.Start.AddDays(-10), coverage);
-        Assert.False(RawWindowFloor.IsTruncated(coverage, baselineStart));
+        Assert.Null(Banner(store, coverage));
     }
+
+    /* The banner the tab's own step raises for the probe's answer on the range the store was built for: the call
+       ViewerServerTab.LoadQueryStoreRegressionsAsync makes, on a real banner control. Null when the banner is hidden. */
+    private static string? Banner(Store store, DateTime? coverage) =>
+        QueryGridSeed.ReadBanner(banner => ViewerServerTab.ShowQueryStoreRegressionsDataStartAsync(banner, Task.FromResult(coverage), store.Start));
 
     private sealed class Store : IAsyncDisposable
     {
         private readonly ScratchPostgres _scratch;
         private readonly ViewerDataService _viewer;
 
-        private Store(ScratchPostgres scratch, ViewerDataService viewer, DateTime end)
+        private Store(ScratchPostgres scratch, ViewerDataService viewer, DateTime end, int rangeMinutes)
         {
             _scratch = scratch;
             _viewer = viewer;
             End = end;
+            RangeMinutes = rangeMinutes;
         }
 
         public DateTime End { get; }
 
-        /// <summary>The start of the one-day range the grid compares with its baseline.</summary>
-        public DateTime Start => End.AddDays(-1);
+        /// <summary>The length of the range the grid compares with its baseline, in minutes.</summary>
+        public int RangeMinutes { get; }
 
-        /// <summary>The probe's answer for the one-day range, as the server tab asks it.</summary>
+        /// <summary>The start of the range the grid compares with its baseline.</summary>
+        public DateTime Start => End.AddMinutes(-RangeMinutes);
+
+        /// <summary>The probe's answer for the range, as the server tab asks it.</summary>
         public Task<DateTime?> ProbeAsync(int serverId, CancellationToken ct) =>
             _viewer.GetQueryStoreRegressionsDataStartAsync(serverId, Start, End, ct);
 
-        public static async Task<Store> CreateAsync(CancellationToken ct)
+        public static async Task<Store> CreateAsync(int rangeMinutes, CancellationToken ct)
         {
             var scratch = await QueryGridSeed.OpenScratchAsync(ct);
             try
             {
                 var end = QueryGridSeed.NowToTheMinute();
-                var start = end.AddDays(-1);
+                var start = end.AddMinutes(-rangeMinutes);
                 await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
                 {
                     await connection.OpenAsync(ct);
@@ -437,7 +469,7 @@ public sealed class ViewerQueryStoreRegressionsDataStartLiveTests
                     await InsertAsync(connection, DeepServerId, "regressions-deep", start.AddDays(-10), end, ct);
                 }
 
-                return new Store(scratch, new ViewerDataService(scratch.ConnectionString), end);
+                return new Store(scratch, new ViewerDataService(scratch.ConnectionString), end, rangeMinutes);
             }
             catch
             {
@@ -475,7 +507,10 @@ public sealed class ViewerQueryStoreRegressionsDataStartLiveTests
     }
 }
 
-/// <summary>What the three query-grid live classes share: the scratch database and the instants a range is built from.</summary>
+/// <summary>
+/// What the three query-grid live classes share: the scratch database, the instants a range is built from, and the banner the product's
+/// own step raises on a real control.
+/// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. This helper reaches DARLING_TEST_PG only to CREATE and DROP
    each test's own database through ScratchPostgres; nothing here touches the shared database. */
 internal static class QueryGridSeed
@@ -498,4 +533,50 @@ internal static class QueryGridSeed
 
     /// <summary>The instant as the store's naive UTC timestamp.</summary>
     public static DateTime Naive(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Unspecified);
+
+    /// <summary>The text of the "Showing since" banner for an instant, in the UTC display mode <see cref="ReadBanner"/> sets, to the second.</summary>
+    public static string Since(DateTime utc) => "Showing since " + utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Runs the product's own banner step against a real banner control and reads the banner back: its text when it shows, null when it is
+    /// hidden. WPF objects need an STA thread, so the step runs on one, and the banner's time text reads the process-wide display mode, so
+    /// it is set to UTC for the step and restored after it (the classes that call this are in the viewer-time-statics collection). The
+    /// banner is seeded visible, so a step that never touches it cannot pass as a hidden banner.
+    /// </summary>
+    public static string? ReadBanner(Func<TextBlock, Task> raise)
+    {
+        string? text = null;
+        Exception? error = null;
+        var thread = new Thread(() =>
+        {
+            var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+            try
+            {
+                ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+                var banner = new TextBlock { Visibility = Visibility.Visible, Text = "stale" };
+
+                raise(banner).GetAwaiter().GetResult();
+
+                text = banner.Visibility == Visibility.Visible ? banner.Text : null;
+            }
+            catch (Exception ex)
+            {
+                error = ex;
+            }
+            finally
+            {
+                ViewerTimeHelper.CurrentDisplayMode = savedMode;
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+
+        if (error is not null)
+        {
+            ExceptionDispatchInfo.Capture(error).Throw();
+        }
+
+        return text;
+    }
 }

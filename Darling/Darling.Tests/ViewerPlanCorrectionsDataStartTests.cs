@@ -155,7 +155,7 @@ public sealed class ViewerPlanCorrectionsDataStartTests : IDisposable
     [Fact]
     public void RowsThatStartInsideTheRange_RaiseTheNotice_AtTheCoverageStart()
     {
-        Assert.Equal("Showing since 2026-09-04 00:00", BannerFor(At(3), [At(3, 6), At(5)]));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(At(3), [At(3, 6), At(5)]));
     }
 
     /* A quiet start: the store covered the whole range, and the first recommendation was collected 5 hours in. No notice. */
@@ -173,10 +173,10 @@ public sealed class ViewerPlanCorrectionsDataStartTests : IDisposable
         var oldest = RangeStart.AddDays(3);
         IEnumerable<DateTime> Page(int count) => Enumerable.Range(0, count).Select(i => oldest.AddMinutes(i));
 
-        Assert.Equal("Showing since 2026-09-04 00:00", BannerFor(At(-20), Page(ViewerDataService.PlanCorrectionsRowCap)));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(At(-20), Page(ViewerDataService.PlanCorrectionsRowCap)));
         Assert.Null(BannerFor(At(-20), Page(ViewerDataService.PlanCorrectionsRowCap - 1)));
         /* The notice comes from the rows, so a probe with no answer does not hide it. */
-        Assert.Equal("Showing since 2026-09-04 00:00", BannerFor(null, Page(ViewerDataService.PlanCorrectionsRowCap)));
+        Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(null, Page(ViewerDataService.PlanCorrectionsRowCap)));
     }
 
     /* WPF objects require STA; same shape as ViewerLongQueriesDataStartTests. */
