@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -193,22 +194,104 @@ internal sealed class ScratchPostgres : IAsyncDisposable
 
     private static void DropEverythingRemembered()
     {
+        var pending = new List<RememberedDatabase>();
         foreach (var (name, entry) in Remembered.ToArray())
+        {
+            pending.Add(new RememberedDatabase(name, entry.AdminConnectionString, entry.Creator));
+        }
+
+        DropRememberedAtExit(pending);
+    }
+
+    /// <summary>One database the exit drain was asked to drop: its name, the connection string that drops it, and the test that created it.</summary>
+    internal readonly record struct RememberedDatabase(string Name, string AdminConnectionString, string Creator);
+
+    /// <summary>What an exit drain did: connections it tried to open, databases it dropped, drops that failed, and databases it left alone.</summary>
+    internal readonly record struct ExitDrainOutcome(int ConnectAttempts, int Dropped, int Failed, int Skipped);
+
+    /// <summary>
+    /// How long the exit drain waits to connect to a cluster, in seconds. The default is 15, and the drain ran once per
+    /// remembered database, so a cluster stopped before the process exited cost 15 seconds for each database the run
+    /// still held (#4981).
+    /// </summary>
+    internal const int ExitDrainConnectTimeoutSeconds = 3;
+
+    /// <summary>
+    /// How long one drop at exit may run, in seconds. This stays at the library default on purpose: a dead cluster
+    /// never gets as far as a command (its connect fails first), and a drop on a live cluster ends with an immediate
+    /// checkpoint that took 11 seconds on a busy local cluster, so a shorter limit cancelled a drop that was working
+    /// and left the very database the drain exists to remove.
+    /// </summary>
+    internal const int ExitDrainCommandTimeoutSeconds = 30;
+
+    /// <summary>The admin connection string with the exit drain's own connect and command timeouts, and no pooling: one connection per drop.</summary>
+    internal static string ExitDrainConnectionString(string adminConnectionString) =>
+        new NpgsqlConnectionStringBuilder(adminConnectionString)
+        {
+            Timeout = ExitDrainConnectTimeoutSeconds,
+            CommandTimeout = ExitDrainCommandTimeoutSeconds,
+            Pooling = false,
+        }.ConnectionString;
+
+    /// <summary>
+    /// The exit drain's body, taking its list as a parameter so a test can run it without a process exit and without
+    /// touching the databases that other tests, running in parallel, still hold.
+    /// </summary>
+    /// <remarks>
+    /// Connects with the short timeouts above, and stops trying a cluster once a connect to it fails without the
+    /// server answering (a stopped cluster, a refused or timed-out connection), so N databases on a dead cluster cost
+    /// one short wait, not N. A server that answers with an error (a bad password, a missing database) is not a dead
+    /// cluster, and a failed drop on a live cluster never stops the others; each skipped database is still named.
+    /// </remarks>
+    internal static ExitDrainOutcome DropRememberedAtExit(IEnumerable<RememberedDatabase> remembered)
+    {
+        var unreachable = new HashSet<string>(StringComparer.Ordinal);
+        int attempts = 0, dropped = 0, failed = 0, skipped = 0;
+        foreach (var db in remembered)
         {
             try
             {
-                using var admin = new NpgsqlConnection(entry.AdminConnectionString);
-                admin.Open();
-                using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)", admin);
+                var cluster = ClusterKey(db.AdminConnectionString);
+                if (unreachable.Contains(cluster))
+                {
+                    skipped++;
+                    Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}) and was not dropped at exit: its cluster did not answer an earlier connect.");
+                    continue;
+                }
+
+                attempts++;
+                using var admin = new NpgsqlConnection(ExitDrainConnectionString(db.AdminConnectionString));
+                try
+                {
+                    admin.Open();
+                }
+                catch (Exception ex) when (ex is not PostgresException)
+                {
+                    unreachable.Add(cluster);
+                    throw;
+                }
+
+                using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{db.Name}\" WITH (FORCE)", admin);
                 drop.ExecuteNonQuery();
-                Remembered.TryRemove(name, out _);
-                Console.Error.WriteLine($"Scratch database {name} outlived its test ({entry.Creator}); dropped at process exit.");
+                Remembered.TryRemove(db.Name, out _);
+                dropped++;
+                Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}); dropped at process exit.");
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Scratch database {name} outlived its test ({entry.Creator}) and could not be dropped at exit: {ex.Message}");
+                failed++;
+                Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}) and could not be dropped at exit: {ex.Message}");
             }
         }
+
+        return new ExitDrainOutcome(attempts, dropped, failed, skipped);
+    }
+
+    /// <summary>The cluster a connection string names, by host and port: what the start-of-run sweep and the exit drain each treat as one cluster.</summary>
+    private static string ClusterKey(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        return $"{builder.Host}:{builder.Port}".ToUpperInvariant();
     }
 
     /// <summary>
@@ -217,8 +300,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// </summary>
     private static async Task SweepOncePerClusterAsync(string baseConnectionString, CancellationToken cancellationToken)
     {
-        var builder = new NpgsqlConnectionStringBuilder(baseConnectionString);
-        var key = $"{builder.Host}:{builder.Port}".ToUpperInvariant();
+        var key = ClusterKey(baseConnectionString);
         var sweep = Sweeps.GetOrAdd(key, _ => new Lazy<Task>(() => RunSweepAsync(baseConnectionString)));
         await sweep.Value.WaitAsync(cancellationToken);
     }
