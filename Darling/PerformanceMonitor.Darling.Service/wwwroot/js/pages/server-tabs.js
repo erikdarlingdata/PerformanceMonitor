@@ -3474,6 +3474,9 @@ const HEAVIEST_COLUMNS = [
   { key: "p95_duration_ms", label: "p95", format: "ms" },
   { key: "max_duration_ms", label: "Max", format: "ms" },
   { key: "frequency_minutes", label: "Every (min)", format: "num1" },
+  /* #4938: the collector's run time on the monitored server's clock, beside the cadence it runs on. Left out unless a
+     row has one, so a server with no run times shows no column of dashes. */
+  { key: "run_at", label: "Run at", hideWhenEmpty: true },
   { key: "amortized_ms_per_minute", label: "ms/min", format: "num1" },
   { key: "pct_of_sweep_budget_per_run", label: "% of sweep", format: "num1" },
 ];
