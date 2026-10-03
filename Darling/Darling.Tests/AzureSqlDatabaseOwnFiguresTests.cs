@@ -492,10 +492,15 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
             "FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;",
             tab, StringComparison.Ordinal);
 
-        Assert.Contains(
-            "int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;",
-            tab, StringComparison.Ordinal);
+        // The CPU term's rule moved to Storage with the inventory figures (#4843).
+        Assert.Contains("item.HealthScore = FinOpsInventoryFigures.HealthScore(item.AvgCpuPct);", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("item.AvgCpuPct ?? 0m", tab, StringComparison.Ordinal);
+
+        var figures = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsInventoryFigures.cs");
+        Assert.Contains(
+            "int? cpuScore = avgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;",
+            figures, StringComparison.Ordinal);
+        Assert.DoesNotContain("avgCpuPct ?? 0m", figures, StringComparison.Ordinal);
     }
 
     [Fact]
