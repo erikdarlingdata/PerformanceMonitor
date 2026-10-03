@@ -121,11 +121,21 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
         Assert.Equal(1, Matches(load, @"var sinceUtc = nowUtc\.AddHours\(-hoursBack\);"));
         Assert.Equal(0, Matches(load, @"DateTime\.UtcNow\.AddHours"));
         Assert.Equal(1, Matches(load, @"var dataStartTask = _dataService\.GetJobHistoryDataStartAsync\(serverId,\s*sinceUtc,\s*nowUtc\);"));
-        Assert.Equal(1, Matches(load, @"await _dataService\.GetJobHistoryAsync\(sinceUtc,\s*serverId,\s*RowCap\)"));
+        Assert.Equal(1, Matches(load, @"var readTask = _dataService\.GetJobHistoryAsync\(sinceUtc,\s*serverId,\s*RowCap\)"));
         /* The probe starts beside the read, not after it. */
         Assert.True(
-            load.IndexOf("GetJobHistoryDataStartAsync(", StringComparison.Ordinal) < load.IndexOf("await _dataService.GetJobHistoryAsync(", StringComparison.Ordinal),
+            load.IndexOf("GetJobHistoryDataStartAsync(", StringComparison.Ordinal) < load.IndexOf("var readTask = _dataService.GetJobHistoryAsync(", StringComparison.Ordinal),
             "the probe starts after the read has been awaited");
+    }
+
+    [Fact]
+    public void TheRead_IsAwaitedThroughTheProbeWatchHelper()
+    {
+        var load = MethodBody(ViewerFile("JobHistoryTab.xaml.cs"), @"private async Task LoadJobsAsync\(");
+
+        Assert.Equal(1, Matches(load, @"ViewerServerTab\.AwaitReadWatchingProbeAsync\(readTask,\s*dataStartTask,\s*""Job History""\)"));
+        Assert.Equal(1, Matches(load, @"var all = await readTask;"));
+        Assert.Equal(0, Matches(load, @"await _dataService\.GetJobHistoryAsync\("));
     }
 
     [Fact]
