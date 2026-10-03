@@ -30,6 +30,7 @@ import {
   emptyStrip,
   noticeStrip,
   keptWindowStrip,
+  windowFloorStrip,
   readTool,
   readWithinKeptHistory,
   apiGet,
@@ -133,6 +134,8 @@ async function loadPanelBody(desc, body, signal) {
     const note = desc.noteKey ? getPath(res.data, desc.noteKey) : null;
     /* #4925: a panel may carry further server notes (`moreNoteKeys`), each rendered as its own line when non-null. */
     const moreNotes = (desc.moreNoteKeys || []).map((k) => getPath(res.data, k));
+    /* #4966: a grid says where its table's data starts when that is after the window's start (windowFloorStrip). */
+    const floor = windowFloorStrip(res.data, desc);
     /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
        A copy, so the caller's descriptor keeps the window it asked for. */
     if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };
@@ -140,6 +143,7 @@ async function loadPanelBody(desc, body, signal) {
 
     mount(body, [
       kept,
+      floor,
       typeof note === "string" && note.trim() ? noticeStrip(note) : null,
       ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noticeStrip(n) : null)),
       rendered,

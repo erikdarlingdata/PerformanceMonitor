@@ -1484,6 +1484,8 @@ public partial class ServerTab : UserControl
             var metric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
             var result = await System.Threading.Tasks.Task.Run(() => _dataService.GetQueryHeatmapAsync(_serverId, metric, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
             UpdateQueryHeatmapChart(result);
+            /* #4966: the metric re-reads over the tab's current window, so the banner is asked over it too. */
+            await RefreshQueryHeatmapBannerAsync(hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {

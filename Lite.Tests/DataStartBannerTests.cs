@@ -126,24 +126,27 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     /// <summary>
     /// The relation list is a closed enum, so no view name ever comes from the caller. Each member must name a real
     /// archive view (<c>v_</c> plus a table in the archivable set) whose time column is the one
-    /// <see cref="LocalDataService.QueryWindowRelationTimeColumn"/> names for it (<c>collection_time</c>, or
-    /// <c>capture_time</c> on the three config snapshots, <c>event_time</c> on the two event tables, #4966, #4989), with a
-    /// <c>server_id</c> column, which is what the probe's SQL assumes. The archive purges each table by that same column
-    /// except for the two event tables: their grids filter on <c>event_time</c>, the event's own time, which is the
-    /// column the probe measures, while the archive still purges them by <c>collection_time</c>, the time a run stored
-    /// the row. The purge column is pinned for those two as <c>collection_time</c>, and the view must carry both.
+    /// <see cref="LocalDataService.QueryWindowRelationTimeColumn"/> names for it (<c>collection_time</c>; <c>capture_time</c>
+    /// on the three config snapshots; <c>event_time</c> on the two event tables, #4966, #4989; <c>sample_time</c> for Memory
+    /// Pressure Events, whose chart filters on it), with a <c>server_id</c> column, which is what the probe's SQL assumes.
+    /// The archive purges each table by that same column except for the two event tables and Memory Pressure Events: their
+    /// grids and chart filter on the event's own time (<c>event_time</c>, <c>sample_time</c>), which is the column the probe
+    /// measures, while the archive still purges them by <c>collection_time</c>, the time a run stored the row. The purge
+    /// column is pinned for those three as <c>collection_time</c>, and the view must carry both.
     /// </summary>
     [Fact]
-    public async Task EveryRelation_NamesARealArchiveView_WithServerIdAndItsTimeColumn()
+    public async Task EveryRelation_NamesARealArchiveView_WithServerIdAndItsProbeTimeColumn()
     {
         await _duckDb.InitializeAsync();
         foreach (var relation in Enum.GetValues<QueryWindowRelation>())
         {
             var view = LocalDataService.QueryWindowRelationView(relation);
+            var timeColumn = LocalDataService.QueryWindowRelationTimeColumn(relation);
+            Assert.Contains(timeColumn, new[] { "collection_time", "capture_time", "event_time", "sample_time" });
             Assert.StartsWith("v_", view, StringComparison.Ordinal);
             var table = view[2..];
-            var timeColumn = LocalDataService.QueryWindowRelationTimeColumn(relation);
             var purgeColumn = relation is QueryWindowRelation.SystemHealthEvents or QueryWindowRelation.DefaultTraceEvents
+                or QueryWindowRelation.MemoryPressureEvents
                 ? "collection_time"
                 : timeColumn;
             Assert.Contains(table, DuckDbInitializer.ArchivableTables);

@@ -23,13 +23,17 @@ namespace PerformanceMonitorLite.Services;
 /// relations (<see cref="QueryStats"/>, <see cref="ProcedureStats"/>, <see cref="QueryStoreStats"/>): every
 /// Queries-tab grid and MCP tool that reads one has no rollup underneath it to fall back on when the requested
 /// window reaches past what the raw table actually retains. The Lite twin of Darling's Active Queries and Current
-/// Waits data-start banners adds <see cref="QuerySnapshots"/> and <see cref="WaitingTasks"/>. A further surface adds
-/// its own member and its arm in <c>QueryWindowRelationView</c>; <c>QueryWindowTruncationTests</c> pins that every
-/// member names a real archive view.
+/// Waits data-start banners adds <see cref="QuerySnapshots"/> and <see cref="WaitingTasks"/>, and #4966 adds
+/// <see cref="PlanCorrection"/> (Plan Corrections) and <see cref="MemoryPressureEvents"/> (Memory Pressure Events); the
+/// Query Heatmap reads <c>v_query_stats</c> and asks the <see cref="QueryStats"/> question. A further surface adds its
+/// own member and its arm in <c>QueryWindowRelationView</c>; <c>DataStartBannerTests</c> pins that every member names a
+/// real archive view with the column the probe windows on.
 /// </summary>
 public enum QueryWindowRelation
 {
     QueryStats,
+    // Group A (Queries tab: Plan Corrections)
+    PlanCorrection,
     ProcedureStats,
     QueryStoreStats,
     QuerySnapshots,
@@ -43,7 +47,8 @@ public enum QueryWindowRelation
     TraceFlags,
     LongQueryCompletions,
 
-    WaitingTasks
+    WaitingTasks,
+    MemoryPressureEvents
 }
 
 public partial class LocalDataService
@@ -51,6 +56,8 @@ public partial class LocalDataService
     internal static string QueryWindowRelationView(QueryWindowRelation relation) => relation switch
     {
         QueryWindowRelation.QueryStats => "v_query_stats",
+        // Group A (Queries tab: Plan Corrections)
+        QueryWindowRelation.PlanCorrection => "v_plan_correction",
         QueryWindowRelation.ProcedureStats => "v_procedure_stats",
         QueryWindowRelation.QueryStoreStats => "v_query_store_stats",
         QueryWindowRelation.QuerySnapshots => "v_query_snapshots",
@@ -63,20 +70,25 @@ public partial class LocalDataService
         QueryWindowRelation.TraceFlags => "v_trace_flags",
         QueryWindowRelation.LongQueryCompletions => "v_long_query_completions",
         QueryWindowRelation.WaitingTasks => "v_waiting_tasks",
+        QueryWindowRelation.MemoryPressureEvents => "v_memory_pressure_events",
         _ => throw new ArgumentOutOfRangeException(nameof(relation), relation, "unknown QueryWindowRelation")
     };
 
     /// <summary>
     /// The collector whose runs <c>collection_log</c> records for a relation the probe reads by coverage
-    /// (<see cref="QueryWindowRelation.QuerySnapshots"/>, <see cref="QueryWindowRelation.WaitingTasks"/>, and #4966's
-    /// System Events, Config Changes and Long Queries relations), or null for the three Queries-tab relations and
-    /// <see cref="QueryWindowRelation.CollectionLog"/>, which keep the row-only probe. A closed map, so nothing a
-    /// caller passes reaches the probe's SQL.
+    /// (<see cref="QueryWindowRelation.QuerySnapshots"/>, <see cref="QueryWindowRelation.WaitingTasks"/>,
+    /// <see cref="QueryWindowRelation.PlanCorrection"/>, <see cref="QueryWindowRelation.MemoryPressureEvents"/>, and #4966's
+    /// System Events, Config Changes and Long Queries relations), or null for the three Queries-tab relations (the Query
+    /// Heatmap reads the first of them) and <see cref="QueryWindowRelation.CollectionLog"/>, which keep the row-only
+    /// probe. A closed map, so nothing a caller passes reaches the probe's SQL.
     /// </summary>
     internal static string? QueryWindowRelationCollector(QueryWindowRelation relation) => relation switch
     {
+        // Group A (Queries tab: Plan Corrections)
+        QueryWindowRelation.PlanCorrection => "plan_correction",
         QueryWindowRelation.QuerySnapshots => "query_snapshots",
         QueryWindowRelation.WaitingTasks => "waiting_tasks",
+        QueryWindowRelation.MemoryPressureEvents => "memory_pressure_events",
         /* Group C of #4966. Every event and snapshot table below holds a row only when something happened or changed
            (system_health and default trace events, long-query completions, and the config snapshots, which the
            collectors take at load), so a collector's runs are what show the store covered a quiet start.
@@ -104,13 +116,16 @@ public partial class LocalDataService
     /// wall clock as stored (its grid converts each row through the server's clock), so the probe does the same
     /// (<see cref="QueryWindowRelationTimeIsServerLocal"/>, #4989): it reads that relation's rows over the grid's padded
     /// server-local window, converts each one to UTC through the clock, and compares the converted times with the UTC
-    /// window. A closed map, so nothing a caller passes reaches the probe's SQL. The collector's own runs in
-    /// <c>v_collection_log</c> always read <c>collection_time</c>, which is UTC.
+    /// window. Memory Pressure Events windows on <c>sample_time</c> (the ring-buffer event's own time, which can sit long
+    /// before the first collection that stored it), so the probe asks the question the chart's own read asks. A closed map,
+    /// so nothing a caller passes reaches the probe's SQL. The collector's own runs in <c>v_collection_log</c> always read
+    /// <c>collection_time</c>, which is UTC.
     /// </summary>
     internal static string QueryWindowRelationTimeColumn(QueryWindowRelation relation) => relation switch
     {
         QueryWindowRelation.ServerConfig or QueryWindowRelation.DatabaseConfig or QueryWindowRelation.TraceFlags => "capture_time",
         QueryWindowRelation.SystemHealthEvents or QueryWindowRelation.DefaultTraceEvents => "event_time",
+        QueryWindowRelation.MemoryPressureEvents => "sample_time",
         _ => "collection_time"
     };
 
@@ -126,11 +141,12 @@ public partial class LocalDataService
     /// <summary>
     /// Where this server's data starts for the requested window, as far as any caller needs to know it. NULL when
     /// the server holds no row inside [<paramref name="startUtc"/>, <paramref name="endUtc"/>] at all (nothing was
-    /// read; for Active Queries and Current Waits, no row and no logged run of the collector either).
+    /// read; for the coverage surfaces, Active Queries, Current Waits, Plan Corrections and Memory Pressure Events, no
+    /// row and no logged run of the collector either).
     /// <paramref name="startUtc"/> itself when the server also holds a row BEFORE the window (the window was
     /// served whole). Otherwise the server's first row inside the window (the data starts late). ONE probe shared by
-    /// every Queries-tab grid (<c>Lite/Controls/ServerTab.*</c>), the Active Queries and Current Waits banners and
-    /// every MCP tool that reads one of the <see cref="QueryWindowRelation"/> relations
+    /// every Queries-tab grid (<c>Lite/Controls/ServerTab.*</c>), the Active Queries, Current Waits, Plan Corrections,
+    /// Query Heatmap and Memory Pressure Events banners and every MCP tool that reads one of the <see cref="QueryWindowRelation"/> relations
     /// (<c>get_top_queries_by_cpu</c>, <c>get_top_procedures_by_cpu</c>, <c>get_query_store_top</c>), so there is
     /// one place that computes the floor rather than near-identical copies that can drift apart. Twin of Darling's
     /// <c>DarlingDataReader.GetQueryStoreWindowFloorAsync</c> (#2364) and of #4953's <c>DataWindowFloor</c>: Lite's
@@ -155,15 +171,17 @@ public partial class LocalDataService
     /// quiet first stretch puts the window's own first row far past its start while older rows are stored, and a
     /// probe that read only the window would raise a false banner).</para>
     ///
-    /// <para><b>Active Queries and Current Waits read coverage, not rows.</b> query_snapshots and waiting_tasks hold
-    /// a row only while something runs or waits, so a server idle overnight, or one whose first waiting task came
-    /// days after it was added, has no row near the window's start though the store covered it. For these two the
-    /// collector's runs in <c>v_collection_log</c> count as well as rows: a run proves the collector was collecting
+    /// <para><b>Active Queries, Current Waits, Plan Corrections and Memory Pressure Events read coverage, not
+    /// rows.</b> query_snapshots and waiting_tasks hold a row only while something runs or waits, plan_correction only
+    /// while the engine has a recommendation, and memory_pressure_events only where the ring buffer logged an event
+    /// (windowed on <c>sample_time</c>, see <see cref="QueryWindowRelationTimeColumn"/>), so a server idle overnight, or
+    /// one whose first waiting task came days after it was added, has no row near the window's start though the store
+    /// covered it. For these four the collector's runs in <c>v_collection_log</c> count as well as rows: a run proves the collector was collecting
     /// then. The log survives exactly as long as the table: it is archived and deleted by the same single horizon
     /// (<see cref="RetentionService.ArchiveRetentionMonths"/>, the same monthly files), so a run older than the
     /// window means the table's rows from then on are still held, and the first run inside the window is where
     /// coverage starts, whether that is the server's first collection or the retention edge, whichever is later.
-    /// For these two the probe answers NULL when the window holds no row and no run, the window's start when a
+    /// For these four the probe answers NULL when the window holds no row and no run, the window's start when a
     /// row or run sits at or before it, and otherwise the first row or run inside the window, whichever is
     /// earlier. A covered window that holds no row (the collector ran, nothing waited) answers the start, so it
     /// shows no banner.</para>

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -191,6 +192,26 @@ public sealed class StoreInstallIdRefusedClusterLiveTests : IClassFixture<Refuse
     private static Task<long> ClusterIdAsync(NpgsqlConnection owner, CancellationToken ct) =>
         ScalarAsync<long>(owner, "SELECT system_identifier FROM pg_control_system()", ct);
 
+    private static Task<int> ServerMajorAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        ScalarAsync<int>(connection, "SELECT current_setting('server_version_num')::int / 10000", ct);
+
+    private static Task<int> StoredMajorAsync(NpgsqlConnection owner, CancellationToken ct) =>
+        ScalarAsync<int>(owner, $"SELECT server_major FROM {Table}", ct);
+
+    /// <summary>The row's version: a write, even one that sets the values it already has, gives the row a new one.</summary>
+    private static Task<string> RowVersionAsync(NpgsqlConnection owner, CancellationToken ct) =>
+        ScalarAsync<string>(owner, $"SELECT xmin::text FROM {Table}", ct);
+
+    /// <summary>Makes the stored row the one the cluster before a major upgrade left: another cluster id and a major below
+    /// this server's, with both OIDs as they are. This server then reads as the same store after an upgrade.</summary>
+    private static async Task<(long Cluster, int Major)> StoreTheRowOfTheClusterBeforeAnUpgradeAsync(NpgsqlConnection owner, CancellationToken ct)
+    {
+        var cluster = await ClusterIdAsync(owner, ct) + 1;
+        var major = await ServerMajorAsync(owner, ct) - 1;
+        await ExecAsync(owner, $"UPDATE {Table} SET system_identifier = {cluster}, server_major = {major}", ct);
+        return (cluster, major);
+    }
+
     private static bool IsTheDatabaseAloneLine(string line) =>
         line.StartsWith("Information:", StringComparison.Ordinal) && line.Contains("database alone", StringComparison.Ordinal);
 
@@ -279,6 +300,100 @@ public sealed class StoreInstallIdRefusedClusterLiveTests : IClassFixture<Refuse
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
         Assert.Equal(1L, await ScalarAsync<long>(owner, $"SELECT count(*) FROM {Table}", ct));
         Assert.Equal(stored, await ReadRowAsync(owner, ct));
+    }
+
+    /// <summary>The server was upgraded to a new major version (the row says cluster A and major M, the server now has
+    /// cluster B and major M+1, and both OIDs are as they were), and the first start after it can't read the cluster id.
+    /// The row keeps the id, and it keeps the major that goes with the cluster id it has: the new major written beside the
+    /// old cluster id would make a later start that can read the new cluster id see a changed cluster id at an equal
+    /// major, which is what a copy of the row looks like. The start writes nothing, so the row is as it found it.</summary>
+    [Fact]
+    public async Task Ensure_AfterAMajorUpgrade_AStartThatCannotReadTheClusterId_KeepsTheId_AndLeavesTheRowAsItWas()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var owner = await OwnerAsync(ct);
+        await using var login = await OpenAsync(_store.LoginConnectionString!, ct);
+        var id = await StoreInstallId.EnsureAsync(login, new CapturingTestLogger(), ct);
+        var (oldCluster, oldMajor) = await StoreTheRowOfTheClusterBeforeAnUpgradeAsync(owner, ct);
+        await RefuseClusterIdAsync(owner, ct);
+        var before = await RowVersionAsync(owner, ct);
+
+        var logger = new CapturingTestLogger();
+        Assert.Equal(id, await StoreInstallId.EnsureAsync(login, logger, ct));
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        var row = await ReadRowAsync(owner, ct);
+        Assert.Equal(id, row.InstallId);
+        Assert.Equal(oldCluster, row.SystemIdentifier);
+        Assert.Equal(oldMajor, await StoredMajorAsync(owner, ct));
+        Assert.Equal(before, await RowVersionAsync(owner, ct));
+    }
+
+    /// <summary>The same upgrade, and a later start can read the cluster id. The id stays, one Information line says the
+    /// cluster id changed and the major rose, and the row is rebound to the new cluster id and major: the start that could
+    /// not read the cluster id did not make the later one look like a copy.</summary>
+    [Fact]
+    public async Task Ensure_AfterAMajorUpgrade_AStartThatCannotReadTheClusterId_ThenOneThatCan_KeepsTheId_AndRebindsTheRow()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var owner = await OwnerAsync(ct);
+        await using var login = await OpenAsync(_store.LoginConnectionString!, ct);
+        var id = await StoreInstallId.EnsureAsync(login, new CapturingTestLogger(), ct);
+        var (oldCluster, oldMajor) = await StoreTheRowOfTheClusterBeforeAnUpgradeAsync(owner, ct);
+        var newCluster = await ClusterIdAsync(owner, ct);
+        var newMajor = await ServerMajorAsync(owner, ct);
+
+        await RefuseClusterIdAsync(owner, ct);
+        var refused = new CapturingTestLogger();
+        Assert.Equal(id, await StoreInstallId.EnsureAsync(login, refused, ct));
+
+        await AllowClusterIdAsync(owner, ct);
+        var allowed = new CapturingTestLogger();
+        var later = await StoreInstallId.EnsureAsync(login, allowed, ct);
+
+        Assert.Equal(id, later);
+        Assert.Equal(0, refused.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, allowed.CountAtLevel(LogLevel.Warning));
+        var line = Assert.Single(allowed.Lines, l => l.StartsWith("Information:", StringComparison.Ordinal));
+        Assert.Contains(oldCluster.ToString(CultureInfo.InvariantCulture), line, StringComparison.Ordinal);
+        Assert.Contains(newCluster.ToString(CultureInfo.InvariantCulture), line, StringComparison.Ordinal);
+        Assert.Contains($"from {oldMajor} to {newMajor}", line, StringComparison.Ordinal);
+        Assert.Contains("id stays", line, StringComparison.Ordinal);
+        var row = await ReadRowAsync(owner, ct);
+        Assert.Equal(id, row.InstallId);
+        Assert.Equal(newCluster, row.SystemIdentifier);
+        Assert.Equal(newMajor, await StoredMajorAsync(owner, ct));
+        Assert.Equal(1L, await ScalarAsync<long>(owner, $"SELECT count(*) FROM {Table}", ct));
+    }
+
+    /// <summary>A row with no cluster id has no cluster id for a major to stay beside, so a start that can't read the cluster
+    /// id still writes the current major into it, whether the stored one was lower or higher. The next such start finds
+    /// nothing left to write.</summary>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(1)]
+    public async Task Ensure_ARowWithNoClusterId_AStartThatCannotReadTheClusterId_StillWritesTheMajor(int storedMajorOffset)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var owner = await OwnerAsync(ct);
+        await using var login = await OpenAsync(_store.LoginConnectionString!, ct);
+        await RefuseClusterIdAsync(owner, ct);
+        var id = await StoreInstallId.EnsureAsync(login, new CapturingTestLogger(), ct);
+        var major = await ServerMajorAsync(owner, ct);
+        await ExecAsync(owner, $"UPDATE {Table} SET server_major = {major + storedMajorOffset}", ct);
+
+        var logger = new CapturingTestLogger();
+        Assert.Equal(id, await StoreInstallId.EnsureAsync(login, logger, ct));
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        var row = await ReadRowAsync(owner, ct);
+        Assert.Equal(id, row.InstallId);
+        Assert.Null(row.SystemIdentifier);
+        Assert.Equal(major, await StoredMajorAsync(owner, ct));
+
+        var written = await RowVersionAsync(owner, ct);
+        Assert.Equal(id, await StoreInstallId.EnsureAsync(login, new CapturingTestLogger(), ct));
+        Assert.Equal(written, await RowVersionAsync(owner, ct));
     }
 
     [Theory]

@@ -48,7 +48,7 @@ public sealed class DataStartBannerProbeFailureTests
             /* What the refresh does: the guarded probe, then the banner step on its answer. */
             var floor = ServerTab.ProbeWindowFloorOrNullAsync(
                 () => Task.FromException<DateTime?>(new InvalidOperationException(tag)),
-                "[DataStartServer] QuerySnapshots").GetAwaiter().GetResult();
+                "[DataStartServer] QuerySnapshots", WindowStart, WindowStart.AddDays(7)).GetAwaiter().GetResult();
             var result = ServerTab.ApplyWindowFloorToBanner(banner, floor, WindowStart, TimeZoneInfo.Utc);
             return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text, result);
         });
@@ -71,7 +71,7 @@ public sealed class DataStartBannerProbeFailureTests
         {
             var banner = new System.Windows.Controls.TextBlock();
             var floor = ServerTab.ProbeWindowFloorOrNullAsync(
-                () => Task.FromResult<DateTime?>(WindowStart.AddDays(3)), tag).GetAwaiter().GetResult();
+                () => Task.FromResult<DateTime?>(WindowStart.AddDays(3)), tag, WindowStart, WindowStart.AddDays(7)).GetAwaiter().GetResult();
             var result = ServerTab.ApplyWindowFloorToBanner(banner, floor, WindowStart, TimeZoneInfo.Utc);
             return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text, result);
         });
@@ -83,7 +83,76 @@ public sealed class DataStartBannerProbeFailureTests
     }
 
     /// <summary>
-    /// The shared banner refresh, the one place the probe is called, goes through the guarded probe, so every surface
+    /// #4966: a window no longer than the 90-minute slack can never get a coverage note (a floor inside it is at most
+    /// its length after the start), so the guarded probe is not called for it: its answer is null, which hides the
+    /// banner and clears its text, however visible the last read left it. The probe stand-in counts its calls, so one
+    /// that was made fails here.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(60)]
+    [InlineData(90)]
+    public void AWindowNoLongerThanTheSlack_MakesNoProbeCall_AndHidesTheBanner(int windowMinutes)
+    {
+        var probeCalls = 0;
+        var (visible, text, answer) = OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock
+            {
+                Visibility = System.Windows.Visibility.Visible,
+                Text = "Showing since 2026-09-04 00:00:00",
+            };
+            var floor = ServerTab.ProbeWindowFloorOrNullAsync(
+                () =>
+                {
+                    probeCalls++;
+                    return Task.FromResult<DateTime?>(WindowStart.AddMinutes(windowMinutes));
+                },
+                "[DataStartServer] QuerySnapshots", WindowStart, WindowStart.AddMinutes(windowMinutes)).GetAwaiter().GetResult();
+            var result = ServerTab.ApplyWindowFloorToBanner(banner, floor, WindowStart, TimeZoneInfo.Utc);
+            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text, result);
+        });
+
+        Assert.Equal(0, probeCalls);
+        Assert.False(answer);
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>
+    /// A window one minute past the slack, or a day wide, still asks the probe, once, and words its answer: the skip
+    /// is for the windows that can never get a note, and no more.
+    /// </summary>
+    [Theory]
+    [InlineData(91, "Showing since 2026-09-01 01:31:00")]
+    [InlineData(24 * 60, "Showing since 2026-09-02 00:00:00")]
+    public void AWindowLongerThanTheSlack_StillCallsTheProbeOnce_AndWordsItsAnswer(int windowMinutes, string expectedText)
+    {
+        var probeCalls = 0;
+        var (visible, text, answer) = OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock();
+            var floor = ServerTab.ProbeWindowFloorOrNullAsync(
+                () =>
+                {
+                    probeCalls++;
+                    return Task.FromResult<DateTime?>(WindowStart.AddMinutes(windowMinutes));
+                },
+                "[DataStartServer] QuerySnapshots", WindowStart, WindowStart.AddMinutes(windowMinutes)).GetAwaiter().GetResult();
+            var result = ServerTab.ApplyWindowFloorToBanner(banner, floor, WindowStart, TimeZoneInfo.Utc);
+            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text, result);
+        });
+
+        Assert.Equal(1, probeCalls);
+        Assert.True(answer);
+        Assert.True(visible);
+        Assert.Equal(expectedText, text);
+    }
+
+    /// <summary>
+    /// The shared banner refresh, the one place the probe is called, goes through the guarded probe, handing it the
+    /// window the probe is asked about (the short-window skip reads it), so every surface
     /// that carries a banner (the three Queries grids, Active Queries, Current Waits) and every read path of each is
     /// covered. Text-scans SOURCE, like QueryWindowTruncationTests.
     /// </summary>
@@ -93,7 +162,7 @@ public sealed class DataStartBannerProbeFailureTests
         var source = File.ReadAllText(ControlsFile("ServerTab.Refresh.cs"));
 
         Assert.Single(Regex.Matches(source,
-            @"private async System\.Threading\.Tasks\.Task RefreshWindowTruncatedBannerAsync\([^)]*\)\s*\{\s*var floor = await ProbeWindowFloorOrNullAsync\(\s*\(\) => Task\.Run\(\(\) => _dataService\.GetQueryWindowFloorAsync\(relation, _serverId, startUtc, endUtc\)\),[^;]*;\s*ApplyWindowFloorToBanner\(banner, floor, startUtc, GetPickerZone\(\)\);"));
+            @"private async System\.Threading\.Tasks\.Task RefreshWindowTruncatedBannerAsync\([^)]*\)\s*\{\s*var floor = await ProbeWindowFloorOrNullAsync\(\s*\(\) => Task\.Run\(\(\) => _dataService\.GetQueryWindowFloorAsync\(relation, _serverId, startUtc, endUtc\)\),\s*\$""[^""]*"",\s*startUtc,\s*endUtc\);\s*ApplyWindowFloorToBanner\(banner, floor, startUtc, GetPickerZone\(\)\);"));
     }
 
     /// <summary>WPF objects require STA, and a probe that has already completed keeps the continuation on this thread.</summary>

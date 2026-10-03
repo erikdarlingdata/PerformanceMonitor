@@ -66,9 +66,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// keeps shorter, so a logged run makes a server count in a window whose rows are gone, and its coverage, the
 /// purge's edge, starts after the window ended.</para>
 ///
-/// <para><b>Why per server, through <c>collect.servers</c>.</b> Every collect table is indexed on
-/// <c>(server_id, time)</c>, every continuous aggregate a panel reads keeps <c>(server_id, bucket)</c>, and
-/// collection_log keeps <c>(server_id, collector_name, collection_time)</c>. A LATERAL per registered server reads
+/// <para><b>Why per server, through <c>collect.servers</c>.</b> Every collect table a panel reads is indexed on
+/// <c>(server_id, time)</c> (the two config snapshot tables are the exception: they hold one snapshot per server a
+/// day and are read bounded by the window), every continuous aggregate a panel reads keeps <c>(server_id, bucket)</c>,
+/// and collection_log keeps <c>(server_id, collection_time)</c>. A LATERAL per registered server reads
 /// the first index entry inside the window, so only the window's chunks are probed; the walk to a source with no
 /// schedule edge runs only for a server that counts, and stops at the oldest chunk that holds the server.
 /// Filtering the fact table by <c>server_name</c>, as a panel's own read does, has no index to use. So the probe
@@ -114,15 +115,15 @@ public static class DataWindowFloor
 
         /// <summary>
         /// The collector that writes the table, whose runs collection_log records; null for a rollup, which no
-        /// collector writes.
+        /// collector writes, and for the collection log itself.
         /// </summary>
         public string? CollectorName { get; }
 
         /// <summary>
         /// The collector's default retention days, when the probe reads the table's retention edge from the
-        /// schedule; null when the schedule gives no edge (a rollup, a raw relation the gated purge owns, a
-        /// collector whose purge horizon is floored at the baseline window), and the probe walks to the oldest row
-        /// the server holds at or before the window's end instead.
+        /// schedule, or the collection log's fixed horizon; null when the schedule gives no edge (a rollup, a raw
+        /// relation the gated purge owns, a collector whose purge horizon is floored at the baseline window), and the
+        /// probe walks to the oldest row the server holds at or before the window's end instead.
         /// </summary>
         public int? RetentionDefaultDays { get; }
 
@@ -139,17 +140,28 @@ public static class DataWindowFloor
         public bool EndExclusive { get; }
 
         /// <summary>
+        /// The two config snapshot tables the probe reads without an index: they hold one snapshot per server a day,
+        /// and every read of them here carries the window's bounds, so TimescaleDB reads only the window's chunks and
+        /// the oldest-row walk (which would read the whole table) never applies to them.
+        /// </summary>
+        private static readonly HashSet<string> s_configSnapshotTables =
+            new HashSet<string>(StringComparer.Ordinal) { "server_config", "database_config" };
+
+        /// <summary>
         /// The raw collector table <paramref name="table"/>, or false when the catalog does not list it or its
-        /// index does not lead with <c>(server_id, time)</c> (<see cref="PgSchemaGenerator.CreateIndex"/>). The
-        /// config snapshots have no index, and index_object_stats orders a server's rows by object before time,
-        /// so the probe would read every row the server holds; neither is probed.
+        /// index does not lead with <c>(server_id, time)</c> (<see cref="PgSchemaGenerator.CreateIndex"/>), unless it
+        /// is a config snapshot table (<c>server_config</c>, <c>database_config</c>), which has no index and is read
+        /// bounded by the window. index_object_stats orders a server's rows by object before time, so the probe
+        /// would read every row the server holds; it is not probed. The collection log is not a collector table
+        /// (<see cref="ForCollectionLog"/>).
         /// </summary>
         public static bool TryForCollectorTable(string table, out Source source)
         {
             source = null!;
             var schema = CollectorCatalog.All.FirstOrDefault(c => string.Equals(c.TargetTable, table, StringComparison.Ordinal));
             if (schema is null
-                || PgSchemaGenerator.CreateIndex(schema)?.EndsWith($"(server_id, {schema.PrefixTimeColumnName});", StringComparison.Ordinal) != true)
+                || (PgSchemaGenerator.CreateIndex(schema)?.EndsWith($"(server_id, {schema.PrefixTimeColumnName});", StringComparison.Ordinal) != true
+                    && !s_configSnapshotTables.Contains(schema.TargetTable)))
             {
                 return false;
             }
@@ -172,6 +184,17 @@ public static class DataWindowFloor
             TryForCollectorTable(table, out var source)
                 ? source
                 : throw new ArgumentException($"'{table}' is not a collector table the data-start probe can read.", nameof(table));
+
+        /// <summary>
+        /// The collection log itself, the run record every collector writes a row to and the Collection Log grids show.
+        /// It is not a collector table, so <see cref="TryForCollectorTable"/> refuses it and this is its factory. Its
+        /// edge is its own fixed horizon (<see cref="DarlingRetentionHorizons.CollectionLogRetentionDays"/>, the
+        /// purge's constant, which no schedule row moves), and a server counts by its own rows in the window, since
+        /// no other log records the log's runs. The window read rides <c>idx_collection_log_time (server_id,
+        /// collection_time)</c>: one index descent per server, never a scan of the log.
+        /// </summary>
+        public static Source ForCollectionLog() =>
+            new("collection_log", "collection_time", endExclusive: false, retentionDefaultDays: DarlingRetentionHorizons.CollectionLogRetentionDays);
 
         /// <summary>
         /// The continuous aggregate <paramref name="view"/>, or false when <see cref="RollupAvailability"/> does not
@@ -262,11 +285,15 @@ public static class DataWindowFloor
                 : "$" + (nextBoundParameter++).ToString(System.Globalization.CultureInfo.InvariantCulture);
 
             string coverage;
-            if (source.RetentionDefaultDays is int days && collector is not null)
+            if (source.RetentionDefaultDays is int days)
             {
-                /* The table's edge is the purge cutoff: the schedule's horizon is the purge's, as written. The later
-                   of it and the server's first collection is where coverage starts, whatever rows survive near it. */
-                coverage = $"GREATEST($3 - make_interval(days => COALESCE((SELECT o.retention_days FROM config.config_collector_schedules AS o WHERE o.server_id IS NULL AND lower(o.collector_name) = '{collector}' AND o.retention_days >= 1 LIMIT 1), {days.ToString(System.Globalization.CultureInfo.InvariantCulture)})), s.created_date)";
+                /* The table's edge is the purge cutoff: the schedule's horizon is the purge's, as written (the
+                   collection log's is its own fixed constant, with no schedule row to ask). The later of it and the
+                   server's first collection is where coverage starts; a row older than it moves the answer earlier. */
+                var horizon = collector is null
+                    ? days.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : $"COALESCE((SELECT o.retention_days FROM config.config_collector_schedules AS o WHERE o.server_id IS NULL AND lower(o.collector_name) = '{collector}' AND o.retention_days >= 1 LIMIT 1), {days.ToString(System.Globalization.CultureInfo.InvariantCulture)})";
+                coverage = $"GREATEST($3 - make_interval(days => {horizon}), s.created_date)";
             }
             else
             {
