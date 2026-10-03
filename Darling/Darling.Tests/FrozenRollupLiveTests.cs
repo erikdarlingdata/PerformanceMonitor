@@ -2153,6 +2153,10 @@ public sealed class FrozenRollupLiveTests
                     $"a row 20 hours back was called a hole in a {zone} session");
             }
 
+            /* A relation with no stitched slot builds a statement that never names the horizon, and must still run:
+               a failed measure reads Unknown, which reads false here. Its source is empty, so it is Covered. */
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "query_store_stats", ct));
+
             bodySucceeded = true;
         }
         finally

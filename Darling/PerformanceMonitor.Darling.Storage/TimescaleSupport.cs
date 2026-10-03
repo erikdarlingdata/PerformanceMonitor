@@ -6708,8 +6708,8 @@ AND   j.hypertable_name = '{relation}'";
     /// store sessions to UTC, so that was harmless in production, but the statement's answer should not hang on
     /// a connection setting (the <see cref="BaselineBackfillProbeSql(string, string)"/> reasoning, which binds
     /// the same kind of horizon as <c>$1</c>). The caller binds <see cref="RetentionArmSafetyHorizon"/> as the
-    /// statement's only parameter. A slot that is not stitched never names it, and PostgreSQL does not require a
-    /// declared parameter to be referenced.
+    /// statement's only parameter. A statement with no stitched slot never names it, so the caller binds the
+    /// parameter only when the text carries the placeholder.
     /// </summary>
     public const string RetentionArmSafetyHorizonPlaceholder = "$1";
 
@@ -7185,12 +7185,17 @@ AND   j.hypertable_name = '{relation}'";
     {
         try
         {
-            using var command = new NpgsqlCommand(RetentionArmSafetySql(relation, sourceTimeColumn, coverageRelations), connection) { CommandTimeout = SetupTimeoutSeconds };
+            var coverageSql = RetentionArmSafetySql(relation, sourceTimeColumn, coverageRelations);
+            using var command = new NpgsqlCommand(coverageSql, connection) { CommandTimeout = SetupTimeoutSeconds };
 
             /* #4981: the stitch's fallback horizon, bound off the service's UTC clock and not computed from
-               now() in the SQL (RetentionArmSafetyHorizonPlaceholder says why). Bound for every relation: a
-               statement with no stitched slot (query_store_stats) never names $1, which PostgreSQL allows. */
-            command.Parameters.AddWithValue(RetentionArmSafetyHorizon(DateTime.UtcNow));
+               now() in the SQL (RetentionArmSafetyHorizonPlaceholder says why). Bound only when the text names
+               it: a relation with no stitched slot (query_store_stats) builds a statement that has no use for it. */
+            if (coverageSql.Contains(RetentionArmSafetyHorizonPlaceholder, StringComparison.Ordinal))
+            {
+                command.Parameters.AddWithValue(RetentionArmSafetyHorizon(DateTime.UtcNow));
+            }
+
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
