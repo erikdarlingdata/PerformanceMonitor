@@ -66,14 +66,11 @@ public static class FinOpsUtilizationFigures
     public static string HealthBand(int score) => score >= 80 ? BandGood : score >= 60 ? BandFair : BandPoor;
 
     /// <summary>The sentence that says why the server got its verdict; empty for no verdict. The numbers in it are
-    /// formatted in <paramref name="culture"/>.</summary>
-    public static string Explanation(UtilizationEfficiencyDto d, IFormatProvider culture)
+    /// formatted in <paramref name="culture"/>, which is made the thread's current culture for the call and restored after.</summary>
+    public static string Explanation(UtilizationEfficiencyDto d, CultureInfo culture)
     {
         var previous = CultureInfo.CurrentCulture;
-        if (culture is CultureInfo requested)
-        {
-            CultureInfo.CurrentCulture = requested;
-        }
+        CultureInfo.CurrentCulture = culture;
 
         try
         {

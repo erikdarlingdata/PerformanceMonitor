@@ -7,6 +7,7 @@
  */
 
 using System.Globalization;
+using System.Linq;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
@@ -75,22 +76,39 @@ public sealed class FinOpsUtilizationFiguresTests
     }
 
     [Theory]
-    [InlineData("RIGHT_SIZED", 0)]
-    [InlineData("", 0)]
-    [InlineData("", 8000)]
-    [InlineData("UNDER_PROVISIONED", 8000)]
-    public void HealthScore_EqualsTheViewerRowsMethod(string status, int phys)
+    [InlineData("RIGHT_SIZED", 0, 20)]
+    [InlineData("", 0, 20)]
+    [InlineData("", 8000, 20)]
+    [InlineData("UNDER_PROVISIONED", 8000, 20)]
+    [InlineData("RIGHT_SIZED", 8000, 100)]
+    [InlineData("RIGHT_SIZED", 8000, -15)]
+    public void HealthScore_EqualsTheOriginalFormula(string status, int phys, int freeWhole)
     {
+        var free = (decimal)freeWhole;
         var dto = Dto(status, phys: phys);
+        var hasCpu = dto.ProvisioningStatus.Length > 0;
+        var expected = FinOpsHealthCalculator.Overall(
+            hasCpu ? FinOpsHealthCalculator.CpuScore(dto.P95CpuPct) : null,
+            FinOpsHealthCalculator.MemoryScore(phys > 0 ? (decimal)dto.BufferPoolMb / phys : 0m),
+            FinOpsHealthCalculator.StorageScore(free));
+        Assert.Equal(expected, FinOpsUtilizationFigures.HealthScore(dto, free));
         var row = PerformanceMonitor.Darling.Viewer.UtilizationEfficiencyRow.From(dto);
-        row.FreeSpacePct = 33m;
-        Assert.Equal(row.ComputeHealthScore(), FinOpsUtilizationFigures.HealthScore(dto, 33m));
+        row.FreeSpacePct = free;
+        Assert.Equal(expected, row.ComputeHealthScore());
+    }
+
+    [Fact]
+    public void ToDto_RoundTripsEveryField()
+    {
+        var dto = new UtilizationEfficiencyDto(1.5m, 2, 3.5m, 4L, 5, 6, 7, 8, 9.5m, 10L, 11L, 12L, 13.5m, 14, 15, 16, 17, "STATUS_X");
+        Assert.Equal(dto, PerformanceMonitor.Darling.Viewer.UtilizationEfficiencyRow.From(dto).ToDto());
     }
 
     [Fact]
     public void HealthBand_AgreesWithScoreColor_ForEveryScore()
     {
-        for (var score = 0; score <= 100; score++)
+        var scores = Enumerable.Range(0, 101).Concat(new[] { -1, 101, int.MinValue, int.MaxValue });
+        foreach (var score in scores)
         {
             var expected = FinOpsHealthCalculator.ScoreColor(score) switch
             {

@@ -204,6 +204,12 @@ public sealed class UtilizationEfficiencyRow
     public int HealthScore { get; set; }
     public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
 
+    /// <summary>The read-result form of these figures.</summary>
+    public UtilizationEfficiencyDto ToDto() => new(
+        AvgCpuPct, MaxCpuPct, P95CpuPct, CpuSamples, TotalMemoryMb, TargetMemoryMb, PhysicalMemoryMb, BufferPoolMb,
+        MemoryRatio, MaxGrantWaiters, GrantTimeouts, ForcedGrants, GrantUtilizationPct, MaxWorkersCount,
+        CurrentWorkersCount, CpuCount, EngineEdition, ProvisioningStatus);
+
     /// <summary>
     /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. The memory
     /// term reads <see cref="PhysicalMemoryMb"/> and <see cref="BufferPoolMb"/>, which come from <c>memory_stats</c>. On an Azure
@@ -211,11 +217,6 @@ public sealed class UtilizationEfficiencyRow
     /// on every edition. A window with no CPU sample (<see cref="HasCpuSample"/> false) leaves the CPU term out: its p95 is a 0
     /// that came from nothing, and scoring that 0 would hand the server a full 100.
     /// </summary>
-    public UtilizationEfficiencyDto ToDto() => new(
-        AvgCpuPct, MaxCpuPct, P95CpuPct, CpuSamples, TotalMemoryMb, TargetMemoryMb, PhysicalMemoryMb, BufferPoolMb,
-        MemoryRatio, MaxGrantWaiters, GrantTimeouts, ForcedGrants, GrantUtilizationPct, MaxWorkersCount,
-        CurrentWorkersCount, CpuCount, EngineEdition, ProvisioningStatus);
-
     public int ComputeHealthScore()
     {
         return FinOpsUtilizationFigures.HealthScore(HasCpuSample, P95CpuPct, PhysicalMemoryMb, BufferPoolMb, FreeSpacePct);

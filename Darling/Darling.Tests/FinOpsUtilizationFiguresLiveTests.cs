@@ -85,6 +85,9 @@ VALUES ($1, $2, $2, TRUE, $3, $4, $4)",
                     }
                 }
 
+                Assert.Null(await FinOpsUtilizationFigures.GetLatestStorageTotalsAsync(source, idB, 30, ct));
+                var c = await FinOpsUtilizationFigures.GetLatestStorageTotalsAsync(source, idC, 30, ct);
+                Assert.Equal((200m, 120m), c!.Value);
                 var a = await FinOpsUtilizationFigures.GetLatestStorageTotalsAsync(source, idA, 30, ct);
                 Assert.Equal((1628m, 705m), a!.Value);
 
