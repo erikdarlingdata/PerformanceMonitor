@@ -3111,7 +3111,13 @@ LIMIT 1";
                     /* #2170: the reload swapped the knob into the live config; move the gate to match. Safe
                        here by construction — top of the sweep, and narrowing never preempts a running body.
                        Inside the success branch because a reload that applied nothing changed no knob. */
-                    ReconcileSweepGate(serverSweepGate, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps), stoppingToken);
+                    var reloadedSweepWidth = StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps);
+                    ReconcileSweepGate(serverSweepGate, reloadedSweepWidth, stoppingToken);
+
+                    /* #4999: the daily-run cap is derived from the sweep width, so every reload recomputes it from the
+                       width just applied. A width that moves the cap changes the log once, and one that does not
+                       leaves both alone. */
+                    ApplyDailyRunCap(StorePoolMaxSize(postgres), reloadedSweepWidth);
                 }
             }
 
@@ -4757,10 +4763,6 @@ LIMIT 1";
     /// </summary>
     private void ReconcileSweepGate(SemaphoreSlim gate, int target, CancellationToken stoppingToken)
     {
-        /* #4999: the daily-run cap is derived from the sweep width, so every width the knob moves to recomputes
-           it, here where the width is applied. A width that changes nothing leaves the cap and the log alone. */
-        ApplyDailyRunCap(StorePoolMaxSize(_postgres), target);
-
         int toRelease;
         bool startAbsorber;
         lock (_gateLock)

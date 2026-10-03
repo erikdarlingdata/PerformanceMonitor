@@ -434,7 +434,7 @@ public sealed class DailyRunCapTests
         /* The collection loop needs a store, so what a case here can pin is that the two places the width is set are
            the two places that recompute the cap, and that the permits are no longer a fixed-size semaphore. */
         Assert.Equal(1, DailyRunKit.Count(source, "ApplyDailyRunCap(StorePoolMaxSize(postgres), initialSweepWidth);"));
-        Assert.Equal(1, DailyRunKit.Count(source, "ApplyDailyRunCap(StorePoolMaxSize(_postgres), target);"));
+        Assert.Equal(1, DailyRunKit.Count(source, "ApplyDailyRunCap(StorePoolMaxSize(postgres), reloadedSweepWidth);"));
         Assert.Equal(0, DailyRunKit.Count(source, "new(MaxConcurrentDailyRuns, MaxConcurrentDailyRuns)"));
     }
 }
