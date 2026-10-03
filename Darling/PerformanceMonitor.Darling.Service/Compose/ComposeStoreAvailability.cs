@@ -342,6 +342,21 @@ internal static class ComposeStoreAvailability
     internal static async Task<string?> BuildDataStartNoticeAsync(
         NpgsqlDataSource postgres, string sourceTable, ComposeRoute route, IReadOnlyList<string>? servers,
         DateTime windowStartUtc, DateTime windowEndUtc, int commandTimeoutSeconds, CancellationToken cancellationToken,
+        ILogger? logger = null) =>
+        (await FindDataStartNoticeAsync(
+            postgres, sourceTable, route, servers, windowStartUtc, windowEndUtc, commandTimeoutSeconds, cancellationToken, logger))?.Text;
+
+    /// <summary>
+    /// The notice <see cref="BuildDataStartNoticeAsync"/> builds, with the instant it names (#4966): the run's answer
+    /// carries that instant beside the sentence, so the page can write the sentence again in the browser's zone. Null
+    /// exactly when <see cref="BuildDataStartNoticeAsync"/> is.
+    /// </summary>
+    internal readonly record struct DataStartNotice(string Text, DateTime DataStartUtc);
+
+    /// <summary><see cref="BuildDataStartNoticeAsync"/>, answering the instant the notice names as well as its text.</summary>
+    internal static async Task<DataStartNotice?> FindDataStartNoticeAsync(
+        NpgsqlDataSource postgres, string sourceTable, ComposeRoute route, IReadOnlyList<string>? servers,
+        DateTime windowStartUtc, DateTime windowEndUtc, int commandTimeoutSeconds, CancellationToken cancellationToken,
         ILogger? logger = null)
     {
         var sources = DataStartSources(sourceTable, route);
@@ -362,7 +377,7 @@ internal static class ComposeStoreAvailability
         }
 
         return RawWindowFloor.IsTruncated(dataStart, windowStartUtc)
-            ? BuildDataStartNotice(dataStart!.Value, windowStartUtc, windowEndUtc)
+            ? new DataStartNotice(BuildDataStartNotice(dataStart!.Value, windowStartUtc, windowEndUtc), dataStart.Value)
             : null;
     }
 

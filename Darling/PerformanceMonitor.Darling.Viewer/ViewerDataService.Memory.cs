@@ -586,6 +586,17 @@ public sealed partial class ViewerDataService
         return items;
     }
 
+    /// <summary>
+    /// Where this server's memory pressure events coverage starts for the window the chart draws (#4966), through the shared probe
+    /// over its named source (<see cref="DataWindowFloor.Source.ForMemoryPressureEvents"/>, probed on <c>sample_time</c> like the read
+    /// below). The table is sparse, so its edge is the purge's cutoff and never its oldest row. The caller works the window out once and
+    /// hands the same start to this probe and to <see cref="GetMemoryPressureEventsAsync"/>. Null when the window holds no event and no
+    /// logged run, when it lies wholly before the coverage, and for a window of 90 minutes or less, which makes no probe call.
+    /// </summary>
+    public Task<DateTime?> GetMemoryPressureEventsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForMemoryPressureEvents(), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
     /// <summary>The RING_BUFFER_RESOURCE_MONITOR pressure samples over the window (the Memory Pressure
     /// Events sub-tab's chart), windowed on <c>sample_time</c>.</summary>
     public async Task<List<MemoryPressureEventRow>> GetMemoryPressureEventsAsync(

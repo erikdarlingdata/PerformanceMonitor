@@ -636,7 +636,27 @@ SELECT
     /// DMV arm entirely (a DMV snapshot never has one) — the population <c>get_blocked_process_xml</c> pages
     /// over, so its <c>limit</c> counts reports rather than rows it would have to discard.</para>
     /// </summary>
-    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportMerge.DefaultCap, bool xmlOnly = false, bool windowOnCollectionTime = false)
+    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false) =>
+        (await ReadRecentBlockedProcessReportsAsync(serverId, hoursBack, fromDate, toDate, databaseNames, asOfUtc, limit, xmlOnly, windowOnCollectionTime)).Rows;
+
+    /// <summary>The Blocked Process Reports grid's row cap: the default <c>limit</c> of
+    /// <see cref="GetRecentBlockedProcessReportsAsync"/> and <see cref="ReadRecentBlockedProcessReportsAsync"/>, and the
+    /// cap the grid's "Showing since" notice judges the page by (#4966), so the read's <c>LIMIT</c> and the notice
+    /// cannot drift apart. The same 200 as the Darling viewer's grid.</summary>
+    public const int BlockedProcessReportGridCap = BlockedProcessReportMerge.DefaultCap;
+
+    /// <summary>
+    /// <see cref="GetRecentBlockedProcessReportsAsync"/>'s rows and where a read that filled its own cap stops the grid being
+    /// complete (#4966): the Lite twin of the Darling viewer's <c>ReadRecentBlockedProcessReportsAsync</c>. The grid is fed by
+    /// two reads, the XE reports (cap = <paramref name="limit"/>) and the always-on DMV snapshots (cap =
+    /// <paramref name="limit"/> plus the XE rows in hand), and the merge then drops the DMV rows an XE report already covers and
+    /// the DMV rows that repeat a pair within a minute, so the merged list can hold FEWER than <paramref name="limit"/> rows
+    /// while the DMV read stopped at its LIMIT and left older snapshots out: a DMV read of 200 + <c>n</c> rows made of
+    /// repeated pairs merges to a handful. The count of the merged list cannot show that, so each read's own count is checked
+    /// before the merge (<see cref="FilledPageStart"/>) and <see cref="BlockedProcessReportsRead.CappedSourceStartUtc"/> names
+    /// the oldest event time of the read that filled its page (the later one when both did).
+    /// </summary>
+    public async Task<BlockedProcessReportsRead> ReadRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -755,14 +775,45 @@ LIMIT $4";
             }
         }
 
+        /* An XE read that returned a whole page (its LIMIT) left older reports out, whatever the merge below keeps. */
+        var xeFilledPageStart = FilledPageStart(items, limit);
+
         // Always-on DMV blocking snapshot: surface its rows in the grid too, so the block-chain viewer is
         // reachable when the blocked-process-report XE captured nothing (AWS RDS). Same connection/lock.
         // Skipped under xmlOnly: a DMV snapshot never carries a report, so it has nothing to add to that page.
+        DateTime? dmvFilledPageStart = null;
         if (!xmlOnly)
-            await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames, limit);
+            dmvFilledPageStart = await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames, limit);
 
-        return items;
+        return new BlockedProcessReportsRead(items, LaterOf(xeFilledPageStart, dmvFilledPageStart));
     }
+
+    /// <summary>
+    /// The oldest event time of a newest-first <paramref name="page"/> that is as long as the <paramref name="fetched"/> rows its
+    /// read asked for (its LIMIT), or null when it is shorter: a page under its LIMIT holds everything the store has in the
+    /// window. A row with no event time never names a start. See <see cref="ReadRecentBlockedProcessReportsAsync"/>.
+    /// </summary>
+    internal static DateTime? FilledPageStart(IReadOnlyCollection<BlockedProcessReportRow> page, int fetched)
+    {
+        if (fetched <= 0 || page.Count < fetched)
+        {
+            return null;
+        }
+
+        DateTime? oldest = null;
+        foreach (var row in page)
+        {
+            if (row.EventTime is DateTime time && (oldest is null || time < oldest))
+            {
+                oldest = time;
+            }
+        }
+
+        return oldest;
+    }
+
+    private static DateTime? LaterOf(DateTime? first, DateTime? second) =>
+        first is DateTime a && second is DateTime b ? (a >= b ? a : b) : first ?? second;
 
     /// <summary>
     /// Fetches always-on DMV blocking-snapshot rows for the blocked-process grid and merges them into the
@@ -772,10 +823,12 @@ LIMIT $4";
     /// always exists. The DMV fetch is <paramref name="cap"/> plus the XE rows already in
     /// <paramref name="items"/> — see <see cref="GetRecentBlockedProcessReportsAsync"/> for why.
     /// </summary>
-    private static async Task AppendDmvBlockedProcessGridRowsAsync(
+    private static async Task<DateTime?> AppendDmvBlockedProcessGridRowsAsync(
         Func<DuckDBCommand> createCommand, List<BlockedProcessReportRow> items, int serverId, DateTime startTime, DateTime endTime, IReadOnlyList<string>? databaseNames, int cap)
     {
         var dmvItems = new List<BlockedProcessReportRow>();
+        /* The DMV read's own cap: the grid's cap plus the XE rows in hand. */
+        var dmvFetch = cap + items.Count;
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
         using (var command = createCommand())
         {
@@ -795,7 +848,7 @@ LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDBParameter { Value = startTime });
             command.Parameters.Add(new DuckDBParameter { Value = endTime });
-            command.Parameters.Add(new DuckDBParameter { Value = cap + items.Count });
+            command.Parameters.Add(new DuckDBParameter { Value = dmvFetch });
             foreach (var db in dbValues)
                 command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -835,7 +888,9 @@ LIMIT $4";
 
         /* Dedup + re-cap moved verbatim to the shared BlockedProcessReportMerge (Phase-5 slice B)
            so the Darling Postgres adapter reproduces EXACTLY these XE-preferred fallback semantics. */
+        var dmvFilledPageStart = FilledPageStart(dmvItems, dmvFetch);
         BlockedProcessReportMerge.AppendDmvFallbackRows(items, dmvItems, cap);
+        return dmvFilledPageStart;
     }
 
     /// <summary>
@@ -1379,6 +1434,17 @@ public class DeadlockProcessDetail : DeadlockProcessInfo
         => DeadlockGraphProcessParser.Parse<DeadlockProcessDetail>(
             rows.Select(r => new DeadlockGraphInput(r.DeadlockGraphXml, r.DeadlockTime, r.VictimSqlText, null))).ToList();
 }
+
+/// <summary>
+/// The Blocked Process Reports grid's rows and where a read that filled its own cap stops the grid being complete
+/// (<see cref="LocalDataService.ReadRecentBlockedProcessReportsAsync"/>, #4966).
+/// </summary>
+/// <param name="Rows">The merged rows, newest first, at most <see cref="LocalDataService.BlockedProcessReportGridCap"/> of them
+/// for a grid read.</param>
+/// <param name="CappedSourceStartUtc">The oldest event time the XE read or the DMV read returned, for the one that returned a
+/// full page (the later, when both did): the older reports of that read are not in the grid, whatever the merged count is.
+/// Null when neither read filled its cap.</param>
+public sealed record BlockedProcessReportsRead(List<BlockedProcessReportRow> Rows, DateTime? CappedSourceStartUtc);
 
 /// <summary>
 /// Lite's blocked-process grid row. The alert-consumed members (event time, database, SPID pair,

@@ -115,7 +115,9 @@ public sealed class ComposeOpenPhaseTimeoutTests
             store, body, TestContext.Current.CancellationToken, null, DarlingWebEndpoints.ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: remapClientTimeout);
 
         Assert.True(outcome.IsServerError, outcome.Error);
-        Assert.StartsWith("Error running query: could not get a store connection in time: ", outcome.Error, StringComparison.Ordinal);
+        /* The same prefix assertion, with the whole text as the failure message: xunit cuts a StartsWith failure after about
+           fifty characters, which hid the cause when this failed on a loaded runner. */
+        Assert.True(outcome.Error!.StartsWith("Error running query: could not get a store connection in time: ", StringComparison.Ordinal), outcome.Error);
         Assert.NotEqual(DarlingWebEndpoints.StatementTimeoutText, outcome.Error);
         Assert.NotEqual("57014", outcome.AuthorSqlState);
     }
