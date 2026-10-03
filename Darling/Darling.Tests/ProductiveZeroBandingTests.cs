@@ -381,12 +381,19 @@ public sealed class ProductiveZeroBandingTests
 
             /* #4620: the sentence rides on EVERY row shape that can carry the flag, not just the full one.
                The compact shape is HEALTHY-only and a regressed row is floored to WARNING, so it never meets
-               one; the full and partial shapes both do, so the flag and the sentence appear once in each. A
-               bare Contains could not see the partial copy go missing, because the full one would satisfy it. */
-            Assert.Equal(2, CountOf(payload, "regressed_from_productive = r.AnyRegression,"));
-            Assert.Equal(2, CountOf(payload, "regression_finding = r.AnyRegressionFinding,"));
-            var partialShape = payload[payload.IndexOf("private static object PartialCollectionHealthRow(", StringComparison.Ordinal)..];
-            Assert.Contains("regression_finding = r.AnyRegressionFinding,", partialShape, StringComparison.Ordinal);
+               one; the full and partial shapes both do, so the flag and the sentence appear once in the full
+               shape and once in every partial shape (#4938: the partial row has a second shape for a collector
+               with a run time, so a file holds one or two of them). A bare Contains could not see a partial copy
+               go missing, because the full one would satisfy it. */
+            var partialAt = payload.IndexOf("private static object PartialCollectionHealthRow(", StringComparison.Ordinal);
+            var partialShape = payload[partialAt..];
+            var partialShapes = CountOf(partialShape, "partial_detail = true,");
+            Assert.InRange(partialShapes, 1, 2);
+            foreach (var carried in new[] { "regressed_from_productive = r.AnyRegression,", "regression_finding = r.AnyRegressionFinding," })
+            {
+                Assert.Equal(1, CountOf(payload[..partialAt], carried));
+                Assert.Equal(partialShapes, CountOf(partialShape, carried));
+            }
         }
 
         /* And the web table has a column for it: the viewer reads the full shape (full_detail: true), which

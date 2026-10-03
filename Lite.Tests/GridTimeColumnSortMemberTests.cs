@@ -308,6 +308,7 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
         { ("Windows/WaitDrillDownWindow.xaml", "ResultsDataGrid", "ElapsedTimeFormatted"), "a duration (how long the request has run), not a time" },
         { ("Controls/ServerTab.xaml", "BlockedProcessReportGrid", "WaitTimeFormatted"), "a wait duration in ms, not a time; it sorts by WaitTimeMs" },
         { ("Controls/ServerTab.xaml", "DeadlockGrid", "WaitTimeFormatted"), "a wait duration in ms, not a time; it sorts by WaitTime" },
+        { ("Windows/CollectorScheduleEditorWindow.xaml", "ScheduleGrid", "RunAt"), "a 24-hour HH:MM time of day (#4938), not an instant: it is zero-padded, so its text order is its time-of-day order, and it has no date to sort by" },
     };
 
     private const string HowToFix =

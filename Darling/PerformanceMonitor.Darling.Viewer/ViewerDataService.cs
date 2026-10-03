@@ -1064,10 +1064,12 @@ SELECT
        this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_install_id' AND column_name = 'table_oid'),
     /* V160 (#4938) gives a collector an optional run time, in a table of its own. The table is the sentinel, found by
-       name in the catalog so the answer does not depend on which privileges the connecting role holds on it. No viewer
-       surface reads a run time yet (the schedule window reads them in a follow-up), so on this branch the connect-time
-       version check rests on the standing invariant alone. Named only in this probe line, never in prose, per the V71
-       finding. */
+       name in the catalog so the answer does not depend on which privileges the connecting role holds on it. The
+       schedule window reads that table (its Run at column) and saving a run time writes it, so a store below V160
+       would answer them with a missing-table error, and the connect gate refuses such a store before the window can
+       open. This probe is the one thing that can fail open: when it throws, the gate lets the store in, so the run-time
+       read treats a missing table as no run times and the run-time save says the store is older than this viewer,
+       each on its own. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 WHERE to_regclass('config.config_collector_run_times') IS NOT NULL)";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
@@ -1305,8 +1307,9 @@ SELECT
            has on the viewer. Named only in the probe line, not this prose, per the V71 finding. */
         /* V160 (#4938): a collector's optional run time, and now the TOP rung, so a fully-migrated store maps to
            EXACTLY StorageVersion.SchemaVersion rather than falling through to the rung below and showing a spurious
-           upgrade banner on a store that is current. No viewer read names it yet; this arm exists so the version banner
-           stays truthful. Named only in the probe line, not this prose, per the V71 finding. */
+           upgrade banner on a store that is current. The schedule window reads and writes it, so a store that maps below
+           this arm is refused at connect, before the window can open. Named only in the probe line, not this prose, per
+           the V71 finding. */
         if (hasCollectorRunAt)
         {
             return 160;
