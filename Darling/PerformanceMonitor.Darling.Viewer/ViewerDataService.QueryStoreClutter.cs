@@ -158,6 +158,18 @@ public partial class ViewerDataService
         QueryStoreOverheadSummary Overhead);
 
     /// <summary>
+    /// Where this server's <c>query_store_stats</c> coverage starts for the window the clutter read draws (#4966), through the shared
+    /// probe (<see cref="DataWindowFloor"/>). The read cost and the plan churn are aggregates over the window from that table, so the
+    /// coverage rule applies: a range that reaches before the server's coverage says where it starts, and a covered range whose first
+    /// rows came late says nothing. The caller works the window out once and hands the same start to this probe and to
+    /// <see cref="GetQueryStoreClutterAsync"/>. Null when the window holds no row and no logged run, when it lies wholly before the
+    /// coverage, and for a window of 90 minutes or less, which makes no probe call.
+    /// </summary>
+    public Task<DateTime?> GetQueryStoreClutterDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_store_stats"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>
     /// The clutter view for one server over the toolbar's window. Runs the four shared arms, composes them
     /// with the shared arithmetic, and projects the result for the grid.
     ///

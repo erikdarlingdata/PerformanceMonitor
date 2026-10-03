@@ -197,6 +197,30 @@ public static class DataWindowFloor
             new("collection_log", "collection_time", endExclusive: false, retentionDefaultDays: DarlingRetentionHorizons.CollectionLogRetentionDays);
 
         /// <summary>
+        /// The memory pressure events table, probed on its payload's own <c>sample_time</c> (#4966). <see cref="TryForCollectorTable"/>
+        /// refuses it, and must keep refusing: its index is <c>(server_id, sample_time)</c>, not its prefix time column
+        /// (<c>collection_time</c>, the partition column the purge cuts on), so the generic factory would probe a column the index does
+        /// not lead with. The chart's read windows on <c>sample_time</c> through that index, and so does this probe.
+        ///
+        /// <para><b>Its edge is the purge's cutoff, never its oldest row.</b> The table is SPARSE: a server goes days with no pressure
+        /// event, so a walk to its oldest row would name the first event after a quiet stretch as where the store begins, a false note on
+        /// a range the store covered whole. The table is in neither group the schedule gives no edge to
+        /// (<see cref="TimescaleSupport.RawRelations"/> is the three raw relations of the gated purge,
+        /// <see cref="DarlingRetentionHorizons.BaselineServingRawCollectors"/> the baseline-floored collectors), so the daily sweep
+        /// applies the schedule's horizon as written: the fleet override in <c>config.config_collector_schedules</c>, else
+        /// <see cref="CollectorScheduleDefaults"/> (30 days). The later of that cutoff and the server's first collection is where
+        /// coverage starts, moved earlier by an event stamped in the window (an event can carry a time from before the first
+        /// collection: the first collection stores the ring buffer's history). A server counts by an event in the window or a logged run
+        /// of the collector in it.</para>
+        /// </summary>
+        public static Source ForMemoryPressureEvents()
+        {
+            var schema = CollectorCatalog.All.Single(c => string.Equals(c.TargetTable, "memory_pressure_events", StringComparison.Ordinal));
+            return new Source(
+                schema.TargetTable, "sample_time", endExclusive: false, schema.Name, CollectorScheduleDefaults.All[schema.Name].RetentionDays);
+        }
+
+        /// <summary>
         /// The continuous aggregate <paramref name="view"/>, or false when <see cref="RollupAvailability"/> does not
         /// know the name. Every rollup a panel reads keeps a <c>(server_id, bucket)</c> index.
         /// <paramref name="lowerBoundUtc"/> is set for a rollup the panel reads only from that instant up

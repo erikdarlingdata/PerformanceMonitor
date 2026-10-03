@@ -40,6 +40,9 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadQueryStoreClutterAsync(DateTime startUtc, DateTime endUtc)
     {
+        /* #4966: the probe starts beside the read, and both take the window the caller worked out once. The verdicts are aggregates
+           over the window from query_store_stats, so the coverage rule applies; the rows are per database and name no time. */
+        var dataStartTask = _dataService.GetQueryStoreClutterDataStartAsync(_server.ServerId, startUtc, endUtc);
         var result = await _dataService.GetQueryStoreClutterAsync(
             _server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
 
@@ -66,7 +69,22 @@ public partial class ViewerServerTab
         /* A reload keeps whichever row is still selected explained, and clears the pane when the selection
            did not survive the refresh — a stale paragraph under a different row is worse than no paragraph. */
         ShowSelectedQueryStoreClutterRecommendation();
+        await ShowQueryStoreClutterDataStartAsync(QueryStoreClutterTruncationBanner, dataStartTask, startUtc);
     }
+
+    /// <summary>
+    /// Raises or hides the "Showing since" banner of the Query Store Clutter panel (#4966), through the shared step the other server-tab
+    /// grids use: the probe's answer (<paramref name="probe"/>, started beside the read:
+    /// <see cref="ViewerDataService.GetQueryStoreClutterDataStartAsync"/>) is compared with the window's start, so a range that
+    /// reaches before the server's coverage names where it starts and a covered range names nothing. The probe is awaited through
+    /// <see cref="DataStartOrNullAsync"/>, so a probe that throws costs this banner and nothing after it. <c>internal static</c> so the
+    /// store-backed tests run the same step as the tab.
+    /// </summary>
+    /// <param name="banner">The panel's banner.</param>
+    /// <param name="probe">The panel's data-start probe, started beside its read.</param>
+    /// <param name="startUtc">The start of the window the panel just drew, the same one its read and its probe took.</param>
+    internal static async Task ShowQueryStoreClutterDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc) =>
+        UpdateTruncationBanner(banner, await DataStartOrNullAsync(probe, "Query Store Clutter"), startUtc);
 
     /// <summary>Selecting a database shows its recommendation whole — the composition's sentences, never
     /// re-worded here, so this pane and the MCP payload say the same thing.</summary>
