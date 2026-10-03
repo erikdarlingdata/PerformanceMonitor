@@ -1579,7 +1579,25 @@ public partial class ServerTab : UserControl
     /// bucket's start), the Y it draws (the bucket's slowest run, in ms) and the hover line that says what stands behind
     /// the point (<see cref="CollectorDurationDetail"/>), all in the same order.
     /// </summary>
-    internal sealed record CollectorDurationSeries(string Collector, double[] Xs, double[] MaxMs, string[] Details);
+    internal sealed record CollectorDurationSeries(string Collector, double[] Xs, double[] MaxMs, string[] Details)
+    {
+        /// <summary>
+        /// The hover lines keyed by the X each point is drawn at: the very <see cref="Xs"/> the scatter is built from, so the
+        /// hover's lookup by the nearest point's X is exact. Keyed by X and not by position because the line breaks at every
+        /// collection gap by inserting a point of its own, which shifts every position after the first break; that point
+        /// has no key and so no line.
+        /// </summary>
+        internal IReadOnlyDictionary<double, string> DetailsByX()
+        {
+            var byX = new Dictionary<double, string>(Xs.Length);
+            for (var i = 0; i < Xs.Length && i < Details.Length; i++)
+            {
+                byX[Xs[i]] = Details[i];
+            }
+
+            return byX;
+        }
+    }
 
     /// <summary>
     /// The hover line of one Duration Trends point (#4989): the point draws its bucket's slowest run, so the line says how
@@ -1628,7 +1646,7 @@ public partial class ServerTab : UserControl
             scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             scatter.LineWidth = 2;
             scatter.MarkerSize = 0;
-            hover?.Add(scatter, line.Collector, line.Details);
+            hover?.Add(scatter, line.Collector, line.DetailsByX());
             colorIdx++;
         }
     }
@@ -1642,6 +1660,9 @@ public partial class ServerTab : UserControl
     private void UpdateCollectorDurationChart(List<CollectorDurationBucket> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(CollectorDurationChart);
+        /* Every render starts the hover empty, the empty range's early return below included: it holds the last render's
+           series, and a tooltip over a chart with nothing on it would still name them. */
+        _collectorDurationHover?.Clear();
         ApplyTheme(CollectorDurationChart);
 
         /* Pin the X axis to the settable window (the same idiom as the CPU / tempdb-size charts) rather than
@@ -1662,12 +1683,12 @@ public partial class ServerTab : UserControl
 
         /* One series per collector, each point a bucket's slowest successful run (the read keeps only the runs the chart
            has always drawn: SUCCESS with a duration). */
-        _collectorDurationHover?.Clear();
         PlotCollectorDurationSeries(CollectorDurationChart, _collectorDurationHover, BuildCollectorDurationSeries(data));
 
         CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         ReapplyAxisColors(CollectorDurationChart);
-        CollectorDurationChart.Plot.YLabel("Duration (ms)");
+        /* Each point is a bucket's slowest run, and the label says so (the Darling viewer's chart uses the same words). */
+        CollectorDurationChart.Plot.YLabel("Slowest run per bucket (ms)");
         CollectorDurationChart.Plot.Axes.AutoScaleY();
         CollectorDurationChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ShowChartLegend(CollectorDurationChart);
