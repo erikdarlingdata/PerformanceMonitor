@@ -199,7 +199,7 @@ On premises, a registration with the trace off leaves the long-query session in 
 
 #### Read-only intent on Azure SQL Database
 
-A session cannot be created over a read-only connection. For a registration with read-only intent, Lite creates the session definition over a connection without the intent. The definition replicates to the read-only replica. Lite then starts the session over the registration's own connection. A drop stops the session on the replica first, then drops it on the primary. Microsoft describes the method in [Monitor read-only replicas with Extended Events](https://learn.microsoft.com/en-us/azure/azure-sql/database/read-scale-out).
+A session cannot be created over a read-only connection. For a registration with read-only intent, Lite creates the session definition over a connection without the intent. The definition replicates to the read-only replica. Lite then starts the session over the registration's own connection. A drop stops the session on the replica first, then drops it on the primary. Microsoft describes the method in [Monitor read-only replicas with Extended Events](https://learn.microsoft.com/en-us/azure/azure-sql/database/read-scale-out). On Hyperscale with several high-availability replicas, a read-only connection lands on one replica that the app cannot choose, so the stop reaches only that one. Microsoft Learn describes no way to address a single high-availability replica; it says the read-intent workload is distributed arbitrarily across them ([Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica)).
 
 A Managed Instance registration with read-only intent needs the trace started on the primary first. Lite does not do that, so the registration gets the read-only message (error 3906). A registration without the intent can land on a read-only database, such as a geo-secondary. It gets one clear message, and Lite retries the create every hour.
 
@@ -216,6 +216,7 @@ Each install uses one long-query session per database while the trace is on. It 
 - Two registrations of one instance in one install drop the old session twice.
 - A lost record costs one more drop. This happens when you recreate the Lite data folder.
 - On RDS Multi-AZ, the drop reaches the primary only. The copy on the standby stays stopped after a failover, unless an older install starts it.
+- On Hyperscale with several high-availability replicas, the stop reaches only the replica that a read-only connection lands on. A copy of the session that runs on another replica is not stopped. Microsoft Learn describes no way to address one high-availability replica: [Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica).
 - On Azure SQL Database, two registrations of one database with different logins share one session name, as before.
 
 #### Clones

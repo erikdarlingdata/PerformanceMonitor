@@ -1098,6 +1098,10 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 
             /* The services' own wrapper: reads and the stop go over the own connection, the drop over one without the intent. */
             database = DarlingAlwaysOnXeSessions.WithReadOnlyIntent(connectionString, own, OpenDatabaseForTests);
+            /* Hyperscale limit (#4961): with several high-availability replicas, a read-only connection lands on one replica the app
+               cannot choose, so this stop reaches only that one, and a copy of the session that runs on another replica is not stopped.
+               Microsoft Learn describes no way to address one HA replica; it says the read-intent workload is "distributed arbitrarily
+               across all available HA replicas": https://learn.microsoft.com/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica */
             if (await database.IsStartedAsync(drop.Session.Name, cancellationToken))
             {
                 await database.ExecuteAsync(stop!, cancellationToken);
