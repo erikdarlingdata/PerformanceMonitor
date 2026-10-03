@@ -4971,6 +4971,10 @@ LIMIT 1";
     /// </summary>
     private readonly ConcurrentDictionary<int, QueryStoreServerGate> _queryStoreGates = new();
 
+    /// <summary>#5003: which collector failures have already had their stack written to the service log since this
+    /// process started. Read and written by every concurrent collector run, so it is a concurrent table inside.</summary>
+    private readonly CollectorFaultStackLog _collectorFaultStacks = new();
+
     /// <summary>
     /// #2717: one <see cref="DetachedCollectorGate"/> per (server, collector) for every collector fired
     /// detached from <see cref="RunDueCollectorsAsync"/>'s sequential body other than query_store (which
@@ -5621,33 +5625,15 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// A deterministic, restart-stable per-server phase offset within a cadence period (#1553 cadence jitter),
-    /// used to break the fleet-wide lockstep at cadence boundaries — the field incident re-herded every server
-    /// at once, so at each boundary all collectors fired together. The <paramref name="serverId"/> is
-    /// <see cref="MonitoredServer.ServerId"/>, which today is an FNV-1a hash
-    /// (<see cref="ServerIdHelper.GetDeterministicHashCode"/>) — so a plain modulo spreads it across
-    /// <c>[0, period)</c> without any further mixing (an extra multiply was reviewed out as unnecessary — the
-    /// input is already avalanched). This is the ONE consumer that wants the value only as a spreading
-    /// function rather than as an identity, so if #2218 ever makes ids sequential the extra mixing that was
-    /// reviewed out has to come back here: consecutive integers modulo a period do not spread, they line up.
-    /// Restart-stable because it is a pure function of the id — no <see cref="Random"/>.
-    /// A non-positive period yields no offset (guards the callers where a period could in principle be zero, and
-    /// keeps the result well-defined for tests). Applied ONLY at initial cadence stamps, never the steady-state
-    /// advance: directly for the on-connect analysis stamp, and — capped at min(interval, 150s) via
-    /// <see cref="SeedJitter"/> — as the small de-cluster jitter <see cref="ComputeSeededNextDue"/> adds to an
-    /// overdue or never-run collector seed (#1575). Internal so a unit test can pin its shape.
+    /// The deterministic, restart-stable per-server phase offset within a cadence period (#1553 cadence jitter).
+    /// The rule moved to <see cref="CollectorCadence.CadencePhaseOffset"/> (#4938) so the shared run-time rules in the
+    /// collectors project can use it; this forwards to it, so the seed jitter (<see cref="SeedJitter"/>), the
+    /// cold-start spread (<see cref="ColdStartFirstSweepDue"/>) and the on-connect analysis stamp, and the pins on
+    /// them, keep one spelling and the same values. Applied ONLY at initial cadence stamps, never the steady-state
+    /// advance. Internal so a unit test can pin its shape.
     /// </summary>
     internal static TimeSpan CadencePhaseOffset(int serverId, int periodSeconds)
-    {
-        if (periodSeconds <= 0)
-        {
-            return TimeSpan.Zero;
-        }
-
-        /* Cast to uint first so a negative FNV hash still maps into [0, period): a signed modulo would yield a
-           negative offset and pull the due time into the past. */
-        return TimeSpan.FromSeconds((uint)serverId % periodSeconds);
-    }
+        => CollectorCadence.CadencePhaseOffset(serverId, periodSeconds);
 
     /// <summary>
     /// The small, bounded per-server seed jitter (#1575): the deterministic <see cref="CadencePhaseOffset"/>
@@ -13259,6 +13245,28 @@ LIMIT 1";
 
             _logger.LogError("  [{Server}] {Collector} => ERROR: {Message}",
                 server.Config.DisplayName, collectorName, message);
+
+            /* #5003: the first failure of each kind from a collector since the service started is written once more
+               with its full text, so the next "Collection was modified" (or any other fault in our own code) names the
+               frame that threw. The line above stays as it is for every failure, and so does the collection_log row.
+
+               The text goes into the message rather than only onto the exception object: the file log renders an
+               exception it is handed as "Type: Message" and drops the stack (DarlingFileLoggerProvider.Log), and the
+               file is the log an operator reads. An OutOfMemoryException is never given one - this arm is its landing
+               pad, and building the text allocates.
+
+               The ERROR (timeout) arm above is deliberately left alone. Its filter admits only an NpgsqlException that
+               the provider classifies as a command timeout, so its cause is a deadline by construction, the authored
+               sentence already names the collector, the database, the elapsed time and the side whose deadline fired,
+               and a stack there would be Npgsql's read frames. A bug in our own code cannot reach it. */
+            if (_collectorFaultStacks.TakeFirst(collectorName, ex) is { } faultText)
+            {
+                _logger.LogError(ex,
+                    "  [{Server}] {Collector} => ERROR detail: first {ExceptionType} from this collector since the service "
+                    + "started, with its full text so the frame that threw is on record. Later failures of this kind log "
+                    + "the one line only.{FullText}",
+                    server.Config.DisplayName, collectorName, ex.GetType().Name, Environment.NewLine + faultText);
+            }
 
             /* A dead connection poisons every collector — force a reconnect + reprobe. The Postgres arm
                matters as much as the SQL Server one and is deliberately NARROWER than "any

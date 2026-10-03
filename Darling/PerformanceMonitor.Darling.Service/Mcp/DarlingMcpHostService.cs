@@ -1018,6 +1018,17 @@ public sealed class DarlingMcpHostService : BackgroundService
                at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Lite twin:
                McpToolGuideTools. */
             .WithGeminiCompatibleTools<DarlingMcpToolGuideTools>()
+            // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+            // FinOps web parity (#4843), set A ends.
+            // Each set belongs to one series of changes. Append to your own set only,
+            // so the two series never edit the same lines of this registration list.
+            // Entries keep the registration list's existing order and form.
+            // Set A and set B are separated on purpose: keep this gap.
+            //
+            //
+            //
+            // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+            // FinOps web parity (#4843), set B ends.
             /* Three call-tool filters, each registered ONCE and each covering every tool with no
                per-tool change — the seam that exists precisely so a decision about all ~147 reads
                is made in one place.

@@ -2574,6 +2574,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private const string CatPlans = "Plans";
     private const string CatDefaultTrace = "Default Trace";
     private const string CatSystemHealth = "System Health";
+    private const string CatFinOps = "FinOps";
 
     private static CatalogParam PServer() => new("server", TypeServer, false, null);
     private static CatalogParam PHours(int def) => new("hours", TypeInt, false, def);
@@ -2796,6 +2797,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_severe_errors"] = R(CatSystemHealth, "system_health: severe (sev >= 17) errors.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_significant_waits"] = R(CatSystemHealth, "system_health: individual 500 ms+ waits with their statement.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_system_health"] = R(CatSystemHealth, "system_health: the raw parsed session records.", PServer(), PHours(24), PLimit(50), PAsOf()),
+            // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+            // FinOps web parity (#4843), set A ends.
+            // Each set belongs to one series of changes. Append to your own set only,
+            // so the two series never edit the same lines of this catalog.
+            // Entries keep the catalog's existing order and form.
+            // Set A and set B are separated on purpose: keep this gap.
+            //
+            //
+            //
+            // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+            // FinOps web parity (#4843), set B ends.
         };
 
     /// <summary>Builds the <c>/api/catalog</c> body: the reads (names taken from <see cref="BuildReadDispatch"/>,
@@ -3726,6 +3738,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_severe_errors"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSevereErrors(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_health_parser_significant_waits"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSignificantWaits(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+            // FinOps web parity (#4843), set A ends.
+            // Each set belongs to one series of changes. Append to your own set only,
+            // so the two series never edit the same lines of this read list.
+            // Entries keep the read list's existing order and form.
+            // Set A and set B are separated on purpose: keep this gap.
+            //
+            //
+            //
+            // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+            // FinOps web parity (#4843), set B ends.
         };
 
         /* #4442: the test-only extra entry, added ONLY when a test set it -- never in a production
