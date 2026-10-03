@@ -666,4 +666,108 @@ public sealed class DarlingAgReaderTests
         Assert.True(result.GroupsTruncated);
         Assert.Contains("top 4", result.GroupsTruncatedNote);
     }
+
+    /* ─────────────────────── #5042 round 1: seeds, skips and the honest note ─────────────────────── */
+
+    /// <summary>One server's VIEW of an AG: a primary view carries a PRIMARY replica row, a secondary view does
+    /// not. <paramref name="criticalDb"/> makes the first database NOT SYNCHRONIZING (a Critical view).</summary>
+    private static (Reader.ReplicaRow[] Replicas, Reader.DatabaseRow[] Databases) AgView(
+        int serverId, string agName, string? groupId, bool primary, int databaseCount, bool criticalDb = false)
+    {
+        var serverName = $"NODE{serverId:D3}A";
+        var replicas = new[]
+        {
+            Replica(serverId, serverName, agName, primary ? serverName : $"NODE{serverId:D3}P", primary ? "PRIMARY" : "SECONDARY", groupId: groupId),
+            Replica(serverId, serverName, agName, primary ? $"NODE{serverId:D3}B" : serverName, "SECONDARY", groupId: groupId),
+        };
+        var databases = new Reader.DatabaseRow[databaseCount];
+        for (var i = 0; i < databaseCount; i++)
+        {
+            var bad = criticalDb && i == 0;
+            databases[i] = new Reader.DatabaseRow(
+                serverId, serverName, At(1), agName, $"AppDatabase_{agName}_{i:D2}", $"NODE{serverId:D3}B", true,
+                bad ? "NOT SYNCHRONIZING" : "SYNCHRONIZED",
+                "00000029000A6B4C000100AE", "00000029000A6B4B00010098",
+                12L, 4L, 1024L, 1024L, false, null, "SYNCHRONOUS_COMMIT", 0L, groupId);
+        }
+
+        return (replicas, databases);
+    }
+
+    private static AgHealthResult BuildViews(int? limit, params (Reader.ReplicaRow[] Replicas, Reader.DatabaseRow[] Databases)[] views) =>
+        Reader.Build(views.SelectMany(v => v.Replicas).ToList(), views.SelectMany(v => v.Databases).ToList(), At(0), limit: limit);
+
+    private static int ViewBytes((Reader.ReplicaRow[] Replicas, Reader.DatabaseRow[] Databases) view) =>
+        System.Text.Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(Reader.Build(view.Replicas, view.Databases, At(0)).AvailabilityGroups[0], Reader.JsonOptions));
+
+    [Fact]
+    public void Build_NoViewOfASecondAgFits_TheNoteNamesItInsteadOfClaimingCoverage()
+    {
+        /* The reporter's shape: AG1 primary view ~30.5 KB / secondary ~15.3 KB, AG2 primary ~61.4 KB / secondary
+           ~30.6 KB, against a ~32 KB budget. AG1's primary seeds and fits; no AG2 view fits next to it. */
+        var ag1P = AgView(1, "AG1", "g1", true, 56);
+        var ag1S = AgView(2, "AG1", "g1", false, 27);
+        var ag2P = AgView(3, "AG2", "g2", true, 115);
+        var ag2S = AgView(4, "AG2", "g2", false, 56);
+        Assert.InRange(ViewBytes(ag1P), 29_000, 32_000);
+        Assert.InRange(ViewBytes(ag2S) + ViewBytes(ag1P), McpResponseBudget.DefaultBytes + 1, int.MaxValue);
+
+        var result = BuildViews(null, ag1P, ag1S, ag2P, ag2S);
+
+        Assert.Contains(result.AvailabilityGroups, g => g.AgName == "AG1");
+        Assert.DoesNotContain(result.AvailabilityGroups, g => g.AgName == "AG2");
+        Assert.True(result.GroupsTruncated);
+        Assert.Contains("No view of 1 availability group(s) fit: AG2", result.GroupsTruncatedNote);
+        Assert.DoesNotContain("at least one view of each availability group", result.GroupsTruncatedNote);
+    }
+
+    [Fact]
+    public void Build_SecondaryViewIsCriticalPrimaryViewHealthy_SeedsTheCriticalView()
+    {
+        var primaryHealthy = AgView(1, "AG1", "g1", true, 2);
+        var secondaryCritical = AgView(2, "AG1", "g1", false, 2, criticalDb: true);
+
+        var result = BuildViews(1, primaryHealthy, secondaryCritical);
+
+        var only = Assert.Single(result.AvailabilityGroups);
+        Assert.Equal(HealthSeverity.Critical, only.Severity);
+    }
+
+    [Fact]
+    public void Build_BigViewSkipped_ASmallLaterViewIsStillKept()
+    {
+        var small1 = AgView(1, "AG1", "g1", true, 2);
+        var big = AgView(2, "AG2", "g2", true, 200);
+        var small2 = AgView(3, "AG3", "g3", true, 2);
+
+        var result = BuildViews(null, small1, big, small2);
+
+        Assert.DoesNotContain(result.AvailabilityGroups, g => g.AgName == "AG2");
+        Assert.Contains(result.AvailabilityGroups, g => g.AgName == "AG1");
+        Assert.Contains(result.AvailabilityGroups, g => g.AgName == "AG3");
+        Assert.Contains("AG2", result.GroupsTruncatedNote);
+    }
+
+    [Fact]
+    public void Build_TwoAgsWithoutGroupId_AreSeededByName()
+    {
+        var a = AgView(1, "AGA", null, true, 2);
+        var a2 = AgView(2, "AGA", null, false, 2);
+        var b = AgView(3, "AGB", null, true, 2);
+        var b2 = AgView(4, "AGb", null, false, 2);
+
+        var result = BuildViews(2, a, a2, b, b2);
+
+        Assert.Equal(2, result.AvailabilityGroups.Count);
+        Assert.Equal(2, result.AvailabilityGroups.Select(g => g.AgName!.ToUpperInvariant()).Distinct().Count());
+    }
+
+    [Fact]
+    public void Build_LimitTwoOnTwoAgsOfTwoViews_ReturnsBothAgs()
+    {
+        var result = BuildViews(2, AgView(1, "AG1", "g1", true, 2), AgView(2, "AG1", "g1", false, 2),
+            AgView(3, "AG2", "g2", true, 2), AgView(4, "AG2", "g2", false, 2));
+
+        Assert.Equal(new[] { "AG1", "AG2" }, result.AvailabilityGroups.Select(g => g.AgName).OrderBy(n => n).ToArray());
+    }
 }

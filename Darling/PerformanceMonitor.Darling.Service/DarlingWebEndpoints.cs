@@ -344,11 +344,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            like /api/fleet — the per-server view is reachable through the /api/read/get_ag_health mirror, which
            owns the name-resolution error path. Unlike that mirror this returns the DTO directly: an AG-less store
            answers with an empty groups array rather than the tool's {status:"empty"} envelope, so the page renders
-           its own empty state and the nav gate can read the count off the same response. */
+           its own empty state and the nav gate can read the count off the same response. #5042: this page renders
+           its own cards, not an MCP client's result buffer, so it passes a null byte budget and never loses a view
+           to the 32 KB cap (the response is compressed on the wire, #4188); only get_ag_health keeps that cap. */
         app.MapGet("/api/ag", async (HttpContext context) =>
         {
             var result = await DarlingAgReader.GetAgHealthAsync(
-                postgres, null, DateTime.UtcNow, cancellationToken: context.RequestAborted);
+                postgres, null, DateTime.UtcNow, responseByteBudget: null, cancellationToken: context.RequestAborted);
             return Results.Json(result, DarlingAgReader.JsonOptions);
         });
 
