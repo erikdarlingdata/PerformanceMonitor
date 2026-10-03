@@ -217,7 +217,9 @@ internal static class DarlingQueryStoreRegressionReader
     /// collected history sits inside the requested window can never show a regression however bad it got.
     /// Reporting that as "no regressions" is the failure this exists to prevent.</para>
     /// <para>Probes the base <c>query_store_stats</c> table, the same source the read itself uses.
-    /// $1 server_id, $2 window start, $3 window end, $4 baseline start (#4195).</para>
+    /// $1 server_id, $2 window start, $3 window end, $4 baseline start (#4195), $5 database filter (text[] or
+    /// NULL, #5015: the same match the read makes, so a caller that filtered can tell a filter that matched nothing
+    /// from one that matched and found nothing wrong).</para>
     /// </summary>
     public const string RegressionCoverageSql = """
         SELECT
@@ -227,6 +229,7 @@ internal static class DarlingQueryStoreRegressionReader
                 WHERE server_id = $1
                 AND   collection_time >= $4
                 AND   collection_time < $2
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
             ) AS has_baseline,
             EXISTS (
                 SELECT 1
@@ -234,6 +237,7 @@ internal static class DarlingQueryStoreRegressionReader
                 WHERE server_id = $1
                 AND   collection_time >= $2
                 AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
             ) AS has_recent
         """;
 
@@ -286,15 +290,21 @@ internal static class DarlingQueryStoreRegressionReader
         return rows;
     }
 
-    /// <summary>Runs <see cref="RegressionCoverageSql"/>.</summary>
+    /// <summary>Runs <see cref="RegressionCoverageSql"/>. <paramref name="databaseName"/> narrows both questions to
+    /// one database, as <see cref="GetQueryStoreRegressionsAsync"/> does (null or blank: every database).</summary>
     public static async Task<(bool HasBaseline, bool HasRecent)> GetCoverageAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DateTime baselineStartUtc,
-        CancellationToken cancellationToken = default)
+        string? databaseName = null, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(RegressionCoverageSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(baselineStartUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+            Value = string.IsNullOrWhiteSpace(databaseName) ? DBNull.Value : new[] { databaseName },
+        });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
             return (false, false);

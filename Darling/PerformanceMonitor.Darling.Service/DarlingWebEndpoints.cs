@@ -371,6 +371,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 string result;
                 try
                 {
+                    /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
+                       taken once here and handed to both the read and the note check. A request with its own anchor
+                       is left as sent. */
+                    var askedAsOf = AsOf(context);
+                    if (askedAsOf is null && WebDataStartNote.NewestFirstCappedReads.Contains(name))
+                    {
+                        askedAsOf = WebDataStartNote.FormatWindowEnd(DateTime.UtcNow);
+                        context.Request.QueryString = context.Request.QueryString.Add("as_of", askedAsOf);
+                    }
+
                     result = await handler(context, postgres, analysis);
 
                     /* #4966: a grid over a window says where its table's data starts when that is after the window's
@@ -378,7 +388,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        failed probe returns the tool's answer as it was. */
                     var askedHours = QueryInt(context, "hours", "hours_back", 0);
                     result = await WebDataStartNote.AddAsync(
-                        postgres, name, Server(context), askedHours > 0 ? askedHours : null, AsOf(context), result, logger, context.RequestAborted);
+                        postgres, name, Server(context), askedHours > 0 ? askedHours : null, askedAsOf, result, logger, context.RequestAborted);
                 }
                 catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                 {
@@ -608,7 +618,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                sees. Only THIS web mapping (see ComposeRunFailureResult) stops putting a STORE fault's text on
                the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
             var stopwatch = Stopwatch.StartNew();
-            var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true);
+            var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true);
             if (outcome.Payload is not null)
             {
                 return JsonNodeResult(outcome.Payload);
@@ -1119,19 +1129,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>Raised when a compose runner cannot open its store connection (pool wait, DNS, TCP connect, TLS or
-    /// startup or login exchange). The original <see cref="NpgsqlException"/> rides as the inner exception. No
-    /// statement ran, so this is never a statement timeout.</summary>
+    /// startup or login exchange). The original exception rides as the inner exception: an
+    /// <see cref="NpgsqlException"/>, or the bare <see cref="TimeoutException"/> the driver throws when a first-time
+    /// setup wait ends (#5016). No statement ran, so this is never a statement timeout.</summary>
     internal sealed class ComposeStoreOpenException : Exception
     {
-        internal ComposeStoreOpenException(NpgsqlException inner)
+        internal ComposeStoreOpenException(Exception inner)
             : base(inner.Message, inner)
         {
         }
     }
 
     /// <summary>Opens a compose runner's store connection, before any statement runs. An <see cref="NpgsqlException"/>
-    /// from the open (other than a <see cref="PostgresException"/> the server sent at login) is raised as
-    /// <see cref="ComposeStoreOpenException"/>.</summary>
+    /// from the open (other than a <see cref="PostgresException"/> the server sent at login), or a bare
+    /// <see cref="TimeoutException"/> (the driver's wait for a data source's first-time setup, #5016), is raised as
+    /// <see cref="ComposeStoreOpenException"/>. A cancellation propagates unchanged: it is the caller's.</summary>
     private static async Task<NpgsqlConnection> OpenComposeConnectionAsync(
         NpgsqlDataSource postgres, System.Threading.CancellationToken cancellationToken)
     {
@@ -1140,6 +1152,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return await postgres.OpenConnectionAsync(cancellationToken);
         }
         catch (NpgsqlException ex) when (ex is not PostgresException)
+        {
+            throw new ComposeStoreOpenException(ex);
+        }
+        catch (TimeoutException ex)
         {
             throw new ComposeStoreOpenException(ex);
         }
@@ -1164,8 +1180,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         if (ex is ComposeStoreOpenException open)
         {
-            return open.InnerException!.InnerException is TimeoutException
-                ? ComposeRunOutcome.ServerError($"Error running query: could not get a store connection in time: {open.InnerException.Message}")
+            /* #5016: whether an open timed out is not the driver's one shape (a read timeout, an expired budget, a connect, a
+               pool wait, the GSS step's wrapper and a bare TimeoutException all differ), so the chain is walked in one helper. */
+            return PostgresOpenTimeout.IsTimedOutOpen(open.InnerException!)
+                ? ComposeRunOutcome.ServerError($"Error running query: could not get a store connection in time: {open.InnerException!.Message}")
                 : ComposeRunOutcome.ServerError($"Error running query: could not open a store connection: {open.InnerException!.Message}");
         }
 
@@ -1198,10 +1216,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <para><paramref name="readLatency"/> (#4782) is the read-latency seat this run is recorded into: the web
     /// route passes the one its own <see cref="MapAll"/> call built, the MCP tool the one its host registered.
     /// Null records nothing (a test calling the runner directly).</para>
+    ///
+    /// <para><paramref name="includeDataStartFields"/> adds the data-start sentence and the instants it names beside
+    /// <c>notice</c> (<see cref="WebDataStartNote.AddComposedPanelInstants"/>), so the page can write the sentence again
+    /// in the browser's zone. Only the web route sets it; the MCP tool leaves it off, so its client reads the sentence
+    /// once, in <c>notice</c>.</para>
     /// </summary>
     internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(
         NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken,
-        ReadLatencyRecorder? readLatency = null, int clientDeadlineHeadroomSeconds = 0, bool remapClientTimeout = false)
+        ReadLatencyRecorder? readLatency = null, int clientDeadlineHeadroomSeconds = 0, bool remapClientTimeout = false, bool includeDataStartFields = false)
     {
         /* #4442 scope 2: recorded ONCE per call, here, so the web /api/compose/run route and the MCP
            run_custom_view_panel tool -- both of which call this ONE runner -- contribute exactly one
@@ -1211,7 +1234,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            a bucket update is the only work in the try, and any failure there is swallowed and logged at
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
-        var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, cancellationToken, readLatency?.Logger);
+        var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger);
         RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken);
         return outcome;
     }
@@ -1280,7 +1303,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// read-latency recorder carries (<see cref="ReadLatencyRecorder.Logger"/>), where the data-start probe reports
     /// a failure it swallows.</summary>
     private static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
-        NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, System.Threading.CancellationToken cancellationToken,
+        NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields, System.Threading.CancellationToken cancellationToken,
         ILogger? logger = null)
     {
         if (body["panel"] is not JsonObject panel)
@@ -1420,10 +1443,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                a store with no TimescaleDB, and one server whose rows start later than the rest. When it is silent,
                ask where this panel's own rows start. The Query Store wide table reports its own start in the
                history note below, so a panel it served is not asked twice. */
+            ComposeStoreAvailability.DataStartNotice? dataStartNotice = null;
             if (retentionNotice is null && !queryStoreWideEligible)
             {
-                retentionNotice = await ComposeStoreAvailability.BuildDataStartNoticeAsync(
+                dataStartNotice = await ComposeStoreAvailability.FindDataStartNoticeAsync(
                     postgres, plan.Measure.SourceTable, compiled.Route, serverScope, start, end, composedQuerySeconds, cancellationToken, logger);
+                retentionNotice = dataStartNotice?.Text;
             }
 
             if (ComposeStoreAvailability.CombineNotices(
@@ -1431,6 +1456,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
             {
                 payload["notice"] = notice;
+
+                /* #4966: the sentence names its times in UTC, which is what any other reader of this answer (the MCP
+                   tool) needs, but the page prints every time in the browser's zone. When the notice is the data-start
+                   one, the answer also carries the instants it names, and the sentence, so the page can write it again
+                   in its own clock. The tier notice names no instant the page prints, and carries none. */
+                if (includeDataStartFields && dataStartNotice is { } found)
+                {
+                    WebDataStartNote.AddComposedPanelInstants(payload, found.Text, found.DataStartUtc, start, end);
+                }
             }
 
             /* #4689: the interval table served this panel from a start later than the window's, so say where it
@@ -2808,6 +2842,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             //
             //
             // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+            ["get_finops"] = R(CatFinOps, "FinOps views for one server, picked by view. view is one of a closed set (today: " + DarlingMcpFinOpsTools.SetAValid + DarlingMcpFinOpsTools.SetBValid + "); an unknown view is refused with the valid list. Windowed over hours; limit caps rows per list.", PServer(), PText("view"), PHours(24), PInt("limit", 10)),
             // FinOps web parity (#4843), set B ends.
         };
 
@@ -3749,6 +3784,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             //
             //
             // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+            ["get_finops"] = (c, pg, an) => DarlingMcpFinOpsTools.GetFinOps(pg, First(c, "view") ?? "", Server(c), Hours(c, 24), QueryInt(c, "limit", null, 10), c.RequestAborted),
             // FinOps web parity (#4843), set B ends.
         };
 

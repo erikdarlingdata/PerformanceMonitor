@@ -437,6 +437,15 @@ internal static class McpHelpers
         DateTime.SpecifyKind(effectiveStart, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
 
     /// <summary>
+    /// #5015: <see cref="FormatEffectiveStart(DateTime)"/> for an instant that may be absent (the oldest or newest of a page
+    /// of events whose time column is nullable, which is null for a page that holds none). Every
+    /// <c>oldest_returned_*</c> and <c>newest_returned_*</c> bound goes through the one formatter, so each prints UTC with
+    /// the Z whatever the column's own kind.
+    /// </summary>
+    public static string? FormatEffectiveStart(DateTime? effectiveStart) =>
+        effectiveStart is DateTime instant ? FormatEffectiveStart(instant) : null;
+
+    /// <summary>
     /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.
     ///
     /// <para>Not a grace period for asking about the future — it is the client-clock allowance. An agent that

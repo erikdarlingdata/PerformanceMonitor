@@ -49,6 +49,13 @@ public class StoredEventCopiesSweepTests
         /* The two last-capture reads, MAX(collection_time) with no time window: a batch that stored only copies of
            events already held still read the session, so its collection_time is a true capture. */
         [("LocalDataService.SystemEvents.cs", "v_system_health_events")] = 2,
+
+        /* The window-floor probe (#4966): its QueryWindowRelationView map names the views, and the probe asks only for the
+           earliest time inside a window and whether any row sits before its start (LIMIT 1). A copy of an event is stored
+           later than its first copy and keeps the first copy's event_time, so it cannot move the earliest time or add an
+           older row. The probe returns no rows, so there is nothing to hide. */
+        [("LocalDataService.QueryWindowFloor.cs", "v_system_health_events")] = 1,
+        [("LocalDataService.QueryWindowFloor.cs", "v_long_query_completions")] = 1,
     };
 
     [Fact]

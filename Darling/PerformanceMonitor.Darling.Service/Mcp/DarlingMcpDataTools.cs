@@ -961,7 +961,7 @@ public sealed class DarlingMcpDataTools
         }
 
         return (start, end.Value, string.Create(System.Globalization.CultureInfo.InvariantCulture,
-            $"Hourly tier: ranked CPU and the measured denominator both cover the served span {start:o} to {end.Value:o}."));
+            $"Hourly tier: ranked CPU and the measured denominator both cover the served span {McpHelpers.FormatEffectiveStart(start)} to {McpHelpers.FormatEffectiveStart(end.Value)}."));
     }
 
     /// <summary>
@@ -2424,8 +2424,9 @@ public sealed class DarlingMcpDataTools
                     only under time ordering, and the ranked page would silently report the wrong ends
                     while the time-ordered test kept passing.
                 */
-                oldest_returned_collection_time = rows.Min(r => r.CollectionTime).ToString("o"),
-                newest_returned_collection_time = rows.Max(r => r.CollectionTime).ToString("o"),
+                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.CollectionTime)),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Max(r => r.CollectionTime)),
                 /* Which ordering the page actually came back in. Stated rather than left to be inferred
                    from whether min_duration_ms was sent, because the first sentence of this tool's
                    description is the only other place that coupling is written down. */
@@ -2591,8 +2592,9 @@ public sealed class DarlingMcpDataTools
                 hours_back,
                 run_count = rows.Count,
                 truncated,
-                oldest_returned_collection_time = rows.Min(r => r.Entry.CollectionTime).ToString("o"),
-                newest_returned_collection_time = rows.Max(r => r.Entry.CollectionTime).ToString("o"),
+                /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.Entry.CollectionTime)),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Max(r => r.Entry.CollectionTime)),
                 order = min_duration_ms is null
                     ? McpHelpers.CollectionLogOrderNewestFirst
                     : McpHelpers.CollectionLogOrderSlowestFirst,

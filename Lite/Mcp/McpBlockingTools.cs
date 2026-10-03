@@ -68,8 +68,8 @@ public sealed class McpBlockingTools
                    deadlock_time, so the bounds are on that stamp; Min/Max over DateTime? skip a null. */
                 deadlocks_returned = page.Count,
                 truncated,
-                oldest_returned_deadlock_time = page.Min(r => r.DeadlockTime)?.ToString("o"),
-                newest_returned_deadlock_time = page.Max(r => r.DeadlockTime)?.ToString("o"),
+                oldest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.DeadlockTime)),
+                newest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.DeadlockTime)),
                 order = "deadlock_time_desc",
                 separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 deadlocks = result
@@ -141,8 +141,8 @@ public sealed class McpBlockingTools
                    "more deadlocks WITH a graph than limit". */
                 deadlocks_returned = withXml.Count,
                 truncated,
-                oldest_returned_deadlock_time = withXml.Min(r => r.DeadlockTime)?.ToString("o"),
-                newest_returned_deadlock_time = withXml.Max(r => r.DeadlockTime)?.ToString("o"),
+                oldest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(withXml.Min(r => r.DeadlockTime)),
+                newest_returned_deadlock_time = McpHelpers.FormatEffectiveStart(withXml.Max(r => r.DeadlockTime)),
                 order = "deadlock_time_desc",
                 deadlocks = result
             }, McpHelpers.JsonOptions);
@@ -257,8 +257,8 @@ public sealed class McpBlockingTools
                    that a quiet page describes a quiet window. */
                 reports_returned = page.Count,
                 truncated,
-                oldest_returned_event_time = page.Min(r => r.EventTime)?.ToString("o"),
-                newest_returned_event_time = page.Max(r => r.EventTime)?.ToString("o"),
+                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.EventTime)),
+                newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
                 order = "event_time_desc",
                 separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 reports = result
@@ -324,8 +324,8 @@ public sealed class McpBlockingTools
                    reports WITH XML in the window than limit". */
                 reports_returned = withXml.Count,
                 truncated,
-                oldest_returned_event_time = withXml.Min(r => r.EventTime)?.ToString("o"),
-                newest_returned_event_time = withXml.Max(r => r.EventTime)?.ToString("o"),
+                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(withXml.Min(r => r.EventTime)),
+                newest_returned_event_time = McpHelpers.FormatEffectiveStart(withXml.Max(r => r.EventTime)),
                 order = "event_time_desc",
                 reports = result
             }, McpHelpers.JsonOptions);

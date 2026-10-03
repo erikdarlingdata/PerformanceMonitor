@@ -162,7 +162,7 @@ public sealed class DataStartBannerProbeFailureTests
         var source = File.ReadAllText(ControlsFile("ServerTab.Refresh.cs"));
 
         Assert.Single(Regex.Matches(source,
-            @"private async System\.Threading\.Tasks\.Task RefreshWindowTruncatedBannerAsync\([^)]*\)\s*\{\s*var floor = await ProbeWindowFloorOrNullAsync\(\s*\(\) => Task\.Run\(\(\) => _dataService\.GetQueryWindowFloorAsync\(relation, _serverId, startUtc, endUtc\)\),\s*\$""[^""]*"",\s*startUtc,\s*endUtc\);\s*ApplyWindowFloorToBanner\(banner, floor, startUtc, GetPickerZone\(\)\);"));
+            @"private async System\.Threading\.Tasks\.Task RefreshWindowTruncatedBannerAsync\([^)]*\)\s*\{\s*var floor = await ProbeWindowFloorOrNullAsync\(\s*\(\) => Task\.Run\(\(\) => _dataService\.GetQueryWindowFloorAsync\(relation, _serverId, startUtc, endUtc\)\),\s*\$""[^""]*"",\s*startUtc,\s*endUtc\);\s*ApplyWindowFloorToBanner\(banner, EarlierOfFloorAndRowShown\(floor, earliestRowShownUtc\), startUtc, GetPickerZone\(\)\);"));
     }
 
     /// <summary>WPF objects require STA, and a probe that has already completed keeps the continuation on this thread.</summary>

@@ -7,7 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
 using Xunit;
 
@@ -59,24 +62,42 @@ public sealed class EffectiveStartUtcTests
     }
 
     /// <summary>
-    /// #4966: where a page's rows stop (<c>oldest_returned_collection_time</c>) describes the window the page covers, so
-    /// the two tools that carry it beside <c>effective_start</c> print it the same way: UTC, with the Z, through the
-    /// shared formatter, in both apps. The newest row's time is the row's own and keeps the store's form.
+    /// #4966, #5015: where a page's rows stop and start (<c>oldest_returned_*</c> and <c>newest_returned_*</c>: collection,
+    /// event, deadlock and alert time) describe the window the page covers, so every tool that carries them prints them the
+    /// same way as <c>effective_start</c>: UTC, with the Z, through the shared formatter, in both apps. The sweep reads
+    /// every tool file of both apps, so a field added later is judged too: none of them can keep a bare
+    /// <c>ToString("o")</c> of the store's naive instant. The one exception is the PostgreSQL log events' pair, which
+    /// reads a <c>DateTime</c> the reader already marks UTC (<c>OccurredAtUtc</c>, which serializes with the Z). Row times
+    /// keep the store's form.
     /// </summary>
-    [Theory]
-    [InlineData("Lite/Mcp/McpSessionTools.cs", 1)]
-    [InlineData("Lite/Mcp/McpWaitTools.cs", 1)]
-    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSessionTools.cs", 2)]
-    public void EveryOldestReturnedWrite_OfTheWindowTools_RoutesThroughTheSharedFormatter(string path, int expectedWrites)
+    [Fact]
+    public void EveryReturnedBoundWrite_OfBothApps_RoutesThroughTheSharedFormatter()
     {
-        var source = RepoFile.ReadRepoFile(path.Split('/'));
-        var writes = source
-            .Split('\n')
-            .Select(line => line.Trim())
-            .Where(line => line.StartsWith("oldest_returned_collection_time = ", StringComparison.Ordinal))
-            .ToList();
+        var found = 0;
+        var unrouted = new List<string>();
+        foreach (var directory in new[] { new[] { "Lite", "Mcp" }, new[] { "Darling", "PerformanceMonitor.Darling.Service", "Mcp" } })
+        {
+            foreach (var file in Directory.EnumerateFiles(RepoFile.PathTo(directory), "*.cs").Order(StringComparer.Ordinal))
+            {
+                foreach (var line in File.ReadAllLines(file).Select(l => l.Trim()))
+                {
+                    if (!Regex.IsMatch(line, @"^(oldest|newest)_returned_\w+ = "))
+                    {
+                        continue;
+                    }
 
-        Assert.Equal(expectedWrites, writes.Count);
-        Assert.All(writes, line => Assert.StartsWith("oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(", line, StringComparison.Ordinal));
+                    found++;
+                    var routed = line.Contains("McpHelpers.FormatEffectiveStart(", StringComparison.Ordinal);
+                    var alreadyUtcByType = Regex.IsMatch(line, @"^(oldest|newest)_returned_at = rows\[(\^1|0)\]\.OccurredAtUtc,$");
+                    if (!routed && !alreadyUtcByType)
+                    {
+                        unrouted.Add($"{Path.GetFileName(file)}: {line}");
+                    }
+                }
+            }
+        }
+
+        Assert.True(found >= 46, $"the sweep found {found} oldest/newest_returned_* writes; it should find every one in both apps (46 today).");
+        Assert.True(unrouted.Count == 0, "These oldest_returned_* / newest_returned_* writes print the store's naive instant, without the Z:\n" + string.Join("\n", unrouted));
     }
 }
