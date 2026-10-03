@@ -153,11 +153,8 @@ function fanout(read, params, specs) {
            where only one of them needs saying so. */
         const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
         const rendered = VIZ[spec.viz](res.data, { ...spec, windowHours: res.keptHours || (params && params.hours) });
-        /* #4966: a table spec says where its table's data starts when that is after the window's start (a chart's
-           axis already shows it), unless the spec renders `truncation_note` itself. */
-        const floor = spec.viz === "table" && spec.noteKey !== "truncation_note" ? windowFloorStrip(res.data) : null;
 
-        mount(body, [keptWindowStrip(res), floor, typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
+        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -184,7 +181,7 @@ export function waitsPanel(server, ctx) {
 
     const waits = res.data.waits || [];
     /* #4966: the Wait Stats grid says where its table's data starts when that is after the window's start. */
-    const parts = [keptWindowStrip(res), windowFloorStrip(res.data), VIZ.table(res.data, { rowsKey: "waits", columns: WAIT_COLUMNS })];
+    const parts = [keptWindowStrip(res), windowFloorStrip(res.data, { viz: "table" }), VIZ.table(res.data, { rowsKey: "waits", columns: WAIT_COLUMNS })];
 
     if (waits.length) {
       const chartSlot = el("div", {}, [loadingStrip()]);

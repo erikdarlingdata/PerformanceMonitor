@@ -134,13 +134,8 @@ async function loadPanelBody(desc, body, signal) {
     const note = desc.noteKey ? getPath(res.data, desc.noteKey) : null;
     /* #4925: a panel may carry further server notes (`moreNoteKeys`), each rendered as its own line when non-null. */
     const moreNotes = (desc.moreNoteKeys || []).map((k) => getPath(res.data, k));
-    /* #4966: a grid says where its table's data starts when that is after the window's start. A chart does not: its
-       time axis already spans the asked range. A descriptor that renders `truncation_note` itself (the Queries tab's
-       grids, #4231) is not drawn twice. */
-    const floor =
-      desc.viz === "table" && desc.noteKey !== "truncation_note" && !(desc.moreNoteKeys || []).includes("truncation_note")
-        ? windowFloorStrip(res.data)
-        : null;
+    /* #4966: a grid says where its table's data starts when that is after the window's start (windowFloorStrip). */
+    const floor = windowFloorStrip(res.data, desc);
     /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
        A copy, so the caller's descriptor keeps the window it asked for. */
     if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };

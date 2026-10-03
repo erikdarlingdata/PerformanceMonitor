@@ -205,10 +205,14 @@ export function keptWindowStrip(res) {
 /**
  * The notice for a grid whose table starts covering the server after the window does (#4966): the response says so with
  * `window_truncated: true` and a `truncation_note` naming where the data starts, in UTC. Null for any other response,
- * which is every window the table covered, a quiet start included. A grid draws it, a chart does not: a chart's time
- * axis already spans the asked range and shows the empty span. The note is text, never markup (R4).
+ * which is every window the table covered, a quiet start included. `desc` is the panel's descriptor: a grid draws the
+ * note, a chart does not (its time axis already spans the asked range and shows the empty span), and a grid that names
+ * `truncation_note` as its own note (the Queries tab's grids, #4231) draws it there, not twice. The note is text,
+ * never markup (R4).
  */
-export function windowFloorStrip(data) {
+export function windowFloorStrip(data, desc) {
+  if (!desc || desc.viz !== "table") return null;
+  if (desc.noteKey === "truncation_note" || (desc.moreNoteKeys || []).includes("truncation_note")) return null;
   if (!data || data.window_truncated !== true) return null;
   const note = data.truncation_note;
   return typeof note === "string" && note.trim() ? noticeStrip(note) : null;

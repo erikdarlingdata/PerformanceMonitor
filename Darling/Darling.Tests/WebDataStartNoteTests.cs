@@ -149,14 +149,14 @@ public sealed class WebDataStartNoteTests
         var panels = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js");
         var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
 
-        Assert.Contains("export function windowFloorStrip(data) {", util, StringComparison.Ordinal);
+        Assert.Contains("export function windowFloorStrip(data, desc) {", util, StringComparison.Ordinal);
+        Assert.Contains("desc.viz !== \"table\"", util, StringComparison.Ordinal);
         Assert.Contains("data.window_truncated !== true", util, StringComparison.Ordinal);
 
-        Assert.Contains("desc.viz === \"table\" && desc.noteKey !== \"truncation_note\"", panels, StringComparison.Ordinal);
-        Assert.Contains("? windowFloorStrip(res.data)", panels, StringComparison.Ordinal);
+        Assert.Contains("const floor = windowFloorStrip(res.data, desc);", panels, StringComparison.Ordinal);
 
-        Assert.Contains("spec.viz === \"table\" && spec.noteKey !== \"truncation_note\" ? windowFloorStrip(res.data) : null", tabs, StringComparison.Ordinal);
-        Assert.Contains("const parts = [keptWindowStrip(res), windowFloorStrip(res.data), VIZ.table(res.data, { rowsKey: \"waits\"", tabs, StringComparison.Ordinal);
+        Assert.Contains("windowFloorStrip(res.data, spec)", tabs, StringComparison.Ordinal);
+        Assert.Contains("const parts = [keptWindowStrip(res), windowFloorStrip(res.data, { viz: \"table\" }), VIZ.table(res.data, { rowsKey: \"waits\"", tabs, StringComparison.Ordinal);
 
         /* The strip is a grid's. No line path asks for it. */
         Assert.DoesNotContain("windowFloorStrip(trend", tabs, StringComparison.Ordinal);
