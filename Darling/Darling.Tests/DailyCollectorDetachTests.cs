@@ -334,6 +334,75 @@ public sealed class DailyCollectorDetachTests
         Assert.True(DarlingWorker.FoldsIntoSweepPeerMark(FastTier, detachedDaily: false));
     }
 
+    /// <summary>
+    /// #4999: the exclusion is keyed on "ran detached", not on "budgeted". pg_wait_sampling is detached by name
+    /// (#3604) and carries no wall-clock budget, so the budget rule alone let its ~30 s run into the peer mark of
+    /// whichever body happened to be running when it finished: the same false-slow-peers reading a daily run
+    /// would have caused. query_store and plan_correction are budgeted and stay out either way.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_wait_sampling")]
+    [InlineData("query_store")]
+    [InlineData("plan_correction")]
+    public void AnyDetachedRun_ByName_DoesNotFoldIntoTheSweepBodysPeerMark(string name)
+    {
+        Assert.True(DarlingWorker.IsDetachedByName(name));
+        Assert.False(DarlingWorker.FoldsIntoSweepPeerMark(name, detachedDaily: false));
+    }
+
+    [Fact]
+    public void TheDetachedRuleAloneKeepsAnUnbudgetedDetachedRunOutOfThePeerMark()
+    {
+        /* The case the budget rule cannot reach: detached, and unbudgeted. */
+        Assert.False(CollectorCatalog.HasWallClockBudget("pg_wait_sampling"));
+
+        var server = MakeServer(4401);
+        Assert.Equal(-1, server.SweepPeerMaxMs);
+
+        /* A finished detached run leaves the mark as the body made it, whichever kind of detached run it is. */
+        DarlingWorker.FoldIntoSweepPeerMark(server, "pg_wait_sampling", detachedDaily: false, sqlMs: 30_000);
+        Assert.Equal(-1, server.SweepPeerMaxMs);
+        DarlingWorker.FoldIntoSweepPeerMark(server, Daily, detachedDaily: true, sqlMs: 2_600_000);
+        Assert.Equal(-1, server.SweepPeerMaxMs);
+
+        /* An ordinary unbudgeted run in the body still folds, and a budgeted one still does not (#2864). */
+        DarlingWorker.FoldIntoSweepPeerMark(server, FastTier, detachedDaily: false, sqlMs: 120);
+        Assert.Equal(120, server.SweepPeerMaxMs);
+        Assert.True(CollectorCatalog.HasWallClockBudget("procedure_stats"));
+        DarlingWorker.FoldIntoSweepPeerMark(server, "procedure_stats", detachedDaily: false, sqlMs: 9_000);
+        Assert.Equal(120, server.SweepPeerMaxMs);
+
+        /* And a detached run finishing after the body has built its mark does not raise it. */
+        DarlingWorker.FoldIntoSweepPeerMark(server, "pg_wait_sampling", detachedDaily: false, sqlMs: 30_000);
+        Assert.Equal(120, server.SweepPeerMaxMs);
+    }
+
+    /// <summary>
+    /// The run reaches the mark only through the rule above: the one call in the run, and the one place that
+    /// writes the high-water mark. A write inline in the run would bypass the rule and read as correct in every
+    /// case above.
+    /// </summary>
+    [Fact]
+    public void TheMarkIsWrittenOnlyThroughTheRuleThatKeepsDetachedRunsOut()
+    {
+        var worker = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
+
+        Assert.Equal(1, CountOf(worker, "FoldIntoSweepPeerMark(server, collectorName, detachedDaily, result.SqlMs);"));
+        Assert.Equal(1, CountOf(worker, "server.SweepPeerMaxMs = (int)Math.Min("));
+    }
+
+    private static int CountOf(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0;
+             i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
     private sealed class RecordingLogger : ILogger<DarlingWorker>
     {
         private List<(LogLevel Level, string Message, Exception? Exception)> Entries { get; } = [];

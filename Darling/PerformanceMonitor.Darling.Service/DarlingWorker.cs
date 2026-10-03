@@ -5038,13 +5038,37 @@ LIMIT 1";
         effectiveIntervalMinutes >= DailyCollectorIntervalMinutes;
 
     /// <summary>
-    /// #4938: whether a finished run's cost goes into the sweep body's peer high-water mark (#2864). Not for a
-    /// budgeted collector, and not for a detached daily run: it ran beside the body rather than in it, finishes
-    /// minutes to hours after the body that dispatched it, and would put its own duration into whichever body is
-    /// running at that moment, which then reads as slow peers that were never slow.
+    /// #4938, #4999: whether a finished run's cost goes into the sweep body's peer high-water mark (#2864). Not
+    /// for a run that ran detached, and not for a budgeted collector. A detached run ran beside the body rather
+    /// than in it, finishes minutes to hours after the body that dispatched it, and would put its own duration
+    /// into whichever body is running at that moment, which then reads as slow peers that were never slow. That
+    /// holds for every detached run, so it is keyed on <see cref="RanDetached"/> and not on the budget:
+    /// pg_wait_sampling is detached and carries no budget, and its ~30 s window used to fold in.
     /// </summary>
     internal static bool FoldsIntoSweepPeerMark(string collectorName, bool detachedDaily) =>
-        !detachedDaily && !CollectorCatalog.HasWallClockBudget(collectorName);
+        !RanDetached(collectorName, detachedDaily) && !CollectorCatalog.HasWallClockBudget(collectorName);
+
+    /// <summary>
+    /// #4999: whether this run ran detached from the sweep body: a daily collector's scheduled run
+    /// (<paramref name="detachedDaily"/>, set by the dispatch that detaches it) or one of the three that are
+    /// detached by name (<see cref="IsDetachedByName"/>), whose every scheduled run is.
+    /// </summary>
+    internal static bool RanDetached(string collectorName, bool detachedDaily) =>
+        detachedDaily || IsDetachedByName(collectorName);
+
+    /// <summary>
+    /// #4999: folds a finished run's SQL time into the sweep body's peer high-water mark when
+    /// <see cref="FoldsIntoSweepPeerMark"/> says it counts. The write is here, not inline in the run, so a test
+    /// can watch the mark itself: that a detached run leaves it alone is a statement about the value, and the
+    /// run that would change it needs a store.
+    /// </summary>
+    internal static void FoldIntoSweepPeerMark(ServerLoopState server, string collectorName, bool detachedDaily, long sqlMs)
+    {
+        if (FoldsIntoSweepPeerMark(collectorName, detachedDaily))
+        {
+            server.SweepPeerMaxMs = (int)Math.Min(int.MaxValue, Math.Max(server.SweepPeerMaxMs, sqlMs));
+        }
+    }
 
     /// <summary>
     /// #4938: keeps a detached daily run in <see cref="InFlightDailyRuns"/> until it ends. The removal is attached
@@ -12977,11 +13001,12 @@ LIMIT 1";
                Budgeted collectors are excluded because they are the heavy ones being explained - a
                mark that included procedure_stats would be dominated by exactly the run in question.
                Asked of the catalog rather than a name list here: the list would be right until a fifth
-               collector earned a budget and silently wrong after. */
-            if (FoldsIntoSweepPeerMark(collectorName, detachedDaily))
-            {
-                server.SweepPeerMaxMs = (int)Math.Min(int.MaxValue, Math.Max(server.SweepPeerMaxMs, result.SqlMs));
-            }
+               collector earned a budget and silently wrong after.
+
+               #4999: and a run that ran DETACHED is excluded whatever its budget. It finishes after the body
+               that dispatched it, so its duration would land in an unrelated body's mark; the budget rule
+               alone left pg_wait_sampling's 30 s window folding in. */
+            FoldIntoSweepPeerMark(server, collectorName, detachedDaily, result.SqlMs);
 
             /* #2674: record this run's cost for the hourly collector_cost aggregate — the same numbers that
                go to collection_log, kept as a compact per-(server, collector) series for the cost panel. */
