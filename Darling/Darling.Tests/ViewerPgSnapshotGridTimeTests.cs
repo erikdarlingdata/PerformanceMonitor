@@ -142,4 +142,20 @@ public sealed class ViewerPgSnapshotGridTimeTests
         Assert.Contains("PgPredicateStatsGrid.SelectedItem is not PgDisplay.PredicateStatRow selected", menu, StringComparison.Ordinal);
         Assert.Contains("var row = selected.Source;", menu, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData("PgExtensionsGrid")]
+    [InlineData("PgServerConfigGrid")]
+    [InlineData("PgBufferUsageGrid")]
+    [InlineData("PgPredicateStatsGrid")]
+    public void TheSnapshotTimeColumnIsHeadedCollected(string grid)
+    {
+        var xaml = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.xaml").ReplaceLineEndings("\n");
+        var start = xaml.IndexOf("x:Name=\"" + grid + "\"", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var end = xaml.IndexOf("</DataGrid>", start, StringComparison.Ordinal);
+        var block = xaml[start..end];
+        Assert.Contains("Header=\"Collected\"", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("Header=\"Captured\"", block, StringComparison.Ordinal);
+    }
 }
