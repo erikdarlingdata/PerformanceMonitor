@@ -334,6 +334,10 @@ public sealed class EngineCapabilityReadWiringTests
     private static readonly Regex HelperDeclaration = new(
         @"private static async Task<string> (\w+)(?:<\w+>)?\(", RegexOptions.Compiled);
 
+    // The lookbehind excludes the helper's own declaration, which a joined part file puts inside a tool body.
+    private static string HelperCallPattern(string helperName) =>
+        $@"(?<!Task<string> )\b{Regex.Escape(helperName)}\(";
+
     /// <summary>
     /// Every collector name a shipped read asks the capability question about, across both SKUs. Exposed so
     /// <see cref="CollectorEngineCapabilityTests.EveryCapturePathEntry_NamesARealCollectorThatIsActuallyGatedSomewhere"/>
@@ -418,7 +422,7 @@ public sealed class EngineCapabilityReadWiringTests
                 var body = source[marks[i].Index..end];
                 foreach (var (helperName, helperCollectors) in viaHelper)
                 {
-                    if (!Regex.IsMatch(body, $@"\b{Regex.Escape(helperName)}\("))
+                    if (!Regex.IsMatch(body, HelperCallPattern(helperName)))
                     {
                         continue;
                     }
@@ -439,7 +443,7 @@ public sealed class EngineCapabilityReadWiringTests
                     Enumerable.Range(0, marks.Count).Any(i =>
                     {
                         var end = i + 1 < marks.Count ? marks[i + 1].Index : source.Length;
-                        return Regex.IsMatch(source[marks[i].Index..end], $@"\b{Regex.Escape(helperName)}\(");
+                        return Regex.IsMatch(source[marks[i].Index..end], HelperCallPattern(helperName));
                     }),
                     $"{file}: helper {helperName} asks the capability question but no tool calls it");
             }
