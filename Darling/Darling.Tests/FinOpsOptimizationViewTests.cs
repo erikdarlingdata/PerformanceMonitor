@@ -56,10 +56,13 @@ public sealed class FinOpsOptimizationViewTests
         Assert.Contains("ordered by total_cpu_ms descending then database_name then query_preview", tail, StringComparison.Ordinal);
         Assert.Contains("limit is the top-N here (1-50, default 10; the desktop shows 20)", tail, StringComparison.Ordinal);
         Assert.Contains("which of several statements tied at the top-N cut is returned is the engine's choice", tail, StringComparison.Ordinal);
-        Assert.Contains("so for expensive_queries it depends on limit", tail, StringComparison.Ordinal);
+        Assert.Contains("so for expensive_queries each row's share depends on limit", tail, StringComparison.Ordinal);
+        Assert.Contains("an attribution of the window's budget across the returned rows, not a measured cost", tail, StringComparison.Ordinal);
+        Assert.Contains("uses hours_back even when its rows start at the clamped effective_start", tail, StringComparison.Ordinal);
+        Assert.Contains("a mix of gated and empty sections returns the payload", tail, StringComparison.Ordinal);
         Assert.Contains("rounded to 2 places", tail, StringComparison.Ordinal);
         Assert.Contains("'monthly cost not set'", tail, StringComparison.Ordinal);
-        Assert.Contains("get_plan_xml", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("get_plan_xml", tail, StringComparison.Ordinal);
         Assert.Contains("ordered by day ascending", tail, StringComparison.Ordinal);
     }
 
@@ -457,6 +460,20 @@ public sealed class FinOpsOptimizationViewLiveTests
         Assert.Equal(
             await DarlingEngineCapability.NotCollectedStatusAsync(ds, PostgresServerId, PostgresServerName, "database_size_stats", ct),
             body);
+    }
+
+    [Fact]
+    public void MixedGatedAndEmptySections_KeepThePayload_AndOnlyAnUngatedEmptyAnswerIsBare()
+    {
+        var gate = McpHelpers.Status("not_collected", "gated");
+        var none = new[] { 0, 0, 0, 0, 0 };
+
+        Assert.True(DarlingMcpFinOpsTools.IsBareEmpty(none, new string?[] { null, null, null, null, null }));
+        /* Some gated, the rest empty: not bare, so each section says which it is. */
+        Assert.False(DarlingMcpFinOpsTools.IsBareEmpty(none, new string?[] { gate, null, null, gate, null }));
+        Assert.False(DarlingMcpFinOpsTools.IsBareEmpty(none, new string?[] { null, null, null, null, gate }));
+        /* Any rows at all keep the payload. */
+        Assert.False(DarlingMcpFinOpsTools.IsBareEmpty(new[] { 0, 1, 0, 0, 0 }, new string?[] { null, null, null, null, null }));
     }
 
     [Fact]

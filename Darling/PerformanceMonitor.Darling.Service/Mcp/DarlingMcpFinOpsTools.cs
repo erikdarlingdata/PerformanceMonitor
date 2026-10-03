@@ -30,6 +30,7 @@ public sealed partial class DarlingMcpFinOpsTools
     [
         // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
         UtilizationView,
+        IndexAnalysisView,
         // FinOps web parity (#4843), set A ends.
         // Each set belongs to one series of changes. Append to your own set only,
         // so the two series never edit the same lines of this allow-list.
@@ -49,9 +50,9 @@ public sealed partial class DarlingMcpFinOpsTools
     ];
 
     // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
-    internal const string SetAViewLines = " " + UtilizationViewLine;
-    internal const string SetAValid = UtilizationView + ", ";
-    internal const string SetAGuides = " " + UtilizationViewGuide;
+    internal const string SetAViewLines = " " + UtilizationViewLine + " " + IndexAnalysisViewLine;
+    internal const string SetAValid = UtilizationView + ", " + IndexAnalysisView + ", ";
+    internal const string SetAGuides = " " + UtilizationViewGuide + " " + IndexAnalysisViewGuide;
     // FinOps web parity (#4843), set A ends.
     // Each set belongs to one series of changes. Append to your own set only,
     // so the two series never edit the same lines of these fragments.
@@ -80,6 +81,8 @@ public sealed partial class DarlingMcpFinOpsTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to read, ending now (default 24).")] int hours_back = 24,
         [Description("Most rows per top-N list the view keeps (1-50, default 10).")] int limit = DefaultLimit,
+        [Description("Database to limit the view to (index_analysis only).")] string? database_name = null,
+        [Description("Return full script and definition text (index_analysis only; default false).")] bool full_text = false,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -96,6 +99,10 @@ public sealed partial class DarlingMcpFinOpsTools
         if (limit < 1 || limit > MaxLimit)
             return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {MaxLimit}.");
 
+        database_name = NormalizeIndexAnalysisDatabaseName(database_name);
+        var misuse = IndexAnalysisOnlyParamMisuse(normalized, database_name, full_text);
+        if (misuse is { } m) return McpHelpers.Refusal(m.Parameter, m.Message);
+
         try
         {
             switch (normalized)
@@ -103,6 +110,8 @@ public sealed partial class DarlingMcpFinOpsTools
                 // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
                 case UtilizationView:
                     return await ReadUtilizationAsync(postgres, resolved, hours_back, limit, cancellationToken);
+                case IndexAnalysisView:
+                    return await ReadIndexAnalysisAsync(postgres, resolved, hours_back, limit, database_name, full_text, cancellationToken);
                 // FinOps web parity (#4843), set A ends.
                 // Each set belongs to one series of changes. Append to your own set only,
                 // so the two series never edit the same lines of this switch.

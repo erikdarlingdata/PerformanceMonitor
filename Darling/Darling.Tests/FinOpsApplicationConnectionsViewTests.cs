@@ -162,7 +162,7 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, ct));
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, cancellationToken: ct));
         Assert.Equal(6, tool.RootElement.GetProperty("application_count").GetInt32());
         Assert.False(tool.RootElement.GetProperty("truncated").GetBoolean());
         Assert.Equal(24, tool.RootElement.GetProperty("hours_back").GetInt32());
@@ -182,7 +182,7 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, ct));
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, cancellationToken: ct));
         var names = tool.RootElement.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("application_name").GetString()).ToArray();
         Assert.Equal(new[] { "", "Zulu", "Alpha", "Quebec", "Lima", "Mike" }, names);
     }
@@ -194,7 +194,7 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, ct));
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, cancellationToken: ct));
         var reader = (await DarlingFinOpsApplicationConnectionsReader.GetApplicationConnectionsAsync(
             ds, ServerId, DateTime.UtcNow.AddHours(-24), 60, ct)).ToDictionary(r => r.ApplicationName);
         foreach (var row in tool.RootElement.GetProperty("rows").EnumerateArray())
@@ -220,7 +220,7 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, ct));
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, cancellationToken: ct));
         var q = tool.RootElement.GetProperty("rows").EnumerateArray().Single(r => r.GetProperty("application_name").GetString() == "Quebec");
         Assert.Equal("Quebec", q.GetProperty("application_name").GetString());
         Assert.Equal(7, q.GetProperty("avg_connections").GetInt64());
@@ -249,7 +249,7 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 48, 10, ct));
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 48, 10, cancellationToken: ct));
         Assert.Contains(tool.RootElement.GetProperty("rows").EnumerateArray(), r => r.GetProperty("application_name").GetString() == "Outside");
     }
 
@@ -260,7 +260,7 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", EmptyServerName, 24, 10, ct);
+        var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", EmptyServerName, 24, 10, cancellationToken: ct);
         Assert.Equal(
             McpHelpers.Status("empty", "No session statistics were collected for this server in the last 24 hours, so there is no per-application connection data to show."),
             body);
@@ -273,7 +273,7 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", PostgresServerName, 24, 10, ct));
+        using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", PostgresServerName, 24, 10, cancellationToken: ct));
         Assert.Equal("not_collected", tool.RootElement.GetProperty("status").GetString());
     }
 
@@ -284,7 +284,7 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 5, ct);
+        var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 5, cancellationToken: ct);
         Assert.Contains("limit", body, StringComparison.Ordinal);
         Assert.Contains("application_connections", body, StringComparison.Ordinal);
         Assert.DoesNotContain("application_count", body, StringComparison.Ordinal);
@@ -297,7 +297,7 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        var tool = await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, ct);
+        var tool = await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, cancellationToken: ct);
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
