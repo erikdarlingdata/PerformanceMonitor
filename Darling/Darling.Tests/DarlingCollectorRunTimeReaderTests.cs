@@ -201,6 +201,33 @@ public sealed class DarlingCollectorRunTimeReaderTests
     }
 
     [Fact]
+    public async Task TheInsufficientPrivilegeWarningReachesTheLogger()
+    {
+        var logger = new CapturingLogger();
+
+        await DarlingCollectorRunTimeReader.ReadRunTimesAsync(
+            () => throw new PostgresException("permission denied", "ERROR", "ERROR", "42501"),
+            DarlingCollectorRunTimeReader.WarnTo(logger));
+
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Warning, entry.Level);
+        Assert.Contains("config_collector_run_times", entry.Text, StringComparison.Ordinal);
+    }
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<(Microsoft.Extensions.Logging.LogLevel Level, string Text)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId,
+            TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
+    }
+
+    [Fact]
     public async Task AMissingTableAnswersNoRunTimesAndAnythingElsePropagates()
     {
         var warnings = new List<string>();
