@@ -213,7 +213,7 @@ public sealed class DarlingAnalysisPipelineTests
     [Fact]
     public void DrillDown_AllSql_AnyValue_OnlyInTheRegressedQueriesQuery()
     {
-        /* any_value() is standard SQL:2023, in Postgres since 16 (product minimum PG is 17).
+        /* any_value() is standard SQL:2023, in Postgres since 16 (product minimum PG is 16).
            It is deliberate in the plan-regression re-detection and nowhere else — the same
            confinement the fact collector pins for its PlanRegressionSql. */
         Assert.Contains("any_value(query_text)", PgDrillDownCollector.RegressedQueriesSql, StringComparison.Ordinal);
