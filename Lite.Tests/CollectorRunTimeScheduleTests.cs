@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -1067,6 +1068,151 @@ public sealed class CollectorRunTimeStartupSeedTests : IDisposable
 
             Assert.Empty(manager.GetDueCollectorsForServer(server.Id, Slot(eastern) + TimeSpan.FromMinutes(1)));
             Assert.Single(manager.GetDueCollectorsForServer(server.Id, Slot(pacific) + TimeSpan.FromMinutes(1)));
+        }
+        finally
+        {
+            duckDb.Dispose();
+        }
+    }
+
+    /* The one floor both Lite paths apply: a collector's own interval plus a day, inclusive at the edge. */
+    [Fact]
+    public void TheLastRunFloor_IsTheCollectorsIntervalPlusADay_AndAnOlderRunReadsAsNeverRun()
+    {
+        var now = new DateTime(2026, 7, 15, 9, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(TimeSpan.FromDays(2), ScheduleManager.LastRunFloor(1440));
+        Assert.Equal(TimeSpan.FromDays(4), ScheduleManager.LastRunFloor(3 * 1440));
+        Assert.Equal(TimeSpan.FromDays(8), ScheduleManager.LastRunFloor(7 * 1440));
+
+        var edge = now - TimeSpan.FromDays(4);
+        Assert.Equal(edge, ScheduleManager.LastRunWithinFloor(edge, now, 3 * 1440));
+        Assert.Null(ScheduleManager.LastRunWithinFloor(edge.AddTicks(-1), now, 3 * 1440));
+        Assert.Equal(edge.AddTicks(-1), ScheduleManager.LastRunWithinFloor(edge.AddTicks(-1), now, 7 * 1440));
+        Assert.Null(ScheduleManager.LastRunWithinFloor(null, now, 3 * 1440));
+    }
+
+    private const string ThreeDay = "index_object_stats";
+
+    private static List<string> DueAt(ScheduleManager manager, ServerConnection server, DateTime atUtc) =>
+        manager.GetDueCollectorsForServer(server.Id, atUtc).Select(s => s.Name).ToList();
+
+    /* A run time about twelve hours from now on the UTC clock, so a test never starts inside a slot's grace. */
+    private static int RunAtTwelveHoursOff() => (DateTime.UtcNow.Hour * 60 + DateTime.UtcNow.Minute + 12 * 60) % 1440;
+
+    /* The latest date whose slot is at or before the instant, found the way the run-time rule finds it. */
+    private static DateOnly LatestSlotDate(DateTime utc, int runAtMinute, int storageId)
+    {
+        var date = DateOnly.FromDateTime(utc).AddDays(-2);
+        while (CollectorRunTime.SlotUtc(date.AddDays(1), runAtMinute, storageId, CollectorRunTime.LocalIsUtc) <= utc)
+        {
+            date = date.AddDays(1);
+        }
+
+        return date;
+    }
+
+    /* The next run get_collection_health names for a collector whose newest log row is lastRunUtc (the health row's stamp is naive UTC). */
+    private static DateTime HealthNextRun(
+        ScheduleManager manager, ServerManager servers, ServerConnection server, string collector, DateTime lastRunUtc, DateTime nowUtc)
+    {
+        var storageId = RemoteCollectorService.GetServerId(server);
+        var settings = manager.GetRunTimeSettingsForStorageServer(servers, storageId, new[] { collector });
+        var stamp = DateTime.SpecifyKind(lastRunUtc, DateTimeKind.Unspecified);
+        var row = new CollectorHealthRow { CollectorName = collector, TotalRuns = 1, SuccessCount = 1, LastRunTime = stamp, LastSuccessTime = stamp };
+        return McpCollectorRunTimes.Compute(storageId, settings, new[] { row }, clock: null, nowUtc)[collector].NextRunUtc!.Value;
+    }
+
+    /* The first slot after now at which the sweep runs the collector. A run-time collector is due only inside a slot's
+       grace, so asking at each day's slot finds the next run the sweep acts on. */
+    private static DateTime FirstSlotTheSweepRuns(
+        ScheduleManager manager, ServerConnection server, string collector, int runAtMinute, DateTime nowUtc)
+    {
+        var storageId = RemoteCollectorService.GetServerId(server);
+        var today = DateOnly.FromDateTime(nowUtc);
+        for (var offset = -1; offset <= 12; offset++)
+        {
+            var slot = CollectorRunTime.SlotUtc(today.AddDays(offset), runAtMinute, storageId, CollectorRunTime.LocalIsUtc);
+            if (slot > nowUtc && DueAt(manager, server, slot).Contains(collector))
+            {
+                return slot;
+            }
+        }
+
+        Assert.Fail("the sweep does not run the collector at any slot in the next twelve days");
+        return default;
+    }
+
+    /* #4938: a collector on an interval of two days or more, with a run time. The sweep seeded a last run only from its
+       interval plus a day back, and get_collection_health used the health row's newest run (it sees seven days) with no
+       floor, so a run between the two bounds gave the sweep "never run" (the next daily slot) and the tool a 3-day grid from
+       that run (a later day): the tool named a next run the sweep did not act on. Both now count a run older than the
+       interval plus a day as never run. The last run here sits a whole number of slot dates behind now, five minutes after
+       that day's slot. */
+    [Theory]
+    [InlineData(2)]   // inside the 4-day floor: both follow the 3-day grid from that run
+    [InlineData(3)]   // still inside it
+    [InlineData(5)]   // past the floor, and the grid happens to land on the next daily slot
+    [InlineData(6)]   // past the floor, and the grid lands two days after the next daily slot
+    public async Task ADaysLongCollectorsNextRun_IsTheSameInTheSweepAndInTheHealthTool(int slotDatesSinceLastRun)
+    {
+        var (duckDb, servers, server) = await OpenAsync();
+        try
+        {
+            var now = DateTime.UtcNow;
+            var runAtMinute = RunAtTwelveHoursOff();
+            var storageId = RemoteCollectorService.GetServerId(server);
+            var lastRun = CollectorRunTime.SlotUtc(
+                LatestSlotDate(now, runAtMinute, storageId).AddDays(-slotDatesSinceLastRun), runAtMinute, storageId, CollectorRunTime.LocalIsUtc)
+                + TimeSpan.FromMinutes(5);
+
+            var manager = new ScheduleManager(_dir);
+            manager.SetScheduleForServer(server.Id, new List<CollectorSchedule>
+            {
+                new() { Name = ThreeDay, Enabled = true, FrequencyMinutes = 3 * 1440, RunAt = CollectorRunTime.Format(runAtMinute) },
+            });
+            await LogAsync(duckDb, server, ThreeDay, lastRun, "SUCCESS");
+            await new RemoteCollectorService(duckDb, servers, manager).EnsureRunTimeReadyAsync(server);
+
+            var toolNext = HealthNextRun(manager, servers, server, ThreeDay, lastRun, now);
+            var sweepNext = FirstSlotTheSweepRuns(manager, server, ThreeDay, runAtMinute, now);
+
+            Assert.Equal(sweepNext, toolNext);
+        }
+        finally
+        {
+            duckDb.Dispose();
+        }
+    }
+
+    /* The floor belongs to each collector's own interval. The start-up read looks back as far as the server's longest daily
+       interval, so a weekly neighbour made the read reach 8 days, and a 3-day collector whose run was six slot dates ago was
+       seeded from it and followed a grid. It is past its own 4-day floor: never run, due at the next daily slot. */
+    [Fact]
+    public async Task TheSweepFloorsEachCollectorAtItsOwnInterval_NotAtTheLongestOnTheServer()
+    {
+        var (duckDb, servers, server) = await OpenAsync();
+        try
+        {
+            var now = DateTime.UtcNow;
+            var runAtMinute = RunAtTwelveHoursOff();
+            var storageId = RemoteCollectorService.GetServerId(server);
+            var lastRun = CollectorRunTime.SlotUtc(
+                LatestSlotDate(now, runAtMinute, storageId).AddDays(-6), runAtMinute, storageId, CollectorRunTime.LocalIsUtc)
+                + TimeSpan.FromMinutes(5);
+
+            var manager = new ScheduleManager(_dir);
+            manager.SetScheduleForServer(server.Id, new List<CollectorSchedule>
+            {
+                new() { Name = ThreeDay, Enabled = true, FrequencyMinutes = 3 * 1440, RunAt = CollectorRunTime.Format(runAtMinute) },
+                new() { Name = "server_config", Enabled = true, FrequencyMinutes = 7 * 1440 },
+            });
+            await LogAsync(duckDb, server, ThreeDay, lastRun, "SUCCESS");
+            await new RemoteCollectorService(duckDb, servers, manager).EnsureRunTimeReadyAsync(server);
+
+            var nextDailySlot = CollectorRunTime.NextDue(now, lastRunUtc: null, runAtMinute, 3 * 1440, storageId, CollectorRunTime.LocalIsUtc);
+
+            Assert.Equal(nextDailySlot, FirstSlotTheSweepRuns(manager, server, ThreeDay, runAtMinute, now));
         }
         finally
         {

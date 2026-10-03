@@ -539,6 +539,20 @@ public class ScheduleManager
     internal static bool IsDailyOrLonger(int effectiveIntervalMinutes) => effectiveIntervalMinutes >= DailyIntervalMinutes;
 
     /// <summary>
+    /// #4938: how far back a daily-or-longer collector's last run still counts: its interval plus a day. A run older than
+    /// that reads as never run, so the collector waits for its next daily slot instead of following a grid of whole
+    /// intervals from a run it is already a day late on. The start-up read of last runs
+    /// (<see cref="RemoteCollectorService"/>) and get_collection_health (<see cref="Mcp.McpCollectorRunTimes"/>) both apply
+    /// it, each collector against its own interval, so the two name the same next run.
+    /// </summary>
+    internal static TimeSpan LastRunFloor(int effectiveIntervalMinutes) =>
+        TimeSpan.FromMinutes(effectiveIntervalMinutes) + TimeSpan.FromDays(1);
+
+    /// <summary>The last run when it is inside <see cref="LastRunFloor"/>, else null: never run.</summary>
+    internal static DateTime? LastRunWithinFloor(DateTime? lastRunUtc, DateTime nowUtc, int effectiveIntervalMinutes) =>
+        lastRunUtc is { } ran && ran >= nowUtc - LastRunFloor(effectiveIntervalMinutes) ? ran : null;
+
+    /// <summary>
     /// #4938: the enabled collectors whose effective interval is a day or more (the on-load ones recur daily), with
     /// that interval. These are the ones whose last run is read from collection_log at start-up.
     /// </summary>
