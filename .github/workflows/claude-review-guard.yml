@@ -47,6 +47,9 @@ name: Claude review guard
 # tell, because a lookup died, it fails CLOSED with its own message: an unexplained drift is the one
 # condition this check exists to make loud, and a 503 must not wave one through.
 #
+# It runs on pull requests into dev only, the branch claude-review.yml reviews. A release pull request
+# into main gets no review, so this check has no verdict to read there and does not run.
+#
 # What the review does per event (claude-review.yml decides it, once, in its `decide` job; this guard
 # does not repeat the decision, it reads what the review run did): a full review when a pull request
 # opens, reopens or is marked ready, and on the `re-review` label; ONE cheaper follow-up review per
@@ -78,7 +81,8 @@ on:
     # verdict (and waits for a `re-review` review); the poll below ignores the review runs that a
     # draft or an unrelated label skipped, so such a run finds the review that matters.
     types: [opened, synchronize, reopened, ready_for_review, labeled]
-    branches: [dev, main]
+    # Pull requests into dev only, the same branch claude-review.yml reviews.
+    branches: [dev]
 
 # Match the review's own cancel-in-progress behavior. A new push cancels the review it is watching,
 # so the guard has to go too, or it waits out its deadline on a run that was cancelled by design.
@@ -132,8 +136,8 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           SHA: ${{ github.event.pull_request.head.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          # The branch this PR merges INTO -- dev for the nightly train, main only for a release PR
-          # from dev. The pending-release arm asks whose copy of $WF this branch carries, so it must
+          # The branch this PR merges INTO: dev, the one branch the trigger lists. The
+          # pending-release arm asks whose copy of $WF this branch carries, so it must
           # read the base, not the head and not the default branch (which is the other side of the
           # comparison).
           BASE: ${{ github.base_ref }}

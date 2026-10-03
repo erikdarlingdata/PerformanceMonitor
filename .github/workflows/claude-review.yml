@@ -1,7 +1,9 @@
 name: Claude Auto Review
 
-# Reviews a pull request into the branches under `on:` below, but spends a full review only where
-# one pays. WHAT RUNS depends on the event, and the `decide` job makes that call once:
+# Reviews a pull request into dev, the one branch under `on:` below, but spends a full review only
+# where one pays. A release pull request from dev into main gets no second review: its changes came
+# into dev as pull requests, and those are where review happens. WHAT RUNS depends on the event, and
+# the `decide` job makes that call once:
 #   - opened, reopened, ready_for_review: a FULL review, at the tier described further down.
 #   - a push (synchronize): at most ONE follow-up review after each full one. It runs on Sonnet
 #     with 30 turns and covers only the commits since the commit the newest verdict reviewed. That
@@ -87,7 +89,8 @@ on:
     # ready for review starts one. `labeled` is here for the `re-review` label alone; the decide job
     # skips every other label before a runner starts.
     types: [opened, synchronize, reopened, ready_for_review, labeled]
-    branches: [dev, main]
+    # Pull requests into dev only. A release pull request into main is not reviewed again.
+    branches: [dev]
 
 # No workflow-level `concurrency`, on purpose. A group at this level is entered by EVERY run the
 # trigger above starts, including the ones that will skip, and with cancel-in-progress a skipping
