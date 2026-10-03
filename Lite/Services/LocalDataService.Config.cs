@@ -270,6 +270,10 @@ public class ServerConfigRow
 {
     /// <summary>The connect-time capture this row belongs to (#3541 A10); every row of one snapshot shares it.</summary>
     public DateTime CaptureTime { get; set; }
+
+    /// <summary>#4966: when this row's snapshot was captured, to the second, in the display zone (the grid's Collected column,
+    /// which sorts by <see cref="CaptureTime"/>). Config is captured on connect, so this is how old the shown value can be.</summary>
+    public string CaptureTimeLocal => ServerTimeHelper.FormatServerTime(CaptureTime);
     public string ConfigurationName { get; set; } = "";
     public long ValueConfigured { get; set; }
     public long ValueInUse { get; set; }
@@ -284,6 +288,10 @@ public class DatabaseConfigRow
 {
     /// <summary>The connect-time capture this row belongs to (#3541 A10).</summary>
     public DateTime CaptureTime { get; set; }
+
+    /// <summary>#4966: when this row's snapshot was captured, to the second, in the display zone (the grid's Collected column,
+    /// which sorts by <see cref="CaptureTime"/>). Config is captured on connect, so this is how old the shown value can be.</summary>
+    public string CaptureTimeLocal => ServerTimeHelper.FormatServerTime(CaptureTime);
     public string DatabaseName { get; set; } = "";
     public string StateDesc { get; set; } = "";
     public int CompatibilityLevel { get; set; }
@@ -358,6 +366,10 @@ public class QueryStoreHealthRow
 {
     /// <summary>The hourly capture this row belongs to (#3541 A10).</summary>
     public DateTime CaptureTime { get; set; }
+
+    /// <summary>#4966: when this row's snapshot was captured, to the second, in the display zone (the grid's Collected column,
+    /// which sorts by <see cref="CaptureTime"/>). Config is captured on connect, so this is how old the shown value can be.</summary>
+    public string CaptureTimeLocal => ServerTimeHelper.FormatServerTime(CaptureTime);
     public string DatabaseName { get; set; } = "";
     public string ActualState { get; set; } = "";
     public string DesiredState { get; set; } = "";
@@ -401,6 +413,10 @@ public class DatabaseScopedConfigRow
 {
     /// <summary>The connect-time capture this row belongs to (#3541 A10).</summary>
     public DateTime CaptureTime { get; set; }
+
+    /// <summary>#4966: when this row's snapshot was captured, to the second, in the display zone (the grid's Collected column,
+    /// which sorts by <see cref="CaptureTime"/>). Config is captured on connect, so this is how old the shown value can be.</summary>
+    public string CaptureTimeLocal => ServerTimeHelper.FormatServerTime(CaptureTime);
     public string DatabaseName { get; set; } = "";
     public string ConfigurationName { get; set; } = "";
     public string Value { get; set; } = "";
@@ -411,6 +427,10 @@ public class TraceFlagRow
 {
     /// <summary>The connect-time capture this row belongs to (#3541 A10).</summary>
     public DateTime CaptureTime { get; set; }
+
+    /// <summary>#4966: when this row's snapshot was captured, to the second, in the display zone (the grid's Collected column,
+    /// which sorts by <see cref="CaptureTime"/>). Config is captured on connect, so this is how old the shown value can be.</summary>
+    public string CaptureTimeLocal => ServerTimeHelper.FormatServerTime(CaptureTime);
     public int TraceFlag { get; set; }
     public bool Status { get; set; }
     public bool IsGlobal { get; set; }
