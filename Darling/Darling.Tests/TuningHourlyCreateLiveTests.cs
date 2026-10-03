@@ -33,6 +33,8 @@ public sealed class TuningHourlyCreateLiveTests
         "idx_query_store_stats_server_db_query_plan_time",
         PgTableTuning.ForcePlanFailuresIndexName,
         PgTableTuning.LegacyRowIndexName,
+        PgTableTuning.QueryStatsRestartRowIndexName,
+        PgTableTuning.ProcedureStatsRestartRowIndexName,
         "idx_store_metrics_kind_name_time",
     };
 
@@ -66,7 +68,7 @@ public sealed class TuningHourlyCreateLiveTests
         await Exec(holder, "BEGIN", ct);
         try
         {
-            await Exec(holder, "LOCK TABLE collect.query_stats, collect.query_store_stats, collect.store_metrics IN ROW EXCLUSIVE MODE", ct);
+            await Exec(holder, "LOCK TABLE collect.query_stats, collect.procedure_stats, collect.query_store_stats, collect.store_metrics IN ROW EXCLUSIVE MODE", ct);
             await Exec(body, "SET lock_timeout = '2s'", ct);
 
             var applied = await PgTableTuning.ApplyAsync(body, NullLogger.Instance, ct);

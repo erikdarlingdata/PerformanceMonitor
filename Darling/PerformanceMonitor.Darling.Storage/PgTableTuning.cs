@@ -167,6 +167,18 @@ public static class PgTableTuning
     /// </summary>
     public const string LegacyRowIndexName = "idx_query_store_stats_server_time_null_start";
 
+    /// <summary>
+    /// The partial index over the restart rows of <c>collect.query_stats</c>:
+    /// <c>(collection_time) WHERE sample_interval_seconds = 0</c>. It serves
+    /// <see cref="IntervalRollupRestartRows.QueryStatsRestartRowsSql"/>. The statement that builds it carries the
+    /// whole account (what it holds, why it builds at start, what the build costs); the procedure_stats twin,
+    /// <see cref="ProcedureStatsRestartRowIndexName"/>, is the same shape on the other table.
+    /// </summary>
+    public const string QueryStatsRestartRowIndexName = "idx_query_stats_restart_rows_time";
+
+    /// <summary>The restart-row partial index on <c>collect.procedure_stats</c>, built and read like <see cref="QueryStatsRestartRowIndexName"/>.</summary>
+    public const string ProcedureStatsRestartRowIndexName = "idx_procedure_stats_restart_rows_time";
+
     public static IReadOnlyList<string> ForcePlanFailuresIndexColumns { get; } = new[]
     {
         "server_id", "collection_time",
@@ -352,6 +364,39 @@ public static class PgTableTuning
            is a first-start build of roughly 30-70 s, inside SetupTimeoutSeconds with over 4x headroom. A build that runs
            out the clock is abandoned and retried at the next start; the hourly pass never builds it. */
         "CREATE INDEX IF NOT EXISTS " + LegacyRowIndexName + " ON collect.query_store_stats (server_id, collection_time) WHERE interval_start_time_utc IS NULL",
+        /* The restart rows of query_stats and procedure_stats (#4605). A restart row is a first collection after a
+           service or server restart: sample_interval_seconds = 0, a delta that cannot be rated. The hourly interval
+           rollups exclude them, so a read of a long window from the rollups adds the raw restart rows back
+           (IntervalRollupRestartRows). With only the (server_id, collection_time) index that arm walks every raw
+           row in the window to find a few: 109 s and 12 s on the largest production store measured.
+
+           WHAT IT HOLDS: only rows WHERE sample_interval_seconds = 0. A restart row is written once per
+           collector after a restart, so the index costs near-zero writes and WAL, and its tree stays small
+           however long the window.
+
+           WHY THE START PATH: the plain CREATE INDEX takes a ShareLock on the hypertable root, which is safe
+           before collectors start and not while they write. CONCURRENTLY is refused on hypertables, so the build
+           runs only here, under SetupTimeoutSeconds, and the hourly pass never builds it (as for LegacyRowIndexName).
+
+           COMPRESSED CHUNKS: CREATE INDEX on the hypertable builds one index per chunk from that chunk's own
+           heap, so each compressed chunk gets an empty 8 KB index and the compressed relations get none. Those
+           chunks are still read by the columnar scan; the index serves the uncompressed chunks.
+
+           THE BUILD'S COST: one read of every uncompressed chunk's heap. Measured on a local TimescaleDB 2.30.1 rig
+           with the real schema (4 chunks of 12 hours, warm, 2 parallel maintenance workers, median of 3):
+             query_stats:     1.5 M rows, 1,065 MB of heap (740 B per row):  CREATE INDEX 242 ms (213-322 ms);
+                              a serial count(*) of the same heap, 275 ms; with no parallel workers the build took 465 ms.
+             procedure_stats: 3.5 M rows, 1,288 MB of heap (386 B per row):  CREATE INDEX 297 ms (293-321 ms);
+                              a serial count(*) of the same heap, 355 ms; with no parallel workers the build took 630 ms.
+           So the build costs about one serial scan of the heap, and about 1.7 serial scans if the server has no
+           parallel workers free. On the largest production store measured, the read set is 12 GB of uncompressed
+           query_stats heap and 6.5 GB of procedure_stats in three chunks each, and 11.2 GB of heap was read in 56.1 s
+           serially, cold (#5021). At that rate the serial scans take about 60 s and 33 s, so the first-start builds
+           are roughly 60-100 s and 33-56 s, one statement each: at least 3x headroom inside the 300 s
+           SetupTimeoutSeconds per statement. A build that runs out of time is abandoned and retried at the next
+           start; the hourly pass never builds it. RestartRowIndexLiveTests holds the plan and the definitions. */
+        "CREATE INDEX IF NOT EXISTS " + QueryStatsRestartRowIndexName + " ON collect.query_stats (collection_time) WHERE sample_interval_seconds = 0",
+        "CREATE INDEX IF NOT EXISTS " + ProcedureStatsRestartRowIndexName + " ON collect.procedure_stats (collection_time) WHERE sample_interval_seconds = 0",
         "ALTER TABLE collect.procedure_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_stats SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.query_store_stats SET (" + InsertTuningOptions + ")",
