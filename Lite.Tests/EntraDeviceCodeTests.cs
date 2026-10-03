@@ -2090,12 +2090,12 @@ public class EntraDeviceCodeTests
     /// A server that accepts a socket and never answers: an open pointed at it connects and then waits for a reply that does not
     /// come, so a test can tell whether an open reached the network at all, with no tenant and no sign-in.
     /// </summary>
-    private sealed class DatabaseOpenRig : IDisposable
+    private sealed class SilentServerSetup : IDisposable
     {
         private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
         private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
 
-        public DatabaseOpenRig(string authenticationType)
+        public SilentServerSetup(string authenticationType)
         {
             _listener.Start();
             var configDir = Path.Combine(_tempDir, "config");
@@ -2104,7 +2104,7 @@ public class EntraDeviceCodeTests
             Servers = new ServerManager(configDir);
             Server = new ServerConnection
             {
-                ServerName = "127.0.0.1," + ((IPEndPoint)_listener.LocalEndpoint).Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ServerName = IPAddress.Loopback + "," + ((IPEndPoint)_listener.LocalEndpoint).Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 DisplayName = "database-open-" + Guid.NewGuid().ToString("N")[..8],
                 DatabaseName = "alpha",
                 AuthenticationType = authenticationType,
@@ -2175,8 +2175,8 @@ public class EntraDeviceCodeTests
            raises a window as device code does, and the flag is the same one. The server these opens point at accepts a socket and
            never answers: an open that did not refuse would connect to it and wait, which the listener shows. Two refusals in
            turn, and the second is also the proof that the first gave back the sign-in lock. */
-        using var rig = new DatabaseOpenRig(AuthenticationTypes.EntraMFA);
-        rig.Servers.GetConnectionStatus(rig.Server.Id).UserCancelledMfa = true;
+        using var setup = new SilentServerSetup(AuthenticationTypes.EntraMFA);
+        setup.Servers.GetConnectionStatus(setup.Server.Id).UserCancelledMfa = true;
 
         foreach (var withoutReadOnlyIntent in new[] { true, false })
         {
@@ -2186,7 +2186,7 @@ public class EntraDeviceCodeTests
             try
             {
                 var refused = await Assert.ThrowsAsync<InvalidOperationException>(
-                    () => open = rig.Probe.OpenAsync(rig.Server, "alpha", withoutReadOnlyIntent, bound.Token));
+                    () => open = setup.Probe.OpenAsync(setup.Server, "alpha", withoutReadOnlyIntent, bound.Token));
 
                 Assert.StartsWith("Interactive authentication cancelled by user", refused.Message, StringComparison.Ordinal);
             }
@@ -2196,7 +2196,7 @@ public class EntraDeviceCodeTests
             }
         }
 
-        Assert.False(rig.WasReached, "an open for a server whose sign-in was declined must refuse before it connects");
+        Assert.False(setup.WasReached, "an open for a server whose sign-in was declined must refuse before it connects");
     }
 
     [Fact]
@@ -2207,8 +2207,8 @@ public class EntraDeviceCodeTests
            that takes the lock waits behind it and is refused only once the lock is released. One that does not take it goes
            straight on and connects to the server that never answers. The hold is short, and given back in finally: the lock
            belongs to the whole process. */
-        using var rig = new DatabaseOpenRig(AuthenticationTypes.EntraMFA);
-        rig.Servers.GetConnectionStatus(rig.Server.Id).UserCancelledMfa = true;
+        using var setup = new SilentServerSetup(AuthenticationTypes.EntraMFA);
+        setup.Servers.GetConnectionStatus(setup.Server.Id).UserCancelledMfa = true;
 
         var signInLock = SignInLock();
         Assert.True(await signInLock.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None), "the sign-in lock should be free when the test starts");
@@ -2218,18 +2218,18 @@ public class EntraDeviceCodeTests
 
         try
         {
-            open = rig.Probe.OpenAsync(rig.Server, "alpha", withoutReadOnlyIntent: false, bound.Token);
+            open = setup.Probe.OpenAsync(setup.Server, "alpha", withoutReadOnlyIntent: false, bound.Token);
             await Task.Delay(TimeSpan.FromSeconds(1), CancellationToken.None);
 
             Assert.False(open.IsCompleted, "an open must wait while another sign-in holds the lock");
-            Assert.False(rig.WasReached, "an open that waits for the sign-in lock has not connected");
+            Assert.False(setup.WasReached, "an open that waits for the sign-in lock has not connected");
 
             signInLock.Release();
             released = true;
 
             var refused = await Assert.ThrowsAsync<InvalidOperationException>(() => open);
             Assert.StartsWith("Interactive authentication cancelled by user", refused.Message, StringComparison.Ordinal);
-            Assert.False(rig.WasReached, "the refusal came before any connection");
+            Assert.False(setup.WasReached, "the refusal came before any connection");
         }
         finally
         {
@@ -2247,7 +2247,7 @@ public class EntraDeviceCodeTests
     {
         /* Only a mode that can put a window up is made to queue: a SQL login has no prompt for the lock to serialise, so its opens
            must not wait behind one. The same hold as above, and this open goes straight to the server that never answers. */
-        using var rig = new DatabaseOpenRig(AuthenticationTypes.SqlServer);
+        using var setup = new SilentServerSetup(AuthenticationTypes.SqlServer);
 
         var signInLock = SignInLock();
         Assert.True(await signInLock.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None), "the sign-in lock should be free when the test starts");
@@ -2256,12 +2256,12 @@ public class EntraDeviceCodeTests
 
         try
         {
-            open = rig.Probe.OpenAsync(rig.Server, "alpha", withoutReadOnlyIntent: true, bound.Token);
+            open = setup.Probe.OpenAsync(setup.Server, "alpha", withoutReadOnlyIntent: true, bound.Token);
 
             var reached = false;
             for (var waited = 0; waited < 100 && !reached; waited++)
             {
-                reached = rig.WasReached;
+                reached = setup.WasReached;
 
                 if (!reached)
                 {
