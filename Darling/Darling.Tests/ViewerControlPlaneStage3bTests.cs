@@ -244,7 +244,7 @@ public sealed class ViewerCollectorSchedulesSqlTests
     {
         var sql = ViewerDataService.CollectorScheduleFleetUpsertSql;
         Assert.Contains("INSERT INTO config_collector_schedules", sql, StringComparison.Ordinal);
-        /* $5 is the V125 databases scope (#3477) and $6 the V158 run time (#4938) — pinned at the FULL
+        /* $5 is the V125 databases scope (#3477) and $6 the V160 run time (#4938) — pinned at the FULL
            arity, because the five-place prefix is a substring of the six-place list and a prefix pin
            would keep passing while a dropped sixth bind shifted nothing visible. */
         Assert.Contains("VALUES (NULL, $1, $2, $3, $4, $5, $6)", sql, StringComparison.Ordinal);
@@ -260,7 +260,7 @@ public sealed class ViewerCollectorSchedulesSqlTests
     public void ServerUpsert_ArbitratesOnServerIdCollectorName_WhereServerIdIsNotNull()
     {
         var sql = ViewerDataService.CollectorScheduleServerUpsertSql;
-        /* $6 is the V125 databases scope (#3477) and $7 the V158 run time (#4938); full arity for the fleet pin's reason. */
+        /* $6 is the V125 databases scope (#3477) and $7 the V160 run time (#4938); full arity for the fleet pin's reason. */
         Assert.Contains("VALUES ($1, $2, $3, $4, $5, $6, $7)", sql, StringComparison.Ordinal);
         Assert.Contains("ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE", sql, StringComparison.Ordinal);
         Assert.Contains("databases = EXCLUDED.databases", sql, StringComparison.Ordinal);

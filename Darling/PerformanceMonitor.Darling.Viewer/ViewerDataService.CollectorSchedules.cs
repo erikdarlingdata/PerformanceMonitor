@@ -48,7 +48,7 @@ public sealed partial class ViewerDataService
     /// <summary>Upserts one FLEET-WIDE override row (server_id NULL). Arbiter matches V17's
     /// <c>ux_config_collector_schedules_fleet</c>. $1 collector_name, $2 frequency (nullable), $3 retention
     /// (nullable), $4 enabled, $5 databases (nullable — the V125 scope; NULL and empty are distinct,
-    /// see <see cref="CollectorScheduleRow.Databases"/>), $6 run_at_minute (nullable smallint — the V158 run
+    /// see <see cref="CollectorScheduleRow.Databases"/>), $6 run_at_minute (nullable smallint — the V160 run
     /// time, minutes after midnight on the server's clock; NULL falls through to the code default).</summary>
     public const string CollectorScheduleFleetUpsertSql = @"
 INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases, run_at_minute)
@@ -63,7 +63,7 @@ ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET
     /// <summary>Upserts one PER-SERVER override row. Arbiter matches V17's
     /// <c>ux_config_collector_schedules_server</c>. $1 server_id, $2 collector_name, $3 frequency (nullable),
     /// $4 retention (nullable), $5 enabled, $6 databases (nullable — the V125 scope), $7 run_at_minute
-    /// (nullable smallint — the V158 run time; -1 is "no fixed time on this server").</summary>
+    /// (nullable smallint — the V160 run time; -1 is "no fixed time on this server").</summary>
     public const string CollectorScheduleServerUpsertSql = @"
 INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases, run_at_minute)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -106,7 +106,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
                 /* V125 (#3477): NULL and empty stay distinct through the round trip — the service's
                    ReadScheduleOverridesAsync says why the collapse would be a semantic change. */
                 reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5),
-                /* V158 (#4938): minutes after midnight on the server's clock, -1 = no fixed time on this server.
+                /* V160 (#4938): minutes after midnight on the server's clock, -1 = no fixed time on this server.
                    NULL stays null so it falls through the layering exactly like the scope above. */
                 reader.IsDBNull(6) ? null : Convert.ToInt32(reader.GetValue(6), CultureInfo.InvariantCulture)));
         }
@@ -181,7 +181,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
                 AddNullableInt(upsert, row.RetentionDays);                                                    // retention
                 upsert.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.Enabled });               // enabled
                 AddNullableTextArray(upsert, row.Databases);                                                  // databases (V125 scope)
-                AddNullableSmallint(upsert, row.RunAtMinute);                                                 // run_at_minute (V158) — written by name, so a save keeps what the row carries and a row with none stores NULL
+                AddNullableSmallint(upsert, row.RunAtMinute);                                                 // run_at_minute (V160) — written by name, so a save keeps what the row carries and a row with none stores NULL
                 await upsert.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -200,7 +200,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
             Value = value.HasValue ? value.Value : DBNull.Value,
         });
 
-    /// <summary>Binds the V158 <c>run_at_minute</c> as a smallint, which is the column's type: null binds SQL NULL (no
+    /// <summary>Binds the V160 <c>run_at_minute</c> as a smallint, which is the column's type: null binds SQL NULL (no
     /// run time at this level, falls through the layering), a value binds as written — 0-1439 is a minute of the day
     /// and -1 is "no fixed time on this server" (the column's CHECK refuses anything else).</summary>
     private static void AddNullableSmallint(NpgsqlCommand command, int? value) =>

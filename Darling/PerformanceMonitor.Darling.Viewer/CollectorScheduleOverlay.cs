@@ -30,11 +30,11 @@ public static class CollectorScheduleOverlay
     /// time (#4938). On the fleet row it is read as clearing the time, because the fleet has nothing to stop.</summary>
     public const string NoRunAtText = "None";
 
-    /// <summary>The stored value for "no fixed time on this server", the V158 column's -1.</summary>
+    /// <summary>The stored value for "no fixed time on this server", the V160 column's -1.</summary>
     private const int NoFixedRunTime = -1;
 
     /// <summary>
-    /// The text the Run at cell holds for a stored value: NULL (and a value the V158 CHECK would refuse, which the
+    /// The text the Run at cell holds for a stored value: NULL (and a value the V160 CHECK would refuse, which the
     /// service also reads as not set) is <see cref="UseDefaultRunAtText"/>, -1 is <see cref="NoRunAtText"/>, and a
     /// minute after midnight is <c>HH:MM</c> through the shared <see cref="CollectorRunTime.Format"/>.
     /// </summary>

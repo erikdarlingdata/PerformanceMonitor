@@ -5574,7 +5574,7 @@ WHERE lower(cs.collector_name) = lower($1)
 ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
     /// <summary>
-    /// The same read for a store the service has not migrated to V158 yet, which has no <c>run_at_minute</c> column (#4938): the
+    /// The same read for a store the service has not migrated to V160 yet, which has no <c>run_at_minute</c> column (#4938): the
     /// column list and its positions are identical, with the run time as a NULL smallint so no row prints a <c>run_at=</c>. The
     /// verbs work against a store older than the binary (a missing column is the idiom, as <see cref="StoreIsSetToPlainTextPlansAsync"/>
     /// reads the V62 column), so a toggle's read-back must not fail on a store whose write succeeded.
@@ -5602,7 +5602,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)
         {
-            /* A store the service has not migrated to V158 yet has no run_at_minute: read the rows without it, so the
+            /* A store the service has not migrated to V160 yet has no run_at_minute: read the rows without it, so the
                read-back omits run_at= instead of failing after a write that already committed. A different missing
                column fails the same way here and is reported as it is. The state code, not the message text, is what
                is matched: lc_messages is not always English. */
@@ -5633,7 +5633,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
                    ReadScheduleOverridesAsync does, so the printout says which one the row carries. */
                 reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
-                /* V158 (#4938): the run time is a smallint, NULL for "no override", -1 for "no fixed time on this server". */
+                /* V160 (#4938): the run time is a smallint, NULL for "no override", -1 for "no fixed time on this server". */
                 reader.IsDBNull(7) ? null : reader.GetInt16(7)));
         }
 

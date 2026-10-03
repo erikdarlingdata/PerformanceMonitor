@@ -571,7 +571,7 @@ WHERE status = 'in_progress'
                     new object?[] { collectorName }, cleared + " (fleet-wide)");
         }
 
-        /* The stored value is a smallint (V158): -1 for "none" on a server, else the minute after midnight. Boxed as a
+        /* The stored value is a smallint (V160): -1 for "none" on a server, else the minute after midnight. Boxed as a
            short so it binds as smallint and the plan's parameters say what the column holds. */
         var stored = none ? (short)-1 : (short)minute;
         if (serverId is int scopedId)
