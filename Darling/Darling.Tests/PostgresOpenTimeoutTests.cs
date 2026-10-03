@@ -134,4 +134,56 @@ public sealed class PostgresOpenTimeoutTests
     private sealed class TaskCanceledExceptionStandIn : OperationCanceledException
     {
     }
+
+    // ---- #5016 follow-up: the clock decides when the driver's own timer tore the socket down ----
+
+    private static readonly TimeSpan OneSecond = TimeSpan.FromSeconds(1);
+
+    private static NpgsqlException AbortedRead() =>
+        new("Exception while reading from stream",
+            new System.IO.IOException("Unable to read data from the transport connection", new SocketException((int)SocketError.OperationAborted)));
+
+    [Fact] // the shape rules alone do not see this one; that is the gap
+    public void AnAbortedSocketRead_IsNotATimeoutByShape() => Assert.False(PostgresOpenTimeout.IsTimedOutOpen(AbortedRead()));
+
+    [Fact]
+    public void AnAbortedSocketRead_AtTheTimeout_IsATimedOutOpen()
+    {
+        Assert.True(PostgresOpenTimeout.IsTimedOutByClock(AbortedRead(), OneSecond, OneSecond, callerCancelled: false));
+        Assert.True(PostgresOpenTimeout.IsTimedOutByClock(AbortedRead(), TimeSpan.FromMilliseconds(950), OneSecond, callerCancelled: false));
+    }
+
+    [Fact]
+    public void AnAbortedSocketRead_WellBeforeTheTimeout_IsNotATimedOutOpen() =>
+        Assert.False(PostgresOpenTimeout.IsTimedOutByClock(AbortedRead(), TimeSpan.FromMilliseconds(50), OneSecond, callerCancelled: false));
+
+    [Fact]
+    public void AServerReply_AtTheTimeout_IsNotATimedOutOpen() =>
+        Assert.False(PostgresOpenTimeout.IsTimedOutByClock(
+            new NpgsqlException("x", new PostgresException("down", "FATAL", "FATAL", "57P01")), OneSecond, OneSecond, callerCancelled: false));
+
+    [Fact]
+    public void ACallerCancellation_AtTheTimeout_IsNotATimedOutOpen()
+    {
+        Assert.False(PostgresOpenTimeout.IsTimedOutByClock(AbortedRead(), OneSecond, OneSecond, callerCancelled: true));
+        Assert.False(PostgresOpenTimeout.IsTimedOutByClock(new NpgsqlException("x", new OperationCanceledException()), OneSecond, OneSecond, callerCancelled: true));
+    }
+
+    [Fact]
+    public void ANestedCancellation_WithTheCallerLive_AtTheTimeout_IsTheDriversTimer_AndTimedOut()
+    {
+        Assert.True(PostgresOpenTimeout.IsTimedOutByClock(
+            new NpgsqlException("Exception while reading from stream", new OperationCanceledException()), OneSecond, OneSecond, callerCancelled: false));
+        Assert.True(PostgresOpenTimeout.IsTimedOutByClock(
+            new NpgsqlException("x", new System.IO.IOException("io", new OperationCanceledException())), OneSecond, OneSecond, callerCancelled: false));
+    }
+
+    [Fact]
+    public void AnOpenThatFailedAfterTheTimeout_AnswersInTime_AndOneThatDidNotKeepsCouldNotOpen()
+    {
+        var inner = AbortedRead();
+        var late = DarlingWebEndpoints.FromRunException(new DarlingWebEndpoints.ComposeStoreOpenException(inner) { FailedAfterTimeout = true });
+        Assert.Equal(InTime + inner.Message, late.Error);
+        Assert.Equal(NotOpened + inner.Message, Answer(inner));
+    }
 }

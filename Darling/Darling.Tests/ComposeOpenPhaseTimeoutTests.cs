@@ -102,6 +102,28 @@ public sealed class ComposeOpenPhaseTimeoutTests
         }
     }
 
+    /// <summary>Every level of the chain the compose runner caught: type, message, and the socket code or HResult that
+    /// says what the operating system did.</summary>
+    private static string DescribeChain(Exception? ex)
+    {
+        var sb = new System.Text.StringBuilder("exception chain:");
+        for (var level = ex; level is not null; level = level.InnerException)
+        {
+            sb.Append(System.Globalization.CultureInfo.InvariantCulture, $"{Environment.NewLine}  {level.GetType().FullName}: {level.Message}");
+            if (level is System.Net.Sockets.SocketException se)
+            {
+                sb.Append(System.Globalization.CultureInfo.InvariantCulture, $" [SocketErrorCode={se.SocketErrorCode}]");
+            }
+
+            if (level is System.IO.IOException)
+            {
+                sb.Append(System.Globalization.CultureInfo.InvariantCulture, $" [HResult=0x{level.HResult:X8}]");
+            }
+        }
+
+        return sb.ToString();
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -111,13 +133,15 @@ public sealed class ComposeOpenPhaseTimeoutTests
         await using var store = NpgsqlDataSource.Create(listener.ConnectionString);
         var body = (JsonObject)JsonNode.Parse(PanelJson)!;
 
+        Exception? thrown = null;
         var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(
-            store, body, TestContext.Current.CancellationToken, null, DarlingWebEndpoints.ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: remapClientTimeout);
+            store, body, TestContext.Current.CancellationToken, null, DarlingWebEndpoints.ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: remapClientTimeout,
+            onRunException: ex => thrown = ex);
 
         Assert.True(outcome.IsServerError, outcome.Error);
         /* The same prefix assertion, with the whole text as the failure message: xunit cuts a StartsWith failure after about
            fifty characters, which hid the cause when this failed on a loaded runner. */
-        Assert.True(outcome.Error!.StartsWith("Error running query: could not get a store connection in time: ", StringComparison.Ordinal), outcome.Error);
+        Assert.True(outcome.Error!.StartsWith("Error running query: could not get a store connection in time: ", StringComparison.Ordinal), outcome.Error + Environment.NewLine + DescribeChain(thrown));
         Assert.NotEqual(DarlingWebEndpoints.StatementTimeoutText, outcome.Error);
         Assert.NotEqual("57014", outcome.AuthorSqlState);
     }

@@ -231,4 +231,16 @@ public class ComposeClientTimeoutAttributionTests
     {
         Assert.Contains("return FromRunException(ex, remapClientTimeout);", WebCode(), StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void TheOpenHelper_ClocksTheOpen_AndFlagsALateFailure_AndTheSentenceReadsTheFlag()
+    {
+        var code = WebCode();
+        var helper = MethodBody(code, "private static async Task<NpgsqlConnection> OpenComposeConnectionAsync(");
+
+        Assert.Contains("Stopwatch.StartNew()", helper, StringComparison.Ordinal);
+        Assert.Contains("PostgresOpenTimeout.IsTimedOutByClock(open.Cause, started.Elapsed, timeout, cancellationToken.IsCancellationRequested)", helper, StringComparison.Ordinal);
+        Assert.Equal(1, Regex.Matches(helper, Regex.Escape("{ FailedAfterTimeout = true }")).Count);
+        Assert.Contains("|| open.FailedAfterTimeout", code, StringComparison.Ordinal);
+    }
 }
