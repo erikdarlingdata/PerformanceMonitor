@@ -166,6 +166,12 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "ViewerServerTab.xaml", "PgReplicationStatsGrid", "BackendStart", Name(typeof(PgDisplay.ReplicationStatRow)), "BackendStartUtc" },
         { "ViewerServerTab.xaml", "PgIndexBloatGrid", "MeasuredAt", Name(typeof(PgDisplay.IndexBloatRow)), "MeasuredAtUtc" },
         { "ViewerServerTab.xaml", "PgIndexBloatGrid", "EstimatedAt", Name(typeof(PgDisplay.IndexBloatRow)), "EstimatedAtUtc" },
+
+        /* #4966: the latest-state grids show their snapshot time as a column. */
+        { "ViewerServerTab.xaml", "PgExtensionsGrid", "CaptureTime", Name(typeof(PgDisplay.ExtensionRow)), "CaptureTimeUtc" },
+        { "ViewerServerTab.xaml", "PgServerConfigGrid", "CollectionTime", Name(typeof(PgDisplay.ServerConfigRow)), "CollectionTimeUtc" },
+        { "ViewerServerTab.xaml", "PgBufferUsageGrid", "CaptureTime", Name(typeof(PgDisplay.BufferUsageRow)), "CaptureTimeUtc" },
+        { "ViewerServerTab.xaml", "PgPredicateStatsGrid", "CaptureTime", Name(typeof(PgDisplay.PredicateStatRow)), "CaptureTimeUtc" },
     };
 
     /// <summary>

@@ -74,20 +74,20 @@ public sealed class ViewerPostgresGridTimeTextTests
     /// the two 01:30s of the repeated hour apart by their offset, UTC mode reads the stored instant, and the UTC member
     /// holds the instant itself in both.
     /// </summary>
-    private static void AssertFollowsTheDisplayMode(Func<DateTime, (string Text, DateTime? Utc)> project)
+    private static void AssertFollowsTheDisplayMode(Func<DateTime, (string Text, DateTime? Utc)> project, string seconds = "")
     {
         WithDisplay(TimeDisplayMode.ServerTime, Eastern, () =>
         {
-            Assert.Equal("2026-11-01 01:30 -04:00", project(FirstPass).Text);
-            Assert.Equal("2026-11-01 01:30 -05:00", project(SecondPass).Text);
+            Assert.Equal($"2026-11-01 01:30{seconds} -04:00", project(FirstPass).Text);
+            Assert.Equal($"2026-11-01 01:30{seconds} -05:00", project(SecondPass).Text);
             Assert.Equal(FirstPass, project(FirstPass).Utc);
             Assert.Equal(SecondPass, project(SecondPass).Utc);
         });
 
         WithDisplay(TimeDisplayMode.UTC, Eastern, () =>
         {
-            Assert.Equal("2026-11-01 05:30", project(FirstPass).Text);
-            Assert.Equal("2026-11-01 06:30", project(SecondPass).Text);
+            Assert.Equal($"2026-11-01 05:30{seconds}", project(FirstPass).Text);
+            Assert.Equal($"2026-11-01 06:30{seconds}", project(SecondPass).Text);
             Assert.Equal(FirstPass, project(FirstPass).Utc);
             Assert.Equal(SecondPass, project(SecondPass).Utc);
         });
@@ -233,13 +233,13 @@ public sealed class ViewerPostgresGridTimeTextTests
         {
             var row = PgDisplay.IndexBloat(BloatReader(at, "measured"));
             return (row.MeasuredAt, row.MeasuredAtUtc);
-        });
+        }, ":00");
 
         AssertFollowsTheDisplayMode(at =>
         {
             var row = PgDisplay.IndexBloat(BloatReader(at, "estimated"));
             return (row.EstimatedAt, row.EstimatedAtUtc);
-        });
+        }, ":00");
 
         var shown = PgDisplay.IndexBloat(BloatReader(FirstPass, "estimated"));
         Assert.Equal("ix_line_items_status", shown.IndexName);
@@ -261,7 +261,7 @@ public sealed class ViewerPostgresGridTimeTextTests
             Assert.Null(noStart.BackendStartUtc);
 
             var measured = PgDisplay.IndexBloat(BloatReader(FirstPass, "measured"));
-            Assert.Equal("2026-11-01 01:30 -04:00", measured.MeasuredAt);
+            Assert.Equal("2026-11-01 01:30:00 -04:00", measured.MeasuredAt);
             Assert.Equal(FirstPass, measured.MeasuredAtUtc);
             Assert.Equal("", measured.EstimatedAt);
             Assert.Null(measured.EstimatedAtUtc);
@@ -269,7 +269,7 @@ public sealed class ViewerPostgresGridTimeTextTests
             var estimated = PgDisplay.IndexBloat(BloatReader(SecondPass, "estimated"));
             Assert.Equal("", estimated.MeasuredAt);
             Assert.Null(estimated.MeasuredAtUtc);
-            Assert.Equal("2026-11-01 01:30 -05:00", estimated.EstimatedAt);
+            Assert.Equal("2026-11-01 01:30:00 -05:00", estimated.EstimatedAt);
             Assert.Equal(SecondPass, estimated.EstimatedAtUtc);
 
             var skipped = PgDisplay.IndexBloat(BloatReader(FirstPass, "estimated", skippedReason: "no pg_stats grant"));
