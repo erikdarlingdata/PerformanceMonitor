@@ -723,21 +723,19 @@ public sealed class CompressionEnableGuardTests
         /* #4951: and collection_log's ALTER goes only through the bounded helper, which runs it inside its own
            transaction and treats a lock it could not get as "try next pass" (the live
            CollectionLogSegmentByLiveTests prove the wait is bounded; this keeps the shape in the unit tier). */
-        Assert.Contains("TrySetCollectionLogCompressionAsync(connection, logger, cancellationToken)", collectionLog, StringComparison.Ordinal);
-        Assert.DoesNotContain("EnableCompressionSql(CollectionLogTable)", collectionLog, StringComparison.Ordinal);
+        Assert.Contains("TryRunBoundedDdlAsync(", collectionLog, StringComparison.Ordinal);
+        Assert.Contains("new[] { EnableCompressionSql(CollectionLogTable) }", collectionLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("new NpgsqlCommand(EnableCompressionSql(CollectionLogTable)", collectionLog, StringComparison.Ordinal);
 
         /* Below TimescaleDB 2.14 the change cannot run while compressed chunks exist, so the version check comes
            first and the ALTER is not attempted there. No live tier here runs a TimescaleDB that old, so the order
            is pinned in this one. */
         var versionCheckAt = collectionLog.IndexOf("CollectionLogSettingsChangeBlockedAsync(connection, logger, cancellationToken)", StringComparison.Ordinal);
-        var alterAt = collectionLog.IndexOf("TrySetCollectionLogCompressionAsync(connection, logger, cancellationToken)", StringComparison.Ordinal);
+        var alterAt = collectionLog.IndexOf("TryRunBoundedDdlAsync(", StringComparison.Ordinal);
         Assert.True(versionCheckAt >= 0 && versionCheckAt < alterAt,
             "EnsureCollectionLogHypertableAsync must check the TimescaleDB version and compressed chunks before it attempts the settings change");
-        var bounded = MethodBody(storage, "private static async Task<CollectionLogSettingsChange> TrySetCollectionLogCompressionAsync(");
-        Assert.False(string.IsNullOrEmpty(bounded), "could not locate TrySetCollectionLogCompressionAsync — this pin cannot silently pass on a parse miss");
-        Assert.Contains("BeginTransactionAsync(cancellationToken)", bounded, StringComparison.Ordinal);
-        Assert.Contains("EnableCompressionSql(CollectionLogTable), connection, transaction)", bounded, StringComparison.Ordinal);
-        Assert.Contains("PostgresErrorCodes.LockNotAvailable", bounded, StringComparison.Ordinal);
+        Assert.Contains("BoundedDdlOutcome.LockBusy", collectionLog, StringComparison.Ordinal);
+        Assert.Contains("\"collection_log's compression settings\"", collectionLog, StringComparison.Ordinal);
 
         /* A read failure must issue every ALTER rather than skip every ALTER: the conservative direction,
            because a needless ALTER costs one lock and a skipped one costs a table that never compresses.
