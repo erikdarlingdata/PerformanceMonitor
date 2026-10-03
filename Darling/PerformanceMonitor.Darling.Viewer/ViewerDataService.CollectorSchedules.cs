@@ -524,7 +524,8 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
 /// null = column NULL (falls through), empty = the explicit "no scope" that stops the fall-through,
 /// non-empty = collect only those databases (<c>excludedDatabases</c> still wins downstream).
 /// </summary>
-public sealed record CollectorScheduleRow(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null);
+public sealed record CollectorScheduleRow(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null)
+    : PerformanceMonitor.Collectors.IScheduleFrequencyOverride;
 
 /// <summary>
 /// One <c>config.config_collector_run_times</c> row as the viewer reads it (#4938): the time of day a collector that runs

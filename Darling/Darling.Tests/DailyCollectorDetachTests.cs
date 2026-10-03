@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -83,6 +84,7 @@ public sealed class DailyCollectorDetachTests
         private readonly object _lock = new();
         private readonly SemaphoreSlim _release = new(0);
         private readonly bool _holdsThroughStop;
+        private readonly HashSet<string> _holds;
         private readonly List<(int ServerId, string Collector)> _started = [];
         private readonly List<(int ServerId, string Collector)> _finished = [];
         private readonly Dictionary<int, ServerRuntime> _dailyRuntimes = [];
@@ -92,9 +94,14 @@ public sealed class DailyCollectorDetachTests
         /// A daily run's hold ignores the token the run was dispatched with, as a run in the middle of a store write
         /// does, so a test can stop the service while runs are still going and see what the stop does to each one.
         /// </param>
-        public FakeRuns(DarlingWorker worker, bool holdsThroughStop = false)
+        /// <param name="holds">
+        /// The collectors whose run holds open until a test releases it: index_object_stats unless a test names
+        /// others, such as an on-load collector whose scheduled run is detached too.
+        /// </param>
+        public FakeRuns(DarlingWorker worker, bool holdsThroughStop = false, string[]? holds = null)
         {
             _holdsThroughStop = holdsThroughStop;
+            _holds = new HashSet<string>(holds ?? [Daily], StringComparer.Ordinal);
             worker.RunOneBodyOverride = async (_, runtime, collector, ct) =>
             {
                 var key = (runtime.ServerId, collector);
@@ -107,7 +114,7 @@ public sealed class DailyCollectorDetachTests
                     }
                 }
 
-                if (collector == Daily)
+                if (_holds.Contains(collector))
                 {
                     await _release.WaitAsync(_holdsThroughStop ? CancellationToken.None : ct);
                 }
@@ -385,12 +392,15 @@ public sealed class DailyCollectorDetachTests
     }
 
     /// <summary>The same server after a reconnect: the same identity, and a new connection.</summary>
-    private static ServerRuntime Reconnected(ServerRuntime old) =>
+    private static ServerRuntime Reconnected(ServerRuntime old) => Reconnected(old, old.Target);
+
+    /// <summary>The same server after a reconnect that reached a target of a different kind.</summary>
+    private static ServerRuntime Reconnected(ServerRuntime old, CollectorTargetInfo target) =>
         new()
         {
             Config = old.Config,
             ConnectionString = old.ConnectionString + ";Application Name=reconnected",
-            Target = old.Target,
+            Target = target,
             StorageName = old.StorageName,
             ServerId = old.ServerId,
         };
@@ -487,6 +497,289 @@ public sealed class DailyCollectorDetachTests
         {
             runs.ReleaseAll();
             await EndsWithinAsync(Task.WhenAll(queued.Passes), Patience);
+        }
+    }
+
+    /* What the run asks again after the wait. The dispatch asked more than whether the server is still there: whether
+       collection is paused (the loop dispatches nothing while it is), whether the collector is still enabled for the
+       server, and whether it still applies to the target. Each one is changed while the 17th run waits. */
+
+    private static void SetField(DarlingWorker worker, string name, object value) =>
+        typeof(DarlingWorker)
+            .GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, value);
+
+    /// <summary>Frees one permit, so the queued run wakes, and returns once that run has ended or has started.</summary>
+    private static async Task WakeTheQueuedRunAsync(DarlingWorker worker, FakeRuns runs, int queuedId)
+    {
+        runs.ReleaseOne();
+        Assert.True(
+            await BecomesTrueAsync(() => worker.InFlightDailyRuns.Count == 15 || runs.HasStarted(queuedId, Daily), Patience),
+            "the queued run ends once a permit frees");
+    }
+
+    [Fact]
+    public async Task ADailyRun_ThatWaitedForAPermitAndFindsCollectionPaused_DoesNotRun_AndIsDueAgainOnResume()
+    {
+        var logger = new RecordingLogger();
+        var worker = MakeWorker(logger);
+        var runs = new FakeRuns(worker);
+        var ct = TestContext.Current.CancellationToken;
+        var queued = await QueueTheSeventeenthAsync(worker, logger, runs, 5300, ct);
+        try
+        {
+            var queuedId = queued.Queued.Runtime!.ServerId;
+            Assert.True(queued.Queued.NextDue[Daily] > DateTime.UtcNow.AddHours(1), "the dispatch moved the due time a day on");
+
+            /* Collection is paused while the run waits. */
+            SetField(worker, "_paused", true);
+
+            await WakeTheQueuedRunAsync(worker, runs, queuedId);
+            Assert.False(runs.HasStarted(queuedId, Daily), "a run that finds collection paused must not run");
+            Assert.Equal(16, runs.Started(Daily));
+            Assert.Equal(15, worker.InFlightDailyRuns.Count);
+
+            /* Nothing else moves a due time on a resume, so a skipped run left a day on would wait until tomorrow:
+               it is due again, and the first pass after the resume runs it. */
+            Assert.True(queued.Queued.NextDue[Daily] <= DateTime.UtcNow, "a run skipped for the pause must be due again, not a day away");
+            SetField(worker, "_paused", false);
+            await worker.RunDueCollectorsAsync(queued.Queued, null!, ct);
+            Assert.True(await BecomesTrueAsync(() => runs.HasStarted(queuedId, Daily), Patience), "the pass after the resume runs it");
+        }
+        finally
+        {
+            SetField(worker, "_paused", false);
+            runs.ReleaseAll();
+            await EndsWithinAsync(Task.WhenAll(queued.Passes), Patience);
+        }
+    }
+
+    [Fact]
+    public async Task ADailyRun_ThatWaitedForAPermitAndFindsItsCollectorDisabled_DoesNotRun()
+    {
+        var logger = new RecordingLogger();
+        var worker = MakeWorker(logger);
+        var runs = new FakeRuns(worker);
+        var ct = TestContext.Current.CancellationToken;
+        var queued = await QueueTheSeventeenthAsync(worker, logger, runs, 5400, ct);
+        try
+        {
+            var queuedId = queued.Queued.Runtime!.ServerId;
+
+            /* An operator turns the collector off for this server while the run waits. */
+            SetField(worker, "_scheduleOverrides", new List<ScheduleOverride> { new(queuedId, Daily, null, null, Enabled: false) });
+
+            await WakeTheQueuedRunAsync(worker, runs, queuedId);
+            Assert.False(runs.HasStarted(queuedId, Daily), "a run whose collector was disabled while it waited must not run");
+            Assert.Equal(16, runs.Started(Daily));
+            Assert.Equal(15, worker.InFlightDailyRuns.Count);
+        }
+        finally
+        {
+            runs.ReleaseAll();
+            await EndsWithinAsync(Task.WhenAll(queued.Passes), Patience);
+        }
+    }
+
+    [Fact]
+    public async Task ADailyRun_ThatWaitedForAPermitAndFindsTheCollectorNoLongerApplyingToItsTarget_DoesNotRun()
+    {
+        var logger = new RecordingLogger();
+        var worker = MakeWorker(logger);
+        var runs = new FakeRuns(worker);
+        var ct = TestContext.Current.CancellationToken;
+        var queued = await QueueTheSeventeenthAsync(worker, logger, runs, 5500, ct);
+        try
+        {
+            var capturedAtDispatch = queued.Queued.Runtime!;
+            var queuedId = capturedAtDispatch.ServerId;
+            Assert.True(CollectorCatalog.AppliesTo(Daily, capturedAtDispatch.Target));
+
+            /* The server reconnects while the run waits, and the target it reaches now is a PostgreSQL one: a SQL Server
+               collector does not apply to it. */
+            var postgres = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql };
+            Assert.False(CollectorCatalog.AppliesTo(Daily, postgres));
+            queued.Queued.Runtime = Reconnected(capturedAtDispatch, postgres);
+
+            await WakeTheQueuedRunAsync(worker, runs, queuedId);
+            Assert.False(runs.HasStarted(queuedId, Daily), "a run whose collector no longer applies to the target must not run");
+            Assert.Equal(16, runs.Started(Daily));
+            Assert.Equal(15, worker.InFlightDailyRuns.Count);
+        }
+        finally
+        {
+            runs.ReleaseAll();
+            await EndsWithinAsync(Task.WhenAll(queued.Passes), Patience);
+        }
+    }
+
+    /* A reconnect while a detached run is still going. The at-connect loop runs the on-load collectors inline, and
+       each one's scheduled run is detached (its recapture is daily). A fault and a reconnect in the middle of that
+       scheduled run brought the loop to the same collector, and a second run started beside the first. */
+
+    private const string OnLoad = "server_config";
+
+    private static EffectiveSchedule OnLoadSchedule(int serverId) => StoreConfigProvider.ResolveSchedule(OnLoad, serverId, []);
+
+    [Fact]
+    public async Task AReconnect_WhileTheScheduledRunOfAnOnLoadCollectorIsStillGoing_StartsNoSecondRun()
+    {
+        var logger = new RecordingLogger();
+        var worker = MakeWorker(logger);
+        var runs = new FakeRuns(worker, holds: [OnLoad]);
+        var server = MakeServer(5601, OnLoad);
+        var ct = TestContext.Current.CancellationToken;
+
+        var scheduledPass = worker.RunDueCollectorsAsync(server, null!, ct);
+        Task? atConnect = null;
+        try
+        {
+            Assert.True(await EndsWithinAsync(scheduledPass, Patience));
+            Assert.True(await BecomesTrueAsync(() => runs.Started(OnLoad) == 1, Patience), "the scheduled run is going");
+
+            /* The reconnect brings the at-connect loop to the same collector. */
+            atConnect = worker.RunOnLoadAsync(server, null!, OnLoad, 5601, OnLoadSchedule(5601), ct);
+            Assert.True(
+                await EndsWithinAsync(atConnect, Patience),
+                "a reconnect must leave out an on-load collector whose scheduled run is still going, not run it a second time and wait on it");
+            Assert.Equal(1, runs.Started(OnLoad));
+            Assert.Contains(
+                logger.Snapshot(),
+                e => e.Level == LogLevel.Information
+                     && e.Message.Contains(OnLoad, StringComparison.Ordinal)
+                     && e.Message.Contains("still going", StringComparison.Ordinal));
+        }
+        finally
+        {
+            runs.ReleaseAll();
+            await EndsWithinAsync(scheduledPass, Patience);
+            if (atConnect is not null)
+            {
+                await EndsWithinAsync(atConnect, Patience);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TheAtConnectRunOfAnOnLoadCollector_RunsWhenNoScheduledRunHoldsTheSlot_AndHoldsItOnlyForItsOwnRun()
+    {
+        var worker = MakeWorker(new RecordingLogger());
+        var runs = new FakeRuns(worker, holds: [OnLoad]);
+        var server = MakeServer(5701);
+        var ct = TestContext.Current.CancellationToken;
+
+        var atConnect = worker.RunOnLoadAsync(server, null!, OnLoad, 5701, OnLoadSchedule(5701), ct);
+        try
+        {
+            Assert.True(await BecomesTrueAsync(() => runs.Started(OnLoad) == 1, Patience), "with no scheduled run going, the at-connect run happens");
+            Assert.False(atConnect.IsCompleted, "the at-connect run is inline: the connect waits for it");
+
+            /* While it runs it holds the slot, so a scheduled run of the same collector leaves it alone. */
+            MarkDue(server, OnLoad);
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            await Task.Delay(100, ct);
+            Assert.Equal(1, runs.Started(OnLoad));
+
+            runs.ReleaseAll();
+            Assert.True(await EndsWithinAsync(atConnect, Patience));
+
+            /* And gives it back: the next scheduled run starts. */
+            MarkDue(server, OnLoad);
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(await BecomesTrueAsync(() => runs.Started(OnLoad) == 2, Patience), "the slot was released after the at-connect run");
+        }
+        finally
+        {
+            runs.ReleaseAll();
+            await EndsWithinAsync(atConnect, Patience);
+        }
+    }
+
+    [Fact]
+    public void TheAtConnectLoop_RunsAnOnLoadCollectorOnlyThroughTheMethodThatTakesTheSlot()
+    {
+        var worker = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
+
+        Assert.Equal(1, CountOf(worker, "await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken);"));
+
+        /* The one other call that spells the collector `name` and passes no peer mark is the snapshot's, which takes
+           the slot itself; a second one would be the at-connect loop running a collector without it. */
+        Assert.Equal(1, CountOf(worker, "await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);"));
+    }
+
+    /* A server removed and added back. The id is the registration's, so the new state has the removed one's id, and a
+       run of the removed state that is still going, or still queued for a permit, held the slot the new state's first
+       daily run needs: that run skipped, and a skipped daily run waits a day. */
+
+    private static ServerRuntime RuntimeFor(MonitoredServer config, int serverId) =>
+        new()
+        {
+            Config = config,
+            ConnectionString = $"Server=tcp:{config.Host},1433;Initial Catalog=master;Encrypt=True",
+            Target = new CollectorTargetInfo(),
+            StorageName = config.Host,
+            ServerId = serverId,
+        };
+
+    private static void Reconcile(DarlingWorker worker, List<DarlingWorker.ServerLoopState> servers, List<MonitoredServer> desired) =>
+        typeof(DarlingWorker)
+            .GetMethod("ReconcileServers", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(worker, [servers, desired]);
+
+    [Fact]
+    public async Task AServerRemovedAndAddedBack_WhileItsDailyRunIsStillGoing_IsNotHeldOffForADay()
+    {
+        var logger = new RecordingLogger();
+        var worker = MakeWorker(logger);
+        var runs = new FakeRuns(worker);
+        var ct = TestContext.Current.CancellationToken;
+        const int ServerId = 5801;
+        const int NeighbourId = 5802;
+
+        var config = new MonitoredServer { Name = "readded", Host = "readded", StoredServerId = ServerId };
+        var first = new DarlingWorker.ServerLoopState { Config = config, Runtime = RuntimeFor(config, ServerId) };
+        MarkDue(first, Daily);
+        var neighbourConfig = new MonitoredServer { Name = "neighbour", Host = "neighbour", StoredServerId = NeighbourId };
+        var neighbour = new DarlingWorker.ServerLoopState { Config = neighbourConfig, Runtime = RuntimeFor(neighbourConfig, NeighbourId) };
+        MarkDue(neighbour, Daily);
+        var servers = new List<DarlingWorker.ServerLoopState> { first, neighbour };
+
+        var passes = new List<Task>
+        {
+            worker.RunDueCollectorsAsync(first, null!, ct),
+            worker.RunDueCollectorsAsync(neighbour, null!, ct),
+        };
+        try
+        {
+            Assert.True(await EndsWithinAsync(Task.WhenAll(passes), Patience));
+            Assert.True(await BecomesTrueAsync(() => runs.Started(Daily) == 2, Patience), "both daily runs are going");
+
+            /* The operator disables the server and enables it again while its run is still going. */
+            Reconcile(worker, servers, [neighbourConfig]);
+            Assert.True(first.Retired);
+            Assert.Single(servers);
+            Reconcile(worker, servers, [neighbourConfig, config]);
+            var second = servers.Single(s => s.Config.ServerId == ServerId);
+            Assert.NotSame(first, second);
+
+            /* The connect path gives the new state its connection, and its daily collector is due. */
+            second.Runtime = RuntimeFor(config, ServerId);
+            MarkDue(second, Daily);
+            await worker.RunDueCollectorsAsync(second, null!, ct);
+            Assert.True(
+                await BecomesTrueAsync(() => runs.Started(Daily) == 3, Patience),
+                "a server added back must run its daily collector, not skip it for a day behind the run of the state that was removed");
+
+            /* Only the removed server's slot was cleared: a neighbour's run that is still going keeps its slot. */
+            MarkDue(neighbour, Daily);
+            await worker.RunDueCollectorsAsync(neighbour, null!, ct);
+            await Task.Delay(100, ct);
+            Assert.Equal(3, runs.Started(Daily));
+        }
+        finally
+        {
+            runs.ReleaseAll();
+            await EndsWithinAsync(Task.WhenAll(passes), Patience);
         }
     }
 

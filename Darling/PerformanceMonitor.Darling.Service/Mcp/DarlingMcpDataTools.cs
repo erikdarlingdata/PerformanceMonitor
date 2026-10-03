@@ -1750,8 +1750,10 @@ public sealed class DarlingMcpDataTools
     /// #4999: the collectors whose single-run cost the server's sequential pass pays: every row except those that
     /// run detached from it. The test is <see cref="DarlingWorker.RunsDetached"/>, the one the worker's dispatch
     /// uses, so this reading and the pass cannot disagree about what runs in the body. The cadence it is given is
-    /// the row's, the shipped one the banding and the roll-up already amortise by; a per-server override that
-    /// moves a collector across the daily line moves it in the worker's dispatch, which this read does not see.
+    /// the row's, which the health read stamped with the interval the collector is scheduled at on this server
+    /// (a per-server override, else the fleet-wide one, else the shipped default: the worker's own resolution),
+    /// so an override that moves a collector across the daily line moves it in this read exactly as it moves it
+    /// in the worker's dispatch.
     /// </summary>
     internal static IEnumerable<CollectorHealth> SweepBodyRows(IEnumerable<CollectorHealth> rows) =>
         rows.Where(r => !DarlingWorker.RunsDetached(r.CollectorName, r.FrequencyMinutes));
