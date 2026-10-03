@@ -498,4 +498,211 @@ public sealed class DarlingRunTimeSchedulingTests
         Assert.Equal(lastRun.AddMinutes(Daily), server.NextDue[Collector]);
         Assert.False(server.RunTimeSlots.ContainsKey(Collector));
     }
+
+    /* ---- a run recorded while a reload is reading the watermarks (#5033) ---- */
+
+    [Fact]
+    public async Task Reload_ARunRecordedDuringTheWatermarkRead_KeepsTheRunsLastRun_Changed()
+    {
+        var runAt = RunTimeTenMinutesAgo();
+        var oldRunAt = (runAt + 120) % Daily;
+        var worker = MakeWorker(FleetRunTime(Collector, oldRunAt));
+        var server = MakeServer(0);
+        server.NextDue[Collector] = DateTime.UtcNow.AddHours(5);
+        server.RunTimeSlots[Collector] = new DarlingWorker.RunTimeSlot(oldRunAt, Daily, server.Clock.Id, null);
+        worker.ScheduleOverridesForTest = [FleetRunTime(Collector, runAt)];
+        worker.AfterRecomputeWatermarkReadForTest = (s, name) =>
+        {
+            if (string.Equals(name, Collector, StringComparison.OrdinalIgnoreCase))
+            {
+                worker.RecordRunTimeHandOff(
+                    s, 0, Collector, new DarlingWorker.RunTimeHandOff(s.RunTimeSlots[Collector], DateTime.UtcNow.AddDays(1)));
+            }
+
+            return Task.CompletedTask;
+        };
+
+        await worker.RecomputeNextDueAsync([server], TestContext.Current.CancellationToken);
+
+        Assert.NotNull(server.RunTimeSlots[Collector].LastRunUtc);
+        Assert.Equal(runAt, server.RunTimeSlots[Collector].RunAtMinute);
+        Assert.True(server.NextDue[Collector] > DateTime.UtcNow.AddHours(10), "the run just recorded counts: the next slot is tomorrow's");
+    }
+
+    [Fact]
+    public async Task Reload_ARunRecordedDuringTheWatermarkRead_KeepsTheRunsLastRun_Cleared()
+    {
+        var runAt = RunTimeTenMinutesAgo();
+        var worker = MakeWorker(FleetRunTime(Collector, runAt));
+        var server = MakeServer(0);
+        server.NextDue[Collector] = DateTime.UtcNow.AddHours(5);
+        server.RunTimeSlots[Collector] = new DarlingWorker.RunTimeSlot(runAt, Daily, server.Clock.Id, DateTime.UtcNow.AddDays(-2));
+        worker.ScheduleOverridesForTest = [FleetRunTime(Collector, -1)];
+        worker.AfterRecomputeWatermarkReadForTest = (s, name) =>
+        {
+            if (string.Equals(name, Collector, StringComparison.OrdinalIgnoreCase))
+            {
+                worker.RecordRunTimeHandOff(
+                    s, 0, Collector, new DarlingWorker.RunTimeHandOff(s.RunTimeSlots[Collector], DateTime.UtcNow.AddDays(1)));
+            }
+
+            return Task.CompletedTask;
+        };
+
+        await worker.RecomputeNextDueAsync([server], TestContext.Current.CancellationToken);
+
+        Assert.False(server.RunTimeSlots.ContainsKey(Collector));
+        Assert.True(server.NextDue[Collector] > DateTime.UtcNow.AddHours(23), "the run just recorded counts: the collector waits a full interval");
+    }
+
+    [Fact]
+    public void Record_AfterAReloadChangedTheRunTime_KeepsTheNewRunTime()
+    {
+        var runAt = RunTimeTwelveHoursAway();
+        var newRunAt = (runAt + 120) % Daily;
+        var worker = MakeWorker();
+        var server = MakeServer(0);
+        var handOff = new DarlingWorker.RunTimeHandOff(
+            new DarlingWorker.RunTimeSlot(runAt, Daily, server.Clock.Id, null), DateTime.UtcNow.AddDays(1));
+        server.RunTimeSlots[Collector] = new DarlingWorker.RunTimeSlot(newRunAt, Daily, server.Clock.Id, null);
+
+        worker.RecordRunTimeHandOff(server, 0, Collector, handOff);
+
+        Assert.Equal(newRunAt, server.RunTimeSlots[Collector].RunAtMinute);
+        Assert.NotNull(server.RunTimeSlots[Collector].LastRunUtc);
+    }
+
+    [Fact]
+    public void Record_WhenAReloadClearedTheRunTime_LeavesNoSlotBehind_AndWhenItDisabledTheCollector_NoStamp()
+    {
+        var runAt = RunTimeTwelveHoursAway();
+        var worker = MakeWorker();
+        var handOff = new DarlingWorker.RunTimeHandOff(
+            new DarlingWorker.RunTimeSlot(runAt, Daily, "utc", null), DateTime.UtcNow.AddDays(1));
+
+        var cleared = MakeServer(0);
+        cleared.NextDue[Collector] = DateTime.UtcNow.AddHours(5);
+        worker.RecordRunTimeHandOff(cleared, 0, Collector, handOff);
+        Assert.False(cleared.RunTimeSlots.ContainsKey(Collector));
+        Assert.True(cleared.NextDue[Collector] > DateTime.UtcNow.AddHours(23), "one interval out from the run just recorded");
+
+        var disabled = MakeServer(0);
+        worker.RecordRunTimeHandOff(disabled, 0, Collector, handOff);
+        Assert.False(disabled.RunTimeSlots.ContainsKey(Collector));
+        Assert.False(disabled.NextDue.ContainsKey(Collector));
+    }
+
+    [Fact]
+    public void EveryRunTimeSlotAccess_IsUnderTheScheduleLock_AndNoLockBodyAwaits()
+    {
+        var raw = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs").ReplaceLineEndings("\n");
+        var text = CSharpSourceWalker.StripCommentsAndStrings(raw);
+        var lines = text.Split('\n');
+
+        Assert.Contains("RecordRunTimeHandOff(server, runtime.ServerId, collectorName, runTimeHandOff);", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("server.RunTimeSlots[collectorName] = runTimeHandOff.Slot with", raw, StringComparison.Ordinal);
+
+        var access = new System.Text.RegularExpressions.Regex(@"RunTimeSlots(\.\w+\(|\[)");
+        var offenders = new List<string>();
+        var checkedCount = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!access.IsMatch(lines[i]))
+            {
+                continue;
+            }
+
+            checkedCount++;
+            if (!IsInsideScheduleLock(lines, i))
+            {
+                offenders.Add($"line {i + 1}: {lines[i].Trim()}");
+            }
+        }
+
+        Assert.True(checkedCount >= 15, $"expected to find the worker's RunTimeSlots accesses, found {checkedCount}");
+        Assert.True(offenders.Count == 0, "RunTimeSlots touched outside lock (server.ScheduleLock): " + string.Join("; ", offenders));
+
+        /* The same rule for the stamp map. Each unlocked site below is matched by a text anchor and is
+           deliberate: none of them is a read-modify-write of a run-time collector's schedule. */
+        var unlockedNextDue = new (string Anchor, string Reason)[]
+        {
+            ("server.NextDue[collectorName] = DateTime.UtcNow;", "paused re-read after the permit wait: a blind 'run when unpaused' stamp"),
+            ("state.NextDue.Clear();", "reconnect epoch reset: clears stamps only, never touches the slots"),
+            ("server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);", "grid advance for collectors without a run time"),
+            ("if (server.NextDue.TryGetValue(name, out var existing))", "reload's branch-choice read; every write it leads to re-reads the stamp under the lock"),
+            ("|| !server.NextDue.TryGetValue(name, out var due))", "sweep's pre-filter read; the run-time branch re-reads the stamp under the lock"),
+        };
+        var stampAccess = new System.Text.RegularExpressions.Regex(@"\bNextDue(\.\w+\(|\[)");
+        var stampOffenders = new List<string>();
+        var stampChecked = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!stampAccess.IsMatch(lines[i]))
+            {
+                continue;
+            }
+
+            stampChecked++;
+            if (!IsInsideScheduleLock(lines, i)
+                && !System.Linq.Enumerable.Any(unlockedNextDue, e => lines[i].Contains(e.Anchor, StringComparison.Ordinal)))
+            {
+                stampOffenders.Add($"line {i + 1}: {lines[i].Trim()}");
+            }
+        }
+
+        Assert.True(stampChecked >= 10, $"expected to find the worker's NextDue accesses, found {stampChecked}");
+        Assert.True(stampOffenders.Count == 0, "NextDue touched outside lock (server.ScheduleLock) and not allow-listed: " + string.Join("; ", stampOffenders));
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].Contains("lock (server.ScheduleLock)", StringComparison.Ordinal))
+            {
+                var depth = 0;
+                for (var j = i + 1; j < lines.Length; j++)
+                {
+                    depth += System.Linq.Enumerable.Count(lines[j], static c => c == '{') - System.Linq.Enumerable.Count(lines[j], static c => c == '}');
+                    Assert.DoesNotContain("await ", lines[j], StringComparison.Ordinal);
+                    if (depth <= 0)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Walks outward from a line, tracking braces, and reports whether any block that encloses it opens on a
+       `lock (server.ScheduleLock)` line. */
+    private static bool IsInsideScheduleLock(string[] lines, int index)
+    {
+        var depth = 0;
+        for (var i = index - 1; i >= 0; i--)
+        {
+            var line = lines[i];
+            for (var c = line.Length - 1; c >= 0; c--)
+            {
+                if (line[c] == '}')
+                {
+                    depth++;
+                }
+                else if (line[c] == '{')
+                {
+                    if (depth == 0)
+                    {
+                        var header = i > 0 && line.Trim() == "{" ? lines[i - 1] : line;
+                        if (header.Contains("lock (server.ScheduleLock)", StringComparison.Ordinal))
+                        {
+                            return true;
+                        }
+                    }
+                    else
+                    {
+                        depth--;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
 }

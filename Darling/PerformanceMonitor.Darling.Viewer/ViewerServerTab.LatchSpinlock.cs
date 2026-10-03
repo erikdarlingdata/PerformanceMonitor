@@ -85,10 +85,8 @@ public partial class ViewerServerTab
         using var probeFanOut = ViewerReadFanOut.Of(2);
         var latchDataStartTask = _dataService.GetLatchStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var spinlockDataStartTask = _dataService.GetSpinlockStatsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        /* Both probes are awaited on one line, each through the catching helper: neither is left unobserved while the other is awaited. */
-        var (latchDataStart, spinlockDataStart) = (await DataStartOrNullAsync(latchDataStartTask, "Latch Stats"), await DataStartOrNullAsync(spinlockDataStartTask, "Spinlock Stats"));
-        UpdateTruncationBanner(LatchStatsTruncationBanner, latchDataStart, startUtc);
-        UpdateTruncationBanner(SpinlockStatsTruncationBanner, spinlockDataStart, startUtc);
+        UpdateTruncationBanner(LatchStatsTruncationBanner, await DataStartOrNullAsync(latchDataStartTask, "Latch Stats"), startUtc);
+        UpdateTruncationBanner(SpinlockStatsTruncationBanner, await DataStartOrNullAsync(spinlockDataStartTask, "Spinlock Stats"), startUtc);
     }
 
     private void RenderLatchStatsChart(List<LatchStatsTrendPoint> data)

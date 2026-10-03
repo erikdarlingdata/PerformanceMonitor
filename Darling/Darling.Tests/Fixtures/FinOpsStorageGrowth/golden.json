@@ -1,0 +1,329 @@
+{
+  "a": {
+    "storageGrowth": [
+      {
+        "DatabaseName": "GrowAlpha",
+        "CurrentSizeMb": 1250.50,
+        "Size7dAgoMb": 1100.00,
+        "Size30dAgoMb": 800.00,
+        "Growth7dMb": 150.50,
+        "Growth30dMb": 450.50,
+        "DailyGrowthRateMb": 14.5322580645161290,
+        "GrowthPct30d": 56.3125000000000000,
+        "HasSiblingRow": false,
+        "HasLogServiceFile": false
+      },
+      {
+        "DatabaseName": "TieDelta",
+        "CurrentSizeMb": 500.00,
+        "Size7dAgoMb": 400.00,
+        "Size30dAgoMb": 300.00,
+        "Growth7dMb": 100.00,
+        "Growth30dMb": 200.00,
+        "DailyGrowthRateMb": 6.4516129032258065,
+        "GrowthPct30d": 66.6666666666666667,
+        "HasSiblingRow": false,
+        "HasLogServiceFile": false
+      },
+      {
+        "DatabaseName": "TieEpsilon",
+        "CurrentSizeMb": 500.00,
+        "Size7dAgoMb": 400.00,
+        "Size30dAgoMb": 300.00,
+        "Growth7dMb": 100.00,
+        "Growth30dMb": 200.00,
+        "DailyGrowthRateMb": 6.4516129032258065,
+        "GrowthPct30d": 66.6666666666666667,
+        "HasSiblingRow": false,
+        "HasLogServiceFile": false
+      },
+      {
+        "DatabaseName": "SiblingOmega",
+        "CurrentSizeMb": 600.00,
+        "Size7dAgoMb": 560.00,
+        "Size30dAgoMb": null,
+        "Growth7dMb": 40.00,
+        "Growth30dMb": null,
+        "DailyGrowthRateMb": 5.0000000000000000,
+        "GrowthPct30d": null,
+        "HasSiblingRow": true,
+        "HasLogServiceFile": false
+      },
+      {
+        "DatabaseName": "GrowBeta",
+        "CurrentSizeMb": 800.00,
+        "Size7dAgoMb": 780.00,
+        "Size30dAgoMb": null,
+        "Growth7dMb": 20.00,
+        "Growth30dMb": null,
+        "DailyGrowthRateMb": 2.5000000000000000,
+        "GrowthPct30d": null,
+        "HasSiblingRow": false,
+        "HasLogServiceFile": false
+      },
+      {
+        "DatabaseName": "HyperDb",
+        "CurrentSizeMb": 300.00,
+        "Size7dAgoMb": 290.00,
+        "Size30dAgoMb": null,
+        "Growth7dMb": 10.00,
+        "Growth30dMb": null,
+        "DailyGrowthRateMb": 1.2500000000000000,
+        "GrowthPct30d": null,
+        "HasSiblingRow": false,
+        "HasLogServiceFile": true
+      },
+      {
+        "DatabaseName": "NewGamma",
+        "CurrentSizeMb": 40.25,
+        "Size7dAgoMb": null,
+        "Size30dAgoMb": null,
+        "Growth7dMb": null,
+        "Growth30dMb": null,
+        "DailyGrowthRateMb": null,
+        "GrowthPct30d": null,
+        "HasSiblingRow": false,
+        "HasLogServiceFile": false
+      }
+    ],
+    "heatmapObjects": [
+      {
+        "DatabaseName": "HeatDb",
+        "SchemaName": "dbo",
+        "TableName": "Orders",
+        "CurrentReservedMb": 167.00,
+        "CurrentUsedMb": 150.30,
+        "TotalRows": 800000,
+        "IndexCount": 3,
+        "Growth7dMb": 0,
+        "Growth30dMb": 67.00,
+        "DailyGrowthRateMb": 2.2333333333333333333333333333,
+        "GrowthPct30d": 67
+      },
+      {
+        "DatabaseName": "HeatDb",
+        "SchemaName": "dbo",
+        "TableName": "Lines",
+        "CurrentReservedMb": 100.00,
+        "CurrentUsedMb": 90.00,
+        "TotalRows": 2000000,
+        "IndexCount": 1,
+        "Growth7dMb": 0,
+        "Growth30dMb": 50.00,
+        "DailyGrowthRateMb": 1.6666666666666666666666666667,
+        "GrowthPct30d": 100
+      },
+      {
+        "DatabaseName": "HeatDb",
+        "SchemaName": "dbo",
+        "TableName": "TiedOne",
+        "CurrentReservedMb": 20.00,
+        "CurrentUsedMb": 18.00,
+        "TotalRows": 1000,
+        "IndexCount": 1,
+        "Growth7dMb": 0,
+        "Growth30dMb": 10.00,
+        "DailyGrowthRateMb": 0.3333333333333333333333333333,
+        "GrowthPct30d": 100
+      },
+      {
+        "DatabaseName": "HeatDb",
+        "SchemaName": "dbo",
+        "TableName": "TiedTwo",
+        "CurrentReservedMb": 30.00,
+        "CurrentUsedMb": 27.00,
+        "TotalRows": 1000,
+        "IndexCount": 1,
+        "Growth7dMb": 0,
+        "Growth30dMb": 10.00,
+        "DailyGrowthRateMb": 0.3333333333333333333333333333,
+        "GrowthPct30d": 50
+      }
+    ],
+    "heatmapSamples": [
+      {
+        "ObjectKey": "dbo.Lines",
+        "Day": "anchor-5d",
+        "ReservedMb": {}
+      },
+      {
+        "ObjectKey": "dbo.Lines",
+        "Day": "anchor-3d",
+        "ReservedMb": {}
+      },
+      {
+        "ObjectKey": "dbo.Lines",
+        "Day": "anchor-1d",
+        "ReservedMb": {}
+      },
+      {
+        "ObjectKey": "dbo.Orders",
+        "Day": "anchor-5d",
+        "ReservedMb": {}
+      },
+      {
+        "ObjectKey": "dbo.Orders",
+        "Day": "anchor-3d",
+        "ReservedMb": {}
+      },
+      {
+        "ObjectKey": "dbo.Orders",
+        "Day": "anchor-1d",
+        "ReservedMb": {}
+      },
+      {
+        "ObjectKey": "dbo.TiedOne",
+        "Day": "anchor-5d",
+        "ReservedMb": {}
+      },
+      {
+        "ObjectKey": "dbo.TiedOne",
+        "Day": "anchor-3d",
+        "ReservedMb": {}
+      },
+      {
+        "ObjectKey": "dbo.TiedOne",
+        "Day": "anchor-1d",
+        "ReservedMb": {}
+      },
+      {
+        "ObjectKey": "dbo.TiedTwo",
+        "Day": "anchor-5d",
+        "ReservedMb": {}
+      },
+      {
+        "ObjectKey": "dbo.TiedTwo",
+        "Day": "anchor-3d",
+        "ReservedMb": {}
+      },
+      {
+        "ObjectKey": "dbo.TiedTwo",
+        "Day": "anchor-1d",
+        "ReservedMb": {}
+      }
+    ],
+    "indexDetailOrders": [
+      {
+        "DatabaseName": "HeatDb",
+        "SchemaName": "dbo",
+        "TableName": "Orders",
+        "IndexName": "PK_Orders",
+        "IndexTypeDesc": "CLUSTERED",
+        "IndexId": 1,
+        "ReservedMb": 120.00,
+        "TotalRows": 800000,
+        "UserSeeks": 5000,
+        "UserScans": 100,
+        "UserLookups": 20,
+        "TotalReads": 5120,
+        "UserUpdates": 400,
+        "LastUserAccess": "anchor-0.083333d",
+        "Classification": "Active"
+      },
+      {
+        "DatabaseName": "HeatDb",
+        "SchemaName": "dbo",
+        "TableName": "Orders",
+        "IndexName": "IX_Orders_Nc",
+        "IndexTypeDesc": "NONCLUSTERED",
+        "IndexId": 2,
+        "ReservedMb": 40.00,
+        "TotalRows": 800000,
+        "UserSeeks": 0,
+        "UserScans": 0,
+        "UserLookups": 0,
+        "TotalReads": 0,
+        "UserUpdates": 0,
+        "LastUserAccess": null,
+        "Classification": "Unused"
+      },
+      {
+        "DatabaseName": "HeatDb",
+        "SchemaName": "dbo",
+        "TableName": "Orders",
+        "IndexName": "IX_Orders_Extra",
+        "IndexTypeDesc": "NONCLUSTERED",
+        "IndexId": 3,
+        "ReservedMb": 7.00,
+        "TotalRows": 800000,
+        "UserSeeks": 0,
+        "UserScans": 0,
+        "UserLookups": 0,
+        "TotalReads": 0,
+        "UserUpdates": 9,
+        "LastUserAccess": null,
+        "Classification": "Write-only"
+      }
+    ],
+    "indexDetailHeap": [
+      {
+        "DatabaseName": "HeatDb",
+        "SchemaName": "dbo",
+        "TableName": "Heap",
+        "IndexName": "(heap)",
+        "IndexTypeDesc": "HEAP",
+        "IndexId": 0,
+        "ReservedMb": 16.00,
+        "TotalRows": 77,
+        "UserSeeks": 3,
+        "UserScans": 0,
+        "UserLookups": 0,
+        "TotalReads": 3,
+        "UserUpdates": 0,
+        "LastUserAccess": null,
+        "Classification": "Active"
+      }
+    ],
+    "indexDetailMissing": []
+  },
+  "b": {
+    "storageGrowth": [
+      {
+        "DatabaseName": "OnlyBeta",
+        "CurrentSizeMb": 123.75,
+        "Size7dAgoMb": null,
+        "Size30dAgoMb": null,
+        "Growth7dMb": null,
+        "Growth30dMb": null,
+        "DailyGrowthRateMb": null,
+        "GrowthPct30d": null,
+        "HasSiblingRow": false,
+        "HasLogServiceFile": false
+      }
+    ],
+    "heatmapObjects": [],
+    "heatmapSamples": [],
+    "indexDetailOrders": [],
+    "indexDetailHeap": [],
+    "indexDetailMissing": []
+  },
+  "c": {
+    "storageGrowth": [
+      {
+        "DatabaseName": "StaleGamma",
+        "CurrentSizeMb": 600.00,
+        "Size7dAgoMb": null,
+        "Size30dAgoMb": 450.00,
+        "Growth7dMb": null,
+        "Growth30dMb": 150.00,
+        "DailyGrowthRateMb": 5.0000000000000000,
+        "GrowthPct30d": 33.3333333333333333,
+        "HasSiblingRow": false,
+        "HasLogServiceFile": false
+      }
+    ],
+    "heatmapObjects": [],
+    "heatmapSamples": [],
+    "indexDetailOrders": [],
+    "indexDetailHeap": [],
+    "indexDetailMissing": []
+  },
+  "d": {
+    "storageGrowth": [],
+    "heatmapObjects": [],
+    "heatmapSamples": [],
+    "indexDetailOrders": [],
+    "indexDetailHeap": [],
+    "indexDetailMissing": []
+  }
+}

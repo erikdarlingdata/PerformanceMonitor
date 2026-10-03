@@ -621,6 +621,20 @@ public sealed class StorageGrowthRow
     /// the size is data space only. See <see cref="HyperscaleLogSize"/>.</summary>
     public bool HasLogServiceFile { get; set; }
 
+    public static StorageGrowthRow From(PerformanceMonitor.Darling.Storage.FinOps.StorageGrowthDto d) => new()
+    {
+        DatabaseName = d.DatabaseName,
+        CurrentSizeMb = d.CurrentSizeMb,
+        Size7dAgoMb = d.Size7dAgoMb,
+        Size30dAgoMb = d.Size30dAgoMb,
+        Growth7dMb = d.Growth7dMb,
+        Growth30dMb = d.Growth30dMb,
+        DailyGrowthRateMb = d.DailyGrowthRateMb,
+        GrowthPct30d = d.GrowthPct30d,
+        HasSiblingRow = d.HasSiblingRow,
+        HasLogServiceFile = d.HasLogServiceFile
+    };
+
     /// <summary>What the grid's Note column says: the log is not in this size, and why. Null when it is.</summary>
     public string? Note => AzureSiblingDatabaseSize.StorageGrowthNote(HasLogServiceFile, HasSiblingRow);
 }
@@ -799,6 +813,20 @@ public sealed class ObjectSizeGrowthRow
     public decimal? Growth30dMb { get; set; }
     public decimal? DailyGrowthRateMb { get; set; }
     public decimal? GrowthPct30d { get; set; }
+
+    public static ObjectSizeGrowthRow From(PerformanceMonitor.Darling.Storage.FinOps.ObjectSizeGrowthDto d, string databaseName) => new()
+    {
+        DatabaseName = databaseName,
+        SchemaName = d.SchemaName,
+        TableName = d.TableName,
+        CurrentReservedMb = d.CurrentReservedMb,
+        CurrentUsedMb = d.CurrentUsedMb,
+        TotalRows = d.TotalRows,
+        IndexCount = d.IndexCount,
+        Growth30dMb = d.Growth30dMb,
+        DailyGrowthRateMb = d.DailyGrowthRateMb,
+        GrowthPct30d = d.GrowthPct30d
+    };
 }
 
 /// <summary>Per-index usage with unused/write-only classification (Storage Growth index drill).
@@ -822,6 +850,25 @@ public sealed class IndexUsageRow
     public long UserUpdates { get; set; }
     public DateTime? LastUserAccess { get; set; }
     public string Classification { get; set; } = "";
+
+    public static IndexUsageRow From(PerformanceMonitor.Darling.Storage.FinOps.IndexUsageDto d) => new()
+    {
+        DatabaseName = d.DatabaseName,
+        SchemaName = d.SchemaName,
+        TableName = d.TableName,
+        IndexName = d.IndexName,
+        IndexTypeDesc = d.IndexTypeDesc,
+        IndexId = d.IndexId,
+        ReservedMb = d.ReservedMb,
+        TotalRows = d.TotalRows,
+        UserSeeks = d.UserSeeks,
+        UserScans = d.UserScans,
+        UserLookups = d.UserLookups,
+        TotalReads = d.TotalReads,
+        UserUpdates = d.UserUpdates,
+        LastUserAccess = d.LastUserAccess,
+        Classification = d.Classification
+    };
 }
 
 /// <summary>Per-index locking/latch contention (Locking &amp; Contention sub-tab).</summary>

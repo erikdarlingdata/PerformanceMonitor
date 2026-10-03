@@ -183,6 +183,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "ViewerServerTab.xaml", "PgServerConfigGrid", "CollectionTime", Name(typeof(PgDisplay.ServerConfigRow)), "CollectionTimeUtc" },
         { "ViewerServerTab.xaml", "PgBufferUsageGrid", "CaptureTime", Name(typeof(PgDisplay.BufferUsageRow)), "CaptureTimeUtc" },
         { "ViewerServerTab.xaml", "PgPredicateStatsGrid", "CaptureTime", Name(typeof(PgDisplay.PredicateStatRow)), "CaptureTimeUtc" },
+        { "ViewerServerTab.xaml", "PgPlanCaptureGrid", "CaptureTime", Name(typeof(PgDisplay.PlanCaptureRow)), "CaptureTimeUtc" },
     };
 
     /// <summary>

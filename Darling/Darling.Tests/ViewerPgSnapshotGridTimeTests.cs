@@ -117,6 +117,52 @@ public sealed class ViewerPgSnapshotGridTimeTests
     }
 
     [Fact]
+    public void WraparoundMeasuredAt_IsTheDisplayZone_ToTheSecond_AndKeepsTheUtcInstant()
+    {
+        InZone(() =>
+        {
+            var row = PgDisplay.Wraparound(new DarlingPgWraparoundReader.PgWraparoundRow(
+                "appdb", Utc, 1, 1, 200, 400, 1.0, 1.0, 1.0, 1.0, 10, 10, true, 2, 2));
+            Assert.Equal(Expected, row.MeasuredAt);
+            Assert.Equal(Utc, row.MeasuredAtUtc);
+        });
+    }
+
+    [Fact]
+    public void PlanCaptureTime_IsTheDisplayZone_ToTheSecond_AndKeepsTheUtcInstant()
+    {
+        InZone(() =>
+        {
+            var row = PgDisplay.PlanCapture(new DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow(
+                "library_loaded", false, null, null, Utc));
+            Assert.Equal(Expected, row.CaptureTime);
+            Assert.Equal(Utc, row.CaptureTimeUtc);
+            Assert.Equal("no", row.Satisfied);
+            Assert.Equal("(not reported)", row.Observed);
+            Assert.Equal(string.Empty, row.Detail);
+        });
+    }
+
+    [Fact]
+    public void ColumnStatCaptureTime_IsTheDisplayZone_ToTheSecond_AndKeepsTheUtcInstant()
+    {
+        InZone(() =>
+        {
+            var row = PgDisplay.ColumnStat(new DarlingPgColumnStatsReader.PgColumnStatRow(
+                "appdb", "public", "t", "c", 1.0, 0.0, 4, 0.5, 0.2, 3, Utc));
+            Assert.Equal(Expected, row.CaptureTime);
+            Assert.Equal(Utc, row.CaptureTimeUtc);
+        });
+    }
+
+    [Fact]
+    public void TheLoadersBindTheDisplayRows_ForPlanCapture()
+    {
+        var tab = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.Postgres.cs").ReplaceLineEndings("\n");
+        Assert.Contains("PgPlanCaptureGrid.ItemsSource = planCaptureTask.Result.Select(PgDisplay.PlanCapture).ToList();", tab, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SnapshotTime_IsEmptyForAMissingTime_AndIndexBloatAndSlotsUseIt()
     {
         InZone(() =>
@@ -149,6 +195,7 @@ public sealed class ViewerPgSnapshotGridTimeTests
     [InlineData("PgServerConfigGrid")]
     [InlineData("PgBufferUsageGrid")]
     [InlineData("PgPredicateStatsGrid")]
+    [InlineData("PgPlanCaptureGrid")]
     public void TheSnapshotTimeColumnIsHeadedCollected(string grid)
     {
         var xaml = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.xaml").ReplaceLineEndings("\n");
@@ -164,5 +211,19 @@ public sealed class ViewerPgSnapshotGridTimeTests
         var headers = Regex.Matches(columns, @"<DataGrid(?:Text|Template)Column\b[^>]*?Header=""(?<h>[^""]*)""");
         var lastColumn = headers[headers.Count - 1].Groups["h"].Value;
         Assert.Equal("Collected", lastColumn);
+    }
+
+    /* The time columns that predate this change keep the header users already know; they gained seconds and a UTC sort. */
+    [Theory]
+    [InlineData("PgWraparoundGrid", "Measured", "MeasuredAt", "MeasuredAtUtc")]
+    [InlineData("PgColumnStatsGrid", "Captured", "CaptureTime", "CaptureTimeUtc")]
+    public void ThePreExistingSnapshotTimeColumnKeepsItsHeader_WithTheSecondAndTheUtcSort(string grid, string header, string binding, string sort)
+    {
+        var xaml = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.xaml").ReplaceLineEndings("\n");
+        var start = xaml.IndexOf("x:Name=\"" + grid + "\"", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var block = xaml[start..xaml.IndexOf("</DataGrid>", start, StringComparison.Ordinal)];
+        Assert.Contains($"Header=\"{header}\" Binding=\"{{Binding {binding}}}\" Width=\"*\" SortMemberPath=\"{sort}\"", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("Header=\"Collected\"", block, StringComparison.Ordinal);
     }
 }
