@@ -69,6 +69,39 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
     /* ───────────────────────── the helper ───────────────────────── */
 
+    /// <summary>
+    /// #4966: the zone marker on effective_start does not depend on the flag beside it. The floor comes off the store as
+    /// a naive instant and the requested start is already UTC, and only the second used to print a trailing Z, so a cut
+    /// window read without one and a covered window with one. Both end in Z now and name the same instants as before.
+    /// </summary>
+    [Fact]
+    public void WindowNotice_EffectiveStart_EndsInZ_WhetherTheWindowWasCutOrCovered()
+    {
+        var start = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        var cut = McpQueryTools.WindowNotice(Naive(start.AddDays(2)), start, "query_snapshots");
+        var covered = McpQueryTools.WindowNotice(null, start, "query_snapshots");
+        var insideSlack = McpQueryTools.WindowNotice(Naive(start.AddMinutes(60)), start, "query_snapshots");
+
+        Assert.True(cut.WindowTruncated);
+        Assert.False(covered.WindowTruncated);
+        Assert.False(insideSlack.WindowTruncated);
+        Assert.Equal("2026-09-03T00:00:00.0000000Z", cut.EffectiveStart);
+        Assert.Equal("2026-09-01T00:00:00.0000000Z", covered.EffectiveStart);
+        /* No cut, but the served start is the floor, which used to print with no Z beside the flag's false. */
+        Assert.Equal("2026-09-01T01:00:00.0000000Z", insideSlack.EffectiveStart);
+    }
+
+    /// <summary>The one formatter every window-floor payload writes effective_start through sets the kind and never shifts the instant.</summary>
+    [Fact]
+    public void FormatEffectiveStart_NamesTheInstantAsUtc_WhicheverKindItCameWith()
+    {
+        var instant = new DateTime(2026, 9, 3, 4, 5, 6, 789, DateTimeKind.Unspecified);
+
+        Assert.Equal("2026-09-03T04:05:06.7890000Z", McpQueryTools.FormatEffectiveStart(instant));
+        Assert.Equal("2026-09-03T04:05:06.7890000Z", McpQueryTools.FormatEffectiveStart(DateTime.SpecifyKind(instant, DateTimeKind.Utc)));
+    }
+
     [Fact]
     public void WindowNotice_AFloorPastTheSlack_IsTruncated_AtTheFloor_NamingTheTable()
     {
@@ -78,7 +111,11 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         var notice = McpQueryTools.WindowNotice(floor, start, "query_snapshots");
 
         Assert.True(notice.WindowTruncated);
-        Assert.Equal(floor.ToString("o"), notice.EffectiveStart);
+        /* #4966: this assertion pinned the floor's own naive spelling, with no zone marker. The payload now names it as
+           UTC, with the trailing Z a covered window's requested start has always carried; the instant is unchanged. */
+        Assert.Equal(DateTime.SpecifyKind(floor, DateTimeKind.Utc).ToString("o"), notice.EffectiveStart);
+        Assert.EndsWith("Z", notice.EffectiveStart, StringComparison.Ordinal);
+        Assert.Equal(floor, ParseUtc(notice.EffectiveStart));
         Assert.NotNull(notice.TruncationNote);
         Assert.Contains("raw query_snapshots retains", notice.TruncationNote, StringComparison.Ordinal);
         Assert.EndsWith("so the older part of it was not read.", notice.TruncationNote, StringComparison.Ordinal);
@@ -96,7 +133,13 @@ public sealed class McpWindowNoticeToolTests : IDisposable
             var notice = McpQueryTools.WindowNotice(floor, start, "waiting_tasks");
             Assert.False(notice.WindowTruncated);
             Assert.Null(notice.TruncationNote);
+            Assert.EndsWith("Z", notice.EffectiveStart, StringComparison.Ordinal);
         }
+
+        /* A floor inside the slack is no cut, but it still moves the served start onto the floor (the clamp only stops
+           it going earlier than asked), and that instant carries the Z too. */
+        var insideSlack = Naive(start.AddMinutes(60));
+        Assert.Equal(insideSlack, ParseUtc(McpQueryTools.WindowNotice(insideSlack, start, "waiting_tasks").EffectiveStart));
 
         Assert.Equal(start.ToString("o"), McpQueryTools.WindowNotice(null, start, "waiting_tasks").EffectiveStart);
         Assert.Equal(start.ToString("o"), McpQueryTools.WindowNotice(start, start, "waiting_tasks").EffectiveStart);
@@ -346,7 +389,9 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     private static void AssertTruncatedAt(JsonElement root, DateTime floor, string table)
     {
         Assert.True(root.GetProperty("window_truncated").GetBoolean());
-        var effectiveStart = ParseUtc(root.GetProperty("effective_start").GetString()!);
+        var effectiveStartText = root.GetProperty("effective_start").GetString()!;
+        Assert.EndsWith("Z", effectiveStartText, StringComparison.Ordinal);
+        var effectiveStart = ParseUtc(effectiveStartText);
         Assert.True(Math.Abs((effectiveStart - floor).TotalSeconds) < 5,
             $"effective_start {effectiveStart:o} should be the seeded floor {floor:o}");
         var note = root.GetProperty("truncation_note").GetString();
@@ -360,7 +405,9 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     {
         Assert.False(root.GetProperty("window_truncated").GetBoolean());
         Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
-        var effectiveStart = ParseUtc(root.GetProperty("effective_start").GetString()!);
+        var effectiveStartText = root.GetProperty("effective_start").GetString()!;
+        Assert.EndsWith("Z", effectiveStartText, StringComparison.Ordinal);
+        var effectiveStart = ParseUtc(effectiveStartText);
         Assert.True(Math.Abs((effectiveStart - requestedStart).TotalMinutes) < 2,
             $"effective_start {effectiveStart:o} should be the requested start {requestedStart:o}");
         AssertNoReachKey(root);
