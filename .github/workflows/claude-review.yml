@@ -11,9 +11,9 @@ name: Claude Auto Review
 #     that is ahead of it is skipped or given a follow-up (a follow-up after a full review, no
 #     review after a follow-up). Everything else gets a FULL review: a push with no verdict yet
 #     (the full review was cancelled or never ran), one whose reviewed commit is no longer an
-#     ancestor of the head (a force-push), a re-run on the head the verdict already covers, and
-#     any read that fails. A verdict with no `review-pass` line counts as full, so the push after
-#     it gets a follow-up.
+#     ancestor of the head (a force-push), a re-run on the head the verdict already covers, a
+#     verdict whose marker head does not fit its commit (below), and any read that fails. A
+#     verdict with no `review-pass` line counts as full, so the push after it gets a follow-up.
 #     Two more reads can change a push's answer. (1) A push that would get no review, because the
 #     newest verdict is already a follow-up, gets a FULL one when another run of this workflow for
 #     the pull request has not finished. After a follow-up only a full trigger (ready for review,
@@ -42,9 +42,9 @@ name: Claude Auto Review
 # before the marker named a head has none, and its commit_id stands in. A marker's head is used
 # only when the verdict's commit_id is that head or comes after it (a compare says identical or
 # ahead). A head that is later than, diverged from or unknown beside the verdict's commit, or
-# one that cannot be compared, does not fit it: the commit_id is stamped when the review is
-# submitted, so it can name content that no review read (a force-push during the review, for
-# one), and no commit is known to be reviewed. That push gets a FULL review, whatever kind the
+# one that cannot be compared, does not fit it. The commit_id cannot stand in for that head
+# either: it can name content that no review read (a force-push during the review, for one), so
+# no commit is known to be reviewed, and the next push gets a FULL review, whatever kind the
 # marker says.
 #
 # The review posts
@@ -227,12 +227,12 @@ jobs:
                   # later than the verdict's commit (behind) would leave the commits between the two out
                   # of every follow-up range, and one that diverged, is unknown to the repository, or
                   # cannot be compared (the read failed) names no commit this verdict can vouch for. The
-                  # verdict's commit_id does not stand in for it either: it is stamped when the review is
-                  # submitted, so it can name content that no review read (after a force-push during the
-                  # review, for one), and a read that fails is a full review. For each of those the
-                  # reviewed commit is cleared, so the check below gives a full review whatever kind the
-                  # marker says, and its reason is the marker note. A head equal to the commit_id needs
-                  # no read, and a marker with no head keeps the handling above.
+                  # verdict's commit_id does not stand in for that head either: it can name content that
+                  # no review read (after a force-push during the review, for one), and a read that fails
+                  # is a full review. For each of those the reviewed commit is cleared, so the check
+                  # below gives a full review whatever kind the marker says, and its reason is the
+                  # marker note. A head equal to the commit_id needs no read, and a marker with no head
+                  # keeps the handling above.
                   marker=$(printf '%s\n' "$LOOKUP_OUT" | tr -d '\r' \
                     | grep -E '^<!-- review-pass: (full|follow-up)( head=[0-9a-f]{40})? -->[[:space:]]*$' | tail -n 1 || true)
                   kind=''; reviewed=$last_commit
