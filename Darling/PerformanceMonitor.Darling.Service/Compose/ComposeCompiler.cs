@@ -115,7 +115,10 @@ public static class ComposeCompiler
     /// <para>Its rows are CUMULATIVE per-Query-Store-interval snapshots and the collector re-fetches the OPEN
     /// interval every cycle, so <c>qs_executions</c> (SUM) and the weighted <c>qs_avg_*</c> ratios would count
     /// one interval's work once per collection. The dedup keeps the LATEST snapshot per interval — the same
-    /// ROW_NUMBER convention the analysis collectors and both apps' Query Store readers use.</para>
+    /// ROW_NUMBER convention the analysis collectors and both apps' Query Store readers use. When the panel
+    /// filters on a dimension of this table, the dedupe ranks only the partitions that hold a matching row
+    /// (<see cref="QueryStorePartitionRestriction"/>); the filter itself stays outside, so a mid-window rename
+    /// cannot change which snapshot survives.</para>
     ///
     /// <para><c>server_id</c> is in the partition because a composed panel spans the fleet, not one server —
     /// and <c>server_name</c> is there too, which is NOT redundant: Postgres can push a qual through a
@@ -172,7 +175,8 @@ public static class ComposeCompiler
     /// them; both are functionally dependent on <c>query_id</c>, so they add no groups.</para>
     /// </summary>
     private static string BuildFactRelation(
-        string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null)
+        string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null,
+        IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null)
     {
         if (route.IsCagg)
         {
@@ -210,10 +214,57 @@ public static class ComposeCompiler
                 + $"WHERE w.{timeColumn} >= {wideStartParam ?? startParam} AND w.{timeColumn} <= {endParam})";
         }
 
-        return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "
-            + $"query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role ORDER BY {timeColumn} DESC, execution_count DESC) AS qs_rn "
+        return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY " + QueryStorePartitionColumns
+            + $" ORDER BY {timeColumn} DESC, execution_count DESC) AS qs_rn "
             + $"FROM {PgSchemaGenerator.CollectSchema}.{QueryStoreTable} "
-            + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}) AS qs_ranked WHERE qs_rn = 1)";
+            + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}"
+            + QueryStorePartitionRestriction(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql)
+            + ") AS qs_ranked WHERE qs_rn = 1)";
+    }
+
+    private const string QueryStorePartitionColumns =
+        "server_id, server_name, database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role";
+
+    private static readonly string[] s_queryStoreNullablePartitionColumns =
+    {
+        "database_name", "query_id", "plan_id", "runtime_stats_interval_id", "first_execution_time", "execution_type_desc", "replica_role",
+    };
+
+    /// <summary>
+    /// The raw dedupe's input restriction when the panel carries dimension filters (#4605): only the partitions
+    /// holding at least one in-window row that matches those filters are ranked. Every kept partition keeps ALL
+    /// of its window rows, so <c>qs_rn = 1</c> picks the same survivor as the unrestricted dedupe, and the outer
+    /// filter still decides which survivors count. A partition with no matching row cannot yield a matching
+    /// survivor. Moving the predicate itself inside the dedupe would NOT be exact: a module renamed mid-window
+    /// leaves one partition with rows under two names, and the filter would change which row survives.
+    ///
+    /// <para>The row-value <c>IN</c> is a hashed semi-join but treats a NULL key as no match, while
+    /// <c>PARTITION BY</c> groups NULLs together. A row with a NULL in any of the nullable key columns is
+    /// therefore decided by a correlated <c>EXISTS</c> with <c>IS NOT DISTINCT FROM</c> instead; only those rows
+    /// pay for it.</para>
+    ///
+    /// <para>Only filters on the fact's own columns reach here; a module-joined dimension is not a column of this
+    /// table. With no such filter the text is empty and the dedupe is unchanged.</para>
+    /// </summary>
+    private static string QueryStorePartitionRestriction(
+        string timeColumn, string startParam, string endParam, IReadOnlyList<string>? dimensionFilters, string? serverScopeSql)
+    {
+        if (dimensionFilters is not { Count: > 0 })
+        {
+            return string.Empty;
+        }
+
+        var table = $"{PgSchemaGenerator.CollectSchema}.{QueryStoreTable}";
+        var window = $"{FactAlias}.{timeColumn} >= {startParam} AND {FactAlias}.{timeColumn} <= {endParam}"
+            + (serverScopeSql is null ? string.Empty : " AND " + serverScopeSql)
+            + string.Concat(dimensionFilters.Select(c => " AND " + c));
+        var anyNull = string.Join(" OR ", s_queryStoreNullablePartitionColumns.Select(c => c + " IS NULL"));
+        var sameKey = "f.server_id = " + QueryStoreTable + ".server_id AND f.server_name = " + QueryStoreTable + ".server_name"
+            + string.Concat(s_queryStoreNullablePartitionColumns.Select(c => $" AND f.{c} IS NOT DISTINCT FROM {QueryStoreTable}.{c}"));
+        return $" AND ((({QueryStorePartitionColumns}) IN (SELECT {FactAlias}.server_id, {FactAlias}.server_name, "
+            + string.Join(", ", s_queryStoreNullablePartitionColumns.Select(c => FactAlias + "." + c))
+            + $" FROM {table} AS {FactAlias} WHERE {window}))"
+            + $" OR (({anyNull}) AND EXISTS (SELECT 1 FROM {table} AS {FactAlias} WHERE {window} AND {sameKey})))";
     }
 
     /// <summary>
@@ -298,9 +349,16 @@ public static class ComposeCompiler
            reuses the same clause TEXT in both its rank CTE and its series query, which reuses the same $n
            placeholders rather than double-binding each value. */
         var filterClauses = new List<string>(plan.Filters.Count);
+        var pushableFilterClauses = new List<string>();
         foreach (var filter in plan.Filters)
         {
-            filterClauses.Add(BuildFilterClause(filter, context, p));
+            var clause = BuildFilterClause(filter, context, p);
+            filterClauses.Add(clause);
+            if (!filter.Dimension.ViaModuleJoin
+                && string.Equals(filter.Dimension.SourceTable, QueryStoreTable, StringComparison.Ordinal))
+            {
+                pushableFilterClauses.Add(clause);
+            }
         }
 
         var timeColumn = route.IsCagg ? ComposeRoute.CaggTimeColumn : s_timeColumnByTable[plan.Measure.SourceTable];
@@ -312,7 +370,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? $"{FactAlias}.server_name = ANY({serverScopeParam})" : null));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a
