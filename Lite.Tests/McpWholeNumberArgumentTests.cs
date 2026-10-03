@@ -28,7 +28,7 @@ namespace Lite.Tests;
 /// </summary>
 public sealed class McpWholeNumberArgumentTests
 {
-    private static List<Type> LiteToolTypes() =>
+    internal static List<Type> LiteToolTypes() =>
         typeof(PerformanceMonitorLite.Mcp.McpWaitTools).Assembly
             .GetTypes()
             .Where(t => t.GetCustomAttribute<McpServerToolTypeAttribute>() is not null)
@@ -41,8 +41,13 @@ public sealed class McpWholeNumberArgumentTests
         McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog);
 
     /// <summary>Lite's tool services are all concrete classes, so none needs a hand-made stand-in.</summary>
-    internal static Task<McpInProcessHost> StartHostAsync(bool installGuard = true) =>
-        McpInProcessHost.StartAsync(LiteToolTypes(), IsServiceParameter, _ => null, installGuard, TestContext.Current.CancellationToken);
+    /// <param name="installGuard">False to leave the call-tool guard out, so a call meets the SDK's binder alone.</param>
+    /// <param name="extraToolTypes">Test-only tool classes to register beside the shipped ones, through the same
+    /// <c>McpSchemaCompat</c> path.</param>
+    internal static Task<McpInProcessHost> StartHostAsync(bool installGuard = true, params Type[] extraToolTypes) =>
+        McpInProcessHost.StartAsync(
+            LiteToolTypes().Concat(extraToolTypes).ToList(), IsServiceParameter, _ => null, installGuard,
+            TestContext.Current.CancellationToken);
 
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
 
@@ -122,10 +127,34 @@ public sealed class McpWholeNumberArgumentTests
         Assert.Null(McpInProcessHost.WholeNumberRefusalProblem("get_wait_stats", "limit", "whole number", result));
     }
 
+    /// <summary>A whole number past <see cref="int"/> sent for <c>hours_back</c>, through a real in-process server with
+    /// the declared parameter types recorded, is refused as too large, and the refusal states no range. The CLR type's
+    /// range is not the range the tool takes: <c>hours_back</c> is an int, but <c>McpHelpers.ValidateHoursBack</c>
+    /// refuses anything outside 1-168. A refusal that quoted "from -2147483648 to 2147483647" gave the caller two
+    /// ranges that disagree, and invited a retry the tool's own validator refuses.</summary>
+    [Fact]
+    public async Task HoursBackPastInt_IsRefusedAsTooLarge_AndStatesNoRange()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var host = await StartHostAsync();
+
+        var result = await host.Client.CallToolAsync(
+            "get_wait_stats", new Dictionary<string, object?> { ["hours_back"] = Json("99999999999") }, cancellationToken: ct);
+
+        var problem = McpInProcessHost.WholeNumberRefusalProblem("get_wait_stats", "hours_back", "whole number of hours", result);
+        Assert.True(problem is null, problem);
+        var message = McpInProcessHost.RefusalMessage(result)!;
+        Assert.Contains("which is too large", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("2147483647", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("-2147483648", message, StringComparison.Ordinal);
+    }
+
     /// <summary>Every integer parameter of every Lite tool refuses 2.5, 1.0, "0.5" and true by name, and passes 1, "1"
-    /// and null. Checked against the guard's decision, so no tool body runs. The binder reads 1 and "1" for every
-    /// integer parameter, but null only for a nullable one: the guard passes null because the schema does not say
-    /// which parameters are nullable, and a non-nullable one still gets the SDK's own error.</summary>
+    /// and null. Checked against the guard's decision, so no tool body runs, and with no recorded parameter types:
+    /// this is the schema-only path that a tool the record does not cover falls back to. The binder reads null only
+    /// for a nullable parameter, and the schema does not say which are, so this path passes null. With the declared
+    /// types recorded, which is how the host calls the guard, a non-nullable parameter refuses null by name;
+    /// <see cref="McpArgumentTypeTests"/> pins that.</summary>
     [Fact]
     public async Task EveryIntegerParameter_RefusesWhatTheBinderCannotRead_AndAcceptsWhatItCan()
     {

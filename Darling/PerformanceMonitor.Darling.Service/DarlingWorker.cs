@@ -2320,6 +2320,14 @@ LIMIT 1";
         var queryStoreIndexes = QueryStoreBackgroundIndexes.RunDelayedAsync(
             postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, QueryStoreBackgroundIndexes.All, stoppingToken);
 
+        /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
+           the first MCP or web call finds each rollup's floor already measured and does not wait ~10 s on the
+           large stores for the oldest compressed chunk's min(bucket). Launched after migrations, never awaited on
+           the startup path, and RunDelayedAsync never throws: a failed warm logs once at Debug and changes
+           nothing else. Drained with the other background work. */
+        var rollupCoverageWarm = RollupCoverageWarmup.RunDelayedAsync(
+            postgres, _logger, RollupCoverageWarmup.ServiceStartDelay, stoppingToken);
+
         /* #4214 ruling 9: the once-per-start store host/settings profile log — host facts, pg_settings and
            the managed conf files only, never the store-size/chunk-total reads --check-settings and the MCP
            read own. Its own short deadline and its own catch: a bad conf file, a permission problem or a
@@ -3814,6 +3822,9 @@ LIMIT 1";
 
         /* And the Query Store read index ensures (#4605, #4952), which absorb their own failures. */
         await queryStoreIndexes;
+
+        /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
+        await rollupCoverageWarm;
 
         _logger.LogInformation("PerformanceMonitor Darling collection loop stopped");
     }
