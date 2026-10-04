@@ -114,7 +114,10 @@ namespace PerformanceMonitor.Common
         /// WHOLE matrix from <c>log1p</c> of the smallest positive cell to <c>log1p</c> of the largest:
         /// <c>floor(t * bandCount)</c>, clamped to <c>bandCount - 1</c>, so the smallest positive cell is band 0 and the
         /// largest is the top band. A cell of 0, or with no sample, has no band (null). When every positive cell is
-        /// equal there is no range to place them in, and they all take the top band. The result has the matrix's shape.
+        /// equal, or there is only one, there is no range to place them in, and they all take band 0 (the darkest colour, where
+        /// the desktop's scale paints position 0.0). A non-finite cell (NaN, +Infinity or -Infinity) has no band (null) and
+        /// is left out of the range. <paramref name="bandCount"/> below 1 throws <see cref="ArgumentOutOfRangeException"/>
+        /// and a null <paramref name="matrix"/> throws <see cref="ArgumentNullException"/>. The result has the matrix's shape.
         /// </summary>
         public static int?[,] MatrixLogBands(FinOpsHeatmapMatrix matrix, int bandCount)
         {
@@ -149,7 +152,7 @@ namespace PerformanceMonitor.Common
                     if (!(v > 0) || double.IsInfinity(v)) continue;
                     if (!(span > 0))
                     {
-                        bands[r, c] = bandCount - 1;
+                        bands[r, c] = 0;
                         continue;
                     }
                     int band = (int)Math.Floor((Math.Log(1 + v) - low) / span * bandCount);
