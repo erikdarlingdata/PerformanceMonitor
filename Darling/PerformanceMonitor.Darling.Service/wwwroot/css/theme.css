@@ -67,3 +67,5 @@ tr.mute-rules-highlight { outline: 2px solid var(--accent); }
 .range-custom[hidden] { display: none; }
 .range-custom-input { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 0.15rem 0.3rem; font-size: 0.78rem; }
 .range-custom-error { color: var(--err); font-size: 0.78rem; }
+/* Alert History (#4843): a dismissed row, shown when "Show dismissed" is on. */
+tr.alert-dismissed { opacity: 0.55; font-style: italic; }
