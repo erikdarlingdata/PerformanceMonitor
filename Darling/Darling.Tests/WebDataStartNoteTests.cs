@@ -222,6 +222,40 @@ public sealed class WebDataStartNoteTests
     }
 
     /// <summary>
+    /// #4966: the query heatmap and the Query Store regressions panels are grids (<c>table()</c> descriptors, no
+    /// <c>noteKey</c>) and neither read is in <see cref="WebDataStartNote.TableByRead"/>, so the page draws the tool's own
+    /// <c>truncation_note</c> above each, through <c>windowFloorStrip</c>, when the answer says <c>window_truncated: true</c>.
+    /// It is the MCP sentence as sent: it names no instant (the regressions tail says "effective_start" and "baseline_end"
+    /// as field names), so nothing in it mixes the server's UTC with the browser's zone. An <c>empty</c> envelope keeps the
+    /// note under <c>hints</c>, which the page does not read, so it draws none there. No page change is needed.
+    /// </summary>
+    [Theory]
+    [InlineData("get_query_heatmap", "Query Heatmap", "query_stats", false)]
+    [InlineData("get_query_store_regressions", "Query Store Regressions", "query_store_stats", true)]
+    public void TheHeatmapAndRegressionsPanels_DrawTheToolsOwnTruncationNote_AsSent(string read, string title, string table, bool baselineTail)
+    {
+        Assert.DoesNotContain(read, WebDataStartNote.TableByRead.Keys);
+
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js").ReplaceLineEndings("\n");
+        var open = tabs.IndexOf("table(\n        \"" + title + "\",\n        \"" + read + "\",", StringComparison.Ordinal);
+        Assert.True(open >= 0, read + " is no longer a table() panel on a server tab");
+        var call = tabs[open..tabs.IndexOf("\n      ),", open, StringComparison.Ordinal)];
+        Assert.DoesNotContain("truncation_note", call, StringComparison.Ordinal);
+
+        var note = DarlingMcpWindowNotice.Build(
+            Utc(2026, 1, 3), Utc(2026, 1, 1), table,
+            baselineTail ? "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end." : null).TruncationNote!;
+        Assert.DoesNotMatch(@"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}", note);
+        Assert.Contains("this server's raw " + table + " retains", note, StringComparison.Ordinal);
+        Assert.Equal(baselineTail, note.EndsWith("baseline_end.", StringComparison.Ordinal));
+
+        var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js").ReplaceLineEndings("\n");
+        Assert.Contains("if (!desc || desc.viz !== \"table\") return null;", util, StringComparison.Ordinal);
+        Assert.Contains("if (!data || data.window_truncated !== true) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("return sent;\n}", util, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The capped rule is for the one list ordered by time. A read that did not hit its cap, a capped answer with no
     /// usable oldest row, and every other listed read, whose cap keeps the top rows of an aggregate over the whole
     /// window (or of a list ranked by something other than time, <c>get_pg_predicate_stats</c>), stay on the
