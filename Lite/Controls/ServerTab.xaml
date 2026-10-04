@@ -2465,15 +2465,18 @@
             <TabItem Header="Latches &amp; Spinlocks">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
                     <!-- Latch wait-time trend (top 5 classes by delta wait) + per-class latest-snapshot grid. -->
-                    <ScottPlot:WpfPlot Grid.Row="0" x:Name="LatchStatsChart"/>
-                    <Expander Grid.Row="1" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
+                    <TextBlock Grid.Row="0" x:Name="LatchStatsWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                    <ScottPlot:WpfPlot Grid.Row="1" x:Name="LatchStatsChart"/>
+                    <Expander Grid.Row="2" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                         <DataGrid x:Name="LatchStatsGrid"
                                   AutoGenerateColumns="False" IsReadOnly="True"
                                   RowStyle="{StaticResource GridRowStyle}"
@@ -2512,8 +2515,9 @@
                     </Expander>
 
                     <!-- Spinlock collisions trend (top 5 spinlocks by delta collisions) + per-spinlock snapshot grid. -->
-                    <ScottPlot:WpfPlot Grid.Row="2" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
-                    <Expander Grid.Row="3" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
+                    <TextBlock Grid.Row="3" x:Name="SpinlockStatsWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" Margin="0,8,0,0" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                    <ScottPlot:WpfPlot Grid.Row="4" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
+                    <Expander Grid.Row="5" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                         <DataGrid x:Name="SpinlockStatsGrid"
                                   AutoGenerateColumns="False" IsReadOnly="True"
                                   RowStyle="{StaticResource GridRowStyle}"
