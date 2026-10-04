@@ -90,6 +90,14 @@ public sealed class FinOpsTabIndexAnalysisPageTests
     }
 
     [Fact]
+    public void TheSuggestionListComesOnlyFromAnUnfilteredRead()
+    {
+        var tab = Tab();
+        Assert.Matches(@"if\s*\(\s*!choice\.db\s*\)\s*\{\s*choice\.names\s*=\s*\(data\.databases\s*\|\|\s*\[\]\)", tab);
+        Assert.Single(Regex.Matches(tab, @"choice\.names\s*="));
+    }
+
+    [Fact]
     public void TheDatabaseFilterReReadsWithDatabaseName()
     {
         var tab = Tab();
