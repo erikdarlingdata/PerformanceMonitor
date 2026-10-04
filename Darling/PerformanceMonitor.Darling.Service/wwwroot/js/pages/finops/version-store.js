@@ -10,7 +10,7 @@
    top databases, both from one get_pvs_stats read. A server whose engine has no PVS shows the read's own message. PVS counts off-row versions only, matching the desktop label. */
 
 import { VIZ } from "../../panels.js";
-import { renderLineChart, SERIES_COLORS } from "../../charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
 import { el, readTool, readErrorStrip, emptyStrip, errorStrip, loadingStrip, mount, fmtNum, localTime, windowFromHours } from "../../util.js";
 
 const TREND_HOURS = 24;
@@ -86,7 +86,7 @@ async function load(server, ctx, body) {
     });
     const { points, series } = pivotTrend(data.trend);
     const chart = points.length
-      ? renderLineChart({ points, xKey: "collection_time", series, formatValue: (v) => fmtNum(v, 2), unit: "PVS off-row MB", ...windowFromHours(TREND_HOURS) })
+      ? zoomableLineChart({ points, xKey: "collection_time", series, formatValue: (v) => fmtNum(v, 2), unit: "PVS off-row MB", ...windowFromHours(TREND_HOURS) }, "pvs-size-trend", chartZoomScope(TREND_HOURS))
       : emptyStrip("No PVS size history in the last " + TREND_HOURS + " hours.");
     mount(body, [
       el("div", { class: "strip notice", role: "status", text: "As of " + localTime(data.as_of) + " (latest snapshot)." }),

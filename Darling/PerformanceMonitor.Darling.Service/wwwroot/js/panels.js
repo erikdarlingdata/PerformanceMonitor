@@ -41,7 +41,7 @@ import {
   sevClass,
   windowFromHours,
 } from "./util.js";
-import { renderLineChart, SERIES_COLORS } from "./charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 
 /* The AbortSignal for the render currently building panels (#4191). A page sets it (setPanelSignal)
    synchronously, immediately before calling a tab's build()/a page's descriptor array, and renderPanel below
@@ -329,7 +329,11 @@ function vizLine(data, desc) {
      params) or when loadPanelBody narrowed the read to the history it keeps, else desc.params.hours. Absent ⇒
      null ⇒ the chart keeps its data-extent domain, unchanged. */
   const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours);
-  return renderLineChart({
+  /* Drag-to-zoom over the loaded points (zoomableLineChart, charts.js). The zoom is held under this chart's
+     identity (title, read and series) and the page's scope (server + tab + preset range), so the poll's rebuild
+     draws it again and a different server, tab or range does not. */
+  const zoomId = [desc.title || "", desc.read || desc.path || "", desc.xKey, seriesCfg.map((s) => s.key).join(",")].join("|");
+  return zoomableLineChart({
     points,
     xKey: desc.xKey,
     series,
@@ -341,7 +345,7 @@ function vizLine(data, desc) {
     unit: desc.unit ?? null,
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
-  });
+  }, zoomId, chartZoomScope(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours));
 }
 
 /* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */

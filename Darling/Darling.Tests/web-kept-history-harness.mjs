@@ -117,7 +117,9 @@ try {
       "export function renderLineChart(opts) {\n" +
       "  chartCalls.push({ windowStart: opts.windowStart, windowEnd: opts.windowEnd });\n" +
       "  return el('div', { class: 'chart-stub' });\n" +
-      "}\n"
+      "}\n" +
+      "export function zoomableLineChart(opts) { return renderLineChart(opts); }\n" +
+      "export function chartZoomScope() { return ''; }\n"
   );
   if (editorScenario) {
     for (const file of ["derive.js", "alert-seed.js", "views-api.js", "refresh-policy.js", "refresh-control.js"]) {

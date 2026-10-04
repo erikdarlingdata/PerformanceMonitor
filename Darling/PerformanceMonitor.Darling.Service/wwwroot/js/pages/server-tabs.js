@@ -41,7 +41,7 @@
 
 import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, windowFromHours, daysText } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
-import { renderLineChart, SERIES_COLORS } from "../charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { READ_FIELDS } from "../read-fields.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
@@ -152,7 +152,7 @@ function fanout(read, params, specs) {
            all pages of a population - the aggregate one beside a capped row list is exactly the pairing
            where only one of them needs saying so. */
         const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
-        const rendered = VIZ[spec.viz](res.data, { ...spec, windowHours: res.keptHours || (params && params.hours) });
+        const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours) });
 
         mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
@@ -230,7 +230,7 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
   mount(slot, [
     keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
-    renderLineChart({
+    zoomableLineChart({
       points: trend.data.trend || [],
       xKey: "time",
       series: [
@@ -242,7 +242,7 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
       ...windowFromHours(trend.keptHours || ctx.hours),
-    }),
+    }, "wait-trend|" + waitType, chartZoomScope(ctx.hours)),
   ]);
 }
 
@@ -307,14 +307,14 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
   mount(slot, [
     keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
-    renderLineChart({
+    zoomableLineChart({
       points: trend.data.trend || [],
       xKey: "time",
       ...perfmonTrendLines(trend.data.trend || []),
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
       ...windowFromHours(trend.keptHours || ctx.hours),
-    }),
+    }, "perfmon-trend|" + counterName, chartZoomScope(ctx.hours)),
   ]);
 }
 
@@ -469,7 +469,7 @@ async function drawQueryTrend(slot, server, ctx, query) {
   mount(slot, [
     keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
-    renderLineChart({
+    zoomableLineChart({
       points: trend.data.trend || [],
       xKey: "collection_time",
       series: [
@@ -482,7 +482,7 @@ async function drawQueryTrend(slot, server, ctx, query) {
          starts later than the window and plots toward the right; the truncation notice above already says so.
          A narrowed read spans the hours it answered for. */
       ...windowFromHours(trend.keptHours || ctx.hours),
-    }),
+    }, "query-trend|" + query.query_hash, chartZoomScope(ctx.hours)),
     VIZ.table(trend.data, {
       rowsKey: "trend",
       columns: QUERY_TREND_COLUMNS,
@@ -539,7 +539,7 @@ export function fileIoPanel(server, ctx) {
     mount(body, [
       keptWindowStrip(res),
       notes.length ? noticeStrip(notes.join(" ")) : null,
-      renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(res.keptHours || ctx.hours) }),
+      zoomableLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(res.keptHours || ctx.hours) }, "file-io-latency", chartZoomScope(ctx.hours)),
     ]);
   })();
   return panel;

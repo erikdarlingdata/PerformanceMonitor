@@ -104,7 +104,8 @@ try {
       "  drawing = false;\n" +
       "  chartCalls.push({ series: (opts.series || []).map((s) => ({ key: s.key, label: s.label })), unit: opts.unit == null ? null : opts.unit, axis, node });\n" +
       "  return node;\n" +
-      "}\n"
+      "}\n" +
+      "export function zoomableLineChart(opts) { return renderLineChart(opts); }\n"
   );
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
   modules = {
