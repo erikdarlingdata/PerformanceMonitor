@@ -8,7 +8,9 @@
 
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -71,7 +73,10 @@ public sealed class DarlingMcpReadLatencyTools
         + "fallback. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
         + "both are optional and compose (AND) when both are given. Empty means no read was recorded for the "
         + "window/filter, which on a fresh store, or one below schema V148, is the expected answer — not a "
-        + "sign anything is broken.")]
+        + "sign anything is broken. The page is also capped to the shared ~32 KB response budget, whichever is "
+        + "smaller than limit: truncated says either cut bit, reads_returned is the rows sent and reads_total the "
+        + "rows the window held, so reads_total minus reads_returned were left out, always from the end of the "
+        + "order above. Narrow with surface or route to see them.")]
     public static async Task<string> GetReadLatency(
         NpgsqlDataSource postgres,
         [Description("Hours of history to summarize. Default 24; max 168 (7 days).")] int hours = DefaultHours,
@@ -127,33 +132,58 @@ public sealed class DarlingMcpReadLatencyTools
             .ThenByDescending(x => x.Row.RunCount)
             .ThenBy(x => x.Row.Surface, StringComparer.Ordinal)
             .ThenBy(x => x.Row.Route, StringComparer.Ordinal)
-            .Take(limit)
             .ToArray();
 
-            return JsonSerializer.Serialize(new
+            var shaped = projected.Select(x => (object)new
+            {
+                surface = x.Row.Surface,
+                route = x.Row.Route,
+                count = x.Row.RunCount,
+                mean_ms = x.Row.MeanMs,
+                max_ms = x.Row.MaxMs,
+                p50_ms = x.P50?.UpperBoundMs,
+                p50_is_at_least = x.P50?.IsAtLeast ?? false,
+                p95_ms = x.P95?.UpperBoundMs,
+                p95_is_at_least = x.P95?.IsAtLeast ?? false,
+                p99_ms = x.P99?.UpperBoundMs,
+                p99_is_at_least = x.P99?.IsAtLeast ?? false,
+                timeouts = x.Row.Timeouts,
+                fallbacks = x.Row.Fallbacks,
+                gate_failures = x.Row.GateFailures,
+            }).ToArray();
+
+            string Envelope(IReadOnlyList<object> page, bool truncated) => JsonSerializer.Serialize(new
             {
                 hours,
                 surface,
                 route,
                 note = BucketEstimateNote,
-                reads = projected.Select(x => new
-                {
-                    surface = x.Row.Surface,
-                    route = x.Row.Route,
-                    count = x.Row.RunCount,
-                    mean_ms = x.Row.MeanMs,
-                    max_ms = x.Row.MaxMs,
-                    p50_ms = x.P50?.UpperBoundMs,
-                    p50_is_at_least = x.P50?.IsAtLeast ?? false,
-                    p95_ms = x.P95?.UpperBoundMs,
-                    p95_is_at_least = x.P95?.IsAtLeast ?? false,
-                    p99_ms = x.P99?.UpperBoundMs,
-                    p99_is_at_least = x.P99?.IsAtLeast ?? false,
-                    timeouts = x.Row.Timeouts,
-                    fallbacks = x.Row.Fallbacks,
-                    gate_failures = x.Row.GateFailures,
-                }),
+                truncated,
+                reads_returned = page.Count,
+                reads_total = shaped.Length,
+                reads = page,
             });
+
+            /* The caller's limit is an upper bound, never a promise: the SERIALIZED response must also fit
+               McpResponseBudget.DefaultBytes. Rows are taken in the total order above until the next one would
+               cross the budget. The envelope is measured once with an empty page and the truncated flag set
+               (the longer spelling), then each row pays its own bytes plus a separating comma. */
+            var page = new List<object>();
+            var running = Encoding.UTF8.GetByteCount(Envelope(Array.Empty<object>(), true));
+            foreach (var row in shaped.Take(limit))
+            {
+                var added = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(row)) + (page.Count == 0 ? 0 : 1);
+                if (page.Count > 0 && running + added > McpResponseBudget.DefaultBytes)
+                {
+                    break;
+                }
+
+                running += added;
+                page.Add(row);
+            }
+
+            var cut = page.Count < shaped.Length;
+            return Envelope(page, cut);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
