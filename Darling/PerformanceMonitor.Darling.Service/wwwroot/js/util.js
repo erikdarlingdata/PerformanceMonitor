@@ -198,6 +198,9 @@ export function readToolWithinKeptHistory(tool, params, signal) {
 
 /** The notice for a read readWithinKeptHistory narrowed to the widest window it takes, or null for any other result. */
 export function keptWindowStrip(res) {
+  if (res && !res.keptHours && res.presetHours) {
+    return noticeStrip("This panel shows the last " + res.presetHours + " hours, not the custom range: its read takes no end time.");
+  }
   if (!res || !res.keptHours) return null;
   return noticeStrip(readLimitText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
 }
@@ -340,6 +343,8 @@ export function axisTime(date, withDate) {
 export function windowFromHours(hours) {
   const h = Number(hours);
   if (!isFinite(h) || h < 1) return null;
+  /* A custom range's own reads span the exact pair the reader picked, not the whole hours they were fetched over. */
+  if (liveRange() && h === activeRange.hours) return { windowStart: activeRange.startMs, windowEnd: activeRange.endMs };
   const windowEnd = Date.now();
   return { windowStart: windowEnd - h * 3600000, windowEnd };
 }
@@ -707,5 +712,81 @@ export function alertDeliveryState(a) {
 
 /** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). */
 export function readTool(tool, params, signal) {
-  return apiGet("/api/read/" + tool + buildQuery(params), signal).then(localizeWindowNote);
+  const plan = planCustomRange(tool, params);
+  return apiGet("/api/read/" + tool + buildQuery(plan.params), signal)
+    .then(localizeWindowNote)
+    .then((res) => finishCustomRange(res, plan));
+}
+
+/* ─────────────────────────── custom range (server page) ─────────────────────────── */
+
+/* The server page's custom start/end, or null for a preset. The page sets it before it builds a tab and clears it for
+   a preset and when the reader leaves the server page. It is applied here, to every read, so the ~100 `hours: ctx.hours`
+   call sites on the server tabs need no change: a read of the active server whose `hours` is the range's own whole-hour
+   count and that names no `as_of` is anchored at the range's end (`as_of`), and its rows are trimmed to the exact pair
+   afterwards. The window the read covers is then [end - hours, end], which starts at or before the picked start. */
+let activeRange = null;
+
+/** `{ server, hours, startMs, endMs, asOf }` for the page's custom range, or null to go back to the presets. `asOf` is
+ *  null for a range that ends now: its reads then name no `as_of` and the server anchors them at its own clock, and only
+ *  the start of the trim applies. */
+export function setActiveRange(range) {
+  activeRange = range || null;
+}
+
+/* The windowed reads that take no `as_of` (the catalog's `hours` without an `as_of`): they keep answering "the last N
+   hours ending now", and say so. Every other windowed read takes `as_of`. WebServerPageRangeTests pins this list
+   against the read catalog. */
+const READS_WITHOUT_AS_OF = new Set(["get_fleet_overview", "get_read_latency", "get_finops"]);
+
+/* The row fields that stamp one sample, event or run at an instant. A list under a read's answer whose rows carry one of
+   these is cut to the exact range. Fields that say when something last happened (last_execution_time and its kin) are
+   left alone: those rows are totals over the window, not points in it. */
+const INSTANT_FIELDS = ["sample_time", "time", "collection_time", "event_time", "occurred_at", "deadlock_time", "change_time", "captured_at", "measured_at", "time_bucket"];
+
+/* The range belongs to the server page: a read from any other page is never anchored by it. */
+function liveRange() {
+  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  return activeRange && (hash === "" || hash.startsWith("#/server/")) ? activeRange : null;
+}
+
+function planCustomRange(tool, params) {
+  const range = liveRange();
+  if (!range || !params || params.server !== range.server || Number(params.hours) !== range.hours || params.as_of != null) {
+    return { params, range: null, ignored: false };
+  }
+  if (READS_WITHOUT_AS_OF.has(tool)) return { params, range: null, ignored: true };
+  return { params: range.asOf ? { ...params, as_of: range.asOf } : params, range, ignored: false };
+}
+
+function finishCustomRange(res, plan) {
+  if (plan.ignored) return res && (res.kind === "data" || res.kind === "empty") ? { ...res, presetHours: Number(plan.params.hours) } : res;
+  if (!plan.range || !res || res.kind !== "data") return res;
+  return { ...res, data: trimToRange(res.data, plan.range.startMs, plan.range.asOf ? plan.range.endMs : Infinity, 0) };
+}
+
+function trimToRange(node, startMs, endMs, depth) {
+  if (!node || typeof node !== "object" || Array.isArray(node) || depth > 2) return node;
+  let out = node;
+  for (const [key, value] of Object.entries(node)) {
+    let next = value;
+    if (Array.isArray(value)) {
+      const first = value.find((r) => r && typeof r === "object");
+      const field = first ? INSTANT_FIELDS.find((f) => f in first) : null;
+      if (field) {
+        next = value.filter((r) => {
+          const at = r && parseUtc(r[field]);
+          return !at || (at.getTime() >= startMs && at.getTime() <= endMs);
+        });
+        if (next.length === value.length) next = value;
+      }
+    } else {
+      next = trimToRange(value, startMs, endMs, depth + 1);
+    }
+    if (next !== value) {
+      if (out === node) out = { ...node };
+      out[key] = next;
+    }
+  }
+  return out;
 }

@@ -45,7 +45,7 @@
  * subtitle rather than inheriting a label that would misdescribe them.
  */
 
-import { el, mount, apiGetFleet, bandClass, loadingStrip } from "../util.js";
+import { el, mount, apiGetFleet, bandClass, loadingStrip, setActiveRange, localTime } from "../util.js";
 import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
@@ -100,11 +100,66 @@ let panelAbort = null;
    matches on), module-scoped like pageHours, and bounded by the number of servers visited in one session. */
 const lastCard = new Map();
 
-/** The {hours,label} context every tab build() is given. */
-function rangeContext() {
+/* The custom start/end, keyed by server (module scope, so the 60s poll's rebuild keeps it and another server starts on
+   the presets). Each value is `{ startMs, endMs, live, spanMs }`. A range whose end is within LIVE_SLACK_MS of now when
+   it is applied is LIVE: it keeps its width and slides to end at "now" on every rebuild, so the poll keeps refreshing
+   it. Any other end is a fixed historical window: its data cannot change, so the poll leaves the panels on screen
+   instead of reading the same hours again. */
+const customRanges = new Map();
+const LIVE_SLACK_MS = 60000;
+const HOUR_MS = 3600000;
+
+/**
+ * Check a picked start and end and map them onto the reads' window (an end, `as_of`, and a whole number of `hours`).
+ * The start rounds EARLIER to a whole hour for the fetch (`hours` is an integer of at least 1); the page trims what comes
+ * back to the exact pair. Returns `{ error }` for an unusable pair, else `{ hours, asOf, live, startMs, endMs }`; `asOf`
+ * is null for a live range, whose reads are anchored at the server's own clock.
+ */
+export function resolveCustomRange(startMs, endMs, nowMs) {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return { error: "Enter both a start and an end." };
+  if (endMs <= startMs) return { error: "The end must be after the start." };
+  if (endMs > nowMs + LIVE_SLACK_MS) return { error: "The end cannot be in the future." };
+  const span = endMs - startMs;
+  if (span < HOUR_MS) return { error: "Pick at least one hour. Drag across a chart to look at a shorter span." };
+  if (span > WIDEST_RANGE_HOURS * HOUR_MS) {
+    return { error: "The range can be at most " + WIDEST_RANGE_HOURS / 24 + " days, the widest preset." };
+  }
+  const live = endMs >= nowMs - LIVE_SLACK_MS;
+  return { hours: Math.ceil(span / HOUR_MS), asOf: live ? null : new Date(endMs).toISOString(), live, startMs, endMs };
+}
+
+/** Apply a custom range to a server and redraw. Returns the error text, or null when the range was taken. */
+export function applyCustomRange(server, startMs, endMs, nowMs = Date.now()) {
+  const r = resolveCustomRange(startMs, endMs, nowMs);
+  if (r.error) return r.error;
+  customRanges.set(server, { startMs, endMs, live: r.live, spanMs: endMs - startMs });
+  redrawPanels();
+  return null;
+}
+
+/** The {hours,label} context every tab build() is given. A custom range also hands the util module its exact pair, so
+ *  every read of this server inside it is anchored and trimmed there. */
+function rangeContext(nowMs = Date.now()) {
+  const custom = current.server ? customRanges.get(current.server) : null;
+  if (custom) {
+    const endMs = custom.live ? nowMs : custom.endMs;
+    const startMs = custom.live ? nowMs - custom.spanMs : custom.startMs;
+    const r = resolveCustomRange(startMs, endMs, nowMs);
+    if (!r.error) {
+      setActiveRange({ server: current.server, hours: r.hours, startMs, endMs, asOf: r.asOf });
+      return { hours: r.hours, label: "custom: " + localTime(new Date(startMs).toISOString()) + " to " + (custom.live ? "now" : localTime(new Date(endMs).toISOString())), custom: true };
+    }
+    customRanges.delete(current.server);
+  }
+  setActiveRange(null);
   const opt = RANGE_OPTIONS.find((o) => o.hours === pageHours) || RANGE_OPTIONS[3];
   return { hours: opt.hours, label: opt.label };
 }
+
+/* Set when the poll ticks over a fixed custom range: the panels the previous render drew stay on screen (see
+   renderServer). `gridKey` names the server and tab that grid shows. */
+let keepGrid = false;
+let gridKey = "";
 
 /**
  * @param {object} [opts] — `{ poll: true }` when this call is the 60s poll's own refresh (app.js's refresh(),
@@ -115,6 +170,10 @@ function rangeContext() {
 export function renderServer(main, server, tabId, opts) {
   const isPoll = !!(opts && opts.poll === true);
   const generation = ++renderGeneration;
+  const custom = customRanges.get(server);
+  /* A fixed custom range cannot change under the poll, so the poll keeps the panels it already drew (same server, same
+     tab) instead of reading the same hours again. A live range, a preset and a tab or server click rebuild as before. */
+  keepGrid = isPoll && !!custom && !custom.live && !!gridNode && gridKey === server + "|" + (tabId || "");
   current = { server, tab: null };
 
   const dot = el("span", { class: "dot" });
@@ -134,7 +193,7 @@ export function renderServer(main, server, tabId, opts) {
 
   /* The bar and the note share one slot because both are decided by the same card. */
   const tabsSlot = el("div", { class: "subtabs-slot" }, [loadingStrip()]);
-  gridNode = el("div", { class: "panel-grid" });
+  if (!keepGrid) gridNode = el("div", { class: "panel-grid" });
   mount(main, [head, whySlot, tabsSlot, gridNode]);
 
   /* Seen this server before? Then its engine is already known and the page paints now — no loading strip, and
@@ -176,6 +235,7 @@ function paintTabs(tabsSlot, server, tabId, card) {
   const tabs = serverTabsFor(card);
   const tab = findServerTab(tabId, tabs);
   current = { server, tab };
+  gridKey = server + "|" + (tabId || "");
   mount(tabsSlot, [subtabBar(server, tab, tabs), tabNote(tab, WIDEST_RANGE_HOURS)]);
   redrawPanels();
   return tabs;
@@ -184,6 +244,11 @@ function paintTabs(tabsSlot, server, tabId, card) {
 /** (Re)fill the panel grid for the current server + tab at the current range. No refetch of anything else. */
 function redrawPanels() {
   if (!gridNode || !current.tab || !current.server) return;
+
+  if (keepGrid) {
+    keepGrid = false;
+    return;
+  }
 
   /* Every redraw replaces the whole panel grid — a fresh render (poll tick or sub-tab click), or the range
      picker choosing a new window for the SAME tab — so it starts a whole new batch of panel reads and the
@@ -216,19 +281,55 @@ function subtabBar(server, active, tabs) {
   );
 }
 
-/** The time-range preset picker. Changing it redraws the panels in place, exactly like the fleet page's sort. */
+/** The time-range picker: the presets, and "Custom…" for a start and end. Changing it redraws the panels in place, exactly
+ *  like the fleet page's sort. The start and end are typed in the browser's zone, the zone every time on this page uses. */
 function rangeControl() {
+  const CUSTOM = "custom";
+  const server = current.server;
   const sel = el(
     "select",
     { class: "range-select-inline", "aria-label": "Time range" },
-    RANGE_OPTIONS.map((o) => el("option", { value: String(o.hours), text: o.label }))
+    [...RANGE_OPTIONS.map((o) => el("option", { value: String(o.hours), text: o.label })), el("option", { value: CUSTOM, text: "Custom…" })]
   );
-  sel.value = String(pageHours);
+  const saved = customRanges.get(server);
+  sel.value = saved ? CUSTOM : String(pageHours);
+
+  const input = (label, ms) => {
+    const box = el("input", { type: "datetime-local", class: "range-custom-input", "aria-label": label, step: "60" });
+    if (ms != null) box.value = localInputValue(ms);
+    return box;
+  };
+  const start = input("Range start", saved ? saved.startMs : null);
+  const end = input("Range end", saved ? (saved.live ? Date.now() : saved.endMs) : null);
+  const message = el("span", { class: "range-custom-error", role: "alert" });
+  const apply = el("button", { type: "button", class: "btn range-custom-apply", text: "Apply" });
+  const form = el("span", { class: "range-custom" }, [start, el("span", { text: "to" }), end, apply, message]);
+  form.hidden = sel.value !== CUSTOM;
+
+  apply.addEventListener("click", () => {
+    const err = applyCustomRange(server, new Date(start.value).getTime(), new Date(end.value).getTime());
+    message.textContent = err || "";
+  });
   sel.addEventListener("change", () => {
+    if (sel.value === CUSTOM) {
+      form.hidden = false;
+      if (!end.value) end.value = localInputValue(Date.now());
+      if (!start.value) start.value = localInputValue(Date.now() - 24 * HOUR_MS);
+      return;
+    }
+    form.hidden = true;
+    message.textContent = "";
+    customRanges.delete(server);
     pageHours = Number(sel.value) || 24;
     redrawPanels();
   });
-  return el("label", { class: "range-control" }, [el("span", { text: "Range" }), sel]);
+  return el("div", { class: "range-control" }, [el("span", { text: "Range" }), sel, form]);
+}
+
+/* A UTC-epoch instant as a datetime-local value in the browser's zone ("2026-01-02T03:04"). */
+function localInputValue(ms) {
+  const d = new Date(ms - new Date(ms).getTimezoneOffset() * 60000);
+  return d.toISOString().slice(0, 16);
 }
 
 /* This server's fleet card, plus the reason sentence the fleet's worst-first ranking computed for it. ONE
