@@ -359,7 +359,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         await _duckDb.InitializeAsync();
         var floor = Anchor.AddMinutes(-20);
         await SeedLogRunsAsync("plan_correction", floor, Anchor, everyMinutes: 5);
-        await SeedPlanCorrectionAsync(Anchor.AddDays(-1), recommendation: null);
+        await SeedPlanCorrectionAsync(floor, recommendation: null);
 
         var root = Root(await CallAsync(Tool.PlanCorrections, hoursBack: 1));
 
