@@ -1055,7 +1055,7 @@ export const SERVER_TABS = [
         "get_deadlock_detail",
         { server, hours: ctx.hours, limit: 5 },
         "deadlocks",
-        DEADLOCK_XML_COLUMNS,
+        deadlockXmlColumns(server),
         ctx.label,
         "No deadlock graph XML captured in this window."
       ),
@@ -3053,11 +3053,65 @@ const DEADLOCK_COLUMNS = [
   { key: "has_deadlock_xml", label: "Graph", format: "bool" },
 ];
 
-const DEADLOCK_XML_COLUMNS = [
-  { key: "deadlock_time", label: "Deadlock Time", format: "time" },
-  { key: "victim_process_id", label: "Victim" },
-  { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
+/* The per-process rows of one deadlock, the desktop Deadlocks grid's columns. The service parses the graph and sends
+   processes[] (absent values left off), so the browser never reads the XML. */
+const DEADLOCK_PROCESS_COLUMNS = [
+  { key: "deadlock_type", label: "Type" },
+  { key: "victim", label: "Victim", render: (r) => document.createTextNode(r.victim ? "Victim" : "") },
+  { key: "spid", label: "SPID", format: "int" },
+  { key: "database_name", label: "Database" },
+  { key: "object_names", label: "Objects", wrap: true },
+  { key: "proc_name", label: "Procedure" },
+  { key: "lock_mode", label: "Lock Mode" },
+  { key: "owner_mode", label: "Owner Mode" },
+  { key: "waiter_mode", label: "Waiter Mode" },
+  { key: "wait_resource", label: "Wait Resource", wrap: true },
+  { key: "wait_time_ms", label: "Wait", format: "ms" },
+  { key: "isolation_level", label: "Isolation" },
+  { key: "transaction_name", label: "Transaction" },
+  { key: "transaction_count", label: "Trans", format: "int" },
+  { key: "priority", label: "Priority", format: "int" },
+  { key: "log_used", label: "Log Used", format: "int" },
+  { key: "login_name", label: "Login" },
+  { key: "host_name", label: "Host" },
+  { key: "client_app", label: "Application", wrap: true },
+  { key: "status", label: "Status" },
+  { key: "sql_text", label: "Statement", render: (r) => codeDisclosure(r.sql_text) },
 ];
+
+/* Which deadlocks have their process sub-grid open, at MODULE scope so the 60 s rebuild of the tab keeps it open. Keyed by
+   server and deadlock id (the dedup key, else the deadlock's own timestamps); one entry per deadlock the session opens. */
+const deadlockProcessesOpen = new Set();
+
+function deadlockProcessKey(server, row) {
+  return server + "\u0001" + (row.dedup_key || (row.collection_time || "") + "|" + (row.deadlock_time || ""));
+}
+
+/** The expandable per-process sub-grid for one deadlock row of get_deadlock_detail. */
+function deadlockProcessesCell(server, row) {
+  const rows = Array.isArray(row.processes) ? row.processes : [];
+  if (!rows.length) return document.createTextNode("—");
+  const key = deadlockProcessKey(server, row);
+  const more = row.processes_truncated > 0 ? " (+" + row.processes_truncated + " more in the graph)" : "";
+  const node = disclosure(rows.length + (rows.length === 1 ? " process" : " processes") + more, [
+    VIZ.table({ processes: rows }, { id: "deadlock-processes", rowsKey: "processes", columns: DEADLOCK_PROCESS_COLUMNS }),
+  ]);
+  if (deadlockProcessesOpen.has(key)) node.setAttribute("open", "");
+  node.addEventListener("toggle", () => {
+    if (node.open) deadlockProcessesOpen.add(key);
+    else deadlockProcessesOpen.delete(key);
+  });
+  return node;
+}
+
+function deadlockXmlColumns(server) {
+  return [
+    { key: "deadlock_time", label: "Deadlock Time", format: "time" },
+    { key: "victim_process_id", label: "Victim" },
+    { key: "processes", label: "Processes", sortable: false, render: (r) => deadlockProcessesCell(server, r) },
+    { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
+  ];
+}
 
 const BPR_COLUMNS = [
   { key: "event_time", label: "Time", format: "time" },
