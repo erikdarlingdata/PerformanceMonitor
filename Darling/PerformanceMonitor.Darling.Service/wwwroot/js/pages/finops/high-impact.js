@@ -6,14 +6,39 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-/* FinOps "High Impact" tab: the top queries by impact score from get_finops (view high_impact) over a fixed
-   24-hour window, each with its share of CPU, duration, reads, writes, memory and executions, the band the read
+/* FinOps "High Impact" tab: the top queries by impact score from get_finops (view high_impact) over a
+   window picked from 1 hour to 7 days, each with its share of CPU, duration, reads, writes, memory and executions, the band the read
    returns as text, and a sample of its statement. */
 
 import { VIZ } from "../../panels.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 
+// The default window.
 const HOURS = 24;
+
+// The desktop's window picker (FinOpsTab.xaml ~:497-499), as hours.
+const WINDOWS = [
+  { value: 1, label: "Last 1 hour" },
+  { value: 4, label: "Last 4 hours" },
+  { value: 12, label: "Last 12 hours" },
+  { value: 24, label: "Last 24 hours" },
+  { value: 168, label: "Last 7 days" },
+];
+
+// The chosen window per server, kept here so the 60 s rebuild of the tab does not put it back to 24 hours.
+const chosenHours = new Map();
+
+// A labelled <select> (the server-tabs.js pickerControl pattern); every value goes through el()'s text and attribute paths.
+function pickerControl(label, options, selected, onPick) {
+  const sel = el(
+    "select",
+    { class: "range-select-inline", "aria-label": label },
+    options.map((o) => el("option", { value: o.value, text: o.label }))
+  );
+  sel.value = String(selected);
+  sel.addEventListener("change", () => onPick(Number(sel.value)));
+  return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
+}
 const LIMIT = 10;
 
 const COLUMNS = [
@@ -49,9 +74,14 @@ export const tab = {
   label: "High Impact",
   build(server, ctx) {
     const body = el("div", {}, [loadingStrip()]);
-    (async () => {
+    let seq = 0;
+    const load = async (hours) => {
+      const mine = ++seq;
+      chosenHours.set(server, hours);
+      mount(body, loadingStrip());
       try {
-        const res = await readTool("get_finops", { server, view: "high_impact", hours: HOURS, limit: LIMIT }, ctx && ctx.signal);
+        const res = await readTool("get_finops", { server, view: "high_impact", hours, limit: LIMIT }, ctx && ctx.signal);
+        if (mine !== seq) return;
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
         if (res.kind === "empty") return mount(body, emptyStrip(res.message));
@@ -61,9 +91,12 @@ export const tab = {
           VIZ.table(data, { rowsKey: "rows", columns: COLUMNS, emptyText: "No queries were ranked for this server." }),
         ]);
       } catch (e) {
-        if (e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
+        if (mine === seq && e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
       }
-    })();
-    return body;
+    };
+    const start = chosenHours.get(server) ?? HOURS;
+    const root = el("div", {}, [pickerControl("Window", WINDOWS, start, (hours) => load(hours)), body]);
+    load(start);
+    return root;
   },
 };

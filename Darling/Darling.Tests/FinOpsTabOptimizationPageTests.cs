@@ -63,10 +63,24 @@ public sealed class FinOpsTabOptimizationPageTests
     }
 
     [Fact]
+    public void ThePickerOffersTheDesktopWindowsAndTheStateIsKeptPerServer()
+    {
+        var tab = Tab();
+        var pairs = Regex.Matches(tab, "\\{ value: (\\d+), label: \"([^\"]+)\" \\}").Select(m => m.Groups[1].Value + "=" + m.Groups[2].Value);
+        Assert.Equal("1=Last 1 hour,4=Last 4 hours,12=Last 12 hours,24=Last 24 hours,168=Last 7 days", string.Join(",", pairs));
+        Assert.Contains("pickerControl(\"Window\", WINDOWS, start,", tab);
+        Assert.Contains("const chosenHours = new Map();", tab);
+        Assert.Contains("chosenHours.set(server, hours);", tab);
+        Assert.Contains("chosenHours.get(server) ?? HOURS", tab);
+        Assert.Contains("(hours) => load(hours)", tab);
+        Assert.DoesNotContain("innerHTML", tab);
+    }
+
+    [Fact]
     public void TheTabReadsGetFinOpsWithTheOptimizationViewWindowAndTopTwenty()
     {
         // Pins the exact read: the view's limit is the expensive-query top-N, and 20 matches the desktop's "Top 20 by CPU".
-        const string call = "readTool(\"get_finops\", { server, view: \"optimization\", hours: HOURS, limit: LIMIT }, ctx && ctx.signal)";
+        const string call = "readTool(\"get_finops\", { server, view: \"optimization\", hours, limit: LIMIT }, ctx && ctx.signal)";
         var tab = Tab();
         Assert.Contains(call, tab);
         Assert.Matches("(?m)^const HOURS = 24;$", tab);
@@ -153,7 +167,7 @@ public sealed class FinOpsTabOptimizationPageTests
         Assert.Contains("return \"last \" + (s.window_hours ?? HOURS) + \" hours\";", tab);
         Assert.Contains("let text = \"Top \" + (s.rows || []).length + \" by CPU, last \" + (s.window_hours ?? HOURS) + \" hours\";", tab);
         Assert.Contains("if (s.effective_start) text += \", from \" + applyFormat(\"time\", s.effective_start) + \" (local time)\";", tab);
-        Assert.Contains("\"Est. cost shares split the server's $\" + applyFormat(\"num2\", data.monthly_cost_usd) + \" monthly cost pro-rated to this window (\" + HOURS + \" hours); they are an attribution, not a measured cost.\"", tab);
+        Assert.Contains("\"Est. cost shares split the server's $\" + applyFormat(\"num2\", data.monthly_cost_usd) + \" monthly cost pro-rated to this window (\" + hours + \" hours); they are an attribution, not a measured cost.\"", tab);
         Assert.Contains(": (data.cost_reason ?? \"monthly cost not set\") + \", so Est. cost share is blank.\";", tab);
     }
 
