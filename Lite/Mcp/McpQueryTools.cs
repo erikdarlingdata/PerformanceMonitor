@@ -1141,6 +1141,23 @@ public sealed class McpQueryTools
             requestedStart, table, tail, emptyAnswer);
 
     /// <summary>
+    /// #4966: <see cref="WindowNoticeAsync"/> for an EVENT list (deadlocks, blocked process reports, long query
+    /// completions), where a first run of the collector can store events from before itself: the coverage probe
+    /// reads the collector's runs and the rows' own time column, but where that column is collection_time
+    /// (long query completions) a page can still show an event older than the probe's floor (the deadlock and
+    /// blocked-process probes already read the event column), and a notice that names a start later than a row it shows is wrong on its face. On a data
+    /// answer the floor is the EARLIER of the probe's and <paramref name="oldestEventShown"/> (the oldest event
+    /// time on the page; null when the page holds none, as on an empty answer). The comparison runs inside the
+    /// probe delegate, so a window the probe is skipped for (90 minutes or less, with rows) stays covered at the
+    /// start that was asked for, as every other window-floor tool does.
+    /// </summary>
+    internal static Task<McpWindowNotice> EventWindowNoticeAsync(
+        Func<Task<DateTime?>> probe, DateTime? oldestEventShown, DateTime requestedStart, DateTime windowEnd, string table, bool emptyAnswer = false) =>
+        WindowNoticeAsync(
+            async () => LocalDataService.EarlierCoverageFloor(await probe(), oldestEventShown),
+            requestedStart, windowEnd, table, emptyAnswer: emptyAnswer);
+
+    /// <summary>
     /// The three window-floor keys <see cref="WindowNotice"/> answers, as the values a tool writes into its payload.
     /// <see cref="EffectiveStart"/> is null only for an empty answer over a window the store holds nothing in
     /// (#5015): there is no start to name.
