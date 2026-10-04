@@ -207,7 +207,8 @@ public sealed class McpToolsListBudgetTests
     // get_finops storage_growth view (view line, view name, object_name parameter, database_name wording), re-measured: 178,646 -> 178,855; tool get_finops 550 -> 614, view 127 -> 143, database_name 52 -> 63, new object_name 69.
     // get_finops storage_growth review answers (guide sentences after the marker, a rename, a switch arm), re-measured: 178,855 -> 178,855; tool get_finops 614, view 143, database_name 63, object_name 69 unchanged.
     // get_finops_recommendations (the FinOps recommendations tool) adds 547 bytes: 178,855 -> 179,402.
-    private const int TotalCeilingBytes = 179_402;
+    // get_server_trend (the per-server instance trend tool: total_waits, cpu_scheduler, memory_clerks, plan_cache) adds 1,093 bytes: 179,402 -> 180,495.
+    private const int TotalCeilingBytes = 180_495;
 
 
 

@@ -328,6 +328,7 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
         "list_custom_alert_templates",
+        "get_server_trend",
         // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
         "get_finops_inventory",
         "get_finops_recommendations",
