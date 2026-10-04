@@ -10,6 +10,7 @@ using System;
 using System.Globalization;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,6 +18,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -77,6 +79,47 @@ public sealed class FinOpsRecommendationsGoldenLiveTests
                 {
                     ["monthly1000"] = await viewer.GetRecommendationsAsync(id, 1000m, ct),
                     ["monthly0"] = await viewer.GetRecommendationsAsync(id, 0m, ct),
+                };
+            }
+
+            AssertGolden(FinOpsOptimizationGoldenLiveTests.Serialize(anchor, map));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = savedCulture;
+        }
+    }
+
+    [Fact]
+    public async Task GetRecommendationsAsync_MatchesGolden_ThroughStorage()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live FinOps recommendations golden test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var anchor = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await SeedAsync(connection, ct);
+        }
+
+        /* The fixture holds en-US formatted text ("13,080 MB", "20%"), so read and serialize under en-US. */
+        var savedCulture = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("en-US");
+            await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var map = new Dictionary<string, object?>();
+            foreach (var (key, id) in new[] { ("a", ServerIdA), ("b", ServerIdB), ("c", ServerIdC) })
+            {
+                map[key] = new Dictionary<string, object?>
+                {
+                    ["monthly1000"] = (await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, id, 1000m, 30, ct)).Select(RecommendationRow.From).ToList(),
+                    ["monthly0"] = (await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, id, 0m, 30, ct)).Select(RecommendationRow.From).ToList(),
                 };
             }
 

@@ -9,7 +9,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -325,5 +327,221 @@ ORDER BY database_name";
         }
 
         return facts;
+    }
+
+    /// <summary>
+    /// Runs every monitor-side FinOps recommendation check over the collected store and returns the consolidated
+    /// list sorted by severity. All reads are async I/O (they don't block the UI thread), and each check is
+    /// isolated in its own try/catch so a single failing read degrades to "that check absent" rather than an
+    /// empty tab. <paramref name="monthlyCost"/> is the per-server budget (0 → findings emit with no savings
+    /// estimate, mirroring Lite's <c>monthlyCost &gt; 0 ? … : null</c>).
+    /// </summary>
+    public static async Task<List<FinOpsRecommendation>> GetRecommendationsAsync(NpgsqlDataSource dataSource, int serverId, decimal monthlyCost, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        var recommendations = new List<FinOpsRecommendation>();
+        var memoryCutoff = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified);
+
+        // 1. Enterprise feature / license audit (collected server_properties + database_config.is_encrypted).
+        try
+        {
+            var facts = await GetEditionFactsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+            if (facts is { } f)
+            {
+                var isEnterprise = f.Edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase);
+
+                // TDE is only the deciding factor on pre-2019 Enterprise — read the config snapshot just then.
+                var tdeDbNames = new List<string>();
+                if (isEnterprise && f.MajorVersion < 15)
+                {
+                    tdeDbNames = FinOpsRecommendationFigures.SelectTdeDatabaseNames(
+                        await GetDatabaseEncryptionFactsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken));
+                }
+
+                recommendations.AddRange(
+                    FinOpsRecommendationFigures.EditionAudit(
+                        f.Edition, f.MajorVersion, f.CpuCount, tdeDbNames, monthlyCost, f.AgReplicaRole, f.IsHadrEnabled));
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Recommendation check failed (Enterprise features): {ex.Message}");
+        }
+
+        // 2. CPU right-sizing (collected utilization efficiency).
+        try
+        {
+            var util = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+            var cpuRecommendation = FinOpsRecommendationFigures.CpuRightSizing(util, monthlyCost);
+            if (cpuRecommendation != null)
+                recommendations.Add(cpuRecommendation);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Recommendation check failed (CPU right-sizing): {ex.Message}");
+        }
+
+        // 3. Memory right-sizing (7-day P95 Total Server Memory vs physical RAM).
+        try
+        {
+            var util = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+            /* No memory advice on an Azure SQL Database (engine_edition 5): its memory comes with its service objective
+               and cannot be resized on its own. util.PhysicalMemoryMb is the database's own memory limit there
+               (memory_stats, filled from committed_target_kb), not the host's, so the skip is not about a wrong
+               denominator: there is nothing to resize. Managed Instance (8) and SQL Server are unchanged. */
+            if (util != null && util.PhysicalMemoryMb > 8192
+                && await GetEngineEditionAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
+            {
+                var (p95Mb, sampleCount, window) = await GetMemoryP95Async(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken);
+
+                var memoryRecommendation = FinOpsRecommendationFigures.MemoryRightSizing(util, p95Mb, sampleCount, window, monthlyCost);
+                if (memoryRecommendation != null)
+                    recommendations.Add(memoryRecommendation);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Recommendation check failed (Memory right-sizing): {ex.Message}");
+        }
+
+        // 5. Compression candidates (collected index_object_stats snapshot; Lite's check 4 is dropped — Darling
+        //    has native Index Analysis, so the sp_IndexCleanup-existence prompt is obsolete).
+        try
+        {
+            var indexes = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+            var rec = FinOpsRecommendationFigures.Compression(indexes);
+            if (rec != null)
+            {
+                recommendations.Add(rec);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Recommendation check failed (Compression): {ex.Message}");
+        }
+
+        // 6. Dormant database detection with cost impact (collected idle DBs + database sizes).
+        try
+        {
+            /* "No query activity in 7 days" is only true once 7 days of query stats exist: a server enrolled hours
+               ago has not been watched long enough to call any database idle. */
+            var idleDbs = await HasQueryStatsCoverageAsync(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken)
+                ? await DarlingFinOpsOptimizationReader.GetIdleDatabasesAsync(dataSource, serverId, DateTime.UtcNow.AddDays(-7), commandTimeoutSeconds, cancellationToken)
+                : new List<IdleDatabase>();
+            if (idleDbs.Count > 0)
+            {
+                var allocatedTotalMb = 0m;
+                if (monthlyCost > 0)
+                {
+                    var totalMb = (await FinOpsUtilizationFigures.GetLatestStorageTotalsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken))?.AllocatedMb ?? 0m;
+                    if (totalMb > 0)
+                        allocatedTotalMb = totalMb;
+                }
+
+                var dormantRecommendation = FinOpsRecommendationFigures.Dormant(
+                    idleDbs.Select(d => (d.DatabaseName, d.TotalSizeMb)).ToList(), allocatedTotalMb, monthlyCost);
+                if (dormantRecommendation != null)
+                    recommendations.Add(dormantRecommendation);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Recommendation check failed (Dormant databases): {ex.Message}");
+        }
+
+        // 7. Dev/test workload detection (collected database name list).
+        try
+        {
+            var devDbs = FinOpsRecommendationFigures.MatchDevTestDatabases(
+                (await GetDatabaseEncryptionFactsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken)).Select(r => r.DatabaseName));
+            var devTestRecommendation = FinOpsRecommendationFigures.DevTest(devDbs);
+            if (devTestRecommendation != null)
+                recommendations.Add(devTestRecommendation);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Recommendation check failed (Dev/test detection): {ex.Message}");
+        }
+
+        // 11. Maintenance window efficiency — jobs running long (collected running_jobs).
+        try
+        {
+            foreach (var run in await GetMaintenanceJobRunsAsync(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken))
+                recommendations.Add(FinOpsRecommendationFigures.MaintenanceJob(run));
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Recommendation check failed (Maintenance window): {ex.Message}");
+        }
+
+        // 12. VM right-sizing — prescriptive core/memory targets (collected 7-day P95 CPU + memory).
+        try
+        {
+            var vmUtil = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+            /* No VM to resize on Azure SQL Database (its cores and memory come with its service objective),
+               and no advice from a window with no CPU sample (its P95 of 0 is not a measurement). */
+            if (vmUtil != null && FinOpsUtilizationFigures.HasCpuSample(vmUtil)
+                && await GetEngineEditionAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
+            {
+                decimal p95Cpu7d = vmUtil.P95CpuPct;
+                var cpuWindow = "recent samples"; // neutral until the 7-day read supplies its own span; the 24-hour fallback has no span of its own
+                int cpuCount = vmUtil.CpuCount;
+                int physMb = vmUtil.PhysicalMemoryMb;
+
+                // Prefer the 7-day P95 CPU; fall back to the 24-hour P95 already on vmUtil.
+                try
+                {
+                    if (await GetCpuP95Async(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken) is { } cpu)
+                    {
+                        p95Cpu7d = cpu.P95CpuPct;
+                        cpuWindow = cpu.Window;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Recommendation check (VM right-sizing) 7-day CPU P95 fell back to 24h: {ex.Message}");
+                }
+
+                var (p95MemMb, memSampleCount, memWindow) = await GetMemoryP95Async(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken);
+
+                foreach (var vmRecommendation in FinOpsRecommendationFigures.VmRightSizing(
+                    p95Cpu7d, cpuWindow, cpuCount, physMb, p95MemMb, memSampleCount, memWindow, monthlyCost))
+                    recommendations.Add(vmRecommendation);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Recommendation check failed (VM right-sizing): {ex.Message}");
+        }
+
+        // 13. Storage tier optimization — databases with low I/O latency (collected file_io_stats).
+        try
+        {
+            var storageRows = await GetStorageTierIoAsync(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken);
+
+            var storageRecommendation = FinOpsRecommendationFigures.StorageTier(storageRows);
+            if (storageRecommendation != null)
+                recommendations.Add(storageRecommendation);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Recommendation check failed (Storage tier): {ex.Message}");
+        }
+
+        // 14. Reserved capacity candidates — stable CPU utilization (collected cpu_utilization_stats).
+        try
+        {
+            if (await GetReservedCapacityAsync(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken) is { } reserved)
+            {
+                var reservedRecommendation = FinOpsRecommendationFigures.ReservedCapacity(reserved.AvgCpuPct, reserved.StddevCpuPct);
+                if (reservedRecommendation != null)
+                    recommendations.Add(reservedRecommendation);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Recommendation check failed (Reserved capacity): {ex.Message}");
+        }
+
+        return FinOpsRecommendationFigures.Ordered(recommendations);
     }
 }
