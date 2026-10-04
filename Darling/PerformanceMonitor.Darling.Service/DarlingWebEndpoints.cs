@@ -1270,7 +1270,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(
         NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken,
         ReadLatencyRecorder? readLatency = null, int clientDeadlineHeadroomSeconds = 0, bool remapClientTimeout = false, bool includeDataStartFields = false,
-        Action<Exception>? onRunException = null)
+        Action<Exception>? onRunException = null, DateTime? nowUtc = null)
     {
         /* #4442 scope 2: recorded ONCE per call, here, so the web /api/compose/run route and the MCP
            run_custom_view_panel tool -- both of which call this ONE runner -- contribute exactly one
@@ -1280,7 +1280,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            a bucket update is the only work in the try, and any failure there is swallowed and logged at
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
-        var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException);
+        var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc);
         RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken);
         return outcome;
     }
@@ -1350,7 +1350,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// a failure it swallows.</summary>
     private static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
         NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields, System.Threading.CancellationToken cancellationToken,
-        ILogger? logger = null, Action<Exception>? onRunException = null)
+        ILogger? logger = null, Action<Exception>? onRunException = null, DateTime? nowUtc = null)
     {
         if (body["panel"] is not JsonObject panel)
         {
@@ -1395,7 +1395,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            An explicit window is an explicit request, so violations REJECT rather than silently sliding an
            endpoint. NowUtc stays the real wall clock either way — routing and the partial-window notice
            measure age from now, never from a historical window's end. */
-        var now = DateTime.UtcNow;
+        /* The optional nowUtc is a test seam (a live test anchors the whole run at one instant); every caller in the service
+           passes nothing, so production reads the real clock exactly as before. */
+        var now = nowUtc ?? DateTime.UtcNow;
         DateTime start;
         DateTime end;
         var hasWindowStart = body["windowStart"] is not null;
@@ -1452,7 +1454,41 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             : default;
         var queryStoreWideEligible = wideResolution.Eligible;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart);
+        /* #4605: only a panel the hourly-plus-raw-edges route could serve pays for the count guard. It runs on one
+           connection, in a REPEATABLE READ READ ONLY transaction the panel statement shares, so a collector batch that
+           commits after the guard cannot add a row the guard never saw. Every other panel opens its own connection
+           inside RunComposedQueryAsync, exactly as before. */
+        var hourlyEdgesCandidate = ComposeSourceRouter.HourlyRawEdgesCandidate(plan!, now, start, end, rollups, coverage);
+        /* The candidate path resolves the compose deadline FIRST, so the run never holds the snapshot's connection while it asks the
+           pool for a second one (at the pool's size, every panel would hold one and wait for another). The same value is the panel's
+           client deadline and bounds the guard. The other path resolves it inside the try below, as it always has. */
+        int? candidateComposedSeconds = null;
+        HourlyEdgesSnapshot? hourlyEdgesSnapshot = null;
+        if (hourlyEdgesCandidate is not null)
+        {
+            candidateComposedSeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);
+            try
+            {
+                hourlyEdgesSnapshot = await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate, serverScope, candidateComposedSeconds.Value, cancellationToken);
+            }
+            catch (PostgresException ex)
+            {
+                /* A login-time server error (53300 too-many-connections, 28P01, 57P01, 3D000) escapes OpenComposeConnectionAsync
+                   unwrapped. It is answered as the panel's own failed open is answered in the main try below. */
+                return FromPostgresException(ex);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* The snapshot's own open failed (ComposeStoreOpenException included): the store is not reachable, which is the same
+                   fault, and the same answer, as the panel's own open failing in the try below. Same seam, same outcome. */
+                onRunException?.Invoke(ex);
+                return FromRunException(ex, remapClientTimeout);
+            }
+        }
+
+        await using var snapshot = hourlyEdgesSnapshot;
+
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -1467,10 +1503,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                re-read per query so a panel with annotation overlays pays one read, not one per source —
                which also means every query in ONE run shares one ceiling, matching the role
                statement_timeout they all run under. */
-            var composedQuerySeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);
+            var composedQuerySeconds = candidateComposedSeconds ?? await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);
 
             var clientSeconds = ComposeClientDeadlineSeconds(composedQuerySeconds, clientDeadlineHeadroomSeconds);
-            var rows = await RunComposedQueryAsync(postgres, compiled!, clientSeconds, cancellationToken);
+            var rows = await RunComposedQueryAsync(postgres, compiled!, clientSeconds, cancellationToken, snapshot?.Connection);
+            if (snapshot is not null)
+            {
+                await snapshot.DisposeAsync();
+            }
+
             /* Event-annotation overlays (design D5): one bounded, catalog-only event query per requested
                source, on the SAME window + server scope, under the same statement_timeout. Additive —
                {sql, rows} are unchanged; a panel that requests no annotations returns an empty array. */
@@ -1773,15 +1814,198 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         return values;
     }
 
+    /// <summary>#4605: the most the count guard's server-side <c>statement_timeout</c> may be, in seconds. The guard runs under
+    /// <c>min(this, the compose deadline)</c>, so a lower operator deadline is never exceeded by the guard.</summary>
+    internal const int HourlyEdgesGuardMaxSeconds = 15;
+
+    /// <summary>#4605: how far the guard's client-side deadline sits above its server-side <c>statement_timeout</c>, so the
+    /// server's cancel wins the race.</summary>
+    internal const int HourlyEdgesGuardClientHeadroomSeconds = 5;
+
+    /// <summary>#4605: the guard's server-side deadline, in whole seconds: <c>min(15, composedSeconds)</c>, and never below one.</summary>
+    internal static int HourlyEdgesGuardSeconds(int composedSeconds) => Math.Max(1, Math.Min(HourlyEdgesGuardMaxSeconds, composedSeconds));
+
+    /// <summary>#4605: the snapshot's isolation is set by <c>BeginTransactionAsync</c>; this makes it read only, before any query runs.</summary>
+    private const string HourlyEdgesReadOnlySql = "SET TRANSACTION READ ONLY";
+
+    /// <summary>#4605: a savepoint so a guard fault (a 15 s timeout cancels the statement and aborts the transaction) can be
+    /// undone and the panel statement still run on the same connection and snapshot.</summary>
+    private const string HourlyEdgesSavepointSql = "SAVEPOINT hourly_edges_guard";
+
+    /// <summary>#4605: undoes a failed guard, and with it the guard's <c>SET LOCAL</c>.</summary>
+    private const string HourlyEdgesRollbackToSavepointSql = "ROLLBACK TO SAVEPOINT hourly_edges_guard";
+
+    /// <summary>#4605: the guard's own, shorter server-side deadline, in force for the guard statement only. SET takes no bound
+    /// parameter, so the text is built from an integer count of seconds and nothing else.</summary>
+    internal static string HourlyEdgesGuardTimeoutSql(int guardSeconds) =>
+        string.Create(CultureInfo.InvariantCulture, $"SET LOCAL statement_timeout = '{guardSeconds}s'");
+
+    /// <summary>#4605: puts the role's <c>statement_timeout</c> (the compose deadline) back for the panel statement. <c>DEFAULT</c> is
+    /// the value the session started with, which for the compose role is the operator's configured deadline, so the panel
+    /// keeps exactly the timeout it has today. Still <c>LOCAL</c>, so nothing outlives the transaction.</summary>
+    private const string HourlyEdgesRestoreTimeoutSql = "SET LOCAL statement_timeout = DEFAULT";
+
+    /// <summary>#4605: the connection and the open REPEATABLE READ READ ONLY transaction one hourly-edges panel run shares between
+    /// its count guard and its panel statement, plus the guard's verdict (null when the guard did not pass). Disposing it ends
+    /// the transaction, which only read, and returns the connection.</summary>
+    private sealed class HourlyEdgesSnapshot : IAsyncDisposable
+    {
+        private readonly NpgsqlTransaction _transaction;
+        private bool _disposed;
+
+        public HourlyEdgesSnapshot(NpgsqlConnection connection, NpgsqlTransaction transaction, ComposeHourlyEdgesVerdict? verdict)
+        {
+            Connection = connection;
+            _transaction = transaction;
+            Verdict = verdict;
+        }
+
+        public NpgsqlConnection Connection { get; }
+
+        public ComposeHourlyEdgesVerdict? Verdict { get; }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            await _transaction.DisposeAsync();
+            await Connection.DisposeAsync();
+        }
+    }
+
+    /// <summary>Opens the run's connection, begins the snapshot transaction and runs the count guard in it. A failed OPEN throws
+    /// <see cref="ComposeStoreOpenException"/> to the caller. A fault after the open (the begin, the read-only step, a guard
+    /// rollback that itself failed) returns null and the panel opens a fresh connection and reads raw; a guard fault that was
+    /// undone cleanly returns a snapshot whose verdict is null and the panel reads raw on it. A cancellation propagates.</summary>
+    private static async Task<HourlyEdgesSnapshot?> BeginHourlyEdgesSnapshotAsync(
+        NpgsqlDataSource postgres, ComposeHourlyEdgesCandidate candidate, IReadOnlyList<string>? serverScope, int composedSeconds,
+        System.Threading.CancellationToken cancellationToken)
+    {
+        /* The open is outside the try on purpose: a store that cannot be reached throws ComposeStoreOpenException to the caller, who
+           answers it the way it answers the panel's own failed open. Opening again here would cost a second open timeout. */
+        var connection = await OpenComposeConnectionAsync(postgres, cancellationToken);
+        NpgsqlTransaction? transaction = null;
+        try
+        {
+            transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+            await ExecuteSnapshotStatementAsync(connection, HourlyEdgesReadOnlySql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var verdict = await ResolveHourlyEdgesVerdictAsync(connection, candidate, serverScope, composedSeconds, cancellationToken);
+            return new HourlyEdgesSnapshot(connection, transaction, verdict);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#4605 compose hourly-edges snapshot could not start; reading raw: {ex.GetType().Name}");
+            if (transaction is not null)
+            {
+                await transaction.DisposeAsync();
+            }
+
+            await connection.DisposeAsync();
+
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            if (transaction is not null)
+            {
+                await transaction.DisposeAsync();
+            }
+
+            await connection.DisposeAsync();
+
+            throw;
+        }
+    }
+
+    private static async Task ExecuteSnapshotStatementAsync(
+        NpgsqlConnection connection, string sql, int commandSeconds, System.Threading.CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = commandSeconds };
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// #4605: runs <see cref="IntervalRollupCountGuard.QueryStatsSql"/> on the run's snapshot connection and returns the verdict
+    /// the compiler needs to take the hourly-plus-raw-edges route, or null. The guard runs under its own 15 s
+    /// <c>statement_timeout</c>, which is put back to the compose deadline before the panel statement. Only a count of 0 is a
+    /// pass; any other count, any fault and any timeout return null, and the panel reads raw. The guard's <c>$3</c> is bound
+    /// from <see cref="ComposeSourceRouter.NormalizeServerScope"/> alone, and the verdict carries that same scope, so a verdict
+    /// proven for one scope never serves another. A failed guard is undone to its savepoint so the transaction stays usable
+    /// for the raw panel statement. If that undo itself fails, the failure is rethrown and the snapshot is abandoned.
+    /// </summary>
+    internal static async Task<ComposeHourlyEdgesVerdict?> ResolveHourlyEdgesVerdictAsync(
+        NpgsqlConnection connection, ComposeHourlyEdgesCandidate candidate, IReadOnlyList<string>? serverScope, int composedSeconds,
+        System.Threading.CancellationToken cancellationToken)
+    {
+        var guardSeconds = HourlyEdgesGuardSeconds(composedSeconds);
+        var scope = ComposeSourceRouter.NormalizeServerScope(serverScope);
+        try
+        {
+            await ExecuteSnapshotStatementAsync(connection, HourlyEdgesSavepointSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            await ExecuteSnapshotStatementAsync(connection, HourlyEdgesGuardTimeoutSql(guardSeconds), McpCommandDeadlines.ReadSeconds, cancellationToken);
+
+            long mismatches;
+            await using (var guard = new NpgsqlCommand(IntervalRollupCountGuard.QueryStatsSql, connection) { CommandTimeout = guardSeconds + HourlyEdgesGuardClientHeadroomSeconds })
+            {
+                guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(candidate.HourStartUtc, DateTimeKind.Unspecified) });
+                guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(candidate.HourEndUtc, DateTimeKind.Unspecified) });
+                guard.Parameters.Add(new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text,
+                    Value = scope is null ? DBNull.Value : scope.ToArray(),
+                });
+                mismatches = Convert.ToInt64(await guard.ExecuteScalarAsync(cancellationToken));
+            }
+
+            await ExecuteSnapshotStatementAsync(connection, HourlyEdgesRestoreTimeoutSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
+            return mismatches == 0
+                ? new ComposeHourlyEdgesVerdict(candidate.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc, scope)
+                : null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#4605 compose hourly-edges count guard failed; reading raw: {ex.GetType().Name}");
+            try
+            {
+                await ExecuteSnapshotStatementAsync(connection, HourlyEdgesRollbackToSavepointSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            }
+            catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
+            {
+                System.Diagnostics.Trace.TraceWarning($"#4605 compose hourly-edges guard rollback failed: {rollbackEx.GetType().Name}");
+
+                /* The transaction cannot be trusted (the client timer may have broken the connection): rethrow to the snapshot
+                   begin, which disposes it and returns no snapshot, so the panel reads raw on a fresh connection. */
+                throw;
+            }
+
+            return null;
+        }
+    }
+
     /// <summary>Runs a compiled composed query on the viewer pool and serializes its rows to a JSON array of
     /// <c>{column: value}</c> objects — generic over the SELECT shape (bucket / group dims / value).</summary>
     private static async Task<JsonArray> RunComposedQueryAsync(
-        NpgsqlDataSource postgres, ComposeCompiled compiled, int clientDeadlineSeconds, System.Threading.CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, ComposeCompiled compiled, int clientDeadlineSeconds, System.Threading.CancellationToken cancellationToken,
+        NpgsqlConnection? sharedConnection = null)
     {
         /* The connection is opened first and on its own, so a pool-wait or connect timeout (also an
            NpgsqlException over a TimeoutException) is never mistaken for the client timer of a running
-           statement. Only a timeout raised below, while the statement executes, becomes the marker. */
-        await using var connection = await OpenComposeConnectionAsync(postgres, cancellationToken);
+           statement. Only a timeout raised below, while the statement executes, becomes the marker.
+           A caller that already holds the run's connection (the hourly-edges snapshot, #4605) passes it and keeps
+           ownership; every other caller leaves it null and this method opens, and disposes, its own. */
+        NpgsqlConnection? ownedConnection = null;
+        if (sharedConnection is null)
+        {
+            ownedConnection = await OpenComposeConnectionAsync(postgres, cancellationToken);
+        }
+
+        await using var ownedScope = ownedConnection;
+        var connection = sharedConnection ?? ownedConnection!;
         await using var command = new NpgsqlCommand(compiled.Sql, connection);
         command.CommandTimeout = clientDeadlineSeconds;
         foreach (var parameter in compiled.Parameters)
@@ -1861,7 +2085,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
     }
 
-    private static JsonValue? DbValueToJson(object value) => value switch
+    internal static JsonValue? DbValueToJson(object value) => value switch
     {
         DateTime dt => JsonValue.Create(dt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture)),
         double d => JsonValue.Create(d),

@@ -15,7 +15,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// restart, a plan-cache eviction) or a gap past the policy. Its delta cannot be rated, so the
 /// rollups exclude it, and a read that wants those rows back takes them from the raw table. The reads carry
 /// presence, not CPU: every counter delta of such a row is 0, so a group that exists only as a restart row
-/// reappears with no value. These two reads are that arm. The routing that runs them beside the rollups lands separately, after the production measurement.
+/// reappears with no value. These two reads are that arm. The routing that runs them beside the rollups is the Custom Views runner (<c>DarlingWebEndpoints.RunComposedPanelCoreAsync</c>), which runs the count guard first.
 /// <para>Each read carries the predicate of the partial index built for it in <see cref="PgTableTuning"/>
 /// (<see cref="PgTableTuning.QueryStatsRestartRowIndexName"/>,
 /// <see cref="PgTableTuning.ProcedureStatsRestartRowIndexName"/>), because the planner uses a partial index

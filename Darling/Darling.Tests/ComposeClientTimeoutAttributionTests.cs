@@ -214,7 +214,8 @@ public class ComposeClientTimeoutAttributionTests
            throws when a wait for a data source's first-time setup ends. A cancellation is in neither arm: it is the caller's. */
         Assert.Equal(2, Regex.Matches(code, Regex.Escape("throw new ComposeStoreOpenException(ex);")).Count);
         Assert.Equal(2, Regex.Matches(code, Regex.Escape("catch (NpgsqlException ex) when (ex.InnerException is TimeoutException)")).Count);
-        Assert.Contains("catch (NpgsqlException ex) when (ex is not PostgresException) { throw new ComposeStoreOpenException(ex); } catch (TimeoutException ex) { throw new ComposeStoreOpenException(ex); }", code, StringComparison.Ordinal);        Assert.Equal(2, Regex.Matches(code, Regex.Escape("await OpenComposeConnectionAsync(postgres, cancellationToken);")).Count);
+        Assert.Contains("catch (NpgsqlException ex) when (ex is not PostgresException) { throw new ComposeStoreOpenException(ex); } catch (TimeoutException ex) { throw new ComposeStoreOpenException(ex); }", code, StringComparison.Ordinal);        /* Three open sites: the panel runner, the server-clocks runner and the hourly-edges snapshot. */
+        Assert.Equal(3, Regex.Matches(code, Regex.Escape("await OpenComposeConnectionAsync(postgres, cancellationToken);")).Count);
     }
 
     [Fact]
