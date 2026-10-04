@@ -138,6 +138,8 @@ public sealed class FinOpsTabStorageGrowthPageTests
         Assert.Contains("text += s.truncated ? \"; more exist.\" : \".\";", tab);
         Assert.Contains("let text = n === 1 ? \"1 index\" : n + \" indexes\";", tab);
         Assert.Contains("text += s.truncated ? \"; the first \" + n + \" of \" + (s.index_count ?? \"more\") + \".\" : \".\";", tab);
+        // The indexes level's one snapshot stamp rides the notice line, worded by the shared helpers; the browser computes nothing.
+        Assert.Contains("if (typeof s.captured_at === \"string\" && s.captured_at) text += \" Collected \" + relTime(s.captured_at) + \" (\" + localTime(s.captured_at) + \").\";", tab);
         Assert.Contains("Shade: the service's size band for each cell (log scale over this table); blank means no sample or zero.", tab);
     }
 

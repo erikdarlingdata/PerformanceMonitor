@@ -596,6 +596,8 @@
                                         <DataGridTextColumn Header="Total Reads" Binding="{Binding TotalReads, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
                                         <DataGridTextColumn Header="Updates" Binding="{Binding UserUpdates, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
                                         <DataGridTextColumn Header="Last Access" Binding="{Binding LastUserAccess, StringFormat=\{0:yyyy-MM-dd HH:mm\}}" Width="140"/>
+                                        <!-- One snapshot for every row; a column rather than a label keeps this grid's time where every other snapshot grid has it. -->
+                                        <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTime}" Width="150" SortMemberPath="CollectionTimeUtc"/>
                                     </DataGrid.Columns>
                                 </DataGrid>
                                 <TextBlock x:Name="FinOpsObjectIndexNoDataMessage" Style="{StaticResource EmptyHint}" Text="No index detail for this object."/>

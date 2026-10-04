@@ -589,7 +589,8 @@ SELECT
         WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
              AND COALESCE(user_updates, 0) > 0 THEN 'Write-only'
         ELSE 'Active'
-    END AS classification
+    END AS classification,
+    collection_time
 FROM v_index_object_stats
 WHERE server_id = $1
 AND   database_name = $2
@@ -624,7 +625,8 @@ ORDER BY index_id";
                 TotalReads = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
                 UserUpdates = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
                 LastUserAccess = reader.IsDBNull(13) ? null : reader.GetDateTime(13),
-                Classification = reader.IsDBNull(14) ? "" : reader.GetString(14)
+                Classification = reader.IsDBNull(14) ? "" : reader.GetString(14),
+                CollectionTime = reader.GetDateTime(15)
             });
         }
         return items;
@@ -720,6 +722,16 @@ public class IndexUsageRow
     public long UserUpdates { get; set; }
     public DateTime? LastUserAccess { get; set; }
     public string Classification { get; set; } = "";
+
+    /// <summary>The snapshot an index-drill row came from (<see cref="LocalDataService.GetObjectIndexDetailAsync"/>'s anchor,
+    /// projected on the row statement). Not set by the index-usage read, which does not project it.</summary>
+    public DateTime CollectionTime { get; set; }
+
+    /// <summary>When that snapshot was collected, to the second, in the display zone: the index drill's Collected column,
+    /// which sorts by <see cref="CollectionTime"/>. The drill reads the database's latest snapshot with no time bound,
+    /// so this is how old the figures can be. <c>collection_time</c> is the collector's own UTC stamp, so it is worded
+    /// from the instant like the other Collected columns.</summary>
+    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
 }
 
 /// <summary>Per-index locking/latch contention.</summary>

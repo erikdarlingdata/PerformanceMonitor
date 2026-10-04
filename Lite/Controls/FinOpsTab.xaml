@@ -1037,6 +1037,8 @@
                               <DataGridTextColumn Header="Total Reads" Binding="{Binding TotalReads, StringFormat='{}{0:N0}'}" Width="100" ElementStyle="{StaticResource RightAlign}"/>
                               <DataGridTextColumn Header="Updates" Binding="{Binding UserUpdates, StringFormat='{}{0:N0}'}" Width="100" ElementStyle="{StaticResource RightAlign}"/>
                               <DataGridTextColumn Header="Last Access" Binding="{Binding LastUserAccess, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="140"/>
+                              <!-- One snapshot for every row; a column rather than a label keeps this grid's time where every other snapshot grid has it. -->
+                              <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime"/>
                           </DataGrid.Columns>
                       </DataGrid>
                       <TextBlock x:Name="ObjectIndexNoDataMessage"

@@ -524,7 +524,7 @@ public sealed class McpLatestSnapshotStampTests
     /// for the server) — a "current" read IS a latest read, and the name had kept it out of the sweep.
     /// </summary>
     private static readonly Regex LatestReaderCall = new(
-        @"\.(GetLatest\w+Async|Get\w+LatestAsync|Get\w+SnapshotAsync|GetCurrent\w+Async|GetPlanCacheBloatAsync|GetCpuSchedulerPressureAsync|GetServerSummaryAsync|GetIndexUsageAsync|GetIndexLockingAsync|GetObjectSizeGrowthAsync|GetRunningJobsAsync)\(",
+        @"\.(GetLatest\w+Async|Get\w+LatestAsync|Get\w+SnapshotAsync|GetCurrent\w+Async|GetPlanCacheBloatAsync|GetCpuSchedulerPressureAsync|GetServerSummaryAsync|GetIndexUsageAsync|GetIndexLockingAsync|GetObjectSizeGrowthAsync|GetObjectIndexDetailAsync|GetRunningJobsAsync)\(",
         RegexOptions.Compiled);
 
     /* ───────────────────────── the readers ───────────────────────── */
@@ -671,6 +671,8 @@ public sealed class McpLatestSnapshotStampTests
            beside it in the same reader, which must stay outside. */
         Assert.Matches(LatestReaderCall, "            var rows = await DarlingPgServerConfigReader.GetCurrentConfigAsync(");
         Assert.DoesNotMatch(LatestReaderCall, "            var rows = await DarlingPgServerConfigReader.GetConfigChangesAsync(");
+        /* #5070: the Storage Growth index drill is a latest read too, and so is held to the stamped dialect. */
+        Assert.Matches(LatestReaderCall, "        var indexes = await DarlingFinOpsStorageGrowthReader.GetObjectIndexDetailAsync(");
     }
 
     /* ───────────────────────── plumbing ───────────────────────── */
