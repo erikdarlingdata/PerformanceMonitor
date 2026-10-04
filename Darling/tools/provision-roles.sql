@@ -18,7 +18,8 @@
 --              config.custom_alert_rules (the user-authored alert rules, #3285), on
 --              config.database_state_expected (the per-database override editor, #1986), and on
 --              config.config_mute_rules (the web dashboard's dedicated mute-rule endpoints, #3450 -- plus the
---              two config_service beacon columns their bump trigger writes as the caller). All non-secret
+--              two config_service beacon columns their bump trigger writes as the caller), and the single
+--              dismissed column of config.config_alert_log (the web Alert History dismiss, #4843). All non-secret
 --              tables; over the web every write is gated server-side by the host's auth + seat model -- these
 --              grants are only the floor beneath that gate. All other write actions degrade gracefully. The
 --              web dashboard's identity, and a locked-down Viewer's (postgres.connectAs = "viewer").
@@ -303,6 +304,13 @@ GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO mcp;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
+
+-- 3d-2. Alert History dismiss (#4843): the web dashboard's POST /api/alert-history/dismiss runs as viewer and
+--     writes `UPDATE config_alert_log SET dismissed = TRUE`. Column-level on exactly that one column, so viewer
+--     can flip the dismissed flag and cannot rewrite what an alert said or reach INSERT/DELETE. config_alert_log
+--     carries no trigger. The WPF read-only probe (has_table_privilege ... 'UPDATE') answers for the table-level
+--     privilege only, so it stays false for viewer. mcp gets none: no MCP tool dismisses an alert.
+GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;
 
 -- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as viewer) and the MCP rule
 --     tools (as mcp) create, edit and delete config.custom_alert_rules -- non-secret rule JSON, the same
