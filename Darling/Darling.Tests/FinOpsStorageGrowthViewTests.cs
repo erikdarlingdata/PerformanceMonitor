@@ -67,9 +67,17 @@ public sealed class FinOpsStorageGrowthViewTests
     [Fact]
     public void OrderDatabases_NullsLast_InBothGrowthKeys_ThenName_FromAReversedInput()
     {
-        var input = new[] { Db("z", null, null), Db("b", 5m, 1m), Db("a", 5m, 1m), Db("c", 5m, null), Db("d", 5m, 9m), Db("e", -3m, 0m), Db("y", null, 4m) };
+        var input = new[] { Db("z", null, null), Db("a", 5m, 1m), Db("b", 5m, 1m), Db("c", 5m, null), Db("d", 5m, 9m), Db("e", -3m, 0m), Db("y", null, 4m) };
         var ordered = DarlingMcpFinOpsTools.OrderStorageGrowthDatabases(input.Reverse()).Select(r => r.DatabaseName).ToArray();
         Assert.Equal(new[] { "d", "a", "b", "c", "e", "y", "z" }, ordered);
+    }
+
+    [Fact]
+    public void BareEmpty_NeedsEverySectionEmpty_AndNoneGated()
+    {
+        Assert.True(DarlingMcpFinOpsTools.IsBareEmpty([0, 0], [null, null]));
+        Assert.False(DarlingMcpFinOpsTools.IsBareEmpty([0, 0], [null, "gated"]));
+        Assert.False(DarlingMcpFinOpsTools.IsBareEmpty([0, 1], [null, null]));
     }
 
     [Fact]
