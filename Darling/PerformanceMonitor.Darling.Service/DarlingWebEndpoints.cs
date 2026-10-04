@@ -371,6 +371,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 var stopwatch = Stopwatch.StartNew();
                 string result;
+                using var readScope = ReadScope.Open(logger);
                 try
                 {
                     /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
@@ -410,7 +411,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        routing this through FormatError first would make ToHttpResult's classifier re-derive
                        from text what this catch already knows structurally, and log it a second time. */
                     DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
-                    RecordWebReadLatency(readLatencyRecorder, name, ReadOutcomeClassifier.Classify(ex, context.RequestAborted), stopwatch.ElapsedMilliseconds);
+                    RecordWebReadLatency(readLatencyRecorder, name, ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback), stopwatch.ElapsedMilliseconds);
                     return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
                 }
 
@@ -422,7 +423,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
                     ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
                     : ReadOutcome.Ok;
-                RecordWebReadLatency(readLatencyRecorder, name, webOutcome, stopwatch.ElapsedMilliseconds);
+                RecordWebReadLatency(readLatencyRecorder, name, ReadScope.Resolve(webOutcome, readScope.Fallback), stopwatch.ElapsedMilliseconds);
 
                 return ToHttpResult(result, "/api/read/" + name, logger, stopwatch.ElapsedMilliseconds);
             });
@@ -1465,8 +1466,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            a bucket update is the only work in the try, and any failure there is swallowed and logged at
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
+        using var readScope = ReadScope.Open(readLatency?.Logger);
         var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc);
-        RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken);
+        RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken, readScope.Fallback);
         return outcome;
     }
 
@@ -1491,7 +1493,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
     }
 
-    private static void RecordComposeLatency(ReadLatencyRecorder? recorder, JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken)
+    private static void RecordComposeLatency(ReadLatencyRecorder? recorder, JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken, ReadFallback? noted = null)
     {
         try
         {
@@ -1521,7 +1523,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                                 ? ReadOutcome.Cancelled
                                 : ReadOutcome.Error;
 
-            recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, readOutcome, elapsedMs);
+            recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, ReadScope.Resolve(readOutcome, noted), elapsedMs);
         }
         catch (Exception ex)
         {
@@ -1861,9 +1863,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                     connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
-                    McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken, storeWide);
+                    McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken, storeWide);
                 if (!plan.UseTable)
                 {
+                    if (plan.DecisionFailed)
+                    {
+                        ReadScope.NoteFallback(ReadFallback.GateFailed, "#4605 compose Query Store wide-table source decision", null);
+                    }
+
                     return default;
                 }
 
@@ -1879,10 +1886,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* #4508/#4283 census: never carry ex.Message into a web-surface trace; the exception's type name
-               alone is enough to distinguish a fault here (this check never answers an HTTP response either
-               way, but the census sweeps every ex.Message in this file regardless of destination). */
-            System.Diagnostics.Trace.TraceWarning($"#4605 compose Query Store wide-table eligibility check failed; reading raw: {ex.GetType().Name}");
+            ReadScope.NoteFallback(ReadFallback.GateFailed, "#4605 compose Query Store wide-table eligibility check", ex);
             return default;
         }
     }
@@ -2083,7 +2087,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            System.Diagnostics.Trace.TraceWarning($"#4605 compose hourly-edges snapshot could not start; reading raw: {ex.GetType().Name}");
+            ReadScope.NoteFallback(ReadFallback.GateFailed, "#4605 compose hourly-edges snapshot start", ex);
             if (transaction is not null)
             {
                 await transaction.DisposeAsync();
@@ -2154,14 +2158,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            System.Diagnostics.Trace.TraceWarning($"#4605 compose hourly-edges count guard failed; reading raw: {ex.GetType().Name}");
+            ReadScope.NoteFallback(ReadFallback.GateFailed, "#4605 compose hourly-edges count guard", ex);
             try
             {
                 await ExecuteSnapshotStatementAsync(connection, HourlyEdgesRollbackToSavepointSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
             }
             catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
             {
-                System.Diagnostics.Trace.TraceWarning($"#4605 compose hourly-edges guard rollback failed: {rollbackEx.GetType().Name}");
+                ReadScope.Warn("#4605 compose hourly-edges guard rollback failed", rollbackEx);
 
                 /* The transaction cannot be trusted (the client timer may have broken the connection): rethrow to the snapshot
                    begin, which disposes it and returns no snapshot, so the panel reads raw on a fresh connection. */
@@ -3248,7 +3252,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_collector_cost"] = R(CatOverview, "The monitoring tool's OWN per-collector cost on the monitored servers (self-monitoring) - which of our collectors is the most expensive to run. Pass collector_name for that one collector's daily trend instead of the ranked list.", PInt("days_back", 7), PText("collector_name")),
             ["get_collector_stall_probes"] = R(CatOverview, "The out-of-band server-wide wait samples taken while one of OUR collectors was stalled mid-read - what the monitored instance was doing inside the window the sequential sweep records nothing in. Carries the outcome census beside the samples, deliberately unbanded.", PServer(), PInt("days_back", 7), PLimit(DarlingMcpStallProbeTools.DefaultLimit)),
             ["get_oversized_plan_backlog"] = R(CatOverview, "The cached plans this tool measured as too large to capture inline, and what the out-of-band sweep has done about each one: per server the three verdict buckets (pending/captured/expired, a strict partition), the attempt figures on still-pending rows, the newest capture and expiry instants, and observed_bytes min/median/max, with the per-collector census beside them. Takes no window - a worklist updated in place, not a series. Pass server_name with include_rows for the claim keys.", PServer(), PBool("include_rows", false), PLimit(DarlingMcpOversizedPlanBacklogTools.DefaultLimit)),
-            ["get_read_latency"] = R(CatOverview, "The monitoring tool's OWN read-latency history (self-monitoring) - which of the web dashboard's or MCP server's own reads is really slow, and how often it times out. p50/p95/p99 are bucket upper-bound estimates, per (surface, route), sorted p95 desc. Optional surface (web/compose/mcp) and route filter.", PHours(DarlingMcpReadLatencyTools.DefaultHours), PText("surface"), PText("route"), PLimit(DarlingMcpReadLatencyTools.DefaultLimit)),
+            ["get_read_latency"] = R(CatOverview, "The monitoring tool's OWN read-latency history (self-monitoring) - which of the web dashboard's or MCP server's own reads is really slow, and how often it times out. p50/p95/p99 are bucket upper-bound estimates, per (surface, route), sorted p95 desc. Optional surface (web/compose/mcp) and route filter. fallbacks and gate_failures count reads that fell back to raw.", PHours(DarlingMcpReadLatencyTools.DefaultHours), PText("surface"), PText("route"), PLimit(DarlingMcpReadLatencyTools.DefaultLimit)),
 
             /* ── latch / spinlock (DarlingMcpLatchSpinlockTools) ── */
             ["get_latch_stats"] = R(CatLatch, "Top latch waits in the window.", PServer(), PHours(24), PTop(10), PAsOf()),

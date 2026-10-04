@@ -697,12 +697,15 @@ FROM (
     /// <param name="BelowFloorStart">Non-null only when the read reaches below raw's floor.</param>
     /// <param name="StartBound">Which bound set <see cref="ReadStart"/>; a surface names it when the read is
     /// truncated.</param>
+    /// <param name="DecisionFailed">True only when the source decision itself faulted and the plan is the
+    /// raw fallback; a legitimate "the gate says raw" leaves it false, so a caller can tell the two apart.</param>
     public readonly record struct WideReadPlan(
         bool UseTable,
         DateTime ClampedStart,
         DateTime ReadStart,
         DateTime? BelowFloorStart,
-        WideStartBound StartBound = WideStartBound.Window)
+        WideStartBound StartBound = WideStartBound.Window,
+        bool DecisionFailed = false)
     {
         /// <summary>Where the table's proven-complete history starts for this read: <see cref="ReadStart"/>
         /// whenever the table serves. NULL when the table does not serve (the gate could not decide), because the
@@ -1144,7 +1147,7 @@ FROM (
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(ex, "Query Store wide-table source decision failed for server {ServerId}; reading raw", serverId);
-            return new WideReadPlan(false, windowStart, windowStart, null);
+            return new WideReadPlan(false, windowStart, windowStart, null, DecisionFailed: true);
         }
     }
 

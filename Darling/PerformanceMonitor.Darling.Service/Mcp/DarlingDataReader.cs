@@ -2157,6 +2157,10 @@ internal static class DarlingDataReader
     /// monitored-TARGET command uses, so the census deliberately does not auto-accept it here.</summary>
     private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
 
+    /// <summary>Test-only fault injection: when set, <see cref="TryGetQueryStoreTopFromTableAsync"/> throws the
+    /// returned exception right after the gate chose the interval table. Never set by product code.</summary>
+    internal static readonly System.Threading.AsyncLocal<Func<Exception>?> TestOnlyTableReadFault = new();
+
     /// <summary>
     /// #3953's gate and table read for the MCP/web top-queries surface, on ONE connection in ONE read-only
     /// REPEATABLE READ transaction (M1, ruling issuecomment-5836972848), mirroring the viewer's
@@ -2171,6 +2175,7 @@ internal static class DarlingDataReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         string? executionType, string? moduleName, CancellationToken cancellationToken)
     {
+        var gateDecided = false;
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
@@ -2183,10 +2188,21 @@ internal static class DarlingDataReader
 
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, startUtc, endUtc, endUtc, QueryStoreTopMinWindow,
-                McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken);
+                McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken);
             if (!plan.UseTable)
             {
+                if (plan.DecisionFailed)
+                {
+                    ReadScope.NoteFallback(ReadFallback.GateFailed, "#3953 MCP top-queries source decision", null);
+                }
+
                 return null;
+            }
+
+            gateDecided = true;
+            if (TestOnlyTableReadFault.Value is { } injectFault)
+            {
+                throw injectFault();
             }
 
             var rows = new List<QueryStoreRow>();
@@ -2208,10 +2224,7 @@ internal static class DarlingDataReader
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* Review D4R M2: same silent-fallback risk as the viewer's twin. This surface has no ILogger
-               reachable from a static method with no DI-injected instance (its caller, DarlingMcpDataTools,
-               takes no logger either), so Trace is the only seam available here. */
-            System.Diagnostics.Trace.TraceWarning($"#3953 MCP top-queries table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
+            ReadScope.NoteFallback(gateDecided ? ReadFallback.FallbackRaw : ReadFallback.GateFailed, "#3953 MCP top-queries table read", ex);
             return null;
         }
     }
@@ -2909,7 +2922,7 @@ FROM config.config_collector_schedules";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            Trace.TraceWarning($"#4999 collection health could not read the collector schedule overrides for server {serverId}; its collectors are judged by their shipped cadences: {ex.GetType().Name}: {ex.Message}");
+            ReadScope.Warn($"#4999 collection health could not read the collector schedule overrides for server {serverId}; its collectors are judged by their shipped cadences", ex);
             return Array.Empty<ScheduleOverride>();
         }
 
