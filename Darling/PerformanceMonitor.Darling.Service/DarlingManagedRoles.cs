@@ -36,7 +36,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>config.custom_views</c> (#1563, the user-authored view definitions), <c>config.custom_alert_rules</c>
 /// (#3285, the user-authored alert rules), <c>config.database_state_expected</c> (#1986, the Viewer's
 /// per-database override editor) and <c>config.config_mute_rules</c> (#3450, the dedicated mute-rule
-/// endpoints — plus the two <c>config_service</c> beacon columns its bump trigger writes as the caller).
+/// endpoints — plus the two <c>config_service</c> beacon columns its bump trigger writes as the caller), and
+/// the single <c>dismissed</c> column of <c>config.config_alert_log</c> (#4843, the web Alert History dismiss).
 /// All non-secret tables; over the web, editing is gated server-side by the host's auth + the seat model
 /// (an OIDC viewer seat is refused every write) — these grants are only the floor beneath that gate. A
 /// locked-down deployment points the Viewer at this role, and its WPF surfaces still read as "look but
@@ -1015,6 +1016,17 @@ GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
 --    read-only UX is unchanged by this grant.
 GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {viewer};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {viewer};
+-- #4843: the web dashboard's Alert History dismiss route (POST /api/alert-history/dismiss) runs as viewer, the web
+--    host's ONLY store identity, and its write is `UPDATE config_alert_log SET dismissed = TRUE` (AlertDismissStore,
+--    the one copy the Viewer's Dismiss Selected / Dismiss All share). The grant is COLUMN-level on exactly that one
+--    column: viewer can flip the dismissed flag and cannot rewrite what an alert said (alert_time, server_id,
+--    metric_name, the values, send_error, muted, detail_text, context_json) or reach INSERT/DELETE. config_alert_log
+--    carries no trigger, so nothing else is written as the invoking role. The seat model, not this grant, decides who
+--    may call the route (a read-only OIDC seat is refused every unsafe method by the host's write gate). The WPF
+--    read-only probe is unaffected: has_table_privilege(..., 'UPDATE') answers for the TABLE-level privilege only
+--    (the column-level form is has_column_privilege), so it stays false for viewer and the locked-down Viewer's
+--    dismiss buttons stay hidden. mcp gets no such grant: no MCP tool dismisses an alert.
+GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {viewer};
 -- #3314: the DELIVERY cooldown -- the sole throttle on a Slack/Teams/PagerDuty/webhook post -- is the one
 -- alert-engine knob stored on config_notification rather than config_alert_settings, so update_alert_settings
 -- spans two tables and needs a write here. This DOES widen mcp into a table holding bearer secrets (the SMTP
