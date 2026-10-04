@@ -544,4 +544,256 @@ public sealed class ComposeSourceRouterTests
             }
         }
     }
+
+    /* ─────────────── the hourly-raw-edges candidate ─────────────── */
+
+    private static readonly DateTime EdgeStart = Now.AddHours(-23.5);
+
+    private static RollupCoverage EdgeCoverage(DateTime? floor, DateTime? ceiling)
+    {
+        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        if (floor is not null)
+        {
+            floors[TimescaleSupport.QueryStatsIntervalHourlyView] = floor.Value;
+        }
+
+        var ceilings = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        if (ceiling is not null)
+        {
+            ceilings[TimescaleSupport.QueryStatsIntervalHourlyView] = ceiling.Value;
+        }
+
+        return new RollupCoverage(floors, new Dictionary<string, DateTime>(StringComparer.Ordinal), RollupAvailability.All, ceilings);
+    }
+
+    private static PanelPlan EdgePlan(
+        string measureKey = "query_worker_us", PanelMode mode = PanelMode.TimeSeries,
+        ComposeTimeBucket bucket = ComposeTimeBucket.Hour, ComposeAggregate aggregate = ComposeAggregate.Sum) =>
+        Plan(measureKey, mode) with { TimeBucket = bucket, Aggregate = aggregate };
+
+    private static ComposeHourlyEdgesCandidate? Edge(
+        PanelPlan? plan = null, DateTime? start = null, DateTime? end = null, DateTime? now = null,
+        RollupAvailability? rollups = null, RollupCoverage? coverage = null) =>
+        ComposeSourceRouter.HourlyRawEdgesCandidate(
+            plan ?? EdgePlan(), now ?? Now, start ?? EdgeStart, end ?? Now,
+            rollups ?? RollupAvailability.All, coverage ?? EdgeCoverage(Now.AddDays(-3), Now.AddMinutes(-20)));
+
+    [Fact]
+    public void HourlyRawEdges_AnEligibleWindow_YieldsTheWholeHourMiddleAndTheSuccessor()
+    {
+        var candidate = Edge();
+
+        Assert.NotNull(candidate);
+        Assert.Equal("query_stats", candidate!.SourceTable);
+        Assert.Equal(TimescaleSupport.QueryStatsIntervalHourlyView, candidate.SuccessorView);
+        Assert.Equal(Now.AddHours(-23), candidate.HourStartUtc);
+        Assert.Equal(Now.AddHours(-1), candidate.HourEndUtc);
+    }
+
+    [Fact]
+    public void HourlyRawEdges_StartAndEndExactlyOnTheHour_AreKept()
+    {
+        var candidate = Edge(start: Now.AddHours(-24), coverage: EdgeCoverage(Now.AddDays(-3), Now.AddMinutes(30)));
+
+        Assert.NotNull(candidate);
+        Assert.Equal(Now.AddHours(-24), candidate!.HourStartUtc);
+        Assert.Equal(Now, candidate.HourEndUtc);
+    }
+
+    [Fact]
+    public void HourlyRawEdges_TheCeiling_ClampsTheEnd()
+    {
+        var candidate = Edge(coverage: EdgeCoverage(Now.AddDays(-3), Now.AddHours(-5).AddMinutes(10)));
+
+        Assert.NotNull(candidate);
+        Assert.Equal(Now.AddHours(-5), candidate!.HourEndUtc);
+    }
+
+    [Fact]
+    public void HourlyRawEdges_AMiddleUnderAnHour_IsNull()
+    {
+        /* The ceiling leaves 0 whole hours after the first whole hour of the window. */
+        Assert.Null(Edge(coverage: EdgeCoverage(Now.AddDays(-3), Now.AddHours(-23).AddMinutes(30))));
+        Assert.Null(Edge(start: Now.AddHours(-12).AddMinutes(-30), end: Now.AddHours(0), coverage: EdgeCoverage(Now.AddDays(-3), Now.AddHours(-12))));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_ResolveNotRaw_IsNull()
+    {
+        Assert.Null(Edge(start: Now.AddDays(-10)));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_ProcedureStats_IsNull()
+    {
+        /* Coverage for the procedure successor is complete, so only the enabled set can refuse it. */
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.ProcedureStatsIntervalHourlyView] = Now.AddDays(-3) },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.ProcedureStatsIntervalHourlyView] = Now.AddMinutes(-20) });
+        Assert.Null(Edge(plan: EdgePlan("proc_worker_us"), coverage: coverage));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_ASourceOutsideTheEnabledSet_IsNull()
+    {
+        /* query_store_stats keeps its own corrected/legacy comparison and is not enabled. */
+        Assert.Null(Edge(plan: EdgePlan("qs_executions")));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_ANonCumulativeMeasure_IsNull()
+    {
+        var perEvent = Measure("query_worker_us") with { Archetype = MeasureArchetype.PerEvent, DeltaColumn = null };
+        Assert.Null(Edge(plan: EdgePlan() with { Measure = perEvent }));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_ARatioMeasure_IsNull_ByTheExplicitKindCheck()
+    {
+        /* A Ratio's AggregationColumn is null already, so a bare ratio would be refused by the column gate. Giving it
+           a mapped column proves the refusal comes from the explicit Kind check, not from that gate. */
+        var ratio = Measure("query_avg_cpu_us") with { Archetype = MeasureArchetype.Cumulative, DeltaColumn = "delta_worker_time" };
+        Assert.Equal(MeasureKind.Ratio, ratio.Kind);
+        Assert.Equal("delta_worker_time", ratio.AggregationColumn);
+        Assert.Null(Edge(plan: EdgePlan() with { Measure = ratio }));
+    }
+
+    [Fact]
+    public void NormalizeServerScope_NullAndEmptyAreTheFleet_AnythingElseIsTheList()
+    {
+        var list = new[] { "A", "B" };
+        Assert.Null(ComposeSourceRouter.NormalizeServerScope(null));
+        Assert.Null(ComposeSourceRouter.NormalizeServerScope(Array.Empty<string>()));
+        Assert.Same(list, ComposeSourceRouter.NormalizeServerScope(list));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_AMeasureColumnTheSuccessorLacks_IsNull()
+    {
+        var unmapped = Measure("query_worker_us") with { DeltaColumn = "delta_rows" };
+        Assert.Null(Edge(plan: EdgePlan() with { Measure = unmapped }));
+    }
+
+    [Theory]
+    [InlineData(ComposeAggregate.Sum, true)]
+    [InlineData(ComposeAggregate.Max, true)]
+    [InlineData(ComposeAggregate.Min, true)]
+    [InlineData(ComposeAggregate.Avg, false)]
+    [InlineData(ComposeAggregate.Count, false)]
+    public void HourlyRawEdges_OnlySumMaxAndMin_Qualify(ComposeAggregate aggregate, bool expected) =>
+        Assert.Equal(expected, Edge(plan: EdgePlan(aggregate: aggregate)) is not null);
+
+    [Fact]
+    public void HourlyRawEdges_AnOverlay_MustMatchSourceAggregateAndColumn()
+    {
+        var sameShape = new ComposeOverlay(Measure("query_executions"), ComposeAggregate.Sum, "count");
+        Assert.NotNull(Edge(plan: EdgePlan() with { Overlay = sameShape }));
+
+        var otherAggregate = new ComposeOverlay(Measure("query_executions"), ComposeAggregate.Max, "count");
+        Assert.Null(Edge(plan: EdgePlan() with { Overlay = otherAggregate }));
+
+        var otherSource = new ComposeOverlay(Measure("proc_executions"), ComposeAggregate.Sum, "count");
+        Assert.Null(Edge(plan: EdgePlan() with { Overlay = otherSource }));
+
+        var unmapped = new ComposeOverlay(Measure("query_executions") with { DeltaColumn = "delta_rows" }, ComposeAggregate.Sum, "count");
+        Assert.Null(Edge(plan: EdgePlan() with { Overlay = unmapped }));
+    }
+
+    [Theory]
+    [InlineData(PanelMode.Ranked, ComposeTimeBucket.None, true)]
+    [InlineData(PanelMode.Scalar, ComposeTimeBucket.None, true)]
+    [InlineData(PanelMode.TimeSeries, ComposeTimeBucket.Hour, true)]
+    [InlineData(PanelMode.TimeSeries, ComposeTimeBucket.Day, true)]
+    [InlineData(PanelMode.RankedTimeSeries, ComposeTimeBucket.Hour, true)]
+    [InlineData(PanelMode.TimeSeries, ComposeTimeBucket.Minute, false)]
+    [InlineData(PanelMode.TimeSeries, ComposeTimeBucket.Auto, false)]
+    [InlineData(PanelMode.RankedTimeSeries, ComposeTimeBucket.Minute, false)]
+    public void HourlyRawEdges_ModeAndBucket(PanelMode mode, ComposeTimeBucket bucket, bool expected) =>
+        Assert.Equal(expected, Edge(plan: EdgePlan(mode: mode, bucket: bucket)) is not null);
+
+    [Fact]
+    public void HourlyRawEdges_AutoBucketThatResolvesToHour_Qualifies()
+    {
+        /* Auto resolves to Hour above 2 days; a 3-day-old start still routes raw, so 2.5 days it is. */
+        var start = Now.AddDays(-2.5);
+        Assert.NotNull(Edge(plan: EdgePlan(bucket: ComposeTimeBucket.Auto), start: start));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_StatementDimension_Qualifies_BecauseItReadsOnlyMappedAndModuleColumns()
+    {
+        /* statement groups on COALESCE(m.object_name, f.query_hash): the module join plus the successor's own
+           query_hash column. */
+        var statement = MeasureCatalog.Dimension("query_stats", "statement")!;
+        Assert.Equal("query_hash", statement.FallbackColumn);
+        Assert.NotNull(Edge(plan: EdgePlan(mode: PanelMode.Ranked) with { GroupBy = new[] { statement } }));
+
+        var objectName = MeasureCatalog.Dimension("query_stats", "object_name")!;
+        Assert.NotNull(Edge(plan: EdgePlan(mode: PanelMode.Ranked) with { GroupBy = new[] { objectName } }));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_ADimensionTheSuccessorLacks_IsNull()
+    {
+        var unmapped = new ComposeDimension("query_stats", "rows_dim", "total_rows", Likeable: false);
+        Assert.Null(Edge(plan: EdgePlan(mode: PanelMode.Ranked) with { GroupBy = new[] { unmapped } }));
+
+        var filter = new ComposeFilter(unmapped, ComposeFilterOp.Eq, new ComposeFilterValue(new[] { "1" }, null));
+        Assert.Null(Edge(plan: EdgePlan() with { Filters = new[] { filter } }));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_TheSuccessorAbsent_IsNull()
+    {
+        var rollups = RollupAvailability.All with { QueryGrainIntervalHourly = false };
+        Assert.Null(Edge(rollups: rollups));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_ASuccessorFloorAfterTheFirstWholeHour_IsNull()
+    {
+        Assert.Null(Edge(coverage: EdgeCoverage(Now.AddHours(-22), Now.AddMinutes(-20))));
+        Assert.Null(Edge(coverage: EdgeCoverage(null, Now.AddMinutes(-20))));
+        Assert.NotNull(Edge(coverage: EdgeCoverage(Now.AddHours(-23), Now.AddMinutes(-20))));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_NoMeasuredCeiling_IsNull()
+    {
+        Assert.Null(Edge(coverage: EdgeCoverage(Now.AddDays(-3), null)));
+        Assert.Null(Edge(coverage: RollupCoverage.Unknown));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_AWindowNotEndingNow_IsNull()
+    {
+        Assert.Null(Edge(start: Now.AddHours(-30), end: Now.AddHours(-2)));
+        Assert.NotNull(Edge(end: Now.AddSeconds(-30)));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_AWindowUnder12Hours_IsNull()
+    {
+        Assert.Null(Edge(start: Now.AddHours(-11.5), coverage: EdgeCoverage(Now.AddDays(-3), Now.AddMinutes(30))));
+        Assert.NotNull(Edge(start: Now.AddHours(-12), coverage: EdgeCoverage(Now.AddDays(-3), Now.AddMinutes(30))));
+    }
+
+    [Fact]
+    public void HourlyRawEdges_EnabledSources_AreExactlyQueryStats()
+    {
+        Assert.True(
+            ComposeSourceRouter.HourlyRawEdgesEnabledSources.SetEquals(new[] { "query_stats" }),
+            "Only query_stats has been measured against its raw read; procedure_stats stays mapped in ComposeHybridColumns but disabled until it is.");
+    }
+
+    [Fact]
+    public void IsCagg_IsTrueOnlyForTheHourlyAndDailyTiers()
+    {
+        Assert.False(new ComposeRoute(ComposeSourceTier.Raw, null).IsCagg);
+        Assert.True(new ComposeRoute(ComposeSourceTier.Hourly, "x").IsCagg);
+        Assert.True(new ComposeRoute(ComposeSourceTier.Daily, "x").IsCagg);
+        Assert.False(new ComposeRoute(ComposeSourceTier.HourlyRawEdges, "x", null, null, Now, Now).IsCagg);
+    }
 }
