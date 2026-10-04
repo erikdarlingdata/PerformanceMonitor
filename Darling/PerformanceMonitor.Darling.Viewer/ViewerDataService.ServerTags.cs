@@ -31,8 +31,11 @@ public sealed record DarlingTagAssignment(int ServerId, int TagId);
 /// <para><b>Direct writes, not the command queue.</b> The viewer's default seat is <c>admin</c>, which
 /// holds write on the config tables, and it already writes <c>config_monitored_servers</c> directly. The
 /// <c>config_command</c> queue exists for imperative actions only the SERVICE can perform — reaching a
-/// monitored SQL Server, flipping service state — and tags are store state the service never reads, so
-/// routing them through the queue would buy nothing and cost an enqueue-and-poll round trip per edit.
+/// monitored SQL Server, flipping service state — and a tag write is plain store state, so
+/// routing them through the queue would buy nothing and cost an enqueue-and-poll round trip per edit. The service
+/// does read tags, but only to resolve tag-scoped custom alert rules (#3350, #3367) through
+/// <c>CustomAlertRuleStore.ListTagMembersSql</c>, and it re-reads membership on its own cache refresh, so a tag
+/// write needs no reload beacon either.
 /// Every write goes through <see cref="ExecuteWriteAsync"/>, so a read-only <c>viewer</c> seat degrades
 /// to <see cref="ViewerReadOnlyException"/> rather than a raw 42501.</para>
 ///
@@ -41,9 +44,9 @@ public sealed record DarlingTagAssignment(int ServerId, int TagId);
 /// freely and the executor runs as superuser, so that grant is full service control.</para>
 ///
 /// <para>Bare table names resolve through the connection's search_path to the <c>config</c> schema, the
-/// same as every other config write in this service. The tree itself is assembled IN MEMORY from these
-/// flat rows (the table is dozens of rows) — no recursive CTE, no <c>ltree</c>, no closure table — and
-/// the depth cap and cycle checks live there too.</para>
+/// same as every other config write in this service. The SQL and the depth, cycle, name and colour rules live
+/// in <c>ServerTagStore</c> and <c>ServerTagRules</c> (Storage), shared with the MCP tools; this class is thin
+/// wrappers over them.</para>
 /// </summary>
 public sealed partial class ViewerDataService
 {

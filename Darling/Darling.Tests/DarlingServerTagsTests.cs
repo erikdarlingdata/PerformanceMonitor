@@ -22,6 +22,56 @@ public sealed class DarlingServerTagsTests
     private static string V32Sql =>
         PgMigrations.Scripts.Single(s => s.Version == 32).Sql;
 
+    private static string ViewerFile(string name) =>
+        RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", name);
+
+    [Fact]
+    public void ViewerTagService_HoldsNoTagSql_TheStoreOwnsIt()
+    {
+        var src = ViewerFile("ViewerDataService.ServerTags.cs");
+
+        foreach (var token in new[] { "FROM server_tags", "INSERT INTO server_tag", "UPDATE server_tags", "DELETE FROM server_tag" })
+        {
+            Assert.DoesNotContain(token, src, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("MainWindow.Tags.cs")]
+    [InlineData("ManageTagsWindow.xaml.cs")]
+    public void TagDialogs_TakeTheDepthCapFromServerTagRules(string file)
+    {
+        var src = ViewerFile(file);
+
+        Assert.Contains("ServerTagRules.MaxDepth", src, StringComparison.Ordinal);
+        Assert.DoesNotContain("MaxTagDepth", src, StringComparison.Ordinal);
+        Assert.DoesNotContain("int MaxDepth = 4;", src, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StaleNeverReadsTagsComments_AreGone()
+    {
+        Assert.DoesNotContain("service never reads", ViewerFile("ViewerDataService.ServerTags.cs"), StringComparison.Ordinal);
+        Assert.DoesNotContain("service never reads", PgMigrations_Source(), StringComparison.Ordinal);
+        Assert.DoesNotContain("service consumes nothing" + " about tags", RepoFile.ReadRepoFile("Darling", "Darling.Tests", "DarlingServerTagsTests.cs"),
+            StringComparison.Ordinal);
+    }
+
+    private static string PgMigrations_Source() =>
+        RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "PgMigrations.cs");
+
+    [Theory]
+    [InlineData("MainWindow.Tags.cs")]
+    [InlineData("ManageTagsWindow.xaml.cs")]
+    public void TagDeleteDialogs_ReadTheImpact_AndUseTheSharedWarning_WithoutBlockingOnAFailedRead(string file)
+    {
+        var src = ViewerFile(file);
+
+        Assert.Contains("GetServerTagDeleteImpactAsync", src, StringComparison.Ordinal);
+        Assert.Contains("ServerTagCoverage.DeleteWarning(", src, StringComparison.Ordinal);
+        Assert.Contains("Delete impact read failed", src, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void V32_IsSchemaQualified_AndTheNewestMigrationTracksTheBuildVersion()
     {
@@ -101,8 +151,8 @@ public sealed class DarlingServerTagsTests
     [Fact]
     public void V32_HasNoReloadBeaconTrigger()
     {
-        /* The service consumes nothing about tags — they feed the viewer's sidebar. A config_bump_version
-           trigger would force a full fleet reconcile on every tag edit (V31 custom_views precedent). */
+        /* The alert evaluator reads tags, but through its own cache refresh, so no beacon is needed. A
+           config_bump_version trigger would force a full fleet reconcile on every tag edit (V31 custom_views precedent). */
         Assert.DoesNotContain("config_bump_version", V32Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("CREATE TRIGGER", V32Sql, StringComparison.Ordinal);
     }
