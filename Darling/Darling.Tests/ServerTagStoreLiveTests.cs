@@ -107,14 +107,108 @@ public sealed class ServerTagStoreLiveTests
         await store.AssignAsync(root.Id, [9001], ct);
         await store.AssignAsync(child.Id, [9001, 9002], ct);
 
-        var deleted = Assert.IsType<ServerTagWriteResult.Ok>(await store.DeleteAsync(root.Id, ct));
+        var deleted = Assert.IsType<ServerTagWriteResult.Ok>(await store.DeleteAsync(root.Id, confirm: true, ct));
         Assert.Equal(3, deleted.RemovedAssignments);
         Assert.Equal(new[] { root.Id, child.Id }.OrderBy(i => i), deleted.RemovedTagIds!);
 
         var snapshot = await store.ReadSnapshotAsync(ct);
         Assert.Empty(snapshot.Tags);
         Assert.Empty(snapshot.Assignments);
-        Assert.IsType<ServerTagWriteResult.NotFound>(await store.DeleteAsync(root.Id, ct));
+        Assert.IsType<ServerTagWriteResult.NotFound>(await store.DeleteAsync(root.Id, confirm: true, ct));
+    }
+
+    [Fact]
+    public async Task ACreateColourWithSpaces_IsStoredTrimmedAndUpperCased()
+    {
+        var opened = await OpenAsync();
+        var (scratch, source, store) = opened!.Value;
+        await using var _ = scratch;
+        await using var __ = source;
+        var ct = TestContext.Current.CancellationToken;
+
+        var created = Assert.IsType<ServerTagWriteResult.Ok>(await store.CreateAsync("Padded", null, " #416fa6 ", ct));
+        Assert.Equal("#416FA6", created.Tag!.Colour);
+    }
+
+    [Fact]
+    public async Task AnUnconfirmedDelete_ReReadsTheRulesUnderTheLock_AndDeletesNothing()
+    {
+        var opened = await OpenAsync();
+        var (scratch, source, store) = opened!.Value;
+        await using var _ = scratch;
+        await using var __ = source;
+        var ct = TestContext.Current.CancellationToken;
+
+        var root = Assert.IsType<ServerTagWriteResult.Ok>(await store.CreateAsync("Prod", null, null, ct)).Tag!;
+        var child = Assert.IsType<ServerTagWriteResult.Ok>(await store.CreateAsync("East", root.Id, null, ct)).Tag!;
+        await store.AssignAsync(child.Id, [9001], ct);
+
+        /* A rule scoped into the subtree after the caller's own pre-check: the store call is made directly, so
+           only the check under the delete lock can stop it. */
+        await ExecAsync(source, $@"INSERT INTO custom_alert_rules (name, definition, enabled, version, created_at, updated_at, updated_by) VALUES
+            ('late-rule', '{{""scope"":{{""mode"":""tag"",""tagId"":{child.Id}}}}}', true, 1, now(), now(), 'test')");
+
+        var refused = Assert.IsType<ServerTagWriteResult.ConfirmRequired>(await store.DeleteAsync(root.Id, confirm: false, ct));
+        Assert.Equal("late-rule", Assert.Single(refused.Rules).Name);
+        Assert.Contains("'late-rule'", refused.Message, StringComparison.Ordinal);
+
+        var snapshot = await store.ReadSnapshotAsync(ct);
+        Assert.Equal(2, snapshot.Tags.Count);
+        Assert.Single(snapshot.Assignments);
+
+        Assert.IsType<ServerTagWriteResult.Ok>(await store.DeleteAsync(root.Id, confirm: true, ct));
+        Assert.Empty((await store.ReadSnapshotAsync(ct)).Tags);
+    }
+
+    [Fact]
+    public async Task AnAssignToATagDeletedInTheMeantime_IsReportedGone_NotAGenericError()
+    {
+        var opened = await OpenAsync();
+        var (scratch, source, store) = opened!.Value;
+        await using var _ = scratch;
+        await using var __ = source;
+        var ct = TestContext.Current.CancellationToken;
+
+        var tag = Assert.IsType<ServerTagWriteResult.Ok>(await store.CreateAsync("Doomed", null, null, ct)).Tag!;
+        Assert.IsType<ServerTagWriteResult.Ok>(await store.DeleteAsync(tag.Id, confirm: true, ct));
+
+        /* The core's pre-read is bypassed: the store is asked to assign to a tag id that is already gone, which
+           is what an assign racing a delete sees (a foreign-key violation). */
+        var gone = await Assert.ThrowsAsync<ServerTagGoneException>(() => store.AssignAsync(tag.Id, [9001], ct));
+        Assert.Equal(tag.Id, gone.TagId);
+
+        /* And through the core, the same race (the snapshot still lists the tag) answers not_found. */
+        var racing = new RacingAssignStore(store, tag);
+        var json = await DarlingMcpServerTagTools.AssignServerTagCore(racing, tag.Id, [9001], ct);
+        Assert.Contains("\"status\":\"not_found\"", json.Replace(" ", string.Empty), StringComparison.Ordinal);
+    }
+
+    /// <summary>A store whose snapshot still lists a tag that is gone and that registers every server: the state
+    /// an assign sees when a delete lands between its pre-read and its insert.</summary>
+    private sealed class RacingAssignStore(ServerTagStore inner, ServerTagRow stale) : IServerTagStore
+    {
+        public async Task<ServerTagSnapshot> ReadSnapshotAsync(System.Threading.CancellationToken ct = default)
+        {
+            var real = await inner.ReadSnapshotAsync(ct);
+            return real with { Tags = real.Tags.Append(stale).ToList() };
+        }
+
+        public Task<System.Collections.Generic.IReadOnlySet<int>> FindRegisteredServerIdsAsync(System.Collections.Generic.IReadOnlyCollection<int> serverIds, System.Threading.CancellationToken ct = default) =>
+            Task.FromResult<System.Collections.Generic.IReadOnlySet<int>>(serverIds.ToHashSet());
+
+        public Task<ServerTagWriteResult> CreateAsync(string name, int? parentId, string? colour, System.Threading.CancellationToken ct = default) => inner.CreateAsync(name, parentId, colour, ct);
+
+        public Task<ServerTagWriteResult> UpdateAsync(int tagId, ServerTagEdit edit, System.Threading.CancellationToken ct = default) => inner.UpdateAsync(tagId, edit, ct);
+
+        public Task<ServerTagWriteResult> DeleteAsync(int tagId, bool confirm, System.Threading.CancellationToken ct = default) => inner.DeleteAsync(tagId, confirm, ct);
+
+        public Task<System.Collections.Generic.IReadOnlyList<int>> AssignAsync(int tagId, System.Collections.Generic.IReadOnlyList<int> serverIds, System.Threading.CancellationToken ct = default) => inner.AssignAsync(tagId, serverIds, ct);
+
+        public Task<System.Collections.Generic.IReadOnlyList<int>> UnassignAsync(int tagId, System.Collections.Generic.IReadOnlyList<int> serverIds, System.Threading.CancellationToken ct = default) => inner.UnassignAsync(tagId, serverIds, ct);
+
+        public Task<bool> HasChildrenAsync(int tagId, System.Threading.CancellationToken ct = default) => inner.HasChildrenAsync(tagId, ct);
+
+        public Task ClearForServerAsync(int serverId, System.Threading.CancellationToken ct = default) => inner.ClearForServerAsync(serverId, ct);
     }
 
     [Fact]

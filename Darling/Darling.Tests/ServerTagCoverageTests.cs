@@ -64,6 +64,20 @@ public sealed class ServerTagCoverageTests
     }
 
     [Fact]
+    public void ARuleWhoseScopeTagWasAlreadyGoneBeforeTheWrite_IsNotListed()
+    {
+        var tags = new[] { new ServerTagRow(1, "Prod", null, 0, null), new ServerTagRow(2, "East", 1, 0, null) };
+        var rules = new[] { new TagScopedRule(7, "dangling", true, 99), new TagScopedRule(8, "live", true, 2) };
+        var before = Snap(tags, [(100, 2)], rules);
+
+        var diff = ServerTagCoverage.SimulateDelete(before, 2);
+
+        Assert.DoesNotContain(diff, d => d.RuleId == 7);
+        Assert.Equal("orphaned", diff.Single(d => d.RuleId == 8).Effect);
+        Assert.Empty(ServerTagCoverage.Diff(before, before));
+    }
+
+    [Fact]
     public void ADeletedScopeTag_IsOrphaned_WithEveryOldServerLost()
     {
         var tags = new[] { new ServerTagRow(1, "Prod", null, 0, null), new ServerTagRow(2, "East", 1, 0, null) };

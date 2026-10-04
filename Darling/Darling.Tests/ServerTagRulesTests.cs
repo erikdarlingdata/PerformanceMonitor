@@ -82,6 +82,8 @@ public sealed class ServerTagRulesTests
     [InlineData("")]
     [InlineData("   ")]
     [InlineData("a\tb")]
+    [InlineData("Prod\u202E")]
+    [InlineData("Pr\u200Bod")]
     public void BadNames_AreRefused(string name)
     {
         var refused = Assert.IsType<ServerTagWriteResult.Refused>(ServerTagRules.CheckName(name, out _));
@@ -95,6 +97,21 @@ public sealed class ServerTagRulesTests
         Assert.Equal("Prod", clean);
         Assert.Null(ServerTagRules.CheckName(new string('a', 100), out _));
         Assert.Equal("bad_name", ServerTagRules.CheckName(new string('a', 101), out _)!.Code);
+    }
+
+    [Fact]
+    public void AFormatCharacterName_SaysItIsAnInvisibleFormattingCharacter()
+    {
+        var refused = Assert.IsType<ServerTagWriteResult.Refused>(ServerTagRules.CheckName("Pr\u200Bod", out _));
+        Assert.Equal("Tag name contains an invisible formatting character.", refused.Message);
+    }
+
+    [Fact]
+    public void ACreateColour_IsTrimmedThenValidated()
+    {
+        Assert.Null(ServerTagRules.CheckCreate(Tree, "Fresh", null, " #416fa6 ", out _, out var colour));
+        Assert.Equal("#416FA6", colour);
+        Assert.IsType<ServerTagWriteResult.Refused>(ServerTagRules.CheckCreate(Tree, "Fresh", null, "   ", out _, out _));
     }
 
     [Fact]

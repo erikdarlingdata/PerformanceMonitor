@@ -130,9 +130,10 @@ public sealed partial class ViewerDataService
     public Task<bool> ServerTagHasChildrenAsync(int tagId, CancellationToken cancellationToken = default) =>
         TagStore.HasChildrenAsync(tagId, cancellationToken);
 
-    /// <summary>Deletes a tag.</summary>
+    /// <summary>Deletes a tag. The caller's confirmation dialog has already warned about scoped alert rules,
+    /// so the store is told the delete is confirmed.</summary>
     public async Task DeleteServerTagAsync(int tagId, CancellationToken cancellationToken = default) =>
-        RequireOk(await TagWriteAsync(() => TagStore.DeleteAsync(tagId, cancellationToken)));
+        RequireOk(await TagWriteAsync(() => TagStore.DeleteAsync(tagId, confirm: true, cancellationToken)));
 
     /// <summary>Assigns one tag to many servers in a single statement.</summary>
     public async Task AssignServerTagAsync(IReadOnlyList<int> serverIds, int tagId, CancellationToken cancellationToken = default) =>

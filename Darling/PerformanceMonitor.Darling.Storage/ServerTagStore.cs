@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -61,6 +62,25 @@ public abstract record ServerTagWriteResult
 
     /// <summary>A rule refused the write: <c>bad_name</c>, <c>bad_colour</c>, <c>depth_limit</c> or <c>cycle</c>.</summary>
     public sealed record Refused(string Code, string Message) : ServerTagWriteResult;
+
+    /// <summary>A delete that was not confirmed found custom alert rules scoped into the subtree, read under the
+    /// delete lock. Nothing was deleted.</summary>
+    public sealed record ConfirmRequired(IReadOnlyList<TagScopedRule> Rules, string Message) : ServerTagWriteResult;
+}
+
+/// <summary>Thrown by <see cref="ServerTagStore.AssignAsync"/> when the tag no longer exists by the time the
+/// insert runs (a foreign-key violation): the tag was deleted concurrently.</summary>
+public sealed class ServerTagGoneException : Exception
+{
+    /// <summary>Creates the exception for <paramref name="tagId"/>.</summary>
+    public ServerTagGoneException(int tagId)
+        : base(string.Create(CultureInfo.InvariantCulture, $"Tag {tagId} no longer exists."))
+    {
+        TagId = tagId;
+    }
+
+    /// <summary>The tag that is gone.</summary>
+    public int TagId { get; }
 }
 
 /// <summary>The fleet-tag store surface shared by the viewer and the MCP tools.</summary>
@@ -78,8 +98,10 @@ public interface IServerTagStore
     /// <summary>Applies a partial edit (rename, colour, move) to one tag.</summary>
     Task<ServerTagWriteResult> UpdateAsync(int tagId, ServerTagEdit edit, CancellationToken ct = default);
 
-    /// <summary>Deletes a tag and its whole subtree and their assignments.</summary>
-    Task<ServerTagWriteResult> DeleteAsync(int tagId, CancellationToken ct = default);
+    /// <summary>Deletes a tag and its whole subtree and their assignments. Without <paramref name="confirm"/>, a
+    /// custom alert rule scoped into the subtree (read under the delete lock) refuses the delete with
+    /// <see cref="ServerTagWriteResult.ConfirmRequired"/>.</summary>
+    Task<ServerTagWriteResult> DeleteAsync(int tagId, bool confirm, CancellationToken ct = default);
 
     /// <summary>Assigns a tag to servers; returns the ids actually inserted.</summary>
     Task<IReadOnlyList<int>> AssignAsync(int tagId, IReadOnlyList<int> serverIds, CancellationToken ct = default);
@@ -207,6 +229,7 @@ WHERE server_id = ANY($1)";
     public const long TreeLockKey = 0x4441524C_54414753;
 
     private const string UniqueViolationSqlState = "23505";
+    private const string ForeignKeyViolationSqlState = "23503";
 
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
@@ -225,7 +248,7 @@ WHERE server_id = ANY($1)";
         await using var connection = await _dataSource.OpenConnectionAsync(ct);
         var tags = await ReadTagsCoreAsync(connection, null, ct);
         var assignments = await ReadAssignmentsCoreAsync(connection, null, ct);
-        var rules = await ReadRulesCoreAsync(connection, ct);
+        var rules = await ReadRulesCoreAsync(connection, null, ct);
         return new ServerTagSnapshot(tags, assignments, rules);
     }
 
@@ -348,7 +371,7 @@ WHERE server_id = ANY($1)";
     }
 
     /// <inheritdoc />
-    public async Task<ServerTagWriteResult> DeleteAsync(int tagId, CancellationToken ct = default)
+    public async Task<ServerTagWriteResult> DeleteAsync(int tagId, bool confirm, CancellationToken ct = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
@@ -363,6 +386,17 @@ WHERE server_id = ANY($1)";
 
         var subtree = ServerTagRules.Descendants(tags, tagId);
         subtree.Add(tagId);
+        if (!confirm)
+        {
+            var scoped = (await ReadRulesCoreAsync(connection, transaction, ct)).Where(r => subtree.Contains(r.ScopeTagId)).ToList();
+            if (scoped.Count > 0)
+            {
+                return new ServerTagWriteResult.ConfirmRequired(
+                    scoped,
+                    string.Create(CultureInfo.InvariantCulture, $"Deleting tag {tagId} and its subtree would leave {scoped.Count} custom alert rule(s) scoped to it matching no server: {string.Join(", ", scoped.Select(r => $"'{r.Name}'"))}. Nothing was deleted. Repeat with confirm=true to proceed."));
+            }
+        }
+
         var assignments = await ReadAssignmentsCoreAsync(connection, transaction, ct);
         var removedAssignments = assignments.Count(a => subtree.Contains(a.TagId));
 
@@ -414,10 +448,18 @@ WHERE server_id = ANY($1)";
         command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = serverIds.ToArray() });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = tagId });
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        try
         {
-            changed.Add(reader.GetInt32(0));
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                changed.Add(reader.GetInt32(0));
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == ForeignKeyViolationSqlState && sql == AssignSql)
+        {
+            // The tag was deleted between the caller's read and this insert.
+            throw new ServerTagGoneException(tagId);
         }
 
         changed.Sort();
@@ -460,10 +502,10 @@ WHERE server_id = ANY($1)";
         return assignments;
     }
 
-    private async Task<List<TagScopedRule>> ReadRulesCoreAsync(NpgsqlConnection connection, CancellationToken ct)
+    private async Task<List<TagScopedRule>> ReadRulesCoreAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken ct)
     {
         var rules = new List<TagScopedRule>();
-        await using var command = Command(TagScopedRulesSql, connection, null);
+        await using var command = Command(TagScopedRulesSql, connection, transaction);
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
