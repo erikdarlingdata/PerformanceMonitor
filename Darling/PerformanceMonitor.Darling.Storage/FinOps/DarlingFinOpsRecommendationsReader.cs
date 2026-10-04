@@ -338,9 +338,7 @@ ORDER BY database_name";
     /// </summary>
     /// <param name="onCheckFailed">Optional. Invoked once per failed check with that check's label and the exception.
     /// It is not invoked for the VM check's inner CPU fallback, which degrades to the 24-hour window and still emits.</param>
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
-        Justification = "The failure hook is optional and trails the token so every existing call site keeps binding unchanged.")]
-    public static async Task<List<FinOpsRecommendation>> GetRecommendationsAsync(NpgsqlDataSource dataSource, int serverId, decimal monthlyCost, int commandTimeoutSeconds, CancellationToken cancellationToken = default, Action<string, Exception>? onCheckFailed = null)
+    public static async Task<List<FinOpsRecommendation>> GetRecommendationsAsync(NpgsqlDataSource dataSource, int serverId, decimal monthlyCost, int commandTimeoutSeconds, Action<string, Exception>? onCheckFailed = null, CancellationToken cancellationToken = default)
     {
         var recommendations = new List<FinOpsRecommendation>();
         var memoryCutoff = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified);

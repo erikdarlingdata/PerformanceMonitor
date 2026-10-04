@@ -301,7 +301,7 @@ VALUES ($1, $2, $3, $4, $5,
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var idA = FinOpsRecommendationsGoldenLiveTests.ServerIdA;
-        var baseline = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, ct);
+        var baseline = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, cancellationToken: ct);
         Assert.Contains(baseline, r => r.Category == "Maintenance");
 
         /* The maintenance read selects from the v_running_jobs view; dropping the view on this scratch store breaks that one read. */
@@ -314,11 +314,11 @@ VALUES ($1, $2, $3, $4, $5,
 
         var failed = new System.Collections.Generic.List<string>();
         var after = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(
-            dataSource, idA, 1000m, TimeoutSeconds, ct, (label, ex) =>
+            dataSource, idA, 1000m, TimeoutSeconds, (label, ex) =>
             {
                 Assert.NotNull(ex);
                 failed.Add(label);
-            });
+            }, ct);
 
         Assert.Equal(new[] { "Maintenance window" }, failed.ToArray());
         Func<FinOpsRecommendation, string> key = r => $"{r.Severity}|{r.Category}|{r.Finding}|{r.Detail}|{r.EstMonthlySavings}";
@@ -364,7 +364,7 @@ VALUES ($1, $2, $3, $4, $5,
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var idA = FinOpsRecommendationsGoldenLiveTests.ServerIdA;
-        var baseline = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, ct);
+        var baseline = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, cancellationToken: ct);
 
         /* Rows older than 24 hours raise a division by zero when the CPU column is projected. The 24-hour utilization
            read never touches them; the 7-day P95 read does, so only the inner fallback of the VM check fires. */
@@ -387,7 +387,7 @@ VALUES ($1, $2, $3, $4, $5,
 
         var failed = new System.Collections.Generic.List<string>();
         var after = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(
-            dataSource, idA, 1000m, TimeoutSeconds, ct, (label, _) => failed.Add(label));
+            dataSource, idA, 1000m, TimeoutSeconds, (label, _) => failed.Add(label), ct);
 
         Assert.DoesNotContain("VM right-sizing", failed);
         Assert.Contains(after, r => r.Category == "Hardware" && r.Finding.StartsWith("CPU:", StringComparison.Ordinal));
