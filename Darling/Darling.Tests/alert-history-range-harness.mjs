@@ -67,7 +67,7 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "alert-range-"));
 try {
   fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "panels.js", "mute-context.js", "views-api.js", "refresh-policy.js", "read-fields.js"]) {
+  for (const f of ["util.js", "panels.js", "mute-context.js", "views-api.js", "refresh-policy.js", "read-fields.js", "grid-tools.js"]) {
     if (fs.existsSync(path.join(jsDir, f))) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
   }
   fs.copyFileSync(path.join(jsDir, "pages", "alerts.js"), path.join(scratch, "pages", "alerts.js"));
