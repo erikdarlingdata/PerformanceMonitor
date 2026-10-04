@@ -116,7 +116,7 @@ public sealed class FinOpsIndexAnalysisViewLiveTests
         var dbs = DarlingMcpFinOpsTools.OrderIndexAnalysisDatabases(read.DatabaseRollups);
         Assert.Equal(dbs.Count, root.GetProperty("databases").GetArrayLength());
         for (var i = 0; i < dbs.Count; i++)
-            AssertSame(Elem(DarlingMcpFinOpsTools.IndexAnalysisRollupRow(dbs[i], true, withTimes.SnapshotTimes[dbs[i].DatabaseName!])), root.GetProperty("databases")[i], "database " + i);
+            AssertSame(Elem(DarlingMcpFinOpsTools.IndexAnalysisRollupRow(dbs[i], true, withTimes.SnapshotTimes[dbs[i].DatabaseId!.Value])), root.GetProperty("databases")[i], "database " + i);
         var recs = DarlingMcpFinOpsTools.OrderIndexAnalysisRecommendations(read.Recommendations);
         Assert.True(recs.Count > 0);
         Assert.Equal(recs.Count, root.GetProperty("recommendation_count").GetInt32());

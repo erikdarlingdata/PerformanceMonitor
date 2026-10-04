@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Darling.Storage.FinOps;
  */
 
 /// <summary>An index analysis and, per database name (case-insensitive), the naive-UTC instant its snapshot was collected.</summary>
-public sealed record IndexAnalysisWithSnapshotTimes(IndexCleanupAnalysisResult Result, IReadOnlyDictionary<string, DateTime> SnapshotTimes);
+public sealed record IndexAnalysisWithSnapshotTimes(IndexCleanupAnalysisResult Result, IReadOnlyDictionary<int, DateTime> SnapshotTimes);
 
 public static class DarlingFinOpsIndexAnalysisReader
 {
@@ -417,17 +417,19 @@ LIMIT 1";
     /// <summary>
     /// <see cref="GetIndexAnalysisAsync"/> plus when each database's snapshot was collected. The time rides beside the
     /// analysis result (the Common types are shared with Lite, which has no stored snapshot to date): a map from
-    /// database name to the naive-UTC instant of that database's newest snapshot. Names are unique within one SQL
-    /// Server instance, and each database's newest cycle carries exactly one, so the map has no collisions.
+    /// database id to the naive-UTC instant of that database's newest snapshot. It is keyed by id, as the analyzer
+    /// groups by id (<see cref="IndexCleanupRollup.DatabaseId"/>): a database that left collection scope keeps its last
+    /// snapshot, so a dropped-and-recreated (or restored-as-new) database can leave two ids sharing one name, and each
+    /// must carry its own time. Each id's newest cycle carries exactly one, so the map has no collisions.
     /// </summary>
     public static async Task<IndexAnalysisWithSnapshotTimes> GetIndexAnalysisWithSnapshotTimesAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
         var rows = await ReadIndexObjectStatsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
         var options = await GetIndexCleanupOptionsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken: cancellationToken);
-        var times = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        var times = new Dictionary<int, DateTime>();
         foreach (var row in rows)
         {
-            times[row.DatabaseName] = row.CollectionTime;
+            times[row.DatabaseId] = row.CollectionTime;
         }
 
         var inputs = rows.ConvertAll(MapToIndexInput);

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -18,6 +19,7 @@ using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Storage.FinOps;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -124,8 +126,8 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(ds, ServerA, 30, ct);
-        Assert.Equal(new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc), read.SnapshotTimes["db5"]);
-        Assert.Equal(new DateTime(2026, 1, 12, 12, 0, 0, DateTimeKind.Utc), read.SnapshotTimes["db6"]);
+        Assert.Equal(new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc), read.SnapshotTimes[DbX]);
+        Assert.Equal(new DateTime(2026, 1, 12, 12, 0, 0, DateTimeKind.Utc), read.SnapshotTimes[DbY]);
 
         var payload = await DarlingMcpFinOpsTools.GetFinOps(ds, "index_analysis", "srv", 24, 10, cancellationToken: ct);
         using var doc = JsonDocument.Parse(payload);
@@ -141,6 +143,61 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
         Assert.Equal(McpHelpers.FormatEffectiveStart(new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc)), stamped["db5"]);
         Assert.Equal(McpHelpers.FormatEffectiveStart(new DateTime(2026, 1, 12, 12, 0, 0, DateTimeKind.Utc)), stamped["db6"]);
         Assert.EndsWith("T12:00:00.0000000Z", stamped["db6"]);
+    }
+
+    /// <summary>Two database ids can share one name once a database leaves collection scope and is recreated: id 7 (left
+    /// scope, newest cycle four days back) and id 8 (live) are both "Shared", and id 9 is "shared" on a case-sensitive
+    /// instance. Each row carries ITS OWN time, through the reader map, get_finops captured_at and the viewer rollup rows.
+    /// Fixed anchors, never the wall clock.</summary>
+    [Fact]
+    public async Task TwoIdsSharingOneName_EachCarryTheirOwnSnapshotTime_AndANameDifferingByCaseStaysApart()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the latest-snapshot live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        if (await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct))
+        {
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await Exec(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerA, "srv", ct);
+        var t = new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Unspecified);
+        await Insert(connection, ServerA, 7, 1, "s7", t.AddDays(-4), 1, 10, ct, "Shared");
+        await Insert(connection, ServerA, 8, 1, "s8", t, 2, 20, ct, "Shared");
+        await Insert(connection, ServerA, 9, 1, "s9", t.AddDays(-1), 3, 30, ct, "shared");
+        await Exec(connection, "UPDATE index_object_stats SET index_type_desc = 'NONCLUSTERED', key_columns = '[a]', reserved_mb = 100, total_rows = 1000, "
+            + "is_unique = false, is_primary_key = false, is_disabled = false, user_seeks = 0, user_scans = 0, user_lookups = 0, user_updates = 5", ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var at7 = new DateTime(2026, 1, 11, 12, 0, 0, DateTimeKind.Utc);
+        var at8 = new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc);
+        var at9 = new DateTime(2026, 1, 14, 12, 0, 0, DateTimeKind.Utc);
+        var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(ds, ServerA, 30, ct);
+        Assert.Equal(at7, read.SnapshotTimes[7]);
+        Assert.Equal(at8, read.SnapshotTimes[8]);
+        Assert.Equal(at9, read.SnapshotTimes[9]);
+
+        var viewerRows = ViewerDataService.ProjectRollups(read.Result, read.SnapshotTimes).Where(r => r.Scope != "ALL DATABASES").ToList();
+        Assert.Equal(new[] { "Shared|" + at7.Ticks, "Shared|" + at8.Ticks, "shared|" + at9.Ticks },
+            viewerRows.Select(v => v.Scope + "|" + v.CollectionTimeUtc!.Value.Ticks).OrderBy(x => x, StringComparer.Ordinal).ToArray());
+
+        var payload = await DarlingMcpFinOpsTools.GetFinOps(ds, "index_analysis", "srv", 24, 10, cancellationToken: ct);
+        using var doc = JsonDocument.Parse(payload);
+        var stamped = doc.RootElement.GetProperty("databases").EnumerateArray()
+            .Select(d => d.GetProperty("database_name").GetString() + "|" + d.GetProperty("captured_at").GetString())
+            .OrderBy(s => s, StringComparer.Ordinal).ToArray();
+        Assert.Equal(new[]
+        {
+            "Shared|" + McpHelpers.FormatEffectiveStart(at7),
+            "Shared|" + McpHelpers.FormatEffectiveStart(at8),
+            "shared|" + McpHelpers.FormatEffectiveStart(at9),
+        }, stamped);
     }
 
     private static async Task<Dictionary<int, DateTime>> ReadStampsAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
@@ -176,12 +233,12 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
     /* user_seeks carries the row's identity; the tie-break row (collection_id 6) is seeded with 13, but the answer
        asserts 12 + 1 so the expected value reads as "the higher collection_id's value". */
     private static async Task Insert(NpgsqlConnection c, int serverId, int dbId, int indexId, string name,
-        DateTime at, long collectionId, long seeks, CancellationToken ct)
+        DateTime at, long collectionId, long seeks, CancellationToken ct, string? databaseName = null)
     {
         await using var insert = new NpgsqlCommand(
             "INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, "
             + "schema_name, object_id, table_name, index_id, index_name, user_seeks, partition_count) "
-            + "VALUES ($1, $2, $3, 'srv', 'db' || $4, $4, 'dbo', 100, 'T', $5, $6, $7, 1)", c);
+            + "VALUES ($1, $2, $3, 'srv', COALESCE($8, 'db' || $4), $4, 'dbo', 100, 'T', $5, $6, $7, 1)", c);
         insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = collectionId });
         insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = at });
         insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
@@ -189,6 +246,7 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
         insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = indexId });
         insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Varchar, Value = name });
         insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = seeks });
+        insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Varchar, Value = (object?)databaseName ?? DBNull.Value });
         await insert.ExecuteNonQueryAsync(ct);
     }
 

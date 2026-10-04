@@ -200,7 +200,7 @@ public sealed partial class DarlingMcpFinOpsTools
     /// </summary>
     internal static string BuildIndexAnalysisPayload(
         string serverName, IndexCleanupAnalysisResult result, int limit, string? databaseName, bool fullText, string? emptyStatus,
-        IReadOnlyDictionary<string, DateTime>? snapshotTimes = null)
+        IReadOnlyDictionary<int, DateTime>? snapshotTimes = null)
     {
         if (result.DatabaseRollups.Count == 0)
         {
@@ -249,7 +249,7 @@ public sealed partial class DarlingMcpFinOpsTools
             overall_workload_reason = filtered ? null : "workload counters are reported per database only, as sp_IndexCleanup does",
             database_count = dbs.Count,
             databases_truncated = dbs.Count > MaxIndexAnalysisDatabases,
-            databases = dbs.Take(MaxIndexAnalysisDatabases).Select(d => IndexAnalysisRollupRow(d, true, SnapshotTimeOf(snapshotTimes, d.DatabaseName))).ToList(),
+            databases = dbs.Take(MaxIndexAnalysisDatabases).Select(d => IndexAnalysisRollupRow(d, true, SnapshotTimeOf(snapshotTimes, d.DatabaseId))).ToList(),
             recommendation_count = ordered.Count,
             truncated = ordered.Count > limit,
             limit,
@@ -258,9 +258,9 @@ public sealed partial class DarlingMcpFinOpsTools
         }, McpHelpers.JsonOptions);
     }
 
-    private static DateTime? SnapshotTimeOf(IReadOnlyDictionary<string, DateTime>? times, string? databaseName)
+    private static DateTime? SnapshotTimeOf(IReadOnlyDictionary<int, DateTime>? times, int? databaseId)
     {
-        if (times == null || databaseName == null || !times.TryGetValue(databaseName, out var at))
+        if (times == null || databaseId == null || !times.TryGetValue(databaseId.Value, out var at))
         {
             return null;
         }

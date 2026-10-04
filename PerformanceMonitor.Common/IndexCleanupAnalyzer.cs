@@ -122,7 +122,7 @@ namespace PerformanceMonitor.Common
                 }
 
                 recommendations.AddRange(BuildRecommendations(perDatabaseAnalyzed, options));
-                databaseRollups.Add(BuildRollup(dbGroup.First().Src.DatabaseName, perDatabaseAnalyzed, options));
+                databaseRollups.Add(BuildRollup(dbGroup.First().Src.DatabaseName, dbGroup.Key, perDatabaseAnalyzed, options));
             }
 
             var ordered = recommendations
@@ -1098,7 +1098,7 @@ namespace PerformanceMonitor.Common
         //  Rollups + notes
         // ────────────────────────────────────────────────────────────────────────────────────────────
 
-        private static IndexCleanupRollup BuildRollup(string databaseName, List<WorkIndex> analyzed, IndexCleanupOptions options)
+        private static IndexCleanupRollup BuildRollup(string databaseName, int databaseId, List<WorkIndex> analyzed, IndexCleanupOptions options)
         {
             decimal unusedSize = 0, compMin = 0, compMax = 0;
             int disable = 0, merge = 0, compressable = 0, unused = 0;
@@ -1158,6 +1158,7 @@ namespace PerformanceMonitor.Common
             return new IndexCleanupRollup
             {
                 DatabaseName = databaseName,
+                DatabaseId = databaseId,
                 TablesAnalyzed = analyzed.Select(w => w.Src.ObjectId).Distinct().Count(),
                 IndexCount = analyzed.Count,
                 TotalSizeGb = totalSize,

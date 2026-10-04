@@ -166,7 +166,7 @@ public sealed partial class ViewerDataService
             _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>
-    /// The analysis plus when each database's snapshot was collected (naive UTC, keyed by database name). The times
+    /// The analysis plus when each database's snapshot was collected (naive UTC, keyed by database id). The times
     /// ride beside the result because the analyzer's types are shared with Lite, which has no stored snapshot to date.
     /// </summary>
     public Task<IndexAnalysisWithSnapshotTimes> GetIndexAnalysisWithSnapshotTimesAsync(int serverId, CancellationToken cancellationToken = default) =>
@@ -174,12 +174,28 @@ public sealed partial class ViewerDataService
             _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>Projects the analyzer recommendations into the detail-grid view-models; <paramref name="snapshotTimes"/> (when given) dates each row by its database's snapshot.</summary>
-    public static List<IndexCleanupRecommendationRow> ProjectRecommendations(IndexCleanupAnalysisResult result, IReadOnlyDictionary<string, DateTime>? snapshotTimes = null) =>
-        result.Recommendations.Select(r => new IndexCleanupRecommendationRow(r, SnapshotTimeOf(snapshotTimes, r.DatabaseName))).ToList();
-
-    private static DateTime? SnapshotTimeOf(IReadOnlyDictionary<string, DateTime>? times, string? databaseName)
+    public static List<IndexCleanupRecommendationRow> ProjectRecommendations(IndexCleanupAnalysisResult result, IReadOnlyDictionary<int, DateTime>? snapshotTimes = null)
     {
-        if (times == null || databaseName == null || !times.TryGetValue(databaseName, out var at))
+        /* A recommendation carries only the database NAME, and names can repeat across ids. Resolve it through this read's
+           rollups (which carry the id): the time is used only when exactly one id owns the name (Ordinal), else null. */
+        var idByName = new Dictionary<string, int?>(StringComparer.Ordinal);
+        foreach (var rollup in result.DatabaseRollups)
+        {
+            if (rollup.DatabaseName == null)
+            {
+                continue;
+            }
+
+            idByName[rollup.DatabaseName] = idByName.ContainsKey(rollup.DatabaseName) ? null : rollup.DatabaseId;
+        }
+
+        return result.Recommendations.Select(r => new IndexCleanupRecommendationRow(
+            r, r.DatabaseName != null && idByName.TryGetValue(r.DatabaseName, out var id) ? SnapshotTimeOf(snapshotTimes, id) : null)).ToList();
+    }
+
+    private static DateTime? SnapshotTimeOf(IReadOnlyDictionary<int, DateTime>? times, int? databaseId)
+    {
+        if (times == null || databaseId == null || !times.TryGetValue(databaseId.Value, out var at))
         {
             return null;
         }
@@ -191,13 +207,13 @@ public sealed partial class ViewerDataService
     /// Projects the analyzer rollups into the summary-grid view-models: the overall "ALL DATABASES" total first,
     /// then one row per database.
     /// </summary>
-    public static List<IndexCleanupRollupRow> ProjectRollups(IndexCleanupAnalysisResult result, IReadOnlyDictionary<string, DateTime>? snapshotTimes = null)
+    public static List<IndexCleanupRollupRow> ProjectRollups(IndexCleanupAnalysisResult result, IReadOnlyDictionary<int, DateTime>? snapshotTimes = null)
     {
         var rows = new List<IndexCleanupRollupRow>
         {
             new(result.OverallRollup, "ALL DATABASES"),
         };
-        rows.AddRange(result.DatabaseRollups.Select(r => new IndexCleanupRollupRow(r, r.DatabaseName ?? "", SnapshotTimeOf(snapshotTimes, r.DatabaseName))));
+        rows.AddRange(result.DatabaseRollups.Select(r => new IndexCleanupRollupRow(r, r.DatabaseName ?? "", SnapshotTimeOf(snapshotTimes, r.DatabaseId))));
         return rows;
     }
 }
