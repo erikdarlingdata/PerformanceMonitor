@@ -2745,6 +2745,119 @@ public class CrossAppGuardCiGateTests
         return Regex.IsMatch(path, rx.ToString());
     }
 
+    /// <summary>One job's text from build.yml: from its two-space-indented key to the next job's.</summary>
+    private static string JobBlock(string yaml, string jobKey)
+    {
+        var at = yaml.IndexOf("\n  " + jobKey + ":\n", StringComparison.Ordinal);
+        Assert.True(at >= 0, $"build.yml's '{jobKey}' job is gone — find where it moved before editing this test");
+        var rest = yaml[(at + 1)..];
+        var next = Regex.Match(rest[3..], "\n  [a-z][a-z0-9-]*:\n");
+        return next.Success ? rest[..(next.Index + 3)] : rest;
+    }
+
+    /// <summary>One step's text inside a job block: from its <c>- name:</c> line to the next step's.</summary>
+    private static string StepBlock(string job, string stepName)
+    {
+        var at = job.IndexOf("      - name: " + stepName + "\n", StringComparison.Ordinal);
+        Assert.True(at >= 0, $"the '{stepName}' step is gone — find where it moved before editing this test");
+        var rest = job[at..];
+        var next = rest.IndexOf("\n      - ", 1, StringComparison.Ordinal);
+        return next < 0 ? rest : rest[..next];
+    }
+
+    /// <summary>
+    /// The Lite shard job's four work steps all run on the scope step's answer and on nothing else, the scope
+    /// step picks <c>reads</c> only for a pull request whose diff reaches just the Darling trees, and only
+    /// shard 0 runs in that mode. These are the lines that make the narrow run narrow, so each is pinned as
+    /// text: a step that dropped its <c>if</c> would run the whole suite in every shard on a Darling-only
+    /// diff, and one that gated on a different condition would skip real work.
+    /// </summary>
+    [Fact]
+    public void TheLiteShardJob_GatesEveryWorkStepOnTheScopeStep_AndNarrowsOnlyOnAPullRequestInShardZero()
+    {
+        var job = JobBlock(ReadBuildYaml(RepoRoot()), "lite-tests");
+
+        foreach (var name in new[] { "Setup .NET 10.0", "Restore Lite.Tests", "Build Lite.Tests", "Run Lite tests (shard)" })
+        {
+            Assert.Contains(
+                "\n        if: steps.scope.outputs.run == 'true'\n",
+                StepBlock(job, name),
+                StringComparison.Ordinal);
+        }
+
+        var scope = StepBlock(job, "Decide how much of the Lite suite runs");
+        Assert.Contains("id: scope", scope, StringComparison.Ordinal);
+
+        /* The ladder, in order: any Lite, core, root or linked-file change is the full suite; a Darling-only
+           diff is full on anything but a pull request and `reads` on a pull request; otherwise nothing. */
+        var ladder = new[]
+        {
+            "if [ \"${LITE}\" = \"true\" ] || [ \"${CORE}\" = \"true\" ] || [ \"${ROOT}\" = \"true\" ] || [ \"${LINKED}\" = \"true\" ]; then\n            mode=full",
+            "elif [ \"${DARLING_READS}\" = \"true\" ] && [ \"${EVENT_NAME}\" != \"pull_request\" ]; then\n            mode=full",
+            "elif [ \"${DARLING_READS}\" = \"true\" ]; then\n            mode=reads",
+            "else\n            mode=none",
+        };
+        var position = -1;
+        foreach (var rung in ladder)
+        {
+            var found = scope.IndexOf(rung, StringComparison.Ordinal);
+            Assert.True(found > position, $"the scope step's mode ladder lost or reordered this rung:\n{rung}");
+            position = found;
+        }
+
+        /* Shard 0 alone runs the narrow selection; every shard runs a full one. */
+        Assert.Contains("run=false\n", scope, StringComparison.Ordinal);
+        Assert.Contains(
+            "if [ \"${mode}\" = \"full\" ] || { [ \"${mode}\" = \"reads\" ] && [ \"${SHARD}\" = \"0\" ]; }; then\n            run=true",
+            scope,
+            StringComparison.Ordinal);
+        Assert.Contains("SHARD: ${{ matrix.shard }}", scope, StringComparison.Ordinal);
+
+        /* And the run step honours the mode: the trait selection only in `reads`, the hash cut otherwise. */
+        var run = StepBlock(job, "Run Lite tests (shard)");
+        Assert.Contains("LITE_SCOPE_MODE: ${{ steps.scope.outputs.mode }}", run, StringComparison.Ordinal);
+        Assert.Contains("if ($env:LITE_SCOPE_MODE -eq 'reads')", run, StringComparison.Ordinal);
+        Assert.Contains("Get-LiteClasses @('-trait', 'Reads=Darling')", run, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A pull request whose CI the gate declined (a draft, or one carrying the merge-train label) must not
+    /// read as passing: a skipped job counts as a pass for a required check. <c>build</c> still starts and
+    /// fails its first step, and both result jobs exit 1 on a pull request whose gate output is not true.
+    /// </summary>
+    [Fact]
+    public void ADeclinedRun_FailsBuildAndBothResultJobs_InsteadOfReadingAsGreen()
+    {
+        var yaml = ReadBuildYaml(RepoRoot());
+        const string message =
+            "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). "
+          + "It can be merged only by an admin override after a merge train covered it.";
+
+        foreach (var jobKey in new[] { "darling-pg-result", "lite-tests-result" })
+        {
+            var job = JobBlock(yaml, jobKey);
+            Assert.Contains("GATE_RUN: ${{ needs.gate.outputs.run }}", job, StringComparison.Ordinal);
+            Assert.Contains("EVENT_NAME: ${{ github.event_name }}", job, StringComparison.Ordinal);
+            Assert.Contains(
+                "if [ \"${EVENT_NAME}\" = \"pull_request\" ] && [ \"${GATE_RUN}\" != \"true\" ]; then\n"
+              + "            echo \"" + message + "\"\n            exit 1\n          fi\n",
+                job,
+                StringComparison.Ordinal);
+            Assert.Contains("needs: [gate, ", job, StringComparison.Ordinal);
+        }
+
+        /* `build` is a required check that would otherwise be merely skipped. It must start whatever the
+           gate said, and its first step must fail when the gate declined the run. */
+        var build = JobBlock(yaml, "build");
+        Assert.Contains("\n    if: ${{ !cancelled() }}\n", build, StringComparison.Ordinal);
+        var first = build[build.IndexOf("    steps:\n", StringComparison.Ordinal)..];
+        first = first[..first.IndexOf("\n      - uses: actions/checkout@v7", StringComparison.Ordinal)];
+        Assert.Contains("- name: Fail when CI did not run", first, StringComparison.Ordinal);
+        Assert.Contains("if: ${{ needs.gate.outputs.run != 'true' }}", first, StringComparison.Ordinal);
+        Assert.Contains(message, first, StringComparison.Ordinal);
+        Assert.Contains("exit 1", first, StringComparison.Ordinal);
+    }
+
     private static string ReadBuildYaml(string repo) =>
         File.ReadAllText(Path.Combine(repo, ".github", "workflows", "build.yml"))
             .Replace("\r\n", "\n", StringComparison.Ordinal);

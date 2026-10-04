@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using Darling.Tests;
 using Xunit;
@@ -37,16 +38,30 @@ namespace Lite.Tests;
 /// comments and prose do not count) that names a path under <c>Darling/</c> or one of its projects, or the
 /// bare segment <c>"Darling"</c> handed to <c>Path.Combine</c> or a segment array. A path assembled from a
 /// constant declared in ANOTHER file is not visible to this scan; the read is then found where the constant's
-/// text sits only if that file is itself a test class, which is the limit of a source scan.</para>
+/// text sits only if that file is itself a test class, which is the limit of a source scan. A class that
+/// enumerates files RECURSIVELY from the repo root (<c>RepoRoot()</c>, or a variable assigned from it, as the
+/// first argument of <c>EnumerateFiles</c>/<c>GetFiles</c> with <c>AllDirectories</c> or a recursive
+/// <c>EnumerationOptions</c>) reads every Darling file without naming one, so it counts as a Darling read
+/// too.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
 public sealed class DarlingReadsTraitGuardTests
 {
     private const string TraitText = "[Trait(\"Reads\", \"Darling\")]";
 
+    /* Indented as well as column 0, so a class inside a block namespace or nested in another class is seen. A
+       nested class's methods belong to the nested class here, and the trait attribute sits directly above
+       that declaration, which is where HasTraitAbove looks. */
     private static readonly Regex s_classDeclaration = new(
-        @"^(?:public|internal)\s+(?:(?:sealed|static|abstract|partial)\s+)*class\s+(?<name>\w+)",
+        @"^[ \t]*(?:(?:public|internal|private|protected|sealed|static|abstract|partial)\s+)*class\s+(?<name>\w+)",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex s_enumerationCall = new(
+        @"\b(?:EnumerateFiles|EnumerateFileSystemEntries|EnumerateDirectories|GetFiles|GetFileSystemEntries|GetDirectories)\s*\(",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex s_repoRootExpression = new(
+        @"^(?:\w+\.)*(?:RepoRoot|FindRepoRoot)\(\s*\)$", RegexOptions.CultureInvariant);
 
     private static readonly Regex s_testAttribute = new(
         @"\[(?:Fact|Theory)\b", RegexOptions.CultureInvariant);
@@ -65,6 +80,66 @@ public sealed class DarlingReadsTraitGuardTests
         Assert.False(ReadsDarling("Assert.Contains(\"Darling: an unseeded store\", head);"));
         Assert.False(ReadsDarling("var p = \"Lite/Services/X.cs\";"));
         Assert.False(ReadsDarling("var p = \"Lite.Tests/Darling.txt\";"));
+    }
+
+    [Fact]
+    public void TheDetector_SeesARecursiveEnumerationFromTheRepoRoot_AndNothingNarrower()
+    {
+        Assert.True(ReadsDarling(
+            "var root = RepoRoot();\nvar f = Directory.EnumerateFiles(root, \"*.cs\", SearchOption.AllDirectories);"));
+        Assert.True(ReadsDarling(
+            "var f = Directory.GetFiles(ParitySource.RepoRoot(), \"*.csproj\", SearchOption.AllDirectories);"));
+        Assert.True(ReadsDarling(
+            "string root = ParitySource.RepoRoot();\nvar o = new EnumerationOptions { RecurseSubdirectories = true };\n"
+          + "var f = Directory.EnumerateFiles(root, \"*.props\", o);"));
+
+        /* Not the root, not recursive, or no enumeration at all. */
+        Assert.False(ReadsDarling(
+            "var root = RepoRoot();\nvar f = Directory.EnumerateFiles(Path.Combine(root, \"Lite\"), \"*.cs\", SearchOption.AllDirectories);"));
+        Assert.False(ReadsDarling(
+            "var root = RepoRoot();\nvar f = Directory.EnumerateFiles(root, \"*.cs\", SearchOption.TopDirectoryOnly);"));
+        Assert.False(ReadsDarling(
+            "var root = RepoRoot();\nvar f = Directory.EnumerateFiles(root, \"*.cs\");"));
+        Assert.False(ReadsDarling(
+            "var dir = Path.Combine(RepoRoot(), \"Lite.Tests\");\nvar f = Directory.GetFiles(dir, \"*.cs\", SearchOption.AllDirectories);"));
+        Assert.False(ReadsDarling(
+            "var root = RepoRoot();\n// Directory.EnumerateFiles(root, \"*.cs\", SearchOption.AllDirectories)\nvar a = 1;"));
+    }
+
+    [Fact]
+    public void TheGuard_FlagsAClassThatEnumeratesTheRepoRootAndCarriesNoTrait()
+    {
+        const string untagged = "namespace Lite.Tests;\n\n"
+          + "public sealed class SyntheticWholeRepoScanTests\n{\n"
+          + "    [Fact]\n"
+          + "    public void Scan()\n"
+          + "    {\n"
+          + "        var root = ParitySource.RepoRoot();\n"
+          + "        var all = Directory.EnumerateFiles(root, \"*.cs\", SearchOption.AllDirectories);\n"
+          + "    }\n"
+          + "}\n";
+        var tagged = untagged.Replace(
+            "public sealed class", TraitText + "\npublic sealed class", StringComparison.Ordinal);
+
+        Assert.Equal(new[] { "SyntheticWholeRepoScanTests" }, UntaggedReaders(untagged));
+        Assert.Empty(UntaggedReaders(tagged));
+    }
+
+    [Fact]
+    public void TheClassScan_SeesIndentedAndNestedClasses()
+    {
+        const string text = "namespace Lite.Tests\n{\n"
+          + "    [Trait(\"Reads\", \"Darling\")]\n"
+          + "    public sealed class InBlockNamespaceTests\n    {\n        [Fact]\n        public void A() { }\n    }\n\n"
+          + "    public sealed class Outer\n    {\n"
+          + "        public sealed class NestedTests\n        {\n            [Fact]\n            public void B() { }\n        }\n"
+          + "    }\n}\n";
+
+        var seen = TestClasses(text).ToDictionary(c => c.Name, c => c.HasTrait);
+
+        Assert.Equal(2, seen.Count);
+        Assert.True(seen["InBlockNamespaceTests"]);
+        Assert.False(seen["NestedTests"]);
     }
 
     [Fact]
@@ -160,8 +235,95 @@ public sealed class DarlingReadsTraitGuardTests
         Assert.Equal(linked, named);
     }
 
+    /// <summary>The test classes in <paramref name="text"/> that read Darling and lack the trait.</summary>
+    private static List<string> UntaggedReaders(string text) =>
+        ReadsDarling(text)
+            ? TestClasses(text).Where(c => !c.HasTrait).Select(c => c.Name).ToList()
+            : new List<string>();
+
+    /// <summary>Whether the text reads a Darling path: a string literal that names one, or a recursive
+    /// enumeration that starts at the repo root.</summary>
+    private static bool ReadsDarling(string text) =>
+        NamesADarlingPath(text) || EnumeratesTheRepoRootRecursively(text);
+
+    /// <summary>Whether a call such as <c>Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)</c>
+    /// starts at the repo root. The first argument counts when it is a repo-root call (<c>RepoRoot()</c>) or a
+    /// variable the file assigns from one; the call is recursive when its arguments say
+    /// <c>AllDirectories</c> or pass an options value and the file sets <c>RecurseSubdirectories = true</c>.</summary>
+    private static bool EnumeratesTheRepoRootRecursively(string text)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+        var rootVariables = new HashSet<string>(StringComparer.Ordinal);
+        foreach (Match m in Regex.Matches(
+                     code, @"\b(?<name>\w+)\s*=\s*(?<rhs>[^;=]+);", RegexOptions.CultureInvariant))
+        {
+            if (s_repoRootExpression.IsMatch(m.Groups["rhs"].Value.Trim()))
+            {
+                rootVariables.Add(m.Groups["name"].Value);
+            }
+        }
+
+        var recursiveOptions = Regex.IsMatch(code, @"RecurseSubdirectories\s*=\s*true", RegexOptions.CultureInvariant);
+
+        foreach (Match call in s_enumerationCall.Matches(code))
+        {
+            var args = CallArguments(code, call.Index + call.Length);
+            if (args.Count == 0)
+            {
+                continue;
+            }
+
+            var first = args[0].Trim();
+            var fromRoot = s_repoRootExpression.IsMatch(first) || rootVariables.Contains(first);
+            var recursive = args.Any(a => a.Contains("AllDirectories", StringComparison.Ordinal))
+                || (recursiveOptions && args.Count >= 3 && !args[^1].Contains("TopDirectoryOnly", StringComparison.Ordinal));
+
+            if (fromRoot && recursive)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The top-level, comma-separated arguments of the call whose opening parenthesis sits just
+    /// before <paramref name="start"/>; empty when the parentheses do not balance.</summary>
+    private static List<string> CallArguments(string code, int start)
+    {
+        var args = new List<string>();
+        var depth = 0;
+        var from = start;
+
+        for (var i = start; i < code.Length; i++)
+        {
+            var c = code[i];
+            if (c is '(' or '[' or '{')
+            {
+                depth++;
+            }
+            else if (c is ')' or ']' or '}')
+            {
+                if (depth == 0)
+                {
+                    args.Add(code[from..i]);
+                    return args;
+                }
+
+                depth--;
+            }
+            else if (c == ',' && depth == 0)
+            {
+                args.Add(code[from..i]);
+                from = i + 1;
+            }
+        }
+
+        return new List<string>();
+    }
+
     /// <summary>Whether the text holds a string literal that reads a Darling path.</summary>
-    private static bool ReadsDarling(string text)
+    private static bool NamesADarlingPath(string text)
     {
         foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))
         {
@@ -206,22 +368,46 @@ public sealed class DarlingReadsTraitGuardTests
             || before.Contains("new string[]", StringComparison.Ordinal);
     }
 
-    /// <summary>Every top-level class in the file that declares a test, with whether the attribute sits
-    /// directly above it.</summary>
+    /// <summary>Every class in the file (top-level, in a block namespace, or nested) that declares a test of
+    /// its own, with whether the trait is on it or on a class that encloses it. A nested helper class that
+    /// declares no test is not a test class, and the tests of an enclosing class are not the nested class's.</summary>
     private static IEnumerable<(string Name, bool HasTrait)> TestClasses(string text)
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(text);
-        var matches = s_classDeclaration.Matches(code);
+        var declarations = new List<(string Name, int Index, int Open, int End)>();
 
-        for (var i = 0; i < matches.Count; i++)
+        foreach (Match m in s_classDeclaration.Matches(code))
         {
-            var end = i + 1 < matches.Count ? matches[i + 1].Index : code.Length;
-            if (!s_testAttribute.IsMatch(code[matches[i].Index..end]))
+            var open = code.IndexOf('{', m.Index);
+            if (open < 0)
             {
                 continue;
             }
 
-            yield return (matches[i].Groups["name"].Value, HasTraitAbove(text, matches[i].Index));
+            declarations.Add((m.Groups["name"].Value, m.Index, open, open + CSharpSourceWalker.BraceBalanced(code, open).Length));
+        }
+
+        foreach (var d in declarations)
+        {
+            var own = new StringBuilder(code[d.Open..d.End]);
+            foreach (var nested in declarations.Where(n => n.Index > d.Open && n.End <= d.End))
+            {
+                for (var i = nested.Index - d.Open; i < nested.End - d.Open; i++)
+                {
+                    own[i] = ' ';
+                }
+            }
+
+            if (!s_testAttribute.IsMatch(own.ToString()))
+            {
+                continue;
+            }
+
+            var traited = declarations
+                .Where(e => e.Index <= d.Index && e.End >= d.End)
+                .Any(e => HasTraitAbove(text, e.Index));
+
+            yield return (d.Name, traited);
         }
     }
 

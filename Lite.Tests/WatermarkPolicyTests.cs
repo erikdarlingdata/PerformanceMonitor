@@ -267,8 +267,8 @@ public sealed class WatermarkPolicyTests
             .Replace("\r\n", "\n", StringComparison.Ordinal);
 
         /* #3887: the filter that gates the SUITE is the lite-tests matrix job's 'lite_shard' — a
-           copy of 'lite' (split with 'darling_reads_shard'), pinned equal by CrossAppGuardCiGateTests. This pin follows the
-           suite rather than the name, because what it protects is the Darling Service tree REACHING the
+           copy of 'lite' (split with 'darling_reads_shard'), pinned equal by CrossAppGuardCiGateTests. This pin
+           follows the suite rather than the name, because what it protects is the Darling Service tree REACHING the
            tests; 'lite' itself still gates the Lite build and publish in the build job. */
         var at = yaml.IndexOf("\n            darling_reads_shard:\n", StringComparison.Ordinal);
         Assert.True(at > 0, "build.yml's 'darling_reads_shard' path filter is gone — find where it moved before editing this test");
@@ -288,9 +288,25 @@ public sealed class WatermarkPolicyTests
            — and IndexOf on the prefix finds the release-only one, whose `if` is the release guard and
            carries no filter at all. That is exactly how this pin first went red on the change that split
            the suite, which is the pin working. */
-        var step = yaml.IndexOf("name: Decide how much of the Lite suite runs", StringComparison.Ordinal);
-        Assert.True(step > 0, "the 'Decide how much of the Lite suite runs' step is gone — find where it moved before editing this test");
-        Assert.Contains("steps.filter.outputs.darling_reads_shard", yaml[step..(step + 1600)], StringComparison.Ordinal);
+        var job = yaml.IndexOf("\n  lite-tests:\n", StringComparison.Ordinal);
+        Assert.True(job > 0, "the 'lite-tests' job is gone — find where it moved before editing this test");
+
+        var scope = yaml.IndexOf("- name: Decide how much of the Lite suite runs\n", job, StringComparison.Ordinal);
+        Assert.True(scope > 0, "the 'Decide how much of the Lite suite runs' step is gone — find where it moved before editing this test");
+        var scopeEnd = yaml.IndexOf("\n      - name: ", scope, StringComparison.Ordinal);
+        Assert.Contains(
+            "DARLING_READS: ${{ steps.filter.outputs.darling_reads_shard }}",
+            yaml[scope..scopeEnd],
+            StringComparison.Ordinal);
+
+        /* The sharded step runs only when the scope step says this leg has work, which for a Darling-only
+           diff is the `reads` selection in shard 0. */
+        var run = yaml.IndexOf("- name: Run Lite tests (shard)\n", job, StringComparison.Ordinal);
+        Assert.True(run > 0, "the 'Run Lite tests (shard)' step is gone — find where it moved before editing this test");
+        Assert.Contains(
+            "\n        if: steps.scope.outputs.run == 'true'\n",
+            yaml[run..(run + 200)],
+            StringComparison.Ordinal);
     }
 
     /// <summary>The repo root, located by walking up from this file's compile-time path — the same idiom

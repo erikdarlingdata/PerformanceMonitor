@@ -58,9 +58,13 @@ jobs:
   #   - a draft pull request: never. Marking it ready starts the run (`ready_for_review`).
   #   - any other pull request: yes.
   #
-  # A skipped job reports as skipped, which satisfies a required check; the two result jobs below
-  # (`Darling PostgreSQL tests`, `Lite tests (result)`) still run and report success when their matrix
-  # was skipped. No job ends failed because of this gate.
+  # A skipped job reports as skipped, and GitHub counts skipped as passing for a required check. A run
+  # the gate declined therefore must not read as green, so three jobs turn it into a FAILURE on a pull
+  # request: `build` (its first step), `Darling PostgreSQL tests` and `Lite tests (result)`. Those are the
+  # required checks, and each keeps its own name. The failure is the intended outcome: a draft or
+  # merge-train pull request shows red until it is marked ready (or, for a merge-train member, until an
+  # admin merges it after the train covered it). Branch protection does not bind admins, so
+  # `gh pr merge --admin` still works.
   gate:
     name: Decide whether CI runs
     runs-on: ubuntu-latest
@@ -101,8 +105,11 @@ jobs:
 
   build:
     needs: gate
-    if: ${{ needs.gate.outputs.run == 'true' }}
-    runs-on: windows-latest
+    # `build` is a required check, so it has to run to report anything but "skipped" (which counts as
+    # passing). When the gate declines the run the job still starts, on a cheap Linux runner, and its
+    # first step fails; no later step has an `always()`/`failure()` condition, so the rest are skipped.
+    if: ${{ !cancelled() }}
+    runs-on: ${{ needs.gate.outputs.run == 'true' && 'windows-latest' || 'ubuntu-latest' }}
 
     # Whether THIS job ran Darling.Tests, taken from the step's own outcome rather than restated as
     # a copy of the step's path gate. The darling-tree-guards job at the bottom of this file runs
@@ -119,6 +126,15 @@ jobs:
       docs-fastpath: ${{ steps.fastpath.outputs.engaged }}
 
     steps:
+      - name: Fail when CI did not run
+        if: ${{ needs.gate.outputs.run != 'true' }}
+        shell: bash
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: |
+          echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it. (gate result: ${GATE_RESULT})"
+          exit 1
+
       - uses: actions/checkout@v7
 
       - name: Detect changed paths
@@ -1392,6 +1408,8 @@ jobs:
         env:
           RESULT: ${{ needs.darling-pg.result }}
           GATE_RESULT: ${{ needs.gate.result }}
+          GATE_RUN: ${{ needs.gate.outputs.run }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           # A gate that did not succeed leaves every job it feeds skipped, which would read as green here.
@@ -1399,11 +1417,16 @@ jobs:
             echo "::error title=CI gate failed::needs.gate.result='${GATE_RESULT}' - the job that decides whether CI runs did not succeed, so nothing ran. Re-run the workflow."
             exit 1
           fi
+          # A declined run (draft or merge-train) leaves every job skipped, which would also read as green.
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ "${GATE_RUN}" != "true" ]; then
+            echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it."
+            exit 1
+          fi
           case "${RESULT}" in
             success)
               echo "::notice title=Darling PG shards green::Every shard succeeded, or the Darling gate skipped the suite on all of them." ;;
             skipped)
-              echo "::notice title=Darling PG shards skipped::The matrix job did not run at all (a draft or merge-train pull request skips CI)." ;;
+              echo "::notice title=Darling PG shards skipped::The matrix job did not run at all (the release event does not run the PG tests)." ;;
             *)
               echo "::error title=Darling PG shards failed::needs.darling-pg.result='${RESULT}' - at least one shard failed or was cancelled. The suite has NOT passed on this commit; read the failing shard's log."
               exit 1 ;;
@@ -1956,6 +1979,8 @@ jobs:
         env:
           RESULT: ${{ needs.lite-tests.result }}
           GATE_RESULT: ${{ needs.gate.result }}
+          GATE_RUN: ${{ needs.gate.outputs.run }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           # A gate that did not succeed leaves every job it feeds skipped, which would read as green here.
@@ -1963,11 +1988,16 @@ jobs:
             echo "::error title=CI gate failed::needs.gate.result='${GATE_RESULT}' - the job that decides whether CI runs did not succeed, so nothing ran. Re-run the workflow."
             exit 1
           fi
+          # A declined run (draft or merge-train) leaves every job skipped, which would also read as green.
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ "${GATE_RUN}" != "true" ]; then
+            echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it."
+            exit 1
+          fi
           case "${RESULT}" in
             success)
               echo "::notice title=Lite shards green::All four class-hash shards succeeded (or every leg's filters said the Lite suite is untouched by this diff)." ;;
             skipped)
-              echo "::notice title=Lite shards skipped::The matrix job itself was skipped: the release guard does it (releases run the whole suite unsharded in the build job), and so does the gate for a draft or merge-train pull request." ;;
+              echo "::notice title=Lite shards skipped::The matrix job itself was skipped, which only the release guard does - and releases run the whole suite unsharded in the build job." ;;
             *)
               echo "::error title=Lite shards failed::needs.lite-tests.result='${RESULT}' - at least one shard failed or was cancelled. The suite has NOT passed on this commit."
               exit 1 ;;
