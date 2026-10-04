@@ -69,6 +69,7 @@ public enum QueryWindowRelation
     /* The Job History tab (#4966): the run history copied from msdb. */
     JobHistory,
 
+    /* The Latches & Spinlocks tab's two trend charts (#4966): the cumulative-delta tables the trends read. */
     LatchStats,
     SpinlockStats
 }
@@ -98,6 +99,8 @@ public partial class LocalDataService
         QueryWindowRelation.WaitingTasks => "v_waiting_tasks",
         QueryWindowRelation.MemoryPressureEvents => "v_memory_pressure_events",
         QueryWindowRelation.JobHistory => "v_job_history",
+        QueryWindowRelation.LatchStats => "v_latch_stats",
+        QueryWindowRelation.SpinlockStats => "v_spinlock_stats",
         _ => throw new ArgumentOutOfRangeException(nameof(relation), relation, "unknown QueryWindowRelation")
     };
 
@@ -133,6 +136,10 @@ public partial class LocalDataService
         /* The Job History tab (#4966). job_history holds a row only when an Agent job ran, and the first collection copies the
            history msdb already holds, so a quiet start is covered by the collector's runs, not by a row near the window's start. */
         QueryWindowRelation.JobHistory => "job_history",
+        /* The Latches & Spinlocks trends (#4966): a flat zero is drawn wherever the read is empty, and the first sample of a
+           class has no delta, so a collector's runs (not the oldest row) say the store covered the window's start. */
+        QueryWindowRelation.LatchStats => "latch_stats",
+        QueryWindowRelation.SpinlockStats => "spinlock_stats",
         _ => null
     };
 
