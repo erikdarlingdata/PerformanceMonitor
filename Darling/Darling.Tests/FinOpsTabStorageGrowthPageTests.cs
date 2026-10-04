@@ -55,7 +55,8 @@ public sealed class FinOpsTabStorageGrowthPageTests
     /// <summary>Every shown key is emitted by the row; the shown count equals the emitted count less the listed deliberate omissions.</summary>
     private static void AssertKeysMatchRow(string constName, string method, string close, int emittedCount, params string[] omitted)
     {
-        var keys = Keys(constName);
+        // captured_at is the indexes section's one snapshot time, copied onto each row by the page, so the row function does not emit it.
+        var keys = Keys(constName).Where(k => k != "captured_at").ToList();
         var row = RowSlice(method, close);
         foreach (var key in keys)
             Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", row);
@@ -102,6 +103,22 @@ public sealed class FinOpsTabStorageGrowthPageTests
         AssertKeysMatchRow("INDEX_COLUMNS", "StorageGrowthIndexRow", "\n    };", 15, "database_name", "schema_name", "table_name", "index_id");
 
     [Fact]
+    public void TheIndexCollectedColumnIsTheEnvelopeSnapshotTimeCopiedOntoEachRow()
+    {
+        // The read stamps one captured_at on the indexes section, not on each row (the desktop's Collected column, #5079).
+        Assert.Contains("captured_at: data.indexes.captured_at ?? null", Tab());
+        Assert.Contains("{ key: \"captured_at\", label: \"Collected\", format: \"time\" },", Tab());
+        Assert.Matches("(?m)^\\s+captured_at = ", ToolSource());
+    }
+
+    [Fact]
+    public void TheObjectViewCarriesTheDesktopsReservationNote()
+    {
+        Assert.Contains("Object / reserved footprint (daily). This is per-object reservation, not file allocation \\u2014 it may not fully explain a database's file-level growth (log / free space).", Tab());
+        Assert.Contains("noticeStrip(OBJECT_GROWTH_NOTE)", Tab());
+    }
+
+    [Fact]
     public void TheColumnsAreInTheDesktopGridOrder()
     {
         // Databases grid: FinOpsTab.xaml FinOpsStorageGrowthDataGrid (~:541-558), Note last.
@@ -109,7 +126,7 @@ public sealed class FinOpsTabStorageGrowthPageTests
         // Objects grid: FinOpsTab.xaml FinOpsObjectGrowthDetailGrid (~:571-583).
         Assert.Equal("schema_name,table_name,reserved_mb,used_mb,total_rows,index_count,growth_mb,growth_pct,daily_growth_rate_mb", string.Join(",", Keys("OBJECT_COLUMNS")));
         // Indexes grid: FinOpsTab.xaml FinOpsObjectIndexDetailGrid (~:590-601).
-        Assert.Equal("index_name,classification,index_type_desc,reserved_mb,total_rows,user_seeks,user_scans,user_lookups,total_reads,user_updates,last_user_access_server_local", string.Join(",", Keys("INDEX_COLUMNS")));
+        Assert.Equal("index_name,classification,index_type_desc,reserved_mb,total_rows,user_seeks,user_scans,user_lookups,total_reads,user_updates,last_user_access_server_local,captured_at", string.Join(",", Keys("INDEX_COLUMNS")));
     }
 
     [Fact]

@@ -27,7 +27,21 @@ public sealed class FinOpsTabHighImpactPageTests
     [Fact]
     public void TheTabReadsGetFinOpsWithTheHighImpactViewWindowAndLimit()
     {
-        Assert.Contains("readTool(\"get_finops\", { server, view: \"high_impact\", hours: HOURS, limit: LIMIT }, ctx && ctx.signal)", Tab());
+        Assert.Contains("readTool(\"get_finops\", { server, view: \"high_impact\", hours, limit: LIMIT }, ctx && ctx.signal)", Tab());
+    }
+
+    [Fact]
+    public void ThePickerOffersTheDesktopWindowsAndTheStateIsKeptPerServer()
+    {
+        var tab = Tab();
+        var pairs = Regex.Matches(tab, "\\{ value: (\\d+), label: \"([^\"]+)\" \\}").Select(m => m.Groups[1].Value + "=" + m.Groups[2].Value);
+        Assert.Equal("1=Last 1 hour,4=Last 4 hours,12=Last 12 hours,24=Last 24 hours,168=Last 7 days", string.Join(",", pairs));
+        Assert.Contains("pickerControl(\"Window\", WINDOWS, start,", tab);
+        Assert.Contains("const chosenHours = new Map();", tab);
+        Assert.Contains("chosenHours.set(server, hours);", tab);
+        Assert.Contains("chosenHours.get(server) ?? HOURS", tab);
+        Assert.Contains("(hours) => load(hours)", tab);
+        Assert.DoesNotContain("innerHTML", tab);
     }
 
     [Fact]
