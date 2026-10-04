@@ -67,8 +67,5 @@ tr.mute-rules-highlight { outline: 2px solid var(--accent); }
 .range-custom[hidden] { display: none; }
 .range-custom-input { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 0.15rem 0.3rem; font-size: 0.78rem; }
 .range-custom-error { color: var(--err); font-size: 0.78rem; }
-/* Copy and CSV strip above a data table (#4843). */
-.grid-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
-.grid-tools .grid-tool { font-size: 12px; padding: 2px 8px; }
-.grid-tools-status { font-size: 12px; opacity: 0.8; margin-left: 6px; }
-td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* Alert History (#4843): a dismissed row, shown when "Show dismissed" is on. */
+tr.alert-dismissed { opacity: 0.55; font-style: italic; }

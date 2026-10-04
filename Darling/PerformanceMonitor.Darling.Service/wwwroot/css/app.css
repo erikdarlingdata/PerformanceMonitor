@@ -424,6 +424,12 @@ table.data td.sev-Warning { color: var(--warn); }
 table.data td.sev-Critical { color: var(--err); }
 table.data td.sev-Healthy { color: var(--ok); }
 
+/* Copy and CSV strip above a data table (#4843). */
+.grid-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
+.grid-tools .grid-tool { font-size: 12px; padding: 2px 8px; }
+.grid-tools-status { font-size: 12px; opacity: 0.8; margin-left: 6px; }
+td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
+
 /* ─────────────────────────── band list ─────────────────────────── */
 
 .bandlist { display: flex; flex-direction: column; gap: 0.4rem; }
@@ -781,6 +787,8 @@ table.data td.sev-Healthy { color: var(--ok); }
   z-index: 20;
 }
 #statusbar .sb-sep { color: var(--border); }
+/* A collection state that is not ok reads as a warning. */
+#statusbar .sb-warn { color: var(--warn, #e0a030); font-weight: 600; }
 #server-list { padding-bottom: 34px; }
 
 /* ─────────────────────────── alert status cell (collapsed channel/sent/muted/error) ─────────────────────────── */
@@ -1114,3 +1122,10 @@ pre.code {
 .heat-band-5 { color: var(--bg); background: rgba(46, 174, 241, 0.65); }
 .heat-band-6 { color: var(--bg); background: rgba(46, 174, 241, 0.76); }
 .heat-band-7 { color: var(--bg); background: rgba(46, 174, 241, 0.87); }
+
+/* ─────────────────────────── analysis Recommendations tab ─────────────────────────── */
+
+.reco-group { margin-bottom: 0.6rem; }
+.reco-card { margin: 0.5rem 0; }
+.reco-fix { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-dark); padding: 0.6rem; border-radius: 4px; }
+.reco-actions { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
