@@ -16,7 +16,7 @@
  * this string; keep it as the single occurrence in wwwroot.
  */
 
-import { el, parseUtc, axisTime, emptyStrip } from "./util.js";
+import { el, mount, parseUtc, axisTime, emptyStrip } from "./util.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -907,4 +907,100 @@ function niceScale(min, max, maxTicks, clampMax, integer = false) {
     ticks.push(v > niceMax ? niceMax : v);
   }
   return { min: niceMin, max: niceMax, step, ticks };
+}
+
+
+/* ─────────────────────────── client-side brush zoom ─────────────────────────── */
+
+/* The zoom each zoomable chart holds, at MODULE scope so the 60 s poll's rebuild of the panel grid re-applies it.
+   Keyed by chart identity (a title plus its read); each entry remembers the scope (server + the page's preset
+   range) it was made under, and a lookup under any other scope drops it — so switching server or range starts
+   every chart at its full domain. Bounded by the charts of the servers visited in one session. */
+const chartZooms = new Map();
+
+/** The scope a chart's zoom is held under: the page address (server + tab, or the FinOps tab) plus the page's
+ *  preset range in hours. A different server, tab or range is a different scope, so its charts start unzoomed. */
+export function chartZoomScope(hours) {
+  return (typeof location !== "undefined" && location.hash ? location.hash : "") + "|" + String(hours);
+}
+
+/** The zoom held for chart `id` under `scope`, or null. A different scope clears the entry. */
+export function getChartZoom(id, scope) {
+  const z = chartZooms.get(id);
+  if (!z) return null;
+  if (z.scope !== scope) {
+    chartZooms.delete(id);
+    return null;
+  }
+  return z;
+}
+
+/** Hold a zoom span (UTC-epoch ms) for chart `id` under `scope`; null from/to clears it. */
+export function setChartZoom(id, scope, fromMs, toMs) {
+  if (fromMs == null || toMs == null || !(toMs > fromMs)) chartZooms.delete(id);
+  else chartZooms.set(id, { scope, from: fromMs, to: toMs });
+}
+
+/**
+ * A line-chart spec narrowed to a zoom span: only the points already loaded that fall inside [from, to], with the
+ * x-axis domain set to the span. Nothing is refetched. A span holding no loaded point leaves the spec untouched
+ * (zoomed: false), so a stale zoom can never blank a chart.
+ */
+export function applyChartZoom(spec, zoom) {
+  if (!zoom) return { spec, zoomed: false };
+  const inside = (spec.points || []).filter((r) => {
+    const d = parseUtc(r[spec.xKey]);
+    return d && d.getTime() >= zoom.from && d.getTime() <= zoom.to;
+  });
+  if (!inside.length) return { spec, zoomed: false };
+  return { spec: { ...spec, points: inside, windowStart: zoom.from, windowEnd: zoom.to }, zoomed: true };
+}
+
+/**
+ * The reset chip shown above a zoomed chart (the Custom Views chip, shared): the span and a × that calls
+ * onZoomChange(null). `zoom` is { startIso, endIso }.
+ */
+export function zoomChip(zoom, onZoomChange) {
+  const from = new Date(zoom.startIso);
+  const to = new Date(zoom.endIso);
+  const label = isNaN(from.getTime()) || isNaN(to.getTime())
+    ? "custom window"
+    : from.toLocaleString() + " → " + to.toLocaleString();
+  const chip = el("div", { class: "drill-chip zoom-chip" }, [
+    el("span", { class: "drill-label", text: "Zoomed: " + label }),
+  ]);
+  const clear = el("button", { class: "btn small drill-clear", type: "button", title: "Reset zoom", "aria-label": "Reset zoom", text: "×" });
+  clear.addEventListener("click", () => onZoomChange(null));
+  chip.appendChild(clear);
+  return chip;
+}
+
+/**
+ * renderLineChart with drag-to-zoom over the points it already has. Dragging narrows the x-domain to the brushed
+ * span and shows a reset chip; the zoom is held at module scope under (id, scope) so a rebuild of the same chart
+ * (the poll) draws it zoomed again. `id` names the chart within its tab; `scope` names what the data was loaded
+ * for (server + preset range) — a different scope draws the full domain.
+ */
+export function zoomableLineChart(spec, id, scope) {
+  const host = el("div", { class: "zoomable-chart" });
+  const draw = () => {
+    const { spec: shown, zoomed } = applyChartZoom(spec, getChartZoom(id, scope));
+    const chart = renderLineChart({
+      ...shown,
+      onZoom: (fromMs, toMs) => {
+        setChartZoom(id, scope, fromMs, toMs);
+        draw();
+      },
+    });
+    const z = zoomed ? getChartZoom(id, scope) : null;
+    const chip = z
+      ? zoomChip({ startIso: new Date(z.from).toISOString(), endIso: new Date(z.to).toISOString() }, () => {
+          setChartZoom(id, scope, null, null);
+          draw();
+        })
+      : null;
+    mount(host, [chip, chart]);
+  };
+  draw();
+  return host;
 }

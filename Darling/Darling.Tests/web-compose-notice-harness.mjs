@@ -83,6 +83,7 @@ try {
       "export const CATEGORICAL_COLORS = ['#111', '#222', '#333', '#444', '#555', '#666'];\n" +
       "const stub = () => el('div', { class: 'chart-stub' });\n" +
       "export const renderLineChart = stub;\n" +
+      "export const zoomChip = stub;\n" +
       "export const renderBarChart = stub;\n" +
       "export const renderPieChart = stub;\n" +
       "export const renderScatterChart = stub;\n"
