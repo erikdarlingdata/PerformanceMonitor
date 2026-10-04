@@ -541,6 +541,8 @@ public sealed class DarlingWebOidcTests
     [InlineData(false, "PATCH", "/api/mute-rules/abc-123", false)]     // no edit
     [InlineData(false, "PUT", "/api/mute-rules/abc-123/enabled", false)] // no flag flip
     [InlineData(false, "DELETE", "/api/mute-rules/abc-123", false)]    // no delete
+    [InlineData(true, "POST", "/api/alert-history/dismiss", true)]     // edit seat: dismiss alert rows (#4843)
+    [InlineData(false, "POST", "/api/alert-history/dismiss", false)]   // viewer: no dismiss
     public void IsRequestAllowed_Matrix(bool canEdit, string method, string path, bool expected)
         => Assert.Equal(expected, DarlingWebSeat.IsRequestAllowed(new DarlingWebSeat("who", canEdit), method, path));
 

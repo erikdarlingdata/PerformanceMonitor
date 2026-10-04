@@ -39,10 +39,11 @@
  * touches innerHTML.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, windowFromHours, daysText } from "../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { READ_FIELDS } from "../read-fields.js";
+import { analysisFindingsTab } from "./analysis-findings.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -128,6 +129,29 @@ function panelShell(title, subtitle, span = 2) {
  * less history than the page's Range answers for the hours it keeps, every panel it feeds says so through
  * keptWindowStrip, and a line spec is windowed over those hours rather than the Range.
  */
+/* `hideWhenNoRows`: a spec that reports a problem is not drawn at all when its rows are absent, as the desktop viewer
+   collapses its section; an unreadable payload hides it too, since the panels beside it on the same read say so.
+   The shell is built HIDDEN, so a clean server never shows the card or its loading strip while the read runs, and it is
+   revealed only when rows arrive. The 60 s rebuild makes a fresh shell every time, so whether the last answer for this
+   server had rows is kept at module scope: a server that has caveats keeps the card up across a rebuild instead of
+   hiding and re-showing it on every poll. */
+const panelHadRows = new Map();
+function panelMemoryKey(read, params, spec) {
+  return read + "|" + JSON.stringify(params || {}) + "|" + spec.title;
+}
+function hidesPanel(spec, res, shell, key) {
+  if (!spec.hideWhenNoRows) return false;
+  const hasRows = res.kind === "data" && (getPath(res.data, spec.rowsKey) || []).length > 0;
+  panelHadRows.set(key, hasRows);
+  if (hasRows) {
+    shell.panel.style.display = "";
+    return false;
+  }
+  shell.panel.style.display = "none";
+  mount(shell.body, []);
+  return true;
+}
+
 function fanout(read, params, specs) {
   for (const spec of specs) {
     if ((spec.viz === "table" || spec.viz === "line") && !spec.emptyText) {
@@ -135,10 +159,15 @@ function fanout(read, params, specs) {
     }
   }
   const shells = specs.map((s) => panelShell(s.title, s.subtitle, s.span ?? 2));
+  const keys = specs.map((s) => panelMemoryKey(read, params, s));
+  specs.forEach((s, i) => {
+    if (s.hideWhenNoRows && !panelHadRows.get(keys[i])) shells[i].panel.style.display = "none";
+  });
   (async () => {
     const res = await readToolWithinKeptHistory(read, params);
     specs.forEach((spec, i) => {
       const body = shells[i].body;
+      if (hidesPanel(spec, res, shells[i], keys[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
       if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
       try {
@@ -870,16 +899,7 @@ export const SERVER_TABS = [
         "No memory clerks in the latest snapshot — the clerk collector may not have run yet.",
         1
       ),
-      table(
-        "Memory Pressure Events",
-        "get_memory_pressure_events",
-        { server, hours: ctx.hours },
-        "events",
-        PRESSURE_COLUMNS,
-        ctx.label,
-        "No memory pressure events in this window — the healthy state for this read.",
-        1
-      ),
+      ...memoryPressurePanels(server, ctx),
       /* #3653: TWO READS UNDER ONE WINDOW (#3637), rendered as the two things they are. The memory-grant
          pair answers with `grants[]` - the NEWEST snapshot in the window, one row per pool (per semaphore and
          pool on the semaphore lens), every row stamped with the same instant - and `window[]` - one row per
@@ -1387,6 +1407,7 @@ export const SERVER_TABS = [
         SNAPSHOT,
         "No database configuration snapshot yet."
       ),
+      scopedConfigPanel(server),
       table(
         "Query Store Health",
         "get_query_store_health",
@@ -1610,6 +1631,7 @@ export const SERVER_TABS = [
            panel assert a window it did not measure. Shared const so the SQL Server and PostgreSQL tabs cannot
            drift apart on it. */
         ALERT_READ_PANEL,
+        COLLECTION_CAVEATS_PANEL,
         {
           title: "Collectors",
           subtitle: "trailing 7 days",
@@ -1642,6 +1664,9 @@ export const SERVER_TABS = [
       ),
     ],
   },
+
+  /* #4843: the desktop viewer's analysis Recommendations view (pages/analysis-findings.js). */
+  analysisFindingsTab,
 ];
 
 /* ─────────────────────────── the PostgreSQL tabs ─────────────────────────── */
@@ -1756,6 +1781,7 @@ export const POSTGRES_TABS = [
            panel assert a window it did not measure. Shared const so the SQL Server and PostgreSQL tabs cannot
            drift apart on it. */
         ALERT_READ_PANEL,
+        COLLECTION_CAVEATS_PANEL,
         {
           title: "Collectors",
           subtitle: "trailing 7 days",
@@ -1867,19 +1893,28 @@ export const POSTGRES_TABS = [
             "No lock cycle was sampled in this window — the healthy state. A cycle has no root blocker to attribute, which is why it is a separate grid rather than a chain with a missing root.",
         },
       ]),
-      table(
-        "Top Query Shapes",
-        "get_pg_top_queries",
-        { server, hours: ctx.hours, limit: 20 },
-        "queries",
-        PG_TOP_QUERY_COLUMNS,
-        ctx.label + ", by total execution time",
-        "No query statistics in this window.",
-        2,
-        /* #4677: the eviction caveat the read builds (null when the counter was read and no pass happened,
-           the unknown sentence when it was never observed), rendered above the rows. */
-        "evictions.note"
-      ),
+      /* One fetch, two panels: the eviction pass count and the statement cap in a tile (the figures the desktop
+         viewer's note names), then the grid. #4677: the caveat the read builds (null when the counter was read and
+         no pass happened, the unknown sentence when it was never observed) renders above the rows. */
+      ...fanout("get_pg_top_queries", { server, hours: ctx.hours, limit: 20 }, [
+        {
+          title: "Statement Evictions",
+          subtitle: ctx.label + ", pg_stat_statements passes",
+          viz: "stat",
+          stats: PG_EVICTION_STATS,
+          span: 1,
+          emptyText: "No eviction figures: the extension's eviction counter was not read in this window.",
+        },
+        {
+          title: "Top Query Shapes",
+          subtitle: ctx.label + ", by total execution time",
+          viz: "table",
+          rowsKey: "queries",
+          columns: PG_TOP_QUERY_COLUMNS,
+          emptyText: "No query statistics in this window.",
+          noteKey: "evictions.note",
+        },
+      ]),
       /* Directly under the query shapes, joined on queryid: a plan only means something beside the
          statement it belongs to. The plan JSON is REDACTED at collection - query text dropped, literals
          replaced - so nothing customer-specific reaches this grid, and the empty text names the usual
@@ -2678,6 +2713,25 @@ const ALERT_READ_PANEL = {
   stats: ALERT_READ_STATS,
 };
 
+/* #4843: the data families the scheduled analysis pass could not read on this server, from the same
+   get_collection_health read as the panels beside it (its `stored_caveats` array, which the service omits when the
+   store records none). The desktop viewer's "Analysis could not read these data families" grid, same four columns, and
+   hidden when empty like it. Shared const so the SQL Server and PostgreSQL tabs cannot drift apart on it. */
+const COLLECTION_CAVEATS_PANEL = {
+  title: "Analysis could not read these data families",
+  subtitle: "as of the latest analysis pass",
+  viz: "table",
+  rowsKey: "stored_caveats",
+  hideWhenNoRows: true,
+  columns: [
+    { key: "family", label: "Family" },
+    { key: "reason", label: "Reason", wrap: true },
+    { key: "first_seen_utc", label: "Since", format: "time" },
+    { key: "last_seen_utc", label: "Last seen", format: "time" },
+  ],
+  emptyText: "The analysis pass read every data family.",
+};
+
 const SWEEP_STATS = [
   { key: "sweep_pressure.verdict", label: "Verdict", format: "text", small: true },
   { key: "sweep_pressure.busy_percent", label: "Sweep busy %", format: "num1" },
@@ -3015,19 +3069,32 @@ const AUTO_TUNING_COLUMNS = [
   { key: "as_of", label: "As of", format: "time" },
 ];
 
+/* The Active Queries grid, in the desktop viewer's column order and wording (Collected and Query Text lead, the anchor rule; the desktop's plan column is not here). */
 const ACTIVE_COLUMNS = [
-  { key: "collection_time", label: "Time", format: "time" },
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
+  { key: "collection_time", label: "Collected", format: "time" },
+  { key: "query_text", label: "Query Text", render: (r) => codeDisclosure(r.query_text) },
   { key: "session_id", label: "SPID", format: "int" },
   { key: "database_name", label: "Database" },
-  { key: "status", label: "Status" },
-  { key: "cpu_time_ms", label: "CPU", format: "ms" },
-  { key: "elapsed_time_formatted", label: "Elapsed" },
-  { key: "wait_type", label: "Wait" },
-  { key: "blocking_session_id", label: "Blocked by", format: "int" },
-  { key: "dop", label: "DOP", format: "int" },
-  { key: "program_name", label: "Application" },
   { key: "login_name", label: "Login" },
+  { key: "host_name", label: "Host" },
+  { key: "program_name", label: "Program" },
+  { key: "status", label: "Status" },
+  { key: "elapsed_time_formatted", label: "Elapsed" },
+  { key: "cpu_time_ms", label: "CPU (ms)", format: "int" },
+  { key: "logical_reads", label: "Logical Reads", format: "int" },
+  { key: "reads", label: "Reads", format: "int" },
+  { key: "writes", label: "Writes", format: "int" },
+  { key: "wait_type", label: "Wait Type" },
+  { key: "wait_time_ms", label: "Wait (ms)", format: "int" },
+  { key: "wait_resource", label: "Wait Resource" },
+  { key: "blocking_session_id", label: "Blocking", format: "int" },
+  { key: "dop", label: "DOP", format: "int" },
+  { key: "parallel_worker_count", label: "Workers", format: "int" },
+  { key: "granted_query_memory_gb", label: "Memory (GB)", format: "num2" },
+  { key: "transaction_isolation_level", label: "Isolation" },
+  { key: "open_transaction_count", label: "Open Tran", format: "int" },
+  { key: "percent_complete", label: "% Done", format: "num1" },
+  { key: "query_hash", label: "Query Hash" },
 ];
 
 const BLOCKING_COLUMNS = [
@@ -3163,6 +3230,108 @@ const PRESSURE_COLUMNS = [
   { key: "memory_indicators_system", label: "System", format: "int" },
 ];
 
+const PG_EVICTION_STATS = [
+  { key: "evictions.eviction_passes_in_window", label: "Eviction passes", format: "int" },
+  { key: "evictions.max_entries", label: "pg_stat_statements.max", format: "int" },
+];
+
+/** Both memory-pressure severities as the desktop chart counts them: indicator 2 is medium, 3 and above severe. */
+const PRESSURE_LINES = [
+  { key: "sql_medium", label: "SQL Server (medium)", color: SERIES_COLORS[0] },
+  { key: "sql_severe", label: "SQL Server (severe)", color: SERIES_COLORS[1] },
+  { key: "os_medium", label: "Operating System (medium)", color: SERIES_COLORS[2] },
+  { key: "os_severe", label: "Operating System (severe)", color: SERIES_COLORS[3] },
+];
+
+const HOUR_MS = 3600000;
+
+/** Said wherever an hour reads as quiet: the read does not say where collection began, so a blank hour may predate it. */
+const PRESSURE_COVERAGE_CAVEAT = "No bar means no event was recorded, which for a server monitored for less than this range includes the hours before collection began.";
+
+/**
+ * The pressure events counted per hour, the way the desktop chart counts them: only samples where SQL Server or the
+ * operating system reads 2 or more are drawn, and each hour holds a count per source and severity. Every hour of the
+ * window is present, an hour with no event as 0, which the stacked-bar chart draws as no bar, as the desktop does. `events` are the read's rows (sample_time is naive UTC); the window is `{ windowStart, windowEnd }` in
+ * epoch ms. Returns `{ points, drawn }`: the hourly rows (`time` is naive-UTC ISO text) and the number of samples counted.
+ */
+export function pressureEventBuckets(events, win) {
+  const counts = new Map();
+  let drawn = 0;
+  for (const e of Array.isArray(events) ? events : []) {
+    const at = parseUtc(e && e.sample_time);
+    if (!at) continue;
+    const process = Number(e.memory_indicators_process);
+    const system = Number(e.memory_indicators_system);
+    if (!(process >= 2 || system >= 2)) continue;
+    drawn++;
+    const hour = Math.floor(at.getTime() / HOUR_MS) * HOUR_MS;
+    const row = counts.get(hour) || { sql_medium: 0, sql_severe: 0, os_medium: 0, os_severe: 0 };
+    if (process === 2) row.sql_medium++;
+    else if (process >= 3) row.sql_severe++;
+    if (system === 2) row.os_medium++;
+    else if (system >= 3) row.os_severe++;
+    counts.set(hour, row);
+  }
+  const hours = new Set(counts.keys());
+  if (win) {
+    for (let h = Math.floor(win.windowStart / HOUR_MS) * HOUR_MS; h <= win.windowEnd; h += HOUR_MS) hours.add(h);
+  }
+  const points = [...hours]
+    .sort((a, b) => a - b)
+    .map((h) => ({ time: new Date(h).toISOString().slice(0, 19), ...(counts.get(h) || { sql_medium: 0, sql_severe: 0, os_medium: 0, os_severe: 0 }) }));
+  return { points, drawn };
+}
+
+/**
+ * The Memory tab's pressure events: an hourly count chart over the read's rows and the rows themselves, from ONE
+ * fetch. The read returns every sample in the window (it has no row cap), so the counts are complete for what the
+ * store holds. It does not say where collection began, so the notice says that a 0 hour is an hour with no event
+ * recorded, which on a server monitored for less than the range includes the hours before collection started.
+ */
+export function memoryPressurePanels(server, ctx) {
+  const chart = panelShell("Memory Pressure Events per Hour", ctx.label, 2);
+  const grid = panelShell("Memory Pressure Events", ctx.label, 1);
+  (async () => {
+    const res = await readToolWithinKeptHistory("get_memory_pressure_events", { server, hours: ctx.hours });
+    if (res.kind === "error") {
+      mount(chart.body, readErrorStrip(res.message));
+      return mount(grid.body, readErrorStrip(res.message));
+    }
+    const empty = "No memory pressure events in this window — the healthy state for this read. " + PRESSURE_COVERAGE_CAVEAT;
+    if (res.kind === "empty") {
+      mount(chart.body, [keptWindowStrip(res), emptyStrip(empty)]);
+      return mount(grid.body, [keptWindowStrip(res), windowFloorStrip(res.data, { viz: "table" }), emptyStrip(res.message)]);
+    }
+    renderInto(chart.body, () => {
+      const hours = res.keptHours || ctx.hours;
+      const { points, drawn } = pressureEventBuckets(res.data.events, windowFromHours(hours));
+      if (!drawn) return [keptWindowStrip(res), emptyStrip("No sample in this window reached medium pressure (an indicator of 2 or more); the table beside this lists every sample the collector stored. " + PRESSURE_COVERAGE_CAVEAT)];
+      const lines = PRESSURE_LINES.filter((l) => points.some((p) => p[l.key] > 0));
+      return [
+        keptWindowStrip(res),
+        noticeStrip(
+          "Samples where an indicator reads 2 or more, counted per hour as stacked bars; an hour with none draws no bar. " + PRESSURE_COVERAGE_CAVEAT
+        ),
+        zoomableLineChart({
+          points,
+          xKey: "time",
+          series: lines,
+          formatValue: (v) => String(Math.round(v)),
+          integerTicks: true,
+          mode: "stacked-bar",
+          unit: "events",
+          ...windowFromHours(hours),
+        }, "memory-pressure-events", chartZoomScope(ctx.hours)),
+      ];
+    });
+    renderInto(grid.body, () => [
+      keptWindowStrip(res),
+      VIZ.table(res.data, { rowsKey: "events", columns: PRESSURE_COLUMNS, emptyText: empty }),
+    ]);
+  })();
+  return [chart.panel, grid.panel];
+}
+
 const CACHE_TYPE_COLUMNS = [
   { key: "cache_type", label: "Cache" },
   { key: "object_type", label: "Object type" },
@@ -3182,23 +3351,64 @@ const SERVER_CONFIG_COLUMNS = [
   { key: "is_advanced", label: "Advanced", format: "bool" },
 ];
 
+/* The WPF Database Configuration grid's columns in its order and wording, less its per-row Collected column:
+   the read stamps one captured_at on the whole snapshot, so the panel subtitle carries it instead. */
 const DB_CONFIG_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "state", label: "State" },
-  { key: "compatibility_level", label: "Compat", format: "int" },
-  { key: "recovery_model", label: "Recovery" },
+  { key: "compatibility_level", label: "Compat Level", format: "int" },
+  { key: "collation", label: "Collation" },
+  { key: "recovery_model", label: "Recovery Model" },
+  { key: "read_only", label: "Read Only", format: "bool" },
   { key: "rcsi", label: "RCSI", format: "bool" },
-  { key: "snapshot_isolation", label: "SI", format: "bool" },
-  { key: "auto_close", label: "Auto close", format: "bool" },
-  { key: "auto_shrink", label: "Auto shrink", format: "bool" },
-  { key: "auto_create_stats", label: "Auto create stats", format: "bool" },
-  { key: "auto_update_stats", label: "Auto update stats", format: "bool" },
-  { key: "query_store", label: "Query Store" },
-  { key: "page_verify", label: "Page verify" },
+  { key: "snapshot_isolation", label: "Snapshot Isolation" },
+  { key: "auto_create_stats", label: "Auto Create Stats", format: "bool" },
+  { key: "auto_update_stats", label: "Auto Update Stats", format: "bool" },
+  { key: "auto_update_stats_async", label: "Async Stats Update", format: "bool" },
+  { key: "parameterization_forced", label: "Forced Parameterization", format: "bool" },
+  { key: "query_store", label: "Query Store", format: "bool" },
+  { key: "encrypted", label: "Encrypted", format: "bool" },
+  { key: "trustworthy", label: "Trustworthy", format: "bool" },
+  { key: "db_chaining", label: "DB Chaining", format: "bool" },
+  { key: "broker_enabled", label: "Broker", format: "bool" },
+  { key: "cdc_enabled", label: "CDC", format: "bool" },
+  { key: "mixed_page_allocation", label: "Mixed Pages", format: "bool" },
+  { key: "log_reuse_wait", label: "Log Reuse Wait" },
+  { key: "auto_close", label: "Auto Close", format: "bool" },
+  { key: "auto_shrink", label: "Auto Shrink", format: "bool" },
+  { key: "page_verify", label: "Page Verify" },
+  { key: "target_recovery_time_seconds", label: "Target Recovery (s)", format: "int" },
+  { key: "delayed_durability", label: "Delayed Durability" },
   { key: "accelerated_database_recovery", label: "ADR", format: "bool" },
-  { key: "optimized_locking", label: "Optimized locking", format: "bool" },
-  { key: "log_reuse_wait", label: "Log reuse wait" },
+  { key: "memory_optimized", label: "Memory Optimized", format: "bool" },
+  { key: "optimized_locking", label: "Optimized Locking", format: "bool" },
 ];
+
+/* The WPF Scoped Configuration grid: one row per database setting; Collected is the snapshot's captured_at. */
+const SCOPED_CONFIG_COLUMNS = [
+  { key: "database_name", label: "Database" },
+  { key: "name", label: "Setting" },
+  { key: "value", label: "Value" },
+  { key: "value_for_secondary", label: "Value for Secondary" },
+  { key: "captured_at", label: "Collected", format: "time" },
+];
+
+/* The scoped-configuration read groups settings under each database; the grid wants one row per setting. The
+   rows live in the panel's closure, not module state, so the 60 s repaint rebuilds them from the read. */
+function scopedConfigPanel(server) {
+  const { panel, body } = panelShell("Database Scoped Configuration", "sys.database_scoped_configurations, newest connect-time snapshot");
+  (async () => {
+    const res = await readTool("get_database_scoped_config", { server });
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+    const rows = [];
+    for (const db of res.data.databases || [])
+      for (const st of db.settings || [])
+        rows.push({ database_name: db.database_name, ...st, captured_at: res.data.captured_at });
+    mount(body, VIZ.table({ rows }, { rowsKey: "rows", columns: SCOPED_CONFIG_COLUMNS, emptyText: "No database-scoped configuration snapshot yet." }));
+  })();
+  return panel;
+}
 
 const QS_HEALTH_COLUMNS = [
   { key: "database_name", label: "Database" },
@@ -3329,101 +3539,163 @@ const HEALTH_ENTRY_COLUMNS = [
 ];
 
 const SEVERE_ERROR_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
-  { key: "error_number", label: "Error", format: "int" },
+  { key: "event_time", label: "Event Time", format: "time" },
+  { key: "error_number", label: "Error #", format: "int" },
   { key: "severity", label: "Severity", format: "int" },
   { key: "state", label: "State", format: "int" },
   { key: "database_name", label: "Database" },
+  { key: "database_id", label: "DB ID", format: "int" },
   { key: "message", label: "Message", wrap: true },
 ];
 
 const SCHEDULER_ISSUE_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
-  { key: "scheduler_id", label: "Scheduler", format: "int" },
-  { key: "cpu_id", label: "CPU", format: "int" },
-  { key: "status", label: "Status" },
-  { key: "is_online", label: "Online", format: "bool" },
-  { key: "is_runnable", label: "Runnable", format: "bool" },
-  { key: "non_yielding_time_ms", label: "Non-yielding", format: "ms" },
-  { key: "thread_quantum_ms", label: "Quantum", format: "ms" },
+  { key: "event_time", label: "Event Time", format: "time" },
+  { key: "sql_cpu_utilization", label: "SQL CPU %", format: "int" },
+  { key: "other_process_cpu", label: "Other-Process CPU %", format: "int" },
+  { key: "system_idle", label: "Idle %", format: "int" },
+  { key: "memory_utilization", label: "Memory %", format: "int" },
+  { key: "page_faults", label: "Page Faults", format: "int" },
+  { key: "working_set_delta_mb", label: "Working Set Δ MB", format: "num1" },
 ];
 
 const IO_ISSUE_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
+  { key: "event_time", label: "Event Time", format: "time" },
   { key: "state", label: "State" },
-  { key: "io_latch_timeouts", label: "Latch timeouts", format: "int" },
-  { key: "interval_long_ios", label: "Long I/Os (interval)", format: "int" },
-  { key: "total_long_ios", label: "Long I/Os (total)", format: "int" },
-  { key: "longest_pending_requests_duration_ms", label: "Longest pending", format: "ms" },
-  { key: "longest_pending_requests_file_path", label: "File", wrap: true },
+  { key: "io_latch_timeouts", label: "Latch Timeouts", format: "int" },
+  { key: "interval_long_ios", label: "Interval Long IOs", format: "int" },
+  { key: "total_long_ios", label: "Total Long IOs", format: "int" },
+  { key: "longest_pending_requests_duration_ms", label: "Pending Duration ms", format: "ms" },
+  { key: "longest_pending_requests_file_path", label: "File Path", wrap: true },
 ];
 
 const CPU_TASK_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
+  { key: "event_time", label: "Event Time", format: "time" },
   { key: "state", label: "State" },
-  { key: "max_workers", label: "Max workers", format: "int" },
-  { key: "workers_created", label: "Created", format: "int" },
-  { key: "workers_idle", label: "Idle", format: "int" },
-  { key: "pending_tasks", label: "Pending", format: "int" },
-  { key: "oldest_pending_task_waiting_time", label: "Oldest pending", format: "int" },
-  { key: "tasks_completed_within_interval", label: "Completed", format: "int" },
-  { key: "has_deadlocked_schedulers_occurred", label: "Deadlocked scheds", format: "bool" },
+  { key: "max_workers", label: "Max Workers", format: "int" },
+  { key: "workers_created", label: "Workers Created", format: "int" },
+  { key: "workers_idle", label: "Workers Idle", format: "int" },
+  { key: "tasks_completed_within_interval", label: "Tasks Completed", format: "int" },
+  { key: "pending_tasks", label: "Pending Tasks", format: "int" },
+  { key: "oldest_pending_task_waiting_time", label: "Oldest Pending ms", format: "int" },
+  { key: "has_unresolvable_deadlock_occurred", label: "Unresolvable DL", format: "bool" },
+  { key: "has_deadlocked_schedulers_occurred", label: "Sched Deadlock", format: "bool" },
   { key: "did_blocking_occur", label: "Blocking", format: "bool" },
 ];
 
+/* The desktop grid's 32 columns in its order. The grid is wider than 20 columns, so it is a candidate for the
+   shared column picker once that lands. */
 const MEMORY_CONDITION_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
-  { key: "last_notification", label: "Notification" },
-  { key: "out_of_memory_exceptions", label: "OOM exceptions", format: "int" },
-  { key: "available_physical_memory_gb", label: "Available", format: "num1" },
-  { key: "working_set_gb", label: "Working set", format: "num1" },
-  { key: "vm_committed_gb", label: "VM committed", format: "num1" },
-  { key: "target_committed_gb", label: "Target committed", format: "num1" },
-  { key: "current_committed_gb", label: "Current committed", format: "num1" },
-  { key: "system_physical_memory_low", label: "System low", format: "int" },
-  { key: "process_physical_memory_low", label: "Process low", format: "int" },
-  { key: "last_oom_factor", label: "Last OOM factor" },
+  { key: "event_time", label: "Event Time", format: "time" },
+  { key: "last_notification", label: "Last Notification" },
+  { key: "name", label: "Report" },
+  { key: "out_of_memory_exceptions", label: "OOM Exceptions", format: "int" },
+  { key: "is_any_pool_out_of_memory", label: "Pool OOM", format: "bool" },
+  { key: "process_out_of_memory_period", label: "OOM Period", format: "int" },
+  { key: "available_physical_memory_gb", label: "Avail Phys GB", format: "num1" },
+  { key: "available_virtual_memory_gb", label: "Avail Virt GB", format: "num1" },
+  { key: "available_paging_file_gb", label: "Avail Paging GB", format: "num1" },
+  { key: "working_set_gb", label: "Working Set GB", format: "num1" },
+  { key: "percent_of_committed_memory_in_ws", label: "% Committed in WS", format: "int" },
+  { key: "page_faults", label: "Page Faults", format: "int" },
+  { key: "system_physical_memory_high", label: "Sys Phys High", format: "int" },
+  { key: "system_physical_memory_low", label: "Sys Phys Low", format: "int" },
+  { key: "process_physical_memory_low", label: "Proc Phys Low", format: "int" },
+  { key: "process_virtual_memory_low", label: "Proc Virt Low", format: "int" },
+  { key: "vm_reserved_gb", label: "VM Reserved GB", format: "num1" },
+  { key: "vm_committed_gb", label: "VM Committed GB", format: "num1" },
+  { key: "locked_pages_allocated", label: "Locked Pages", format: "int" },
+  { key: "large_pages_allocated", label: "Large Pages", format: "int" },
+  { key: "emergency_memory_gb", label: "Emergency GB", format: "num1" },
+  { key: "emergency_memory_in_use_gb", label: "Emerg In Use GB", format: "num1" },
+  { key: "target_committed_gb", label: "Target Committed GB", format: "num1" },
+  { key: "current_committed_gb", label: "Current Committed GB", format: "num1" },
+  { key: "pages_allocated", label: "Pages Alloc", format: "int" },
+  { key: "pages_reserved", label: "Pages Reserved", format: "int" },
+  { key: "pages_free", label: "Pages Free", format: "int" },
+  { key: "pages_in_use", label: "Pages In Use", format: "int" },
+  { key: "page_alloc_potential", label: "Alloc Potential", format: "int" },
+  { key: "numa_growth_phase", label: "NUMA Growth", format: "int" },
+  { key: "last_oom_factor", label: "Last OOM Factor" },
+  { key: "last_os_error", label: "Last OS Error", format: "int" },
 ];
 
 const MEMORY_BROKER_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
+  { key: "event_time", label: "Event Time", format: "time" },
+  { key: "broker_id", label: "Broker ID", format: "int" },
   { key: "broker", label: "Broker" },
   { key: "notification", label: "Notification" },
-  { key: "memory_ratio", label: "Ratio", format: "num2" },
-  { key: "new_target", label: "New target", format: "int" },
-  { key: "currently_allocated", label: "Allocated", format: "int" },
-  { key: "previously_allocated", label: "Previously", format: "int" },
-  { key: "currently_predicated", label: "Predicated", format: "int" },
+  { key: "pool_metadata_id", label: "Pool Meta ID", format: "int" },
+  { key: "delta_time", label: "Delta Time", format: "int" },
+  { key: "memory_ratio", label: "Mem Ratio", format: "num2" },
+  { key: "new_target", label: "New Target", format: "int" },
+  { key: "overall", label: "Overall", format: "int" },
   { key: "rate", label: "Rate", format: "num2" },
+  { key: "currently_predicated", label: "Predicated", format: "int" },
+  { key: "currently_allocated", label: "Allocated", format: "int" },
+  { key: "previously_allocated", label: "Prev Allocated", format: "int" },
 ];
 
 /* #2484: the Significant Waits grid. Signal duration sits beside the total on purpose -- both are
    milliseconds, so they share a column format honestly, and a signal close to the total is CPU pressure
    wearing a wait type's name. The statement goes through codeDisclosure like every other SQL column. */
 const SIGNIFICANT_WAIT_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
+  { key: "event_time", label: "Event Time", format: "time" },
   { key: "wait_type", label: "Wait Type" },
-  { key: "duration_ms", label: "Duration", format: "ms" },
-  { key: "signal_duration_ms", label: "Signal", format: "ms" },
-  { key: "wait_resource", label: "Resource", wrap: true },
+  { key: "duration_ms", label: "Duration ms", format: "ms" },
+  { key: "signal_duration_ms", label: "Signal ms", format: "ms" },
+  { key: "wait_resource", label: "Wait Resource", wrap: true },
   { key: "session_id", label: "Session", format: "int" },
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
 ];
 
+/* The desktop grid's 28 columns in its order; a candidate for the shared column picker once that lands. */
 const MEMORY_OOM_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
-  { key: "memory_node_id", label: "Node", format: "int" },
-  { key: "memory_utilization_pct", label: "Utilization", format: "pct" },
+  { key: "event_time", label: "Event Time", format: "time" },
+  { key: "node_id", label: "Node ID", format: "int" },
+  { key: "memory_node_id", label: "Mem Node ID", format: "int" },
+  { key: "memory_utilization_pct", label: "Mem Util %", format: "pct" },
+  { key: "total_physical_memory_kb", label: "Total Phys KB", format: "int" },
+  { key: "available_physical_memory_kb", label: "Avail Phys KB", format: "int" },
+  { key: "total_page_file_kb", label: "Total Page KB", format: "int" },
+  { key: "available_page_file_kb", label: "Avail Page KB", format: "int" },
+  { key: "total_virtual_address_space_kb", label: "Total VAS KB", format: "int" },
+  { key: "available_virtual_address_space_kb", label: "Avail VAS KB", format: "int" },
+  { key: "target_kb", label: "Target KB", format: "int" },
+  { key: "reserved_kb", label: "Reserved KB", format: "int" },
+  { key: "committed_kb", label: "Committed KB", format: "int" },
+  { key: "shared_committed_kb", label: "Shared Committed KB", format: "int" },
+  { key: "awe_kb", label: "AWE KB", format: "int" },
+  { key: "pages_kb", label: "Pages KB", format: "int" },
   { key: "failure_type", label: "Failure" },
-  { key: "failure_value", label: "Value", format: "int" },
-  { key: "available_physical_memory_kb", label: "Available", format: "int" },
-  { key: "committed_kb", label: "Committed", format: "int" },
-  { key: "target_kb", label: "Target", format: "int" },
+  { key: "failure_value", label: "Failure Val", format: "int" },
   { key: "resources", label: "Resources", wrap: true },
-  { key: "last_error", label: "Last error" },
+  { key: "factor_text", label: "Factor" },
+  { key: "factor_value", label: "Factor Val", format: "int" },
+  { key: "last_error", label: "Last Error" },
+  { key: "pool_metadata_id", label: "Pool Meta ID", format: "int" },
+  { key: "is_process_in_job", label: "In Job" },
+  { key: "is_system_physical_memory_high", label: "Sys Phys High" },
+  { key: "is_system_physical_memory_low", label: "Sys Phys Low" },
+  { key: "is_process_physical_memory_low", label: "Proc Phys Low" },
+  { key: "is_process_virtual_memory_low", label: "Proc Virt Low" },
 ];
 
-const DEFAULT_TRACE_COLUMNS = READ_FIELDS.get_default_trace_events.table.columns;
+const DEFAULT_TRACE_COLUMNS = [
+  { key: "event_time", label: "Event Time", format: "time" },
+  { key: "category", label: "Category" },
+  { key: "event_name", label: "Event" },
+  { key: "database_name", label: "Database" },
+  { key: "object_name", label: "Object" },
+  { key: "login_name", label: "Login" },
+  { key: "host_name", label: "Host" },
+  { key: "application_name", label: "Application" },
+  { key: "spid", label: "SPID", format: "int" },
+  { key: "duration_ms", label: "Duration ms", format: "ms" },
+  { key: "growth_mb", label: "Growth MB", format: "mb" },
+  { key: "severity", label: "Severity", format: "int" },
+  { key: "error_number", label: "Error #", format: "int" },
+  { key: "text_data", label: "Details", wrap: true },
+];
 
 /* #2484: the raw log's columns. The duration SPLIT is the reason this table earns its place beside the
    rollup -- total time cannot separate a collector that is slow because the monitored server is slow from

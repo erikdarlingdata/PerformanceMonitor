@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -387,10 +388,33 @@ public sealed class DarlingMcpServerAdminTools
             var resolved = target.Candidates[0];
             var resolvedDefinition = definitions.First(d => d.Server.ServerId == resolved.ServerId);
 
-            await using var command = postgres.CreateCommand("DELETE FROM config_monitored_servers WHERE server_id = $1");
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
-            var affected = await command.ExecuteNonQueryAsync();
+            /* The server's tag assignments go in the same transaction as its definition: server_id is a fixed hash
+               of the connection, so a re-added server would otherwise get its old tags back and rejoin
+               tag-scoped alert rules. */
+            int affected;
+            await using (var connection = await postgres.OpenConnectionAsync())
+            await using (var transaction = await connection.BeginTransactionAsync())
+            {
+                /* Two-arg on the store connection with the transaction ASSIGNED, and the SQL hoisted to a local:
+                   the shape McpReadCommandTimeoutTests recognises as a store command (see the same note in
+                   DarlingMcpAlertTools); the three-arg form is the monitored-target shape. */
+                const string deleteSql = "DELETE FROM config_monitored_servers WHERE server_id = $1";
+                await using (var command = new NpgsqlCommand(deleteSql, connection) { Transaction = transaction })
+                {
+                    command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                    command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                    affected = await command.ExecuteNonQueryAsync();
+                }
+
+                await using (var clear = new NpgsqlCommand(ServerTagStore.ClearForServerSql, connection) { Transaction = transaction })
+                {
+                    clear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                    clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                    await clear.ExecuteNonQueryAsync();
+                }
+
+                await transaction.CommitAsync();
+            }
 
             return affected > 0
                 ? RemovedAnswer(resolvedDefinition, target.MatchedBy)

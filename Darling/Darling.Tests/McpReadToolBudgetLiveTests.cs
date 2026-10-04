@@ -85,6 +85,7 @@ public sealed class McpReadToolBudgetLiveTests
         "delete_custom_alert_rule", "delete_custom_view", "delete_mute_rule", "delete_notification_route",
         "mute_analysis_finding", "remove_server", "set_mute_rule_enabled", "set_notification_route_enabled",
         "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule",
+        "create_server_tag", "update_server_tag", "delete_server_tag", "assign_server_tag", "unassign_server_tag",
     };
 
     /// <summary>Empty since get_collection_health's per-field cut (the last #4198 row on this list, like Lite's

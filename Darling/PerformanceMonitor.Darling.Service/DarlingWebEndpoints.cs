@@ -139,6 +139,11 @@ public static class DarlingWebEndpoints
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
         "list_custom_alert_templates",
+        "create_server_tag",
+        "update_server_tag",
+        "delete_server_tag",
+        "assign_server_tag",
+        "unassign_server_tag",
         "get_tool_guide",
     };
 
@@ -431,6 +436,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCustomViews(app, postgres, logger, readLatencyRecorder);
         MapCustomAlerts(app, postgres, logger);
         MapMuteRules(app, postgres, logger);
+        MapAlertHistoryDismiss(app, postgres, logger);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
            FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
@@ -968,6 +974,190 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var result = await Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore(store, id);
             return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
+    }
+
+    /// <summary>The most alert keys one dismiss request may carry.</summary>
+    internal const int MaxDismissKeys = 1000;
+
+    /// <summary>The most request-body bytes the dismiss route reads before it answers 400.</summary>
+    internal const int MaxDismissBodyBytes = 256 * 1024;
+
+    /// <summary>The longest metric name a dismiss key may carry; real metric names are far shorter.</summary>
+    internal const int MaxDismissMetricNameLength = 512;
+
+    /// <summary>
+    /// <c>POST /api/alert-history/dismiss</c>: marks the listed Alert History rows dismissed (the web twin of the
+    /// Viewer's Dismiss Selected; Dismiss All is the client sending every visible key, so there is no
+    /// dismiss-everything verb). The body is <c>{"alerts":[{"alert_time":"…","server_id":1,"metric_name":"…"}]}</c>,
+    /// the identity the Viewer's dismiss keys on, taken from the row <c>get_alert_history</c> returned.
+    /// <c>application/json</c> is required (415 otherwise, the CSRF defense the mute routes use); a read-only
+    /// seat is refused by the host's group-level write gate before this handler runs
+    /// (<see cref="Hosting.DarlingWebSeat.IsRequestAllowed"/> allows only GET/HEAD/OPTIONS for it). The write
+    /// runs on the host's <c>viewer</c> pool, whose only privilege here is the column-level
+    /// <c>UPDATE (dismissed)</c> on <c>config_alert_log</c>. Keys are deduped; a key that names no alert row is
+    /// counted in <c>unknown</c>, not an error. 200 answers <c>{requested, dismissed, already_dismissed, unknown}</c>.
+    /// </summary>
+    private static void MapAlertHistoryDismiss(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    {
+        app.MapPost("/api/alert-history/dismiss", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            string body;
+            try
+            {
+                body = await ReadBoundedBodyAsync(context, MaxDismissBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
+            var parsed = ParseDismissBody(body, out var keys, out var refusal);
+            if (!parsed)
+            {
+                return ErrorResult(refusal!, StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var outcome = await AlertDismissStore.DismissKeysAsync(
+                    postgres, keys, McpCommandDeadlines.ReadSeconds, context.RequestAborted);
+
+                /* Who dismissed is not stored on the row; this line is the only record. Counts only, no alert text. */
+                logger.LogInformation(
+                    "Alert dismiss by {Principal}: requested {Requested}, dismissed {Dismissed}, known {Known}",
+                    DarlingWebSeat.FromContext(context).EditorPrincipal, outcome.Requested, outcome.Dismissed, outcome.Known);
+
+                return JsonNodeResult(new JsonObject
+                {
+                    ["requested"] = outcome.Requested,
+                    ["dismissed"] = outcome.Dismissed,
+                    ["already_dismissed"] = Math.Max(0, outcome.Known - outcome.Dismissed),
+                    ["unknown"] = Math.Max(0, outcome.Requested - outcome.Known),
+                });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/alert-history/dismiss", stopwatch.ElapsedMilliseconds, ex);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+    }
+
+    /// <summary>
+    /// PURE: parses a dismiss body into its distinct keys, in first-seen order. False with a caller-facing
+    /// <paramref name="refusal"/> when the body is not a JSON object with a non-empty <c>alerts</c> array of at
+    /// most <see cref="MaxDismissKeys"/> objects, each with an ISO-8601 <c>alert_time</c>, an integer
+    /// <c>server_id</c> and a non-empty <c>metric_name</c>. A time that carries an offset is converted to UTC; a
+    /// bare time is taken as the store's naive UTC, which is how <c>get_alert_history</c> spells it.
+    /// </summary>
+    internal static bool ParseDismissBody(string body, out List<AlertDismissKey> keys, out string? refusal)
+    {
+        keys = new List<AlertDismissKey>();
+        refusal = null;
+
+        JsonNode? root;
+        try
+        {
+            root = JsonNode.Parse(body);
+        }
+        catch (JsonException)
+        {
+            refusal = "Request body must be a JSON object.";
+            return false;
+        }
+
+        /* A duplicate property name makes the JsonObject indexer throw ArgumentException; that is a caller's
+           malformed body (400), not a server fault. */
+        JsonNode? alertsNode = null;
+        try
+        {
+            alertsNode = (root as JsonObject)?["alerts"];
+        }
+        catch (ArgumentException)
+        {
+            refusal = "Request body must be a JSON object with one alerts array.";
+            return false;
+        }
+
+        if (root is not JsonObject || alertsNode is not JsonArray alerts)
+        {
+            refusal = "Request body must be {\"alerts\": [{\"alert_time\", \"server_id\", \"metric_name\"}, ...]}.";
+            return false;
+        }
+
+        if (alerts.Count == 0)
+        {
+            refusal = "alerts must name at least one alert.";
+            return false;
+        }
+
+        if (alerts.Count > MaxDismissKeys)
+        {
+            refusal = $"alerts may name at most {MaxDismissKeys} alerts per request.";
+            return false;
+        }
+
+        var seen = new HashSet<AlertDismissKey>();
+        foreach (var item in alerts)
+        {
+            if (item is not JsonObject entry
+                || !TryReadString(entry["alert_time"], out var timeText)
+                || !TryReadString(entry["metric_name"], out var metric)
+                || metric.Length == 0 || metric.Length > MaxDismissMetricNameLength
+                || entry["server_id"] is not JsonValue idValue || !idValue.TryGetValue<int>(out var serverId)
+                || !DateTime.TryParse(
+                    timeText, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var time))
+            {
+                refusal = "Each alert needs an ISO-8601 alert_time, an integer server_id and a non-empty metric_name.";
+                return false;
+            }
+
+            var key = new AlertDismissKey(DateTime.SpecifyKind(time, DateTimeKind.Unspecified), serverId, metric);
+            if (seen.Add(key))
+            {
+                keys.Add(key);
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryReadString(JsonNode? node, out string value)
+    {
+        value = "";
+        if (node is JsonValue v && v.TryGetValue<string>(out var text) && text is not null)
+        {
+            value = text;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Reads the request body, refusing (<see cref="InvalidDataException"/>) past <paramref name="maxBytes"/>.</summary>
+    private static async Task<string> ReadBoundedBodyAsync(HttpContext context, int maxBytes)
+    {
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        int read;
+        while ((read = await context.Request.Body.ReadAsync(chunk, context.RequestAborted)) > 0)
+        {
+            if (buffer.Length + read > maxBytes)
+            {
+                throw new InvalidDataException("Request body is too large.");
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
+
+        return System.Text.Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
     }
 
     /// <summary>Reads the raw request body text — what the mute-rule cores parse themselves, so the web layer
@@ -3087,6 +3277,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── jobs (DarlingMcpJobTools) ── */
             ["get_running_jobs"] = R(CatJobs, "Currently-running SQL Agent jobs.", PServer()),
+            ["get_job_history"] = R(CatJobs, "Retained SQL Agent job runs, newest first; omit server for every server.", PServer(), PHours(24), PText("job_name"), PText("status"), PText("category"), PLimit(100), PAsOf()),
 
             /* ── stored plan XML (DarlingMcpPlanTools; the analyze_*_plan compute family stays excluded) ── */
             ["get_plan_xml"] = R(CatPlans, "The stored execution-plan XML for a query (requires query_hash).", PReqText("query_hash"), PServer(), PText("database_name")),
@@ -4029,6 +4220,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── jobs ── */
             ["get_running_jobs"] = (c, pg, an) => DarlingMcpJobTools.GetRunningJobs(pg, Server(c), c.RequestAborted),
+            ["get_job_history"] = (c, pg, an) => DarlingMcpJobTools.GetJobHistory(pg, Server(c), Hours(c, 24), Str(c, "job_name"), Str(c, "status"), Str(c, "category"), Rows(c, "limit", 100), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
             /* ── stored plan XML (READ; the analyze_*_plan compute family stays excluded) ── */
             ["get_plan_xml"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
