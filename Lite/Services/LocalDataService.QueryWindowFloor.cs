@@ -67,7 +67,10 @@ public enum QueryWindowRelation
     MemoryPressureEvents,
 
     /* The Job History tab (#4966): the run history copied from msdb. */
-    JobHistory
+    JobHistory,
+
+    /* The Blocking tab's Lock Wait Trend (#4966): the wait_stats collector. */
+    WaitStats
 }
 
 public partial class LocalDataService
@@ -95,6 +98,7 @@ public partial class LocalDataService
         QueryWindowRelation.WaitingTasks => "v_waiting_tasks",
         QueryWindowRelation.MemoryPressureEvents => "v_memory_pressure_events",
         QueryWindowRelation.JobHistory => "v_job_history",
+        QueryWindowRelation.WaitStats => "v_wait_stats",
         _ => throw new ArgumentOutOfRangeException(nameof(relation), relation, "unknown QueryWindowRelation")
     };
 
@@ -130,6 +134,8 @@ public partial class LocalDataService
         /* The Job History tab (#4966). job_history holds a row only when an Agent job ran, and the first collection copies the
            history msdb already holds, so a quiet start is covered by the collector's runs, not by a row near the window's start. */
         QueryWindowRelation.JobHistory => "job_history",
+        /* The Lock Wait Trend (#4966) draws a rate series, so a quiet start is covered by the collector's runs. */
+        QueryWindowRelation.WaitStats => "wait_stats",
         _ => null
     };
 
