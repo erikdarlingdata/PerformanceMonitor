@@ -1539,8 +1539,9 @@ public sealed class McpPayloadContractCensusTests
         ("scan_truncated", ["DarlingMcpBlockingTools.cs"],
             "the dedup_key fingerprint scan's ceiling (FingerprintScanCeiling), observed off a ceiling + 1 fetch, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("processes_truncated", ["DarlingMcpBlockingTools.cs"],
+        ("processes_truncated", ["DarlingMcpBlockingTools.cs"],
             "get_deadlock_detail's processes[] is cut by two bounds, the per-deadlock cap DarlingDeadlockProcessRows.MaxProcessesPerDeadlock (12) and the default page's shared row budget (DefaultPageRowBudget, 24); the rows cut from one deadlock are counted beside it. Unlike the boolean <bound>_truncated keys around it, processes_truncated is a COUNT (0 when nothing was cut), kept under this name because it is the per-deadlock twin of the page's truncated and a reader looks for it beside processes"),
-        ("window_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs", "McpSessionTools.cs", "McpWaitTools.cs"],
+        ("window_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpJobTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs", "McpSessionTools.cs", "McpWaitTools.cs"],
             "the #2364 / #2353 WINDOW floor (#3653 item 17): the tier that answered did not hold the whole requested window, so the served series begins later than asked — beside effective_start / effective_hours_back, observed off the served head against the shared ninety-minute TruncationSlack, no cap involved; get_query_trend and get_query_store_top write it in their initializers, the duration-trend trio through TrendDisclosure.WriteTo (Darling) and WriteDisclosure (Lite); get_query_store_clutter (#3797) writes it in its initializer for its plan-churn and wait arms, which read the same raw tier get_query_store_top does, off the same window-floor read and the same ninety-minute slack; Lite's get_active_queries and get_waiting_tasks (QuerySnapshots / WaitingTasks, read by coverage), get_query_store_regressions (checked against the baseline's start, the earlier of its two windows) and get_query_heatmap (#4966) write it in their initializers through McpQueryTools.WindowNotice, beside a page cut of their own (truncated), so they publish effective_start without effective_hours_back, which the window-floor rule below holds apart for the window floor"),
         ("findings_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: get_analysis_findings' GROUP PAGE cut — limit caps the collapsed per-chain groups returned (default 18), independent of the pre-existing truncated above (the raw WindowCoveringLimit occurrence read, beside truncation_note): truncated warns occurrence stats may under-report, findings_truncated warns other diagnostic chains exist but are not on this page at all"),
@@ -1603,7 +1604,7 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhyItSurvives)[] PageCountsUnderANeutralNoun =
     [
-        ("shown", ["DarlingMcpDefaultTraceTools.cs", "DarlingMcpHealthParserTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpDefaultTraceTools.cs", "McpHealthParserTools.cs"],
+        ("shown", ["DarlingMcpDefaultTraceTools.cs", "DarlingMcpHealthParserTools.cs", "DarlingMcpJobTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpDefaultTraceTools.cs", "McpHealthParserTools.cs"],
             "the page's count beside an honest WHOLE total (total_entries / total_events / total_facts, or a <noun>_count over the whole in-memory set) — the cut is exact and disclosed by the pair; the #3594 spelling is *_returned + truncated, and the rename is fenced tonight because four PgTarget* test files read shown off get_analysis_facts"),
     ];
 
