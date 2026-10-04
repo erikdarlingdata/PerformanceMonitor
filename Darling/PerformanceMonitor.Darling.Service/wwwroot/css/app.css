@@ -781,6 +781,8 @@ table.data td.sev-Healthy { color: var(--ok); }
   z-index: 20;
 }
 #statusbar .sb-sep { color: var(--border); }
+/* A collection state that is not ok reads as a warning. */
+#statusbar .sb-warn { color: var(--warn, #e0a030); font-weight: 600; }
 #server-list { padding-bottom: 34px; }
 
 /* ─────────────────────────── alert status cell (collapsed channel/sent/muted/error) ─────────────────────────── */

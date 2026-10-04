@@ -67,5 +67,3 @@ tr.mute-rules-highlight { outline: 2px solid var(--accent); }
 .range-custom[hidden] { display: none; }
 .range-custom-input { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 0.15rem 0.3rem; font-size: 0.78rem; }
 .range-custom-error { color: var(--err); font-size: 0.78rem; }
-/* Status bar: a collection state that is not ok reads as a warning. */
-#statusbar .sb-warn { color: var(--warn, #e0a030); font-weight: 600; }
