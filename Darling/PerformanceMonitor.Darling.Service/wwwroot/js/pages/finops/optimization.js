@@ -37,7 +37,7 @@ const WAIT_COLUMNS = [
   { key: "pct_of_total", label: "% of total", format: "num1" },
   { key: "top_wait_type", label: "Top wait type" },
   { key: "top_wait_time_ms", label: "Top wait (ms)", format: "int" },
-  { key: "est_cost_usd", label: "Est. cost ($)", format: "num2" },
+  { key: "est_cost_usd", label: "Est. cost share ($)", format: "num2" },
 ];
 
 const QUERY_COLUMNS = [
@@ -49,11 +49,11 @@ const QUERY_COLUMNS = [
   { key: "avg_reads_per_exec", label: "Avg reads/exec", format: "int" },
   { key: "executions", label: "Executions", format: "int" },
   { key: "has_plan", label: "Has plan", format: "bool" },
-  { key: "est_cost_usd", label: "Est. cost ($)", format: "num2" },
+  { key: "est_cost_usd", label: "Est. cost share ($)", format: "num2" },
 ];
 
 const GRANT_COLUMNS = [
-  { key: "day", label: "Day" },
+  { key: "day", label: "Day (UTC)" },
   { key: "avg_granted_mb", label: "Avg granted (MB)", format: "num1" },
   { key: "avg_used_mb", label: "Avg used (MB)", format: "num1" },
   { key: "efficiency_pct", label: "Efficiency (%)", format: "num1" },
@@ -78,14 +78,14 @@ function windowNotice(s) {
 
 function queryNotice(s) {
   let text = "Top " + (s.rows || []).length + " by CPU, last " + (s.window_hours ?? HOURS) + " hours";
-  if (s.effective_start) text += ", from " + applyFormat("time", s.effective_start);
+  if (s.effective_start) text += ", from " + applyFormat("time", s.effective_start) + " (local time)";
   return text + ".";
 }
 
 function costLine(data) {
   return data.monthly_cost_usd != null
-    ? "Estimated costs are shares of a monthly cost of $" + applyFormat("num2", data.monthly_cost_usd) + "."
-    : (data.cost_reason ?? "monthly cost not set");
+    ? "Est. cost shares split the server's $" + applyFormat("num2", data.monthly_cost_usd) + " monthly cost pro-rated to this window (" + HOURS + " hours); they are an attribution, not a measured cost."
+    : (data.cost_reason ?? "monthly cost not set") + ", so Est. cost share is blank.";
 }
 
 // One section: a heading, then the table, the empty strip or the notice, by the section's own status.

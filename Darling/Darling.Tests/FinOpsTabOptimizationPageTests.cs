@@ -97,6 +97,7 @@ public sealed class FinOpsTabOptimizationPageTests
     [Fact]
     public void TheColumnsAreInTheDesktopGridOrder()
     {
+        // Order source: the five Optimization grids in Darling/PerformanceMonitor.Darling.Viewer/FinOpsTab.xaml (~:758-855), in their column order.
         // Idle Databases grid: Darling/PerformanceMonitor.Darling.Viewer/FinOpsTab.xaml, FinOpsIdleDatabasesDataGrid (~:758-765).
         Assert.Equal("database_name,total_size_mb,file_count,last_execution_server_local", string.Join(",", Keys("IDLE_COLUMNS")));
         // tempdb Pressure grid: FinOpsTab.xaml (~:771-779).
@@ -107,7 +108,7 @@ public sealed class FinOpsTabOptimizationPageTests
         Assert.Equal("database_name,query_preview,total_cpu_ms,avg_cpu_ms_per_exec,total_reads,avg_reads_per_exec,executions,has_plan,est_cost_usd", string.Join(",", Keys("QUERY_COLUMNS")));
         // Memory Grant Efficiency grid: FinOpsTab.xaml (~:844-855).
         Assert.Equal("day,avg_granted_mb,avg_used_mb,efficiency_pct,peak_granted_mb,wasted_mb,total_grantees,total_waiters,timeout_errors,forced_grants", string.Join(",", Keys("GRANT_COLUMNS")));
-        Assert.Contains("{ key: \"est_cost_usd\", label: \"Est. cost ($)\", format: \"num2\" }", Tab());
+        Assert.Contains("{ key: \"est_cost_usd\", label: \"Est. cost share ($)\", format: \"num2\" }", Tab());
         Assert.Contains("{ key: \"total_cpu_ms\", label: \"Total CPU\", format: \"ms\" }", Tab());
     }
 
@@ -151,9 +152,9 @@ public sealed class FinOpsTabOptimizationPageTests
         Assert.Contains("text += s.truncated ? \"; the top \" + n + \" of \" + (s.database_count ?? \"more\") + \".\" : \".\";", tab);
         Assert.Contains("return \"last \" + (s.window_hours ?? HOURS) + \" hours\";", tab);
         Assert.Contains("let text = \"Top \" + (s.rows || []).length + \" by CPU, last \" + (s.window_hours ?? HOURS) + \" hours\";", tab);
-        Assert.Contains("if (s.effective_start) text += \", from \" + applyFormat(\"time\", s.effective_start);", tab);
-        Assert.Contains("\"Estimated costs are shares of a monthly cost of $\" + applyFormat(\"num2\", data.monthly_cost_usd) + \".\"", tab);
-        Assert.Contains(": (data.cost_reason ?? \"monthly cost not set\");", tab);
+        Assert.Contains("if (s.effective_start) text += \", from \" + applyFormat(\"time\", s.effective_start) + \" (local time)\";", tab);
+        Assert.Contains("\"Est. cost shares split the server's $\" + applyFormat(\"num2\", data.monthly_cost_usd) + \" monthly cost pro-rated to this window (\" + HOURS + \" hours); they are an attribution, not a measured cost.\"", tab);
+        Assert.Contains(": (data.cost_reason ?? \"monthly cost not set\") + \", so Est. cost share is blank.\";", tab);
     }
 
     [Fact]
