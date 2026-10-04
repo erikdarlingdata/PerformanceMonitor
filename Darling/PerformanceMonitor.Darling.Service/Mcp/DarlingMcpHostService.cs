@@ -1020,6 +1020,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpToolGuideTools>()
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
             .WithGeminiCompatibleTools<DarlingMcpFinOpsInventoryTools>()
+            .WithGeminiCompatibleTools<DarlingMcpFinOpsRecommendationsTools>()
             // FinOps web parity (#4843), set A ends.
             // Each set belongs to one series of changes. Append to your own set only,
             // so the two series never edit the same lines of this registration list.

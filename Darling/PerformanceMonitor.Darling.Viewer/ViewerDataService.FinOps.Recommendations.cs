@@ -182,7 +182,7 @@ public sealed partial class ViewerDataService
     /// estimate, mirroring Lite's <c>monthlyCost &gt; 0 ? … : null</c>).
     /// </summary>
     public async Task<List<RecommendationRow>> GetRecommendationsAsync(int serverId, decimal monthlyCost, CancellationToken cancellationToken = default) =>
-        (await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(_dataSource, serverId, monthlyCost, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)).Select(RecommendationRow.From).ToList();
+        (await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(_dataSource, serverId, monthlyCost, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken: cancellationToken)).Select(RecommendationRow.From).ToList();
 
     /// <summary>Human-readable duration formatting for the maintenance-window finding (Lite's FinOps FormatDuration, verbatim).</summary>
     private static string FormatDuration(long seconds) => FinOpsRecommendationFigures.FormatDuration(seconds);

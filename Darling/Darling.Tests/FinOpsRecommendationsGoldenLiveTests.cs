@@ -120,8 +120,8 @@ public sealed class FinOpsRecommendationsGoldenLiveTests
             {
                 map[key] = new Dictionary<string, object?>
                 {
-                    ["monthly1000"] = (await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, id, 1000m, 30, ct)).Select(RecommendationRow.From).ToList(),
-                    ["monthly0"] = (await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, id, 0m, 30, ct)).Select(RecommendationRow.From).ToList(),
+                    ["monthly1000"] = (await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, id, 1000m, 30, cancellationToken: ct)).Select(RecommendationRow.From).ToList(),
+                    ["monthly0"] = (await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, id, 0m, 30, cancellationToken: ct)).Select(RecommendationRow.From).ToList(),
                 };
             }
 
