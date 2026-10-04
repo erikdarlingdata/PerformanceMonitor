@@ -6,4 +6,4 @@ param get_finops.hours_back 50
 param get_finops.limit 59
 param get_finops.object_name 69
 param get_finops.server_name 28
-param get_finops.view 143
+param get_finops.view 159
