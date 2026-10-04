@@ -1272,8 +1272,9 @@ public sealed class McpPayloadContractCensusTests
     /// <c>IndexUsageSql</c> is the object-stats residual <see cref="McpLatestSnapshotStampTests.UnstampedLatestReadsPendingA10"/>
     /// already holds, and <c>IndexUsageMatchCountSql</c> is a <c>COUNT(*)</c> over the same anchor with no row
     /// to stamp. <c>ObjectIndexDetailSql</c> (the FinOps Storage Growth index drill, in a Storage subfolder the scan
-    /// only reaches since it went recursive) is the same shape as <c>IndexUsageSql</c>: per-index rows at the database's
-    /// latest snapshot, with no anchor column projected.
+    /// only reaches since it went recursive) is per-index rows like <c>IndexUsageSql</c>, but anchored on the
+    /// DATABASE's latest snapshot with no time bound, so a database that left collection scope answers with an old
+    /// snapshot and nothing says when it was taken (#5070).
     ///
     /// <para><b>This roster GREW once, in #3879, and #3880 shrank it back by ruling.</b> It is written
     /// shrink-only, on the reasoning that a read either projects its anchor or is waiting for the A10 lane to
@@ -1287,11 +1288,16 @@ public sealed class McpPayloadContractCensusTests
     /// neighbours are unstamped too, and all three would leave together when A10 stamped the family.
     /// <b>Erik ruled the other way</b> (#3880): a read that has just become one honest instant can say WHICH
     /// instant, so stamp it rather than roster it. <c>IndexLockingSql</c> projects <c>ios.collection_time</c>,
-    /// <c>get_object_locking</c> publishes <c>captured_at</c> on both SKUs, and this list is back to the two
+    /// <c>get_object_locking</c> publishes <c>captured_at</c> on both SKUs, and this list went back to the two
     /// entries it held before #3879 — the shrink-only direction restored, with the growth episode kept on the
     /// record here rather than quietly erased.</para>
     ///
-    /// <para>The two survivors are not the same kind of gap. <c>IndexUsageSql</c> is a genuine A10 residual:
+    /// <para><b>It grew again in #5069, to three,</b> and not because a read became unstamped: the read moved
+    /// into the Storage <c>FinOps</c> subfolder in #5050, and this census could not see it until #5069 made the
+    /// reader scan recursive. <c>ObjectIndexDetailSql</c> waits on #5070, which projects its anchor and stamps
+    /// <c>get_finops</c> <c>storage_growth</c> at the indexes level; it leaves this list then.</para>
+    ///
+    /// <para>The original two are not the same kind of gap. <c>IndexUsageSql</c> is a genuine A10 residual:
     /// projecting its anchor and stamping <c>get_index_usage</c> is the same small edit #3880 made next door,
     /// and it is available whenever the family is taken. <c>IndexUsageMatchCountSql</c> is structural — a
     /// scalar <c>COUNT(*)</c> has no row for a stamp to ride on, so it leaves this list only if it ever
@@ -2344,6 +2350,13 @@ public sealed class McpPayloadContractCensusTests
             var root = RepoFile.PathTo(directory);
             foreach (var file in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories).Order(StringComparer.Ordinal))
             {
+                /* Build output is not source: skip bin/ and obj/ so the scan and its file-count floor stay the same on every machine. */
+                var segments = Path.GetRelativePath(root, file).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (segments.Contains("bin", StringComparer.OrdinalIgnoreCase) || segments.Contains("obj", StringComparer.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 var name = Path.GetFileName(file);
                 if (name.Contains("ForcePlan", StringComparison.Ordinal))
                 {
