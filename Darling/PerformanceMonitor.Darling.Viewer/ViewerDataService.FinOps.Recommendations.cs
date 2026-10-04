@@ -265,26 +265,9 @@ public sealed partial class ViewerDataService
             {
                 var (p95Mb, sampleCount, window) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
 
-                // Need ~16 samples to smooth a single-point anomaly without delaying the recommendation for hours.
-                if (sampleCount >= 16)
-                {
-                    var memRatio = (decimal)p95Mb / util.PhysicalMemoryMb;
-                    var targetMb = Math.Max(8192, p95Mb * 2);
-                    // Compared in the whole GB the text prints, so the advice never reads "of 8GB RAM ... reducing to ~8GB".
-                    if (memRatio < 0.50m && targetMb / 1024 < util.PhysicalMemoryMb / 1024)
-                    {
-                        recommendations.Add(new RecommendationRow
-                        {
-                            Category = "Memory",
-                            Severity = memRatio < 0.30m ? "High" : "Medium",
-                            Confidence = "Medium",
-                            Finding = $"Memory over-provisioned (P95 SQL memory uses {memRatio:P0} of {util.PhysicalMemoryMb / 1024}GB RAM)",
-                            Detail = $"P95 SQL Server memory from {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
-                                     $"Consider reducing to ~{targetMb / 1024}GB.",
-                            EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / util.PhysicalMemoryMb) * 0.30m : null
-                        });
-                    }
-                }
+                var memoryRecommendation = FinOpsRecommendationFigures.MemoryRightSizing(util.ToDto(), p95Mb, sampleCount, window, monthlyCost);
+                if (memoryRecommendation != null)
+                    recommendations.Add(RecommendationRow.From(memoryRecommendation));
             }
         }
         catch (Exception ex)
@@ -441,58 +424,9 @@ public sealed partial class ViewerDataService
 
                 var (p95MemMb, memSampleCount, memWindow) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
 
-                // CPU prescription: only if >= 4 cores.
-                if (cpuCount >= 4)
-                {
-                    int targetCores = 0;
-                    if (p95Cpu7d < 15)
-                        targetCores = Math.Max(2, cpuCount / 4);
-                    else if (p95Cpu7d < 30)
-                        targetCores = Math.Max(2, cpuCount / 2);
-
-                    if (targetCores > 0 && targetCores < cpuCount)
-                    {
-                        recommendations.Add(new RecommendationRow
-                        {
-                            Category = "Hardware",
-                            Severity = "Medium",
-                            Confidence = "Medium",
-                            Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
-                            Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
-                                     $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
-                            EstMonthlySavings = monthlyCost > 0
-                                ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
-                                : null
-                        });
-                    }
-                }
-
-                // Memory prescription: needs >= 4 GB physical and a handful of samples.
-                if (physMb >= 4096 && physMb > 0 && memSampleCount >= 16)
-                {
-                    var memRatio = (decimal)p95MemMb / physMb;
-                    int targetMb = 0;
-                    if (memRatio < 0.25m)
-                        targetMb = Math.Max(4096, physMb / 4);
-                    else if (memRatio < 0.40m)
-                        targetMb = Math.Max(4096, physMb / 2);
-
-                    if (targetMb > 0 && targetMb / 1024 < physMb / 1024)
-                    {
-                        recommendations.Add(new RecommendationRow
-                        {
-                            Category = "Hardware",
-                            Severity = "Medium",
-                            Confidence = "Medium",
-                            Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {memRatio:P0})",
-                            Detail = $"P95 SQL Server memory from {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
-                                     $"Reducing to {targetMb / 1024}GB would still leave headroom.",
-                            EstMonthlySavings = monthlyCost > 0
-                                ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m
-                                : null
-                        });
-                    }
-                }
+                foreach (var vmRecommendation in FinOpsRecommendationFigures.VmRightSizing(
+                    p95Cpu7d, cpuWindow, cpuCount, physMb, p95MemMb, memSampleCount, memWindow, monthlyCost))
+                    recommendations.Add(RecommendationRow.From(vmRecommendation));
             }
         }
         catch (Exception ex)
@@ -575,23 +509,9 @@ public sealed partial class ViewerDataService
                 var avgCpu = Convert.ToDecimal(reader.GetValue(0), CultureInfo.InvariantCulture);
                 var stddevCpu = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1), CultureInfo.InvariantCulture);
 
-                if (avgCpu > 20 && stddevCpu > 0)
-                {
-                    var cv = stddevCpu / avgCpu;
-                    if (cv < 0.3m)
-                    {
-                        var confidence = cv < 0.15m ? "High" : "Medium";
-                        recommendations.Add(new RecommendationRow
-                        {
-                            Category = "Cloud",
-                            Severity = "Low",
-                            Confidence = confidence,
-                            Finding = $"Stable CPU utilization (avg {avgCpu:N1}%, CV {cv:N2}) — reserved capacity candidate",
-                            Detail = $"CPU utilization is consistently {avgCpu:N1}% with low variance (±{stddevCpu:N1}%). " +
-                                     "Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads."
-                        });
-                    }
-                }
+                var reservedRecommendation = FinOpsRecommendationFigures.ReservedCapacity(avgCpu, stddevCpu);
+                if (reservedRecommendation != null)
+                    recommendations.Add(RecommendationRow.From(reservedRecommendation));
             }
         }
         catch (Exception ex)

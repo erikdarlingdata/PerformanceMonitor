@@ -43,14 +43,18 @@ public sealed class RightSizingWindowTests
     [InlineData("ViewerDataService.FinOps.Recommendations.cs")]
     public void ViewerRightSizing_NamesTheCoveredWindow_AndSkipsAnUnchangedSize(string file)
     {
-        var source = CSharpSourceWalker.StripCommentsAndStrings(
-            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file));
+        // The viewer keeps the reads and the window text; the thresholds and the advice wording moved to Darling.Storage.
         var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file);
+        var storageRaw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs");
+        var source = CSharpSourceWalker.StripCommentsAndStrings(storageRaw);
 
         Assert.DoesNotContain("\"the last ", raw, StringComparison.Ordinal);
-        Assert.Contains("From {cpuWindow}, P95 CPU utilization was", raw, StringComparison.Ordinal);
-        Assert.Contains("P95 SQL Server memory from {window} is", raw, StringComparison.Ordinal);
-        Assert.Contains("P95 SQL Server memory from {memWindow} is", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"the last ", storageRaw, StringComparison.Ordinal);
+        Assert.Contains("From {cpuWindow}, P95 CPU utilization was", storageRaw, StringComparison.Ordinal);
+        Assert.Contains("P95 SQL Server memory from {window} is", storageRaw, StringComparison.Ordinal);
+        Assert.Contains("P95 SQL Server memory from {memWindow} is", storageRaw, StringComparison.Ordinal);
+        Assert.DoesNotContain("memory over 7 days is {p95MemMb", storageRaw, StringComparison.Ordinal);
+        Assert.DoesNotContain("memory over 7 days is {p95Mb", storageRaw, StringComparison.Ordinal);
         Assert.DoesNotContain("memory over 7 days is {p95MemMb", raw, StringComparison.Ordinal);
         Assert.DoesNotContain("memory over 7 days is {p95Mb", raw, StringComparison.Ordinal);
         Assert.Contains("RightSizingWindow.Describe(", raw, StringComparison.Ordinal);

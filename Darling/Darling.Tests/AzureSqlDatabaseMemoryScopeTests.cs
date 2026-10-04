@@ -240,10 +240,15 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
            and the rules file reads no physical-memory column of its own. */
         var rules = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs");
 
-        Assert.Contains("of {util.PhysicalMemoryMb / 1024}GB RAM", rules, StringComparison.Ordinal);
+        var figures = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs");
+
+        Assert.Contains("of {util.PhysicalMemoryMb / 1024}GB RAM", figures, StringComparison.Ordinal);
         Assert.False(
             Regex.IsMatch(rules, @"physical_memory_mb"),
             "the recommendation rules must not read a physical-memory column of their own");
+        Assert.False(
+            Regex.IsMatch(figures, @"physical_memory_mb"),
+            "the recommendation figures must not read a physical-memory column of their own");
     }
 
     [Fact]
