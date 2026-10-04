@@ -44,4 +44,16 @@ public sealed class ViewerFinOpsRecommendationsDelegatesTests
         Assert.Equal(DarlingFinOpsRecommendationsReader.ReservedCapacitySql, ViewerDataService.RecommendationsReservedCapacitySql);
         Assert.Equal(DarlingFinOpsRecommendationsReader.EngineEditionSql, ViewerDataService.RecommendationsEngineEditionSql);
     }
+
+    [Fact]
+    public void TheViewerRecommendationsRead_ForwardsToTheStorageComposer_AndHoldsNoCommandOfItsOwn()
+    {
+        var source = ViewerSource();
+        var start = source.IndexOf("Task<List<RecommendationRow>> GetRecommendationsAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var end = source.IndexOf("\n\n", start, StringComparison.Ordinal);
+        var body = source.Substring(start, end - start);
+        Assert.Contains("DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("CreateCommand(", source, StringComparison.Ordinal);
+    }
 }
