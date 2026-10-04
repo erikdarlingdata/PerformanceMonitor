@@ -33,13 +33,15 @@ namespace PerformanceMonitor.Darling.Service;
 /// grids) is left as the tool wrote it.</para>
 ///
 /// <para><b>Which reads.</b> Only a grid over one collector table whose rows are stamped with the collection time, the
-/// change histories over the config snapshot tables they diff, or the collection log: <see cref="TableByRead"/>. A chart whose time axis spans the asked range already shows the empty span, a read of
+/// change histories over the config snapshot tables they diff, the memory grant and plan correction reads over their snapshot
+/// tables, or the collection log: <see cref="TableByRead"/>. The memory grant reads answer a window aggregate and the newest
+/// snapshot in one payload; the note is about the aggregate, and the page opts the newest-snapshot panels out. A chart whose time axis spans the asked range already shows the empty span, a read of
 /// the newest snapshot has no window to cut, and an event surface (blocked process reports, deadlocks, system health
 /// events, the default trace) filters on the event's own time, which can reach before the first collection, so a
 /// coverage start could name a time later than the history it shows. Those are not in this list.</para>
 ///
-/// <para><b>A capped list.</b> Three listed reads are LISTS over time, newest first, under a row cap:
-/// <c>get_waiting_tasks</c>, <c>get_collection_log</c> and <c>get_pg_server_config_changes</c>
+/// <para><b>A capped list.</b> Four listed reads are LISTS over time, newest first, under a row cap:
+/// <c>get_waiting_tasks</c>, <c>get_collection_log</c>, <c>get_pg_server_config_changes</c> and <c>get_plan_corrections</c>
 /// (<see cref="NewestFirstCappedReads"/>). When one hits its cap the grid ends at the oldest row the read returned,
 /// whatever the store covers, so the note names that row (<c>effective_start</c> is the answer's
 /// <c>oldest_returned_collection_time</c>, or for the configuration changes the earliest <c>changed_at</c> on the page,
@@ -60,7 +62,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// cut) and the read did not hit a row cap that cuts by time (or hit it, and its oldest row is at or before the
 /// window's start), nothing in scope holds a row or logged a run in it, the
 /// answer is an envelope other than the read's own "looked and found nothing" word (<see cref="NothingFoundStatusByRead"/>:
-/// <c>empty</c>, or <c>no_changes</c> for the PostgreSQL changes, which are probed like rows; unavailable, not_collected and
+/// <c>empty</c>, or <c>no_changes</c> for the PostgreSQL changes, which are probed like rows; unavailable (the memory grant reads' no-snapshot word), not_collected and
 /// invalid are not) or an error rather than rows, the read cannot be resolved, the
 /// window is no longer than the 90-minute slack (a window that short can never be cut by the store's coverage, so the
 /// probe is not asked), or the probe fails. A failed probe costs the grid its notice, never its rows.</para>
@@ -96,6 +98,13 @@ internal static class WebDataStartNote
         /* The raw run log under Collection Health on a SQL Server page and on Overview for PostgreSQL (#4966): not a
            collector table, so its source is the collection log's own (TryGetSource). */
         ["get_collection_log"] = CollectionLogTable,
+
+        /* The SQL Server snapshot reads (#4966). Memory grants and the resource semaphore read the one memory_grant_stats
+           table; their page opts the newest-snapshot halves out (windowNote:false) and keeps the note on the window
+           aggregates. Plan corrections list recommendations by capture time, newest first. */
+        ["get_memory_grants"] = "memory_grant_stats",
+        ["get_resource_semaphore"] = "memory_grant_stats",
+        ["get_plan_corrections"] = "plan_correction",
     };
 
     /// <summary>
@@ -137,7 +146,7 @@ internal static class WebDataStartNote
     /// none: it says something other than "nothing happened".
     ///
     /// <para>The change histories and the collection log answer <c>empty</c> (the PostgreSQL changes read says
-    /// <c>no_changes</c>), as do waiting tasks, wait sampling, kernel stats, lock stats and predicate stats: each ran its
+    /// <c>no_changes</c>), as do waiting tasks, plan corrections, wait sampling, kernel stats, lock stats and predicate stats: each ran its
     /// query and found no rows in the window. The collection log's <c>empty</c> covers a quiet window and a filter that matched
     /// nothing, and the coverage fact holds for both; its <c>unavailable</c> (never collected) stays as it is. Latch stats,
     /// spinlock stats, wait stats and PostgreSQL wait events are left out: their no-rows answer is <c>unavailable</c>. A test
@@ -155,6 +164,7 @@ internal static class WebDataStartNote
         ["get_trace_flag_changes"] = "empty",
         ["get_pg_server_config_changes"] = "no_changes",
         ["get_collection_log"] = "empty",
+        ["get_plan_corrections"] = "empty",
     };
 
     /// <summary>
@@ -179,16 +189,19 @@ internal static class WebDataStartNote
     /// <summary>
     /// The listed reads that LIST rows newest first under a row cap, so a capped answer ends at a time inside the
     /// window (<c>get_waiting_tasks</c>: <c>ORDER BY collection_time DESC</c>, the cap read as <c>truncated</c> and
-    /// the end of the shown rows as <c>oldest_returned_collection_time</c>). Every other listed read is an
+    /// the end of the shown rows as <c>oldest_returned_collection_time</c>); <c>get_plan_corrections</c> pages its
+    /// recommendations the same way (<c>ORDER BY collection_time DESC</c>, the cap read as <c>truncated</c>, the same
+    /// oldest field and order word). Every other listed read is an
     /// aggregate over the whole window or a list ranked by something other than time, whose cap hides no time range;
     /// a <c>truncated</c> flag on those answers is about rows kept by rank and does not name a time. A test holds
-    /// the list to one read, each name one <see cref="TableByRead"/> lists.
+    /// the list to these four reads, each name one <see cref="TableByRead"/> lists.
     /// </summary>
     internal static readonly IReadOnlySet<string> NewestFirstCappedReads = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_waiting_tasks",
         "get_collection_log",
         "get_pg_server_config_changes",
+        "get_plan_corrections",
     };
 
     /// <summary>

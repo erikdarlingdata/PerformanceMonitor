@@ -210,7 +210,8 @@ public sealed class McpToolsListBudgetTests
     // get_job_history (the job history read) adds 1,296 bytes: 179,402 -> 180,698.
     // The fleet server-tag write tools (#5085, five tools: create, update, delete, assign and unassign) add 4,174 bytes on their own base: 179,402 -> 183,576.
     // #5085 (server-tag tools, merge): re-measured after merging origin/dev (dev now includes #5095); combined total 184,872 bytes, 170 tools
-    private const int TotalCeilingBytes = 184_872;
+    // get_server_trend (#5117), get_finops view database_sizes (#5121) and get_deadlock_detail processes (deadlock rows) re-measured together on dev 0032cfa6d: 184,872 -> 186,010.
+    private const int TotalCeilingBytes = 186_010;
 
 
 
