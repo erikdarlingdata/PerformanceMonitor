@@ -45,7 +45,7 @@ public sealed class DarlingMcpFinOpsToolsTests
         Assert.Equal(typeof(Task<string>), method.ReturnType);
 
         var described = method.GetParameters().Where(p => p.GetCustomAttribute<DescriptionAttribute>() is not null).ToArray();
-        Assert.Equal(new[] { "view", "server_name", "hours_back", "limit", "database_name", "full_text" }, described.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "view", "server_name", "hours_back", "limit", "database_name", "full_text", "object_name" }, described.Select(p => p.Name).ToArray());
         Assert.False(described.Single(p => p.Name == "view").HasDefaultValue, "view is required");
         Assert.Equal(24, described.Single(p => p.Name == "hours_back").DefaultValue);
         Assert.Equal(10, described.Single(p => p.Name == "limit").DefaultValue);
@@ -59,7 +59,7 @@ public sealed class DarlingMcpFinOpsToolsTests
         //
         //
         // FinOps web parity (#4843), set B: list your views below this line only.
-        var setBViews = new[] { "high_impact", "database_resources", "application_connections", "optimization" };
+        var setBViews = new[] { "high_impact", "database_resources", "application_connections", "optimization", "storage_growth" };
         // FinOps web parity (#4843), set B ends.
         var valid = DarlingMcpFinOpsTools.SetAValid + DarlingMcpFinOpsTools.SetBValid;
         foreach (var view in setAViews.Concat(setBViews))

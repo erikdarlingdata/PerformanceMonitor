@@ -109,6 +109,60 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
+        /// Puts every cell of a heatmap matrix into one of <paramref name="bandCount"/> discrete bands, the discrete form of
+        /// the desktop's single colour scale. Each cell above 0 is placed by <c>log1p(value)</c>, normalised across the
+        /// WHOLE matrix from <c>log1p</c> of the smallest positive cell to <c>log1p</c> of the largest:
+        /// <c>floor(t * bandCount)</c>, clamped to <c>bandCount - 1</c>, so the smallest positive cell is band 0 and the
+        /// largest is the top band. A cell of 0, or with no sample, has no band (null). When every positive cell is
+        /// equal, or there is only one, there is no range to place them in, and they all take band 0 (the darkest colour, where
+        /// the desktop's scale paints position 0.0). A non-finite cell (NaN, +Infinity or -Infinity) has no band (null) and
+        /// is left out of the range. <paramref name="bandCount"/> below 1 throws <see cref="ArgumentOutOfRangeException"/>
+        /// and a null <paramref name="matrix"/> throws <see cref="ArgumentNullException"/>. The result has the matrix's shape.
+        /// </summary>
+        public static int?[,] MatrixLogBands(FinOpsHeatmapMatrix matrix, int bandCount)
+        {
+            if (matrix == null) throw new ArgumentNullException(nameof(matrix));
+            ArgumentOutOfRangeException.ThrowIfLessThan(bandCount, 1);
+
+            int rows = matrix.Intensities.GetLength(0);
+            int cols = matrix.Intensities.GetLength(1);
+            var bands = new int?[rows, cols];
+
+            double smallest = double.PositiveInfinity;
+            double largest = double.NegativeInfinity;
+            for (int r = 0; r < rows; r++)
+            {
+                for (int c = 0; c < cols; c++)
+                {
+                    double v = matrix.Intensities[r, c];
+                    if (!(v > 0) || double.IsInfinity(v)) continue;
+                    if (v < smallest) smallest = v;
+                    if (v > largest) largest = v;
+                }
+            }
+            if (double.IsPositiveInfinity(smallest)) return bands;
+
+            double low = Math.Log(1 + smallest);
+            double span = Math.Log(1 + largest) - low;
+            for (int r = 0; r < rows; r++)
+            {
+                for (int c = 0; c < cols; c++)
+                {
+                    double v = matrix.Intensities[r, c];
+                    if (!(v > 0) || double.IsInfinity(v)) continue;
+                    if (!(span > 0))
+                    {
+                        bands[r, c] = 0;
+                        continue;
+                    }
+                    int band = (int)Math.Floor((Math.Log(1 + v) - low) / span * bandCount);
+                    bands[r, c] = Math.Clamp(band, 0, bandCount - 1);
+                }
+            }
+            return bands;
+        }
+
+        /// <summary>
         /// Computes per-column color intensities (0..1) on a log1p scale, normalized to the column max. A
         /// column whose max is 0 yields all-zero intensities (the max=0 divide-by-zero guard, #1138 §3B).
         /// Negative values clamp to 0. This is the math behind the Locking grid's per-column cell shading;

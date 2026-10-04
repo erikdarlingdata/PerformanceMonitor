@@ -94,7 +94,7 @@ public sealed class FinOpsIndexAnalysisViewLiveTests
         Assert.True(JsonElement.DeepEquals(expected, actual), $"{what}: expected {expected.GetRawText()} but got {actual.GetRawText()}");
 
     private static async Task<JsonDocument> ToolAsync(NpgsqlDataSource pg, string server, int limit = 10, string? db = null, bool full = false, CancellationToken ct = default) =>
-        JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(pg, "index_analysis", server, 24, limit, db, full, ct));
+        JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(pg, "index_analysis", server, 24, limit, db, full, cancellationToken: ct));
 
     [Theory]
     [InlineData(ServerNameA)]

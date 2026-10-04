@@ -127,7 +127,7 @@ public sealed class FinOpsWebReadParityLiveTests
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var name = FinOpsIndexAnalysisViewLiveTests.ServerNameC;
-        var tool = await DarlingMcpFinOpsTools.GetFinOps(postgres, "index_analysis", name, 24, 3, "tenant_gamma", true, ct);
+        var tool = await DarlingMcpFinOpsTools.GetFinOps(postgres, "index_analysis", name, 24, 3, "tenant_gamma", true, cancellationToken: ct);
         var (status, body) = await GetAsync(postgres, $"/api/read/get_finops?server={name}&view=index_analysis&limit=3&database_name=tenant_gamma&full_text=true", ct);
 
         Assert.Equal(StatusCodes.Status200OK, status);

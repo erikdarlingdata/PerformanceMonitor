@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -42,14 +43,33 @@ public sealed partial class DarlingMcpFinOpsTools
 
     private static readonly string[] IndexAnalysisActions = ["COMPRESS", "DISABLE", "DROP CONSTRAINT", "MAKE UNIQUE", "MERGE", "REVIEW"];
 
-    /// <summary>Refuses <c>database_name</c> and <c>full_text</c> on every view except index_analysis.</summary>
-    internal static (string Parameter, string Message)? IndexAnalysisOnlyParamMisuse(string view, string? databaseName, bool fullText)
+    /// <summary>Each optional parameter and the only views that accept it; every other view refuses it.</summary>
+    private static readonly (string Parameter, string[] Views)[] OptionalParamViews =
+    [
+        ("database_name", [IndexAnalysisView, StorageGrowthView]),
+        ("full_text", [IndexAnalysisView]),
+        ("object_name", [StorageGrowthView]),
+    ];
+
+    /// <summary>
+    /// Refuses <c>database_name</c>, <c>full_text</c> and <c>object_name</c> on every view that does not accept them,
+    /// in that order, naming the views that do.
+    /// </summary>
+    internal static (string Parameter, string Message)? OptionalParamMisuse(string view, string? databaseName, bool fullText, string? objectName = null)
     {
-        if (view == IndexAnalysisView) return null;
-        if (databaseName != null)
-            return ("database_name", $"database_name applies only to view {IndexAnalysisView}; omit it for view {view}.");
-        if (fullText)
-            return ("full_text", $"full_text applies only to view {IndexAnalysisView}; omit it for view {view}.");
+        foreach (var (parameter, views) in OptionalParamViews)
+        {
+            var given = parameter switch
+            {
+                "database_name" => databaseName != null,
+                "full_text" => fullText,
+                "object_name" => objectName != null,
+                _ => throw new UnreachableException(parameter),
+            };
+            if (!given || views.Contains(view)) continue;
+            var only = views.Length == 1 ? $"view {views[0]}" : $"views {string.Join(" and ", views)}";
+            return (parameter, $"{parameter} applies only to {only}; omit it for view {view}.");
+        }
         return null;
     }
 
@@ -60,9 +80,9 @@ public sealed partial class DarlingMcpFinOpsTools
         return text.Length > cap ? (text[..McpHelpers.TextElementCutLength(text, cap)] + "…", true) : (text, false);
     }
 
-    /// <summary>Treats an empty or whitespace-only <c>database_name</c> as no filter.</summary>
-    internal static string? NormalizeIndexAnalysisDatabaseName(string? databaseName) =>
-        string.IsNullOrWhiteSpace(databaseName) ? null : databaseName;
+    /// <summary>Treats an empty or whitespace-only optional text parameter (<c>database_name</c>, <c>object_name</c>) as not given.</summary>
+    internal static string? NormalizeOptionalText(string? text) =>
+        string.IsNullOrWhiteSpace(text) ? null : text;
 
     /// <summary>The recommendation ordering: size, then the full name chain, action label, consolidation rule (nulls first) and index id, so a cut never depends on analyzer order.</summary>
     internal static List<IndexCleanupRecommendation> OrderIndexAnalysisRecommendations(IEnumerable<IndexCleanupRecommendation> rows) =>
@@ -185,7 +205,7 @@ public sealed partial class DarlingMcpFinOpsTools
                 ?? McpHelpers.Status("empty", "No index statistics were collected for this server yet, so there is no index analysis.");
         }
 
-        databaseName = NormalizeIndexAnalysisDatabaseName(databaseName);
+        databaseName = NormalizeOptionalText(databaseName);
         var filtered = databaseName != null;
         var rollups = filtered
             ? result.DatabaseRollups.Where(r => string.Equals(r.DatabaseName, databaseName, StringComparison.OrdinalIgnoreCase)).ToList()
