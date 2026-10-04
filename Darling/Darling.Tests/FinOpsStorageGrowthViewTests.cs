@@ -110,13 +110,35 @@ public sealed class FinOpsStorageGrowthViewTests
     }
 
     [Fact]
-    public void MatrixLogBands_AllEqual_TakeTheTopBand_AndAnEmptyMatrixHasNone()
+    public void MatrixLogBands_AllEqual_OrASingleCell_TakeBandZero_AndAnEmptyMatrixHasNone()
     {
         var bands = FinOpsHeatmapBuilder.MatrixLogBands(Matrix(5, 0, 5), 8);
-        Assert.Equal(7, bands[0, 0]);
+        Assert.Equal(0, bands[0, 0]);
         Assert.Null(bands[0, 1]);
-        Assert.Equal(7, bands[0, 2]);
+        Assert.Equal(0, bands[0, 2]);
+        Assert.Equal(0, FinOpsHeatmapBuilder.MatrixLogBands(Matrix(0, 42, 0), 8)[0, 1]);
         Assert.Null(FinOpsHeatmapBuilder.MatrixLogBands(Matrix(0, 0), 8)[0, 1]);
+    }
+
+    [Fact]
+    public void MatrixLogBands_NonFiniteCellsHaveNoBand_AndAreLeftOutOfTheRange()
+    {
+        var bands = FinOpsHeatmapBuilder.MatrixLogBands(Matrix(double.NaN, double.PositiveInfinity, double.NegativeInfinity, 3, 99), 8);
+        Assert.Null(bands[0, 0]);
+        Assert.Null(bands[0, 1]);
+        Assert.Null(bands[0, 2]);
+        Assert.Equal(0, bands[0, 3]);
+        Assert.Equal(7, bands[0, 4]);
+        Assert.Null(FinOpsHeatmapBuilder.MatrixLogBands(Matrix(double.NaN, double.PositiveInfinity), 8)[0, 1]);
+    }
+
+    [Fact]
+    public void MatrixLogBands_RefusesABandCountBelowOne_AndANullMatrix()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => FinOpsHeatmapBuilder.MatrixLogBands(Matrix(1, 2), 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => FinOpsHeatmapBuilder.MatrixLogBands(Matrix(1, 2), -1));
+        Assert.Throws<ArgumentNullException>(() => FinOpsHeatmapBuilder.MatrixLogBands(null!, 8));
+        Assert.Equal(0, FinOpsHeatmapBuilder.MatrixLogBands(Matrix(1, 2), 1)[0, 1]);
     }
 
     [Fact]
@@ -135,7 +157,7 @@ public sealed class FinOpsStorageGrowthViewTests
 
         var objs = Enumerable.Range(0, 20).Select(i => new ObjectSizeGrowthDto(name, name + i.ToString("D2"), 99999999.9m, 99999999.9m, 9_999_999_999L, 99, 99999999.9m, 99999.99m, 9999.9m)).ToList();
         var samples = objs.SelectMany(o => Enumerable.Range(0, 30).Select(d => new FinOpsObjectDaySample($"{o.SchemaName}.{o.TableName}", new DateTime(2026, 9, 1).AddDays(d), 12345678.9 + d))).ToList();
-        var objectsBytes = Encoding.UTF8.GetByteCount(DarlingMcpFinOpsTools.BuildStorageGrowthObjectsPayload(new string('s', 128), 24, DarlingMcpFinOpsTools.StorageGrowthDatabaseSection(dbs, dbs[0].DatabaseName, null), objs, true, samples, null));
+        var objectsBytes = Encoding.UTF8.GetByteCount(DarlingMcpFinOpsTools.BuildStorageGrowthObjectsPayload(new string('s', 128), 24, DarlingMcpFinOpsTools.StorageGrowthDatabaseSection(dbs, dbs[0].DatabaseName, null), objs, 21, samples, null));
 
         var ixs = Enumerable.Range(0, 60).Select(i => new IndexUsageDto(name, name, name, name + i, "NONCLUSTERED COLUMNSTORE", i, 99999999.9m, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, new DateTime(2026, 9, 1, 1, 2, 3), "Write-only")).ToList();
         var indexesBytes = Encoding.UTF8.GetByteCount(DarlingMcpFinOpsTools.BuildStorageGrowthIndexesPayload(new string('s', 128), 24, DarlingMcpFinOpsTools.StorageGrowthDatabaseSection(dbs, dbs[0].DatabaseName, null), ixs, null));
@@ -356,7 +378,7 @@ public sealed class FinOpsStorageGrowthViewLiveTests
             level1.RootElement.GetProperty("databases").GetProperty("rows").GetRawText());
 
         var windowStart = DateTime.SpecifyKind(now.AddDays(-30), DateTimeKind.Unspecified);
-        var (objects, samples) = await DarlingFinOpsStorageGrowthReader.GetObjectGrowthHeatmapDataAsync(ds, ServerId, "Alpha", windowStart, 30, 11, 60, ct);
+        var (objects, samples) = await DarlingFinOpsStorageGrowthReader.GetObjectGrowthHeatmapDataAsync(ds, ServerId, "Alpha", windowStart, 30, 20, 60, ct);
         var (ranked, _) = DarlingMcpFinOpsTools.RankStorageGrowthObjects(objects, 10);
         var (days, objectRows) = DarlingMcpFinOpsTools.StorageGrowthObjectRows(ranked, samples);
         using var level2 = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Alpha", cancellationToken: ct));
@@ -409,6 +431,40 @@ public sealed class FinOpsStorageGrowthViewLiveTests
     }
 
     [Fact]
+    public async Task ObjectsLevel_RanksTheDesktopsTwenty_BeforeCuttingToLimit()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using (var c = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await c.OpenAsync(ct);
+            var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+            /* 15 tables that shrink (growth below 0) and 5 new tables with one sample only (growth null, counted as 0). */
+            for (var i = 0; i < 20; i++)
+            {
+                var table = (i < 15 ? "Shrink" : "New") + i.ToString("D2");
+                foreach (var d in i < 15 ? new[] { 29, 0 } : new[] { 0 })
+                {
+                    await DarlingMcpTestData.ExecAsync(c, ct,
+                        @"INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates)
+                          VALUES ($1,$2,$3,$4,'Gamma','dbo',$5,$6,1,'PK','CLUSTERED',$7,$7,1000,0,0,0,0)",
+                        CollectionIdGenerator.Next(), now.Date.AddDays(-d).AddMinutes(10), ServerId, ServerName, 500 + i, table, d == 29 ? 500m + i : 100m + i);
+                }
+            }
+        }
+
+        using var doc = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Gamma", cancellationToken: ct));
+        var objects = doc.RootElement.GetProperty("objects");
+        /* The desktop's order: the 5 new tables (0) above the 15 shrinking ones, key ordinal inside each tie; the first 10 are the 5 new and the 5 least-shrunk. */
+        var expected = Enumerable.Range(15, 5).Select(i => "dbo.New" + i.ToString("D2"))
+            .Concat(new[] { "dbo.Shrink00", "dbo.Shrink01", "dbo.Shrink02", "dbo.Shrink03", "dbo.Shrink04" }).ToArray();
+        Assert.Equal(expected, objects.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("object_name").GetString()).ToArray());
+        Assert.Equal(20, objects.GetProperty("object_count").GetInt32());
+        Assert.True(objects.GetProperty("truncated").GetBoolean());
+    }
+
+    [Fact]
     public async Task PostgresServer_IsExactlyNotCollected()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -419,6 +475,10 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         Assert.Equal("not_collected", JsonDocument.Parse(expected!).RootElement.GetProperty("status").GetString());
         Assert.Equal(expected, await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", PostgresServerName, 24, 10, cancellationToken: ct));
         Assert.Equal(expected, await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", PostgresServerName, 24, 10, "Alpha", cancellationToken: ct));
+        /* The indexes level on a gated engine says not collected, not that the table is outside the top 20. */
+        var indexes = await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", PostgresServerName, 24, 10, "Alpha", object_name: "dbo.Big", cancellationToken: ct);
+        Assert.Equal("not_collected", JsonDocument.Parse(indexes).RootElement.GetProperty("status").GetString());
+        Assert.Equal(expected, indexes);
     }
 
     [Fact]

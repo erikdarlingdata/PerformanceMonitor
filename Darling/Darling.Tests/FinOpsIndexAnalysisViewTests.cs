@@ -72,9 +72,9 @@ public sealed class FinOpsIndexAnalysisViewTests
     [Fact]
     public void DatabaseName_EmptyOrWhitespace_IsNoFilter_AndTheWorkloadReasonFollowsOverall()
     {
-        Assert.Null(DarlingMcpFinOpsTools.NormalizeIndexAnalysisDatabaseName(""));
-        Assert.Null(DarlingMcpFinOpsTools.NormalizeIndexAnalysisDatabaseName("  "));
-        Assert.Equal("d", DarlingMcpFinOpsTools.NormalizeIndexAnalysisDatabaseName("d"));
+        Assert.Null(DarlingMcpFinOpsTools.NormalizeOptionalText(""));
+        Assert.Null(DarlingMcpFinOpsTools.NormalizeOptionalText("  "));
+        Assert.Equal("d", DarlingMcpFinOpsTools.NormalizeOptionalText("d"));
         var r = new IndexCleanupAnalysisResult { DatabaseRollups = [Roll("d")], Recommendations = [Rec("a")] };
         var blank = Build(r, db: " ");
         Assert.NotEqual(JsonValueKind.Null, blank.GetProperty("overall").ValueKind);
@@ -83,9 +83,9 @@ public sealed class FinOpsIndexAnalysisViewTests
         var one = Build(r, db: "d");
         Assert.Equal(JsonValueKind.Null, one.GetProperty("overall").ValueKind);
         Assert.Equal(JsonValueKind.Null, one.GetProperty("overall_workload_reason").ValueKind);
-        Assert.Null(DarlingMcpFinOpsTools.OptionalParamMisuse("utilization", DarlingMcpFinOpsTools.NormalizeIndexAnalysisDatabaseName(""), false));
+        Assert.Null(DarlingMcpFinOpsTools.OptionalParamMisuse("utilization", DarlingMcpFinOpsTools.NormalizeOptionalText(""), false));
         var tool = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.cs").ReplaceLineEndings("\n");
-        Assert.True(tool.IndexOf("database_name = NormalizeIndexAnalysisDatabaseName(database_name);", StringComparison.Ordinal)
+        Assert.True(tool.IndexOf("database_name = NormalizeOptionalText(database_name);", StringComparison.Ordinal)
             < tool.IndexOf("OptionalParamMisuse(normalized", StringComparison.Ordinal));
     }
 

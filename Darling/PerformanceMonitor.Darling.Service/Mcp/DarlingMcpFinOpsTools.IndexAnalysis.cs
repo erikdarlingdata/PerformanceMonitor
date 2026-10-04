@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -62,7 +63,8 @@ public sealed partial class DarlingMcpFinOpsTools
             {
                 "database_name" => databaseName != null,
                 "full_text" => fullText,
-                _ => objectName != null,
+                "object_name" => objectName != null,
+                _ => throw new UnreachableException(parameter),
             };
             if (!given || views.Contains(view)) continue;
             var only = views.Length == 1 ? $"view {views[0]}" : $"views {string.Join(" and ", views)}";
@@ -78,9 +80,9 @@ public sealed partial class DarlingMcpFinOpsTools
         return text.Length > cap ? (text[..McpHelpers.TextElementCutLength(text, cap)] + "…", true) : (text, false);
     }
 
-    /// <summary>Treats an empty or whitespace-only <c>database_name</c> as no filter.</summary>
-    internal static string? NormalizeIndexAnalysisDatabaseName(string? databaseName) =>
-        string.IsNullOrWhiteSpace(databaseName) ? null : databaseName;
+    /// <summary>Treats an empty or whitespace-only optional text parameter (<c>database_name</c>, <c>object_name</c>) as not given.</summary>
+    internal static string? NormalizeOptionalText(string? text) =>
+        string.IsNullOrWhiteSpace(text) ? null : text;
 
     /// <summary>The recommendation ordering: size, then the full name chain, action label, consolidation rule (nulls first) and index id, so a cut never depends on analyzer order.</summary>
     internal static List<IndexCleanupRecommendation> OrderIndexAnalysisRecommendations(IEnumerable<IndexCleanupRecommendation> rows) =>
@@ -203,7 +205,7 @@ public sealed partial class DarlingMcpFinOpsTools
                 ?? McpHelpers.Status("empty", "No index statistics were collected for this server yet, so there is no index analysis.");
         }
 
-        databaseName = NormalizeIndexAnalysisDatabaseName(databaseName);
+        databaseName = NormalizeOptionalText(databaseName);
         var filtered = databaseName != null;
         var rollups = filtered
             ? result.DatabaseRollups.Where(r => string.Equals(r.DatabaseName, databaseName, StringComparison.OrdinalIgnoreCase)).ToList()

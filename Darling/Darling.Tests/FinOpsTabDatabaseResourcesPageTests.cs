@@ -28,13 +28,38 @@ public sealed class FinOpsTabDatabaseResourcesPageTests
     public void TheTabReadsGetFinOpsWithTheDatabaseResourcesViewWindow()
     {
         // The exact call is a no-noise guard: a limit would only cap the top lists, which this tab does not show.
-        const string call = "readTool(\"get_finops\", { server, view: \"database_resources\", hours: HOURS }, ctx && ctx.signal)";
+        const string call = "readTool(\"get_finops\", { server, view: \"database_resources\", hours }, ctx && ctx.signal)";
         var tab = Tab();
         Assert.Contains(call, tab);
     }
 
     [Fact]
-    public void TheWindowIs24HoursAndThereIsNoLimitConstant()
+    public void ThePickerOffersTheDesktopWindowsInOrder()
+    {
+        // Source: FinOpsTab.xaml ~:497-499, FinOpsResourceUsageTimeRangeCombo.
+        var tab = Tab();
+        var pairs = Regex.Matches(tab, "\\{ value: (\\d+), label: \"([^\"]+)\" \\}").Select(m => m.Groups[1].Value + "=" + m.Groups[2].Value);
+        Assert.Equal("1=Last 1 hour,4=Last 4 hours,12=Last 12 hours,24=Last 24 hours,168=Last 7 days", string.Join(",", pairs));
+        Assert.Contains("pickerControl(\"Window\", WINDOWS, HOURS,", tab);
+    }
+
+    [Fact]
+    public void TheChangeHandlerRereadsWithTheChosenHoursAndTheFirstReadUsesTheDefault()
+    {
+        var tab = Tab();
+        Assert.Contains("sel.addEventListener(\"change\", () => onPick(Number(sel.value)));", tab);
+        Assert.Contains("(hours) => load(hours)", tab);
+        Assert.Contains("load(HOURS);", tab);
+    }
+
+    [Fact]
+    public void ThePickerUsesNoInnerHtml()
+    {
+        Assert.DoesNotContain("innerHTML", Tab());
+    }
+
+    [Fact]
+    public void TheWindowDefaultsTo24HoursAndThereIsNoLimitConstant()
     {
         var tab = Tab();
         Assert.Matches("(?m)^const HOURS = 24;$", tab);
