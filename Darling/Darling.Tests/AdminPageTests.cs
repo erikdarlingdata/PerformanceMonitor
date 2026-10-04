@@ -49,6 +49,54 @@ public sealed class AdminPageTests
     }
 
     [Fact]
+    public void TheServersTab_CallsItsStatusColumnFreshness_BecauseTheDesktopStatusIsEnabledOrDisabled()
+    {
+        var page = Page();
+        Assert.Contains("{ key: \"status\", label: \"Freshness\"", page);
+        Assert.DoesNotContain("label: \"Status\"", page);
+        Assert.Contains("whether collection is enabled or disabled", page);
+        Assert.Contains("label: \"Email to\"", page);
+        Assert.DoesNotContain("Email recipients", page);
+    }
+
+    [Fact]
+    public void TheSettingsTab_SplitsTheLongRunningQueryFilters_IntoTheirOwnSectionAfterAlertThresholds()
+    {
+        var page = Page();
+        var thresholds = page.IndexOf("title: \"Alert thresholds\"", StringComparison.Ordinal);
+        var filters = page.IndexOf("title: \"Long Running Query Filters\"", StringComparison.Ordinal);
+        var bands = page.IndexOf("title: \"Health bands\"", StringComparison.Ordinal);
+        Assert.True(thresholds >= 0 && filters > thresholds && bands > filters);
+    }
+
+    [Fact]
+    public void EveryTopLevelKeyOfTheAlertSettingsPayload_IsOnThePage()
+    {
+        var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs").ReplaceLineEndings("\n");
+        var start = source.IndexOf("private static object BuildAlertSettingsPayload(", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var open = source.IndexOf("=> new\n    {\n", start, StringComparison.Ordinal) + "=> new\n    {\n".Length;
+        var close = source.IndexOf("\n    };", open, StringComparison.Ordinal);
+        Assert.True(open > 0 && close > open);
+        // Top-level members sit at exactly eight spaces; nested members and comment text sit deeper or start with a comment mark.
+        var keys = System.Text.RegularExpressions.Regex.Matches(source.Substring(open, close - open), "^ {8}([a-z_]+) = ", System.Text.RegularExpressions.RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value).ToArray();
+        Assert.True(keys.Length >= 24, "the payload parse found only " + keys.Length + " keys");
+
+        var page = Page();
+        var start2 = page.IndexOf("export const SETTING_SECTIONS = [", StringComparison.Ordinal);
+        var block = page.Substring(start2, page.IndexOf("\n];", start2, StringComparison.Ordinal) - start2);
+        var shown = System.Text.RegularExpressions.Regex.Matches(block, "\"([a-z_]+)\"").Select(m => m.Groups[1].Value).ToHashSet();
+        foreach (var k in keys) Assert.True(shown.Contains(k), "the Admin page's settings sections do not list the payload key '" + k + "'");
+
+        // The per-group allow-list covers every group the sections name.
+        var gstart = page.IndexOf("export const GROUP_FIELDS = {", StringComparison.Ordinal);
+        var gblock = page.Substring(gstart, page.IndexOf("\n};", gstart, StringComparison.Ordinal) - gstart);
+        foreach (var g in System.Text.RegularExpressions.Regex.Matches(block, "groups: \\[([^\\]]*)\\]").SelectMany(m => System.Text.RegularExpressions.Regex.Matches(m.Groups[1].Value, "\"([a-z_]+)\"")).Select(m => m.Groups[1].Value))
+            Assert.Contains("  " + g + ": [", gblock);
+    }
+
+    [Fact]
     public void ThePage_OffersNoWriteCall()
     {
         var page = Page();
@@ -140,6 +188,40 @@ public sealed class AdminPageBehaviourTests
         Assert.NotEmpty(texts);
         Assert.DoesNotContain(texts, t => t.Contains("SECRET", StringComparison.Ordinal));
         Assert.DoesNotContain(texts, t => t.Contains("hooks.example.test", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheSettingsTab_DrawsOnlyTheFieldsItListsForAGroup_AndNeverTheStoresSecretNames()
+    {
+        var texts = Texts("settings", out _);
+        Assert.Contains("cpu.threshold_percent", texts);
+        Assert.DoesNotContain(texts, t => t.Contains("UNLISTED", StringComparison.Ordinal));
+        Assert.DoesNotContain(texts, t => t.Contains("future_knob", StringComparison.Ordinal));
+        Assert.DoesNotContain(texts, t => t.Contains("slack_url", StringComparison.Ordinal) || t.Contains("pagerduty_routing_key", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheLongRunningQueryFilters_AreTheirOwnSection()
+    {
+        var texts = Texts("settings", out _);
+        Assert.Contains("Alert thresholds", texts);
+        Assert.Contains("Long Running Query Filters", texts);
+        Assert.Contains("long_running_query.exclude_backups", texts);
+        Assert.Contains("long_running_query.threshold_minutes", texts);
+        Assert.True(Array.IndexOf(texts, "Long Running Query Filters") < Array.IndexOf(texts, "long_running_query.exclude_backups"));
+        Assert.True(Array.IndexOf(texts, "long_running_query.threshold_minutes") < Array.IndexOf(texts, "Long Running Query Filters"));
+    }
+
+    [Theory]
+    [InlineData("repaint-settings")]
+    [InlineData("repaint-servers")]
+    public void ARepaintOfTheTabOnScreen_KeepsItsBody_UntilTheReadLands(string scenario)
+    {
+        Texts(scenario, out var root);
+        var repaint = root.GetProperty("repaint");
+        Assert.True(repaint.GetProperty("sameBody").GetBoolean());
+        Assert.False(repaint.GetProperty("loadingShown").GetBoolean());
+        Assert.True(repaint.GetProperty("rowsKept").GetBoolean());
     }
 
     [Fact]

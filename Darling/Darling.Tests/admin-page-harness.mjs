@@ -19,7 +19,7 @@ const SECRETS = {
   route: { route_id: 7, metric_match: "Blocking Detected", match_kind: "exact_metric", family: "performance",
     configured_channels: ["slack", "pagerduty"], smtp_recipients: ["ops@example.test"], enabled: true,
     modified_at_utc: "2026-01-01T00:00:00Z", webhook_url: "https://hooks.example.test/SECRET-HOOK", password: "SECRET-PW",
-    routing_key: "SECRET-KEY", slack_webhook_url: "https://hooks.example.test/SECRET-SLACK" },
+    routing_key: "SECRET-KEY", slack_url: "https://hooks.example.test/SECRET-SLACKURL", pagerduty_routing_key: "SECRET-PDKEY", slack_webhook_url: "https://hooks.example.test/SECRET-SLACK" },
 };
 const reads = [];
 const payloads = {
@@ -27,7 +27,8 @@ const payloads = {
     engine_version: "SQL Server 2022", status: "Online", read_only: false, last_collection: "2026-01-01T00:00:00Z",
     password: "SECRET-PW" }] },
   routes: { routes: [SECRETS.route] },
-  settings: { alerts_enabled: true, cooldown_minutes: 15, cpu: { enabled: true, threshold_percent: 90, webhook_url: "SECRET-HOOK" },
+  settings: { alerts_enabled: true, cooldown_minutes: 15, cpu: { enabled: true, threshold_percent: 90, webhook_url: "SECRET-HOOK", slack_url: "SECRET-SLACKURL", pagerduty_routing_key: "SECRET-PDKEY", connection_string: "SECRET-CS", auth_token: "SECRET-AUTH", future_knob: "UNLISTED-VALUE" },
+    long_running_query: { enabled: true, threshold_minutes: 30, max_results: 10, exclude_backups: true, excluded_logins: ["svc"] },
     health_bands: { deadlock_warn_per_hour: 1, deadlock_critical_per_hour: 5 }, excluded_databases: ["master"],
     analysis: { enabled: true, interval_minutes: 60, smtp_password: "SECRET-PW" }, fleet_sweep: { enabled: true, interval_minutes: 60 },
     smtp_password: "SECRET-PW" },
@@ -47,11 +48,22 @@ const context = vm.createContext({
 vm.runInContext(source, context);
 
 const main = { kids: [] };
-const tab = scenario;
+const tab = scenario.replace(/^repaint-/, "");
 vm.runInContext(`renderAdmin(main, ${JSON.stringify(tab)})`, Object.assign(context, { main }));
 await new Promise((r) => setTimeout(r, 20));
+let repaint = null;
+if (scenario.startsWith("repaint-")) {
+  /* The 60 s poll: render the same tab again and look at the page BEFORE the read lands. */
+  const before = main.kids[2];
+  const textsBefore = [];
+  vm.runInContext(`renderAdmin(main, ${JSON.stringify(tab)})`, context);
+  const walkB = (n) => { if (!n) return; if (n.text != null) textsBefore.push(String(n.text)); (n.kids || []).forEach(walkB); };
+  walkB(main.kids[2]);
+  repaint = { sameBody: main.kids[2] === before, loadingShown: textsBefore.some((t) => t.startsWith("Loading")), rowsKept: textsBefore.length > 1 };
+  await new Promise((r) => setTimeout(r, 20));
+}
 
 const texts = [];
 const walk = (n) => { if (!n) return; if (n.text != null) texts.push(String(n.text)); (n.kids || []).forEach(walk); };
 walk(main);
-console.log(JSON.stringify({ texts, reads, tabs: main.kids.length }));
+console.log(JSON.stringify({ texts, reads, tabs: main.kids.length, repaint }));

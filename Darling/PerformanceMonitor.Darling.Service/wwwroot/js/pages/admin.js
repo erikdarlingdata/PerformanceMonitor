@@ -24,7 +24,7 @@ export const SERVER_COLUMNS = [
   { key: "server_name", label: "Server" },
   { key: "engine_kind", label: "Engine" },
   { key: "engine_version", label: "Version" },
-  { key: "status", label: "Status", statusSev: true },
+  { key: "status", label: "Freshness", statusSev: true },
   { key: "read_only", label: "Read only", format: "bool" },
   { key: "last_collection", label: "Last Collected", format: "time" },
 ];
@@ -36,7 +36,7 @@ export const ROUTE_COLUMNS = [
   { key: "match_kind", label: "Kind" },
   { key: "family", label: "Family" },
   { key: "channels", label: "Channels set", wrap: true },
-  { key: "smtp_recipients", label: "Email recipients", wrap: true },
+  { key: "smtp_recipients", label: "Email to", wrap: true },
   { key: "modified_at_utc", label: "Modified", format: "time" },
 ];
 
@@ -54,6 +54,14 @@ export const SETTING_SECTIONS = [
       "self_alerts", "pvs", "file_growth", "long_running_job", "failed_job", "database_state", "ag", "delivery"],
     top: ["alerts_enabled", "notify_connection_changes", "notify_connection_down_at_startup", "connection_refire_minutes",
       "cooldown_minutes"],
+    groupFields: { long_running_query: ["enabled", "threshold_minutes", "max_results"] },
+  },
+  {
+    title: "Long Running Query Filters",
+    groups: ["long_running_query"],
+    top: [],
+    groupFields: { long_running_query: ["exclude_sp_server_diagnostics", "exclude_wait_for", "exclude_backups",
+      "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"] },
   },
   { title: "Health bands", groups: ["health_bands"], top: [] },
   { title: "Global alert filters", groups: [], top: ["excluded_databases"] },
@@ -61,8 +69,34 @@ export const SETTING_SECTIONS = [
   { title: "Fleet sweep reports", groups: ["fleet_sweep"], top: [] },
 ];
 
+/* The fields the page shows for each group. A key the read carries that is not listed here is not drawn, so a field
+   added to the service later cannot reach the page until it is listed (and reviewed) here. */
+export const GROUP_FIELDS = {
+  cpu: ["enabled", "threshold_percent", "mode"],
+  blocking: ["enabled", "count_threshold", "wait_threshold_seconds", "pg_count_threshold"],
+  deadlocks: ["enabled", "count_threshold", "pg_count_threshold"],
+  health_bands: ["deadlock_warn_per_hour", "deadlock_critical_per_hour"],
+  poison_wait: ["enabled", "threshold_ms"],
+  long_running_query: ["enabled", "threshold_minutes", "max_results", "exclude_sp_server_diagnostics", "exclude_wait_for",
+    "exclude_backups", "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"],
+  tempdb_space: ["enabled", "threshold_percent"],
+  low_disk: ["enabled", "threshold_percent", "threshold_gb", "critical_free_percent", "critical_free_gb"],
+  self_alerts: ["disk_free_warn_percent", "disk_free_warn_gb", "collection_stale_minutes", "collection_failure_threshold",
+    "store_job_cadence_warn_percent", "retention_hold_warn_ratio", "retention_hold_critical_ratio"],
+  pvs: ["enabled", "threshold_percent", "floor_gb"],
+  file_growth: ["enabled", "rise_mb", "volume_percent", "lookback_minutes"],
+  long_running_job: ["enabled", "multiplier"],
+  failed_job: ["enabled", "lookback_minutes"],
+  database_state: ["enabled"],
+  ag: ["enabled", "lag_threshold_seconds", "redo_queue_threshold_kb", "disconnect_refire_minutes"],
+  delivery: ["mode", "per_event_max", "cooldown_minutes"],
+  analysis: ["enabled", "interval_minutes", "notifications_enabled", "notify_severity", "notify_cooldown_minutes",
+    "uncorroborated_route", "uncorroborated_route_source"],
+  fleet_sweep: ["enabled", "interval_minutes"],
+};
+
 /* A key that names a credential or a destination is never shown, whatever the read carries. */
-const SECRET_KEY = /(url|password|passwd|secret|token|credential|api_?key|routing_key|smtp_user|webhook)/i;
+const SECRET_KEY = /(url|password|passwd|secret|token|credential|api_?key|routing_key|smtp_user|webhook|connection_?string|auth|pwd)/i;
 
 export function isSecretKey(key) {
   return SECRET_KEY.test(String(key));
@@ -76,11 +110,13 @@ function valueText(v) {
   return String(v);
 }
 
-/** Setting rows for one group: [{ setting, value }], one per scalar or list key, secret-shaped keys dropped. */
-export function groupRows(prefix, group) {
+/** Setting rows for one group: [{ setting, value }], only the fields the group allow-list names (or `fields`, when a
+    section shows part of a group) that the group carries; a secret-shaped key is dropped even if it were listed. */
+export function groupRows(prefix, group, fields) {
   if (!group || typeof group !== "object" || Array.isArray(group)) return [];
-  return Object.keys(group)
-    .filter((k) => !isSecretKey(k))
+  const allowed = fields || GROUP_FIELDS[prefix] || [];
+  return allowed
+    .filter((k) => k in group && !isSecretKey(k))
     .map((k) => ({ setting: prefix + "." + k, value: valueText(group[k]) }));
 }
 
@@ -90,7 +126,7 @@ export function settingSections(data) {
   return SETTING_SECTIONS.map((s) => {
     const rows = [];
     for (const k of s.top) if (k in d && !isSecretKey(k)) rows.push({ setting: k, value: valueText(d[k]) });
-    for (const g of s.groups) rows.push(...groupRows(g, d[g]));
+    for (const g of s.groups) rows.push(...groupRows(g, d[g], s.groupFields && s.groupFields[g]));
     return { title: s.title, rows };
   }).filter((s) => s.rows.length);
 }
@@ -124,6 +160,8 @@ const TABS = [
 /* The tab last shown, so a repaint with a bare #/admin returns to it. */
 let activeTab = "servers";
 let renderGeneration = 0;
+let shownBody = null;
+let shownTab = null;
 
 function findTab(id) {
   return TABS.find((t) => t.id === id) || TABS.find((t) => t.id === activeTab) || TABS[0];
@@ -150,7 +188,7 @@ function failure(res, emptyPrefix) {
 }
 
 const SERVER_NOT_SHOWN =
-  "Not shown here: authentication, installed version, monthly cost and Added date. The read does not return them; " +
+  "Not shown here: whether collection is enabled or disabled, authentication, installed version, monthly cost and Added date. The read does not return them; " +
   "add, edit and remove stay in the desktop Manage Servers window.";
 
 async function buildServers(body, generation) {
@@ -210,7 +248,11 @@ export function renderAdmin(main, tabId) {
   const tab = findTab(tabId);
   activeTab = tab.id;
   const generation = ++renderGeneration;
-  const body = el("div", { class: "admin-body" }, [loadingStrip("Loading " + tab.label.toLowerCase())]);
+  /* A repaint of the tab already on screen keeps the body it drew, so the page does not collapse and lose its scroll
+     position while the read is in flight; the loading strip is only for the first draw of a tab. */
+  const body = shownBody && shownTab === tab.id ? shownBody : el("div", { class: "admin-body" }, [loadingStrip("Loading " + tab.label.toLowerCase())]);
+  shownBody = body;
+  shownTab = tab.id;
   mount(main, [el("div", { class: "page-head" }, [el("h2", { text: "Admin" })]), tabBar(tab), body]);
   BUILDERS[tab.id](body, generation).catch((e) => {
     if (generation === renderGeneration) mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
