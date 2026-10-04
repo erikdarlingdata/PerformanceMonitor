@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -24,6 +25,13 @@ public enum ComposeSourceTier
 
     /// <summary>The daily continuous aggregate (<c>collect.&lt;table&gt;_daily</c>).</summary>
     Daily,
+
+    /// <summary>A SUM/MAX/MIN panel whose whole middle hours come from the interval-honest hourly successor, with
+    /// the restart rows of those hours and both partial-hour edges read from raw. It is taken only when a
+    /// count-guard verdict proves the successor holds exactly what raw holds for those hours. It is not a
+    /// rollup read on its own (<see cref="ComposeRoute.IsCagg"/> is false): everything but the FROM item
+    /// compiles as raw.</summary>
+    HourlyRawEdges,
 }
 
 /// <summary>
@@ -36,12 +44,15 @@ public enum ComposeSourceTier
 /// is null when the clause names one relation. It is carried as a value, set where the router builds the clause, so
 /// the data-start probe reads the successor over the same range the panel does.</para>
 /// </summary>
-public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation, string? CaggFromClause = null, DateTime? StitchBoundaryUtc = null)
+public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation, string? CaggFromClause = null, DateTime? StitchBoundaryUtc = null,
+    DateTime? EdgeStartUtc = null, DateTime? EdgeEndUtc = null)
 {
     /// <summary>The raw route — the compiler's unchanged behaviour.</summary>
     public static readonly ComposeRoute Raw = new(ComposeSourceTier.Raw, null);
 
-    public bool IsCagg => Tier != ComposeSourceTier.Raw;
+    /// <summary>True for a route that reads a rollup alone (<c>Hourly</c>, <c>Daily</c>). <see cref="ComposeSourceTier.HourlyRawEdges"/>
+    /// reads raw outside its middle hours, so it is not a CAGG route.</summary>
+    public bool IsCagg => Tier is ComposeSourceTier.Hourly or ComposeSourceTier.Daily;
 
     /// <summary>Every CAGG's time dimension is the <c>time_bucket(...) AS bucket</c> column.</summary>
     public const string CaggTimeColumn = "bucket";
@@ -49,7 +60,40 @@ public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation, 
     /// <summary>The compiler's fact-table alias every CAGG <see cref="CaggFromClause"/> is built with (#3653
     /// A6): <c>f</c>, matching <c>ComposeCompiler.FactAlias</c>.</summary>
     public const string FactAlias = "f";
+
+    /// <summary>The rollup-side alias of the whole-hour middle inside the hourly-raw-edges FROM item.</summary>
+    public const string HybridMidAlias = "mid";
 }
+
+/// <summary>The column map the hourly-raw-edges FROM item projects. Group columns and delta columns are named
+/// the same in raw and in the interval-honest hourly successors (<c>collect.query_stats_interval_hourly</c>,
+/// <c>collect.procedure_stats_interval_hourly</c>), so one SELECT list serves every arm.</summary>
+internal static class ComposeHybridColumns
+{
+    /// <summary>The successor's group columns, per raw table.</summary>
+    public static readonly IReadOnlyDictionary<string, string[]> GroupColumns = new Dictionary<string, string[]>(StringComparer.Ordinal)
+    {
+        ["query_stats"] = new[] { "server_id", "server_name", "database_name", "query_hash", "sql_handle" },
+        ["procedure_stats"] = new[] { "server_id", "server_name", "database_name", "schema_name", "object_name" },
+    };
+
+    /// <summary>Raw delta column to the successor's base name; the successor holds <c>&lt;base&gt;_sum</c>,
+    /// <c>&lt;base&gt;_max</c> and <c>&lt;base&gt;_min</c> for each.</summary>
+    public static readonly IReadOnlyDictionary<string, string> Measures = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["delta_worker_time"] = "worker_time",
+        ["delta_elapsed_time"] = "elapsed_time",
+        ["delta_execution_count"] = "execution_count",
+    };
+}
+
+/// <summary>A window the hourly-raw-edges route could serve: the source, its interval-honest hourly successor,
+/// and the whole-hour middle <c>[HourStartUtc, HourEndUtc)</c> the successor would answer.</summary>
+public sealed record ComposeHourlyEdgesCandidate(string SourceTable, string SuccessorView, DateTime HourStartUtc, DateTime HourEndUtc);
+
+/// <summary>A count guard's proof for one candidate: the successor's per-(server, hour) row counts matched raw's
+/// over <c>[HourStartUtc, HourEndUtc)</c>. The route is taken only when the verdict matches the candidate.</summary>
+public sealed record ComposeHourlyEdgesVerdict(string SourceTable, DateTime HourStartUtc, DateTime HourEndUtc);
 
 /// <summary>One raw table's continuous-aggregate coverage: its hourly (and optional daily) rollup view names and
 /// the dimensions those rollups are grouped by — the set a panel's group-by/filter dimensions must be a subset of
@@ -153,6 +197,14 @@ public static class ComposeSourceRouter
     /// retention, so raw never routes to an about-to-drop chunk. Aliases the shared definition (#1661); the
     /// viewer's built-in tabs route off the same value.</summary>
     public static readonly TimeSpan RawRouteMaxAge = RetentionTierRouter.RawMaxAge;
+
+    /// <summary>The sources the hourly-raw-edges route is enabled for. Only <c>query_stats</c> has been measured
+    /// against its raw read, so <c>procedure_stats</c> (mapped in <see cref="ComposeHybridColumns"/>) stays out.</summary>
+    internal static readonly IReadOnlySet<string> HourlyRawEdgesEnabledSources =
+        new HashSet<string>(StringComparer.Ordinal) { "query_stats" };
+
+    private static readonly TimeSpan HourlyRawEdgesMinWindow = TimeSpan.FromHours(12);
+    private static readonly TimeSpan HourlyRawEdgesEndSlack = TimeSpan.FromMinutes(1);
 
     /// <summary>The hourly CAGG is chosen up to this age — a day inside the 90-day (#1937) hourly retention; older windows
     /// fall to the daily CAGG (or stay on the hourly, capped, when no daily CAGG exists yet). Aliases the shared
@@ -377,4 +429,121 @@ public static class ComposeSourceRouter
                 tierCoverage.DailyFloorUtc),
         };
     }
+
+    /// <summary>
+    /// The hourly-raw-edges candidate for a panel whose window ends now, or null. Null unless every gate holds:
+    /// <see cref="Resolve"/> chose raw; the source is enabled; every measure is a cumulative delta column the
+    /// successor holds; the aggregate is Sum, Max or Min (an overlay must match source and aggregate); the mode is
+    /// Ranked or Scalar, or a time series bucketed by hour or day; every grouped or filtered dimension is a
+    /// successor column or a module-join dimension whose fallback column the successor holds; the successor
+    /// exists, reaches back to the first whole hour, and has a measured ceiling; the whole-hour middle is at
+    /// least an hour; the window ends within a minute of now; and it spans at least 12 hours.
+    ///
+    /// <para>The <c>statement</c> dimension qualifies: its group expression is
+    /// <c>COALESCE(m.object_name, f.query_hash)</c> (the module join plus the <c>query_hash</c> fallback), and
+    /// both are available to every arm.</para>
+    /// </summary>
+    public static ComposeHourlyEdgesCandidate? HourlyRawEdgesCandidate(
+        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, DateTime windowEndUtc,
+        RollupAvailability rollups, RollupCoverage coverage)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(coverage);
+
+        if (Resolve(plan, nowUtc, windowStartUtc, rollups, coverage).Tier != ComposeSourceTier.Raw)
+        {
+            return null;
+        }
+
+        var source = plan.Measure.SourceTable;
+        if (!HourlyRawEdgesEnabledSources.Contains(source) || !ComposeHybridColumns.GroupColumns.TryGetValue(source, out var groupColumns))
+        {
+            return null;
+        }
+
+        if (!IsHourlyEdgesMeasure(plan.Measure) || plan.Aggregate is not (ComposeAggregate.Sum or ComposeAggregate.Max or ComposeAggregate.Min))
+        {
+            return null;
+        }
+
+        if (plan.Overlay is ComposeOverlay overlay
+            && (overlay.Measure.SourceTable != source || overlay.Aggregate != plan.Aggregate || !IsHourlyEdgesMeasure(overlay.Measure)))
+        {
+            return null;
+        }
+
+        if (plan.Mode is not (PanelMode.Ranked or PanelMode.Scalar))
+        {
+            var bucket = MeasureCatalog.ResolveBucket(plan.TimeBucket, (windowEndUtc - windowStartUtc).TotalSeconds);
+            if (bucket is not (ComposeTimeBucket.Hour or ComposeTimeBucket.Day))
+            {
+                return null;
+            }
+        }
+
+        foreach (var dimension in plan.GroupBy.Concat(plan.Filters.Select(f => f.Dimension)))
+        {
+            var readsMapped = dimension.ViaModuleJoin
+                ? dimension.FallbackColumn is null || Array.IndexOf(groupColumns, dimension.FallbackColumn) >= 0
+                : Array.IndexOf(groupColumns, dimension.Column) >= 0;
+            if (!readsMapped)
+            {
+                return null;
+            }
+        }
+
+        var cagg = ComposeCaggCatalog.For(source);
+        if (cagg is null)
+        {
+            return null;
+        }
+
+        var successor = TimescaleSupport.SuccessorOf(cagg.HourlyView);
+        if (successor is null || !rollups.Has(successor))
+        {
+            return null;
+        }
+
+        var hStart = CeilHour(windowStartUtc);
+        if (coverage.FloorOf(successor) is not DateTime floor || floor > hStart)
+        {
+            return null;
+        }
+
+        if (coverage.CeilingOf(successor) is not DateTime ceiling)
+        {
+            return null;
+        }
+
+        var hEnd = Min(FloorHour(windowEndUtc), FloorHour(ceiling));
+        if (hEnd - hStart < TimeSpan.FromHours(1))
+        {
+            return null;
+        }
+
+        if (nowUtc - windowEndUtc > HourlyRawEdgesEndSlack)
+        {
+            return null;
+        }
+
+        if (windowEndUtc - windowStartUtc < HourlyRawEdgesMinWindow)
+        {
+            return null;
+        }
+
+        return new ComposeHourlyEdgesCandidate(source, successor, hStart, hEnd);
+    }
+
+    private static bool IsHourlyEdgesMeasure(ComposeMeasure measure) =>
+        measure.Archetype == MeasureArchetype.Cumulative
+        && measure.AggregationColumn is string column
+        && ComposeHybridColumns.Measures.ContainsKey(column);
+
+    private static DateTime CeilHour(DateTime value) =>
+        value == FloorHour(value) ? value : FloorHour(value).AddHours(1);
+
+    private static DateTime FloorHour(DateTime value) =>
+        new(value.Year, value.Month, value.Day, value.Hour, 0, 0, value.Kind);
+
+    private static DateTime Min(DateTime a, DateTime b) => a < b ? a : b;
 }
