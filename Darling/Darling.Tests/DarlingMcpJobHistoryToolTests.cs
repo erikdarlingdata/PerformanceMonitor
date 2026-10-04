@@ -264,7 +264,9 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         {
             await SeedAsync(c, ct);
             /* More runs after as_of than any fetch limit: 2100 one-second successful outcomes of the same job, local
-               16:00 onward on alpha (UTC-5), so 21:00Z onward - all after as_of 20:00Z. */
+               15:01 onward on alpha (UTC-5), so 20:01Z onward - all inside the hour after as_of 20:00Z, where a widened
+               end bound would fill the whole fetch with them. A successful run exactly AT as_of (local 15:00) is seeded too. */
+            await InsertAsync(c, ct, 8, ServerA, NameA, "Nightly ETL", "Data Maintenance", 0, 1, 600, new DateTime(2026, 3, 10, 15, 0, 0), null);
             await DarlingMcpTestData.ExecAsync(c, ct,
                 @"INSERT INTO job_history (job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name, job_enabled,
                                            category_name, step_id, step_name, run_status, run_status_desc, run_datetime, run_duration_seconds,
@@ -272,7 +274,7 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
                   SELECT 4843200000 + g, $1, $2, $3, 4843200000 + g, 'job-Nightly-ETL', 'Nightly ETL', true,
                          'Data Maintenance', 0, '(Job outcome)', 1, 'The job succeeded.', $4 + g * interval '1 minute', 1, 0, NULL
                   FROM generate_series(1, 2100) AS g",
-                new DateTime(2026, 3, 10, 12, 0, 0, DateTimeKind.Unspecified), ServerA, NameA, new DateTime(2026, 3, 10, 16, 0, 0, DateTimeKind.Unspecified));
+                new DateTime(2026, 3, 10, 12, 0, 0, DateTimeKind.Unspecified), ServerA, NameA, new DateTime(2026, 3, 10, 15, 0, 0, DateTimeKind.Unspecified));
 
             const string pastAsOf = "2026-03-10T20:00:00Z";
             var limited = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, limit: 3, as_of: pastAsOf, cancellationToken: ct)).RootElement;
@@ -282,12 +284,12 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
                 r => Assert.True(DateTime.Parse(r.GetProperty("run_time").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal) <= new DateTime(2026, 3, 10, 20, 0, 0, DateTimeKind.Utc)));
 
             var all = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, limit: 10, as_of: pastAsOf, cancellationToken: ct)).RootElement;
-            Assert.Equal(4, all.GetProperty("shown").GetInt32());
+            Assert.Equal(5, all.GetProperty("shown").GetInt32());
             Assert.False(all.GetProperty("truncated").GetBoolean());
             foreach (var run in all.GetProperty("runs").EnumerateArray().Where(r => r.GetProperty("job_name").GetString() == "Nightly ETL"))
             {
-                /* The success stats stop at as_of too: the 13:00Z success is the last one, and its 600 s is the average. */
-                Assert.Equal(new DateTime(2026, 3, 10, 13, 0, 0, DateTimeKind.Utc), DateTime.Parse(run.GetProperty("last_success").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal));
+                /* The success stats stop at as_of too, inclusive: the success exactly at 20:00Z is the last one. */
+                Assert.Equal(new DateTime(2026, 3, 10, 20, 0, 0, DateTimeKind.Utc), DateTime.Parse(run.GetProperty("last_success").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal));
                 Assert.False(run.GetProperty("is_long_running").GetBoolean());
             }
 

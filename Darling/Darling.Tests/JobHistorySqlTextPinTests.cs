@@ -294,12 +294,12 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC
     [Theory]
     [InlineData(false, 4)]
     [InlineData(true, 5)]
-    public void UntilUtc_BoundsTheNewestRunsWidenedAndTheStatsExactly(bool scoped, int firstParam)
+    public void UntilUtc_BoundsTheNewestRunsAndTheStatsExactly(bool scoped, int firstParam)
     {
         var sql = DarlingJobHistoryReader.BuildJobHistorySql(scoped, new JobHistoryFilter(JobName: "x", UntilUtc: new System.DateTime(2026, 3, 11)));
         var untilParam = "$" + (firstParam + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        Assert.Contains($"jh.run_datetime < {untilParam} + make_interval(mins => so.offset_minutes) + interval '1 hour'", sql);
-        Assert.Contains($"jh.run_datetime < {untilParam} + make_interval(mins => so.offset_minutes)\n", sql);
+        Assert.Equal(2, Regex.Matches(sql, Regex.Escape($"jh.run_datetime <= {untilParam} + make_interval(mins => so.offset_minutes)")).Count);
+        Assert.DoesNotContain("+ interval '1 hour'", sql);
         Assert.Equal(2, Regex.Matches(sql, Regex.Escape(untilParam + " + make_interval")).Count);
     }
 }

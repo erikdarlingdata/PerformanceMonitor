@@ -73,15 +73,19 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
 
         if (UntilUtc is not null)
         {
-            sql += $"\n        AND   jh.run_datetime < ${next} + make_interval(mins => so.offset_minutes) + interval '1 hour'";
+            sql += $"\n        AND   jh.run_datetime <= ${next} + make_interval(mins => so.offset_minutes)";
         }
 
         return sql;
     }
 
-    /// <summary>The job-stats clause for the end instant: exact (no widening), so a stat never names a run after it.</summary>
+    /// <summary>
+    /// The job-stats clause for the end instant, the same exact bound as <see cref="Clauses"/>, so a stat never names a run after it
+    /// and a run exactly at the end instant is both shown and counted. Both convert with the stored server offset, so across a DST
+    /// change they can be off by up to an hour; the exact C# cut in <see cref="ApplyWindow"/> settles the rows shown.
+    /// </summary>
     internal string StatsClause(int firstParam) =>
-        UntilUtc is null ? string.Empty : $"\n        AND   jh.run_datetime < ${UntilParam(firstParam)} + make_interval(mins => so.offset_minutes)";
+        UntilUtc is null ? string.Empty : $"\n        AND   jh.run_datetime <= ${UntilParam(firstParam)} + make_interval(mins => so.offset_minutes)";
 
     internal IEnumerable<NpgsqlParameter> Parameters()
     {
