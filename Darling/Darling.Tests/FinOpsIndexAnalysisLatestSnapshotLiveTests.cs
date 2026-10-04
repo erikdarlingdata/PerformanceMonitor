@@ -67,6 +67,8 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
         await Insert(connection, ServerA, DbY, 1, "j1", t.AddDays(-5), 7, 30, ct);
         await Insert(connection, ServerA, DbY, 2, "j2", t.AddDays(-5), 8, 40, ct);
         await Insert(connection, ServerA, DbY, 1, "j1", t.AddDays(-3), 9, 31, ct);
+        /* Same-instant tie in the compressed chunk: the higher collection_id must win there too. */
+        await Insert(connection, ServerA, DbY, 1, "j1", t.AddDays(-3), 12, 32, ct);
         /* Server B: must not leak. */
         await Insert(connection, ServerB, DbX, 1, "b1", t, 10, 99, ct);
         await Insert(connection, ServerB, DbY, 1, "b2", t.AddDays(-4), 11, 98, ct);
@@ -80,7 +82,7 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
         var a = await ReadAsync(connection, ServerA, ct);
         Assert.Equal(2, a.Count);
         Assert.Equal(12 + 1, a[(DbX, "i1")]);
-        Assert.Equal(31, a[(DbY, "j1")]);
+        Assert.Equal(32, a[(DbY, "j1")]);
         Assert.DoesNotContain((DbX, "i2"), a.Keys);
         Assert.DoesNotContain((DbY, "j2"), a.Keys);
 
