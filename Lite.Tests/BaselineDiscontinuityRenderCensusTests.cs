@@ -31,6 +31,7 @@ namespace PerformanceMonitorLite.Tests;
 /// (Lite's tool descriptions, which the compiler concatenated), and both on the same names so a tool that
 /// leaves one SKU's roster reds the census rather than quietly narrowing "every".
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class BaselineDiscontinuityRenderCensusTests
 {
     /// <summary>The trend tools that carry <c>discontinuities[]</c>, by SKU source file. Same eight names on each side.</summary>

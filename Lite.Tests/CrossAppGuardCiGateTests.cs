@@ -82,6 +82,7 @@ namespace Lite.Tests;
 /// EQUALITY against what the filter could not reach, and honoured only while
 /// <see cref="WholeTreeBackstopIsIntact"/> holds.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public class CrossAppGuardCiGateTests
 {
     /* Which filter gates which suite, per build.yml's "Run Lite tests (shard)" / "Run Darling tests"
@@ -1333,15 +1334,17 @@ public class CrossAppGuardCiGateTests
                whether the suite runs on a pull request. The copy is pinned byte-equal to the build
                job's 'lite' by TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs, so reading
                either set here asserts the same reachability. */
-            filterName: "lite_shard",
-            gatingStep: "Run Lite tests (shard)",
+            filterNames: new[] { "lite_shard", "darling_reads_shard" },
+            gatingStep: "Decide how much of the Lite suite runs",
+            gatingWindow: 1600,
             backstopped: null);
 
         Check(repo, yaml, failures,
             scannedProject: DarlingTestsDir,
             other: LiteTrees,
-            filterName: "darling",
+            filterNames: new[] { "darling" },
             gatingStep: "Run Darling tests",
+            gatingWindow: 400,
             /* This arm alone, because this arm alone has a backstop: darling-tree-guards runs the whole
                Darling suite exactly when the darling filter did not fire. There is no counterpart for
                Lite.Tests, so the Lite arm gets no exemptions at all rather than an empty list that would
@@ -1376,11 +1379,20 @@ public class CrossAppGuardCiGateTests
     {
         var yaml = ReadBuildYaml(RepoRoot());
 
-        foreach (var (original, copy) in new[]
-                 { ("lite", "lite_shard"), ("core", "core_shard"), ("root", "root_shard") })
+        /* The build job's 'lite' set is carried in two blocks here: lite_shard (Lite and Lite.Tests, which
+           run the whole suite) followed by darling_reads_shard (the three Darling trees Lite.Tests reads as
+           source, which run only the classes tagged as reading them). Their concatenation, in order, is the
+           copy. */
+        foreach (var (original, copies) in new[]
+                 {
+                     ("lite", new[] { "lite_shard", "darling_reads_shard" }),
+                     ("core", new[] { "core_shard" }),
+                     ("root", new[] { "root_shard" }),
+                 })
         {
+            var copy = string.Join(" + ", copies);
             var originalPatterns = FilterPatterns(yaml, original);
-            var copiedPatterns = FilterPatterns(yaml, copy);
+            var copiedPatterns = copies.SelectMany(c => FilterPatterns(yaml, c)).ToList();
 
             /* Anti-vacuity on BOTH sides: a renamed or moved block returns an empty list, and two empty
                lists are equal — which is exactly the green that would mean this pin had stopped reading the
@@ -1464,22 +1476,35 @@ public class CrossAppGuardCiGateTests
         List<string> failures,
         string scannedProject,
         SkuTrees other,
-        string filterName,
+        string[] filterNames,
         string gatingStep,
+        int gatingWindow,
         IReadOnlyDictionary<string, string>? backstopped)
     {
-        var patterns = FilterPatterns(yaml, filterName);
-        Assert.True(
-            patterns.Count > 0,
-            $"build.yml's '{filterName}' path filter is gone — find where it moved before editing this test");
+        /* A suite can be gated by more than one filter block: the Lite suite's Darling entries live in
+           their own block so a diff that reaches only them can run a narrower selection. The union is what
+           decides whether a read is reachable at all. */
+        var filterName = string.Join("' + '", filterNames);
+        var patterns = new List<string>();
+        foreach (var name in filterNames)
+        {
+            var named = FilterPatterns(yaml, name);
+            Assert.True(
+                named.Count > 0,
+                $"build.yml's '{name}' path filter is gone — find where it moved before editing this test");
+            patterns.AddRange(named);
+        }
 
-        /* The step must actually consume the filter, or the entries are decoration. */
+        /* The step must actually consume every filter, or the entries are decoration. */
         var step = yaml.IndexOf("name: " + gatingStep, StringComparison.Ordinal);
         Assert.True(step > 0, $"the '{gatingStep}' step is gone — find where it moved before editing this test");
-        Assert.Contains(
-            $"steps.filter.outputs.{filterName} == 'true'",
-            yaml[step..Math.Min(step + 400, yaml.Length)],
-            StringComparison.Ordinal);
+        foreach (var name in filterNames)
+        {
+            Assert.Contains(
+                $"steps.filter.outputs.{name}",
+                yaml[step..Math.Min(step + gatingWindow, yaml.Length)],
+                StringComparison.Ordinal);
+        }
 
         var scan = Scan(repo, scannedProject, other);
 

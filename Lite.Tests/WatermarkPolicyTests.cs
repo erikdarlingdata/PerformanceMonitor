@@ -24,6 +24,7 @@ namespace Lite.Tests;
 /// permanently (#2102, hours-wide). The clamp floors a stale watermark to now-MaxCatchup; a fresh
 /// watermark and a null watermark pass through untouched.
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class WatermarkPolicyTests
 {
     private static readonly DateTime Now = new(2026, 7, 17, 12, 0, 0, DateTimeKind.Utc);
@@ -266,11 +267,11 @@ public sealed class WatermarkPolicyTests
             .Replace("\r\n", "\n", StringComparison.Ordinal);
 
         /* #3887: the filter that gates the SUITE is the lite-tests matrix job's 'lite_shard' — a
-           byte-for-byte copy of 'lite', pinned equal by CrossAppGuardCiGateTests. This pin follows the
+           copy of 'lite' (split with 'darling_reads_shard'), pinned equal by CrossAppGuardCiGateTests. This pin follows the
            suite rather than the name, because what it protects is the Darling Service tree REACHING the
            tests; 'lite' itself still gates the Lite build and publish in the build job. */
-        var at = yaml.IndexOf("\n            lite_shard:\n", StringComparison.Ordinal);
-        Assert.True(at > 0, "build.yml's 'lite_shard' path filter is gone — find where it moved before editing this test");
+        var at = yaml.IndexOf("\n            darling_reads_shard:\n", StringComparison.Ordinal);
+        Assert.True(at > 0, "build.yml's 'darling_reads_shard' path filter is gone — find where it moved before editing this test");
 
         /* The block runs to the next area key at the same indent; its own entries are indented deeper. */
         var rest = yaml[(at + 1)..];
@@ -287,9 +288,9 @@ public sealed class WatermarkPolicyTests
            — and IndexOf on the prefix finds the release-only one, whose `if` is the release guard and
            carries no filter at all. That is exactly how this pin first went red on the change that split
            the suite, which is the pin working. */
-        var step = yaml.IndexOf("name: Run Lite tests (shard)", StringComparison.Ordinal);
-        Assert.True(step > 0, "the 'Run Lite tests (shard)' step is gone — find where it moved before editing this test");
-        Assert.Contains("steps.filter.outputs.lite_shard == 'true'", yaml[step..(step + 400)], StringComparison.Ordinal);
+        var step = yaml.IndexOf("name: Decide how much of the Lite suite runs", StringComparison.Ordinal);
+        Assert.True(step > 0, "the 'Decide how much of the Lite suite runs' step is gone — find where it moved before editing this test");
+        Assert.Contains("steps.filter.outputs.darling_reads_shard", yaml[step..(step + 1600)], StringComparison.Ordinal);
     }
 
     /// <summary>The repo root, located by walking up from this file's compile-time path — the same idiom

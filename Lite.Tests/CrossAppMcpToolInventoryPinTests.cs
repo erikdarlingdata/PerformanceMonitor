@@ -38,6 +38,7 @@ namespace Lite.Tests;
 /// miss a tool that relied on framework-derived naming.
 /// </para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class CrossAppMcpToolInventoryPinTests
 {
     private const string LiteMcpDir = "Lite/Mcp";
