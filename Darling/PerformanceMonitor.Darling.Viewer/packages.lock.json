@@ -496,8 +496,7 @@
           "PerformanceMonitor.Common": "[3.9.0, )",
           "PerformanceMonitor.Darling.Storage": "[3.9.0, )",
           "PerformanceMonitor.Notifications": "[3.9.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.11, )"
+          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )"
         }
       },
       "performancemonitor.darling.storage": {
@@ -520,8 +519,7 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.1, )",
-          "PerformanceMonitor.Common": "[3.9.0, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.11, )"
+          "PerformanceMonitor.Common": "[3.9.0, )"
         }
       },
       "performancemonitor.ui": {
@@ -598,12 +596,6 @@
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "10.0.0"
         }
-      },
-      "System.Security.Cryptography.ProtectedData": {
-        "type": "CentralTransitive",
-        "requested": "[10.0.12, )",
-        "resolved": "10.0.11",
-        "contentHash": "PNoxCTPb+Tlux+GJyq4c89ddYdpioVSqfGx8pqOF6shCSKwUNNctXhQtRkCICjbJmGrJJsW8NY52kVYO/b8mlQ=="
       }
     }
   }
