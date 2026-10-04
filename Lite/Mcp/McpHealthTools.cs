@@ -961,7 +961,8 @@ public sealed class McpHealthTools
             var truncated = rows.Count > effectiveLimit;
             if (truncated) rows = rows.Take(effectiveLimit).ToList();
 
-            var filtered = !string.IsNullOrWhiteSpace(collector_name) || min_duration_ms is not null;
+            var filtered = !string.IsNullOrWhiteSpace(collector_name) || min_duration_ms is not null
+                || !string.IsNullOrWhiteSpace(status);
 
             /* #4966: where this server's run log starts for the window. The probe reads the log itself (v_collection_log, on
                collection_time; the relation names no collector, so it is the row-only probe) over the window the read took, and it

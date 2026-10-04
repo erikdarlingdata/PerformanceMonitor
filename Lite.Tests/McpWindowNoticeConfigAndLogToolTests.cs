@@ -300,6 +300,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     {
         await _duckDb.InitializeAsync();
         await SeedDataAsync(tool, WindowStart.AddDays(-9), baselineAt: WindowStart.AddDays(-10));
+        await SeedLogRunsAsync("wait_stats", Anchor.AddDays(-3), Anchor, everyMinutes: 60);
 
         var root = Root(await CallAsync(tool));
 
@@ -349,6 +350,54 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         Assert.False(root.TryGetProperty("status", out _));
         Assert.Equal(0, root.GetProperty("recommendations_returned").GetInt32());
         AssertTruncatedAt(root, Anchor.AddDays(-2), "plan_correction");
+    }
+
+    /// <summary>A one-hour, tuning-only answer is probed too (short window, empty page): effective_start is the probe's floor, not the asked start.</summary>
+    [Fact]
+    public async Task PlanCorrections_AOneHourTuningOnlyAnswer_NamesTheProbesFloor_NotTheAskedStart()
+    {
+        await _duckDb.InitializeAsync();
+        var floor = Anchor.AddMinutes(-20);
+        await SeedLogRunsAsync("plan_correction", floor, Anchor, everyMinutes: 5);
+        await SeedPlanCorrectionAsync(Anchor.AddDays(-1), recommendation: null);
+
+        var root = Root(await CallAsync(Tool.PlanCorrections, hoursBack: 1));
+
+        Assert.False(root.TryGetProperty("status", out _));
+        AssertTruncatedAt(root, floor, "plan_correction");
+    }
+
+    /// <summary>A status filter that matches nothing, over a window with runs, is a filtered-empty answer, not a quiet window.</summary>
+    [Fact]
+    public async Task CollectionLog_AStatusFilterThatMatchesNothing_TakesTheFilteredEmptyBranch()
+    {
+        await _duckDb.InitializeAsync();
+        await SeedLogRunsAsync("wait_stats", Anchor.AddHours(-20), Anchor, everyMinutes: 30);
+
+        var root = Root(await McpHealthTools.GetCollectionLog(
+            Service(), _serverManager, ServerName, 24, as_of: AsOf, status: "FAILED"));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.DoesNotContain("genuinely quiet", message, StringComparison.Ordinal);
+        Assert.Contains("matched", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A snapshot before the window with NO run in the window proves nothing was read: not covered.</summary>
+    [Theory]
+    [InlineData(Tool.ServerConfig)]
+    [InlineData(Tool.DatabaseConfig)]
+    [InlineData(Tool.TraceFlags)]
+    public async Task AConfigWindow_OneSnapshotBeforeIt_ButNoRunInIt_SaysNothingWasRead(Tool tool)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedDataAsync(tool, WindowStart.AddDays(-9), baselineAt: WindowStart.AddDays(-10));
+        await SeedLogRunsAsync("wait_stats", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+
+        var root = Root(await CallAsync(tool));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        AssertNothingHeld(root.GetProperty("hints"), TableOf(tool));
     }
 
     /// <summary>The collection log's probe is the log itself, unfiltered: a collector filter that matches nothing still says where the log starts.</summary>

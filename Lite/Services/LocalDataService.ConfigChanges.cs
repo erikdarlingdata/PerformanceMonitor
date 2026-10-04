@@ -159,17 +159,18 @@ public partial class LocalDataService
             return floor;
         }
 
+        /* A snapshot before the window only proves coverage if the server was monitored during it: at least one run in the
+           window. With none, nothing was read, and the null answer says so. */
         var view = QueryWindowRelationView(relation);
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = $@"
 SELECT 1
-FROM {view}
-WHERE server_id = $1
-AND   capture_time < $2
-LIMIT 1";
+WHERE EXISTS (SELECT 1 FROM {view} WHERE server_id = $1 AND capture_time < $2)
+AND   EXISTS (SELECT 1 FROM v_collection_log WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
         return await command.ExecuteScalarAsync() is not null ? startUtc : null;
     }
 
