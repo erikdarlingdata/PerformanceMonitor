@@ -47,3 +47,12 @@
 
   color-scheme: dark;
 }
+
+/* Mute Rules page (#4843) */
+.mute-form { padding: 12px 16px; margin-bottom: 12px; }
+.mute-field { display: block; margin: 6px 0; }
+.mute-label { display: block; font-size: 12px; opacity: 0.8; }
+.mute-input { width: 100%; max-width: 420px; }
+.mute-rules-field-error { display: block; color: var(--err); font-size: 12px; }
+.mute-actions .btn { margin-right: 4px; }
+tr.mute-rules-highlight { outline: 2px solid var(--accent); }
