@@ -355,9 +355,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         /* The coverage probe measures the purge edge from the collector's retention, and a fleet-wide override row in
            config_collector_schedules for either collector (another test's leftover on a shared store) moves that edge off the
            seven days these cases assume. The cases are about the default, so the fleet rows for the two collectors are set aside and put back in the finally. */
-        var savedFleetRows = new List<(string Name, int? Frequency, int? Retention, bool Enabled)>();
+        var savedFleetRows = new List<(string Name, int? Frequency, int? Retention, bool Enabled, string[]? Databases)>();
         await using (var save = new NpgsqlCommand(
-            "SELECT collector_name, frequency_minutes, retention_days, enabled FROM config_collector_schedules WHERE server_id IS NULL AND lower(collector_name) IN ('query_snapshots', 'waiting_tasks')", connection))
+            "SELECT collector_name, frequency_minutes, retention_days, enabled, databases FROM config_collector_schedules WHERE server_id IS NULL AND lower(collector_name) IN ('query_snapshots', 'waiting_tasks')", connection))
         await using (var saved = await save.ExecuteReaderAsync(ct))
         {
             while (await saved.ReadAsync(ct))
@@ -365,7 +365,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
                 savedFleetRows.Add((saved.GetString(0),
                     saved.IsDBNull(1) ? null : saved.GetInt32(1),
                     saved.IsDBNull(2) ? null : saved.GetInt32(2),
-                    saved.GetBoolean(3)));
+                    saved.GetBoolean(3),
+                    saved.IsDBNull(4) ? null : (string[])saved.GetValue(4)));
             }
         }
 
@@ -387,8 +388,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             foreach (var row in savedFleetRows)
             {
                 await DarlingMcpTestData.ExecAsync(connection, System.Threading.CancellationToken.None,
-                    "INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES (NULL, $1, $2, $3, $4) ON CONFLICT DO NOTHING",
-                    row.Name, (object?)row.Frequency ?? DBNull.Value, (object?)row.Retention ?? DBNull.Value, row.Enabled);
+                    "INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases) VALUES (NULL, $1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                    row.Name, (object?)row.Frequency ?? DBNull.Value, (object?)row.Retention ?? DBNull.Value, row.Enabled, (object?)row.Databases ?? DBNull.Value);
             }
 
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
