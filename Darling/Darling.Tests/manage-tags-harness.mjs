@@ -7,7 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-const [jsDir, scenario] = process.argv.slice(-2);
+const [jsDir, scenarioArg] = process.argv.slice(-2);
+const [scenario, scenarioParam] = scenarioArg.split(":");
 
 class FakeNode {
   constructor(tag, text) {
@@ -80,6 +81,8 @@ const card = (server_id, display_name, tags) => ({ server_id, display_name, tags
 let cards = [card(10, "srv-a", [{ id: 1 }]), card(11, "srv-b", []), card(12, "srv-c", [{ id: 1 }])];
 
 let canEdit = true;
+let networkDown = false;
+let gate = null;
 let responder = () => ({ status: 200, body: {} });
 const calls = [];
 globalThis.fetch = async (url, init = {}) => {
@@ -88,6 +91,8 @@ globalThis.fetch = async (url, init = {}) => {
   if (url === "/api/session") return reply(200, { can_edit: canEdit });
   if (url === "/api/fleet") return reply(200, { tags: forest, cards });
   calls.push({ method, url, body, contentType: (init.headers || {})["Content-Type"] || null });
+  if (networkDown) throw new Error("connection refused");
+  if (gate) await gate;
   const r = responder(method, url, body);
   return reply(r.status, r.body);
 };
@@ -177,7 +182,7 @@ try {
       await clickText(main, "Delete");
       const afterFirst = { calls: calls.length, text: paint(), anyway: buttons(main, "Delete anyway").length };
       await clickText(main, "Delete anyway");
-      return { afterFirst, calls, text: paint(), selectedAfter: all(main, (x) => x.attrs["aria-pressed"] === "true").length };
+      return { afterFirst, calls, text: paint(), selectedAfter: all(main, (x) => x.attrs["aria-current"] === "true").length };
     },
     deleteDeclined: async () => {
       confirmAnswer = false;
@@ -202,10 +207,144 @@ try {
       await tick(main, box(main, 11), true);
       await mountPage();
       return {
-        pressed: all(main, (n) => n.attrs["aria-pressed"] === "true").map((n) => n.attrs["data-tag-id"]),
+        pressed: all(main, (n) => n.attrs["aria-current"] === "true").map((n) => n.attrs["data-tag-id"]),
         checked: [10, 11, 12].map((id) => box(main, id).checked),
         calls: calls.length,
       };
+    },
+    staleEdit: async () => {
+      responder = () => ({ status: 200, body: { status: "assigned", affected_rules: [] } });
+      await mountPage();
+      await fire(nodeButton(main, 1), "click");
+      await tick(main, box(main, 11), true);
+      cards = [card(10, "srv-a", [{ id: 1 }]), card(11, "srv-b", []), card(12, "srv-c", [{ id: 1 }]), card(13, "srv-d", [{ id: 1 }])];
+      await mountPage();
+      const checkedAfterTick = [10, 11, 12, 13].map((id) => box(main, id).checked);
+      await clickText(main, "Apply");
+      return { checkedAfterTick, calls };
+    },
+    tickForm: async () => {
+      await mountPage();
+      await clickText(main, "New root tag");
+      await typeInto(main, "name", "Typed");
+      const before = field(main, "name");
+      await mountPage();
+      const after = field(main, "name");
+      return { same: before === after, value: after.value, forms: all(main, (n) => n.attrs["data-field"] === "name").length };
+    },
+    tickParents: async () => {
+      await mountPage();
+      await clickText(main, "New root tag");
+      await typeInto(main, "name", "Typed");
+      const before = field(main, "name");
+      forest.push(tag(5, "Added", null, 2, null));
+      await mountPage();
+      const options = all(field(main, "parent_id"), (n) => n.tag === "option").map((o) => o.attrs.value);
+      forest.pop();
+      return { same: before === field(main, "name"), options };
+    },
+    dblDelete: async () => {
+      responder = (m, u) => u.includes("confirm=true")
+        ? { status: 200, body: { status: "deleted", deleted_tag_ids: [3], affected_rules: [{ rule_id: "r2", name: "West rule" }] } }
+        : { status: 409, body: { status: "confirm_required", message: "Would orphan.", affected_rules: [{ rule_id: "r2", name: "West rule" }] } };
+      await mountPage();
+      await fire(nodeButton(main, 3), "click");
+      await clickText(main, "Delete");
+      const go = buttons(main, "Delete anyway")[0];
+      let release;
+      gate = new Promise((r) => { release = r; });
+      const errors = [];
+      const run = () => Promise.resolve().then(() => go.handlers.click[0]()).catch((e) => errors.push(String(e)));
+      const p1 = run();
+      const p2 = run();
+      await settle();
+      gate = null;
+      release();
+      await Promise.all([p1, p2]);
+      await settle();
+      return { calls, errors, text: paint() };
+    },
+    dblSave: async () => {
+      responder = () => ({ status: 201, body: { status: "created", tag: { tag_id: 9 }, affected_rules: [] } });
+      await mountPage();
+      await clickText(main, "New root tag");
+      await typeInto(main, "name", "Dup");
+      const save = buttons(main, "Save")[0];
+      let release;
+      gate = new Promise((r) => { release = r; });
+      const errors = [];
+      const run = () => Promise.resolve().then(() => save.handlers.click[0]()).catch((e) => errors.push(String(e)));
+      const p1 = run();
+      const p2 = run();
+      await settle();
+      gate = null;
+      release();
+      await Promise.all([p1, p2]);
+      await settle();
+      return { calls, errors };
+    },
+    dblApply: async () => {
+      responder = () => ({ status: 200, body: { status: "assigned", affected_rules: [] } });
+      await mountPage();
+      await fire(nodeButton(main, 1), "click");
+      await tick(main, box(main, 11), true);
+      await tick(main, box(main, 12), false);
+      const apply = buttons(main, "Apply")[0];
+      let release;
+      gate = new Promise((r) => { release = r; });
+      const errors = [];
+      const run = () => Promise.resolve().then(() => apply.handlers.click[0]()).catch((e) => errors.push(String(e)));
+      const p1 = run();
+      const p2 = run();
+      await settle();
+      gate = null;
+      release();
+      await Promise.all([p1, p2]);
+      await settle();
+      return { calls, errors };
+    },
+    editGone: async () => {
+      responder = () => ({ status: 404, body: { status: "not_found", message: "No such tag." } });
+      await mountPage();
+      await fire(nodeButton(main, 3), "click");
+      await clickText(main, "Edit");
+      await typeInto(main, "name", "Renamed");
+      forest.splice(2, 1);
+      await clickText(main, "Save");
+      const out = { text: paint(), formOpen: buttons(main, "Save").length, node: all(main, (n) => n.attrs["data-tag-id"] === "3").length };
+      forest.splice(2, 0, tag(3, "West", null, 1, "#E15759"));
+      return out;
+    },
+    partial: async () => {
+      responder = (m) => m === "POST"
+        ? { status: 200, body: { status: "assigned", affected_rules: [{ rule_id: "r7", name: "Gained rule", effect: "gained" }] } }
+        : { status: 500, body: { message: "Store unavailable." } };
+      await mountPage();
+      await fire(nodeButton(main, 1), "click");
+      await tick(main, box(main, 11), true);
+      await tick(main, box(main, 12), false);
+      const fleetBefore = calls.length;
+      await clickText(main, "Apply");
+      return { calls: calls.length - fleetBefore, text: paint() };
+    },
+    refusal: async () => {
+      const status = Number(scenarioParam);
+      responder = () => status === 0 ? { status: 200, body: {} } : { status, body: status === 403 ? { error: "Read-only sign-in." } : status === 404 ? { message: "No such tag." } : status === 415 ? { error: "Content-Type must be application/json." } : { message: "Boom." } };
+      networkDown = status === 0;
+      await mountPage();
+      await clickText(main, "New root tag");
+      await typeInto(main, "name", "Keep me");
+      await clickText(main, "Save");
+      const name = field(main, "name");
+      return { text: paint(), formOpen: buttons(main, "Save").length, kept: name ? name.value : null };
+    },
+    deleteRefusal: async () => {
+      const status = Number(scenarioParam);
+      responder = () => ({ status, body: { message: "Refused " + status + "." } });
+      await mountPage();
+      await fire(nodeButton(main, 3), "click");
+      await clickText(main, "Delete");
+      return { text: paint(), selected: all(main, (x) => x.attrs["aria-current"] === "true").length, calls: calls.length };
     },
     readonly: async () => {
       canEdit = false;

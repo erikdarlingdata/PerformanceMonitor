@@ -49,7 +49,7 @@ public sealed class ManageTagsPageTests
         var page = Page();
         Assert.Contains("if (status === 409 && b.status === \"confirm_required\") return { kind: \"confirm\"", page);
         Assert.Contains("const res = await deleteTag(tag.id, false);", page);
-        Assert.Contains("const res = await deleteTag(id, true);", page);
+        Assert.Contains("const res = await deleteTag(pending.id, true);", page);
         Assert.DoesNotContain(".includes(\"already exists\")", page);
         Assert.DoesNotContain("message.match", page);
     }

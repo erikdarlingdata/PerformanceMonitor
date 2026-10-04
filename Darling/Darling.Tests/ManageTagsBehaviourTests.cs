@@ -139,6 +139,7 @@ public sealed class ManageTagsBehaviourTests
         Assert.Equal("/api/server-tags/3", calls[0].GetProperty("url").GetString());
         Assert.Equal("/api/server-tags/3?confirm=true", calls[1].GetProperty("url").GetString());
         Assert.Contains("Tag deleted.", r.GetProperty("text").GetString());
+        Assert.Contains("West rule", r.GetProperty("text").GetString());
         Assert.Equal(0, r.GetProperty("selectedAfter").GetInt32());
     }
 
@@ -186,5 +187,115 @@ public sealed class ManageTagsBehaviourTests
         Assert.Equal(0, r.GetProperty("newRoot").GetInt32());
         Assert.All(r.GetProperty("writes").EnumerateArray(), e => Assert.Equal(0, e.GetInt32()));
         Assert.All(r.GetProperty("disabled").EnumerateArray(), e => Assert.True(e.GetBoolean()));
+    }
+
+    private static string[] Methods(JsonElement calls) => calls.EnumerateArray().Select(c => c.GetProperty("method").GetString() + " " + c.GetProperty("url").GetString()).ToArray();
+
+    [Fact]
+    public void ACheckedBoxIsAnIntent_SoAServerAssignedElsewhereIsNeitherUncheckedNorUnassigned()
+    {
+        if (!TryRun("staleEdit", out var r)) return;
+
+        Assert.Equal(new[] { true, true, true, true }, r.GetProperty("checkedAfterTick").EnumerateArray().Select(e => e.GetBoolean()).ToArray());
+        var calls = r.GetProperty("calls");
+        Assert.Equal(new[] { "POST /api/server-tags/1/servers" }, Methods(calls));
+        Assert.Equal("{\"server_ids\":[11]}", calls[0].GetProperty("body").GetRawText());
+    }
+
+    [Fact]
+    public void ARefresh_KeepsTheOpenFormsInputElementAndItsTypedValue()
+    {
+        if (!TryRun("tickForm", out var r)) return;
+
+        Assert.True(r.GetProperty("same").GetBoolean());
+        Assert.Equal("Typed", r.GetProperty("value").GetString());
+        Assert.Equal(1, r.GetProperty("forms").GetInt32());
+    }
+
+    [Fact]
+    public void ARefresh_UpdatesTheFormsParentOptions_WithoutReplacingTheTypedField()
+    {
+        if (!TryRun("tickParents", out var r)) return;
+
+        Assert.True(r.GetProperty("same").GetBoolean());
+        Assert.Contains("5", Strings(r.GetProperty("options")));
+    }
+
+    [Fact]
+    public void ADoubleClickOnDeleteAnyway_SendsOneConfirmedDelete_AndListsTheRules()
+    {
+        if (!TryRun("dblDelete", out var r)) return;
+
+        Assert.Equal(new[] { "DELETE /api/server-tags/3", "DELETE /api/server-tags/3?confirm=true" }, Methods(r.GetProperty("calls")));
+        Assert.Empty(r.GetProperty("errors").EnumerateArray());
+        Assert.Contains("West rule", r.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void ADoubleClickOnSave_SendsOnePost_WithNoError()
+    {
+        if (!TryRun("dblSave", out var r)) return;
+
+        Assert.Equal(new[] { "POST /api/server-tags" }, Methods(r.GetProperty("calls")));
+        Assert.Empty(r.GetProperty("errors").EnumerateArray());
+    }
+
+    [Fact]
+    public void ADoubleClickOnApply_SendsOnePostAndOneDelete()
+    {
+        if (!TryRun("dblApply", out var r)) return;
+
+        Assert.Equal(new[] { "POST /api/server-tags/1/servers", "DELETE /api/server-tags/1/servers" }, Methods(r.GetProperty("calls")));
+        Assert.Empty(r.GetProperty("errors").EnumerateArray());
+    }
+
+    [Fact]
+    public void AnEditAnswered404_ClosesTheFormAndReReadsTheTree()
+    {
+        if (!TryRun("editGone", out var r)) return;
+
+        Assert.Equal(0, r.GetProperty("formOpen").GetInt32());
+        Assert.Equal(0, r.GetProperty("node").GetInt32());
+        Assert.Contains("No such tag.", r.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void WhenThePostLandsAndTheDeleteFails_TheRulesGatheredSoFarAreShownWithTheError()
+    {
+        if (!TryRun("partial", out var r)) return;
+
+        Assert.Equal(2, r.GetProperty("calls").GetInt32());
+        Assert.Contains("Store unavailable.", r.GetProperty("text").GetString());
+        Assert.Contains("Gained rule", r.GetProperty("text").GetString());
+    }
+
+    [Theory]
+    [InlineData(403, "This session is read-only, so the change was not made.")]
+    [InlineData(404, "No such tag.")]
+    [InlineData(415, "Content-Type must be application/json.")]
+    [InlineData(500, "Boom.")]
+    [InlineData(0, "Network error: connection refused")]
+    public void AFailedWrite_ShowsTheHouseMessage_AndKeepsTheFormWhereItDoesNotMeanTheTagIsGone(int status, string message)
+    {
+        if (!TryRun("refusal:" + status, out var r)) return;
+
+        Assert.Contains(message, r.GetProperty("text").GetString());
+        if (status != 404)
+        {
+            Assert.Equal(1, r.GetProperty("formOpen").GetInt32());
+            Assert.Equal("Keep me", r.GetProperty("kept").GetString());
+        }
+    }
+
+    [Theory]
+    [InlineData(403, "This session is read-only, so the change was not made.")]
+    [InlineData(500, "Refused 500.")]
+    [InlineData(415, "Refused 415.")]
+    public void AFailedDelete_ShowsTheHouseMessage_AndKeepsTheSelection(int status, string message)
+    {
+        if (!TryRun("deleteRefusal:" + status, out var r)) return;
+
+        Assert.Contains(message, r.GetProperty("text").GetString());
+        Assert.Equal(1, r.GetProperty("selected").GetInt32());
     }
 }

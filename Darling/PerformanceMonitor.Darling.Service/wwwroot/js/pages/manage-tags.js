@@ -18,8 +18,12 @@
  * rules; the page shows them and sends the delete again with confirm=true only when the user asks again.
  *
  * Polling: app.js re-calls renderManageTags on its 60 s tick. The selected tag, an open form and the unsaved
- * checkbox edits live in module scope (`selectedId`, `form`, `edits`), so a tick re-reads and repaints without
- * losing them. All server text reaches the DOM through el()/textContent.
+ * checkbox intents live in module scope (`selectedId`, `form`, `edits`), so a tick re-reads and repaints without
+ * losing them. A tick redraws the tree, the server list and the form's parent options only; the open form's
+ * inputs are drawn by openForm, closeForm and submit and are never rebuilt by a tick, so focus and caret stay.
+ * An intent is what the user changed ({add, remove} per tag), never a snapshot of the whole checked set, so a
+ * server assigned or unassigned elsewhere is never undone by Apply. Every write handler is guarded by `busy`, so
+ * a double click sends one request. All server text reaches the DOM through el()/textContent.
  */
 
 import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, reportSessionExpired } from "../util.js";
@@ -98,10 +102,11 @@ export function buildPatch(original, values) {
   return patch;
 }
 
-/** The two id lists an Apply sends: newly checked → add, newly unchecked → remove. */
-export function diffAssignment(baseline, checked) {
-  const add = [...checked].filter((id) => !baseline.has(id));
-  const remove = [...baseline].filter((id) => !checked.has(id));
+/** The two id lists an Apply sends from a tag's intent: ids to assign that the baseline lacks, ids to unassign
+ *  that the baseline carries. An id the baseline already agrees with is not sent. */
+export function diffAssignment(baseline, intent) {
+  const add = [...intent.add].filter((id) => !baseline.has(id));
+  const remove = [...intent.remove].filter((id) => baseline.has(id));
   return { add, remove };
 }
 
@@ -162,7 +167,10 @@ let selectedId = null;
 let form = null;
 let notice = null;
 let pendingDelete = null;
-/* Unsaved checkbox edits, keyed by tag id: the set of server ids the user wants checked. */
+/* True while a write is in flight: a second click on any write control does nothing until it settles. */
+let busy = false;
+/* Unsaved checkbox intents, keyed by tag id: { add, remove } server-id sets recorded from the change events.
+   Checked = baseline ∪ add − remove. An entry exists only while it holds an id. */
 const edits = new Map();
 
 export async function renderManageTags(main) {
@@ -184,6 +192,7 @@ export async function renderManageTags(main) {
   const body = el("div", {});
   mount(main, [headEl, noticeBox, formBox, body]);
   live = { main, headEl, noticeBox, formBox, body, canEdit, forest: [], cards: [] };
+  if (form) mount(formBox, formNode());
   mount(body, loadingStrip("Loading tags…"));
   await refresh(live);
 }
@@ -194,16 +203,36 @@ async function refresh(state) {
   const d = res.data || {};
   state.forest = Array.isArray(d.tags) ? d.tags : [];
   state.cards = Array.isArray(d.cards) ? d.cards : [];
-  if (selectedId != null && !state.forest.some((t) => t.id === selectedId)) {
-    edits.delete(selectedId);
-    selectedId = null;
-  }
+  if (selectedId != null && !state.forest.some((t) => t.id === selectedId)) selectedId = null;
+  pruneEdits(state);
   draw(state);
+  refreshParentOptions(state);
+}
+
+/** Drops the intents of tags that no longer exist and every id the baseline now agrees with. */
+function pruneEdits(state) {
+  const known = new Set(state.forest.map((t) => t.id));
+  for (const [id, intent] of [...edits]) {
+    if (!known.has(id)) {
+      edits.delete(id);
+      continue;
+    }
+    const base = baselineOf(state, id);
+    for (const s of [...intent.add]) if (base.has(s)) intent.add.delete(s);
+    for (const s of [...intent.remove]) if (!base.has(s)) intent.remove.delete(s);
+    if (!intent.add.size && !intent.remove.size) edits.delete(id);
+  }
+}
+
+/** Rebuilds only the open form's parent options, in place, so the typed fields keep their element and focus. */
+function refreshParentOptions(state) {
+  if (!form || !form.parentSelect) return;
+  mount(form.parentSelect, parentOptions(state).map((o) => el("option", { value: o.value, text: o.label })));
+  form.parentSelect.value = form.values.parent_id;
 }
 
 function draw(state) {
   drawNotice(state);
-  mount(state.formBox, form ? formNode() : []);
   if (!state.forest.length) {
     return mount(state.body, emptyStrip("No tags are defined." + (state.canEdit ? " Use New root tag to create one." : "")));
   }
@@ -258,9 +287,9 @@ function treeNode(state) {
         class: "tag-node" + (tag.id === selectedId ? " tag-selected" : ""),
         type: "button",
         "data-tag-id": tag.id,
-        "aria-pressed": tag.id === selectedId ? "true" : "false",
+        "aria-current": tag.id === selectedId ? "true" : null,
         onClick: () => select(tag.id),
-      }, [swatch(tag.colour), el("span", { text: tag.name })]),
+      }, [swatch(tag.colour), el("span", { text: tag.name + (edits.has(tag.id) ? " (unsaved)" : "") })]),
     ])));
 }
 
@@ -291,7 +320,25 @@ function baselineOf(state, tagId) {
 }
 
 function checkedOf(state, tagId) {
-  return edits.has(tagId) ? edits.get(tagId) : baselineOf(state, tagId);
+  const checked = baselineOf(state, tagId);
+  const intent = edits.get(tagId);
+  if (intent) {
+    for (const id of intent.add) checked.add(id);
+    for (const id of intent.remove) checked.delete(id);
+  }
+  return checked;
+}
+
+/** Records one checkbox change as an intent against the current baseline. */
+function recordIntent(state, tagId, serverId, isChecked) {
+  const intent = edits.get(tagId) || { add: new Set(), remove: new Set() };
+  const inBase = baselineOf(state, tagId).has(serverId);
+  intent.add.delete(serverId);
+  intent.remove.delete(serverId);
+  if (isChecked && !inBase) intent.add.add(serverId);
+  if (!isChecked && inBase) intent.remove.add(serverId);
+  if (intent.add.size || intent.remove.size) edits.set(tagId, intent);
+  else edits.delete(tagId);
 }
 
 function assignmentNode(state, tag) {
@@ -302,12 +349,7 @@ function assignmentNode(state, tag) {
     box.checked = checked.has(c.server_id);
     box.disabled = !state.canEdit;
     box.addEventListener("change", () => {
-      const next = new Set(checkedOf(state, tag.id));
-      if (box.checked) next.add(c.server_id);
-      else next.delete(c.server_id);
-      edits.set(tag.id, next);
-      const dirty = diffAssignment(baselineOf(state, tag.id), next);
-      if (!dirty.add.length && !dirty.remove.length) edits.delete(tag.id);
+      recordIntent(state, tag.id, c.server_id, box.checked);
     });
     return el("label", { class: "tags-server" }, [box, el("span", { text: c.display_name })]);
   });
@@ -322,22 +364,35 @@ function assignmentNode(state, tag) {
 }
 
 async function applyAssignment(tagId) {
-  const edited = edits.get(tagId);
-  if (!edited) return setNotice("No assignment changes to apply.", false);
-  const { add, remove } = diffAssignment(baselineOf(live, tagId), edited);
-  const rules = [];
-  if (add.length) {
-    const res = await assignServers(tagId, add);
-    if (res.kind !== "ok") return failNotice(res);
-    rules.push(...res.rules);
+  if (busy) return;
+  busy = true;
+  try {
+    const intent = edits.get(tagId);
+    if (!intent) return setNotice("No assignment changes to apply.", false);
+    const { add, remove } = diffAssignment(baselineOf(live, tagId), intent);
+    const rules = [];
+    if (add.length) {
+      const res = await assignServers(tagId, add);
+      if (res.kind !== "ok") return failNotice(res);
+      rules.push(...res.rules);
+    }
+    if (remove.length) {
+      const res = await unassignServers(tagId, remove);
+      if (res.kind !== "ok") {
+        /* The assign half landed: show its rules with the error and re-read, so the baseline is current. */
+        if (add.length) {
+          notice = { message: res.message, isError: true, rules };
+          return await refresh(live);
+        }
+        return failNotice(res);
+      }
+      rules.push(...res.rules);
+    }
+    edits.delete(tagId);
+    await afterWrite("Assignment applied.", rules);
+  } finally {
+    busy = false;
   }
-  if (remove.length) {
-    const res = await unassignServers(tagId, remove);
-    if (res.kind !== "ok") return failNotice(res);
-    rules.push(...res.rules);
-  }
-  edits.delete(tagId);
-  await afterWrite("Assignment applied.", rules);
 }
 
 /* ─────────────────────────── writes ─────────────────────────── */
@@ -357,17 +412,30 @@ async function afterWrite(message, rules) {
 }
 
 async function remove(tag) {
+  if (busy) return;
   if (!window.confirm("Delete tag \"" + tag.name + "\" and every tag under it?\n\nServers and their data are untouched. This cannot be undone.")) return;
-  notice = null;
-  pendingDelete = null;
-  const res = await deleteTag(tag.id, false);
-  await finishDelete(tag.id, res);
+  busy = true;
+  try {
+    notice = null;
+    pendingDelete = null;
+    const res = await deleteTag(tag.id, false);
+    await finishDelete(tag.id, res);
+  } finally {
+    busy = false;
+  }
 }
 
 async function confirmDelete() {
-  const id = pendingDelete.id;
-  const res = await deleteTag(id, true);
-  await finishDelete(id, res);
+  if (busy || !pendingDelete) return;
+  const pending = pendingDelete;
+  busy = true;
+  try {
+    const res = await deleteTag(pending.id, true);
+    if (pendingDelete !== pending) return;
+    await finishDelete(pending.id, res);
+  } finally {
+    busy = false;
+  }
 }
 
 function cancelDelete() {
@@ -391,7 +459,7 @@ async function finishDelete(id, res) {
 /* ─────────────────────────── form ─────────────────────────── */
 
 function openForm(f) {
-  form = { banner: null, ...f };
+  form = { banner: null, parentSelect: null, ...f };
   if (live) mount(live.formBox, formNode());
 }
 
@@ -422,12 +490,13 @@ function formNode() {
     parentOptions(live).map((o) => el("option", { value: o.value, text: o.label })));
   parentSelect.value = form.values.parent_id;
   parentSelect.addEventListener("change", () => { form.values.parent_id = parentSelect.value; });
+  form.parentSelect = parentSelect;
   return el("div", { class: "card tag-form" }, [
     el("h3", { text: form.mode === "create" ? "New tag" : "Edit tag" }),
     form.banner ? el("div", { class: "strip error", role: "alert", text: form.banner }) : null,
-    el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Name" }), nameInput]),
-    el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Colour" }), colourInput, el("span", {}, swatches)]),
-    el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Parent" }), parentSelect]),
+    el("div", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Name" }), nameInput]),
+    el("div", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Colour" }), colourInput, el("span", {}, swatches)]),
+    el("div", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Parent" }), parentSelect]),
     el("div", { class: "form-actions" }, [
       el("button", { class: "btn primary", type: "button", text: "Save", onClick: submit }),
       el("button", { class: "btn", type: "button", text: "Cancel", onClick: closeForm }),
@@ -436,22 +505,39 @@ function formNode() {
 }
 
 async function submit() {
-  form.banner = null;
-  let res;
-  if (form.mode === "create") {
-    res = await createTag(formToCreateBody(form.values));
-  } else {
-    const patch = buildPatch(form.original, form.values);
-    if (Object.keys(patch).length === 0) return closeForm();
-    res = await patchTag(form.id, patch);
+  if (busy || !form) return;
+  const f = form;
+  busy = true;
+  try {
+    f.banner = null;
+    let res;
+    if (f.mode === "create") {
+      res = await createTag(formToCreateBody(f.values));
+    } else {
+      const patch = buildPatch(f.original, f.values);
+      if (Object.keys(patch).length === 0) return closeForm();
+      res = await patchTag(f.id, patch);
+    }
+    if (form !== f) return;
+    if (res.kind === "notfound") {
+      /* The tag was deleted elsewhere: close the form and re-read, as a delete does. */
+      closeForm();
+      if (f.mode === "edit") {
+        edits.delete(f.id);
+        if (selectedId === f.id) selectedId = null;
+      }
+      return await afterWrite(res.message, []);
+    }
+    if (res.kind !== "ok") {
+      f.banner = res.message;
+      return mount(live.formBox, formNode());
+    }
+    const made = res.body.tag && res.body.tag.tag_id;
+    if (f.mode === "create" && made != null) selectedId = made;
+    const verb = f.mode === "create" ? "Tag created." : res.status === "unchanged" ? "No change." : "Tag updated.";
+    closeForm();
+    await afterWrite(verb, res.rules);
+  } finally {
+    busy = false;
   }
-  if (res.kind !== "ok") {
-    form.banner = res.message;
-    return mount(live.formBox, formNode());
-  }
-  const made = res.body.tag && res.body.tag.tag_id;
-  if (form.mode === "create" && made != null) selectedId = made;
-  const verb = form.mode === "create" ? "Tag created." : res.status === "unchanged" ? "No change." : "Tag updated.";
-  closeForm();
-  await afterWrite(verb, res.rules);
 }
