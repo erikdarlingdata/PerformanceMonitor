@@ -105,7 +105,7 @@ public sealed class PgPlanLogParserQueryIdPrefixTests
     /// the stored JSON.</summary>
     [Theory]
     [InlineData("Run Condition", "(row_number() OVER (?) <= 918273)")]
-    [InlineData("Order By", "(t.embedding <-> '[918273,2]'::vector)")]
+    [InlineData("Order By", "(t.location <-> 918273)")]
     [InlineData("Table Function Call", "generate_series(1, 918273)")]
     public void ANumberInAConditionLikeField_IsMasked(string field, string value)
     {

@@ -141,7 +141,7 @@ public static class PgPlanLogParser
     {
         "Filter", "Index Cond", "Recheck Cond", "Join Filter", "Hash Cond", "Merge Cond",
         "TID Cond", "One-Time Filter", "Cache Key", "Function Call", "Output", "Group Key",
-        "Sort Key", "Presorted Key", "Hash Key", "Conflict Filter", "Repeatable Seed",
+        "Sort Key", "Presorted Key", "Hash Key", "Conflict Filter", "Repeatable Seed", "Run Condition", "Order By", "Table Function Call",
     };
 
     /* INTERNAL rather than private, and that is the sharing mechanism (#3601): PgLogTextRedactor applies

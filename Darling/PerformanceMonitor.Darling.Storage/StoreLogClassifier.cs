@@ -745,7 +745,7 @@ public static class StoreLogClassifier
         if (string.Equals(eventClass, SlowPlanClass, StringComparison.Ordinal))
         {
             return "an auto_explain plan - kept as redacted JSON (statement text and bind values removed, literals "
-                + "masked), one row per plan shape; a plan that could not be read whole keeps only its duration line";
+                + "masked), one row per plan (runs with the same plan and estimates share a row); a plan that could not be read whole keeps only its duration line";
         }
 
         if (string.Equals(eventClass, RoutineClass, StringComparison.Ordinal))
@@ -1101,12 +1101,14 @@ public static class StoreLogClassifier
     /// the one spelling of that head). It is kept ONLY if it parses whole as an <c>auto_explain</c> JSON plan,
     /// through <see cref="PgPlanLogParser.FromBlock"/> (the redaction the monitored-target plan route uses, not a
     /// second one: <c>Query Text</c> and <c>Query Parameters</c> removed, quoted literals and condition numbers
-    /// masked). Its MESSAGE is <c>plan &lt;hash&gt; &lt;top node&gt; queryid=&lt;id or ?&gt;</c>, so one plan shape
-    /// is one row however often it ran, and the id is the statement's, when the plan carries one
+    /// masked). Its MESSAGE is <c>plan &lt;hash&gt; &lt;top node&gt; queryid=&lt;id or ?&gt;</c>, so one plan
+    /// (with its estimates) is one row however often it ran, and the id is the statement's, when the plan carries one
     /// (<c>auto_explain.log_verbose</c> with <c>compute_query_id</c>). The kept ENTRY is the first line and the
     /// compact redacted JSON on one tab-led line. A plan that does not parse whole (text, YAML or XML format, a
-    /// cut by the entry cap or a read boundary, bad JSON) or whose kept entry would pass
-    /// <see cref="MaxSampleLength"/> keeps only its first line and <see cref="PgLogTextRedactor.WithheldPlan"/>:
+    /// cut by the entry cap or a read boundary, bad JSON, or a body the reader throws on) keeps only its first line
+    /// and <see cref="PgLogTextRedactor.WithheldPlan"/>. One that parses but whose kept entry would pass
+    /// <see cref="MaxSampleLength"/> keeps the same message and a <see cref="PlanTooLargeMarker"/> sample in place of
+    /// the JSON:
     /// raw plan text is never kept. Every line under the plan that is not tab-led (a field such as CONTEXT) is
     /// dropped. Idempotent: the kept JSON re-parses to the same hash. False when the first line is not a plan head.
     /// </summary>
@@ -1128,16 +1130,22 @@ public static class StoreLogClassifier
             body.Append(lines[i], 1, lines[i].Length - 1).Append('\n');
         }
 
-        var parsed = PgPlanLogParser.FromBlock(0, 0, body.ToString());
-        if (parsed is { } plan)
+        /* Fail closed: a body the reader chokes on (a non-string Node Type, say) is withheld, never thrown, so one odd
+           line cannot stop the sweep. */
+        try
         {
-            var kept = firstLine + "\n\t" + plan.PlanJson;
-            if (kept.Length <= MaxSampleLength)
+            if (PgPlanLogParser.FromBlock(0, 0, body.ToString()) is { } plan)
             {
                 sanitizedMessage = "plan " + plan.PlanHash + " " + (plan.TopNodeType ?? "?") + " queryid=" + QueryIdOf(plan.PlanJson);
-                sanitizedRaw = kept;
+                var kept = firstLine + "\n\t" + plan.PlanJson;
+                sanitizedRaw = kept.Length <= MaxSampleLength
+                    ? kept
+                    : firstLine + "\n\t" + PlanTooLargeMarker + plan.PlanJson.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + " characters";
                 return true;
             }
+        }
+        catch (Exception)
+        {
         }
 
         sanitizedMessage = WithheldPlanMessage;
@@ -1400,8 +1408,10 @@ public static class StoreLogClassifier
            syntax error's token first names its form only after the token, so what the cap left names none. */
         var cut = sample.Length >= MaxSampleLength && !sample.Contains('\n');
         var lineMessage = PrimaryMessageOf(sample) ?? message ?? firstLine;
-        var (_, retained, key, maskedSample) = MaskRetained(eventClass, lineMessage, sample, cut);
-        if (!retained)
+        var (maskedClass, retained, key, maskedSample) = MaskRetained(eventClass, lineMessage, sample, cut);
+        /* A legacy slow_statement row whose sample is a plan head comes back as another class: empty it, as before
+           plans were kept, rather than relabel it in place. */
+        if (!retained || !string.Equals(maskedClass, eventClass, StringComparison.Ordinal))
         {
             return (null, null);
         }
