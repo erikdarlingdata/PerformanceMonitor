@@ -1023,6 +1023,15 @@ GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {mcp};
 --    read-only UX is unchanged by this grant.
 GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {viewer};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {viewer};
+-- #5085: the web dashboard's server-tag endpoints (POST/PATCH/DELETE under /api/server-tags) run as viewer, so it
+--    gets the SAME two single-table writes mcp holds above. The seat model decides who may call them (a read-only
+--    seat is refused every unsafe method); these grants are only the floor beneath that gate. Both tables are
+--    non-secret and carry no reload-beacon trigger, so no config_service column is involved. The WPF Viewer's
+--    read-only probe is unchanged: it discriminates on config_alert_log UPDATE (ViewerDataService.ReadOnlyProbeSql),
+--    which these grants do not touch, so a read-only desktop seat still reads as read-only and its tag editors
+--    stay disabled. A server removal also clears that server's server_tag_map rows, which needs the DELETE here.
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {viewer};
 -- #3314: the DELIVERY cooldown -- the sole throttle on a Slack/Teams/PagerDuty/webhook post -- is the one
 -- alert-engine knob stored on config_notification rather than config_alert_settings, so update_alert_settings
 -- spans two tables and needs a write here. This DOES widen mcp into a table holding bearer secrets (the SMTP

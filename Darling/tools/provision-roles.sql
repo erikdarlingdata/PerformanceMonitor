@@ -307,6 +307,11 @@ GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
 --     tables are non-secret with no beacon trigger, and server_tags.id is an identity column (no sequence grant).
 GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;
 GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
+-- #5085: the web dashboard's /api/server-tags endpoints run as viewer, so viewer gets the same two single-table
+--     writes (the seat model decides who may call them; these grants are only the floor). The WPF Viewer's read-only
+--     probe still discriminates on config_alert_log UPDATE, so a connectAs = "viewer" Viewer stays read-only.
+GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;
+GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;
 
 -- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as viewer) and the MCP rule
 --     tools (as mcp) create, edit and delete config.custom_alert_rules -- non-secret rule JSON, the same
