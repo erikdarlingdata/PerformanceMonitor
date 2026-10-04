@@ -107,10 +107,10 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
     // ── read layer ──
 
     [Fact]
-    public async Task ObjectGrowthDrill_ATableWithNoEarlierSampleReadsUnknown_NotZero()
+    public async Task ObjectGrowthDrill_ATableCreatedInTheWindowCountsItsWholeSize()
     {
         await SeedScenarioAsync();
-        // NewTable exists only in the latest snapshot: there is nothing earlier to compare with.
+        // NewTable exists only in the latest snapshot: it was created after the earliest one, so it grew from nothing.
         await InsertObjectStat(_latest, "AppDb", 900, 1, "dbo", "NewTable", "PK_NewTable", 30m, 1_000, 0, 0, 0, 0, 0, 0);
 
         var (objects, _) = await _dataService.GetObjectGrowthHeatmapDataAsync(ServerId, "AppDb");
@@ -119,10 +119,10 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         Assert.Equal(400m, big.Growth30dMb!.Value);
         Assert.Equal(400m / 30m, big.DailyGrowthRateMb!.Value, 4);
         var added = Assert.Single(objects, o => o.TableName == "NewTable");
-        Assert.Null(added.Growth30dMb);
-        Assert.Null(added.DailyGrowthRateMb);
+        Assert.Equal(30m, added.Growth30dMb!.Value);
+        Assert.Equal(30m / 30m, added.DailyGrowthRateMb!.Value, 4);
         Assert.Null(added.GrowthPct30d);
-        Assert.Equal("NewTable", objects[^1].TableName);
+        Assert.Equal("BigTable", objects[0].TableName);
     }
 
     [Fact]

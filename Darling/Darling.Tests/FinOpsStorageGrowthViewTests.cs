@@ -61,6 +61,15 @@ public sealed class FinOpsStorageGrowthViewTests
     }
 
     [Fact]
+    public void GuideTail_NoLongerSaysTheHeatmapAndGridCanDiffer()
+    {
+        var tail = McpToolGuideTests.Served("get_finops").Tail;
+        Assert.NotNull(tail);
+        Assert.DoesNotContain("can differ from the grid", tail, StringComparison.Ordinal);
+        Assert.Contains("a table created in the window counts its whole size", tail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ViewsAllowList_ContainsTheView() =>
         Assert.Contains("storage_growth", DarlingMcpFinOpsTools.Views);
 
@@ -83,7 +92,7 @@ public sealed class FinOpsStorageGrowthViewTests
     [Fact]
     public void OrderIndexes_ByIndexId_ThenNameOrdinal_FromAReversedInput()
     {
-        IndexUsageDto Ix(int id, string n) => new("d", "s", "t", n, "NONCLUSTERED", id, 1m, 1, 0, 0, 0, 0, 0, null, "Unused");
+        IndexUsageDto Ix(int id, string n) => new("d", "s", "t", n, "NONCLUSTERED", id, 1m, 1, 0, 0, 0, 0, 0, null, "Unused", new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
         var ordered = DarlingMcpFinOpsTools.OrderStorageGrowthIndexes(new[] { Ix(2, "b"), Ix(2, "a"), Ix(1, "z") }.Reverse());
         Assert.Equal(new[] { "z", "a", "b" }, ordered.Select(i => i.IndexName).ToArray());
     }
@@ -159,7 +168,7 @@ public sealed class FinOpsStorageGrowthViewTests
         var samples = objs.SelectMany(o => Enumerable.Range(0, 30).Select(d => new FinOpsObjectDaySample($"{o.SchemaName}.{o.TableName}", new DateTime(2026, 9, 1).AddDays(d), 12345678.9 + d))).ToList();
         var objectsBytes = Encoding.UTF8.GetByteCount(DarlingMcpFinOpsTools.BuildStorageGrowthObjectsPayload(new string('s', 128), 24, DarlingMcpFinOpsTools.StorageGrowthDatabaseSection(dbs, dbs[0].DatabaseName, null), objs, 21, samples, null));
 
-        var ixs = Enumerable.Range(0, 60).Select(i => new IndexUsageDto(name, name, name, name + i, "NONCLUSTERED COLUMNSTORE", i, 99999999.9m, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, new DateTime(2026, 9, 1, 1, 2, 3), "Write-only")).ToList();
+        var ixs = Enumerable.Range(0, 60).Select(i => new IndexUsageDto(name, name, name, name + i, "NONCLUSTERED COLUMNSTORE", i, 99999999.9m, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, new DateTime(2026, 9, 1, 1, 2, 3), "Write-only", new DateTime(2026, 9, 1, 4, 5, 6, DateTimeKind.Utc))).ToList();
         var indexesBytes = Encoding.UTF8.GetByteCount(DarlingMcpFinOpsTools.BuildStorageGrowthIndexesPayload(new string('s', 128), 24, DarlingMcpFinOpsTools.StorageGrowthDatabaseSection(dbs, dbs[0].DatabaseName, null), ixs, null));
 
         Console.WriteLine($"storage_growth worst case bytes: databases {databases}, objects {objectsBytes}, indexes {indexesBytes}");
@@ -364,6 +373,31 @@ public sealed class FinOpsStorageGrowthViewLiveTests
     }
 
     [Fact]
+    public async Task IndexesLevel_PublishesTheSnapshotInstant_AFixedOldOne()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        /* A database that left collection scope five days ago: its daily index snapshots stop at a day boundary the seed
+           fixes (the seed's own UTC midnight, never a later clock read), so the newest one is five days old. */
+        var last = DarlingMcpTestData.Naive(DateTime.UtcNow).Date.AddDays(-5).AddMinutes(10);
+        for (var d = 24; d >= 0; d--)
+        {
+            await Obj(c, ct, last.AddDays(-d), "Gone", "Old", 1, "PK_Old", 10m + (24 - d), 1, 1, null);
+            await Obj(c, ct, last.AddDays(-d), "Gone", "Old", 2, "IX_Old", 5m, 0, 0, null);
+        }
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var doc = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Gone", object_name: "dbo.Old", cancellationToken: ct));
+        var section = doc.RootElement.GetProperty("indexes");
+        Assert.Equal("ok", section.GetProperty("status").GetString());
+        Assert.Equal(McpHelpers.FormatEffectiveStart(last), section.GetProperty("captured_at").GetString());
+        Assert.EndsWith("T00:10:00.0000000Z", section.GetProperty("captured_at").GetString());
+        Assert.Equal(2, section.GetProperty("index_count").GetInt32());
+    }
+
+    [Fact]
     public async Task EveryLevel_EqualsTheReadersRows_MappedThroughTheRowFunctions()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -440,25 +474,26 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         {
             await c.OpenAsync(ct);
             var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
-            /* 15 tables that shrink (growth below 0) and 5 new tables with one sample only (growth null, counted as 0). */
+            /* 14 tables that shrink (growth below 0), 5 new tables with one sample only (absent from the earliest snapshot, so growth is their whole size) and dbo.ZNull, whose size is unknown at the latest instant (the SQL sorts its null growth last; the desktop's order counts it as 0). */
             for (var i = 0; i < 20; i++)
             {
-                var table = (i < 15 ? "Shrink" : "New") + i.ToString("D2");
-                foreach (var d in i < 15 ? new[] { 29, 0 } : new[] { 0 })
+                var table = i == 14 ? "ZNull" : (i < 14 ? "Shrink" : "New") + i.ToString("D2");
+                foreach (var d in i < 14 ? new[] { 29, 0 } : new[] { 0 })
                 {
                     await DarlingMcpTestData.ExecAsync(c, ct,
                         @"INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates)
                           VALUES ($1,$2,$3,$4,'Gamma','dbo',$5,$6,1,'PK','CLUSTERED',$7,$7,1000,0,0,0,0)",
-                        CollectionIdGenerator.Next(), now.Date.AddDays(-d).AddMinutes(10), ServerId, ServerName, 500 + i, table, d == 29 ? 500m + i : 100m + i);
+                        CollectionIdGenerator.Next(), now.Date.AddDays(-d).AddMinutes(10), ServerId, ServerName, 500 + i, table, i == 14 ? (decimal?)null : d == 29 ? 500m + i : 100m + i);
                 }
             }
         }
 
         using var doc = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Gamma", cancellationToken: ct));
         var objects = doc.RootElement.GetProperty("objects");
-        /* The desktop's order: the 5 new tables (0) above the 15 shrinking ones, key ordinal inside each tie; the first 10 are the 5 new and the 5 least-shrunk. */
-        var expected = Enumerable.Range(15, 5).Select(i => "dbo.New" + i.ToString("D2"))
-            .Concat(new[] { "dbo.Shrink00", "dbo.Shrink01", "dbo.Shrink02", "dbo.Shrink03", "dbo.Shrink04" }).ToArray();
+        /* The desktop's order counts the unknown size as 0: the 5 new tables by size (115..119), then dbo.ZNull (0), then the 14 shrinking ones (all -400, key ordinal inside the tie); the first 10 are the 5 new, largest first, dbo.ZNull and the 4 least shrunk.
+           The SQL order alone puts the null growth last, so without the re-rank dbo.ZNull would not be among the first 10. */
+        var expected = Enumerable.Range(15, 5).Reverse().Select(i => "dbo.New" + i.ToString("D2"))
+            .Concat(new[] { "dbo.ZNull", "dbo.Shrink00", "dbo.Shrink01", "dbo.Shrink02", "dbo.Shrink03" }).ToArray();
         Assert.Equal(expected, objects.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("object_name").GetString()).ToArray());
         Assert.Equal(20, objects.GetProperty("object_count").GetInt32());
         Assert.True(objects.GetProperty("truncated").GetBoolean());

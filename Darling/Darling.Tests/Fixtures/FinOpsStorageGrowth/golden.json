@@ -116,6 +116,19 @@
       {
         "DatabaseName": "HeatDb",
         "SchemaName": "dbo",
+        "TableName": "NewTable",
+        "CurrentReservedMb": 12.50,
+        "CurrentUsedMb": 11.25,
+        "TotalRows": 123,
+        "IndexCount": 1,
+        "Growth7dMb": 0,
+        "Growth30dMb": 12.50,
+        "DailyGrowthRateMb": 0.4166666666666666666666666667,
+        "GrowthPct30d": null
+      },
+      {
+        "DatabaseName": "HeatDb",
+        "SchemaName": "dbo",
         "TableName": "TiedOne",
         "CurrentReservedMb": 20.00,
         "CurrentUsedMb": 18.00,
@@ -125,19 +138,6 @@
         "Growth30dMb": 10.00,
         "DailyGrowthRateMb": 0.3333333333333333333333333333,
         "GrowthPct30d": 100
-      },
-      {
-        "DatabaseName": "HeatDb",
-        "SchemaName": "dbo",
-        "TableName": "TiedTwo",
-        "CurrentReservedMb": 30.00,
-        "CurrentUsedMb": 27.00,
-        "TotalRows": 1000,
-        "IndexCount": 1,
-        "Growth7dMb": 0,
-        "Growth30dMb": 10.00,
-        "DailyGrowthRateMb": 0.3333333333333333333333333333,
-        "GrowthPct30d": 50
       }
     ],
     "heatmapSamples": [
@@ -157,6 +157,11 @@
         "ReservedMb": {}
       },
       {
+        "ObjectKey": "dbo.NewTable",
+        "Day": "anchor-1d",
+        "ReservedMb": {}
+      },
+      {
         "ObjectKey": "dbo.Orders",
         "Day": "anchor-5d",
         "ReservedMb": {}
@@ -183,21 +188,6 @@
       },
       {
         "ObjectKey": "dbo.TiedOne",
-        "Day": "anchor-1d",
-        "ReservedMb": {}
-      },
-      {
-        "ObjectKey": "dbo.TiedTwo",
-        "Day": "anchor-5d",
-        "ReservedMb": {}
-      },
-      {
-        "ObjectKey": "dbo.TiedTwo",
-        "Day": "anchor-3d",
-        "ReservedMb": {}
-      },
-      {
-        "ObjectKey": "dbo.TiedTwo",
         "Day": "anchor-1d",
         "ReservedMb": {}
       }
@@ -218,7 +208,8 @@
         "TotalReads": 5120,
         "UserUpdates": 400,
         "LastUserAccess": "anchor-0.083333d",
-        "Classification": "Active"
+        "Classification": "Active",
+        "CollectionTimeUtc": "anchor-0.375d"
       },
       {
         "DatabaseName": "HeatDb",
@@ -235,7 +226,8 @@
         "TotalReads": 0,
         "UserUpdates": 0,
         "LastUserAccess": null,
-        "Classification": "Unused"
+        "Classification": "Unused",
+        "CollectionTimeUtc": "anchor-0.375d"
       },
       {
         "DatabaseName": "HeatDb",
@@ -252,7 +244,8 @@
         "TotalReads": 0,
         "UserUpdates": 9,
         "LastUserAccess": null,
-        "Classification": "Write-only"
+        "Classification": "Write-only",
+        "CollectionTimeUtc": "anchor-0.375d"
       }
     ],
     "indexDetailHeap": [
@@ -271,7 +264,8 @@
         "TotalReads": 3,
         "UserUpdates": 0,
         "LastUserAccess": null,
-        "Classification": "Active"
+        "Classification": "Active",
+        "CollectionTimeUtc": "anchor-0.375d"
       }
     ],
     "indexDetailMissing": []

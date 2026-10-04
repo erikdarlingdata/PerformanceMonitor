@@ -851,6 +851,13 @@ public sealed class IndexUsageRow
     public DateTime? LastUserAccess { get; set; }
     public string Classification { get; set; } = "";
 
+    /// <summary>The snapshot these figures came from, naive UTC (kind Utc); the Collected column sorts by it.</summary>
+    public DateTime CollectionTimeUtc { get; set; }
+
+    /// <summary>When that snapshot was collected, to the second, in the display zone: the Collected column's text.
+    /// The index drill reads the database's latest snapshot with no time bound, so this is how old the figures can be.</summary>
+    public string CollectionTime => PgDisplay.SnapshotTime(CollectionTimeUtc);
+
     public static IndexUsageRow From(PerformanceMonitor.Darling.Storage.FinOps.IndexUsageDto d) => new()
     {
         DatabaseName = d.DatabaseName,
@@ -867,7 +874,8 @@ public sealed class IndexUsageRow
         TotalReads = d.TotalReads,
         UserUpdates = d.UserUpdates,
         LastUserAccess = d.LastUserAccess,
-        Classification = d.Classification
+        Classification = d.Classification,
+        CollectionTimeUtc = d.CollectionTime
     };
 }
 

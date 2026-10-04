@@ -434,7 +434,7 @@ GROUP BY
     database_name,
     sql_handle,
     query_text
-ORDER BY SUM(delta_worker_time) DESC
+ORDER BY SUM(delta_worker_time) DESC, database_name, sql_handle, query_text
 LIMIT $3";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

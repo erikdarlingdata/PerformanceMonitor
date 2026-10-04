@@ -13,7 +13,7 @@
    computes nothing. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat } from "../../util.js";
+import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat, relTime, localTime } from "../../util.js";
 
 const HOURS = 24;
 const OBJECT_LIMIT = 20;
@@ -94,6 +94,8 @@ function indexNotice(s) {
   const n = (s.rows || []).length;
   let text = n === 1 ? "1 index" : n + " indexes";
   text += s.truncated ? "; the first " + n + " of " + (s.index_count ?? "more") + "." : ".";
+  // One snapshot for every row, so the notice says when it was collected; the read has no time bound, so it can be old.
+  if (typeof s.captured_at === "string" && s.captured_at) text += " Collected " + relTime(s.captured_at) + " (" + localTime(s.captured_at) + ").";
   return text;
 }
 
