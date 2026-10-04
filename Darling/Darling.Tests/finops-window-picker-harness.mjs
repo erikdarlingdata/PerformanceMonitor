@@ -73,7 +73,7 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "finops-window-"));
 try {
   fs.mkdirSync(path.join(scratch, "pages", "finops"), { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "panels.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
+  for (const f of ["util.js", "panels.js", "grid-tools.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
   for (const f of ["optimization.js", "high-impact.js", "index-analysis.js"]) {
     fs.copyFileSync(path.join(jsDir, "pages", "finops", f), path.join(scratch, "pages", "finops", f));
   }
