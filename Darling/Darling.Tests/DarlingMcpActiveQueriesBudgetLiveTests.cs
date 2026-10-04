@@ -71,15 +71,16 @@ public sealed class DarlingMcpActiveQueriesBudgetLiveTests
                 var hasWait = i % 4 == 0;
 
                 await DarlingMcpTestData.ExecAsync(connection, ct,
-                    @"INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, elapsed_time_formatted, query_text, status, blocking_session_id, wait_type, wait_time_ms, cpu_time_ms, total_elapsed_time_ms, reads, writes, logical_reads, granted_query_memory_gb, transaction_isolation_level, dop, parallel_worker_count, login_name, host_name, program_name, open_transaction_count, request_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)",
+                    @"INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, elapsed_time_formatted, query_text, status, blocking_session_id, wait_type, wait_time_ms, cpu_time_ms, total_elapsed_time_ms, reads, writes, logical_reads, granted_query_memory_gb, transaction_isolation_level, dop, parallel_worker_count, login_name, host_name, program_name, open_transaction_count, request_id, wait_resource, percent_complete, query_hash)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)",
                     CollectionIdGenerator.Next(), t, ServerId, ServerName, 100 + i, db,
                     "00 00:00:05.125", text, i % 5 == 0 ? "suspended" : "running", 0,
                     hasWait ? "PAGEIOLATCH_SH" : null, hasWait ? 250L + i : 0L, 1000L + (i * 37), 1500L + (i * 37),
                     10_000L + (i * 123), 50L + i, i % 7, i % 6 == 0 ? 0.75m : 0m,
                     i % 2 == 0 ? "Read Committed" : "Repeatable Read", i % 6 == 0 ? 8 : 1, i % 6 == 0 ? 4 : 0,
                     i % 2 == 0 ? "app_svc_prod" : @"CONTOSO\svc_reporting", $"APPSRV{i % 5:D2}",
-                    i % 2 == 0 ? ".Net SqlClient Data Provider" : "MyOrderService.Worker", i % 3 == 0 ? 1 : 0, 0);
+                    i % 2 == 0 ? ".Net SqlClient Data Provider" : "MyOrderService.Worker", i % 3 == 0 ? 1 : 0, 0,
+                    "KEY: 5:72057594043432960 (a1b2c3d4e5f6)", 12.5m + i, "0x" + (0x1A2B3C4D5E6F7080L + i).ToString("X16"));
             }
 
             /* #4198's own default (25, down from 50) truncates the 50-row population — total_snapshots still
