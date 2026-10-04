@@ -24,6 +24,7 @@
 import { el, mount, readTool, buildQuery, loadingStrip, errorStrip, emptyStrip, disclosure,
          ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
 import { VIZ } from "../panels.js";
+import { getSession } from "../views-api.js";
 
 /* #3169: the state-carrying notification_type values, derived from the one shared map rather than listed a
    second time. The status label already carries each of them, so the channel chip beside it must not repeat
@@ -41,6 +42,25 @@ const ALERT_COLUMNS = [
   { key: "detail_text", label: "Detail", render: (a) => detailCell(a) },
   { key: "triage", label: "Triage", render: (a) => triageCell(a) },
 ];
+
+/* The Mute column exists only for a seat whose session reports can_edit (the server enforces the write gate;
+   this is only the affordance). Both links open the Mute Rules create form pre-filled from the row, using the
+   row's OWN server spelling: engine alerts carry the registry hostname and the self-alert family the display
+   name, and a rule matches server_name exactly. "Mute similar" leaves the server blank (this metric anywhere). */
+let canMute = false;
+const MUTE_COLUMN = { key: "mute", label: "Mute", render: (a) => muteCell(a) };
+function alertColumns() {
+  return canMute ? ALERT_COLUMNS.concat([MUTE_COLUMN]) : ALERT_COLUMNS;
+}
+
+function muteCell(a) {
+  const link = (text, params) => el("a", { href: "#/mute-rules" + buildQuery(params), text });
+  return el("span", {}, [
+    link("Mute this alert", { server_name: a.server_name, metric_name: a.metric_name }),
+    " · ",
+    link("Mute similar", { metric_name: a.metric_name }),
+  ]);
+}
 
 /* #3539 A8e: the tier the alert FIRED at, as the tool reports it — never re-derived here from the metric name
  * (R1). The service reads it off the row's persisted context and falls back to the name only for rows that
@@ -218,7 +238,7 @@ function alertKey(a) {
  * single-row page and lifting the <tr> back out - reuses the shared renderer's formatting/severity classes
  * without duplicating them, and without vizTable itself having to know about incremental refresh. */
 function alertRowNode(row) {
-  const wrap = VIZ.table({ alerts: [row] }, { rowsKey: "alerts", columns: ALERT_COLUMNS });
+  const wrap = VIZ.table({ alerts: [row] }, { rowsKey: "alerts", columns: alertColumns() });
   return wrap.querySelector("tbody tr");
 }
 
@@ -264,6 +284,7 @@ export async function renderAlerts(main) {
     return;
   }
 
+  canMute = !!(await getSession()).can_edit;
   const filter = el("input", {
     class: "filter-box",
     type: "text",
@@ -323,7 +344,7 @@ function drawAlerts(state) {
     return;
   }
 
-  const table = VIZ.table({ alerts: rows }, { rowsKey: "alerts", columns: ALERT_COLUMNS });
+  const table = VIZ.table({ alerts: rows }, { rowsKey: "alerts", columns: alertColumns() });
   mount(state.tableBox, table);
   const tbody = table.querySelector("tbody");
   const rowMap = new Map();
