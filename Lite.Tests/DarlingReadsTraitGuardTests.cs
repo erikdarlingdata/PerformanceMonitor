@@ -139,7 +139,7 @@ public sealed class DarlingReadsTraitGuardTests
 
         Assert.Equal(2, seen.Count);
         Assert.True(seen["InBlockNamespaceTests"]);
-        Assert.False(seen["NestedTests"]);
+        Assert.False(seen["NestedTests"]); // a nested class is flagged even though no enclosing class carries the trait
     }
 
     [Fact]
@@ -369,7 +369,8 @@ public sealed class DarlingReadsTraitGuardTests
     }
 
     /// <summary>Every class in the file (top-level, in a block namespace, or nested) that declares a test of
-    /// its own, with whether the trait is on it or on a class that encloses it. A nested helper class that
+    /// its own, with whether the trait is on that class itself. xunit's trait selection reads a class's own attributes,
+    /// so a nested class does not take the trait of the class around it. A nested helper class that
     /// declares no test is not a test class, and the tests of an enclosing class are not the nested class's.</summary>
     private static IEnumerable<(string Name, bool HasTrait)> TestClasses(string text)
     {
@@ -403,11 +404,7 @@ public sealed class DarlingReadsTraitGuardTests
                 continue;
             }
 
-            var traited = declarations
-                .Where(e => e.Index <= d.Index && e.End >= d.End)
-                .Any(e => HasTraitAbove(text, e.Index));
-
-            yield return (d.Name, traited);
+            yield return (d.Name, HasTraitAbove(text, d.Index));
         }
     }
 
