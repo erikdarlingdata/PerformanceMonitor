@@ -687,6 +687,11 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 }
 .filter-box:focus { outline: none; border-color: var(--accent); }
 
+/* Alert History: the Dismiss Selected / Dismiss All bar (shown only to a seat that can edit). */
+.dismiss-bar { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 0.6rem; }
+.dismiss-status { font-size: 0.85rem; color: var(--muted); }
+.dismiss-status.dismiss-error { color: var(--crit, #e05050); font-weight: 600; }
+
 .muted { color: var(--muted); }
 .section-title { font-size: 1rem; font-weight: 600; margin: 0 0 0.6rem; }
 

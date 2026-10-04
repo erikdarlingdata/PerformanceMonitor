@@ -23,7 +23,7 @@
  * every 60s. Sort order, filters and every rendered field are unchanged.
  */
 
-import { el, mount, readTool, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
+import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
          ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { mutePrefillParams } from "../mute-context.js";
@@ -57,7 +57,44 @@ const ALERT_COLUMNS = [
 let canMute = false;
 const MUTE_COLUMN = { key: "mute", label: "Mute", csv: false, render: (a) => muteCell(a) };
 function alertColumns() {
-  return canMute ? ALERT_COLUMNS.concat([MUTE_COLUMN]) : ALERT_COLUMNS;
+  return canMute ? [SELECT_COLUMN].concat(ALERT_COLUMNS, [MUTE_COLUMN]) : ALERT_COLUMNS;
+}
+
+/* Dismiss (the web twin of the Viewer's Dismiss Selected / Dismiss All), for a seat that can edit. The checked
+ * rows live at module scope keyed by alertKey(), so the 60 s rebuild keeps them; they are cleared after a
+ * successful dismiss and whenever a filter changes. The write is POST /api/alert-history/dismiss with the
+ * (alert_time, server_id, metric_name) of each row; one request may list at most DISMISS_CHUNK rows, so a longer
+ * list goes in several requests and the counts are added up. */
+const DISMISS_CHUNK = 1000;
+const selected = new Map();
+const SELECT_COLUMN = { key: "select", label: "Select", csv: false, render: (a) => selectCell(a) };
+
+/* A row can be dismissed when it is live and names its server by id (the dismiss key needs server_id). */
+function dismissable(a) {
+  return a.dismissed !== true && a.server_id != null;
+}
+
+function dismissKeyOf(a) {
+  return { alert_time: a.alert_time, server_id: a.server_id, metric_name: a.metric_name };
+}
+
+/* Empties the checked set and unticks the boxes of the rows the table keeps (reconcileRows reuses their nodes). */
+function clearSelection(state) {
+  selected.clear();
+  if (state && state.tbody) {
+    for (const tr of state.tbody.children) for (const box of tr.querySelectorAll("input")) box.checked = false;
+  }
+}
+
+function selectCell(a) {
+  if (!dismissable(a)) return el("span", { class: "muted", text: "" });
+  const box = el("input", { type: "checkbox", "aria-label": "Select alert " + a.metric_name });
+  box.checked = selected.has(alertKey(a));
+  box.addEventListener("change", () => {
+    if (box.checked) selected.set(alertKey(a), a); else selected.delete(alertKey(a));
+    if (live) updateDismissBar(live);
+  });
+  return box;
 }
 
 function muteCell(a) {
@@ -380,6 +417,83 @@ function markDismissed(tr, row) {
  * detaches this page's headEl from the document, so a stale `live` falls through to a full rebuild below. */
 let live = null;
 
+/* The dismiss toolbar: Dismiss Selected (with the checked count), Dismiss All (every listed row the current
+ * filters show), and a status line carrying the last outcome. Present only for a seat that can edit. */
+function buildDismissBar(state) {
+  const selBtn = el("button", { type: "button", class: "btn", text: "Dismiss Selected" });
+  const allBtn = el("button", { type: "button", class: "btn", text: "Dismiss All" });
+  const status = el("span", { class: "dismiss-status", text: "" });
+  const bar = el("div", { class: "dismiss-bar" }, [selBtn, allBtn, status]);
+  state.dismiss = { bar, selBtn, allBtn, status, busy: false };
+  selBtn.addEventListener("click", () => dismissRows(state, [...selected.values()]));
+  allBtn.addEventListener("click", () => {
+    const rows = visibleRows(state).filter(dismissable);
+    if (!rows.length) return;
+    /* Same prompt the desktop asks before Dismiss All. */
+    const ask = "Dismiss " + rows.length + " alert(s)?\n\nDismissed alerts are hidden from this view but remain in the database.";
+    if (typeof globalThis.confirm === "function" && !globalThis.confirm(ask)) return;
+    dismissRows(state, rows);
+  });
+  updateDismissBar(state);
+  return bar;
+}
+
+function updateDismissBar(state) {
+  const d = state.dismiss;
+  if (!d) return;
+  d.selBtn.textContent = selected.size ? "Dismiss Selected (" + selected.size + ")" : "Dismiss Selected";
+  d.selBtn.disabled = d.busy || selected.size === 0;
+  d.allBtn.disabled = d.busy || !visibleRows(state).some(dismissable);
+}
+
+/* The rows the current filter box lets through - what the table shows and what Dismiss All acts on. */
+function visibleRows(state) {
+  const q = state.filter.value.trim().toLowerCase();
+  return q ? state.alerts.filter((a) => String(a.server_name || "").toLowerCase().includes(q)) : state.alerts;
+}
+
+function dismissOutcomeText(t) {
+  let text = "Dismissed " + t.dismissed + " of " + t.requested;
+  if (t.already_dismissed > 0) text += "; " + t.already_dismissed + " already dismissed";
+  if (t.unknown > 0) text += "; " + t.unknown + " " + (t.unknown === 1 ? "was" : "were") + " already gone";
+  return text;
+}
+
+async function dismissRows(state, rows) {
+  const d = state.dismiss;
+  if (!d || d.busy || !rows.length) return;
+  d.busy = true;
+  updateDismissBar(state);
+  d.status.textContent = "Dismissing " + rows.length + "…";
+  const totals = { requested: 0, dismissed: 0, already_dismissed: 0, unknown: 0 };
+  let failure = null;
+  for (let i = 0; i < rows.length && !failure; i += DISMISS_CHUNK) {
+    const res = await apiSend("POST", "/api/alert-history/dismiss", { alerts: rows.slice(i, i + DISMISS_CHUNK).map(dismissKeyOf) });
+    if (res.kind === "data" && res.data && typeof res.data === "object") {
+      for (const k of Object.keys(totals)) totals[k] += Number(res.data[k]) || 0;
+    } else if (res.status === 403) {
+      failure = res.message && !/^Request failed/.test(res.message) ? res.message : "This session is read-only, so nothing was dismissed.";
+    } else if (res.kind === "auth") {
+      failure = res.message || "Your session has expired. Sign in again.";
+    } else {
+      failure = res.message || "The dismiss request failed.";
+    }
+  }
+  d.busy = false;
+  if (failure) {
+    /* Never claim success; a partly done request says how far it got. */
+    d.status.textContent = totals.requested ? failure + " (" + dismissOutcomeText(totals) + " before it failed)" : failure;
+    d.status.setAttribute("class", "dismiss-status dismiss-error");
+    updateDismissBar(state);
+    if (totals.requested) await refreshAlerts(state);
+    return;
+  }
+  clearSelection(state);
+  d.status.setAttribute("class", "dismiss-status");
+  d.status.textContent = dismissOutcomeText(totals);
+  await refreshAlerts(state);
+}
+
 export async function renderAlerts(main) {
   if (live && live.main === main && live.headEl.isConnected) {
     await refreshAlerts(live);
@@ -387,6 +501,7 @@ export async function renderAlerts(main) {
   }
 
   canMute = !!(await getSession()).can_edit;
+  if (!canMute) selected.clear();
   await loadServerNames();
   const filter = el("input", {
     class: "filter-box",
@@ -415,16 +530,21 @@ export async function renderAlerts(main) {
     el("label", { class: "range-control" }, [dismissedBox, el("span", { text: "Show dismissed" })]),
     filter,
   ]);
-  mount(main, [headEl, noticeBox, tableBox]);
+  live = { main, headEl, meta, noticeBox, tableBox, filter, alerts: [], tbody: null, rowMap: null, seq: 0, dismiss: null };
+  mount(main, canMute ? [headEl, buildDismissBar(live), noticeBox, tableBox] : [headEl, noticeBox, tableBox]);
 
-  live = { main, headEl, meta, noticeBox, tableBox, filter, alerts: [], tbody: null, rowMap: null, seq: 0 };
-  /* A changed choice refetches and reconciles the table that is already drawn, the same path a poll tick takes. */
-  const changed = () => refreshAlerts(live);
+  /* A changed choice refetches and reconciles the table that is already drawn, the same path a poll tick takes.
+     It also drops the checked rows: they were picked from the list the old choice showed. */
+  const changed = () => { clearSelection(live); return refreshAlerts(live); };
   windowSel.addEventListener("change", () => { choices.hours = Number(windowSel.value); changed(); });
   limitSel.addEventListener("change", () => { choices.limit = Number(limitSel.value); changed(); });
   serverSel.addEventListener("change", () => { choices.server = serverSel.value; changed(); });
   dismissedBox.addEventListener("change", () => { choices.dismissed = !!dismissedBox.checked; changed(); });
-  filter.addEventListener("input", () => drawAlerts(live));
+  filter.addEventListener("input", () => {
+    clearSelection(live);
+    drawAlerts(live);
+    updateDismissBar(live);
+  });
 
   mount(tableBox, loadingStrip("Loading alerts…"));
   await refreshAlerts(live);
@@ -445,15 +565,21 @@ async function refreshAlerts(state) {
     state.alerts = [];
     state.tbody = null;
     state.rowMap = null;
+    selected.clear();
+    updateDismissBar(state);
     mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyStrip(res.message));
     return;
   }
   state.alerts = res.data.alerts || [];
+  /* A checked row that is no longer listed (dismissed elsewhere, aged out) is no longer selected. */
+  const listed = new Set(state.alerts.filter(dismissable).map(alertKey));
+  for (const key of [...selected.keys()]) if (!listed.has(key)) selected.delete(key);
   if (res.data.truncated === true) {
     mount(state.noticeBox, noticeStrip(
       "More alerts exist than shown: the newest " + state.alerts.length + " are listed. Raise the row limit or narrow the range to see the rest."));
   }
   drawAlerts(state);
+  updateDismissBar(state);
 }
 
 /* Applies the (client-side, unchanged) server filter to state.alerts and either reconciles the existing table
