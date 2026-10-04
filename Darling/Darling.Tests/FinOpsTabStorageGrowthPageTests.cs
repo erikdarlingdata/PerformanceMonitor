@@ -191,6 +191,8 @@ public sealed class FinOpsTabStorageGrowthPageTests
     {
         var tab = Tab();
         Assert.Contains("const OBJECT_GONE = \"is not among the\";", tab);
+        // The tab's drop-back depends on this refusal wording in the C# message.
+        Assert.Contains("is not among the", ToolSource());
         Assert.Contains("if (res.kind === \"error\" && state.level === \"indexes\" && String(res.message).includes(OBJECT_GONE)) {\n          state.level = \"objects\";", tab.Replace("\r\n", "\n"));
     }
 
