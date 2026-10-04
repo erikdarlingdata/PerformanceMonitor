@@ -14,7 +14,9 @@
  * The 60 s poll rebuilds the tab, so the checked set, the search text and the metric live at MODULE scope, keyed by
  * the caller's key (the server), and a rebuilt picker reads them back. The checked set starts as the caller's defaults
  * and stays the reader's once they touch it, even when it is empty. A checked value the rebuilt options no longer hold
- * is dropped from the set when the picker is built; the reader's choice among the values that remain is kept.
+ * (a wait that fell out of the top list on this poll) stays checked and stays listed after the options, so a poll never
+ * unchecks what the reader chose. The search box's focus and caret are held too: the rebuild replaces the input, and
+ * restoreFocus() puts the caret back in the new one when the old one had focus.
  *
  * R4: every label reaches the DOM through el's text path.
  */
@@ -80,14 +82,16 @@ export function mergeSeriesRows(series, xKey, valueKey) {
 /**
  * Build the picker. `opts`: key (state key), label, options (string values, heaviest first), max (cap on checked),
  * metrics (optional [{ value, label }]), onChange(checkedValuesInOptionOrder, metricValue).
- * Returns { node, checked() }.
+ * Returns { node, checked(), metric(), restoreFocus() }: call restoreFocus() once node is in the page.
  */
 export function multiPicker(opts) {
   const { key, label, options, max, metrics = null, onChange } = opts;
   const state = pickerState(key);
-  const known = new Set(options);
   const defaults = () => topWaitDefaults(options, max);
-  state.checked = state.checked ? new Set([...state.checked].filter((v) => known.has(v))) : new Set(defaults());
+  state.checked = state.checked ? new Set(state.checked) : new Set(defaults());
+  const known = new Set(options);
+  /* The listed values: the caller's options, then any checked value they no longer hold. */
+  const listedValues = [...options, ...[...state.checked].filter((v) => !known.has(v))];
   if (metrics && metrics.length && !metrics.some((m) => m.value === state.metric)) state.metric = metrics[0].value;
 
   const search = el("input", { type: "search", class: "mp-search", "aria-label": "Search " + label, placeholder: "Search" });
@@ -98,11 +102,11 @@ export function multiPicker(opts) {
 
   const visible = () => {
     const q = state.search.trim().toLowerCase();
-    return q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
+    return q ? listedValues.filter((o) => o.toLowerCase().includes(q)) : listedValues;
   };
   const changed = () => {
     render();
-    onChange(options.filter((o) => state.checked.has(o)), state.metric);
+    onChange(listedValues.filter((o) => state.checked.has(o)), state.metric);
   };
   const render = () => {
     const full = state.checked.size >= max;
@@ -134,6 +138,17 @@ export function multiPicker(opts) {
     state.search = search.value;
     render();
   });
+  /* The rebuild replaces the input. When the one still in the page had focus, remember its caret now, while it is
+     still there, and put both back on the new input once it is mounted. */
+  const was = typeof document !== "undefined" ? document.activeElement : null;
+  const hadFocus = !!(was && was.dataset && was.dataset.mpKey === key);
+  const caret = hadFocus ? { start: was.selectionStart, end: was.selectionEnd } : null;
+  search.dataset.mpKey = key;
+  const restoreFocus = () => {
+    if (!hadFocus) return;
+    search.focus();
+    if (caret.start != null && typeof search.setSelectionRange === "function") search.setSelectionRange(caret.start, caret.end);
+  };
   const button = (text, handler) => el("button", { type: "button", class: "btn mp-btn", text, onClick: handler });
   const selectAll = button("Select All", () => {
     for (const o of visible()) if (state.checked.size < max) state.checked.add(o);
@@ -172,5 +187,5 @@ export function multiPicker(opts) {
     hint,
     list,
   ]);
-  return { node, checked: () => options.filter((o) => state.checked.has(o)), metric: () => state.metric };
+  return { node, checked: () => listedValues.filter((o) => state.checked.has(o)), metric: () => state.metric, restoreFocus };
 }

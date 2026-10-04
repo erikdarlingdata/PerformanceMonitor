@@ -45,6 +45,13 @@ class FakeNode {
   addEventListener(type, listener) {
     (this.listeners[type] = this.listeners[type] || []).push(listener);
   }
+  focus() {
+    globalThis.document.activeElement = this;
+  }
+  setSelectionRange(start, end) {
+    this.selectionStart = start;
+    this.selectionEnd = end;
+  }
   getBoundingClientRect() {
     return { left: 0, top: 0, width: 1000, height: 320 };
   }
@@ -59,15 +66,43 @@ class FakeNode {
 
 globalThis.Node = FakeNode;
 globalThis.document = {
+  activeElement: null,
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (ns, tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
 };
 
 const fetches = [];
+let inFlight = 0;
+let maxInFlight = 0;
+let aborted = 0;
+let hold = null; /* when set, get_wait_trend reads wait for it (a promise) or for their signal's abort */
 let answer = () => ({ status: 200, body: {} });
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, init) => {
   fetches.push(String(url));
+  if (hold && String(url).includes("get_wait_trend")) {
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    let live = true;
+    const done = () => { if (live) { live = false; inFlight--; } };
+    try {
+      await new Promise((resolve, reject) => {
+        const signal = init && init.signal;
+        const onAbort = () => {
+          aborted++;
+          done();
+          const e = new Error("aborted");
+          e.name = "AbortError";
+          reject(e);
+        };
+        if (signal && signal.aborted) return onAbort();
+        if (signal) signal.addEventListener("abort", onAbort);
+        hold.then(resolve);
+      });
+    } finally {
+      done();
+    }
+  }
   const reply = answer(new URL(String(url), "http://viewer.test"));
   const raw = reply.body === undefined ? "" : JSON.stringify(reply.body);
   return { status: reply.status, ok: reply.status >= 200 && reply.status < 300, text: async () => raw };
@@ -82,7 +117,13 @@ let modules;
 try {
   fs.mkdirSync(path.join(scratch, "pages"));
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "panels.js", "read-fields.js", "multi-picker.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
+  for (const f of ["util.js", "panels.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
+  for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js")]) {
+    const from = path.join(jsDir, rel);
+    if (!fs.existsSync(from)) continue;
+    fs.mkdirSync(path.dirname(path.join(scratch, rel)), { recursive: true });
+    fs.copyFileSync(from, path.join(scratch, rel));
+  }
   fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
   fs.copyFileSync(path.join(jsDir, "charts.js"), path.join(scratch, "charts-real.js"));
   fs.writeFileSync(
@@ -112,18 +153,21 @@ const ago = (m) => new Date(Date.now() - m * 60000).toISOString().slice(0, 19);
 
 const NAMES = ["CXPACKET", "PAGEIOLATCH_SH", "LCK_M_X", "WRITELOG", "ASYNC_NETWORK_IO", "SOS_SCHEDULER_YIELD", "THREADPOOL",
   "W08", "W09", "W10", "W11", "W12", "W13", "W14"];
-const stats = data({ server: "SRV1", waits: NAMES.map((n, i) => ({ wait_type: n, wait_time_ms: 1000 - i, signal_wait_time_ms: 1, waiting_tasks: 1 })) });
+const statsFor = (names) => data({ server: "SRV1", waits: names.map((n, i) => ({ wait_type: n, wait_time_ms: 1000 - i, signal_wait_time_ms: 1, waiting_tasks: 1 })) });
 const trendFor = (name) => data({
   server: "SRV1", wait_type: name,
   trend: [{ time: ago(10), wait_time_ms_per_second: 5, signal_wait_time_ms_per_second: 1 }, { time: ago(5), wait_time_ms_per_second: 7, signal_wait_time_ms_per_second: 2 }],
   discontinuities: [],
 });
 let failing = new Set();
+let emptyTrends = false;
+let statNames = NAMES;
 answer = (url) => {
   const t = tool(url);
-  if (t === "get_wait_stats") return stats;
+  if (t === "get_wait_stats") return statsFor(statNames);
   if (t === "get_wait_trend") {
     const w = url.searchParams.get("wait_type");
+    if (emptyTrends) return data({ status: "no_data", message: "No trend rows for " + w + "." });
     return failing.has(w) ? { status: 500, body: { error: "boom" } } : trendFor(w);
   }
   return data({});
@@ -165,6 +209,68 @@ const chartInfo = () => {
 const notes = (root) => all(root, (n) => String(n.className).includes("notice")).map((n) => n.textContent);
 
 const scenarios = {
+  allEmpty: async () => {
+    emptyTrends = true;
+    const root = await build("SRV1");
+    return { chart: chartInfo(), errors: all(root, (n) => n.className === "strip error").map((n) => n.textContent), empties: all(root, (n) => n.className === "strip empty").map((n) => n.textContent) };
+  },
+  fastClicks: async () => {
+    const root = await build("SRV1");
+    await click(button(root, "Clear All"));
+    let release;
+    hold = new Promise((r) => (release = r));
+    fetches.length = 0;
+    maxInFlight = 0;
+    aborted = 0;
+    /* Select All, Top waits, Select All, Top waits without letting a read finish. */
+    for (const name of ["Select All", "Top waits", "Select All", "Top waits"]) {
+      button(root, name).listeners.click.forEach((l) => l({}));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const stillInFlight = inFlight;
+    const sent = trendReads().length;
+    release();
+    await settle();
+    return { sent, maxInFlight, stillInFlight, aborted, chart: chartInfo() };
+  },
+  focusKept: async () => {
+    const first = await build("SRV1");
+    const search = all(first, (n) => n.tag === "input" && n.attrs.type === "search")[0];
+    search.value = "WRI";
+    search.listeners.input.forEach((l) => l({}));
+    search.selectionStart = 1;
+    search.selectionEnd = 2;
+    search.focus();
+    const rebuilt = await build("SRV1");
+    const next = all(rebuilt, (n) => n.tag === "input" && n.attrs.type === "search")[0];
+    return { sameNode: next === search, focused: globalThis.document.activeElement === next, start: next.selectionStart, end: next.selectionEnd, value: next.value };
+  },
+  noFocusStolen: async () => {
+    const first = await build("SRV1");
+    globalThis.document.activeElement = null;
+    const rebuilt = await build("SRV1");
+    const next = all(rebuilt, (n) => n.tag === "input" && n.attrs.type === "search")[0];
+    return { focused: globalThis.document.activeElement === next };
+  },
+  capInDraw: async () => {
+    const root = await build("SRV1");
+    fetches.length = 0;
+    const slot = new FakeNode("div");
+    await modules.tabs.drawWaitTrends(slot, "SRV9", ctx, NAMES, "wait_time_ms_per_second");
+    return { reads: trendReads().length };
+  },
+  droppedOut: async () => {
+    const first = await build("SRV1");
+    await click(button(first, "Clear All"));
+    await toggle(boxes(first).find((b) => b.attrs["aria-label"] === "W13"), true);
+    statNames = NAMES.filter((n) => n !== "W13");
+    fetches.length = 0;
+    const rebuilt = await build("SRV1");
+    const out = { checked: checkedNames(rebuilt), listedLast: listed(rebuilt).slice(-1), reads: trendReads() };
+    statNames = NAMES;
+    const back = await build("SRV1");
+    return { ...out, checkedBack: checkedNames(back) };
+  },
   defaults: async () => {
     const root = await build("SRV1");
     return { checked: checkedNames(root), reads: trendReads(), chart: chartInfo(), count: all(root, (n) => n.className === "mp-count")[0].textContent };

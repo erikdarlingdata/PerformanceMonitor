@@ -434,8 +434,9 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     /// privilege (the web dashboard's dedicated mute-rule endpoints run as viewer), which would have flipped
     /// every <c>connectAs = "viewer"</c> Viewer to "writable" while its alert-dismiss writes still 42501'd —
     /// buttons offered, writes refused. <c>config_alert_log</c> UPDATE is one of the writes this probe actually
-    /// gates and stays with admin/owner (never in the viewer role's enumerated web-surface set), so the probe
-    /// keeps discriminating the two roles it exists to tell apart — and the locked-down Viewer's read-only UX,
+    /// gates and stays with admin/owner at TABLE level. The viewer role now holds a COLUMN-level
+    /// <c>UPDATE (dismissed)</c> (the web dismiss route), which <c>has_table_privilege(..., 'UPDATE')</c> does not
+    /// see, so the probe still reads false for a viewer seat and keeps discriminating the two roles it exists to tell apart — and the locked-down Viewer's read-only UX,
     /// mute-rule buttons included, is unchanged by the web grant.</para>
     /// </summary>
     public const string ReadOnlyProbeSql = "SELECT has_table_privilege('config_alert_log', 'UPDATE')";

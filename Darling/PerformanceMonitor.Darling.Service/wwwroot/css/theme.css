@@ -62,13 +62,8 @@ table.data th .sort-ind { display: inline-block; min-width: 1em; font-size: 0.8e
 .mute-actions .btn { margin-right: 4px; }
 tr.mute-rules-highlight { outline: 2px solid var(--accent); }
 
-/* Multi-select picker (multi-picker.js): Wait Stats' checkbox list over a multi-series chart. */
-.multi-picker { margin: 8px 0; }
-.mp-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.mp-label { font-size: 12px; opacity: 0.8; }
-.mp-search { min-width: 160px; }
-.mp-count { font-size: 12px; opacity: 0.8; margin-left: auto; }
-.mp-hint { display: block; font-size: 12px; color: var(--warn); }
-.mp-list { display: flex; flex-wrap: wrap; gap: 4px 16px; max-height: 160px; overflow-y: auto; margin-top: 6px; }
-.mp-item { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; white-space: nowrap; }
-.mp-none, .mp-metric-note { font-size: 12px; opacity: 0.7; }
+/* Server page custom range (#4843) */
+.range-custom { display: inline-flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
+.range-custom[hidden] { display: none; }
+.range-custom-input { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 0.15rem 0.3rem; font-size: 0.78rem; }
+.range-custom-error { color: var(--err); font-size: 0.78rem; }

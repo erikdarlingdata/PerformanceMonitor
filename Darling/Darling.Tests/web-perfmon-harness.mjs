@@ -90,7 +90,12 @@ try {
   fs.copyFileSync(path.join(jsDir, "panels.js"), path.join(scratch, "panels.js"));
   fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
   fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
-  fs.copyFileSync(path.join(jsDir, "multi-picker.js"), path.join(scratch, "multi-picker.js"));
+  for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js")]) {
+    const from = path.join(jsDir, rel);
+    if (!fs.existsSync(from)) continue;
+    fs.mkdirSync(path.dirname(path.join(scratch, rel)), { recursive: true });
+    fs.copyFileSync(from, path.join(scratch, rel));
+  }
   fs.copyFileSync(path.join(jsDir, "charts.js"), path.join(scratch, "charts-real.js"));
   fs.writeFileSync(
     path.join(scratch, "charts.js"),

@@ -159,10 +159,58 @@ public sealed class WebWaitStatsMultiSelectBehaviourTests
     }
 
     [Fact]
+    public void WhenEveryReadIsEmpty_AndNoneFailed_TheChartShowsTheEmptyState_NotAnError()
+    {
+        var r = Run("allEmpty");
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("chart").ValueKind);
+        Assert.Empty(r.GetProperty("errors").EnumerateArray());
+        Assert.Single(Strings(r.GetProperty("empties")), e => e.Contains("trend data"));
+    }
+
+    [Fact]
+    public void FastClicks_AbortTheSupersededReads_SoAtMostOneDrawsReadsAreInFlight()
+    {
+        var r = Run("fastClicks");
+        Assert.Equal(40, r.GetProperty("sent").GetInt32());
+        Assert.True(r.GetProperty("maxInFlight").GetInt32() <= 10, "more than ten reads were in flight at once");
+        Assert.Equal(10, r.GetProperty("stillInFlight").GetInt32());
+        Assert.Equal(30, r.GetProperty("aborted").GetInt32());
+        Assert.Equal(10, r.GetProperty("chart").GetProperty("labels").GetArrayLength());
+    }
+
+    [Fact]
+    public void ARebuild_PutsTheFocusAndCaretBackInTheSearchBox_OnlyWhenItHadThem()
+    {
+        var r = Run("focusKept");
+        Assert.False(r.GetProperty("sameNode").GetBoolean());
+        Assert.True(r.GetProperty("focused").GetBoolean());
+        Assert.Equal(1, r.GetProperty("start").GetInt32());
+        Assert.Equal(2, r.GetProperty("end").GetInt32());
+        Assert.Equal("WRI", r.GetProperty("value").GetString());
+        Assert.False(Run("noFocusStolen").GetProperty("focused").GetBoolean());
+    }
+
+    [Fact]
+    public void TheChart_NeverDrawsMoreThanTheCap_EvenWhenHandedMore()
+    {
+        Assert.Equal(10, Run("capInDraw").GetProperty("reads").GetInt32());
+    }
+
+    [Fact]
+    public void ACheckedWait_OutsideThisPollsList_StaysCheckedListedAndRead_AndIsStillThereWhenItReturns()
+    {
+        var r = Run("droppedOut");
+        Assert.Equal(new[] { "W13" }, Strings(r.GetProperty("checked")));
+        Assert.Equal(new[] { "W13" }, Strings(r.GetProperty("listedLast")));
+        Assert.Equal(new[] { "W13" }, Strings(r.GetProperty("reads")));
+        Assert.Equal(new[] { "W13" }, Strings(r.GetProperty("checkedBack")));
+    }
+
+    [Fact]
     public void TheWaitsPanel_ReadsGetWaitTrend_OncePerWait_WithTheWaitTypeAndHours_AndImportsThePickerOnlyHere()
     {
         var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        Assert.Contains("readToolWithinKeptHistory(\"get_wait_trend\", { server, wait_type: waitType, hours: ctx.hours })", tabs);
+        Assert.Contains("readToolWithinKeptHistory(\"get_wait_trend\", { server, wait_type: waitType, hours: ctx.hours }, mine.signal)", tabs);
         Assert.Contains("waitTypes.map(", tabs);
         Assert.Contains("const MAX_WAITS_CHARTED = 10;", tabs);
         Assert.Contains("from \"../multi-picker.js\"", tabs);
