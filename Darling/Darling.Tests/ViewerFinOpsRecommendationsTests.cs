@@ -470,7 +470,7 @@ public sealed class ViewerFinOpsRecommendationsTests
         var body = RightSizingRulesSource();
 
         Assert.Matches(
-            new Regex(@"util\s*==\s*null\s*\|\|\s*!\s*util\s*\.\s*HasCpuSample\s*\|\|\s*util\s*\.\s*P95CpuPct\s*>=\s*30"),
+            new Regex(@"util\s*==\s*null\s*\|\|\s*!\s*FinOpsUtilizationFigures\s*\.\s*HasCpuSample\s*\(\s*util\s*\)\s*\|\|\s*util\s*\.\s*P95CpuPct\s*>=\s*30"),
             CpuRightSizingBuilderSource());
         Assert.Matches(
             new Regex(@"BuildCpuRightSizingRecommendation\s*\(\s*util\s*,\s*monthlyCost\s*\)"),
@@ -496,12 +496,15 @@ public sealed class ViewerFinOpsRecommendationsTests
         RecommendationsMethodSource("Task<List<RecommendationRow>> GetRecommendationsAsync(");
 
     private static string CpuRightSizingBuilderSource() =>
-        RecommendationsMethodSource("RecommendationRow? BuildCpuRightSizingRecommendation(");
+        RecommendationsMethodSource("FinOpsRecommendation? CpuRightSizing(", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs");
 
-    private static string RecommendationsMethodSource(string signatureText)
+    private static string RecommendationsMethodSource(string signatureText) =>
+        RecommendationsMethodSource(signatureText, "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs");
+
+    private static string RecommendationsMethodSource(string signatureText, params string[] projectPath)
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(
-            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs"));
+            RepoFile.ReadRepoFile(["Darling", .. projectPath]));
         var signature = source.IndexOf(signatureText, StringComparison.Ordinal);
         Assert.True(signature >= 0, $"{signatureText} is gone, so this pin would read nothing.");
         return CSharpSourceWalker.BraceBalanced(source, source.IndexOf('{', signature));

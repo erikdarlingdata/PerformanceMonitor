@@ -1,0 +1,242 @@
+{
+  "a": {
+    "monthly1000": [
+      {
+        "Category": "Memory",
+        "Severity": "High",
+        "Confidence": "Medium",
+        "Finding": "Memory over-provisioned (P95 SQL memory uses 20% of 64GB RAM)",
+        "Detail": "P95 SQL Server memory from 20 samples over 19 hours is 13,080 MB out of 65,536 MB physical RAM (20% utilization). Consider reducing to ~25GB.",
+        "EstMonthlySavings": 180.24902343750000
+      },
+      {
+        "Category": "Compute",
+        "Severity": "Medium",
+        "Confidence": "Medium",
+        "Finding": "CPU over-provisioned (16 cores, P95 = 24.0%)",
+        "Detail": "P95 CPU utilization is 24.0% (avg 21.9%, max 24%) across 16 cores. Consider reducing to ~5 cores.",
+        "EstMonthlySavings": 412.500000
+      },
+      {
+        "Category": "Databases",
+        "Severity": "Medium",
+        "Confidence": "High",
+        "Finding": "1 idle database(s) consuming 2.0GB",
+        "Detail": "No query activity in 7 days: ArchiveA. Consider archiving or removing these databases.",
+        "EstMonthlySavings": 39.348293882569935444205348900
+      },
+      {
+        "Category": "Environment",
+        "Severity": "Medium",
+        "Confidence": "Low",
+        "Finding": "2 possible dev/test database(s) on production server",
+        "Detail": "Databases matching dev/test patterns: app_dev_a, qa1_a. If these are non-production workloads, consider moving to a lower-cost tier or separate server.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Maintenance",
+        "Severity": "Medium",
+        "Confidence": "High",
+        "Finding": "WeeklyRebuildA ran long 5 times in 7 days",
+        "Detail": "Average duration: 1h 6m 40s, max: 1h 6m 40s, historical average: 1m 0s. Review whether this job's schedule or operations need tuning.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Hardware",
+        "Severity": "Medium",
+        "Confidence": "Medium",
+        "Finding": "CPU: reduce from 16 to 8 cores (P95 CPU 24.0%)",
+        "Detail": "From 30 samples over 21 hours, P95 CPU utilization was 24.0%. Current allocation of 16 cores can safely be reduced to 8 cores.",
+        "EstMonthlySavings": 250.000
+      },
+      {
+        "Category": "Hardware",
+        "Severity": "Medium",
+        "Confidence": "Medium",
+        "Finding": "Memory: reduce from 64GB to 16GB (P95 SQL memory uses 20%)",
+        "Detail": "P95 SQL Server memory from 20 samples over 19 hours is 13,080 MB of 65,536 MB physical RAM (20%). Reducing to 16GB would still leave headroom.",
+        "EstMonthlySavings": 225.0000
+      },
+      {
+        "Category": "Licensing",
+        "Severity": "Low",
+        "Confidence": "High",
+        "Finding": "TDE in use — Enterprise Edition downgrade blocker",
+        "Detail": "The following databases use Transparent Data Encryption: OrdersA, SalesA. TDE must be removed before downgrading to Standard Edition.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Licensing",
+        "Severity": "Low",
+        "Confidence": "Low",
+        "Finding": "Enterprise to Standard would save ~$6,667/mo at list pricing (16 cores)",
+        "Detail": "Based on list pricing differential of ~$5,000/core/year between Enterprise and Standard. Actual savings depend on your licensing agreement. See Enterprise feature audit for downgrade blockers.",
+        "EstMonthlySavings": 6666.6666666666666666666666667
+      },
+      {
+        "Category": "Storage",
+        "Severity": "Low",
+        "Confidence": "High",
+        "Finding": "1 uncompressed object(s) >= 1GB (2.0GB total)",
+        "Detail": "Large uncompressed tables/indexes: dbo.T1 (2.0GB). Consider PAGE or ROW compression to reduce storage and improve I/O.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Maintenance",
+        "Severity": "Low",
+        "Confidence": "High",
+        "Finding": "NightlyLoadA ran long 3 times in 7 days",
+        "Detail": "Average duration: 1m 41s, max: 1m 41s, historical average: 1m 0s. Review whether this job's schedule or operations need tuning.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Storage",
+        "Severity": "Low",
+        "Confidence": "Medium",
+        "Finding": "1 database(s) with low IO latency — standard storage may suffice",
+        "Detail": "These databases have avg read latency under 5ms and write under 3ms across 6 samples over 15 hours: OrdersA (read 2.0ms, write 1.0ms). Premium/high-performance storage may not be needed.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Cloud",
+        "Severity": "Low",
+        "Confidence": "High",
+        "Finding": "Stable CPU utilization (avg 21.9%, CV 0.06) — reserved capacity candidate",
+        "Detail": "CPU utilization is consistently 21.9% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
+        "EstMonthlySavings": null
+      }
+    ],
+    "monthly0": [
+      {
+        "Category": "Memory",
+        "Severity": "High",
+        "Confidence": "Medium",
+        "Finding": "Memory over-provisioned (P95 SQL memory uses 20% of 64GB RAM)",
+        "Detail": "P95 SQL Server memory from 20 samples over 19 hours is 13,080 MB out of 65,536 MB physical RAM (20% utilization). Consider reducing to ~25GB.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Compute",
+        "Severity": "Medium",
+        "Confidence": "Medium",
+        "Finding": "CPU over-provisioned (16 cores, P95 = 24.0%)",
+        "Detail": "P95 CPU utilization is 24.0% (avg 21.9%, max 24%) across 16 cores. Consider reducing to ~5 cores.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Databases",
+        "Severity": "Medium",
+        "Confidence": "High",
+        "Finding": "1 idle database(s) consuming 2.0GB",
+        "Detail": "No query activity in 7 days: ArchiveA. Consider archiving or removing these databases.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Environment",
+        "Severity": "Medium",
+        "Confidence": "Low",
+        "Finding": "2 possible dev/test database(s) on production server",
+        "Detail": "Databases matching dev/test patterns: app_dev_a, qa1_a. If these are non-production workloads, consider moving to a lower-cost tier or separate server.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Maintenance",
+        "Severity": "Medium",
+        "Confidence": "High",
+        "Finding": "WeeklyRebuildA ran long 5 times in 7 days",
+        "Detail": "Average duration: 1h 6m 40s, max: 1h 6m 40s, historical average: 1m 0s. Review whether this job's schedule or operations need tuning.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Hardware",
+        "Severity": "Medium",
+        "Confidence": "Medium",
+        "Finding": "CPU: reduce from 16 to 8 cores (P95 CPU 24.0%)",
+        "Detail": "From 30 samples over 21 hours, P95 CPU utilization was 24.0%. Current allocation of 16 cores can safely be reduced to 8 cores.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Hardware",
+        "Severity": "Medium",
+        "Confidence": "Medium",
+        "Finding": "Memory: reduce from 64GB to 16GB (P95 SQL memory uses 20%)",
+        "Detail": "P95 SQL Server memory from 20 samples over 19 hours is 13,080 MB of 65,536 MB physical RAM (20%). Reducing to 16GB would still leave headroom.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Licensing",
+        "Severity": "Low",
+        "Confidence": "High",
+        "Finding": "TDE in use — Enterprise Edition downgrade blocker",
+        "Detail": "The following databases use Transparent Data Encryption: OrdersA, SalesA. TDE must be removed before downgrading to Standard Edition.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Licensing",
+        "Severity": "Low",
+        "Confidence": "Low",
+        "Finding": "Enterprise to Standard would save ~$6,667/mo at list pricing (16 cores)",
+        "Detail": "Based on list pricing differential of ~$5,000/core/year between Enterprise and Standard. Actual savings depend on your licensing agreement. See Enterprise feature audit for downgrade blockers.",
+        "EstMonthlySavings": 6666.6666666666666666666666667
+      },
+      {
+        "Category": "Storage",
+        "Severity": "Low",
+        "Confidence": "High",
+        "Finding": "1 uncompressed object(s) >= 1GB (2.0GB total)",
+        "Detail": "Large uncompressed tables/indexes: dbo.T1 (2.0GB). Consider PAGE or ROW compression to reduce storage and improve I/O.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Maintenance",
+        "Severity": "Low",
+        "Confidence": "High",
+        "Finding": "NightlyLoadA ran long 3 times in 7 days",
+        "Detail": "Average duration: 1m 41s, max: 1m 41s, historical average: 1m 0s. Review whether this job's schedule or operations need tuning.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Storage",
+        "Severity": "Low",
+        "Confidence": "Medium",
+        "Finding": "1 database(s) with low IO latency — standard storage may suffice",
+        "Detail": "These databases have avg read latency under 5ms and write under 3ms across 6 samples over 15 hours: OrdersA (read 2.0ms, write 1.0ms). Premium/high-performance storage may not be needed.",
+        "EstMonthlySavings": null
+      },
+      {
+        "Category": "Cloud",
+        "Severity": "Low",
+        "Confidence": "High",
+        "Finding": "Stable CPU utilization (avg 21.9%, CV 0.06) — reserved capacity candidate",
+        "Detail": "CPU utilization is consistently 21.9% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
+        "EstMonthlySavings": null
+      }
+    ]
+  },
+  "b": {
+    "monthly1000": [
+      {
+        "Category": "Cloud",
+        "Severity": "Low",
+        "Confidence": "High",
+        "Finding": "Stable CPU utilization (avg 21.9%, CV 0.06) — reserved capacity candidate",
+        "Detail": "CPU utilization is consistently 21.9% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
+        "EstMonthlySavings": null
+      }
+    ],
+    "monthly0": [
+      {
+        "Category": "Cloud",
+        "Severity": "Low",
+        "Confidence": "High",
+        "Finding": "Stable CPU utilization (avg 21.9%, CV 0.06) — reserved capacity candidate",
+        "Detail": "CPU utilization is consistently 21.9% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
+        "EstMonthlySavings": null
+      }
+    ]
+  },
+  "c": {
+    "monthly1000": [],
+    "monthly0": []
+  }
+}
