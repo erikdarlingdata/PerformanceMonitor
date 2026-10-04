@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Common;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -271,6 +272,9 @@ public sealed class DarlingMcpServerAdminTools
         }
     }
 
+    /// <summary>The definition delete <c>remove_server</c> runs, ahead of the tag-assignment clear in the same transaction.</summary>
+    internal const string RemoveServerDeleteSql = "DELETE FROM config_monitored_servers WHERE server_id = $1";
+
     [McpServerTool(Name = "remove_server"), Description(
         "Deletes a monitored server's definition from the shared central store (config_monitored_servers) " +
         "immediately, no confirm step; the service drops it from collection within one sweep. Already-collected " +
@@ -387,10 +391,32 @@ public sealed class DarlingMcpServerAdminTools
             var resolved = target.Candidates[0];
             var resolvedDefinition = definitions.First(d => d.Server.ServerId == resolved.ServerId);
 
-            await using var command = postgres.CreateCommand("DELETE FROM config_monitored_servers WHERE server_id = $1");
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
-            var affected = await command.ExecuteNonQueryAsync();
+            /* The definition delete and the server's tag assignments go in ONE transaction (#5085): server_tag_map has
+               no foreign key to the definitions, and server_id is a deterministic hash of host + database + intent, so
+               a removed-then-re-added server would otherwise take its old tags (and the custom alert rules scoped to
+               them) back. A delete that matched nothing rolls back, so a concurrent remove writes nothing. */
+            await using var connection = await postgres.OpenConnectionAsync();
+            await using var transaction = await connection.BeginTransactionAsync();
+            int affected;
+            await using (var command = new NpgsqlCommand(RemoveServerDeleteSql, connection, transaction))
+            {
+                command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                affected = await command.ExecuteNonQueryAsync();
+            }
+
+            if (affected > 0)
+            {
+                await using var clear = new NpgsqlCommand(ServerTagStore.ClearForServerSql, connection, transaction);
+                clear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                await clear.ExecuteNonQueryAsync();
+                await transaction.CommitAsync();
+            }
+            else
+            {
+                await transaction.RollbackAsync();
+            }
 
             return affected > 0
                 ? RemovedAnswer(resolvedDefinition, target.MatchedBy)

@@ -505,7 +505,14 @@ ORDER BY COALESCE(s.display_name, c.name)";
         await using var command = _dataSource.CreateCommand(MonitoredServerDeleteSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        await ExecuteWriteAsync(command, cancellationToken);
+        var removed = await ExecuteWriteAsync(command, cancellationToken);
+        if (removed > 0)
+        {
+            /* The definition delete is one statement and the assignment clear a second, not one transaction: the
+               tag map has no foreign key to the definitions, and a failure of the clear leaves only orphan map
+               rows (the next remove of the same id clears them). #5085. */
+            await ClearServerTagsAsync(serverId, cancellationToken);
+        }
     }
 
     /// <summary>Toggles a server's <c>is_enabled</c> flag without rewriting its other columns.</summary>
