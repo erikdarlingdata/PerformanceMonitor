@@ -336,7 +336,11 @@ ORDER BY database_name";
     /// empty tab. <paramref name="monthlyCost"/> is the per-server budget (0 → findings emit with no savings
     /// estimate, mirroring Lite's <c>monthlyCost &gt; 0 ? … : null</c>).
     /// </summary>
-    public static async Task<List<FinOpsRecommendation>> GetRecommendationsAsync(NpgsqlDataSource dataSource, int serverId, decimal monthlyCost, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    /// <param name="onCheckFailed">Optional. Invoked once per failed check with that check's label and the exception.
+    /// It is not invoked for the VM check's inner CPU fallback, which degrades to the 24-hour window and still emits.</param>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
+        Justification = "The failure hook is optional and trails the token so every existing call site keeps binding unchanged.")]
+    public static async Task<List<FinOpsRecommendation>> GetRecommendationsAsync(NpgsqlDataSource dataSource, int serverId, decimal monthlyCost, int commandTimeoutSeconds, CancellationToken cancellationToken = default, Action<string, Exception>? onCheckFailed = null)
     {
         var recommendations = new List<FinOpsRecommendation>();
         var memoryCutoff = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified);
@@ -365,6 +369,7 @@ ORDER BY database_name";
         catch (Exception ex)
         {
             Debug.WriteLine($"Recommendation check failed (Enterprise features): {ex.Message}");
+            onCheckFailed?.Invoke("Enterprise features", ex);
         }
 
         // 2. CPU right-sizing (collected utilization efficiency).
@@ -378,6 +383,7 @@ ORDER BY database_name";
         catch (Exception ex)
         {
             Debug.WriteLine($"Recommendation check failed (CPU right-sizing): {ex.Message}");
+            onCheckFailed?.Invoke("CPU right-sizing", ex);
         }
 
         // 3. Memory right-sizing (7-day P95 Total Server Memory vs physical RAM).
@@ -401,6 +407,7 @@ ORDER BY database_name";
         catch (Exception ex)
         {
             Debug.WriteLine($"Recommendation check failed (Memory right-sizing): {ex.Message}");
+            onCheckFailed?.Invoke("Memory right-sizing", ex);
         }
 
         // 5. Compression candidates (collected index_object_stats snapshot; Lite's check 4 is dropped — Darling
@@ -417,6 +424,7 @@ ORDER BY database_name";
         catch (Exception ex)
         {
             Debug.WriteLine($"Recommendation check failed (Compression): {ex.Message}");
+            onCheckFailed?.Invoke("Compression", ex);
         }
 
         // 6. Dormant database detection with cost impact (collected idle DBs + database sizes).
@@ -446,6 +454,7 @@ ORDER BY database_name";
         catch (Exception ex)
         {
             Debug.WriteLine($"Recommendation check failed (Dormant databases): {ex.Message}");
+            onCheckFailed?.Invoke("Dormant databases", ex);
         }
 
         // 7. Dev/test workload detection (collected database name list).
@@ -460,6 +469,7 @@ ORDER BY database_name";
         catch (Exception ex)
         {
             Debug.WriteLine($"Recommendation check failed (Dev/test detection): {ex.Message}");
+            onCheckFailed?.Invoke("Dev/test detection", ex);
         }
 
         // 11. Maintenance window efficiency — jobs running long (collected running_jobs).
@@ -471,6 +481,7 @@ ORDER BY database_name";
         catch (Exception ex)
         {
             Debug.WriteLine($"Recommendation check failed (Maintenance window): {ex.Message}");
+            onCheckFailed?.Invoke("Maintenance window", ex);
         }
 
         // 12. VM right-sizing — prescriptive core/memory targets (collected 7-day P95 CPU + memory).
@@ -511,6 +522,7 @@ ORDER BY database_name";
         catch (Exception ex)
         {
             Debug.WriteLine($"Recommendation check failed (VM right-sizing): {ex.Message}");
+            onCheckFailed?.Invoke("VM right-sizing", ex);
         }
 
         // 13. Storage tier optimization — databases with low I/O latency (collected file_io_stats).
@@ -525,6 +537,7 @@ ORDER BY database_name";
         catch (Exception ex)
         {
             Debug.WriteLine($"Recommendation check failed (Storage tier): {ex.Message}");
+            onCheckFailed?.Invoke("Storage tier", ex);
         }
 
         // 14. Reserved capacity candidates — stable CPU utilization (collected cpu_utilization_stats).
@@ -540,6 +553,7 @@ ORDER BY database_name";
         catch (Exception ex)
         {
             Debug.WriteLine($"Recommendation check failed (Reserved capacity): {ex.Message}");
+            onCheckFailed?.Invoke("Reserved capacity", ex);
         }
 
         return FinOpsRecommendationFigures.Ordered(recommendations);

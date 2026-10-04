@@ -282,4 +282,114 @@ VALUES ($1, $2, $3, $4, $5,
         FALSE, FALSE)",
             CollectionIdGenerator.Next(), at, FinOpsRecommendationsGoldenLiveTests.ServerIdA, FinOpsRecommendationsGoldenLiveTests.ServerNameA, db,
             encrypted.HasValue ? encrypted.Value : (object)DBNull.Value);
+
+    [Fact]
+    public async Task Composer_ReportsAFailedCheck_ToTheHook_AndKeepsTheRest()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live FinOps recommendation reads test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await FinOpsRecommendationsGoldenLiveTests.SeedAsync(connection, ct, DateTime.UtcNow);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var idA = FinOpsRecommendationsGoldenLiveTests.ServerIdA;
+        var baseline = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, ct);
+        Assert.Contains(baseline, r => r.Category == "Maintenance");
+
+        /* The maintenance read selects from the v_running_jobs view; dropping the view on this scratch store breaks that one read. */
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await using var drop = new NpgsqlCommand("DROP VIEW v_running_jobs CASCADE", connection);
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        var failed = new System.Collections.Generic.List<string>();
+        var after = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(
+            dataSource, idA, 1000m, TimeoutSeconds, ct, (label, ex) =>
+            {
+                Assert.NotNull(ex);
+                failed.Add(label);
+            });
+
+        Assert.Equal(new[] { "Maintenance window" }, failed.ToArray());
+        Func<FinOpsRecommendation, string> key = r => $"{r.Severity}|{r.Category}|{r.Finding}|{r.Detail}|{r.EstMonthlySavings}";
+        Assert.Equal(
+            baseline.Where(r => r.Category != "Maintenance").Select(key).ToArray(),
+            after.Select(key).ToArray());
+    }
+
+    [Fact]
+    public void TheStorageComposer_KeepsOneDebugLinePerFailedCheck()
+    {
+        var src = System.IO.File.ReadAllText(System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(SourcePath())!, "..", "PerformanceMonitor.Darling.Storage", "FinOps",
+            "DarlingFinOpsRecommendationsReader.cs"));
+        foreach (var label in new[]
+        {
+            "Enterprise features", "CPU right-sizing", "Memory right-sizing", "Compression", "Dormant databases",
+            "Dev/test detection", "Maintenance window", "VM right-sizing", "Storage tier", "Reserved capacity",
+        })
+        {
+            Assert.Contains($"Recommendation check failed ({label}): {{ex.Message}}", src, StringComparison.Ordinal);
+            Assert.Contains($"onCheckFailed?.Invoke(\"{label}\", ex);", src, StringComparison.Ordinal);
+        }
+    }
+
+    private static string SourcePath([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
+
+    [Fact]
+    public async Task Composer_DoesNotReportTheVmCpuFallback_WhileTheVmRowsStillEmit()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live FinOps recommendation reads test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await FinOpsRecommendationsGoldenLiveTests.SeedAsync(connection, ct, DateTime.UtcNow);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var idA = FinOpsRecommendationsGoldenLiveTests.ServerIdA;
+        var baseline = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, ct);
+
+        /* Rows older than 24 hours raise a division by zero when the CPU column is projected. The 24-hour utilization
+           read never touches them; the 7-day P95 read does, so only the inner fallback of the VM check fires. */
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await using var cols = new NpgsqlCommand(
+                "SELECT string_agg(CASE WHEN column_name = 'sqlserver_cpu_utilization' " +
+                "THEN 'CASE WHEN collection_time < now() - interval ''30 hours'' THEN (sqlserver_cpu_utilization / 0)::int ELSE sqlserver_cpu_utilization END AS sqlserver_cpu_utilization' " +
+                "ELSE quote_ident(column_name) END, ', ' ORDER BY ordinal_position) FROM information_schema.columns " +
+                "WHERE table_schema = current_schema() AND table_name = 'cpu_utilization_stats'", connection);
+            var list = (string)(await cols.ExecuteScalarAsync(ct))!;
+            await using var swap = new NpgsqlCommand(
+                "DROP VIEW v_cpu_utilization_stats CASCADE; CREATE VIEW v_cpu_utilization_stats AS SELECT " + list + " FROM cpu_utilization_stats;" +
+                "CREATE TEMP TABLE old_cpu AS SELECT * FROM cpu_utilization_stats WHERE server_id = " + idA + " LIMIT 1;" +
+                "UPDATE old_cpu SET collection_id = 999001, collection_time = now() - interval '3 days';" +
+                "INSERT INTO cpu_utilization_stats SELECT * FROM old_cpu", connection);
+            await swap.ExecuteNonQueryAsync(ct);
+        }
+
+        var failed = new System.Collections.Generic.List<string>();
+        var after = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(
+            dataSource, idA, 1000m, TimeoutSeconds, ct, (label, _) => failed.Add(label));
+
+        Assert.DoesNotContain("VM right-sizing", failed);
+        Assert.Contains(after, r => r.Category == "Hardware" && r.Finding.StartsWith("CPU:", StringComparison.Ordinal));
+    }
 }
