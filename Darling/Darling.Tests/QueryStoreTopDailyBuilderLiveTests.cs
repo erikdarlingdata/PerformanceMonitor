@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// second pass clears. Every seed is at a fixed past date and every call passes <c>nowUtc</c> explicitly, so no fact
 /// reads the clock. Live facts run when <c>DARLING_TEST_PG</c> is set, each on its own scratch store.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class QueryStoreTopDailyBuilderLiveTests
 {
     private const string SkipText = "Set DARLING_TEST_PG to a Postgres connection string to run the daily summary builder's live pins (each mints its own scratch database).";
