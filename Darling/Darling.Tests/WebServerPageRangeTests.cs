@@ -146,4 +146,143 @@ public sealed class WebServerPageRangeTests
         Assert.NotEmpty(hours);
         Assert.All(hours, h => Assert.InRange(h, 1, McpHelpers.MaxHoursBack));
     }
+
+    /// <summary>A custom start and end maps to the reads' window: <c>as_of</c> is the end and <c>hours</c> is the span rounded
+    /// UP to whole hours, so the fetch starts at or before the picked start. A span under an hour, a reversed pair, a future
+    /// end and a span wider than the widest preset are refused; an end at "now" is live and names no <c>as_of</c>.</summary>
+    [Fact]
+    public void ACustomRange_MapsToAsOfAndWholeHours_AndRefusesWhatNoReadTakes()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("customMapping", out var r)) return;
+
+        var found = r.GetProperty("found");
+        var rounded = found.GetProperty("rounded");
+        Assert.Equal(4, rounded.GetProperty("hours").GetInt32());
+        Assert.Equal("2026-01-02T10:30:00.000Z", rounded.GetProperty("asOf").GetString());
+        Assert.False(rounded.GetProperty("live").GetBoolean());
+        Assert.Equal(4, found.GetProperty("exact").GetProperty("hours").GetInt32());
+        Assert.Contains("at least one hour", found.GetProperty("subHour").GetProperty("error").GetString());
+        Assert.Contains("after the start", found.GetProperty("reversed").GetProperty("error").GetString());
+        Assert.Contains("future", found.GetProperty("future").GetProperty("error").GetString());
+        Assert.Contains("7 days", found.GetProperty("tooWide").GetProperty("error").GetString());
+        var live = found.GetProperty("live");
+        Assert.True(live.GetProperty("live").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, live.GetProperty("asOf").ValueKind);
+        Assert.Equal(5, live.GetProperty("hours").GetInt32());
+    }
+
+    /// <summary>Through the page: applying a past-end range re-reads the tab with the rounded hours and <c>as_of</c>, and a
+    /// read that names no window (the scheduler pressure read) is left as it was.</summary>
+    [Fact]
+    public void ApplyingACustomRange_ReReadsTheTabAnchoredAtItsEnd()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("customPageReads", out var r)) return;
+
+        var reads = Strings(r.GetProperty("found"), "reads");
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("found").GetProperty("err").ValueKind);
+        Assert.Contains("/api/read/get_cpu_utilization?server=SRV1&hours=4&as_of=2026-01-02T10%3A30%3A00.000Z", reads);
+        Assert.Contains("/api/read/get_top_queries_by_cpu?server=SRV1&hours=4&top=20&as_of=2026-01-02T10%3A30%3A00.000Z", reads);
+        Assert.Contains("/api/read/get_cpu_scheduler_pressure?server=SRV1", reads);
+        Assert.Empty(Strings(r, "errors"));
+    }
+
+    /// <summary>The 60 s poll leaves a fixed historical window alone; a live range, a tab click and a preset still read, and
+    /// the pair belongs to the server it was picked for.</summary>
+    [Fact]
+    public void ThePoll_DoesNotRefreshAPastEndRange_ButKeepsItForTheServerAndRefreshesTheRest()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("customPoll", out var r)) return;
+
+        var found = r.GetProperty("found");
+        Assert.Empty(Strings(found, "pastPoll"));
+        /* A rebuild that is not the poll (a tab click) still draws the same custom window. */
+        Assert.Contains("/api/read/get_cpu_utilization?server=SRV1&hours=4&as_of=2026-01-02T10%3A30%3A00.000Z", Strings(found, "tabClick"));
+        /* Another server starts on the preset. */
+        Assert.Contains("/api/read/get_cpu_utilization?server=SRV2&hours=24", Strings(found, "other"));
+        /* A range that ends now keeps refreshing, and names no as_of. */
+        var live = Strings(found, "livePoll");
+        Assert.Contains(live, f => f.StartsWith("/api/read/get_cpu_utilization?server=SRV3&hours=6", System.StringComparison.Ordinal));
+        Assert.DoesNotContain(live, f => f.Contains("as_of=", System.StringComparison.Ordinal));
+    }
+
+    /// <summary>A chart over a custom range holds only the points inside the exact pair and its axis spans that pair; a read
+    /// that takes no <c>as_of</c> shows the preset notice; a read for another server is untouched.</summary>
+    [Fact]
+    public void ACustomRange_TrimsToTheExactPair_AndNamesThePanelsThatKeepThePreset()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("customTrimAndNotice", out var r)) return;
+
+        var fetches = Strings(r, "fetches");
+        Assert.Contains("/api/read/get_cpu_utilization?server=SRV1&hours=4&as_of=2026-01-02T10%3A30%3A00.000Z", fetches);
+        Assert.Contains("/api/read/get_read_latency?server=SRV1&hours=4", fetches);
+        Assert.Contains("/api/read/get_cpu_utilization?server=SRV2&hours=4", fetches);
+        Assert.Equal("This panel shows the last 4 hours, not the custom range: its read takes no end time.", Assert.Single(Strings(r, "notices")));
+        /* 07:30, 09:00 and 10:00 are inside 07:15 to 10:30; 06:00 and 11:00 are not. The other server's chart keeps all five. */
+        Assert.Equal(new[] { 3, 5 }, r.GetProperty("chartPoints").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(new int?[] { 3, 3 }, r.GetProperty("chartHours").EnumerateArray().Select(e => (int?)e.GetInt32()).ToArray());
+    }
+
+    /// <summary>The reads that keep the preset are exactly the catalog's windowed reads that take no <c>as_of</c>, and every
+    /// other windowed read takes one.</summary>
+    [Fact]
+    public void TheReadsWithoutAsOf_AreTheCatalogsWindowedReadsThatTakeNone()
+    {
+        var catalog = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        /* An entry runs from its `["name"] = R(` to the next entry's start (or the end of the file), so one that wraps
+           over several lines is read whole. */
+        var starts = Regex.Matches(catalog, @"\[""(\w+)""\] = R\(").ToArray();
+        var entries = starts.Select((m, i) => (Name: m.Groups[1].Value, Body: catalog[m.Index..(i + 1 < starts.Length ? starts[i + 1].Index : catalog.Length)])).ToArray();
+        Assert.True(entries.Length > 100, "The read catalog's entries were not found.");
+        var windowedWithoutAsOf = entries
+            .Where(e => e.Body.Contains("PHours(", System.StringComparison.Ordinal) && !e.Body.Contains("PAsOf()", System.StringComparison.Ordinal))
+            .Select(e => e.Name)
+            .OrderBy(n => n, System.StringComparer.Ordinal)
+            .ToArray();
+        Assert.NotEmpty(windowedWithoutAsOf);
+
+        var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js");
+        var set = Regex.Match(util, @"READS_WITHOUT_AS_OF = new Set\(\[(.*?)\]\)", RegexOptions.Singleline);
+        Assert.True(set.Success, "util.js no longer declares READS_WITHOUT_AS_OF.");
+        var declared = Regex.Matches(set.Groups[1].Value, @"""(\w+)""").Select(m => m.Groups[1].Value).OrderBy(n => n, System.StringComparer.Ordinal).ToArray();
+        Assert.Equal(windowedWithoutAsOf, declared);
+    }
+
+    /// <summary>A read wider than the store keeps is asked again for the hours it keeps. On a custom range that retry keeps the
+    /// range's end (<c>as_of</c>), the chart draws only the part of the range the store holds, and the notice says so.</summary>
+    [Fact]
+    public void ANarrowedRead_OnACustomRange_KeepsTheEndAndSaysItShowsThePartTheStoreHolds()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("customKeptHistory", out var r)) return;
+
+        var fetches = Strings(r, "fetches");
+        Assert.Contains("/api/read/get_cpu_utilization?server=SRV1&hours=24&as_of=2026-01-02T10%3A30%3A00.000Z", fetches);
+        Assert.Contains("/api/read/get_cpu_utilization?server=SRV1&hours=4&as_of=2026-01-02T10%3A30%3A00.000Z", fetches);
+        Assert.DoesNotContain("/api/read/get_cpu_utilization?server=SRV1&hours=4", fetches.Where(f => !f.Contains("as_of=", System.StringComparison.Ordinal)));
+        /* 06:30 to 10:30 is the part of 07:15-yesterday to 10:30 a 4-hour store holds: 07:30, 09:00 and 10:00 are in, 06:00 is out. */
+        Assert.Equal(new[] { 3 }, r.GetProperty("chartPoints").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Contains("the part of the custom range the store still holds", Assert.Single(Strings(r, "notices")));
+    }
+
+    /// <summary>The trim cuts per-point series. A row that stamps its LAST sample (the latch read's <c>captured_at</c>) is a total over
+    /// the window and stays, even when that stamp falls in the rounded-up slack before the picked start.</summary>
+    [Fact]
+    public void TheTrim_LeavesAggregateRowsAlone()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("customAggregateRows", out var r)) return;
+
+        var found = r.GetProperty("found");
+        Assert.Equal(2, found.GetProperty("latchRows").GetInt32());
+        Assert.Equal(3, found.GetProperty("seriesRows").GetInt32());
+    }
+
+    /// <summary>A span that is not a whole number of hours says where totals and rankings begin; a whole-hour span adds nothing.</summary>
+    [Fact]
+    public void ARoundedRange_SaysWhereTheAggregatesBegin()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("customRoundedLabel", out var r)) return;
+
+        var found = r.GetProperty("found");
+        Assert.Contains("aggregate from", found.GetProperty("rounded").GetString());
+        Assert.DoesNotContain("aggregate from", found.GetProperty("whole").GetString());
+    }
 }
