@@ -191,7 +191,7 @@ public sealed class WebChartZoomBehaviourTests
         }
 
         // The server-tab and FinOps chart callers go through the zoomable wrapper.
-        Assert.Equal(4, Regex.Matches(Js("pages", "server-tabs.js"), @"zoomableLineChart\(").Count);
+        Assert.Equal(5, Regex.Matches(Js("pages", "server-tabs.js"), @"zoomableLineChart\(").Count);
         Assert.Contains("zoomableLineChart(", Js("pages", "finops", "version-store.js"));
         var panels = Js("panels.js");
         var vizLine = panels.Substring(panels.IndexOf("function vizLine(", StringComparison.Ordinal));
