@@ -1945,8 +1945,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             long mismatches;
             await using (var guard = new NpgsqlCommand(IntervalRollupCountGuard.QueryStatsSql, connection) { CommandTimeout = guardSeconds + HourlyEdgesGuardClientHeadroomSeconds })
             {
-                guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = candidate.HourStartUtc });
-                guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = candidate.HourEndUtc });
+                guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(candidate.HourStartUtc, DateTimeKind.Unspecified) });
+                guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(candidate.HourEndUtc, DateTimeKind.Unspecified) });
                 guard.Parameters.Add(new NpgsqlParameter
                 {
                     NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text,

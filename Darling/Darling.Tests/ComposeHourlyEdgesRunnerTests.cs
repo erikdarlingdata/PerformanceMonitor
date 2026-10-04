@@ -47,6 +47,16 @@ public class ComposeHourlyEdgesRunnerTests
     }
 
     [Fact]
+    public void TheGuardTimestampParameters_AreBoundNaive_BecauseNpgsqlRefusesKindUtcForTimestamp()
+    {
+        /* an hours-based panel gives the router Kind=Utc hour instants; they must be made Unspecified before the bind */
+        var body = Resolver();
+        Assert.Contains("Value = DateTime.SpecifyKind(candidate.HourStartUtc, DateTimeKind.Unspecified)", body, StringComparison.Ordinal);
+        Assert.Contains("Value = DateTime.SpecifyKind(candidate.HourEndUtc, DateTimeKind.Unspecified)", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("Value = candidate.Hour", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheGuardTimeout_IsSetBeforeTheGuard_AndRestoredAfterItAndBeforeThePanel()
     {
         var body = Resolver();

@@ -56,12 +56,13 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
         "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":50,\"groupBy\":[\"database_name\",\"object_name\"],\"viz\":\"table\"}";
 
     /// <summary>The one instant every fact runs at: 37 minutes and 21 seconds into an hour, so the window's start is not on an
-    /// hour and h1 is the next whole hour (23 whole hours of middle). Its kind is Unspecified on purpose: the guard binds the
-    /// router's hour instants to timestamp-without-time-zone parameters, and Npgsql refuses a Kind=Utc value there.</summary>
-    private static readonly DateTime Anchor = new(2026, 1, 5, 12, 37, 21, DateTimeKind.Unspecified);
+    /// hour and h1 is the next whole hour (23 whole hours of middle). Its kind is Utc, as the clock the runner reads is, so an
+    /// hours-based body gives the router Kind=Utc hour instants; the guard must bind them as naive timestamps. The explicit-window
+    /// facts format the window as Unspecified (see RunAsync).</summary>
+    private static readonly DateTime Anchor = new(2026, 1, 5, 12, 37, 21, DateTimeKind.Utc);
 
     /// <summary>The on-the-hour variant: the 24-hour window starts exactly on an hour, so h1 equals the window's start.</summary>
-    private static readonly DateTime OnTheHourAnchor = new(2026, 1, 5, 12, 0, 0, DateTimeKind.Unspecified);
+    private static readonly DateTime OnTheHourAnchor = new(2026, 1, 5, 12, 0, 0, DateTimeKind.Utc);
 
     private static long s_collectionId = Anchor.Ticks;
 
@@ -190,6 +191,21 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
         var outcome = await RunAsync(store, PanelByDatabase);
         Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
         AssertHybridTaken(outcome.Payload!);
+    }
+
+    [Fact]
+    public async Task AnOrdinaryHoursPanel_WithAUtcAnchor_TakesTheRoute_AndMatchesRaw()
+    {
+        /* the production shape: hours = 24, now = a Kind=Utc DateTime, so the router's hour instants are Kind=Utc */
+        Assert.Equal(DateTimeKind.Utc, Anchor.Kind);
+        await using var store = await StoreAsync();
+        await SeedAnchorAsync(store);
+        await store.RefreshAsync();
+
+        var (hybrid, raw) = await RunBothAsync(store, PanelByDatabase, relativeWindow: true);
+        AssertHybridTaken(hybrid);
+        Assert.Equal(DateTimeKind.Utc, store.Anchor.Kind);
+        Assert.Equal(raw.ToJsonString(), hybridRows(hybrid));
     }
 
     private const string PanelMax =
@@ -442,8 +458,8 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
         }
         else
         {
-            body["windowStart"] = store.WindowStart.ToString("o", CultureInfo.InvariantCulture);
-            body["windowEnd"] = store.WindowEnd.ToString("o", CultureInfo.InvariantCulture);
+            body["windowStart"] = DateTime.SpecifyKind(store.WindowStart, DateTimeKind.Unspecified).ToString("o", CultureInfo.InvariantCulture);
+            body["windowEnd"] = DateTime.SpecifyKind(store.WindowEnd, DateTimeKind.Unspecified).ToString("o", CultureInfo.InvariantCulture);
         }
 
         if (scope is not null)
