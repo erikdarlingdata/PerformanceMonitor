@@ -54,6 +54,7 @@ import { renderNotebookEditor } from "./notebook.js";
 import { renderAlertEditor } from "./alert-editor.js";
 import { getSession, listViews } from "./views-api.js";
 import { renderMuteRules } from "./pages/mute-rules.js";
+import { renderManageTags } from "./pages/manage-tags.js";
 
 /* The shell (sidebar, view list, AG nav) refreshes every POLL_MS; the page re-renders on its own interval. */
 const POLL_MS = 60000;
@@ -112,6 +113,7 @@ function currentRoute() {
     const q = h.indexOf("?");
     return { name: "muteRules", query: q >= 0 ? h.slice(q + 1) : "" };
   }
+  if (h === "#/manage-tags") return { name: "manageTags" };
   return { name: "fleet" };
 }
 
@@ -183,6 +185,7 @@ function route(opts) {
   else if (r.name === "notebook") renderView(main, r.id); // renderView kind-detects -> notebook document
   else if (r.name === "notebookEditor") renderNotebookEditor(main, r.id, r.template);
   else if (r.name === "muteRules") renderMuteRules(main, r.query);
+  else if (r.name === "manageTags") renderManageTags(main);
   else renderFleet(main);
 }
 
@@ -198,6 +201,7 @@ function navKeyFor(r) {
   if (r.name === "views" || isViewItemRoute(r.name)) return "views";
   if (r.name === "alertRules" || r.name === "alertEditor") return "alert-rules";
   if (r.name === "muteRules") return "mute-rules";
+  if (r.name === "manageTags") return "manage-tags";
   return r.name;
 }
 
