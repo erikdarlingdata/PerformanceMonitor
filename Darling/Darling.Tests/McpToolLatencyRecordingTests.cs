@@ -52,6 +52,20 @@ public sealed class McpToolLatencyRecordingTests
         [McpServerTool(Name = "latency_probe_ok"), Description("Test-only: always answers Ok.")]
         public static string ProbeOk() => "probe-ok";
 
+        [McpServerTool(Name = "latency_probe_gate_failed"), Description("Test-only: answers Ok after noting a gate failure.")]
+        public static string ProbeGateFailed()
+        {
+            ReadScope.NoteFallback(ReadFallback.GateFailed, "probe", null);
+            return "probe-ok";
+        }
+
+        [McpServerTool(Name = "latency_probe_gate_failed_then_error"), Description("Test-only: notes a gate failure, then answers an error envelope.")]
+        public static string ProbeGateFailedThenError()
+        {
+            ReadScope.NoteFallback(ReadFallback.GateFailed, "probe", null);
+            return PerformanceMonitor.Common.McpHelpers.FormatError("latency_probe_gate_failed_then_error", new InvalidOperationException("probe failed"));
+        }
+
         [McpServerTool(Name = "latency_probe_timeout"), Description("Test-only: answers the 57014 statement-timeout envelope.")]
         public static string ProbeTimeout() =>
             PerformanceMonitor.Common.McpHelpers.FormatError(
@@ -129,6 +143,20 @@ public sealed class McpToolLatencyRecordingTests
         using var reader = new System.IO.StreamReader(ctx.Response.Body);
         var body = await reader.ReadToEndAsync();
         return (ctx.Response.StatusCode, body);
+    }
+
+    [Fact]
+    public async Task AToolThatNotesAFallback_RecordsGateFailed_AndAFailedToolStillRecordsError()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        using var server = await BuildServer(readLatency);
+
+        await ToolsCallAsync(server, "/", "latency_probe_gate_failed");
+        await ToolsCallAsync(server, "/", "latency_probe_gate_failed_then_error");
+
+        var drained = readLatency.Drain();
+        Assert.Equal(ReadOutcome.GateFailed, Assert.Single(drained, d => d.Route == "latency_probe_gate_failed").Outcome);
+        Assert.Equal(ReadOutcome.Error, Assert.Single(drained, d => d.Route == "latency_probe_gate_failed_then_error").Outcome);
     }
 
     [Fact]

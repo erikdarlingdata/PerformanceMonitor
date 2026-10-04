@@ -156,6 +156,56 @@ public sealed class GetReadLatencyLiveTests
     }
 
     [Fact]
+    public async Task FallbackAndGateFailedSamples_AreCountedSeparately_InsideCount_AndTiesOrderBySurfaceThenRoute()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the get_read_latency fallback pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        try
+        {
+            var accumulator = new ReadLatencyAccumulator();
+            foreach (var route in new[] { "route_b", "route_a" })
+            {
+                accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.Ok, 50);
+                accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.FallbackRaw, 50);
+                accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.FallbackRaw, 50);
+                accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.GateFailed, 50);
+            }
+
+            await accumulator.FlushAsync(connection, DateTime.UtcNow.AddHours(-1), logger: null, ct);
+
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var json = await DarlingMcpReadLatencyTools.GetReadLatency(postgres, hours: 48, cancellationToken: ct);
+            using var document = JsonDocument.Parse(json);
+            var reads = document.RootElement.GetProperty("reads").EnumerateArray().ToArray();
+
+            Assert.Equal(new[] { "route_a", "route_b" }, reads.Select(r => r.GetProperty("route").GetString()).ToArray());
+            foreach (var read in reads)
+            {
+                Assert.Equal(4, read.GetProperty("count").GetInt64());
+                Assert.Equal(2, read.GetProperty("fallbacks").GetInt64());
+                Assert.Equal(1, read.GetProperty("gate_failures").GetInt64());
+                Assert.Equal(0, read.GetProperty("timeouts").GetInt64());
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
     public async Task SurfaceAndRouteFilters_EachScopeToOneRow()
     {
         var baseConnectionString = ConnectionString;
