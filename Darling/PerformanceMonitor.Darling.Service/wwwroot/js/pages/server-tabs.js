@@ -129,9 +129,23 @@ function panelShell(title, subtitle, span = 2) {
  * keptWindowStrip, and a line spec is windowed over those hours rather than the Range.
  */
 /* `hideWhenNoRows`: a spec that reports a problem is not drawn at all when its rows are absent, as the desktop viewer
-   collapses its section; an unreadable payload hides it too, since the panels beside it on the same read say so. */
-function hidesPanel(spec, res, shell) {
-  if (!spec.hideWhenNoRows || (res.kind === "data" && (getPath(res.data, spec.rowsKey) || []).length)) return false;
+   collapses its section; an unreadable payload hides it too, since the panels beside it on the same read say so.
+   The shell is built HIDDEN, so a clean server never shows the card or its loading strip while the read runs, and it is
+   revealed only when rows arrive. The 60 s rebuild makes a fresh shell every time, so whether the last answer for this
+   server had rows is kept at module scope: a server that has caveats keeps the card up across a rebuild instead of
+   hiding and re-showing it on every poll. */
+const panelHadRows = new Map();
+function panelMemoryKey(read, params, spec) {
+  return read + "|" + JSON.stringify(params || {}) + "|" + spec.title;
+}
+function hidesPanel(spec, res, shell, key) {
+  if (!spec.hideWhenNoRows) return false;
+  const hasRows = res.kind === "data" && (getPath(res.data, spec.rowsKey) || []).length > 0;
+  panelHadRows.set(key, hasRows);
+  if (hasRows) {
+    shell.panel.style.display = "";
+    return false;
+  }
   shell.panel.style.display = "none";
   mount(shell.body, []);
   return true;
@@ -144,11 +158,15 @@ function fanout(read, params, specs) {
     }
   }
   const shells = specs.map((s) => panelShell(s.title, s.subtitle, s.span ?? 2));
+  const keys = specs.map((s) => panelMemoryKey(read, params, s));
+  specs.forEach((s, i) => {
+    if (s.hideWhenNoRows && !panelHadRows.get(keys[i])) shells[i].panel.style.display = "none";
+  });
   (async () => {
     const res = await readToolWithinKeptHistory(read, params);
     specs.forEach((spec, i) => {
       const body = shells[i].body;
-      if (hidesPanel(spec, res, shells[i])) return;
+      if (hidesPanel(spec, res, shells[i], keys[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
       if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
       try {
@@ -2691,14 +2709,14 @@ const ALERT_READ_PANEL = {
 };
 
 /* #4843: the data families the scheduled analysis pass could not read on this server, from the same
-   get_collection_health read as the panels beside it (its `collection_caveats` array, which the service omits when the
+   get_collection_health read as the panels beside it (its `stored_caveats` array, which the service omits when the
    store records none). The desktop viewer's "Analysis could not read these data families" grid, same four columns, and
    hidden when empty like it. Shared const so the SQL Server and PostgreSQL tabs cannot drift apart on it. */
 const COLLECTION_CAVEATS_PANEL = {
   title: "Analysis could not read these data families",
   subtitle: "as of the latest analysis pass",
   viz: "table",
-  rowsKey: "collection_caveats",
+  rowsKey: "stored_caveats",
   hideWhenNoRows: true,
   columns: [
     { key: "family", label: "Family" },

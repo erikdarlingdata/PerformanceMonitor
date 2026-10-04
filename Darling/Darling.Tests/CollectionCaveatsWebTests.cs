@@ -28,7 +28,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The collection caveats on the web Collection Health tabs (#4843): <c>get_collection_health</c> carries a
-/// <c>collection_caveats</c> array from <c>collect.analysis_collection_caveats</c>, the SQL Server and PostgreSQL tabs draw it
+/// <c>stored_caveats</c> array from <c>collect.analysis_collection_caveats</c>, the SQL Server and PostgreSQL tabs draw it
 /// as a grid of the desktop viewer's four columns, and a server with none shows no grid. No new tool carries it.
 /// </summary>
 public sealed class CollectionCaveatsWebTests
@@ -73,7 +73,7 @@ public sealed class CollectionCaveatsWebTests
         var e = RunHarness().GetProperty(engine);
 
         var empty = e.GetProperty("empty");
-        Assert.True(empty.GetProperty("hidden").GetBoolean(), "a payload without collection_caveats must leave the panel hidden");
+        Assert.True(empty.GetProperty("hidden").GetBoolean(), "a payload without stored_caveats must leave the panel hidden");
         Assert.Empty(empty.GetProperty("rows").EnumerateArray());
 
         var rows = e.GetProperty("rows");
@@ -83,6 +83,21 @@ public sealed class CollectionCaveatsWebTests
         Assert.Equal(2, cells.Length);
         Assert.Equal(new[] { "plans", "timeout" }, cells[0].Take(2).ToArray());
         Assert.Equal(new[] { "waits", "missing_schema" }, cells[1].Take(2).ToArray());
+    }
+
+    [Theory]
+    [InlineData("sqlserver")]
+    [InlineData("postgres")]
+    public void WhileTheReadIsOutstanding_AServerNeverSeenShowsNoCard_AndARebuildOfOneWithCaveatsKeepsIt(string engine)
+    {
+        var e = RunHarness().GetProperty(engine);
+
+        var pending = e.GetProperty("pending");
+        Assert.True(pending.GetProperty("present").GetBoolean());
+        Assert.True(pending.GetProperty("hidden").GetBoolean(), "a clean server must not flash the card while get_collection_health is still running");
+
+        var rebuild = e.GetProperty("rebuild");
+        Assert.False(rebuild.GetProperty("hidden").GetBoolean(), "a rebuild of a server whose last read had caveats must keep the card visible");
     }
 
     [Theory]
@@ -103,7 +118,7 @@ public sealed class CollectionCaveatsWebTests
     public void BothTabsShareOnePanel_ReadingTheHealthPayloadsArray_AndNoCaveatToolExists()
     {
         var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        Assert.Contains("rowsKey: \"collection_caveats\"", tabs, StringComparison.Ordinal);
+        Assert.Contains("rowsKey: \"stored_caveats\"", tabs, StringComparison.Ordinal);
         Assert.Contains("hideWhenNoRows: true", tabs, StringComparison.Ordinal);
         Assert.Equal(2, tabs.Split("        COLLECTION_CAVEATS_PANEL,", StringSplitOptions.None).Length - 1);
         Assert.DoesNotContain("get_collection_caveats", tabs, StringComparison.Ordinal);
@@ -121,7 +136,7 @@ public sealed class CollectionCaveatsWebTests
 
         var with = DarlingCollectionCaveatReader.AttachToJson(cleanJson, new[] { Row("plans") });
         using var doc = JsonDocument.Parse(with);
-        var entry = Assert.Single(doc.RootElement.GetProperty("collection_caveats").EnumerateArray());
+        var entry = Assert.Single(doc.RootElement.GetProperty("stored_caveats").EnumerateArray());
         Assert.Equal("plans", entry.GetProperty("family").GetString());
         Assert.Equal("timeout", entry.GetProperty("reason").GetString());
         Assert.StartsWith("2026-01-01T00:00:00", entry.GetProperty("first_seen_utc").GetString(), StringComparison.Ordinal);
@@ -202,7 +217,7 @@ public sealed class CollectionCaveatsWebTests
             // No rows: the key is absent, not null and not empty.
             using (var clean = await HealthAsync(postgres, server, ct))
             {
-                Assert.False(clean.RootElement.TryGetProperty("collection_caveats", out _));
+                Assert.False(clean.RootElement.TryGetProperty("stored_caveats", out _));
             }
 
             // Two rows through the store's own writer, read back through the real tool.
@@ -216,7 +231,7 @@ public sealed class CollectionCaveatsWebTests
                 now, null, ct);
             using (var with = await HealthAsync(postgres, server, ct))
             {
-                var entries = with.RootElement.GetProperty("collection_caveats").EnumerateArray().ToArray();
+                var entries = with.RootElement.GetProperty("stored_caveats").EnumerateArray().ToArray();
                 Assert.Equal(new[] { "plans", "waits" }, entries.Select(x => x.GetProperty("family").GetString()).ToArray());
                 Assert.Equal(new[] { "timeout", "missing_schema" }, entries.Select(x => x.GetProperty("reason").GetString()).ToArray());
                 var first = DateTime.Parse(entries[0].GetProperty("first_seen_utc").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
@@ -224,10 +239,47 @@ public sealed class CollectionCaveatsWebTests
                 Assert.True(last - first > TimeSpan.FromHours(1.9), "Since keeps the first sighting and Last seen takes the newest");
             }
 
-            // Another server's rows are not this server's.
-            using (var other = await HealthAsync(postgres, server, ct))
+            // Another server's rows are not this server's: B has its own caveat, and each side sees only its own.
+            const int otherId = 480_142;
+            const string otherServer = "caveat-health-b";
+            await using (var registerB = new NpgsqlCommand(
+                """
+                INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+                VALUES ($1, $2, $2, TRUE, 15, $3, $3)
+                """, connection))
             {
-                Assert.Equal(2, other.RootElement.GetProperty("collection_caveats").GetArrayLength());
+                registerB.Parameters.AddWithValue(otherId);
+                registerB.Parameters.AddWithValue(otherServer);
+                registerB.Parameters.AddWithValue(DateTime.SpecifyKind(now, DateTimeKind.Unspecified));
+                await registerB.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var logB = new NpgsqlCommand(
+                """
+                INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected)
+                VALUES ($1, $2, $3, $4, 'wait_stats', 'SUCCESS', 120, 10)
+                """, connection))
+            {
+                logB.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                logB.Parameters.AddWithValue(DateTime.SpecifyKind(now.AddMinutes(-1), DateTimeKind.Unspecified));
+                logB.Parameters.AddWithValue(otherId);
+                logB.Parameters.AddWithValue(otherServer);
+                await logB.ExecuteNonQueryAsync(ct);
+            }
+
+            await CollectionCaveatStore.ApplyPassAsync(
+                postgres, otherId,
+                new[] { new CollectionCaveatStore.UnreadFamily("locks", "timeout") },
+                now, null, ct);
+            using (var a = await HealthAsync(postgres, server, ct))
+            {
+                Assert.Equal(new[] { "plans", "waits" }, a.RootElement.GetProperty("stored_caveats").EnumerateArray().Select(x => x.GetProperty("family").GetString()).ToArray());
+            }
+
+            using (var b = await HealthAsync(postgres, otherServer, ct))
+            {
+                var only = Assert.Single(b.RootElement.GetProperty("stored_caveats").EnumerateArray());
+                Assert.Equal("locks", only.GetProperty("family").GetString());
             }
 
             // A store below V141 has no table: no caveats, and the health read still answers.
@@ -238,7 +290,7 @@ public sealed class CollectionCaveatsWebTests
 
             using (var old = await HealthAsync(postgres, server, ct))
             {
-                Assert.False(old.RootElement.TryGetProperty("collection_caveats", out _));
+                Assert.False(old.RootElement.TryGetProperty("stored_caveats", out _));
                 Assert.True(old.RootElement.GetProperty("collectors").GetArrayLength() > 0);
             }
 

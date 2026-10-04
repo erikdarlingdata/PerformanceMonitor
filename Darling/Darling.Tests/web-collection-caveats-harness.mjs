@@ -1,6 +1,6 @@
 /* Runs the shipped Collection Health tab of both engines (wwwroot/js/pages/server-tabs.js) against a scripted
    /api/read answer and prints, as one line of JSON, what each tab read and whether its collection-caveats panel is
-   drawn: hidden for a payload without `collection_caveats`, a grid of the four columns for a payload with rows.
+   drawn: hidden for a payload without `stored_caveats`, a grid of the four columns for a payload with rows.
        node web-collection-caveats-harness.mjs <path to wwwroot/js> */
 import fs from "node:fs";
 import os from "node:os";
@@ -57,9 +57,11 @@ globalThis.document = {
 
 const fetches = [];
 let healthBody = {};
+let healthHangs = false;
 globalThis.fetch = async (url) => {
   const u = new URL(String(url), "http://viewer.test");
   fetches.push(u.pathname.replace("/api/read/", "") + "?" + u.searchParams.toString());
+  if (healthHangs && u.pathname.endsWith("/get_collection_health")) return new Promise(() => {});
   const body = u.pathname.endsWith("/get_collection_health") ? healthBody : {};
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
 };
@@ -85,11 +87,12 @@ try {
     return out;
   };
 
-  const run = async (registry, id, body) => {
+  const run = async (registry, id, body, server = "srv-a", hangs = false) => {
     healthBody = body;
+    healthHangs = hangs;
     fetches.length = 0;
     const tab = registry.find((t) => t.id === id);
-    const panels = tab.build("srv-a", { hours: 24, label: "24h" }).flat();
+    const panels = tab.build(server, { hours: 24, label: "24h" }).flat();
     await new Promise((r) => setTimeout(r, 50));
     const panel = panels.find((p) => p && p.tag && find(p, (n) => n.tag === "h3" && n.textContent.startsWith(TITLE)));
     const rows = panel ? collect(panel, "tr").slice(1).map((tr) => collect(tr, "td").map((td) => td.textContent)) : [];
@@ -107,14 +110,24 @@ try {
   const none = { collectors: [], sweep_pressure: {} };
   const some = {
     ...none,
-    collection_caveats: [
+    stored_caveats: [
       { family: "plans", reason: "timeout", first_seen_utc: "2026-01-01T00:00:00.0000000Z", last_seen_utc: "2026-01-02T00:00:00.0000000Z" },
       { family: "waits", reason: "missing_schema", first_seen_utc: "2026-01-01T00:00:00.0000000Z", last_seen_utc: "2026-01-02T00:00:00.0000000Z" },
     ],
   };
   const out = {};
   for (const [name, registry, id] of [["sqlserver", tabs.SERVER_TABS, "health"], ["postgres", tabs.POSTGRES_TABS, "overview"]]) {
-    out[name] = { empty: await run(registry, id, none), rows: await run(registry, id, some) };
+    out[name] = {
+      empty: await run(registry, id, none),
+      rows: await run(registry, id, some),
+      // A read that never answers: a server never seen before must not show the card or its loading strip.
+      pending: await run(registry, id, none, "srv-pending", true),
+      // A rebuild (the 60 s poll) of a server whose last answer had rows keeps the card up while the read runs.
+      rebuild: await (async () => {
+        await run(registry, id, some, "srv-rebuild");
+        return run(registry, id, some, "srv-rebuild", true);
+      })(),
+    };
   }
   console.log(JSON.stringify(out));
 } finally {

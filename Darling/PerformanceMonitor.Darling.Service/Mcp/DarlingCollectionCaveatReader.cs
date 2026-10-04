@@ -18,7 +18,7 @@ using PerformanceMonitor.Common;
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
-/// The collection caveats <c>get_collection_health</c> carries as <c>collection_caveats</c> (#4843): the data
+/// The collection caveats <c>get_collection_health</c> carries as <c>stored_caveats</c> (#4843): the data
 /// families the scheduled analysis pass currently cannot read on a server, as <c>collect.analysis_collection_caveats</c>
 /// (V141) holds them. The same four columns the desktop viewer's "Analysis could not read these data families" grid shows.
 /// A different layer from the in-memory <c>analysis_caveats</c> block beside it: that one remembers the last few passes in
@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingCollectionCaveatReader
 {
     /// <summary>The payload key. Absent, never null or empty, when the server has no caveat.</summary>
-    internal const string PayloadKey = "collection_caveats";
+    internal const string PayloadKey = "stored_caveats";
 
     /// <summary>One server's caveats. $1 server_id. Schema-qualified, so a 42P01 from it can only mean this table is missing.</summary>
     public const string CaveatsSql = """
@@ -89,7 +89,7 @@ internal static class DarlingCollectionCaveatReader
     }
 
     /// <summary>
-    /// Adds <c>collection_caveats</c> to a serialized health payload, and returns the text untouched when there are none.
+    /// Adds <c>stored_caveats</c> to a serialized health payload, and returns the text untouched when there are none.
     /// Spliced into the JSON rather than carried as a property for the reason the ledger's block is one: the MCP serializer
     /// writes nulls, so a property would put an empty key on every clean server's answer.
     /// </summary>
