@@ -24,6 +24,7 @@
 import { el, mount, readTool, buildQuery, loadingStrip, errorStrip, emptyStrip, disclosure,
          ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
 import { VIZ } from "../panels.js";
+import { mutePrefillParams } from "../mute-context.js";
 import { getSession } from "../views-api.js";
 
 /* #3169: the state-carrying notification_type values, derived from the one shared map rather than listed a
@@ -56,7 +57,7 @@ function alertColumns() {
 function muteCell(a) {
   const link = (text, params) => el("a", { href: "#/mute-rules" + buildQuery(params), text });
   return el("span", {}, [
-    link("Mute this alert", { server_name: a.server_name, metric_name: a.metric_name }),
+    link("Mute this alert", mutePrefillParams(a)),
     " · ",
     link("Mute similar", { metric_name: a.metric_name }),
   ]);

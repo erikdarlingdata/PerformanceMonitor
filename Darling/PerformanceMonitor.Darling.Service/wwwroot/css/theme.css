@@ -53,6 +53,6 @@
 .mute-field { display: block; margin: 6px 0; }
 .mute-label { display: block; font-size: 12px; opacity: 0.8; }
 .mute-input { width: 100%; max-width: 420px; }
-.field-error { display: block; color: #c0392b; font-size: 12px; }
+.mute-rules-field-error { display: block; color: var(--err); font-size: 12px; }
 .mute-actions .btn { margin-right: 4px; }
-tr.highlight { outline: 2px solid #3b82f6; }
+tr.mute-rules-highlight { outline: 2px solid var(--accent); }

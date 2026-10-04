@@ -7,8 +7,13 @@
  */
 
 using System.ComponentModel;
+using System;
 using System.Diagnostics;
+using System.Threading.Tasks;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Notifications;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -102,5 +107,93 @@ public sealed class MuteRulesBehaviourTests
         Assert.Equal("notfound", r.GetProperty("notfound").GetProperty("kind").GetString());
         Assert.Equal("readonly", r.GetProperty("readonly").GetProperty("kind").GetString());
         Assert.Equal("n1", r.GetProperty("created").GetProperty("rule").GetProperty("id").GetString());
+    }
+
+    /* The pin through the product's own matching: the body the page's "Mute this alert" produces is created by
+       the real create core and judged by MuteRule.MatchesAt against the context the producer builds for that
+       alert (DarlingWorker passes the stored name and the store id; the self-alert family passes its stored label
+       and no id). The display name deliberately differs from the stored one. */
+    private static async Task<MuteRule> CreateFrom(JsonElement body, int registeredId)
+    {
+        var store = new FakeMuteRuleStore();
+        var result = await DarlingMcpAlertTools.CreateMuteRuleCore(store, body.GetRawText(),
+            id => Task.FromResult<string?>(id == registeredId ? "stored-host" : null));
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(result));
+        var id = (string)JsonNode.Parse(result)!["mute_rule"]!["id"]!;
+        return store.Row(id)!;
+    }
+
+    [Fact]
+    public async Task MuteThisAlert_OnAnEngineRow_MatchesTheProducersContext_AndNotAnotherServer()
+    {
+        if (!TryRun("bodies", out var r)) return;
+        var rule = await CreateFrom(r.GetProperty("engine"), 7);
+        var now = DateTime.UtcNow;
+
+        Assert.True(rule.MatchesAt(new AlertMuteContext { ServerName = "stored-host", ServerId = 7, MetricName = "High CPU" }, now));
+        Assert.False(rule.MatchesAt(new AlertMuteContext { ServerName = "stored-host", ServerId = 8, MetricName = "High CPU" }, now));
+        Assert.False(rule.MatchesAt(new AlertMuteContext { ServerName = "stored-host", ServerId = 7, MetricName = "Blocking" }, now));
+
+        var narrowed = await CreateFrom(r.GetProperty("engineDetail"), 7);
+        Assert.True(narrowed.MatchesAt(new AlertMuteContext { ServerName = "stored-host", ServerId = 7, MetricName = "High CPU", DatabaseName = "Sales", WaitType = "LCK_M_X" }, now));
+        Assert.False(narrowed.MatchesAt(new AlertMuteContext { ServerName = "stored-host", ServerId = 7, MetricName = "High CPU", DatabaseName = "Other", WaitType = "LCK_M_X" }, now));
+    }
+
+    [Fact]
+    public async Task MuteThisAlert_OnASelfAlertRow_MatchesItsStoredLabel_AndNotAnotherServer()
+    {
+        if (!TryRun("bodies", out var r)) return;
+        var rule = await CreateFrom(r.GetProperty("self"), 0);
+        var now = DateTime.UtcNow;
+
+        Assert.False(r.GetProperty("self").TryGetProperty("server_id", out _));
+        Assert.True(rule.MatchesAt(new AlertMuteContext { ServerName = "Monitor Store", MetricName = "Disk Pressure" }, now));
+        Assert.False(rule.MatchesAt(new AlertMuteContext { ServerName = "other-host", MetricName = "Disk Pressure" }, now));
+    }
+
+    [Fact]
+    public void ThePrefill_ParsesDetailText_LikeTheDesktop_AndKeysOnTheIdOnlyWhenOneExists()
+    {
+        if (!TryRun("prefill", out var r)) return;
+
+        var engine = r.GetProperty("engine");
+        Assert.Equal(7, engine.GetProperty("server_id").GetInt32());
+        Assert.Equal("stored-host", engine.GetProperty("server_name").GetString());
+        var self = r.GetProperty("self");
+        Assert.Equal(JsonValueKind.Null, self.GetProperty("server_id").ValueKind);
+        Assert.Equal("Monitor Store", self.GetProperty("server_name").GetString());
+        Assert.Equal("Display Name", r.GetProperty("oldPayload").GetProperty("server_name").GetString());
+
+        var detail = r.GetProperty("detail");
+        Assert.Equal("Sales", detail.GetProperty("database_pattern").GetString());
+        Assert.Equal("LCK_M_X", detail.GetProperty("wait_type_pattern").GetString());
+        Assert.Equal("Nightly", detail.GetProperty("job_name_pattern").GetString());
+        Assert.Equal("SELECT 1 FROM t", detail.GetProperty("query_text_pattern").GetString());
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("custom").GetProperty("database_pattern").ValueKind);
+        Assert.Equal(200, r.GetProperty("longQuery").GetInt32());
+        Assert.Equal(7, r.GetProperty("body").GetProperty("server_id").GetInt32());
+    }
+
+    [Fact]
+    public void AnExpiredSession_IsSignInNotReadOnly_AndAnUnparseable2xxIsNotASave()
+    {
+        if (!TryRun("expiry", out var r)) return;
+
+        Assert.Equal("expired", r.GetProperty("s401").GetProperty("kind").GetString());
+        Assert.Equal("readonly", r.GetProperty("s403").GetProperty("kind").GetString());
+        Assert.Equal("expired", r.GetProperty("html200").GetProperty("kind").GetString());
+        Assert.Equal("expired", r.GetProperty("empty200").GetProperty("kind").GetString());
+        Assert.Equal("ok", r.GetProperty("json201").GetProperty("kind").GetString());
+        /* The 401 reached the shared sign-in takeover; the 403 did not. */
+        Assert.Equal(1, r.GetProperty("after401").GetInt32());
+        Assert.Equal(1, r.GetProperty("after403").GetInt32());
+    }
+
+    [Fact]
+    public void CancellingTheForm_LetsTheSameMuteLinkReopenIt()
+    {
+        if (!TryRun("reopen", out var r)) return;
+
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("last").ValueKind);
     }
 }

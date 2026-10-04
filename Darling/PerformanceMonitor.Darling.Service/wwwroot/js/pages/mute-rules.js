@@ -22,7 +22,7 @@
  * el()/textContent.
  */
 
-import { el, mount, readTool, loadingStrip, errorStrip, emptyStrip, localTime } from "../util.js";
+import { el, mount, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired } from "../util.js";
 import * as api from "../alerts-api.js";
 
 /** The editable text scope/pattern fields, in form order, with their labels. `reason` and the expiry follow. */
@@ -36,7 +36,10 @@ export const TEXT_FIELDS = [
   { key: "reason", label: "Reason" },
 ];
 const EXPIRY = "expires_at_utc";
-const EDITABLE_KEYS = TEXT_FIELDS.map((f) => f.key).concat([EXPIRY]);
+/* server_id is not a form field: it arrives from an Alert History pre-fill and rides along in the create body, so
+   the rule is keyed on the server's store id (the name is only its label). */
+const SERVER_ID = "server_id";
+const EDITABLE_KEYS = TEXT_FIELDS.map((f) => f.key).concat([EXPIRY, SERVER_ID]);
 
 /** A datetime-local value ("2026-08-01T10:30", local clock) to an ISO UTC string, or "" when blank/unparseable. */
 export function localInputToIso(v) {
@@ -59,6 +62,7 @@ export function isoToLocalInput(iso) {
 function fieldValue(values, key) {
   const raw = values[key] == null ? "" : String(values[key]).trim();
   if (key === EXPIRY) return localInputToIso(raw) || null;
+  if (key === SERVER_ID) return /^-?\d+$/.test(raw) && Number(raw) !== 0 ? Number(raw) : null;
   return raw === "" ? null : raw;
 }
 
@@ -87,6 +91,7 @@ export const EMPTY_CREATE_WARNING =
 export function buildPatch(original, values) {
   const patch = {};
   for (const key of EDITABLE_KEYS) {
+    if (key === SERVER_ID) continue; /* never edited on the form, so an edit must not clear it */
     const next = fieldValue(values, key);
     const old = original[key] == null || original[key] === "" ? null : original[key];
     const same = key === EXPIRY && next !== null && old !== null
@@ -101,7 +106,8 @@ export function buildPatch(original, values) {
 export function interpretWrite(status, body) {
   const b = body && typeof body === "object" ? body : {};
   const message = typeof b.message === "string" ? b.message : typeof b.error === "string" ? b.error : "Request failed (HTTP " + status + ")";
-  if (status === 401 || status === 403) return { kind: "readonly", message: "This session is read-only, so the change was not made." };
+  if (status === 401) return { kind: "expired", message: "Your session has expired. Sign in again." };
+  if (status === 403) return { kind: "readonly", message: "This session is read-only, so the change was not made." };
   if (status === 404) return { kind: "notfound", message };
   if (status === 409 && b.status === "already_exists") return { kind: "exists", existingId: b.rule_id || null, message };
   if (status === 400) {
@@ -137,7 +143,13 @@ async function send(method, path, body) {
   } catch {
     parsed = null;
   }
-  return interpretWrite(resp.status, parsed);
+  let result = interpretWrite(resp.status, parsed);
+  if (result.kind === "ok" && (parsed === null || typeof parsed !== "object")) {
+    /* A 2xx that is not a JSON body is a sign-in page in front of the API, not a saved rule. */
+    result = { kind: "expired", message: "Your session has expired. Sign in again." };
+  }
+  if (result.kind === "expired") reportSessionExpired(result.message, "/");
+  return result;
 }
 
 const createRule = (body) => send("POST", "/api/mute-rules", body);
@@ -183,7 +195,8 @@ export async function renderMuteRules(main, query) {
   if (canEdit && query && query !== lastPrefillQuery) {
     lastPrefillQuery = query;
     form = null;
-    openForm({ mode: "create", values: parsePrefill(query) });
+    const values = parsePrefill(query);
+    openForm({ mode: "create", values, idName: values[SERVER_ID] ? values.server_name || "" : null });
   } else if (form) {
     drawForm();
   }
@@ -277,6 +290,12 @@ function drawForm() {
 
 function closeForm() {
   form = null;
+  /* Forget the deep link too, so clicking the same alert's Mute link again reopens the form. */
+  lastPrefillQuery = null;
+  /* The deep link stays in the address bar; drop it so the same Mute link is a real navigation next time. */
+  if (typeof window !== "undefined" && window.history && window.history.replaceState && String(window.location && window.location.hash).includes("?")) {
+    window.history.replaceState(null, "", "#/mute-rules");
+  }
   drawForm();
 }
 
@@ -310,7 +329,7 @@ function goToExisting() {
   closeForm();
   const row = live && live.listBox.querySelector('[data-rule-id="' + id + '"]');
   if (row) {
-    row.classList.add("highlight");
+    row.classList.add("mute-rules-highlight");
     if (row.scrollIntoView) row.scrollIntoView({ block: "center" });
   }
 }
@@ -324,7 +343,7 @@ function fieldRow(key, label, type) {
   return el("label", { class: "mute-field" }, [
     el("span", { class: "mute-label", text: label }),
     input,
-    form.errors[key] ? el("span", { class: "field-error", text: form.errors[key] }) : null,
+    form.errors[key] ? el("span", { class: "mute-rules-field-error", text: form.errors[key] }) : null,
   ]);
 }
 
@@ -335,6 +354,8 @@ async function submit() {
   let res;
   if (form.mode === "create") {
     const body = formToCreateBody(form.values);
+    /* The id keys the rule only while the name is the one the row carried; an edited name is a deliberate by-name rule. */
+    if (body[SERVER_ID] !== undefined && (form.values.server_name || "").trim() !== (form.idName || "")) delete body[SERVER_ID];
     if (isEmptyCreate(body) && !form.confirmEmpty) {
       form.confirmEmpty = true;
       return drawForm();
