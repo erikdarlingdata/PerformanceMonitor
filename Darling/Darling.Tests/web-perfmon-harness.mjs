@@ -88,6 +88,7 @@ try {
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
   fs.copyFileSync(path.join(jsDir, "panels.js"), path.join(scratch, "panels.js"));
+  fs.copyFileSync(path.join(jsDir, "grid-tools.js"), path.join(scratch, "grid-tools.js"));
   fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
   fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
   fs.copyFileSync(path.join(jsDir, "charts.js"), path.join(scratch, "charts-real.js"));

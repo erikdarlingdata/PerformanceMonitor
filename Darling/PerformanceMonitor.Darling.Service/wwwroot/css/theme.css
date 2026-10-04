@@ -61,3 +61,9 @@ table.data th .sort-ind { display: inline-block; min-width: 1em; font-size: 0.8e
 .mute-rules-field-error { display: block; color: var(--err); font-size: 12px; }
 .mute-actions .btn { margin-right: 4px; }
 tr.mute-rules-highlight { outline: 2px solid var(--accent); }
+
+/* Copy and CSV strip above a data table (#4843). */
+.grid-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
+.grid-tools .grid-tool { font-size: 12px; padding: 2px 8px; }
+.grid-tools-status { font-size: 12px; opacity: 0.8; margin-left: 6px; }
+td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }

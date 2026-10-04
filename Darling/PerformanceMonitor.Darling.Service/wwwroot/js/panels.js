@@ -43,6 +43,7 @@ import {
   windowFromHours,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
+import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 
 /* The AbortSignal for the render currently building panels (#4191). A page sets it (setPanelSignal)
    synchronously, immediately before calling a tab's build()/a page's descriptor array, and renderPanel below
@@ -180,7 +181,7 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue}], sortable, sortId }
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
 
    Column-header sort (#4843). A header click cycles ascending -> descending -> the server's own order, with a ▲/▼
    indicator and aria-sort; Enter and Space on the focused header do the same. The comparison reads the RAW row value
@@ -199,8 +200,10 @@ function vizTable(data, desc) {
 
   const grid = desc.sortable === false ? null : makeGridSort(desc, cols, rows);
   const bodyRows = rows.map((row) => {
-    const tr = el("tr", {}, cols.map((c) => cell(row, c)));
+    const rc = typeof desc.rowClass === "function" ? desc.rowClass(row) : desc.rowClass;
+    const tr = el("tr", { class: typeof rc === "string" && rc ? rc : null }, cols.map((c) => cell(row, c)));
     trRow.set(tr, row);
+    if (typeof desc.onRow === "function") desc.onRow(row, tr);
     return tr;
   });
   /* The rows are classified when the body attaches, so the headers are built after the grid has seen them. */
@@ -213,7 +216,76 @@ function vizTable(data, desc) {
   );
   if (grid) grid.syncHeads();
 
-  return el("div", { class: "table-wrap" }, [el("table", { class: "data" }, [el("thead", {}, [head]), tbody])]);
+  const wrap = el("div", { class: "table-wrap" }, [el("table", { class: "data" }, [el("thead", {}, [head]), tbody])]);
+  if (desc.tools === false) return wrap;
+  return el("div", { class: "grid-box" }, [gridTools(desc, cols, tbody), wrap]);
+}
+
+/* Copy and CSV for one table (#4843). Both read the tbody as it stands, so they follow the active sort and any
+   in-place reconcile. Copy puts what the user sees on the clipboard: the cells' text, tab-separated, with a header
+   row on Copy All. The CSV carries RAW values (the stored ISO instant, the unformatted number) under the column
+   labels, quoted per RFC 4180 and with a leading ' on a text cell a spreadsheet would run as a formula. A column
+   whose values are arrays or objects has no one-cell form, so the CSV leaves it out (Copy keeps it: it copies the
+   cell's text). A custom-render column over a key the rows do not carry has no raw value, so its CSV cell is the
+   text it shows. Set `tools: false` on the descriptor to draw a table without the strip. */
+function gridTools(desc, cols, tbody) {
+  const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
+  let lastCell = null;
+  let lastCellText = null;
+  const say = (m) => {
+    status.textContent = m;
+  };
+  const trs = () => [...tbody.children];
+  const textRows = (list) => list.map((tr) => [...tr.children].map((td) => td.textContent));
+  tbody.addEventListener("click", (e) => {
+    const td = e && e.target && typeof e.target.closest === "function" ? e.target.closest("td") : null;
+    if (!td) return;
+    if (lastCell && lastCell.classList) lastCell.classList.remove("cell-picked");
+    lastCell = td;
+    lastCellText = td.textContent;
+    if (td.classList) td.classList.add("cell-picked");
+  });
+  const finish = async (text, what) => {
+    const r = await copyText(text);
+    say(r.ok ? "Copied " + what + "." : r.message);
+  };
+  const copyCell = () => {
+    if (!lastCell) return say("Click a cell first, then choose Copy cell.");
+    return finish(lastCellText, "the cell");
+  };
+  const copyRow = () => {
+    const tr = lastCell && lastCell.parentNode;
+    if (!tr) return say("Click a cell in the row first, then choose Copy row.");
+    return finish(toTsv(textRows([tr])), "the row");
+  };
+  const copyAll = () => finish(toTsv([cols.map((c) => c.label), ...textRows(trs())]), "the table");
+  const exportCsv = () => {
+    const list = trs();
+    const objs = list.map((tr) => trRow.get(tr));
+    const keep = cols
+      .map((c, i) => {
+        const raw = objs.map((r) => (r ? getPath(r, c.key) : undefined));
+        if (raw.some(isListValue)) return null;
+        const textOnly = typeof c.render === "function" && raw.every((v) => v === undefined);
+        return { i, c, raw, textOnly };
+      })
+      .filter(Boolean);
+    const lines = [keep.map((k) => k.c.label), ...list.map((tr, ri) => keep.map((k) => (k.textOnly ? tr.children[k.i].textContent : k.raw[ri])))];
+    try {
+      downloadCsv(csvFileName(desc.title ?? desc.sortId ?? desc.id ?? desc.rowsKey), toCsv(lines));
+      say("Exported " + list.length + " row" + (list.length === 1 ? "" : "s") + ".");
+    } catch (e) {
+      say("Export failed: " + (e && e.message ? e.message : "the browser refused the download."));
+    }
+  };
+  const btn = (label, title, fn) => el("button", { type: "button", class: "btn grid-tool", title, onClick: fn, text: label });
+  return el("div", { class: "grid-tools" }, [
+    btn("Copy cell", "Copy the last cell you clicked", copyCell),
+    btn("Copy row", "Copy the row of the last cell you clicked", copyRow),
+    btn("Copy all", "Copy the table with its header row, tab-separated", copyAll),
+    btn("Export CSV", "Download the rows in their current order as a CSV file", exportCsv),
+    status,
+  ]);
 }
 
 /* An unsortable header cell. The sortable one is built by makeGridSort().headerCell; both are the place a later
