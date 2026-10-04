@@ -18,6 +18,27 @@ import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, error
 const HOURS = 24;
 const OBJECT_LIMIT = 20;
 
+// The drill per server: { level, database, object }. It lives at module scope because the page's 60 s poll calls build()
+// again and a build-local state would drop the reader back to Databases mid-drill.
+const drills = new Map();
+
+function drillFor(server) {
+  let d = drills.get(server);
+  if (!d) {
+    d = { level: "databases", database: null, object: null };
+    drills.set(server, d);
+  }
+  return d;
+}
+
+// The service refuses an object that is no longer among the top objects with this wording.
+const OBJECT_GONE = "is not among the";
+
+// The desktop's yyyy-MM-dd HH:mm: slicing the server-local string, not a clock conversion.
+function accessText(v) {
+  return v == null ? v : String(v).slice(0, 16).replace("T", " ");
+}
+
 const DATABASE_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "current_size_mb", label: "Current (MB)", format: "num2" },
@@ -99,9 +120,10 @@ function heatmap(section) {
       ...days.map((d, i) => {
         const c = (r.cells || [])[i] || [null, null];
         const mb = c[0];
-        const band = c[1];
+        const shade = c[1];
+        const known = Number.isInteger(shade) && shade >= 0 && shade <= 7;
         return el("td", {
-          class: band == null ? null : "heat-band-" + band,
+          class: known ? "num heat-band-" + shade : "num",
           title: r.schema_name + "." + r.table_name + " | " + String(d).slice(0, 10) + " | " + applyFormat("num1", mb) + " MB reserved",
           text: mb == null ? "" : applyFormat("num1", mb),
         });
@@ -129,7 +151,7 @@ export const tab = {
   label: "Storage Growth",
   build(server, ctx) {
     const body = el("div", {}, [loadingStrip()]);
-    const state = { level: "databases", database: null, object: null };
+    const state = drillFor(server);
     let seq = 0;
 
     function crumb() {
@@ -182,6 +204,11 @@ export const tab = {
         const res = await readTool("get_finops", params, ctx && ctx.signal);
         if (mine !== seq) return;
         if (res.kind === "aborted" || res.kind === "auth") return;
+        if (res.kind === "error" && state.level === "indexes" && String(res.message).includes(OBJECT_GONE)) {
+          state.level = "objects";
+          state.object = null;
+          return load();
+        }
         if (res.kind === "error") return chrome([readErrorStrip(res.message)]);
         if (res.kind === "empty") return chrome([emptyStrip(res.message)]);
         const data = res.data || {};
@@ -190,11 +217,12 @@ export const tab = {
         } else if (state.level === "objects") {
           const s = data.objects || {};
           const parts = [el("h3", { text: "Objects by Growth" })];
+          if (data.database && data.database.status === "empty") parts.push(noticeStrip("This database is not in the latest snapshot."));
           if (s.status === "ok") parts.push(noticeStrip(objectNotice(s)), heatmap(s), VIZ.table(s, { rowsKey: "rows", columns: [drillColumn("Show indexes", openIndexes), ...OBJECT_COLUMNS], emptyText: "No object size data for this database yet." }));
           else parts.push(...sectionContent(s, OBJECT_COLUMNS, "No object size data for this database yet.", objectNotice));
           chrome(parts);
         } else {
-          chrome([el("h3", { text: "Indexes" }), ...sectionContent(data.indexes, INDEX_COLUMNS, "No index detail for this object.", indexNotice)]);
+          chrome([el("h3", { text: "Indexes" }), ...sectionContent(data.indexes && data.indexes.rows ? { ...data.indexes, rows: data.indexes.rows.map((r) => ({ ...r, last_user_access_server_local: accessText(r.last_user_access_server_local) })) } : data.indexes, INDEX_COLUMNS, "No index detail for this object.", indexNotice)]);
         }
       } catch (e) {
         if (e?.name !== "AbortError" && mine === seq) chrome([errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e)))]);

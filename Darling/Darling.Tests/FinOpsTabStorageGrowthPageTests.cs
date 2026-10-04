@@ -146,7 +146,8 @@ public sealed class FinOpsTabStorageGrowthPageTests
     {
         var tab = Tab();
         // The class is built from the band alone; nothing else in the tab mentions the class family.
-        Assert.Contains("class: band == null ? null : \"heat-band-\" + band,", tab);
+        Assert.Contains("const known = Number.isInteger(shade) && shade >= 0 && shade <= 7;", tab);
+        Assert.Contains("class: known ? \"num heat-band-\" + shade : \"num\",", tab);
         Assert.Single(Regex.Matches(tab, "heat-band"));
         Assert.DoesNotContain("Math.", tab);
         Assert.Contains("title: r.schema_name + \".\" + r.table_name + \" | \" + String(d).slice(0, 10) + \" | \" + applyFormat(\"num1\", mb) + \" MB reserved\",", tab);
@@ -164,7 +165,7 @@ public sealed class FinOpsTabStorageGrowthPageTests
     public void TheDrillBackAndBreadcrumbArePresent()
     {
         var tab = Tab();
-        Assert.Contains("const state = { level: \"databases\", database: null, object: null };", tab);
+        Assert.Contains("const state = drillFor(server);", tab);
         Assert.Contains("drillColumn(\"Show objects\", openObjects)", tab);
         Assert.Contains("drillColumn(\"Show indexes\", openIndexes)", tab);
         Assert.Contains("el(\"button\", { type: \"button\", class: \"btn\", text: \"Back\", onClick: back })", tab);
@@ -172,6 +173,34 @@ public sealed class FinOpsTabStorageGrowthPageTests
         Assert.Contains("const parts = [\"Storage Growth\"];", tab);
         // A refusal or error on a drill keeps Back: the error strip goes through the same chrome.
         Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"error\"\\) return chrome\\(\\[readErrorStrip\\(res\\.message\\)\\]\\);$", tab);
+    }
+
+    [Fact]
+    public void TheDrillLivesAtModuleScopeSoTheRepaintKeepsIt()
+    {
+        var tab = Tab();
+        Assert.Matches("(?m)^const drills = new Map\\(\\);$", tab);
+        Assert.Contains("drills.get(server)", tab);
+        var build = tab.Substring(tab.IndexOf("build(server, ctx)", System.StringComparison.Ordinal));
+        Assert.DoesNotContain("level: \"databases\"", build);
+        Assert.DoesNotContain("new Map(", build);
+    }
+
+    [Fact]
+    public void ARestoredIndexesReadForAGoneObjectDropsBackToObjects()
+    {
+        var tab = Tab();
+        Assert.Contains("const OBJECT_GONE = \"is not among the\";", tab);
+        Assert.Contains("if (res.kind === \"error\" && state.level === \"indexes\" && String(res.message).includes(OBJECT_GONE)) {\n          state.level = \"objects\";", tab.Replace("\r\n", "\n"));
+    }
+
+    [Fact]
+    public void LastAccessShowsMinutesAndTheDarkTextSitsOnTheStrongBands()
+    {
+        Assert.Contains("String(v).slice(0, 16).replace(\"T\", \" \")", Tab());
+        var css = Css();
+        foreach (var b in new[] { 5, 6, 7 }) Assert.Matches("(?m)^\\.heat-band-" + b + " \\{ color: var\\(--bg\\);", css);
+        foreach (var b in new[] { 0, 1, 2, 3, 4 }) Assert.DoesNotMatch("(?m)^\\.heat-band-" + b + " \\{ color:", css);
     }
 
     [Fact]

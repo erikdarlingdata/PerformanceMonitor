@@ -1110,6 +1110,6 @@ pre.code {
 .heat-band-2 { background: rgba(46, 174, 241, 0.32); }
 .heat-band-3 { background: rgba(46, 174, 241, 0.43); }
 .heat-band-4 { background: rgba(46, 174, 241, 0.54); }
-.heat-band-5 { background: rgba(46, 174, 241, 0.65); }
-.heat-band-6 { background: rgba(46, 174, 241, 0.76); }
-.heat-band-7 { background: rgba(46, 174, 241, 0.87); }
+.heat-band-5 { color: var(--bg); background: rgba(46, 174, 241, 0.65); }
+.heat-band-6 { color: var(--bg); background: rgba(46, 174, 241, 0.76); }
+.heat-band-7 { color: var(--bg); background: rgba(46, 174, 241, 0.87); }
