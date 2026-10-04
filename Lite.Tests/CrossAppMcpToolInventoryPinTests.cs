@@ -64,6 +64,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
            nothing for a Lite twin to read. If Lite ever gains a PostgreSQL target, port these and delete
            them from here; the ratchet only shrinks. */
         "get_pg_wait_stats",
+        /* #4843: fleet-wide Agent job history. Lite has a Job History tab but no MCP read of it yet. */
+        "get_job_history",
         /* #2719: instance CPU via AWS Performance Insights. Same reason again, and doubly so — this reads
            the AWS RDS/Aurora SDK directly rather than a database connection at all, which Lite (a
            standalone desktop app with no AWS credentials of its own) has no route to regardless of target. */
@@ -331,6 +333,14 @@ public sealed class CrossAppMcpToolInventoryPinTests
         /* #4843: Darling-only for now, not by architecture: the per-server trend reads (waits, CPU scheduler,
            memory clerks, plan cache) have local DuckDB twins, so Lite could serve this tool later. */
         "get_server_trend",
+        /* #5085: the fleet server-tag write tools (create/update/delete/assign/unassign_server_tag) write
+           config.server_tags and config.server_tag_map in the central Postgres store, the same Darling-ONLY kind
+           of entry as the custom-alert-rule tools above: Lite keeps its tags in its own local config. */
+        "create_server_tag",
+        "update_server_tag",
+        "delete_server_tag",
+        "assign_server_tag",
+        "unassign_server_tag",
         // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
         "get_finops_inventory",
         "get_finops_recommendations",

@@ -1004,6 +1004,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                narrow INSERT/UPDATE/DELETE grant on ONLY config.custom_alert_rules (granted under V116), never the
                config pivot or the secret columns. */
             .WithGeminiCompatibleTools<DarlingMcpCustomAlertTools>()
+            /* The fleet server-tag WRITE tools (#5085) - create_server_tag / update_server_tag / delete_server_tag /
+               assign_server_tag / unassign_server_tag. They write config.server_tags and config.server_tag_map
+               through the SAME ServerTagStore the Viewer uses, with the depth, cycle, duplicate, name and colour
+               rules in ServerTagRules, and every result names the custom alert rules the change affects. The mcp
+               role carries the narrow INSERT/UPDATE/DELETE grant on ONLY those two tables (the admin gate), never
+               the config pivot or the secret columns. */
+            .WithGeminiCompatibleTools<DarlingMcpServerTagTools>()
             /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
                or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
                Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service
