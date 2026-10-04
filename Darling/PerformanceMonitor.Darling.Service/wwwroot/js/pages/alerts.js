@@ -23,7 +23,7 @@
 
 import { el, mount, readTool, buildQuery, loadingStrip, errorStrip, emptyStrip, disclosure,
          ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
-import { VIZ } from "../panels.js";
+import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 
 /* #3169: the state-carrying notification_type values, derived from the one shared map rather than listed a
    second time. The status label already carries each of them, so the channel chip beside it must not repeat
@@ -320,6 +320,7 @@ function drawAlerts(state) {
 
   if (state.tbody) {
     reconcileRows(state.tbody, rows, state.rowMap);
+    reapplyGridSort(state.tbody);
     return;
   }
 
@@ -327,7 +328,7 @@ function drawAlerts(state) {
   mount(state.tableBox, table);
   const tbody = table.querySelector("tbody");
   const rowMap = new Map();
-  [...tbody.children].forEach((tr, i) => rowMap.set(alertKey(rows[i]), tr));
+  [...tbody.children].forEach((tr) => rowMap.set(alertKey(gridRowOf(tr)), tr));
   state.tbody = tbody;
   state.rowMap = rowMap;
 }
