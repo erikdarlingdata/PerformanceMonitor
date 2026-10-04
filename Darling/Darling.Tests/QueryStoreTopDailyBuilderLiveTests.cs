@@ -58,9 +58,15 @@ public sealed class QueryStoreTopDailyBuilderLiveTests
 
     private static string At(DateTime value) => value.ToString("yyyy-MM-dd HH:mm:ss.ffffff", System.Globalization.CultureInfo.InvariantCulture);
 
-    private static async Task CoverAsync(NpgsqlConnection connection, int serverId, CancellationToken ct) =>
+    /// <summary>Enrolls the server (enabled unless told otherwise) and gives it a wide-table coverage claim.</summary>
+    private static async Task CoverAsync(
+        NpgsqlConnection connection, int serverId, CancellationToken ct, string filledSince = "2025-12-01 00:00:00", bool enabled = true)
+    {
         await ExecAsync(connection,
-            $"INSERT INTO collect.query_store_interval_wide_coverage (server_id, filled_since, applied_through) VALUES ({serverId}, TIMESTAMP '2025-12-01 00:00:00', TIMESTAMP '2026-03-01 00:00:00')", ct);
+            $"INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES ({serverId}, 'srv{serverId}', {(enabled ? "TRUE" : "FALSE")}) ON CONFLICT (server_id) DO NOTHING", ct);
+        await ExecAsync(connection,
+            $"INSERT INTO collect.query_store_interval_wide_coverage (server_id, filled_since, applied_through) VALUES ({serverId}, TIMESTAMP '{filledSince}', TIMESTAMP '2026-03-01 00:00:00')", ct);
+    }
 
     private static int s_interval;
 
@@ -69,7 +75,7 @@ public sealed class QueryStoreTopDailyBuilderLiveTests
         NpgsqlConnection connection, int serverId, DateTime collectionTime, long queryId, CancellationToken ct,
         string? moduleName = null, string? replicaRole = null, long? executionCount = null, long? duration = null,
         long? cpu = null, long? reads = null, long? writes = null, long? physical = null, long? rowcount = null,
-        DateTime? lastExecution = null, string? planHash = null)
+        DateTime? lastExecution = null, string? planHash = null, DateTime? firstExecution = null)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO collect.query_store_interval_wide
@@ -77,12 +83,13 @@ INSERT INTO collect.query_store_interval_wide
  module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes,
  avg_physical_io_reads, avg_rowcount, query_plan_hash, replica_role, runtime_stats_interval_id, interval_start_time_utc)
 VALUES
-(@ct, @server, 'db1', @query, @query, 'Regular', @ct - interval '10 minutes', @last,
+(@ct, @server, 'db1', @query, @query, 'Regular', @first, @last,
  @module, 'h' || @query, @ec, @dur, @cpu, @reads, @writes,
  @phys, @rows, @ph, @replica, @interval, @ct - interval '10 minutes')", connection);
         command.Parameters.Add(new NpgsqlParameter("ct", NpgsqlDbType.Timestamp) { Value = collectionTime });
         command.Parameters.Add(new NpgsqlParameter("server", NpgsqlDbType.Integer) { Value = serverId });
         command.Parameters.Add(new NpgsqlParameter("query", NpgsqlDbType.Bigint) { Value = queryId });
+        command.Parameters.Add(new NpgsqlParameter("first", NpgsqlDbType.Timestamp) { Value = firstExecution ?? collectionTime.AddMinutes(-10) });
         command.Parameters.Add(new NpgsqlParameter("last", NpgsqlDbType.Timestamp) { Value = (object?)lastExecution ?? collectionTime });
         command.Parameters.Add(new NpgsqlParameter("module", NpgsqlDbType.Text) { Value = (object?)moduleName ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter("ec", NpgsqlDbType.Bigint) { Value = (object?)executionCount ?? DBNull.Value });
@@ -309,6 +316,7 @@ GROUP BY server_id, database_name, query_id, plan_id, query_hash, execution_type
         await RunLiveAsync(async (scratch, connection, ct) =>
         {
             /* now 2026-01-20 12:00, retention 9 days: the cutoff is (2026-01-11)::date - 1 = 2026-01-10. */
+            await ExecAsync(connection, "INSERT INTO collect.servers (server_id, server_name) VALUES (1, 'srv1')", ct);
             foreach (var d in new[] { 8, 9, 10, 11 })
             {
                 await ExecAsync(connection,
@@ -340,7 +348,7 @@ GROUP BY server_id, database_name, query_id, plan_id, query_hash, execution_type
             Assert.Equal(QueryStoreTopDaily.MaxBuildsPerTick, result.Built);
             Assert.Equal(0, result.Failed);
             Assert.Equal((long)QueryStoreTopDaily.MaxBuildsPerTick, Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built", ct)));
-            var first = (now - TimeSpan.FromDays(Retention)).Date.AddDays(1);
+            var first = (now - TimeSpan.FromDays(Retention)).Date.AddDays(2);
             Assert.Equal(first, (DateTime)(await ScalarAsync(connection, "SELECT min(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
             Assert.Equal(first.AddDays(QueryStoreTopDaily.MaxBuildsPerTick - 1), (DateTime)(await ScalarAsync(connection, "SELECT max(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
 
@@ -360,7 +368,7 @@ GROUP BY server_id, database_name, query_id, plan_id, query_hash, execution_type
             var now = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Unspecified);
             const int Retention = 150;
             var cap = QueryStoreTopDaily.MaxBuildsPerTick;
-            var first = (now - TimeSpan.FromDays(Retention)).Date.AddDays(1);
+            var first = (now - TimeSpan.FromDays(Retention)).Date.AddDays(2);
 
             var one = await QueryStoreTopDaily.RunTickAsync(source, now, Retention, NullLogger.Instance, ct);
             Assert.Equal(cap, one.BuiltPass2);
@@ -376,6 +384,160 @@ GROUP BY server_id, database_name, query_id, plan_id, query_hash, execution_type
             Assert.Equal((long)(2 * cap), Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built WHERE pass = 2", ct)));
             Assert.Equal(first.AddDays(2 * cap - 1), (DateTime)(await ScalarAsync(connection, "SELECT max(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
             Assert.Equal(firstBuiltAt, (DateTime)(await ScalarAsync(connection, "SELECT built_at FROM collect.query_store_top_daily_built WHERE day = DATE '" + At(first)[..10] + "'", ct))!);
+        });
+    }
+
+    [Fact]
+    public async Task ALateWriteIntoABuiltDay_IsMissed_AsDocumented()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await SeedAsync(connection, 1, Day.AddHours(5), 1, ct, executionCount: 1);
+            await CoverAsync(connection, 1, ct);
+            await using var source = DataSource(scratch);
+            var dayEnd = Day.AddDays(1);
+
+            await TickBuiltAsync(source, dayEnd.AddHours(2));
+            await TickBuiltAsync(source, dayEnd.AddHours(25));
+            var finalBuild = await BuiltRowAsync(connection, 1, Day, ct);
+            Assert.Equal((short)2, finalBuild!.Value.Pass);
+            Assert.Equal(1L, await SummarizedRowsAsync(connection, 1, Day, ct));
+
+            /* A backfill lands a wide row in the built day. Nothing plans the day again, so the summary does not see it. */
+            await SeedAsync(connection, 1, Day.AddHours(6), 2, ct, executionCount: 1);
+            await TickBuiltAsync(source, dayEnd.AddDays(3));
+
+            Assert.Equal(1L, await SummarizedRowsAsync(connection, 1, Day, ct));
+            Assert.Equal(finalBuild, await BuiltRowAsync(connection, 1, Day, ct));
+            Assert.Equal(2L, Convert.ToInt64(await ScalarAsync(connection,
+                "SELECT count(*) FROM collect.query_store_interval_wide WHERE server_id = 1 AND collection_time >= TIMESTAMP '2026-01-10' AND collection_time < TIMESTAMP '2026-01-11'", ct)));
+        });
+    }
+
+    [Fact]
+    public async Task TheFirstExecutionRange_KeepsTheRowsAtItsEdges_AndDropsTheOneAtTheUpperEdge()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            var collected = Day.AddHours(12);
+            var upper = Day.AddDays(1) + QueryStoreTopDaily.SkewSlack;
+
+            /* 1: the oldest start a stored row can have (a second inside the span margin plus catch-up). 2 and 3: a start
+               just inside the upper edge, and exactly on it. 4: an ordinary row. */
+            await SeedAsync(connection, 1, collected, 1, ct, executionCount: 1, duration: 10,
+                firstExecution: collected - QueryStoreTopDaily.FinalBuildAfter + TimeSpan.FromSeconds(1));
+            await SeedAsync(connection, 1, collected, 2, ct, executionCount: 2, duration: 20, firstExecution: upper - TimeSpan.FromSeconds(1));
+            await SeedAsync(connection, 1, collected, 3, ct, executionCount: 4, duration: 40, firstExecution: upper);
+            await SeedAsync(connection, 1, collected, 4, ct, executionCount: 8, duration: 80);
+            await CoverAsync(connection, 1, ct);
+
+            Assert.Equal(3L, await QueryStoreTopDaily.BuildDayAsync(connection, 1, DateOnly.FromDateTime(Day), 1, Day.AddDays(1).AddHours(2), ct));
+
+            const string Direct = @"
+SELECT server_id, DATE '2026-01-10' AS day, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
+       count(*) AS interval_rows, sum(execution_count) AS execution_count_sum,
+       sum(avg_duration_us::numeric) AS avg_duration_us_sum, count(avg_duration_us) AS avg_duration_us_n,
+       min(first_execution_time) AS first_execution_time_min
+FROM collect.query_store_interval_wide
+WHERE server_id = 1 AND collection_time >= TIMESTAMP '2026-01-10' AND collection_time < TIMESTAMP '2026-01-11'
+  AND first_execution_time < TIMESTAMP '2026-01-11 01:00:00'
+GROUP BY server_id, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name";
+            const string Stored = @"
+SELECT server_id, day, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
+       interval_rows, execution_count_sum, avg_duration_us_sum, avg_duration_us_n, first_execution_time_min
+FROM collect.query_store_top_daily WHERE server_id = 1 AND day = DATE '2026-01-10'";
+
+            Assert.Equal(new long[] { 1, 2, 4 },
+                (await ScalarAsync(connection, "SELECT array_agg(query_id ORDER BY query_id) FROM collect.query_store_top_daily WHERE server_id = 1", ct) as long[])!);
+            Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM (({Stored}) EXCEPT ({Direct})) x", ct));
+            Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM (({Direct}) EXCEPT ({Stored})) x", ct));
+            Assert.Equal(3L, (await BuiltRowAsync(connection, 1, Day, ct))!.Value.SourceRows);
+        });
+    }
+
+    [Fact]
+    public async Task TheOldestPlannedDay_IsTwoDaysAfterTheRetentionHorizon()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await CoverAsync(connection, 1, ct);
+            await using var source = DataSource(scratch);
+            var now = new DateTime(2026, 1, 20, 12, 0, 0, DateTimeKind.Unspecified);
+
+            await using var planConnection = await source.OpenConnectionAsync(ct);
+            var plan = await QueryStoreTopDaily.PlanBuildsAsync(planConnection, now, RetentionDays, ct);
+
+            /* (now - 9 days)::date is 2026-01-11; the purge may already have cut part of 2026-01-12. */
+            Assert.Equal(new DateOnly(2026, 1, 13), plan.Min(b => b.Day));
+            Assert.Equal(new DateOnly(2026, 1, 19), plan.Max(b => b.Day));
+            Assert.Equal(7, plan.Count);
+        });
+    }
+
+    [Fact]
+    public async Task OnlyEnabledServers_AndOnlyDaysAfterTheirCoverageClaim_ArePlanned_AndADisabledServersRowsAreCollected()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            const int Retention = 20;
+            var now = new DateTime(2026, 1, 20, 12, 0, 0, DateTimeKind.Unspecified);
+            await CoverAsync(connection, 1, ct, filledSince: "2026-01-08 15:00:00");
+            await CoverAsync(connection, 2, ct, enabled: false);
+            await SeedAsync(connection, 1, new DateTime(2026, 1, 9, 5, 0, 0), 1, ct, executionCount: 1);
+            foreach (var d in new[] { 10, 11 })
+            {
+                await ExecAsync(connection,
+                    $"INSERT INTO collect.query_store_top_daily (server_id, day, interval_rows, avg_duration_us_n, avg_cpu_time_us_n, avg_logical_io_reads_n, avg_logical_io_writes_n, avg_physical_io_reads_n, avg_rowcount_n) VALUES (2, DATE '2026-01-{d:00}', 1, 0, 0, 0, 0, 0, 0)", ct);
+                await ExecAsync(connection,
+                    $"INSERT INTO collect.query_store_top_daily_built (server_id, day, pass, built_at, source_rows) VALUES (2, DATE '2026-01-{d:00}', 2, TIMESTAMP '2026-01-15 00:00:00', 1)", ct);
+            }
+
+            await using var source = DataSource(scratch);
+            await using (var planConnection = await source.OpenConnectionAsync(ct))
+            {
+                var plan = await QueryStoreTopDaily.PlanBuildsAsync(planConnection, now, Retention, ct);
+                Assert.DoesNotContain(plan, b => b.ServerId == 2);
+                Assert.All(plan, b => Assert.Equal(1, b.ServerId));
+                Assert.Equal(new DateOnly(2026, 1, 9), plan.Min(b => b.Day));
+                Assert.Equal(new DateOnly(2026, 1, 19), plan.Max(b => b.Day));
+            }
+
+            var result = await QueryStoreTopDaily.RunTickAsync(source, now, Retention, NullLogger.Instance, ct);
+
+            Assert.Equal(0, result.Failed);
+            Assert.Equal(11, result.Built);
+            Assert.Equal(2L, result.DaysRemoved);
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily WHERE server_id = 2", ct)));
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built WHERE server_id = 2", ct)));
+            Assert.Equal(11L, Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built WHERE server_id = 1", ct)));
+            Assert.Equal(1L, await SummarizedRowsAsync(connection, 1, new DateTime(2026, 1, 9), ct));
+            Assert.Null(await BuiltRowAsync(connection, 1, new DateTime(2026, 1, 8), ct));
+        });
+    }
+
+    [Fact]
+    public async Task ATickPastItsTimeBudget_StopsStartingBuilds_AndReportsTheRestDeferred()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await CoverAsync(connection, 1, ct);
+            await using var source = DataSource(scratch);
+            var now = new DateTime(2026, 1, 20, 12, 0, 0, DateTimeKind.Unspecified);
+
+            /* The elapsed time is read before each build: zero before the first, past the budget from then on. */
+            var reads = 0;
+            var result = await QueryStoreTopDaily.RunTickAsync(source, now, RetentionDays, NullLogger.Instance,
+                () => reads++ == 0 ? TimeSpan.Zero : QueryStoreTopDaily.MaxTickDuration, ct);
+
+            Assert.Equal(1, result.Built);
+            Assert.Equal(6, result.Deferred);
+            Assert.Equal(0, result.Failed);
+            Assert.Equal("2026-01-13", await ScalarAsync(connection, "SELECT string_agg(day::text, ',') FROM collect.query_store_top_daily_built", ct));
+
+            /* The next tick plans what was deferred. */
+            var next = await QueryStoreTopDaily.RunTickAsync(source, now, RetentionDays, NullLogger.Instance, ct);
+            Assert.Equal(6, next.Built);
+            Assert.Equal(0, next.Deferred);
         });
     }
 
@@ -411,8 +573,10 @@ GROUP BY server_id, database_name, query_id, plan_id, query_hash, execution_type
         Assert.Equal(TimeSpan.FromHours(2), QueryStoreTopDaily.BuildAfter);
         Assert.Equal(TimeSpan.FromHours(25), QueryStoreTopDaily.FinalBuildAfter);
         Assert.Equal(60, QueryStoreTopDaily.MaxBuildsPerTick);
-        Assert.Equal(120, QueryStoreTopDaily.BuildStatementTimeoutSeconds);
-        Assert.Contains("120s", typeof(QueryStoreTopDaily).GetField("StatementTimeoutSql", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!.ToString(), StringComparison.Ordinal);
+        Assert.Equal(60, QueryStoreTopDaily.BuildStatementTimeoutSeconds);
+        Assert.Equal(TimeSpan.FromMinutes(10), QueryStoreTopDaily.MaxTickDuration);
+        Assert.Equal(TimeSpan.FromHours(1), QueryStoreTopDaily.SkewSlack);
+        Assert.Contains("60s", typeof(QueryStoreTopDaily).GetField("StatementTimeoutSql", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!.ToString(), StringComparison.Ordinal);
     }
 
     private static string Body(string source, string signature)
