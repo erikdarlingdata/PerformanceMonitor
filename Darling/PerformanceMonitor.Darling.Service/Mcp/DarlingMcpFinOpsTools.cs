@@ -99,8 +99,9 @@ public sealed partial class DarlingMcpFinOpsTools
 
         var validation = McpHelpers.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
-        if (limit < 1 || limit > MaxLimit)
-            return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {MaxLimit}.");
+        var maxLimit = normalized == DatabaseSizesView ? MaxDatabaseSizeRows : MaxLimit;
+        if (limit < 1 || limit > maxLimit)
+            return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {maxLimit}.");
 
         database_name = NormalizeOptionalText(database_name);
         object_name = NormalizeOptionalText(object_name);
@@ -138,7 +139,7 @@ public sealed partial class DarlingMcpFinOpsTools
                 case StorageGrowthView:
                     return await ReadStorageGrowthAsync(postgres, resolved, hours_back, limit, database_name, object_name, cancellationToken);
                 case DatabaseSizesView:
-                    return await ReadDatabaseSizesAsync(postgres, resolved, cancellationToken);
+                    return await ReadDatabaseSizesAsync(postgres, resolved, limit, cancellationToken);
                 // FinOps web parity (#4843), set B ends.
                 default:
                     return McpHelpers.Refusal("view", $"Invalid view value '{view}'. Valid views: {string.Join(", ", Views)}.");

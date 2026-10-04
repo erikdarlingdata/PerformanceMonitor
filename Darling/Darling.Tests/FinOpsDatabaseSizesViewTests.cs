@@ -47,10 +47,39 @@ public sealed class FinOpsDatabaseSizesViewTests
         var files = Enumerable.Range(0, 600).Select(File).ToList();
         var json = DarlingMcpFinOpsTools.DatabaseSizesPayload("srv", files, 1234.50m);
         using var doc = JsonDocument.Parse(json);
-        Assert.Equal(DarlingMcpFinOpsTools.MaxDatabaseSizeRows, doc.RootElement.GetProperty("rows").GetArrayLength());
+        Assert.Equal(DarlingMcpFinOpsTools.DefaultDatabaseSizeRows, doc.RootElement.GetProperty("rows").GetArrayLength());
         Assert.Equal(600, doc.RootElement.GetProperty("file_count").GetInt32());
         Assert.True(doc.RootElement.GetProperty("truncated").GetBoolean());
         Assert.True(Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes, $"{Encoding.UTF8.GetByteCount(json)} bytes");
+    }
+
+    [Fact]
+    public void ACallAtTheCeiling_ListsEveryFileUpToTheCeiling_AndSaysWhenItStillCuts()
+    {
+        var files = Enumerable.Range(0, 600).Select(File).ToList();
+        var cap = DarlingMcpFinOpsTools.DatabaseSizeRowCap(DarlingMcpFinOpsTools.MaxDatabaseSizeRows);
+        Assert.Equal(500, cap);
+        using var doc = JsonDocument.Parse(DarlingMcpFinOpsTools.DatabaseSizesPayload("srv", files, 1234.50m, cap));
+        Assert.Equal(500, doc.RootElement.GetProperty("rows").GetArrayLength());
+        Assert.Equal(600, doc.RootElement.GetProperty("file_count").GetInt32());
+        Assert.True(doc.RootElement.GetProperty("truncated").GetBoolean());
+        using var all = JsonDocument.Parse(DarlingMcpFinOpsTools.DatabaseSizesPayload("srv", files.Take(300).ToList(), 1234.50m, cap));
+        Assert.Equal(300, all.RootElement.GetProperty("rows").GetArrayLength());
+        Assert.False(all.RootElement.GetProperty("truncated").GetBoolean());
+    }
+
+    [Fact]
+    public void TheDefaultLimit_MeansTheDefaultRowCount_AndAnyOtherLimitIsTheCount()
+    {
+        Assert.Equal(DarlingMcpFinOpsTools.DefaultDatabaseSizeRows, DarlingMcpFinOpsTools.DatabaseSizeRowCap(10));
+        Assert.Equal(11, DarlingMcpFinOpsTools.DatabaseSizeRowCap(11));
+    }
+
+    [Fact]
+    public void CapturedAt_IsAUtcStamp_LikeTheSiblingViews()
+    {
+        using var doc = JsonDocument.Parse(DarlingMcpFinOpsTools.DatabaseSizesPayload("srv", [File(0)], 0m));
+        Assert.EndsWith("Z", doc.RootElement.GetProperty("captured_at").GetString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -157,6 +186,34 @@ public sealed class FinOpsDatabaseSizesViewLiveTests
 
         Assert.DoesNotContain(rows, r => r.GetProperty("database_name").GetString() == "OldDb");
         Assert.Equal(1000m, tool.RootElement.GetProperty("monthly_cost_usd").GetDecimal());
+    }
+
+    [Fact]
+    public async Task ALimitAtTheCeiling_ReturnsMoreThanTheDefaultRows_AndOverTheCeilingIsRefused()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using (var c = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await c.OpenAsync(ct);
+            var at = DarlingMcpTestData.Naive(DateTime.UtcNow).AddMinutes(-30);
+            for (var i = 0; i < 120; i++)
+                await FileRowAsync(c, ct, at, "BulkDb" + (i / 2), "bulk" + i + ".mdf", "ROWS", 100m + i, 50m, 1m, false, null, "FULL", null, i + 1);
+        }
+
+        using var dflt = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_sizes", ServerName, cancellationToken: ct));
+        Assert.Equal(DarlingMcpFinOpsTools.DefaultDatabaseSizeRows, dflt.RootElement.GetProperty("rows").GetArrayLength());
+        Assert.True(dflt.RootElement.GetProperty("truncated").GetBoolean());
+
+        using var max = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_sizes", ServerName,
+            limit: DarlingMcpFinOpsTools.MaxDatabaseSizeRows, cancellationToken: ct));
+        Assert.Equal(120, max.RootElement.GetProperty("rows").GetArrayLength());
+        Assert.Equal(120, max.RootElement.GetProperty("file_count").GetInt32());
+        Assert.False(max.RootElement.GetProperty("truncated").GetBoolean());
+
+        using var over = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_sizes", ServerName, limit: 501, cancellationToken: ct));
+        Assert.Contains("1 to 500", over.RootElement.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

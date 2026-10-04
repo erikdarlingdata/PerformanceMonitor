@@ -29,8 +29,12 @@ public sealed class FinOpsTabDatabaseSizesPageTests
     public void TheTabReadsTheDatabaseSizesViewOfGetFinOpsForTheServer()
     {
         var tab = Tab();
-        Assert.Contains("readTool(\"get_finops\", { server, view: \"database_sizes\" }, ctx && ctx.signal)", tab);
+        Assert.Contains("readTool(\"get_finops\", { server, view: \"database_sizes\", limit: MAX_FILES }, ctx && ctx.signal)", tab);
         Assert.DoesNotContain("get_database_sizes", tab);
+        var tabMax = Regex.Match(tab, "const MAX_FILES = (\\d+);").Groups[1].Value;
+        var viewMax = Regex.Match(ViewSource(), "int MaxDatabaseSizeRows = (\\d+);").Groups[1].Value;
+        Assert.NotEmpty(viewMax);
+        Assert.Equal(viewMax, tabMax);
         Assert.Contains("DatabaseSizesView = \"database_sizes\"", ViewSource());
     }
 

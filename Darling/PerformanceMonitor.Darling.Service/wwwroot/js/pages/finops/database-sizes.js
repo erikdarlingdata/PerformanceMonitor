@@ -58,6 +58,9 @@ const COLUMNS = [
   { key: "size_note", label: "Note", wrap: true, hideWhenEmpty: true },
 ];
 
+/* The most files the view lists; the grid shows every file, so the tab asks for the ceiling. */
+const MAX_FILES = 500;
+
 export const tab = {
   id: "database-sizes",
   label: "Database Sizes",
@@ -65,7 +68,7 @@ export const tab = {
     const body = el("div", {}, [loadingStrip()]);
     (async () => {
       try {
-        const res = await readTool("get_finops", { server, view: "database_sizes" }, ctx && ctx.signal);
+        const res = await readTool("get_finops", { server, view: "database_sizes", limit: MAX_FILES }, ctx && ctx.signal);
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
         if (res.kind === "empty") return mount(body, emptyStrip(res.message));
