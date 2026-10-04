@@ -61,4 +61,30 @@ public sealed class FinOpsTabPvsPageTests
     {
         Assert.DoesNotContain("Not on the web yet", Tab);
     }
+
+    [Fact]
+    public void Tab_ShowsAbortedLagCleanupAndTheThreeSkippedCountersInTheDesktopOrder()
+    {
+        var order = new[]
+        {
+            "key: \"oldest_aborted_transaction_id\"",
+            "key: \"aborted_transaction_lag\", label: \"Aborted Lag\"",
+            "key: \"cleanup_state\", label: \"Cleanup\"",
+            "key: \"skipped_low_water_mark\", label: \"Skipped: Secondary\"",
+            "key: \"skipped_min_useful_xts\", label: \"Skipped: Snapshot\"",
+            "key: \"skipped_oldest_aborted\", label: \"Skipped: Aborted\"",
+        };
+        var at = -1;
+        foreach (var pin in order)
+        {
+            var next = Tab.IndexOf(pin, System.StringComparison.Ordinal);
+            Assert.True(next > at, "column missing or out of order: " + pin);
+            at = next;
+        }
+
+        foreach (var key in new[] { "aborted_transaction_lag", "cleanup_state", "skipped_low_water_mark", "skipped_min_useful_xts", "skipped_oldest_aborted" })
+        {
+            Assert.Contains(key + " = ", Tool);
+        }
+    }
 }
