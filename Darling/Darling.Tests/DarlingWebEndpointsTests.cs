@@ -423,6 +423,10 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("{\"status\":\"updated\",\"tag\":{}}", 200, 200)]
     [InlineData("{\"status\":\"unchanged\",\"tag\":{}}", 200, 200)]
     [InlineData("{\"status\":\"deleted\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"assigned\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"unassigned\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"some_future_status\"}", 200, 500)]   // N2: an unmapped status is a 500, never a silent 2xx
+    [InlineData("{\"status\":\"some_future_status\"}", 201, 500)]
     [InlineData("{\"status\":\"invalid\",\"refusal\":\"bad_name\",\"message\":\"x\"}", 201, 400)]
     [InlineData("{\"status\":\"not_found\",\"message\":\"x\"}", 200, 404)]
     [InlineData("{\"status\":\"conflict\",\"refusal\":\"duplicate_name\",\"message\":\"x\"}", 201, 409)]

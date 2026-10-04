@@ -124,4 +124,37 @@ public sealed class ServerTagWebRoutesLiveTests
         Assert.Equal(HttpStatusCode.OK, deleted.Status);
         Assert.Equal("deleted", deleted.Body.GetProperty("status").GetString());
     }
+
+    [Fact]
+    public async Task TheRoutes_AnswerMalformedBodiesAndEdgesWith4xxNeverA500()
+    {
+        var (scratch, source) = await OpenAsync();
+        await using var _ = scratch;
+        await using var __ = source;
+        await using var app = await StartAsync(source);
+        using var client = app.GetTestClient();
+        var patch = new HttpMethod("PATCH");
+
+        var created = await SendAsync(client, HttpMethod.Post, "/api/server-tags", "{\"name\":\"Prod\"}");
+        var tagId = created.Body.GetProperty("tag").GetProperty("tag_id").GetInt32();
+        Assert.Equal(HttpStatusCode.Created, (await SendAsync(client, HttpMethod.Post, "/api/server-tags", "{\"name\":\"Other\"}")).Status);
+
+        /* M1: a duplicate JSON key is the caller's malformed body. */
+        Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(client, HttpMethod.Post, "/api/server-tags", "{\"name\":\"a\",\"name\":\"b\"}")).Status);
+        Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(client, patch, $"/api/server-tags/{tagId}", "{\"name\":\"a\",\"name\":\"b\"}")).Status);
+        Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(client, HttpMethod.Post, $"/api/server-tags/{tagId}/servers", "{\"server_ids\":[1],\"server_ids\":[2]}")).Status);
+
+        /* M2: a body past the 64 KB cap is refused, on every body-reading route. */
+        var pad = new string(' ', 70 * 1024);   // valid JSON either way, so only the cap can refuse it
+        var big = "{\"name\":\"Padded\"}" + pad;
+        Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(client, HttpMethod.Post, "/api/server-tags", big)).Status);
+        Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(client, patch, $"/api/server-tags/{tagId}", "{\"name\":\"Prod\"}" + pad)).Status);
+
+        /* L4: 415 on both DELETE routes, a non-"true" confirm, and a PATCH to a sibling's name. */
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, (await SendAsync(client, HttpMethod.Delete, $"/api/server-tags/{tagId}", null, "text/plain")).Status);
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, (await SendAsync(client, HttpMethod.Delete, $"/api/server-tags/{tagId}/servers", "{\"server_ids\":[1]}", "text/plain")).Status);
+        Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(client, HttpMethod.Delete, $"/api/server-tags/{tagId}?confirm=1", null)).Status);
+        Assert.Equal(HttpStatusCode.BadRequest, (await SendAsync(client, HttpMethod.Delete, $"/api/server-tags/{tagId}?confirm=TRUE", null)).Status);
+        Assert.Equal(HttpStatusCode.Conflict, (await SendAsync(client, patch, $"/api/server-tags/{tagId}", "{\"name\":\"other\"}")).Status);
+    }
 }

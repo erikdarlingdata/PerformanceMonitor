@@ -470,6 +470,17 @@ public sealed class DarlingMcpServerTagTools
             return (null, "changes_json must be a JSON object holding any of name, colour and parent_id.", null);
         }
 
+        /* A duplicate property name throws ArgumentException on the first enumeration; that is a caller's
+           malformed body, not a server fault, so force it here where it can answer invalid. */
+        try
+        {
+            _ = body.Count;
+        }
+        catch (ArgumentException)
+        {
+            return (null, "changes_json has a duplicate field.", null);
+        }
+
         bool hasName = false, hasColour = false, hasParent = false;
         string? name = null, colour = null;
         int? parentId = null;

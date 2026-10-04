@@ -8,11 +8,13 @@
 
 using System;
 using System.Linq;
+using System.Text.Json.Nodes;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -90,6 +92,113 @@ public sealed class ServerTagViewerRoleLiveTests
         finally
         {
             await ExecAsync(owner, $"DROP OWNED BY {RoleName}; DROP ROLE IF EXISTS {RoleName};", ct);
+        }
+    }
+
+    /// <summary>L3 (#5137 review): the cores, not just the store, as a NOSUPERUSER role holding EXACTLY the viewer
+    /// role's provisioned grants. Every GRANT / REVOKE statement that names <c>viewer</c> is taken from
+    /// <see cref="DarlingManagedRoles.BuildProvisioningSql"/> in order (so the column-carved SELECT on
+    /// <c>config_monitored_servers</c> applies, not a blanket SELECT), then retargeted at the scratch role.
+    /// Seeded as owner: one monitored server and one custom alert rule scoped to the tag.</summary>
+    [Fact]
+    public async Task TheExactViewerGrants_LetTheWebCoresCreateAssignUpdateUnassignAndDeleteWithAScopedRule()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live viewer-role server-tag test (it mints its own scratch database and role).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var roleName = "tag_core_" + Guid.NewGuid().ToString("N")[..8];
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var ownerString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+        await using var owner = NpgsqlDataSource.Create(ownerString);
+        await using (var connection = new NpgsqlConnection(ownerString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, null, ct);
+        }
+
+        var provisioning = DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+        var viewerStatements = new System.Collections.Generic.List<string>();
+        /* Drop the comment lines BEFORE splitting: the provisioning prose contains semicolons. */
+        var uncommented = string.Join('\n', provisioning.Split('\n').Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal)));
+        foreach (var raw in uncommented.Split(';'))
+        {
+            var statement = raw.Trim();
+            var isGrant = statement.StartsWith("GRANT ", StringComparison.Ordinal);
+            if (!isGrant && !statement.StartsWith("REVOKE ", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var marker = isGrant ? " TO " : " FROM ";
+            var at = statement.LastIndexOf(marker, StringComparison.Ordinal);
+            if (at < 0 || statement.Contains("EXECUTE ON FUNCTION", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var targets = statement[(at + marker.Length)..].Split(',').Select(t => t.Trim()).ToList();
+            if (!targets.Contains("viewer", StringComparer.Ordinal))
+            {
+                continue;
+            }
+
+            viewerStatements.Add(statement[..at] + marker + roleName);
+        }
+
+        /* The viewer's table-wide config SELECT and its column carve must both be in what we replay. */
+        Assert.Contains(viewerStatements, x => x.Contains("SELECT ON ALL TABLES IN SCHEMA config", StringComparison.Ordinal));
+        Assert.Contains(viewerStatements, x => x.StartsWith("GRANT SELECT (", StringComparison.Ordinal) && x.Contains("config_monitored_servers", StringComparison.Ordinal));
+        Assert.Contains(viewerStatements, x => x.EndsWith("config.server_tags " + "TO " + roleName, StringComparison.Ordinal));
+        Assert.Contains(viewerStatements, x => x.EndsWith("config.server_tag_map " + "TO " + roleName, StringComparison.Ordinal));
+
+        await ExecAsync(owner, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
+        try
+        {
+            foreach (var statement in viewerStatements)
+            {
+                await ExecAsync(owner, statement, ct);
+            }
+
+            await using (var seed = await owner.OpenConnectionAsync(ct))
+            {
+                await DarlingMcpTestData.RegisterServerAsync(seed, 41, "core-viewer-a", ct);
+            }
+
+            var asViewer = new NpgsqlConnectionStringBuilder(ownerString) { Username = roleName, Password = RolePassword }.ConnectionString;
+            await using var source = NpgsqlDataSource.Create(asViewer);
+            var store = new ServerTagStore(source, 30);
+
+            var created = JsonNode.Parse(await DarlingMcpServerTagTools.CreateServerTagCore(store, "Prod", null, null, ct))!;
+            Assert.Equal("created", created["status"]!.GetValue<string>());
+            var tagId = created["tag"]!["tag_id"]!.GetValue<int>();
+
+            var assigned = JsonNode.Parse(await DarlingMcpServerTagTools.AssignServerTagCore(store, tagId, new[] { 41 }, ct))!;
+            Assert.Equal("assigned", assigned["status"]!.GetValue<string>());
+
+            var updated = JsonNode.Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, tagId, "{\"name\":\"Production\"}", ct))!;
+            Assert.Equal("updated", updated["status"]!.GetValue<string>());
+
+            await using (var command = owner.CreateCommand("INSERT INTO custom_alert_rules (name, definition, enabled, version, created_at, updated_at, updated_by) VALUES "
+                + $"('tag-rule', '{{\"scope\":{{\"mode\":\"tag\",\"tagId\":{tagId}}}}}', true, 1, now(), now(), 'test')"))
+            {
+                await command.ExecuteNonQueryAsync(ct);
+            }
+
+            var unassigned = JsonNode.Parse(await DarlingMcpServerTagTools.UnassignServerTagCore(store, tagId, new[] { 41 }, ct))!;
+            Assert.Equal("unassigned", unassigned["status"]!.GetValue<string>());
+
+            var needsConfirm = JsonNode.Parse(await DarlingMcpServerTagTools.DeleteServerTagCore(store, tagId, false, ct))!;
+            Assert.Equal("confirm_required", needsConfirm["status"]!.GetValue<string>());
+
+            var deleted = JsonNode.Parse(await DarlingMcpServerTagTools.DeleteServerTagCore(store, tagId, true, ct))!;
+            Assert.Equal("deleted", deleted["status"]!.GetValue<string>());
+        }
+        finally
+        {
+            await ExecAsync(owner, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", ct);
         }
     }
 
