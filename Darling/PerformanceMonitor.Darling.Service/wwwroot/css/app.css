@@ -1124,3 +1124,10 @@ pre.code {
 .heat-band-5 { color: var(--bg); background: rgba(46, 174, 241, 0.65); }
 .heat-band-6 { color: var(--bg); background: rgba(46, 174, 241, 0.76); }
 .heat-band-7 { color: var(--bg); background: rgba(46, 174, 241, 0.87); }
+
+/* ─────────────────────────── analysis Recommendations tab ─────────────────────────── */
+
+.reco-group { margin-bottom: 0.6rem; }
+.reco-card { margin: 0.5rem 0; }
+.reco-fix { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-dark); padding: 0.6rem; border-radius: 4px; }
+.reco-actions { display: flex; gap: 0.5rem; margin-top: 0.4rem; }

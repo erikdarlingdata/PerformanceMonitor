@@ -85,6 +85,10 @@ try {
   fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
   fs.copyFileSync(path.join(jsDir, "panels.js"), path.join(scratch, "panels.js"));
   fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
+  /* Modules that server-tabs.js and panels.js import as other PRs land: copied when present. */
+  for (const f of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js")]) {
+    if (fs.existsSync(path.join(jsDir, f))) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
+  }
   fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
   for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js")]) {
     const from = path.join(jsDir, rel);
