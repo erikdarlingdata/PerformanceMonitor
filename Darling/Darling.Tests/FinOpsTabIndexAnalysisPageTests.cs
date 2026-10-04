@@ -72,18 +72,81 @@ public sealed class FinOpsTabIndexAnalysisPageTests
     public void TheTabReadsIndexAnalysisWithTheToolMaxLimit()
     {
         var tab = Tab();
-        Assert.Contains("readTool(\"get_finops\", { server, view: \"index_analysis\", limit: LIMIT }, ctx && ctx.signal)", tab);
+        Assert.Contains("const params = { server, view: \"index_analysis\", limit: LIMIT };", tab);
+        Assert.Contains("readTool(\"get_finops\", params, ctx && ctx.signal)", tab);
         var limit = Regex.Match(tab, "(?m)^const LIMIT = (\\d+);$");
         Assert.True(limit.Success);
         var max = Regex.Match(ToolsMain(), "private const int MaxLimit = (\\d+);");
         Assert.True(max.Success);
         Assert.Equal(int.Parse(max.Groups[1].Value), int.Parse(limit.Groups[1].Value));
-        var call = tab.Substring(tab.IndexOf("readTool(", System.StringComparison.Ordinal), 120);
+        // The first, unfiltered read sends neither optional parameter: they are added to params only from a choice.
+        var call = tab.Substring(tab.IndexOf("const params = ", System.StringComparison.Ordinal), 200);
+        call = call.Substring(0, call.IndexOf(';'));
         Assert.DoesNotContain("hours:", call);
         Assert.DoesNotContain("database_name:", call);
         Assert.DoesNotContain("full_text:", call);
         Assert.DoesNotContain("hours:", tab);
         Assert.DoesNotContain("full_text:", tab);
+    }
+
+    [Fact]
+    public void TheDatabaseFilterReReadsWithDatabaseName()
+    {
+        var tab = Tab();
+        Assert.Contains("if (choice.db) params.database_name = choice.db;", tab);
+        Assert.DoesNotContain("database_name: choice", tab);
+        Assert.Contains("type: \"text\", list: listId", tab);
+        Assert.Contains("el(\"datalist\", { id: listId })", tab);
+        Assert.Contains("choice.names = (data.databases || []).map((d) => d.database_name)", tab);
+        Assert.Contains("el(\"span\", { text: \"Database\" })", tab);
+        Assert.Contains("dbInput.addEventListener(\"change\"", tab);
+        Assert.Contains("choice.db = dbInput.value.trim();", tab);
+    }
+
+    [Fact]
+    public void TheFullTextToggleReReadsWithFullText()
+    {
+        var tab = Tab();
+        Assert.Contains("if (choice.full) params.full_text = true;", tab);
+        Assert.Contains("type: \"checkbox\"", tab);
+        Assert.Contains("Full script and definition text", tab);
+        Assert.Contains("fullBox.addEventListener(\"change\"", tab);
+        Assert.Contains("choice.full = fullBox.checked;", tab);
+    }
+
+    [Fact]
+    public void TheFilterAndToggleSurviveAPoll()
+    {
+        var tab = Tab();
+        Assert.Matches("(?m)^const choices = new Map\\(\\);$", tab);
+        var build = tab.Substring(tab.IndexOf("  build(server, ctx) {", System.StringComparison.Ordinal));
+        Assert.StartsWith("  build(server, ctx) {\n    const choice = choiceFor(server);", build);
+        Assert.DoesNotContain("const choices", build);
+        Assert.Contains("choices.get(server)", tab);
+    }
+
+    [Fact]
+    public void ALateReadDoesNotOverwriteANewerOne()
+    {
+        var tab = Tab();
+        Assert.Contains("const mine = ++generation;", tab);
+        Assert.Matches("(?m)^\\s+const res = await readTool\\(.*\\n\\s+if \\(mine !== generation\\) return;$", tab);
+    }
+
+    [Fact]
+    public void TheControlsAreNotRemountedByARead()
+    {
+        var tab = Tab();
+        Assert.Contains("return el(\"div\", {}, [controls, content]);", tab);
+        Assert.DoesNotContain("mount(controls", tab);
+        Assert.DoesNotContain("mount(body", tab);
+        Assert.Contains("mount(content, loadingStrip());", tab);
+    }
+
+    [Fact]
+    public void AFilteredNoticeNamesTheDatabase()
+    {
+        Assert.Contains("\" Database \" + db + \".\"", Tab());
     }
 
     [Fact]
@@ -193,8 +256,8 @@ public sealed class FinOpsTabIndexAnalysisPageTests
     {
         var tab = Tab();
         Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"aborted\" \\|\\| res\\.kind === \"auth\"\\) return;$", tab);
-        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"empty\"\\) return mount\\(body, emptyStrip\\(res\\.message\\)\\);$", tab);
-        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"error\"\\) return mount\\(body, readErrorStrip\\(res\\.message\\)\\);$", tab);
+        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"empty\"\\) return mount\\(content, emptyStrip\\(res\\.message\\)\\);$", tab);
+        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"error\"\\) return mount\\(content, readErrorStrip\\(res\\.message\\)\\);$", tab);
         Assert.Contains("Could not render this tab: ", tab);
     }
 

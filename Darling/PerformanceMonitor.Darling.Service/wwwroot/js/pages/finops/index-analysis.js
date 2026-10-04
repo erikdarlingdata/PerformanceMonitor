@@ -11,7 +11,10 @@
    Rows stay in payload order: recommendations largest index first, databases by total maximum savings. At most LIMIT
    recommendations and the first databases come back, and the notice says so. Differences from the desktop grid:
    the overall row has no workload figures, so those cells show "—"; an average wait of none shows 0.00; script and
-   definition text is cut by the read; analyzer notes sit in a collapsed block; there are no filters or tooltips. */
+   definition text is cut by the read unless the "Full script and definition text" box is ticked; analyzer notes sit in a
+   collapsed block; there are no tooltips. A Database box (any name; the list suggests the databases shown by the last
+   unfiltered read) and that box re-read the view; the controls stay put and only the content below them is remounted.
+   The choice is kept per server in module state, so it survives the page's poll rebuilds while the page stays open. */
 
 import { VIZ } from "../../panels.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtNum } from "../../util.js";
@@ -70,33 +73,73 @@ function recommendationRow(r) {
   return { ...r, index_size_gb_text: fmtNum(r.index_size_gb, 3) };
 }
 
-function noticeText(data, n) {
+// The latest choice per server: { db, full, names } where names are the databases of the last unfiltered read.
+const choices = new Map();
+
+function choiceFor(server) {
+  let c = choices.get(server);
+  if (!c) {
+    c = { db: "", full: false, names: [] };
+    choices.set(server, c);
+  }
+  return c;
+}
+
+let listCounter = 0;
+
+function noticeText(data, n, db) {
   const count = n === 0
     ? "No cleanup recommendations: indexes look clean."
     : (data.truncated ? "The largest " + n + " of " + data.recommendation_count + " recommendations." : n + (n === 1 ? " recommendation." : " recommendations."));
   const cut = data.databases_truncated ? " Showing the largest databases of " + data.database_count + "." : "";
   const workload = data.overall_workload_reason ? " Overall row: " + data.overall_workload_reason + "." : "";
-  return count + cut + " Analyzed from the latest collected snapshot." + workload;
+  const filter = db ? " Database " + db + "." : "";
+  return count + filter + cut + " Analyzed from the latest collected snapshot." + workload;
 }
 
 export const tab = {
   id: "index-analysis",
   label: "Index Analysis",
   build(server, ctx) {
-    const body = el("div", {}, [loadingStrip()]);
-    (async () => {
+    const choice = choiceFor(server);
+    const content = el("div", {}, [loadingStrip()]);
+    const listId = "index-analysis-databases-" + (++listCounter);
+    const datalist = el("datalist", { id: listId });
+    const fillNames = () => mount(datalist, choice.names.map((n) => el("option", { value: n })));
+    fillNames();
+    const dbInput = el("input", { type: "text", list: listId, class: "sort-select", autocomplete: "off", placeholder: "All databases" });
+    dbInput.value = choice.db;
+    const fullBox = el("input", { type: "checkbox" });
+    fullBox.checked = choice.full;
+    const controls = el("div", { class: "sort-control" }, [
+      el("label", { class: "sort-control" }, [el("span", { text: "Database" }), dbInput]),
+      datalist,
+      el("label", { class: "sort-control" }, [fullBox, el("span", { text: "Full script and definition text" })]),
+    ]);
+    let generation = 0;
+
+    async function load() {
+      const mine = ++generation;
+      const params = { server, view: "index_analysis", limit: LIMIT };
+      if (choice.db) params.database_name = choice.db;
+      if (choice.full) params.full_text = true;
       try {
-        const res = await readTool("get_finops", { server, view: "index_analysis", limit: LIMIT }, ctx && ctx.signal);
+        const res = await readTool("get_finops", params, ctx && ctx.signal);
+        if (mine !== generation) return;
         if (res.kind === "aborted" || res.kind === "auth") return;
-        if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-        if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+        if (res.kind === "error") return mount(content, readErrorStrip(res.message));
+        if (res.kind === "empty") return mount(content, emptyStrip(res.message));
         const data = res.data || {};
+        if (!choice.db) {
+          choice.names = (data.databases || []).map((d) => d.database_name).filter(Boolean);
+          fillNames();
+        }
         const recs = (data.recommendations || []).map(recommendationRow);
         const rollups = (data.overall ? [rollupRow({ ...data.overall, database_name: "ALL DATABASES" })] : [])
           .concat((data.databases || []).map(rollupRow));
         const lead = (data.uptime_warning ? 1 : 0) + (data.dedupe_only_applied ? 1 : 0);
         const notes = data.notes || [];
-        const parts = [noticeStrip(noticeText(data, recs.length))];
+        const parts = [noticeStrip(noticeText(data, recs.length, choice.db))];
         notes.slice(0, lead).forEach((t) => parts.push(noticeStrip(t)));
         const more = notes.slice(lead);
         if (more.length) {
@@ -109,11 +152,26 @@ export const tab = {
         parts.push(VIZ.table({ rows: rollups }, { rowsKey: "rows", columns: ROLLUP_COLUMNS, emptyText: "No index statistics collected yet." }));
         parts.push(el("h3", { text: "Recommendations" }));
         parts.push(VIZ.table({ rows: recs }, { rowsKey: "rows", columns: RECOMMENDATION_COLUMNS, emptyText: "No cleanup recommendations: indexes look clean." }));
-        mount(body, parts);
+        mount(content, parts);
       } catch (e) {
-        if (e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
+        if (mine === generation && e?.name !== "AbortError") mount(content, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
       }
-    })();
-    return body;
+    }
+
+    function reread() {
+      mount(content, loadingStrip());
+      load();
+    }
+
+    dbInput.addEventListener("change", () => {
+      choice.db = dbInput.value.trim();
+      reread();
+    });
+    fullBox.addEventListener("change", () => {
+      choice.full = fullBox.checked;
+      reread();
+    });
+    load();
+    return el("div", {}, [controls, content]);
   },
 };
