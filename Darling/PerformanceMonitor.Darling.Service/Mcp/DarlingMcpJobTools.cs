@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -16,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -100,6 +102,111 @@ public sealed class DarlingMcpJobTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_running_jobs", ex);
+        }
+    }
+
+    /// <summary>The run statuses <c>get_job_history</c> accepts, by their <c>sysjobhistory</c> codes 0 to 3.</summary>
+    private static readonly string[] HistoryStatuses = ["Failed", "Succeeded", "Retry", "Canceled"];
+
+    [McpServerTool(Name = "get_job_history"), Description("Gets retained SQL Agent job runs (steps and job outcomes) whose run time falls in a window ending at as_of, newest first, for one server or the whole fleet. Filters job_name, status and category apply before the limit. run_time and last_success are UTC. Empty: no run matched; not_collected means this engine has no Agent history. window_truncated marks a window floor, not a limit cut; effective_start gives the reach served; truncated marks a limit cut.")]
+    public static async Task<string> GetJobHistory(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name. Omit for every server.")] string? server_name = null,
+        [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
+        [Description("Exact job name, case-insensitive.")] string? job_name = null,
+        [Description("Run status: Failed, Succeeded, Retry or Canceled.")] string? status = null,
+        [Description("Exact job category name, case-insensitive.")] string? category = null,
+        [Description("Maximum number of runs to return. Default 100.")] int limit = 100,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
+    {
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd)
+            ?? McpHelpers.ValidateTop(limit)
+            ?? McpHelpers.ValidateChoice(status, HistoryStatuses, "status");
+        if (validation != null) return validation;
+
+        try
+        {
+            /* Fleet-wide when no server is named: the resolver would auto-pick or refuse, and neither is the
+               answer to "every server". A named server resolves through the registry as everywhere else. */
+            (int ServerId, string ServerName)? scope = null;
+            if (!string.IsNullOrWhiteSpace(server_name))
+            {
+                var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
+                if (fault != null) return fault;
+                var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, server_name);
+                if (error != null) return error;
+                scope = resolved;
+            }
+
+            var filter = new JobHistoryFilter(
+                string.IsNullOrWhiteSpace(job_name) ? null : job_name.Trim(),
+                string.IsNullOrWhiteSpace(status) ? null : Array.FindIndex(HistoryStatuses, s => string.Equals(s, status.Trim(), StringComparison.OrdinalIgnoreCase)),
+                string.IsNullOrWhiteSpace(category) ? null : category.Trim(),
+                windowEnd);
+
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var fetched = await DarlingJobHistoryReader.GetAsync(
+                postgres, requestedStart, scope?.ServerId, limit + 1, McpCommandDeadlines.ReadSeconds, filter, cancellationToken);
+            var truncated = fetched.Count > limit;
+            var rows = fetched.Take(limit).ToList();
+
+            var source = DataWindowFloor.Source.ForCollectorTable("job_history");
+            var floor = scope is { } one
+                ? await DataWindowFloor.GetForServerAsync(postgres, source, one.ServerId, requestedStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken)
+                : await DataWindowFloor.GetAsync(postgres, [source], null, requestedStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            /* Job history is an event surface: a run's own time can sit long before the collection that stored it,
+               so coverage starts at the earlier of the probe's floor and the oldest run shown. */
+            if (rows.Count > 0 && rows[^1].RunDateTimeUtc is { } oldest && (floor is null || oldest < floor))
+                floor = oldest;
+            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
+            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+
+            if (rows.Count == 0)
+            {
+                if (scope is { } s1)
+                {
+                    var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, s1.ServerId, s1.ServerName, "job_history", cancellationToken);
+                    if (notCollected != null) return notCollected;
+                }
+
+                return McpHelpers.Status("empty", "No job runs matched in the requested time range.", new
+                {
+                    effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
+                    window_truncated = windowTruncated
+                });
+            }
+
+            var runs = rows.Select(r => new
+            {
+                run_time = McpHelpers.FormatEffectiveStart(r.RunDateTimeUtc),
+                server = r.ServerName,
+                job_name = r.JobName,
+                category = r.CategoryName,
+                step = r.StepId == 0 ? "(Job outcome)" : $"{r.StepId}: {r.StepName}",
+                status = r.RunStatus >= 0 && r.RunStatus < HistoryStatuses.Length ? HistoryStatuses[r.RunStatus] : r.RunStatusDesc,
+                duration_seconds = r.RunDurationSeconds,
+                duration_formatted = DarlingJobReader.FormatDuration(r.RunDurationSeconds),
+                retries = r.RetriesAttempted,
+                last_success = McpHelpers.FormatEffectiveStart(r.LastSuccessfulRunUtc),
+                is_long_running = r.IsLongRunning,
+                message = McpHelpers.Truncate(r.Message, 500)
+            }).ToList();
+
+            return JsonSerializer.Serialize(new
+            {
+                server = scope?.ServerName,
+                hours_back,
+                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
+                window_truncated = windowTruncated,
+                shown = runs.Count,
+                truncated,
+                runs
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_job_history", ex);
         }
     }
 }

@@ -102,13 +102,8 @@ public sealed class PgStatementEvictionNoteTests
         Assert.DoesNotContain("evicted entries", mcp, StringComparison.Ordinal);
         Assert.DoesNotContain("evicted entries", viewer, StringComparison.Ordinal);
 
-        var at = web.IndexOf("\"get_pg_top_queries\",\r\n        { server, hours: ctx.hours, limit: 20 }", StringComparison.Ordinal);
-        if (at < 0)
-        {
-            at = web.IndexOf("\"get_pg_top_queries\",\n        { server, hours: ctx.hours, limit: 20 }", StringComparison.Ordinal);
-        }
-
+        var at = web.IndexOf("fanout(\"get_pg_top_queries\"", StringComparison.Ordinal);
         Assert.True(at >= 0, "the Top Query Shapes panel moved");
-        Assert.Contains("\"evictions.note\"", web.Substring(at, 700), StringComparison.Ordinal);
+        Assert.Contains("noteKey: \"evictions.note\"", web.Substring(at, 1500), StringComparison.Ordinal);
     }
 }

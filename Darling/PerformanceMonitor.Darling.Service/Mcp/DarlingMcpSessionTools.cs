@@ -208,6 +208,7 @@ public sealed class DarlingMcpSessionTools
                 reads = r.Reads,
                 writes = r.Writes,
                 wait_type = string.IsNullOrEmpty(r.WaitType) ? null : r.WaitType,
+                wait_resource = string.IsNullOrEmpty(r.WaitResource) ? null : r.WaitResource,
                 wait_time_ms = r.WaitTimeMs > 0 ? r.WaitTimeMs : (long?)null,
                 blocking_session_id = r.BlockingSessionId > 0 ? r.BlockingSessionId : (int?)null,
                 /* #3541 A13: the two blocking disclosures. is_head_blocker is why a WAITFOR row can be here;
@@ -219,6 +220,8 @@ public sealed class DarlingMcpSessionTools
                 granted_query_memory_gb = r.GrantedQueryMemoryGb > 0 ? r.GrantedQueryMemoryGb : (double?)null,
                 transaction_isolation_level = string.IsNullOrEmpty(r.TransactionIsolationLevel) ? null : r.TransactionIsolationLevel,
                 open_transaction_count = r.OpenTransactionCount > 0 ? r.OpenTransactionCount : (int?)null,
+                percent_complete = r.PercentComplete > 0 ? r.PercentComplete : null,
+                query_hash = string.IsNullOrEmpty(r.QueryHash) ? null : r.QueryHash,
                 login_name = r.LoginName,
                 host_name = r.HostName,
                 program_name = r.ProgramName,

@@ -503,6 +503,7 @@
         "type": "Project",
         "dependencies": {
           "Npgsql": "[10.0.3, )",
+          "PerformanceMonitor.Analysis": "[3.9.0, )",
           "PerformanceMonitor.Collectors": "[3.9.0, )",
           "PerformanceMonitor.Common": "[3.9.0, )",
           "PerformanceMonitor.PlanAnalysis": "[3.9.0, )"
