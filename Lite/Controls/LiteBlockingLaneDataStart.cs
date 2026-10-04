@@ -44,22 +44,32 @@ internal static class LiteBlockingLaneDataStart
     }
 
     /// <summary>
-    /// The note step: probes BOTH relations over the window the chart's reads took (a window of 90 minutes or less starts no probe,
-    /// and a probe that throws costs only its series' start), chooses the start, and words the banner in <paramref name="zone"/>.
-    /// <paramref name="floorOf"/> is <c>LocalDataService.GetQueryWindowFloorAsync</c> for the relation. Static so the live-store
-    /// tests drive it without building the UserControl.
+    /// The note step: chooses the start the note names, then words the banner in <paramref name="zone"/>
+    /// (<see cref="ServerTab.ApplyWindowFloorToBanner"/>). The banner is touched on the caller's thread only, after the start is chosen.
     /// </summary>
     internal static async Task ShowAsync(
         TextBlock banner, Func<QueryWindowRelation, Task<DateTime?>> floorOf, DateTime startUtc, DateTime endUtc,
         IEnumerable<TrendPoint> blockingBars, IEnumerable<TrendPoint> deadlockBars, TimeZoneInfo zone)
+    {
+        var start = await StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars);
+        ServerTab.ApplyWindowFloorToBanner(banner, start, startUtc, zone);
+    }
+
+    /// <summary>
+    /// Probes BOTH relations over the window the chart's reads took (a window of 90 minutes or less starts no probe, and a probe
+    /// that throws costs only its series' start) and chooses the start. <paramref name="floorOf"/> is
+    /// <c>LocalDataService.GetQueryWindowFloorAsync</c> for the relation. Touches no WPF object, so the live-store tests drive it.
+    /// </summary>
+    internal static async Task<DateTime?> StartAsync(
+        Func<QueryWindowRelation, Task<DateTime?>> floorOf, DateTime startUtc, DateTime endUtc,
+        IEnumerable<TrendPoint> blockingBars, IEnumerable<TrendPoint> deadlockBars)
     {
         var blockingProbe = ServerTab.ProbeWindowFloorOrNullAsync(
             () => floorOf(QueryWindowRelation.BlockedProcessReports), "Overview blocking chart (blocking)", startUtc, endUtc);
         var deadlockProbe = ServerTab.ProbeWindowFloorOrNullAsync(
             () => floorOf(QueryWindowRelation.Deadlocks), "Overview blocking chart (deadlocks)", startUtc, endUtc);
 
-        var start = await ChooseAsync(blockingProbe, deadlockProbe, blockingBars, deadlockBars);
-        ServerTab.ApplyWindowFloorToBanner(banner, start, startUtc, zone);
+        return await ChooseAsync(blockingProbe, deadlockProbe, blockingBars, deadlockBars);
     }
 
     /// <summary>One series' start: the earlier of its floor and its earliest bar with a count above zero; whichever exists; null when neither.</summary>

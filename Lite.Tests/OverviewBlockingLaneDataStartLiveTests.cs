@@ -80,9 +80,13 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
     {
         var service = new LocalDataService(_duckDb);
         floorOf ??= relation => service.GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc);
-        var banner = OnStaThread(() => new System.Windows.Controls.TextBlock());
-        await LiteBlockingLaneDataStart.ShowAsync(banner, floorOf, startUtc, endUtc, blockingBars, deadlockBars, TimeZoneInfo.Utc);
-        return OnStaThread(() => (banner.Visibility == System.Windows.Visibility.Visible, banner.Text));
+        var start = await LiteBlockingLaneDataStart.StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars);
+        return OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock();
+            ServerTab.ApplyWindowFloorToBanner(banner, start, startUtc, TimeZoneInfo.Utc);
+            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text);
+        });
     }
 
     /// <summary>Blocking was collected from 2 days back, deadlocks from 3: the one note names the later start, in the chart's zone.</summary>

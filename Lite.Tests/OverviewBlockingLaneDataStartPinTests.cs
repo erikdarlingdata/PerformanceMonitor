@@ -78,6 +78,7 @@ public sealed class OverviewBlockingLaneDataStartPinTests
         Assert.Contains("floorOf(QueryWindowRelation.BlockedProcessReports)", step, StringComparison.Ordinal);
         Assert.Contains("floorOf(QueryWindowRelation.Deadlocks)", step, StringComparison.Ordinal);
         Assert.Equal(2, Regex.Matches(step, @"ServerTab\.ProbeWindowFloorOrNullAsync\(").Count);
+        Assert.Contains("StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars)", step, StringComparison.Ordinal);
         Assert.Contains("ChooseAsync(blockingProbe, deadlockProbe, blockingBars, deadlockBars)", step, StringComparison.Ordinal);
         Assert.Contains("ServerTab.ApplyWindowFloorToBanner(banner, start, startUtc, zone)", step, StringComparison.Ordinal);
         Assert.Contains("bar.Count > 0", Step(), StringComparison.Ordinal);
