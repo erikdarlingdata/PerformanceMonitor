@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
@@ -16,7 +17,7 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// The Window picker on the FinOps Optimization, High Impact and Application Connections tabs, run from the shipped
+/// The Window picker on the FinOps Optimization and High Impact tabs, run from the shipped
 /// page scripts under Node (<c>finops-window-picker-harness.mjs</c>): the first build reads 24 hours, a pick re-reads
 /// with the chosen hours, a rebuild for the same server (the 60 s poll) keeps the pick, and another server starts at
 /// 24 hours again. Node is skipped when it is not installed.
@@ -60,7 +61,6 @@ public sealed class FinOpsWindowPickerBehaviourTests
     [Theory]
     [InlineData("optimization")]
     [InlineData("high-impact")]
-    [InlineData("application-connections")]
     public void ThePickKeepsAcrossARebuildForTheSameServerAndResetsForAnother(string tab)
     {
         var t = Run().GetProperty(tab);
@@ -83,5 +83,33 @@ public sealed class FinOpsWindowPickerBehaviourTests
         var other = t.GetProperty("other");
         Assert.Equal(new[] { "24" }, Hours(other));
         Assert.Equal("24", other.GetProperty("select").GetString());
+    }
+
+    [Fact]
+    public void TheExpensiveQueriesNoticeSaysTheKeptTextWindowWhenTheServiceCutTheAskedOne()
+    {
+        var notice = Run().GetProperty("expensiveNotice");
+        var cut = notice.GetProperty("cut").GetString()!;
+        Assert.Contains("showing the last 3 days; query text and plans are not retained beyond that", cut);
+        Assert.DoesNotContain("last 168 hours", cut);
+
+        var uncut = notice.GetProperty("uncut").GetString()!;
+        Assert.Contains("last 24 hours, from ", uncut);
+        Assert.DoesNotContain("not retained", uncut);
+    }
+
+    [Fact]
+    public void TheIndexAnalysisCollectedTimeIsSetOnlyForANameOneDatabaseOwns_AndTheCompareIsCaseSensitive()
+    {
+        var c = Run().GetProperty("indexCollected");
+        var text = c.GetProperty("text").GetString()!;
+        var marker = "Original DefinitionScriptCollected";
+        var rec = text[(text.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..];
+
+        // Two ids share "Shared": neither roll-up time is borrowed. "Solo" and "solo" differ by case: each gets its own.
+        Assert.DoesNotContain(c.GetProperty("shared1").GetString()!, rec);
+        Assert.DoesNotContain(c.GetProperty("shared2").GetString()!, rec);
+        Assert.Contains(c.GetProperty("solo").GetString()!, rec);
+        Assert.Contains(c.GetProperty("lower").GetString()!, rec);
     }
 }

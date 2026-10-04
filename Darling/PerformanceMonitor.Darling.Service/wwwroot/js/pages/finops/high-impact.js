@@ -16,7 +16,7 @@ import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, error
 // The default window.
 const HOURS = 24;
 
-// The desktop's window picker (FinOpsTab.xaml ~:497-499), as hours.
+// The desktop's window choices (FinOpsTab.xaml ~:874), as hours.
 const WINDOWS = [
   { value: 1, label: "Last 1 hour" },
   { value: 4, label: "Last 4 hours" },

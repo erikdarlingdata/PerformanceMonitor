@@ -71,8 +71,15 @@ function rollupRow(r) {
   return { ...r, reads_breakdown: r.total_reads == null ? null : fmtInt(r.total_reads) + " (" + fmtInt(r.user_seeks) + " seeks, " + fmtInt(r.user_scans) + " scans, " + fmtInt(r.user_lookups) + " lookups)" };
 }
 
-// A recommendation carries no snapshot time of its own; its database's roll-up does (captured_at), and the cell stays
-// missing for a database the roll-up list does not hold.
+// A recommendation carries no snapshot time of its own; its database's roll-up does (captured_at). The time is set only
+// when exactly one listed database row has that name (ordinal, case-sensitive); two ids sharing a name, or a database the
+// roll-up list does not hold (the web sees only the databases shown, not every roll-up), leave the cell missing.
+function capturedByName(databases) {
+  const seen = new Map();
+  for (const d of databases) seen.set(d.database_name, seen.has(d.database_name) ? null : (d.captured_at ?? null));
+  return seen;
+}
+
 function recommendationRow(r, captured) {
   return { ...r, index_size_gb_text: fmtNum(r.index_size_gb, 3), captured_at: captured.get(r.database_name) ?? null };
 }
@@ -138,7 +145,7 @@ export const tab = {
           choice.names = (data.databases || []).map((d) => d.database_name).filter(Boolean);
           fillNames();
         }
-        const captured = new Map((data.databases || []).map((d) => [d.database_name, d.captured_at]));
+        const captured = capturedByName(data.databases || []);
         const recs = (data.recommendations || []).map((r) => recommendationRow(r, captured));
         const rollups = (data.overall ? [rollupRow({ ...data.overall, database_name: "ALL DATABASES" })] : [])
           .concat((data.databases || []).map(rollupRow));

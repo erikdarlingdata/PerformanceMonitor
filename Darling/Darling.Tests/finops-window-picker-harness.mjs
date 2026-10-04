@@ -1,4 +1,4 @@
-/* Runs the shipped Optimization, High Impact and Application Connections tabs (wwwroot/js/pages/finops) against a
+/* Runs the shipped Optimization and High Impact tabs (wwwroot/js/pages/finops) against a
    recording fetch and a node-tree DOM, and prints as one line of JSON what each tab asked for: the first build, a change
    of the Window picker, a rebuild for the same server (the 60 s poll) and a build for another server.
        node finops-window-picker-harness.mjs <path to wwwroot/js> */
@@ -60,9 +60,10 @@ globalThis.document = {
 };
 
 const fetches = [];
+let body = "{}";
 globalThis.fetch = async (url) => {
   fetches.push(String(url));
-  return { status: 200, ok: true, text: async () => "{}" };
+  return { status: 200, ok: true, text: async () => body };
 };
 
 const find = (node, tag) => (node.tag === tag ? node : node.children.map((c) => find(c, tag)).find(Boolean) || null);
@@ -73,7 +74,7 @@ try {
   fs.mkdirSync(path.join(scratch, "pages", "finops"), { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   for (const f of ["util.js", "panels.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  for (const f of ["optimization.js", "high-impact.js", "application-connections.js"]) {
+  for (const f of ["optimization.js", "high-impact.js", "index-analysis.js"]) {
     fs.copyFileSync(path.join(jsDir, "pages", "finops", f), path.join(scratch, "pages", "finops", f));
   }
   fs.writeFileSync(
@@ -81,7 +82,7 @@ try {
     'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n'
   );
   const out = {};
-  for (const name of ["optimization", "high-impact", "application-connections"]) {
+  for (const name of ["optimization", "high-impact"]) {
     const { tab } = await import(pathToFileURL(path.join(scratch, "pages", "finops", name + ".js")).href);
     const run = async (server, pick) => {
       fetches.length = 0;
@@ -101,6 +102,42 @@ try {
       other: await run("srv-b"),
     };
   }
+
+  // The Expensive Queries notice: a window the service cut to the kept query-text days says so; an uncut one keeps the hours.
+  const { tab: optimization } = await import(pathToFileURL(path.join(scratch, "pages", "finops", "optimization.js")).href);
+  const noticeFor = async (windowHours, startedHoursAgo) => {
+    const start = new Date(Date.now() - startedHoursAgo * 3600000).toISOString();
+    body = JSON.stringify({ expensive_queries: { status: "ok", rows: [], window_hours: windowHours, effective_start: start } });
+    const root = optimization.build("srv-notice-" + windowHours, {});
+    await new Promise((r) => setTimeout(r, 20));
+    return root.textContent;
+  };
+  out.expensiveNotice = { cut: await noticeFor(168, 72), uncut: await noticeFor(24, 24) };
+
+  // The Index Analysis Collected cell: set only when exactly one listed database row has the name (ordinal comparison).
+  const { tab: indexAnalysis } = await import(pathToFileURL(path.join(scratch, "pages", "finops", "index-analysis.js")).href);
+  const { applyFormat } = await import(pathToFileURL(path.join(scratch, "util.js")).href);
+  const stamp = (d) => applyFormat("time", d);
+  const rec = (n) => ({ database_name: n, table_name: "t", index_name: "i", action: "DISABLE" });
+  body = JSON.stringify({
+    databases: [
+      { database_name: "Shared", captured_at: "2026-03-01T10:00:00Z" },
+      { database_name: "Shared", captured_at: "2026-03-05T11:00:00Z" },
+      { database_name: "Solo", captured_at: "2026-03-02T12:00:00Z" },
+      { database_name: "solo", captured_at: "2026-03-03T13:00:00Z" },
+    ],
+    recommendations: [rec("Shared"), rec("Solo"), rec("solo")],
+  });
+  const rootIa = indexAnalysis.build("srv-ia", {});
+  await new Promise((r) => setTimeout(r, 20));
+  const text = rootIa.textContent;
+  out.indexCollected = {
+    text,
+    shared1: stamp("2026-03-01T10:00:00Z"),
+    shared2: stamp("2026-03-05T11:00:00Z"),
+    solo: stamp("2026-03-02T12:00:00Z"),
+    lower: stamp("2026-03-03T13:00:00Z"),
+  };
   console.log(JSON.stringify(out));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });

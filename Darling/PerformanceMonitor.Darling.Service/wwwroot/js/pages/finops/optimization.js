@@ -17,7 +17,9 @@ import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, error
 // The default window.
 const HOURS = 24;
 
-// The desktop's window picker (FinOpsTab.xaml ~:497-499), as hours.
+// The desktop's window choices (FinOpsTab.xaml ~:791 Wait Stats and ~:818 Expensive Queries), as hours. The desktop has a
+// picker for each of those two sections; the web keeps ONE picker that moves both. The other sections stay fixed, as on
+// the desktop.
 const WINDOWS = [
   { value: 1, label: "Last 1 hour" },
   { value: 4, label: "Last 4 hours" },
@@ -103,7 +105,15 @@ function windowNotice(s) {
 }
 
 function queryNotice(s) {
-  let text = "Top " + (s.rows || []).length + " by CPU, last " + (s.window_hours ?? HOURS) + " hours";
+  const hours = s.window_hours ?? HOURS;
+  const start = s.effective_start ? Date.parse(s.effective_start) : NaN;
+  // The service cuts this section to the window query text is kept for, so a start later than the asked window began
+  // means the window was shortened: say what is shown, with the length taken from the start.
+  if (Number.isFinite(start) && start > Date.now() - hours * 3600000 + 60000) {
+    const days = Math.max(1, Math.round((Date.now() - start) / 86400000));
+    return "Top " + (s.rows || []).length + " by CPU, showing the last " + days + " days; query text and plans are not retained beyond that.";
+  }
+  let text = "Top " + (s.rows || []).length + " by CPU, last " + hours + " hours";
   if (s.effective_start) text += ", from " + applyFormat("time", s.effective_start) + " (local time)";
   return text + ".";
 }

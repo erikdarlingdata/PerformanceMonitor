@@ -165,7 +165,7 @@ public sealed class FinOpsTabOptimizationPageTests
         Assert.Contains("let text = (n === 1 ? \"1 idle database\" : n + \" idle databases\") + \" over the last \" + (s.window_days ?? \"?\") + \" days\";", tab);
         Assert.Contains("text += s.truncated ? \"; the top \" + n + \" of \" + (s.database_count ?? \"more\") + \".\" : \".\";", tab);
         Assert.Contains("return \"last \" + (s.window_hours ?? HOURS) + \" hours\";", tab);
-        Assert.Contains("let text = \"Top \" + (s.rows || []).length + \" by CPU, last \" + (s.window_hours ?? HOURS) + \" hours\";", tab);
+        Assert.Contains("let text = \"Top \" + (s.rows || []).length + \" by CPU, last \" + hours + \" hours\";", tab);
         Assert.Contains("if (s.effective_start) text += \", from \" + applyFormat(\"time\", s.effective_start) + \" (local time)\";", tab);
         Assert.Contains("\"Est. cost shares split the server's $\" + applyFormat(\"num2\", data.monthly_cost_usd) + \" monthly cost pro-rated to this window (\" + hours + \" hours); they are an attribution, not a measured cost.\"", tab);
         Assert.Contains(": (data.cost_reason ?? \"monthly cost not set\") + \", so Est. cost share is blank.\";", tab);
