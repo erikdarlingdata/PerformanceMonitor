@@ -129,6 +129,10 @@ public static class StoreLogClassifier
     /// or a read boundary, not JSON): every such plan is one row, whatever the statement was.</summary>
     public const string WithheldPlanMessage = "plan withheld";
 
+    /// <summary>What a plan that parsed but is too large to keep holds in place of its JSON: the marker and the
+    /// JSON's length in characters, never any of its content.</summary>
+    public const string PlanTooLargeMarker = "plan too large to keep: ";
+
     /// <summary>What a kept statement reads as when it cannot be read to its end (cut at a cap or a read
     /// boundary, or opening a literal it never closes): the masking fails closed rather than trusting a mask
     /// that cannot know what the cut hid.</summary>
