@@ -478,8 +478,9 @@ export function buildQuery(params) {
    the poll loop (app.js refresh()) can tell whether the page it is about to re-render has already settled
    before firing a whole new set of the same reads on top of it. apiSendRead (a read that must travel as a POST,
    the composed-panel run) IS counted, so a slow panel holds the poll off and the refresh back-off measures it.
-   apiGetFleet and apiSend are deliberately NOT counted here — the fleet read is the one request every caller
-   already shares regardless of render (#3895), and a mutation is not a "page read" a poll tick should wait out. */
+   apiGetFleet IS counted too (each caller counts its own wait on the shared request), so a render whose reads are
+   fleet reads is timed for as long as it ran. apiSend is deliberately NOT counted: a mutation is not a "page read"
+   a poll tick should wait out. */
 let inFlightReads = 0;
 
 /** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
@@ -529,15 +530,20 @@ let fleetRequest = null;
  * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
  */
 export async function apiGetFleet() {
-  if (!fleetRequest) {
-    fleetRequest = fetchBody("/api/fleet").finally(() => {
-      fleetRequest = null;
-    });
-  }
+  inFlightReads++;
+  try {
+    if (!fleetRequest) {
+      fleetRequest = fetchBody("/api/fleet").finally(() => {
+        fleetRequest = null;
+      });
+    }
 
-  const shared = await fleetRequest;
-  if (shared.transportError) return { kind: "error", message: shared.transportError };
-  return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    const shared = await fleetRequest;
+    if (shared.transportError) return { kind: "error", message: shared.transportError };
+    return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+  } finally {
+    inFlightReads--;
+  }
 }
 
 /** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a
