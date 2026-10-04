@@ -179,7 +179,7 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,sevKey,statusSev}] } */
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev}] } */
 function vizTable(data, desc) {
   const allCols = Array.isArray(desc.columns) ? desc.columns : [];
   if (!allCols.length) return emptyStrip(NO_FIELDS_MSG);
@@ -227,6 +227,7 @@ function cell(row, c) {
     const rcls = [];
     if (c.wrap) rcls.push("wrap");
     if (c.mono) rcls.push("mono");
+    if (c.pre) rcls.push("pre");
     return el("td", { class: rcls.join(" ") || null }, [c.render(row)]);
   }
   const raw = getPath(row, c.key);
@@ -234,6 +235,7 @@ function cell(row, c) {
   if (isNumericCol(c)) cls.push("num");
   if (c.wrap) cls.push("wrap");
   if (c.mono) cls.push("mono");
+  if (c.pre) cls.push("pre");
   if (c.sevKey) cls.push(sevClass(getPath(row, c.sevKey)));
   if (c.statusSev) cls.push(sevClass(statusToSev(raw)));
   /* nullKey names another field of the SAME row that says why this one is empty (get_file_io_stats' size_note:

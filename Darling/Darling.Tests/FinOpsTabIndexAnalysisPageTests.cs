@@ -213,7 +213,52 @@ public sealed class FinOpsTabIndexAnalysisPageTests
     public void TheEnvelopeKeysTheTabReadsAreEmitted(string key)
     {
         Assert.Matches(KeyPattern(key), EnvelopeSlice());
-        Assert.Contains("data." + key, Tab());
+        Assert.Matches(@"data\." + key + @"\b", Tab());
+    }
+
+    [Fact]
+    public void TheTypedDatabaseTextSurvivesAPoll()
+    {
+        var tab = Tab();
+        Assert.Matches(@"addEventListener\(""input"", \(\) => \{\s*choice\.draft = dbInput\.value;", tab);
+        Assert.Contains("choice.caret = [dbInput.selectionStart, dbInput.selectionEnd];", tab);
+        Assert.Contains("dbInput.value = choice.draft ?? choice.db;", tab);
+        Assert.Matches(@"addEventListener\(""change"", \(\) => \{\s*choice\.db = dbInput\.value\.trim\(\);\s*choice\.draft = undefined;", tab);
+    }
+
+    [Fact]
+    public void FocusSurvivesAPoll()
+    {
+        var tab = Tab();
+        Assert.Matches(@"addEventListener\(""focus"", \(\) => \{\s*choice\.focused = true;", tab);
+        Assert.Matches(@"addEventListener\(""blur"", \(\) => \{\s*if \(dbInput\.isConnected\) choice\.focused = false;", tab);
+        Assert.Matches(@"if \(choice\.focused\) \{\s*setTimeout\(\(\) => \{\s*if \(dbInput\.isConnected\) \{\s*dbInput\.focus\(\);\s*if \(choice\.caret\) dbInput\.setSelectionRange\(choice\.caret\[0\], choice\.caret\[1\]\);", tab);
+        Assert.DoesNotContain("requestAnimationFrame", tab);
+    }
+
+    [Fact]
+    public void TheFullTextColumnsKeepTheirLineBreaks()
+    {
+        var tab = Tab();
+        Assert.Contains("{ key: \"original_index_definition\", label: \"Original Definition\", wrap: true, mono: true, pre: true }", tab);
+        Assert.Contains("{ key: \"script\", label: \"Script\", wrap: true, mono: true, pre: true }", tab);
+        var panels = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js").ReplaceLineEndings("\n");
+        Assert.Equal(2, Regex.Matches(panels, @"if \(c\.pre\) (rcls|cls)\.push\(""pre""\);").Count);
+        var css = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css").ReplaceLineEndings("\n");
+        var wrap = css.IndexOf("table.data td.wrap {", System.StringComparison.Ordinal);
+        var pre = css.IndexOf("table.data td.pre { white-space: pre-wrap; }", System.StringComparison.Ordinal);
+        Assert.True(wrap >= 0 && pre > wrap, "td.pre must follow td.wrap so it wins");
+    }
+
+    [Fact]
+    public void TheLeadNotesAreTheUptimeThenDedupeNotesTheServerEmitsFirst()
+    {
+        var source = ToolSource();
+        var uptime = source.IndexOf("notes.Add(IndexAnalysisUptimeNote)", System.StringComparison.Ordinal);
+        var dedupe = source.IndexOf("notes.Add(IndexAnalysisDedupeNote)", System.StringComparison.Ordinal);
+        var analyzer = source.IndexOf("notes.AddRange(result.Notes)", System.StringComparison.Ordinal);
+        Assert.True(uptime >= 0 && dedupe > uptime, "uptime note must come before the dedupe note");
+        Assert.True(analyzer > dedupe, "analyzer notes must come after both lead notes");
     }
 
     [Fact]

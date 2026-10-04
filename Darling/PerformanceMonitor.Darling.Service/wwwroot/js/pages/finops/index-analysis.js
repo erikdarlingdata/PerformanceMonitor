@@ -60,8 +60,8 @@ const RECOMMENDATION_COLUMNS = [
   { key: "target_index_name", label: "Target Index" },
   { key: "superseded_by", label: "Superseded / Related", wrap: true },
   { key: "additional_info", label: "Info", wrap: true },
-  { key: "original_index_definition", label: "Original Definition", wrap: true, mono: true },
-  { key: "script", label: "Script", wrap: true, mono: true },
+  { key: "original_index_definition", label: "Original Definition", wrap: true, mono: true, pre: true },
+  { key: "script", label: "Script", wrap: true, mono: true, pre: true },
 ];
 
 // The reads cell as the desktop writes it. The overall row carries no counters, so its cell stays missing.
@@ -108,7 +108,7 @@ export const tab = {
     const fillNames = () => mount(datalist, choice.names.map((n) => el("option", { value: n })));
     fillNames();
     const dbInput = el("input", { type: "text", list: listId, class: "sort-select", autocomplete: "off", placeholder: "All databases" });
-    dbInput.value = choice.db;
+    dbInput.value = choice.draft ?? choice.db;
     const fullBox = el("input", { type: "checkbox" });
     fullBox.checked = choice.full;
     const controls = el("div", { class: "sort-control" }, [
@@ -163,8 +163,21 @@ export const tab = {
       load();
     }
 
+    // The panel is rebuilt on every poll. Keep the uncommitted text, the caret and the focus on the per-server
+    // choice so the new box can take them back. A blur caused by the old panel leaving the page must not clear focus.
+    dbInput.addEventListener("input", () => {
+      choice.draft = dbInput.value;
+      choice.caret = [dbInput.selectionStart, dbInput.selectionEnd];
+    });
+    dbInput.addEventListener("focus", () => {
+      choice.focused = true;
+    });
+    dbInput.addEventListener("blur", () => {
+      if (dbInput.isConnected) choice.focused = false;
+    });
     dbInput.addEventListener("change", () => {
       choice.db = dbInput.value.trim();
+      choice.draft = undefined;
       reread();
     });
     fullBox.addEventListener("change", () => {
@@ -172,6 +185,14 @@ export const tab = {
       reread();
     });
     load();
+    if (choice.focused) {
+      setTimeout(() => {
+        if (dbInput.isConnected) {
+          dbInput.focus();
+          if (choice.caret) dbInput.setSelectionRange(choice.caret[0], choice.caret[1]);
+        }
+      }, 0);
+    }
     return el("div", {}, [controls, content]);
   },
 };
