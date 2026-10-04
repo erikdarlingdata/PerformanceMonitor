@@ -418,6 +418,7 @@ table.data th {
 table.data tbody tr:nth-child(even) { background: var(--row-alt); }
 table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.data td.wrap { white-space: normal; max-width: 620px; }
+table.data td.pre { white-space: pre-wrap; }
 table.data td.mono { font-family: var(--mono); font-size: 0.78rem; }
 table.data td.sev-Warning { color: var(--warn); }
 table.data td.sev-Critical { color: var(--err); }
