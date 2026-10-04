@@ -61,6 +61,15 @@ public sealed class FinOpsStorageGrowthViewTests
     }
 
     [Fact]
+    public void GuideTail_NoLongerSaysTheHeatmapAndGridCanDiffer()
+    {
+        var tail = McpToolGuideTests.Served("get_finops").Tail;
+        Assert.NotNull(tail);
+        Assert.DoesNotContain("can differ from the grid", tail, StringComparison.Ordinal);
+        Assert.Contains("a table created in the window counts its whole size", tail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ViewsAllowList_ContainsTheView() =>
         Assert.Contains("storage_growth", DarlingMcpFinOpsTools.Views);
 
