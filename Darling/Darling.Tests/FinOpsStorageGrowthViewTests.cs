@@ -370,23 +370,22 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var c = new NpgsqlConnection(scratch.ConnectionString);
         await c.OpenAsync(ct);
-        /* A database that left collection scope: its newest index snapshot is at a fixed instant, long before the others. */
-        var old = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Unspecified);
-        await Obj(c, ct, old.AddDays(-1), "Gone", "Old", 1, "PK_Old", 9m, 1, 1, null);
-        await Obj(c, ct, old, "Gone", "Old", 1, "PK_Old", 10m, 1, 1, null);
-        await Obj(c, ct, old, "Gone", "Old", 2, "IX_Old", 5m, 0, 0, null);
-        await Size(c, ct, DarlingMcpTestData.Naive(DateTime.UtcNow).AddMinutes(-5), "Gone", 100m, 1);
-        for (var d = 0; d < 3; d++)
+        /* A database that left collection scope five days ago: its daily index snapshots stop at a day boundary the seed
+           fixes (the seed's own UTC midnight, never a later clock read), so the newest one is five days old. */
+        var last = DarlingMcpTestData.Naive(DateTime.UtcNow).Date.AddDays(-5).AddMinutes(10);
+        for (var d = 24; d >= 0; d--)
         {
-            await Obj(c, ct, old.AddDays(-30 + d), "Gone", "Old", 1, "PK_Old", 10m + d, 1, 1, null);
+            await Obj(c, ct, last.AddDays(-d), "Gone", "Old", 1, "PK_Old", 10m + (24 - d), 1, 1, null);
+            await Obj(c, ct, last.AddDays(-d), "Gone", "Old", 2, "IX_Old", 5m, 0, 0, null);
         }
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         using var doc = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Gone", object_name: "dbo.Old", cancellationToken: ct));
         var section = doc.RootElement.GetProperty("indexes");
         Assert.Equal("ok", section.GetProperty("status").GetString());
-        Assert.Equal(McpHelpers.FormatEffectiveStart(old), section.GetProperty("captured_at").GetString());
-        Assert.Equal("2026-01-02T03:04:05.0000000Z", section.GetProperty("captured_at").GetString());
+        Assert.Equal(McpHelpers.FormatEffectiveStart(last), section.GetProperty("captured_at").GetString());
+        Assert.EndsWith("T00:10:00.0000000Z", section.GetProperty("captured_at").GetString());
+        Assert.Equal(2, section.GetProperty("index_count").GetInt32());
     }
 
     [Fact]
