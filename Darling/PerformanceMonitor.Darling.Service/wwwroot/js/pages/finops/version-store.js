@@ -10,7 +10,7 @@
    top databases, both from one get_pvs_stats read. A server whose engine has no PVS shows the read's own message. PVS counts off-row versions only, matching the desktop label. */
 
 import { VIZ } from "../../panels.js";
-import { renderLineChart, SERIES_COLORS } from "../../charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
 import { el, readTool, readErrorStrip, emptyStrip, errorStrip, loadingStrip, mount, fmtNum, localTime, windowFromHours } from "../../util.js";
 
 const TREND_HOURS = 24;
@@ -29,6 +29,11 @@ const COLUMNS = [
   { key: "offrow_version_cleaner_end_time", label: "Off-row cleaner end", format: "time" },
   { key: "oldest_active_transaction_id", label: "Oldest active transaction id", format: "int" },
   { key: "oldest_aborted_transaction_id", label: "Oldest aborted transaction id", format: "int" },
+  { key: "aborted_transaction_lag", label: "Aborted Lag", format: "int" },
+  { key: "cleanup_state", label: "Cleanup" },
+  { key: "skipped_low_water_mark", label: "Skipped: Secondary", format: "int" },
+  { key: "skipped_min_useful_xts", label: "Skipped: Snapshot", format: "int" },
+  { key: "skipped_oldest_aborted", label: "Skipped: Aborted", format: "int" },
 ];
 
 /* One row per collection time, one column per database, so the chart draws one line per database. */
@@ -86,7 +91,7 @@ async function load(server, ctx, body) {
     });
     const { points, series } = pivotTrend(data.trend);
     const chart = points.length
-      ? renderLineChart({ points, xKey: "collection_time", series, formatValue: (v) => fmtNum(v, 2), unit: "PVS off-row MB", ...windowFromHours(TREND_HOURS) })
+      ? zoomableLineChart({ points, xKey: "collection_time", series, formatValue: (v) => fmtNum(v, 2), unit: "PVS off-row MB", ...windowFromHours(TREND_HOURS) }, "pvs-size-trend", chartZoomScope(TREND_HOURS))
       : emptyStrip("No PVS size history in the last " + TREND_HOURS + " hours.");
     mount(body, [
       el("div", { class: "strip notice", role: "status", text: "As of " + localTime(data.as_of) + " (latest snapshot)." }),

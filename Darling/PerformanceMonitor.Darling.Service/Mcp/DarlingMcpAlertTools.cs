@@ -147,6 +147,9 @@ public sealed class DarlingMcpAlertTools
                     alert_time = r.AlertTime.ToString("o"),
                     server_id = r.ServerId,
                     server_name = r.ServerName,
+                    /* The spelling the row was WRITTEN under, which is what a mute rule keyed by name matches
+                       (server_name above is the registry display name where one exists). */
+                    stored_server_name = r.StoredServerName,
                     metric_name = r.MetricName,
                     current_value = r.CurrentValue,
                     threshold_value = r.ThresholdValue,

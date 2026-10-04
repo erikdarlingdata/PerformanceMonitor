@@ -195,7 +195,7 @@ public sealed class FinOpsTabIndexAnalysisPageTests
         Assert.Matches(KeyPattern("index_size_gb"), row);
         Assert.Matches(KeyPattern("total_reads"), DatabaseRowSlice());
         Assert.Equal(23, Regex.Matches(row, "(?m)^\\s+[a-z_]+( = |,$)").Count);
-        Assert.Equal(16, keys.Count);
+        Assert.Equal(17, keys.Count);
     }
 
     [Fact]
@@ -208,7 +208,7 @@ public sealed class FinOpsTabIndexAnalysisPageTests
             string.Join(",", Keys("ROLLUP_COLUMNS")));
         Assert.Equal(
             "action,result_kind,consolidation_rule,database_name,schema_name,table_name,index_name,index_size_gb_text,index_rows,"
-            + "index_reads,index_writes,target_index_name,superseded_by,additional_info,original_index_definition,script",
+            + "index_reads,index_writes,target_index_name,superseded_by,additional_info,original_index_definition,script,captured_at",
             string.Join(",", Keys("RECOMMENDATION_COLUMNS")));
     }
 

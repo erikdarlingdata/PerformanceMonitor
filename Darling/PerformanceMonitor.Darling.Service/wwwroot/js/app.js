@@ -41,6 +41,7 @@ import { navigateServer } from "./panels.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
 import { renderSweeps } from "./pages/sweeps.js";
+import { renderAdmin } from "./pages/admin.js";
 import { renderServer } from "./pages/server.js";
 import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
@@ -52,6 +53,7 @@ import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
 import { renderAlertEditor } from "./alert-editor.js";
 import { getSession, listViews } from "./views-api.js";
+import { renderMuteRules } from "./pages/mute-rules.js";
 
 /* The shell (sidebar, view list, AG nav) refreshes every POLL_MS; the page re-renders on its own interval. */
 const POLL_MS = 60000;
@@ -87,6 +89,8 @@ function currentRoute() {
     return { name: "alertEditor", id: "new", template: decodeURIComponent(h.slice("#/alert-rule/new/".length)) };
   }
   if (h.startsWith("#/alert-rule/")) return { name: "alertEditor", id: decodeURIComponent(h.slice("#/alert-rule/".length)) };
+  /* #/admin and #/admin/{tab}: the read-only Admin page; an unknown tab falls back inside the page. */
+  if (h === "#/admin" || h.startsWith("#/admin/")) return { name: "admin", tab: safeDecode(h.slice("#/admin".length).replace(/^\//, "")) };
   /* #/views (list) is checked before the #/view/ forms; and the /edit form is tested before the bare /view/. */
   if (h === "#/views" || h === "#/views/") return { name: "views" };
   if (h === "#/view/new") return { name: "editor", id: "new" };
@@ -103,6 +107,11 @@ function currentRoute() {
     return { name: "notebookEditor", id: decodeURIComponent(h.slice("#/notebook/".length, h.length - "/edit".length)) };
   }
   if (h.startsWith("#/notebook/")) return { name: "notebook", id: decodeURIComponent(h.slice("#/notebook/".length)) };
+  /* #/mute-rules[?server_name=..&metric_name=..] — the query pre-fills the create form (Alert History actions). */
+  if (h === "#/mute-rules" || h.startsWith("#/mute-rules?")) {
+    const q = h.indexOf("?");
+    return { name: "muteRules", query: q >= 0 ? h.slice(q + 1) : "" };
+  }
   return { name: "fleet" };
 }
 
@@ -166,12 +175,14 @@ function route(opts) {
   else if (r.name === "alerts") renderAlerts(main);
   else if (r.name === "alertRules") renderAlertRuleList(main);
   else if (r.name === "alertEditor") renderAlertEditor(main, r.id, r.template);
+  else if (r.name === "admin") renderAdmin(main, r.tab);
   else if (r.name === "triage") renderTriage(main, r.query);
   else if (r.name === "views") renderViewList(main);
   else if (r.name === "view") renderView(main, r.id);
   else if (r.name === "editor") renderEditor(main, r.id);
   else if (r.name === "notebook") renderView(main, r.id); // renderView kind-detects -> notebook document
   else if (r.name === "notebookEditor") renderNotebookEditor(main, r.id, r.template);
+  else if (r.name === "muteRules") renderMuteRules(main, r.query);
   else renderFleet(main);
 }
 
@@ -186,6 +197,7 @@ function isViewItemRoute(name) {
 function navKeyFor(r) {
   if (r.name === "views" || isViewItemRoute(r.name)) return "views";
   if (r.name === "alertRules" || r.name === "alertEditor") return "alert-rules";
+  if (r.name === "muteRules") return "mute-rules";
   return r.name;
 }
 
