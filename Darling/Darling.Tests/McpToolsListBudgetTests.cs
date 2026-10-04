@@ -204,7 +204,8 @@ public sealed class McpToolsListBudgetTests
     // get_finops optimization guide gains the cost-attribution and mixed-status sentences after the guide marker, re-measured: 178,341 -> 178,341 (the head is unchanged).
     // get_finops view index_analysis (view line, view name, database_name and full_text parameters), re-measured on the tree merged with dev: 178,258 -> 178,563.
     // get_finops optimization view, with dev merged (index_analysis already in) and the tree re-measured: 178,563 -> 178,646; tool get_finops 481 -> 550, view 113 -> 127.
-    private const int TotalCeilingBytes = 178_646;
+    // get_finops storage_growth view (view line, view name, object_name parameter, database_name wording), re-measured: 178,646 -> 178,855; tool get_finops 550 -> 614, view 127 -> 143, database_name 52 -> 63, new object_name 69.
+    private const int TotalCeilingBytes = 178_855;
 
 
 

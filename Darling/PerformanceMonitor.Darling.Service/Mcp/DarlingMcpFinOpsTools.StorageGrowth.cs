@@ -104,7 +104,8 @@ public sealed partial class DarlingMcpFinOpsTools
         IReadOnlyList<ObjectSizeGrowthDto> ranked, IEnumerable<FinOpsObjectDaySample> samples)
     {
         var keysTopFirst = ranked.Select(StorageGrowthObjectKey).ToList();
-        var matrix = FinOpsHeatmapBuilder.BuildMatrix(Enumerable.Reverse(keysTopFirst).ToList(), samples);
+        var shown = keysTopFirst.ToHashSet(StringComparer.Ordinal);
+        var matrix = FinOpsHeatmapBuilder.BuildMatrix(Enumerable.Reverse(keysTopFirst).ToList(), samples.Where(x => shown.Contains(x.ObjectKey)));
         var bands = FinOpsHeatmapBuilder.MatrixLogBands(matrix, StorageGrowthBandCount);
         var days = matrix.Days.Select(McpHelpers.FormatEffectiveStart).ToList();
         var rows = new List<object>();
@@ -157,7 +158,74 @@ public sealed partial class DarlingMcpFinOpsTools
         classification = r.Classification,
     };
 
-    private static object StorageGrowthDatabaseSection(List<StorageGrowthDto> rows, string databaseName, string? gate)
+    internal static string BuildStorageGrowthDatabasesPayload(string server, int hoursBack, List<StorageGrowthDto> databases)
+    {
+        var ordered = OrderStorageGrowthDatabases(databases);
+        return JsonSerializer.Serialize(new
+        {
+            server,
+            view = StorageGrowthView,
+            level = "databases",
+            hours_back = hoursBack,
+            databases = new
+            {
+                status = "ok",
+                message = (string?)null,
+                database_count = ordered.Count,
+                truncated = ordered.Count > MaxStorageGrowthDatabases,
+                rows = ordered.Take(MaxStorageGrowthDatabases).Select(StorageGrowthDatabaseRow).ToList(),
+            },
+        }, McpHelpers.JsonOptions);
+    }
+
+    internal static string BuildStorageGrowthObjectsPayload(
+        string server, int hoursBack, object database, IReadOnlyList<ObjectSizeGrowthDto> ranked, bool truncated,
+        IEnumerable<FinOpsObjectDaySample> samples, string? objectGate)
+    {
+        var (days, rows) = StorageGrowthObjectRows(ranked, samples);
+        return JsonSerializer.Serialize(new
+        {
+            server,
+            view = StorageGrowthView,
+            level = "objects",
+            hours_back = hoursBack,
+            database,
+            objects = new
+            {
+                status = SectionStatus(objectGate, ranked.Count),
+                message = objectGate == null ? null : NotCollectedMessage(objectGate),
+                window_days = StorageGrowthWindowDays,
+                object_count = ranked.Count,
+                truncated,
+                days,
+                rows,
+            },
+        }, McpHelpers.JsonOptions);
+    }
+
+    internal static string BuildStorageGrowthIndexesPayload(
+        string server, int hoursBack, object database, List<IndexUsageDto> indexes, string? indexGate)
+    {
+        var ordered = OrderStorageGrowthIndexes(indexes);
+        return JsonSerializer.Serialize(new
+        {
+            server,
+            view = StorageGrowthView,
+            level = "indexes",
+            hours_back = hoursBack,
+            database,
+            indexes = new
+            {
+                status = SectionStatus(indexGate, indexes.Count),
+                message = indexGate == null ? null : NotCollectedMessage(indexGate),
+                index_count = ordered.Count,
+                truncated = ordered.Count > MaxStorageGrowthIndexes,
+                rows = ordered.Take(MaxStorageGrowthIndexes).Select(StorageGrowthIndexRow).ToList(),
+            },
+        }, McpHelpers.JsonOptions);
+    }
+
+    internal static object StorageGrowthDatabaseSection(List<StorageGrowthDto> rows, string databaseName, string? gate)
     {
         var row = rows.FirstOrDefault(r => string.Equals(r.DatabaseName, databaseName, StringComparison.Ordinal));
         return new
@@ -194,22 +262,7 @@ public sealed partial class DarlingMcpFinOpsTools
             if (dbGate != null) return dbGate;
             if (IsBareEmpty([databases.Count], [dbGate]))
                 return McpHelpers.Status("empty", "No database size snapshot was found for this server, so there is no storage growth to show.");
-            var ordered = OrderStorageGrowthDatabases(databases);
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                view = StorageGrowthView,
-                level = "databases",
-                hours_back = hoursBack,
-                databases = new
-                {
-                    status = "ok",
-                    message = (string?)null,
-                    database_count = ordered.Count,
-                    truncated = ordered.Count > MaxStorageGrowthDatabases,
-                    rows = ordered.Take(MaxStorageGrowthDatabases).Select(StorageGrowthDatabaseRow).ToList(),
-                },
-            }, McpHelpers.JsonOptions);
+            return BuildStorageGrowthDatabasesPayload(resolved.ServerName, hoursBack, databases);
         }
 
         var windowStart = DateTime.SpecifyKind(now.AddDays(-StorageGrowthWindowDays), DateTimeKind.Unspecified);
@@ -228,25 +281,7 @@ public sealed partial class DarlingMcpFinOpsTools
 
         if (objectsLevel)
         {
-            var (days, rows) = StorageGrowthObjectRows(ranked, samples);
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                view = StorageGrowthView,
-                level = "objects",
-                hours_back = hoursBack,
-                database,
-                objects = new
-                {
-                    status = SectionStatus(objectGate, ranked.Count),
-                    message = objectGate == null ? null : NotCollectedMessage(objectGate),
-                    window_days = StorageGrowthWindowDays,
-                    object_count = ranked.Count,
-                    truncated,
-                    days,
-                    rows,
-                },
-            }, McpHelpers.JsonOptions);
+            return BuildStorageGrowthObjectsPayload(resolved.ServerName, hoursBack, database, ranked, truncated, samples, objectGate);
         }
 
         var match = ranked.FirstOrDefault(o => string.Equals(StorageGrowthObjectKey(o), objectName, StringComparison.Ordinal));
@@ -257,22 +292,6 @@ public sealed partial class DarlingMcpFinOpsTools
         var indexes = await DarlingFinOpsStorageGrowthReader.GetObjectIndexDetailAsync(
             postgres, resolved.ServerId, databaseName, match.SchemaName, match.TableName, timeout, ct);
         var indexGate = indexes.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", ct) : null;
-        var orderedIndexes = OrderStorageGrowthIndexes(indexes);
-        return JsonSerializer.Serialize(new
-        {
-            server = resolved.ServerName,
-            view = StorageGrowthView,
-            level = "indexes",
-            hours_back = hoursBack,
-            database,
-            indexes = new
-            {
-                status = SectionStatus(indexGate, indexes.Count),
-                message = indexGate == null ? null : NotCollectedMessage(indexGate),
-                index_count = orderedIndexes.Count,
-                truncated = orderedIndexes.Count > MaxStorageGrowthIndexes,
-                rows = orderedIndexes.Take(MaxStorageGrowthIndexes).Select(StorageGrowthIndexRow).ToList(),
-            },
-        }, McpHelpers.JsonOptions);
+        return BuildStorageGrowthIndexesPayload(resolved.ServerName, hoursBack, database, indexes, indexGate);
     }
 }
