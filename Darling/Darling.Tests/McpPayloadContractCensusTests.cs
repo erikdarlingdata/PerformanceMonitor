@@ -1268,10 +1268,12 @@ public sealed class McpPayloadContractCensusTests
     /// <summary>
     /// The Darling reader SQL constants whose outer statement anchors on <c>= (SELECT MAX(collection_time |
     /// capture_time) …)</c> — a latest-snapshot read — and do NOT project the anchor column, so the tool above
-    /// them cannot stamp the snapshot's time (#3541 A10, "latest is a time"). Two, both known:
+    /// them cannot stamp the snapshot's time (#3541 A10, "latest is a time"). Three, all known:
     /// <c>IndexUsageSql</c> is the object-stats residual <see cref="McpLatestSnapshotStampTests.UnstampedLatestReadsPendingA10"/>
     /// already holds, and <c>IndexUsageMatchCountSql</c> is a <c>COUNT(*)</c> over the same anchor with no row
-    /// to stamp.
+    /// to stamp. <c>ObjectIndexDetailSql</c> (the FinOps Storage Growth index drill, in a Storage subfolder the scan
+    /// only reaches since it went recursive) is the same shape as <c>IndexUsageSql</c>: per-index rows at the database's
+    /// latest snapshot, with no anchor column projected.
     ///
     /// <para><b>This roster GREW once, in #3879, and #3880 shrank it back by ruling.</b> It is written
     /// shrink-only, on the reasoning that a read either projects its anchor or is waiting for the A10 lane to
@@ -1297,6 +1299,7 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly string[] LatestAnchoredReadsWithoutTheirStamp =
     [
+        "DarlingFinOpsStorageGrowthReader.cs ObjectIndexDetailSql",
         "DarlingObjectStatsReader.cs IndexUsageMatchCountSql",
         "DarlingObjectStatsReader.cs IndexUsageSql",
     ];
@@ -2270,8 +2273,8 @@ public sealed class McpPayloadContractCensusTests
 
     /// <summary>
     /// Every literal <c>LIMIT n</c> (<c>n &gt; 1</c>) that ENDS a reader statement on either SKU — the shape
-    /// #3541 A3 and #3659 found behind tools that advertised <c>limit</c>. Six remain, all in Lite's
-    /// service layer, none behind a tool that takes a <c>limit</c>: five are viewer-only reads and one
+    /// #3541 A3 and #3659 found behind tools that advertised <c>limit</c>. Seven remain: six in Lite's
+    /// service layer plus one in the Darling FinOps recommendations reader (<c>MaintenanceWindowSql</c>, the top-10 long-running jobs, a ceiling over a short list; the scan reads Storage subfolders since the FinOps readers live there), none behind a tool that takes a <c>limit</c>: five are viewer-only reads and one
     /// (<c>GetPlanCacheSnapshotAsync</c>, behind <c>get_plan_cache_bloat</c>, which takes no cap) is a
     /// ceiling of 30 over a population of a dozen cache types. <c>LIMIT 1</c> is the latest-row idiom and is
     /// not a page. The Long Queries grid's read (<c>GetRecentLongQueryCompletionsAsync</c>) left the roster in
@@ -2283,6 +2286,7 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string File, string Member, int Limit)[] StatementTerminalLiteralLimits =
     [
+        ("DarlingFinOpsRecommendationsReader.cs", "(file scope)", 10),
         ("LocalDataService.Blocking.cs", "GetBlockingPairRowsAsync", 5000),
         ("LocalDataService.FinOps.Recommendations.cs", "GetRecommendationsAsync", 10),
         ("LocalDataService.PlanCache.cs", "GetPlanCacheSnapshotAsync", 30),
@@ -2338,7 +2342,7 @@ public sealed class McpPayloadContractCensusTests
         })
         {
             var root = RepoFile.PathTo(directory);
-            foreach (var file in Directory.EnumerateFiles(root, pattern).Order(StringComparer.Ordinal))
+            foreach (var file in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories).Order(StringComparer.Ordinal))
             {
                 var name = Path.GetFileName(file);
                 if (name.Contains("ForcePlan", StringComparison.Ordinal))
