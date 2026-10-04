@@ -2854,6 +2854,9 @@ const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "baseline_cpu_ms", label: "Baseline CPU", format: "ms" },
   { key: "recent_cpu_ms", label: "Recent CPU", format: "ms" },
   { key: "io_regression_percent", label: "Reads +%", format: "num1" },
+  { key: "baseline_reads", label: "Base Reads (pages)", format: "int" },
+  { key: "recent_reads", label: "Recent Reads (pages)", format: "int" },
+  { key: "baseline_exec_count", label: "Base Execs", format: "int" },
   { key: "recent_exec_count", label: "Recent Execs", format: "int" },
   /* A plan count that moved between the two sides is the first thing to check: a query that regressed
      while gaining a plan is usually a plan-choice problem, not a data one. */
@@ -2959,26 +2962,49 @@ const QS_CLERK_STATS = [
 const LONG_QUERY_COLUMNS = [
   { key: "event_time", label: "Time", format: "time" },
   { key: "statement", label: "Statement", render: (r) => codeDisclosure(r.statement) },
-  { key: "database_name", label: "Database" },
-  { key: "object_name", label: "Object" },
+  { key: "event_type", label: "Event Type" },
   { key: "duration_ms", label: "Duration", format: "ms" },
   { key: "cpu_ms", label: "CPU", format: "ms" },
+  { key: "logical_reads", label: "Logical Reads", format: "int" },
+  { key: "physical_reads", label: "Physical Reads", format: "int" },
+  { key: "writes", label: "Writes", format: "int" },
   { key: "row_count", label: "Rows", format: "int" },
   { key: "result", label: "Result" },
-  { key: "client_app_name", label: "Application" },
+  { key: "database_name", label: "Database" },
+  { key: "object_name", label: "Object" },
   { key: "session_id", label: "SPID", format: "int" },
+  { key: "client_app_name", label: "Application" },
+  { key: "server_principal_name", label: "Login" },
+  { key: "query_hash", label: "Query Hash" },
 ];
 
+/* The Script, Executable and Revertable columns the desktop grid adds are not here: get_plan_corrections
+   returns no implementation script or action flags, and the page does not rebuild them. */
 const PLAN_CORRECTION_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
   { key: "database_name", label: "Database" },
-  { key: "query_id", label: "Query ID", format: "int" },
   { key: "recommendation_state", label: "State" },
+  { key: "recommendation_state_reason", label: "State Reason", wrap: true },
   { key: "recommendation_reason", label: "Reason", wrap: true },
   { key: "score", label: "Score", format: "int" },
   { key: "estimated_gain_seconds", label: "Est. gain (s)", format: "num1" },
+  { key: "query_id", label: "Query ID", format: "int" },
+  { key: "regressed_plan_id", label: "Regressed Plan", format: "int" },
+  { key: "last_good_plan_id", label: "Last Good Plan", format: "int" },
+  { key: "last_good_plan_forcing_type", label: "Forcing Type" },
   { key: "last_good_plan_is_forced", label: "Forced", format: "bool" },
+  { key: "last_good_plan_force_failure_reason", label: "Force Failure", wrap: true },
+  { key: "regressed_plan_execution_count", label: "Regressed Execs", format: "int" },
+  { key: "regressed_plan_cpu_time_average_ms", label: "Regressed CPU (ms)", format: "num2" },
+  { key: "last_good_plan_execution_count", label: "Last Good Execs", format: "int" },
+  { key: "last_good_plan_cpu_time_average_ms", label: "Last Good CPU (ms)", format: "num2" },
+  { key: "valid_since", label: "Valid Since", format: "time" },
+  { key: "last_refresh", label: "Last Refresh", format: "time" },
+  { key: "execute_action_initiated_by", label: "Executed By" },
+  { key: "execute_action_initiated_time", label: "Executed At", format: "time" },
+  { key: "revert_action_initiated_by", label: "Reverted By" },
+  { key: "revert_action_initiated_time", label: "Reverted At", format: "time" },
 ];
 
 const AUTO_TUNING_COLUMNS = [
