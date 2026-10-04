@@ -47,7 +47,7 @@ import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderAlertRuleList } from "./pages/alert-rules.js";
 import { renderViewList, renderView, currentViewRefresh, onViewRefreshChange, clearViewRefresh } from "./pages/views.js";
-import { REFRESH_CHOICES, PAGE_REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel, loadPageRefreshChoice, savePageRefreshChoice } from "./refresh-policy.js";
+import { REFRESH_CHOICES, PAGE_REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel, loadPageRefreshChoice, savePageRefreshChoice, PAGE_REFRESH_KEY } from "./refresh-policy.js";
 import { buildPageRefreshControl } from "./refresh-control.js";
 import { renderTriage } from "./pages/triage.js";
 import { renderEditor } from "./editor.js";
@@ -397,13 +397,26 @@ function syncPageRefreshControl(routeName) {
   pageRefreshControl.root.hidden = !isPickerRoute(routeName);
 }
 
-/* The Refresh button: one shell refresh and one immediate page re-render. The page's in-flight check has to run
-   BEFORE the shell's reads start (they count as in flight too), and a page still loading ignores the click. */
+/* The Refresh button: one shell refresh and one immediate page re-render. While any read is outstanding it does
+   nothing (the button is disabled and marked busy until they settle), so a double-click sends one refresh. */
+function syncRefreshBusy() {
+  if (pageRefreshControl) pageRefreshControl.setBusy(hasInFlightReads());
+}
+
 function refreshPageNow() {
-  if (isSessionExpired()) return;
-  const busy = hasInFlightReads();
+  if (isSessionExpired() || hasInFlightReads()) return;
   refreshShell();
-  if (!busy && !isNoPollRoute(currentRoute().name)) route({ poll: true });
+  if (!isNoPollRoute(currentRoute().name)) route({ poll: true });
+  syncRefreshBusy();
+}
+
+/* Another tab saved a different interval: take it here too. */
+function onPageRefreshStorage(event) {
+  if (event.key !== null && event.key !== PAGE_REFRESH_KEY) return;
+  pageRefreshChoice = loadPageRefreshChoice(localStorage);
+  if (pageRefreshControl) pageRefreshControl.setChoice(pageRefreshChoice);
+  if (!pageRendering) scheduleNextPageRefresh(Date.now());
+  else updateRefreshHint();
 }
 
 function initPageRefreshControl() {
@@ -415,6 +428,7 @@ function initPageRefreshControl() {
     else updateRefreshHint();
   }, refreshPageNow);
   anchor.parentNode.appendChild(pageRefreshControl.root);
+  window.addEventListener("storage", onPageRefreshStorage);
   syncPageRefreshControl(currentRoute().name);
 }
 
@@ -486,13 +500,13 @@ function schedulerTick() {
      "(slow page)", and pageIsDue never fired because it needs !pageRendering. Settling here stamps the end at
      the first tick that sees no reads outstanding and schedules the next refresh from that moment. */
   if (pageRendering && !hasInFlightReads()) settlePageRender(now);
+  syncRefreshBusy();
   if (document.hidden || isAutoRefreshPaused() || isSessionExpired()) {
     updateRefreshHint();
     return;
   }
-  /* Off on a server or FinOps page means no reads at all, the shell's own roll-up included. */
-  const quiet = isPickerRoute(currentRoute().name) && pageIntervalMs() === 0;
-  if (!quiet && now - shellLastRefreshAt >= POLL_MS) refreshShell();
+  /* Off pauses only the page's own render; the shell roll-up (sidebar, status bar, session check) keeps running. */
+  if (now - shellLastRefreshAt >= POLL_MS) refreshShell();
   if (pageIsDue(now)) refreshPage();
   updateRefreshHint();
 }

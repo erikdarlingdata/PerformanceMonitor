@@ -79,9 +79,31 @@ public sealed class WebPageRefreshIntervalBehaviourTests
     }
 
     [Fact]
-    public void Off_FiresNoReads_ForFifteenMinutes_ShellRollUpIncluded()
+    public void Off_FiresNoPageReads_ForFifteenMinutes_ButTheShellReadsContinue()
     {
-        Assert.Equal(0, Run().GetProperty("offReads").GetInt32());
+        var r = Run();
+        Assert.Equal(0, r.GetProperty("offPageReads").GetInt32());
+        // 900 s at the 60 s shell roll-up: sidebar, view list and AG nav keep running, so a lapsed session still shows.
+        Assert.True(r.GetProperty("offShellReads").GetInt32() >= 15, "shell reads stopped under Off");
+    }
+
+    [Fact]
+    public void TheRefreshButton_IgnoresClicksWhileReadsRun_AndShowsItIsBusy()
+    {
+        var r = Run();
+        Assert.Equal(1, r.GetProperty("doubleClickViews").GetInt32());
+        Assert.Equal(1, r.GetProperty("doubleClickRenders").GetInt32());
+        Assert.True(r.GetProperty("busyWhileReading").GetBoolean());
+        Assert.True(r.GetProperty("idleAfterSettle").GetBoolean());
+    }
+
+    [Fact]
+    public void AnIntervalSavedInAnotherTab_AppliesHere()
+    {
+        var r = Run();
+        Assert.Equal("off", r.GetProperty("storageSelectValue").GetString());
+        Assert.Equal(0, r.GetProperty("storageOffRenders").GetInt32());
+        Assert.Equal("Auto-refresh off", r.GetProperty("storageHint").GetString());
     }
 
     [Fact]
@@ -99,7 +121,12 @@ public sealed class WebPageRefreshIntervalBehaviourTests
         var starts = r.GetProperty("backoffStarts").EnumerateArray().Select(e => e.GetInt32()).ToArray();
         Assert.True(starts.Length >= 2, "expected at least two renders in the window");
         // Reads that take 20 s are more than half of 30 s, so the next render waits 4x the render time, not 30 s.
-        Assert.True(starts[1] - starts[0] >= 80, "the slow page re-rendered after " + (starts[1] - starts[0]) + " s");
+        var gaps = r.GetProperty("backoffGaps").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+        Assert.True(gaps[0] >= 80, "the slow page re-rendered after " + gaps[0] + " s");
+        // Every later gap is at least the 30 s interval. It is not asserted at 4x: the shared fetch helpers
+        // (apiGetFleet/fetchBody) do not register their reads as in flight, so a render whose reads are all fleet reads
+        // is timed shorter than it ran. That predates this selector and lives in util.js.
+        Assert.All(gaps, g => Assert.True(g >= 30, "a render started " + g + " s after the previous one"));
         Assert.True(r.GetProperty("backoffHintSaysSlow").GetBoolean());
         // Reads that never finish inside the window: the one render only, no stacked second one.
         Assert.Equal(1, r.GetProperty("stackedRenders").GetInt32());

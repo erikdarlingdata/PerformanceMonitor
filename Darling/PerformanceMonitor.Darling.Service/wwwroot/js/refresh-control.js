@@ -25,10 +25,13 @@ export function buildRefreshControl(current, onChange) {
  * @param {string} current  the effective page choice key ("30s" | "1m" | "5m" | "off")
  * @param {(choice: string) => void} onChange  called with the new key when the operator picks one
  * @param {() => void} onRefresh  called once per Refresh click
- * @returns {{ root: HTMLElement, select: HTMLElement }}
+ * @returns {{ root: HTMLElement, select: HTMLElement, setBusy: (busy: boolean) => void, setChoice: (choice: string) => void }}
+ *   `setBusy` disables the Refresh button (aria-busy, "Refreshing…" title) while reads run; `setChoice` shows a choice
+ *   another tab saved.
  */
 export function buildPageRefreshControl(current, onChange, onRefresh) {
-  const select = el("select", { class: "refresh-select", id: "page-refresh-select", "aria-label": "Auto-refresh interval" });
+  const select = el("select", { class: "refresh-select", id: "page-refresh-select", "aria-label": "Auto-refresh interval",
+    title: "How often this page reloads its data. Off pauses this page only; the sidebar and status bar keep updating." });
   for (const key of Object.keys(PAGE_REFRESH_CHOICES)) {
     select.appendChild(el("option", { value: key, text: refreshLabel(key) }));
   }
@@ -36,8 +39,16 @@ export function buildPageRefreshControl(current, onChange, onRefresh) {
   select.addEventListener("change", () => onChange(select.value));
   const button = el("button", { class: "auto-refresh-toggle", id: "page-refresh-now", type: "button", text: "Refresh" });
   button.addEventListener("click", () => onRefresh());
+  const idleTitle = "Reload this page now";
+  button.setAttribute("title", idleTitle);
+  const setBusy = (busy) => {
+    button.disabled = busy;
+    if (busy) button.setAttribute("aria-busy", "true"); else button.removeAttribute("aria-busy");
+    button.setAttribute("title", busy ? "Refreshing…" : idleTitle);
+  };
+  const setChoice = (choice) => { select.value = choice; };
   const root = el("div", { class: "refresh-control page-refresh-control", id: "page-refresh-control" }, [
     el("span", { text: "Auto-refresh:" }), select, button,
   ]);
-  return { root, select };
+  return { root, select, setBusy, setChoice };
 }

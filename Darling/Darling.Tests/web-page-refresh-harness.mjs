@@ -55,7 +55,8 @@ globalThis.Node = FakeNode;
 globalThis.window = globalThis;
 globalThis.location = { hash: "#/server/alpha", pathname: "/", search: "", href: "http://localhost/", origin: "http://localhost" };
 globalThis.history = { pushState() {}, replaceState() {}, back() {} };
-globalThis.addEventListener = () => {};
+const winListeners = {};
+globalThis.addEventListener = (t, f) => { (winListeners[t] ||= []).push(f); };
 globalThis.removeEventListener = () => {};
 globalThis.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
 globalThis.requestAnimationFrame = () => 0;
@@ -130,13 +131,14 @@ out.next30 = await secondsToNextRead("30s");
 out.next1m = await secondsToNextRead("1m");
 out.next5m = await secondsToNextRead("5m");
 
-// Off fires nothing, not even the shell roll-up.
+// Off fires no page reads; the shell roll-up (sidebar, views, status bar) keeps running.
 {
-  const find = await fresh("off");
+  await fresh("off");
   await advance(2);
-  const base = fetches;
-  out.offReads = await advance(900);
-  void base;
+  const r0 = renders; const f0 = fetches;
+  await advance(900);
+  out.offPageReads = renders - r0;
+  out.offShellReads = fetches - f0;
 }
 
 // Refresh fires one immediate page refresh (and none when nothing else is due).
@@ -148,9 +150,41 @@ out.next5m = await secondsToNextRead("5m");
   out.refreshClickReads = renders - before;
   out.refreshClickRerendersPage = out.refreshClickReads > 0;
   await advance(2);
-  const sampleBefore = fetches;
-  out.refreshAfterOffReads = await advance(300);
-  void sampleBefore;
+  const rendersBefore = renders;
+  await advance(300);
+  out.refreshAfterOffReads = renders - rendersBefore;
+}
+
+// Refresh while reads are running is a no-op: a double-click sends one shell refresh and one render.
+{
+  await fresh("off");
+  await advance(2);
+  fetchDelayMs = 5000;
+  const log0 = fetchLog.length; const r0 = renders;
+  const btn = brand.find((x) => x.attrs.id === "page-refresh-now");
+  btn.dispatch("click"); btn.dispatch("click"); await drain();
+  const views = () => fetchLog.slice(log0).filter((l) => l.includes("/api/views")).length;
+  out.doubleClickViews = views();
+  out.doubleClickRenders = renders - r0;
+  out.busyWhileReading = btn.disabled === true && btn.attrs["aria-busy"] === "true" && btn.attrs.title === "Refreshing…";
+  await advance(10);
+  out.doubleClickRenders = renders - r0;
+  out.idleAfterSettle = btn.disabled === false && btn.getAttribute("aria-busy") === null;
+  fetchDelayMs = 0;
+}
+
+// A choice saved by another tab (storage event) applies here.
+{
+  const find = await fresh("1m");
+  await advance(2);
+  storage.set("darling.pageRefresh", "off");
+  (winListeners.storage || []).forEach((f) => f({ key: "darling.pageRefresh" }));
+  await drain();
+  out.storageSelectValue = find().value;
+  const r0 = renders;
+  await advance(300);
+  out.storageOffRenders = renders - r0;
+  out.storageHint = byId["refresh-hint"].textContent;
 }
 
 // Persistence: choosing writes the key; a new boot reads it back into the selector.
@@ -177,7 +211,7 @@ out.next5m = await secondsToNextRead("5m");
     if (/slow page/.test(byId["refresh-hint"].textContent)) hintSlow = true;
   }
   out.backoffStarts = starts;
-  out.backoffFirstGap = starts.length > 1 ? starts[1] - starts[0] : null;
+  out.backoffGaps = starts.slice(1).map((v, i) => v - starts[i]);
   out.backoffHintSaysSlow = hintSlow;
   bootDelay = 100000; // reads outlast many 30 s intervals
   await fresh("30s");
