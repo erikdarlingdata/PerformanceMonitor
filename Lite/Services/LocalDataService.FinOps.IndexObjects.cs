@@ -467,7 +467,7 @@ SELECT
     l.index_count,
     CASE
         WHEN (SELECT latest_time FROM bounds) = (SELECT earliest_time FROM bounds) THEN NULL
-        ELSE l.cur_reserved_mb - e.e_reserved_mb
+        ELSE l.cur_reserved_mb - COALESCE(e.e_reserved_mb, 0)
     END AS growth_mb
 FROM latest l
 LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
@@ -481,7 +481,7 @@ LIMIT {topN}";
             while (await reader.ReadAsync())
             {
                 var current = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2));
-                /* No earlier sample for this table (new table, or one snapshot only): null, not 0. */
+                /* One snapshot only: null, not 0. A table missing from the earliest snapshot was created since and counts its whole size (its percent stays null: it grew from nothing). */
                 decimal? growth = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6));
                 objects.Add(new ObjectSizeGrowthRow
                 {
@@ -523,10 +523,10 @@ earliest AS (
 ),
 ranked AS (
     SELECT l.schema_name, l.table_name,
-        l.cur_reserved_mb - COALESCE(e.e_reserved_mb, l.cur_reserved_mb) AS growth_mb
+        l.cur_reserved_mb - COALESCE(e.e_reserved_mb, 0) AS growth_mb
     FROM latest l
     LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
-    ORDER BY growth_mb DESC, l.schema_name, l.table_name
+    ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
     LIMIT {topN}
 )
 SELECT

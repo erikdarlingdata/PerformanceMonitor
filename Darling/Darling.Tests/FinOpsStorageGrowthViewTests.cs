@@ -440,7 +440,7 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         {
             await c.OpenAsync(ct);
             var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
-            /* 15 tables that shrink (growth below 0) and 5 new tables with one sample only (growth null, counted as 0). */
+            /* 15 tables that shrink (growth below 0) and 5 new tables with one sample only (absent from the earliest snapshot, so growth is their whole size). */
             for (var i = 0; i < 20; i++)
             {
                 var table = (i < 15 ? "Shrink" : "New") + i.ToString("D2");
@@ -456,8 +456,8 @@ public sealed class FinOpsStorageGrowthViewLiveTests
 
         using var doc = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Gamma", cancellationToken: ct));
         var objects = doc.RootElement.GetProperty("objects");
-        /* The desktop's order: the 5 new tables (0) above the 15 shrinking ones, key ordinal inside each tie; the first 10 are the 5 new and the 5 least-shrunk. */
-        var expected = Enumerable.Range(15, 5).Select(i => "dbo.New" + i.ToString("D2"))
+        /* The desktop's order: the 5 new tables by size (115..119) above the 15 shrinking ones (all -400, key ordinal inside the tie); the first 10 are the 5 new, largest first, and 5 shrinking. */
+        var expected = Enumerable.Range(15, 5).Reverse().Select(i => "dbo.New" + i.ToString("D2"))
             .Concat(new[] { "dbo.Shrink00", "dbo.Shrink01", "dbo.Shrink02", "dbo.Shrink03", "dbo.Shrink04" }).ToArray();
         Assert.Equal(expected, objects.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("object_name").GetString()).ToArray());
         Assert.Equal(20, objects.GetProperty("object_count").GetInt32());
