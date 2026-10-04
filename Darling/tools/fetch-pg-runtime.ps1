@@ -263,6 +263,8 @@ $requiredFiles = @(
     'bin\vcruntime140_1.dll',
     'bin\msvcp140.dll',
     'lib\timescaledb.dll',
+    'lib\pg_stat_statements.dll',
+    'lib\auto_explain.dll',
     "lib\timescaledb-$tsVersion.dll",
     "lib\timescaledb-tsl-$tsVersion.dll",
     'share\extension\timescaledb.control',
