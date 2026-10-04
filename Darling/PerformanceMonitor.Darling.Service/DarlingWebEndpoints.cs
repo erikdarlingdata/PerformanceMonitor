@@ -1471,12 +1471,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 hourlyEdgesSnapshot = await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate, serverScope, candidateComposedSeconds.Value, cancellationToken);
             }
-            catch (ComposeStoreOpenException open)
+            catch (PostgresException ex)
             {
-                /* The snapshot's own open failed: the store is not reachable, which is the same fault, and the same answer, as the
-                   panel's own open failing in the try below. It goes through the same seam and the same outcome. */
-                onRunException?.Invoke(open);
-                return FromRunException(open, remapClientTimeout);
+                /* A login-time server error (53300 too-many-connections, 28P01, 57P01, 3D000) escapes OpenComposeConnectionAsync
+                   unwrapped. It is answered as the panel's own failed open is answered in the main try below. */
+                return FromPostgresException(ex);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* The snapshot's own open failed (ComposeStoreOpenException included): the store is not reachable, which is the same
+                   fault, and the same answer, as the panel's own open failing in the try below. Same seam, same outcome. */
+                onRunException?.Invoke(ex);
+                return FromRunException(ex, remapClientTimeout);
             }
         }
 

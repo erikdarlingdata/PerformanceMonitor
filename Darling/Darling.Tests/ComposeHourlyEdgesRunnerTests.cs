@@ -123,12 +123,18 @@ public class ComposeHourlyEdgesRunnerTests
 
         var core = code.IndexOf("private static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(", StringComparison.Ordinal);
         var call = code.IndexOf("await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate", core, StringComparison.Ordinal);
-        var handler = code.IndexOf("catch (ComposeStoreOpenException open)", call, StringComparison.Ordinal);
-        var outcome = code.IndexOf("return FromRunException(open, remapClientTimeout);", handler, StringComparison.Ordinal);
-        var panelOutcome = code.IndexOf("return FromRunException(ex, remapClientTimeout);", core, StringComparison.Ordinal);
-        Assert.True(call > 0 && handler > call && outcome > handler, "the begin is covered by a handler for the open failure");
-        Assert.True(outcome - call < 800, "the handler is the begin's own");
-        Assert.True(panelOutcome > outcome, "and it answers through the same FromRunException the panel's own open failure uses");
+        var pg = code.IndexOf("catch (PostgresException ex)", call, StringComparison.Ordinal);
+        var pgOutcome = code.IndexOf("return FromPostgresException(ex);", pg, StringComparison.Ordinal);
+        var general = code.IndexOf("catch (Exception ex) when (ex is not OperationCanceledException)", pgOutcome, StringComparison.Ordinal);
+        var seam = code.IndexOf("onRunException?.Invoke(ex);", general, StringComparison.Ordinal);
+        var outcome = code.IndexOf("return FromRunException(ex, remapClientTimeout);", seam, StringComparison.Ordinal);
+        var panelOutcome = code.IndexOf("return FromRunException(ex, remapClientTimeout);", outcome + 1, StringComparison.Ordinal);
+        Assert.True(call > 0 && pg > call && pgOutcome > pg && general > pgOutcome && seam > general && outcome > seam,
+            "the begin is covered by the main try's arms, in the same order: PostgresException, then the non-cancellation arm");
+        Assert.True(outcome - call < 1800, "the handlers are the begin's own");
+        Assert.True(panelOutcome > outcome, "and they answer through the same FromPostgresException / FromRunException the panel's own failed open uses");
+        Assert.DoesNotContain("catch (OperationCanceledException", code[call..outcome], StringComparison.Ordinal);
+        Assert.DoesNotContain("catch (ComposeStoreOpenException", code[call..outcome], StringComparison.Ordinal);
     }
 
     [Fact]
