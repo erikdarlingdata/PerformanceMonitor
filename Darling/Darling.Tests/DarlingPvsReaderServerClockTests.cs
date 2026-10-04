@@ -26,8 +26,8 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingPvsReaderServerClockTests
 {
-    /* The select is 13 columns wide: four server-local cleaner times at 8..11, then collection_time. */
-    private static DataTable NewTable() => Table(13, 8, 9, 10, 11, 12);
+    /* The select is 16 columns wide: four server-local cleaner times at 8..11, collection_time, then the three skipped counters. */
+    private static DataTable NewTable() => Table(16, 8, 9, 10, 11, 12);
 
     private static DarlingPvsReader.PvsStatsRow Read(DataTable table, ServerClock clock)
     {
