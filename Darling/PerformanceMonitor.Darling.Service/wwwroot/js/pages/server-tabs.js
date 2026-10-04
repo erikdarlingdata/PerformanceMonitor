@@ -760,10 +760,16 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  *
  * `moreNoteKeys` is a list of further fields on the same response, each rendered as its own note beneath the
  * `noteKey` one; an empty or absent value draws nothing. Optional, like `noteKey`.
+ *
+ * `columnGroups` ({ groups: [names], defaultGroups: [names] }) is for a wide grid: a column with `group: "<name>"`
+ * is shown only while its group's toggle is on, and the ungrouped columns are always shown (see vizTable's
+ * columnPicker).
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null) {
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
-  return renderPanel({ title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey });
+  const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey };
+  if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
+  return renderPanel(desc);
 }
 
 /**
@@ -1632,7 +1638,8 @@ export const SERVER_TABS = [
         "events",
         MEMORY_CONDITION_COLUMNS,
         ctx.label,
-        "No memory condition events in this window."
+        "No memory condition events in this window.",
+        2, null, null, MEMORY_CONDITION_GROUPS
       ),
       table(
         "Memory Broker",
@@ -1650,7 +1657,8 @@ export const SERVER_TABS = [
         "events",
         MEMORY_OOM_COLUMNS,
         ctx.label,
-        "No memory node OOM events in this window — the healthy state for this read."
+        "No memory node OOM events in this window — the healthy state for this read.",
+        2, null, null, MEMORY_OOM_GROUPS
       ),
       /* #2484: the ninth member of the get_health_parser_* family. Built with table(), not a bare object
          literal -- mount() stringifies anything it cannot consume, so a literal renders as [object Object]
@@ -3642,8 +3650,7 @@ const CPU_TASK_COLUMNS = [
   { key: "did_blocking_occur", label: "Blocking", format: "bool" },
 ];
 
-/* The desktop grid's 32 columns in its order. The grid is wider than 20 columns, so it is a candidate for the
-   shared column picker once that lands. */
+/* The desktop grid's 32 columns in its order. */
 const MEMORY_CONDITION_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
   { key: "last_notification", label: "Last Notification" },
@@ -3651,33 +3658,37 @@ const MEMORY_CONDITION_COLUMNS = [
   { key: "out_of_memory_exceptions", label: "OOM Exceptions", format: "int" },
   { key: "is_any_pool_out_of_memory", label: "Pool OOM", format: "bool" },
   { key: "process_out_of_memory_period", label: "OOM Period", format: "int" },
-  { key: "available_physical_memory_gb", label: "Avail Phys GB", format: "num1" },
-  { key: "available_virtual_memory_gb", label: "Avail Virt GB", format: "num1" },
-  { key: "available_paging_file_gb", label: "Avail Paging GB", format: "num1" },
-  { key: "working_set_gb", label: "Working Set GB", format: "num1" },
-  { key: "percent_of_committed_memory_in_ws", label: "% Committed in WS", format: "int" },
-  { key: "page_faults", label: "Page Faults", format: "int" },
-  { key: "system_physical_memory_high", label: "Sys Phys High", format: "int" },
-  { key: "system_physical_memory_low", label: "Sys Phys Low", format: "int" },
-  { key: "process_physical_memory_low", label: "Proc Phys Low", format: "int" },
-  { key: "process_virtual_memory_low", label: "Proc Virt Low", format: "int" },
-  { key: "vm_reserved_gb", label: "VM Reserved GB", format: "num1" },
-  { key: "vm_committed_gb", label: "VM Committed GB", format: "num1" },
-  { key: "locked_pages_allocated", label: "Locked Pages", format: "int" },
-  { key: "large_pages_allocated", label: "Large Pages", format: "int" },
-  { key: "emergency_memory_gb", label: "Emergency GB", format: "num1" },
-  { key: "emergency_memory_in_use_gb", label: "Emerg In Use GB", format: "num1" },
-  { key: "target_committed_gb", label: "Target Committed GB", format: "num1" },
-  { key: "current_committed_gb", label: "Current Committed GB", format: "num1" },
-  { key: "pages_allocated", label: "Pages Alloc", format: "int" },
-  { key: "pages_reserved", label: "Pages Reserved", format: "int" },
-  { key: "pages_free", label: "Pages Free", format: "int" },
-  { key: "pages_in_use", label: "Pages In Use", format: "int" },
-  { key: "page_alloc_potential", label: "Alloc Potential", format: "int" },
-  { key: "numa_growth_phase", label: "NUMA Growth", format: "int" },
-  { key: "last_oom_factor", label: "Last OOM Factor" },
-  { key: "last_os_error", label: "Last OS Error", format: "int" },
+  { key: "available_physical_memory_gb", label: "Avail Phys GB", format: "num1", group: "Process memory" },
+  { key: "available_virtual_memory_gb", label: "Avail Virt GB", format: "num1", group: "Process memory" },
+  { key: "available_paging_file_gb", label: "Avail Paging GB", format: "num1", group: "Process memory" },
+  { key: "working_set_gb", label: "Working Set GB", format: "num1", group: "Process memory" },
+  { key: "percent_of_committed_memory_in_ws", label: "% Committed in WS", format: "int", group: "Process memory" },
+  { key: "page_faults", label: "Page Faults", format: "int", group: "Process memory" },
+  { key: "system_physical_memory_high", label: "Sys Phys High", format: "int", group: "Pressure flags" },
+  { key: "system_physical_memory_low", label: "Sys Phys Low", format: "int", group: "Pressure flags" },
+  { key: "process_physical_memory_low", label: "Proc Phys Low", format: "int", group: "Pressure flags" },
+  { key: "process_virtual_memory_low", label: "Proc Virt Low", format: "int", group: "Pressure flags" },
+  { key: "vm_reserved_gb", label: "VM Reserved GB", format: "num1", group: "Allocation detail" },
+  { key: "vm_committed_gb", label: "VM Committed GB", format: "num1", group: "Allocation detail" },
+  { key: "locked_pages_allocated", label: "Locked Pages", format: "int", group: "Allocation detail" },
+  { key: "large_pages_allocated", label: "Large Pages", format: "int", group: "Allocation detail" },
+  { key: "emergency_memory_gb", label: "Emergency GB", format: "num1", group: "Allocation detail" },
+  { key: "emergency_memory_in_use_gb", label: "Emerg In Use GB", format: "num1", group: "Allocation detail" },
+  { key: "target_committed_gb", label: "Target Committed GB", format: "num1", group: "Allocation detail" },
+  { key: "current_committed_gb", label: "Current Committed GB", format: "num1", group: "Allocation detail" },
+  { key: "pages_allocated", label: "Pages Alloc", format: "int", group: "Allocation detail" },
+  { key: "pages_reserved", label: "Pages Reserved", format: "int", group: "Allocation detail" },
+  { key: "pages_free", label: "Pages Free", format: "int", group: "Allocation detail" },
+  { key: "pages_in_use", label: "Pages In Use", format: "int", group: "Allocation detail" },
+  { key: "page_alloc_potential", label: "Alloc Potential", format: "int", group: "Allocation detail" },
+  { key: "numa_growth_phase", label: "NUMA Growth", format: "int", group: "Allocation detail" },
+  { key: "last_oom_factor", label: "Last OOM Factor", group: "Allocation detail" },
+  { key: "last_os_error", label: "Last OS Error", format: "int", group: "Allocation detail" },
 ];
+
+/* Memory Conditions column groups: the report, the time and the OOM counters are always shown; the rest follow the
+   desktop grid's order in three toggles, with the process memory figures on at first. */
+const MEMORY_CONDITION_GROUPS = { groups: ["Process memory", "Pressure flags", "Allocation detail"], defaultGroups: ["Process memory"] };
 
 const MEMORY_BROKER_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
@@ -3708,37 +3719,41 @@ const SIGNIFICANT_WAIT_COLUMNS = [
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
 ];
 
-/* The desktop grid's 28 columns in its order; a candidate for the shared column picker once that lands. */
+/* The desktop grid's 28 columns in its order. */
 const MEMORY_OOM_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
   { key: "node_id", label: "Node ID", format: "int" },
   { key: "memory_node_id", label: "Mem Node ID", format: "int" },
   { key: "memory_utilization_pct", label: "Mem Util %", format: "pct" },
-  { key: "total_physical_memory_kb", label: "Total Phys KB", format: "int" },
-  { key: "available_physical_memory_kb", label: "Avail Phys KB", format: "int" },
-  { key: "total_page_file_kb", label: "Total Page KB", format: "int" },
-  { key: "available_page_file_kb", label: "Avail Page KB", format: "int" },
-  { key: "total_virtual_address_space_kb", label: "Total VAS KB", format: "int" },
-  { key: "available_virtual_address_space_kb", label: "Avail VAS KB", format: "int" },
-  { key: "target_kb", label: "Target KB", format: "int" },
-  { key: "reserved_kb", label: "Reserved KB", format: "int" },
-  { key: "committed_kb", label: "Committed KB", format: "int" },
-  { key: "shared_committed_kb", label: "Shared Committed KB", format: "int" },
-  { key: "awe_kb", label: "AWE KB", format: "int" },
-  { key: "pages_kb", label: "Pages KB", format: "int" },
-  { key: "failure_type", label: "Failure" },
-  { key: "failure_value", label: "Failure Val", format: "int" },
-  { key: "resources", label: "Resources", wrap: true },
-  { key: "factor_text", label: "Factor" },
-  { key: "factor_value", label: "Factor Val", format: "int" },
-  { key: "last_error", label: "Last Error" },
-  { key: "pool_metadata_id", label: "Pool Meta ID", format: "int" },
-  { key: "is_process_in_job", label: "In Job" },
-  { key: "is_system_physical_memory_high", label: "Sys Phys High" },
-  { key: "is_system_physical_memory_low", label: "Sys Phys Low" },
-  { key: "is_process_physical_memory_low", label: "Proc Phys Low" },
-  { key: "is_process_virtual_memory_low", label: "Proc Virt Low" },
+  { key: "total_physical_memory_kb", label: "Total Phys KB", format: "int", group: "Memory sizes" },
+  { key: "available_physical_memory_kb", label: "Avail Phys KB", format: "int", group: "Memory sizes" },
+  { key: "total_page_file_kb", label: "Total Page KB", format: "int", group: "Memory sizes" },
+  { key: "available_page_file_kb", label: "Avail Page KB", format: "int", group: "Memory sizes" },
+  { key: "total_virtual_address_space_kb", label: "Total VAS KB", format: "int", group: "Memory sizes" },
+  { key: "available_virtual_address_space_kb", label: "Avail VAS KB", format: "int", group: "Memory sizes" },
+  { key: "target_kb", label: "Target KB", format: "int", group: "Pool detail" },
+  { key: "reserved_kb", label: "Reserved KB", format: "int", group: "Pool detail" },
+  { key: "committed_kb", label: "Committed KB", format: "int", group: "Pool detail" },
+  { key: "shared_committed_kb", label: "Shared Committed KB", format: "int", group: "Pool detail" },
+  { key: "awe_kb", label: "AWE KB", format: "int", group: "Pool detail" },
+  { key: "pages_kb", label: "Pages KB", format: "int", group: "Pool detail" },
+  { key: "failure_type", label: "Failure", group: "Failure" },
+  { key: "failure_value", label: "Failure Val", format: "int", group: "Failure" },
+  { key: "resources", label: "Resources", wrap: true, group: "Failure" },
+  { key: "factor_text", label: "Factor", group: "Failure" },
+  { key: "factor_value", label: "Factor Val", format: "int", group: "Failure" },
+  { key: "last_error", label: "Last Error", group: "Failure" },
+  { key: "pool_metadata_id", label: "Pool Meta ID", format: "int", group: "Flags" },
+  { key: "is_process_in_job", label: "In Job", group: "Flags" },
+  { key: "is_system_physical_memory_high", label: "Sys Phys High", group: "Flags" },
+  { key: "is_system_physical_memory_low", label: "Sys Phys Low", group: "Flags" },
+  { key: "is_process_physical_memory_low", label: "Proc Phys Low", group: "Flags" },
+  { key: "is_process_virtual_memory_low", label: "Proc Virt Low", group: "Flags" },
 ];
+
+/* Node OOM column groups: the event time, node ids and utilisation are always shown; the failure columns are on at
+   first and the size, pool and flag columns follow the desktop grid's order behind their toggles. */
+const MEMORY_OOM_GROUPS = { groups: ["Memory sizes", "Pool detail", "Failure", "Flags"], defaultGroups: ["Failure"] };
 
 const DEFAULT_TRACE_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },

@@ -217,8 +217,55 @@ function vizTable(data, desc) {
   if (grid) grid.syncHeads();
 
   const wrap = el("div", { class: "table-wrap" }, [el("table", { class: "data" }, [el("thead", {}, [head]), tbody])]);
-  if (desc.tools === false) return wrap;
-  return el("div", { class: "grid-box" }, [gridTools(desc, cols, tbody), wrap]);
+  const picker = columnPicker(desc, cols, head, tbody);
+  if (desc.tools === false) return picker ? el("div", { class: "grid-box" }, [picker, wrap]) : wrap;
+  return el("div", { class: "grid-box" }, picker ? [picker, gridTools(desc, cols, tbody), wrap] : [gridTools(desc, cols, tbody), wrap]);
+}
+
+/* Column groups (#4843). A descriptor with `groups: ["Memory detail", ...]` and `defaultGroups: [...]` marks wide
+   grids: a column carrying `group: "<name>"` is drawn only while its group is on, and a column with no group (or a
+   group the list does not name) is always shown. A "Columns:" strip above the table carries one toggle per group.
+   Every column is still built, and a hidden one is only display:none, so the sort, Copy and CSV indexes stay
+   aligned and Copy / CSV carry ALL columns, the way the desktop grid's export iterates every column whether or not
+   it is shown. A column the user sorted by stays the sort key after its group is hidden. The toggles live at module
+   scope under the table's key (route + identity + columns), so the 60 s repaint keeps them and another server's
+   grid starts from the defaults. Returns null for a descriptor without groups. */
+function columnPicker(desc, cols, head, tbody) {
+  const groups = Array.isArray(desc.groups) ? desc.groups.filter((g) => cols.some((c) => c.group === g)) : [];
+  if (!groups.length) return null;
+  const key = gridSortKey(desc, cols);
+  const on = () => gridGroupsOn.get(key) || new Set(Array.isArray(desc.defaultGroups) ? desc.defaultGroups : []);
+  const shown = (c) => !c.group || !groups.includes(c.group) || on().has(c.group);
+  const show = (node, yes) => {
+    if (node && node.style) node.style.display = yes ? "" : "none";
+  };
+  const buttons = new Map();
+  const apply = () => {
+    const rowsAll = [head, ...tbody.children];
+    cols.forEach((c, i) => {
+      const yes = shown(c);
+      for (const tr of rowsAll) show(tr.children[i], yes);
+    });
+    for (const [g, b] of buttons) {
+      const live = on().has(g);
+      b.setAttribute("aria-pressed", live ? "true" : "false");
+      b.className = "btn col-toggle" + (live ? " on" : "");
+    }
+  };
+  const toggles = groups.map((g) => {
+    const b = el("button", { type: "button", class: "btn col-toggle", text: g, title: "Show or hide the " + g + " columns" });
+    b.addEventListener("click", () => {
+      const next = new Set(on());
+      if (next.has(g)) next.delete(g);
+      else next.add(g);
+      gridGroupsOn.set(key, next);
+      apply();
+    });
+    buttons.set(g, b);
+    return b;
+  });
+  apply();
+  return el("div", { class: "col-picker" }, [el("span", { class: "col-picker-label", text: "Columns:" }), ...toggles]);
 }
 
 /* Copy and CSV for one table (#4843). Both read the tbody as it stands, so they follow the active sort and any
@@ -324,7 +371,9 @@ const gridSortState = new Map(); // grows by one entry per table the session sor
 const trRow = new WeakMap();
 const tbodyGrid = new WeakMap();
 /* The cell each grid's Copy cell / Copy row act on (see gridTools), keyed like the sort state. */
-const gridPicked = new Map(); // one entry per table the session clicks in; bounded by routes x tables
+const gridPicked = new Map();
+/* The column groups switched on for each grid (see columnPicker), keyed like the sort state; absent means defaultGroups. */
+const gridGroupsOn = new Map(); // one entry per grouped table the session toggles; bounded by routes x tables // one entry per table the session clicks in; bounded by routes x tables
 
 /* The table identity: `desc.sortId`, else `desc.id`, else `desc.title`, else `desc.rowsKey`. Panels built by
    renderPanel carry a title; the FinOps tabs call VIZ.table with a rowsKey, and two grids of one tab can share one,

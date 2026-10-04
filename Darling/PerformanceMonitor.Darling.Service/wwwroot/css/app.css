@@ -438,6 +438,12 @@ table.data td.sev-Healthy { color: var(--ok); }
 .grid-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
 .grid-tools .grid-tool { font-size: 12px; padding: 2px 8px; }
 .grid-tools-status { font-size: 12px; opacity: 0.8; margin-left: 6px; }
+
+/* Column-group toggles above a wide table (#4843). */
+.col-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
+.col-picker .col-picker-label { font-size: 12px; opacity: 0.8; margin-right: 2px; }
+.col-picker .col-toggle { font-size: 12px; padding: 2px 8px; }
+.col-picker .col-toggle.on { border-color: var(--accent, currentColor); font-weight: 600; }
 td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* ─────────────────────────── band list ─────────────────────────── */
