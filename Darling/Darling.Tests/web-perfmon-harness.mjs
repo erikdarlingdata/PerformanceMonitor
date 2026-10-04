@@ -104,7 +104,8 @@ try {
       "  drawing = false;\n" +
       "  chartCalls.push({ series: (opts.series || []).map((s) => ({ key: s.key, label: s.label })), unit: opts.unit == null ? null : opts.unit, axis, node });\n" +
       "  return node;\n" +
-      "}\n"
+      "}\n" +
+      "export function zoomableLineChart(opts) { return renderLineChart(opts); }\n"
   );
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
   modules = {
@@ -277,7 +278,7 @@ const charts = modules.charts.chartCalls.map((chart) => ({
 
 console.log(JSON.stringify({
   headers: table ? all(table, "th").map((th) => th.textContent) : [],
-  numericHeaders: table ? all(table, "th").map((th) => th.className === "num") : [],
+  numericHeaders: table ? all(table, "th").map((th) => String(th.className).split(" ").includes("num")) : [],
   rows: table ? all(table, "tr").map((tr) => all(tr, "td").map((td) => td.textContent)).filter((cells) => cells.length) : [],
   charts,
   errors: all(root, "div").filter((n) => n.className === "strip error").map((n) => n.textContent),

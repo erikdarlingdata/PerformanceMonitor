@@ -21,7 +21,7 @@
  */
 
 import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
-import { renderLineChart, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
+import { renderLineChart, zoomChip, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer } from "./panels.js";
 import { getCatalog } from "./views-api.js";
 
@@ -789,25 +789,6 @@ function annotationMetaMap() {
 /** The dual-axis overlay's FIXED series color (#1606) — the tail of CATEGORICAL_COLORS, so it can never
  *  collide with the primary series' CATEGORICAL_COLORS[0] on an ungrouped chart. */
 const OVERLAY_COLOR = "#ba68c8";
-
-/**
- * The transient zoom chip (#1606): the brushed window as local time, plus a clear that re-runs the panel on
- * its original window. View-state only — the stored definition is never touched (the drill-chip idiom).
- */
-function zoomChip(zoom, onZoomChange) {
-  const from = new Date(zoom.startIso);
-  const to = new Date(zoom.endIso);
-  const label = isNaN(from.getTime()) || isNaN(to.getTime())
-    ? "custom window"
-    : from.toLocaleString() + " → " + to.toLocaleString();
-  const chip = el("div", { class: "drill-chip zoom-chip" }, [
-    el("span", { class: "drill-label", text: "Zoomed: " + label }),
-  ]);
-  const clear = el("button", { class: "btn small drill-clear", type: "button", title: "Reset zoom", "aria-label": "Reset zoom", text: "×" });
-  clear.addEventListener("click", () => onZoomChange(null));
-  chip.appendChild(clear);
-  return chip;
-}
 
 function drillChip(drill, onDrill) {
   const parts = drill.keys.map((k) => humanize(k.dimension) + " = " + k.value);

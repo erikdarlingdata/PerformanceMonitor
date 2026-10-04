@@ -22,6 +22,7 @@ const COLUMNS = [
     key: "max_size_mb",
     label: "Max size",
     align: "right",
+    sortValue: (row) => (row.max_size_mb === -1 ? Infinity : row.max_size_mb),
     render: (row) => el("span", { text: row.max_size_mb === -1 ? "Unlimited" : row.max_size_mb == null ? "—" : fmtMb(row.max_size_mb) }),
   },
   { key: "volume_mount_point", label: "Volume" },

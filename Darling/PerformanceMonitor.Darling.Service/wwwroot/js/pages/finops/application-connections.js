@@ -58,6 +58,7 @@ export const tab = {
         if (res.kind === "empty") return mount(body, emptyStrip(res.message));
         const data = res.data || {};
         mount(body, [
+          el("h3", { text: "Application Connections (24h)" }),
           noticeStrip(noticeText(data)),
           VIZ.table(data, { rowsKey: "rows", columns: COLUMNS, emptyText: "No application connection data was recorded for this server." }),
         ]);

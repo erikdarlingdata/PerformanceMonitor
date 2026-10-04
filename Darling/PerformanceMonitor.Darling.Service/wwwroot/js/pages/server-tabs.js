@@ -41,7 +41,7 @@
 
 import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, windowFromHours, daysText } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
-import { renderLineChart, SERIES_COLORS } from "../charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { READ_FIELDS } from "../read-fields.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
@@ -152,7 +152,7 @@ function fanout(read, params, specs) {
            all pages of a population - the aggregate one beside a capped row list is exactly the pairing
            where only one of them needs saying so. */
         const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
-        const rendered = VIZ[spec.viz](res.data, { ...spec, windowHours: res.keptHours || (params && params.hours) });
+        const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours) });
 
         mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
@@ -230,7 +230,7 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
   mount(slot, [
     keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
-    renderLineChart({
+    zoomableLineChart({
       points: trend.data.trend || [],
       xKey: "time",
       series: [
@@ -242,7 +242,7 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
       ...windowFromHours(trend.keptHours || ctx.hours),
-    }),
+    }, "wait-trend|" + waitType, chartZoomScope(ctx.hours)),
   ]);
 }
 
@@ -307,14 +307,14 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
   mount(slot, [
     keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
-    renderLineChart({
+    zoomableLineChart({
       points: trend.data.trend || [],
       xKey: "time",
       ...perfmonTrendLines(trend.data.trend || []),
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
       ...windowFromHours(trend.keptHours || ctx.hours),
-    }),
+    }, "perfmon-trend|" + counterName, chartZoomScope(ctx.hours)),
   ]);
 }
 
@@ -469,7 +469,7 @@ async function drawQueryTrend(slot, server, ctx, query) {
   mount(slot, [
     keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
-    renderLineChart({
+    zoomableLineChart({
       points: trend.data.trend || [],
       xKey: "collection_time",
       series: [
@@ -482,7 +482,7 @@ async function drawQueryTrend(slot, server, ctx, query) {
          starts later than the window and plots toward the right; the truncation notice above already says so.
          A narrowed read spans the hours it answered for. */
       ...windowFromHours(trend.keptHours || ctx.hours),
-    }),
+    }, "query-trend|" + query.query_hash, chartZoomScope(ctx.hours)),
     VIZ.table(trend.data, {
       rowsKey: "trend",
       columns: QUERY_TREND_COLUMNS,
@@ -539,7 +539,7 @@ export function fileIoPanel(server, ctx) {
     mount(body, [
       keptWindowStrip(res),
       notes.length ? noticeStrip(notes.join(" ")) : null,
-      renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(res.keptHours || ctx.hours) }),
+      zoomableLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(res.keptHours || ctx.hours) }, "file-io-latency", chartZoomScope(ctx.hours)),
     ]);
   })();
   return panel;
@@ -2855,6 +2855,9 @@ const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "baseline_cpu_ms", label: "Baseline CPU", format: "ms" },
   { key: "recent_cpu_ms", label: "Recent CPU", format: "ms" },
   { key: "io_regression_percent", label: "Reads +%", format: "num1" },
+  { key: "baseline_reads", label: "Base Reads (pages)", format: "int" },
+  { key: "recent_reads", label: "Recent Reads (pages)", format: "int" },
+  { key: "baseline_exec_count", label: "Base Execs", format: "int" },
   { key: "recent_exec_count", label: "Recent Execs", format: "int" },
   /* A plan count that moved between the two sides is the first thing to check: a query that regressed
      while gaining a plan is usually a plan-choice problem, not a data one. */
@@ -2960,26 +2963,49 @@ const QS_CLERK_STATS = [
 const LONG_QUERY_COLUMNS = [
   { key: "event_time", label: "Time", format: "time" },
   { key: "statement", label: "Statement", render: (r) => codeDisclosure(r.statement) },
-  { key: "database_name", label: "Database" },
-  { key: "object_name", label: "Object" },
+  { key: "event_type", label: "Event Type" },
   { key: "duration_ms", label: "Duration", format: "ms" },
   { key: "cpu_ms", label: "CPU", format: "ms" },
+  { key: "logical_reads", label: "Logical Reads", format: "int" },
+  { key: "physical_reads", label: "Physical Reads", format: "int" },
+  { key: "writes", label: "Writes", format: "int" },
   { key: "row_count", label: "Rows", format: "int" },
   { key: "result", label: "Result" },
-  { key: "client_app_name", label: "Application" },
+  { key: "database_name", label: "Database" },
+  { key: "object_name", label: "Object" },
   { key: "session_id", label: "SPID", format: "int" },
+  { key: "client_app_name", label: "Application" },
+  { key: "server_principal_name", label: "Login" },
+  { key: "query_hash", label: "Query Hash" },
 ];
 
+/* The Script, Executable and Revertable columns the desktop grid adds are not here: get_plan_corrections
+   returns no implementation script or action flags, and the page does not rebuild them. */
 const PLAN_CORRECTION_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
   { key: "database_name", label: "Database" },
-  { key: "query_id", label: "Query ID", format: "int" },
   { key: "recommendation_state", label: "State" },
+  { key: "recommendation_state_reason", label: "State Reason", wrap: true },
   { key: "recommendation_reason", label: "Reason", wrap: true },
   { key: "score", label: "Score", format: "int" },
   { key: "estimated_gain_seconds", label: "Est. gain (s)", format: "num1" },
+  { key: "query_id", label: "Query ID", format: "int" },
+  { key: "regressed_plan_id", label: "Regressed Plan", format: "int" },
+  { key: "last_good_plan_id", label: "Last Good Plan", format: "int" },
+  { key: "last_good_plan_forcing_type", label: "Forcing Type" },
   { key: "last_good_plan_is_forced", label: "Forced", format: "bool" },
+  { key: "last_good_plan_force_failure_reason", label: "Force Failure", wrap: true },
+  { key: "regressed_plan_execution_count", label: "Regressed Execs", format: "int" },
+  { key: "regressed_plan_cpu_time_average_ms", label: "Regressed CPU (ms)", format: "num2" },
+  { key: "last_good_plan_execution_count", label: "Last Good Execs", format: "int" },
+  { key: "last_good_plan_cpu_time_average_ms", label: "Last Good CPU (ms)", format: "num2" },
+  { key: "valid_since", label: "Valid Since", format: "time" },
+  { key: "last_refresh", label: "Last Refresh", format: "time" },
+  { key: "execute_action_initiated_by", label: "Executed By" },
+  { key: "execute_action_initiated_time", label: "Executed At", format: "time" },
+  { key: "revert_action_initiated_by", label: "Reverted By" },
+  { key: "revert_action_initiated_time", label: "Reverted At", format: "time" },
 ];
 
 const AUTO_TUNING_COLUMNS = [

@@ -34,6 +34,15 @@ public sealed class FinOpsTabApplicationConnectionsPageTests
     }
 
     [Fact]
+    public void TheTabHasNoWindowPickerAndSaysItIs24HoursLikeTheDesktopHeader()
+    {
+        var tab = Tab();
+        Assert.Contains("el(\"h3\", { text: \"Application Connections (24h)\" })", tab);
+        Assert.DoesNotContain("<select", tab);
+        Assert.DoesNotContain("\"select\"", tab);
+    }
+
+    [Fact]
     public void TheWindowIs24HoursAndThereIsNoLimitConstant()
     {
         var tab = Tab();
