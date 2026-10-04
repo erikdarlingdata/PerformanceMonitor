@@ -108,10 +108,12 @@ try {
   fs.copyFileSync(path.join(jsDir, "panels.js"), path.join(scratch, "panels.js"));
   fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
   fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
+  fs.copyFileSync(path.join(jsDir, "multi-picker.js"), path.join(scratch, "multi-picker.js"));
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { el } from "./util.js";\n' +
       "export const SERIES_COLORS = ['#111', '#222', '#333', '#444', '#555', '#666'];\n" +
+      "export const CATEGORICAL_COLORS = SERIES_COLORS;\n" +
       "export const chartCalls = [];\n" +
       "export function normalizeColor(color) { return color; }\n" +
       "export function renderLineChart(opts) {\n" +
