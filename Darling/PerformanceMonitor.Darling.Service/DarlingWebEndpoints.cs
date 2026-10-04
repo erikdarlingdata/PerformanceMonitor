@@ -1851,8 +1851,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         NpgsqlTransaction? transaction = null;
         try
         {
-            var opening = OpenComposeConnectionAsync(postgres, cancellationToken);
-            connection = await opening;
+            connection = await OpenComposeConnectionAsync(postgres, cancellationToken);
             transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
             await ExecuteSnapshotStatementAsync(connection, HourlyEdgesReadOnlySql, McpCommandDeadlines.ReadSeconds, cancellationToken);
             var verdict = await ResolveHourlyEdgesVerdictAsync(connection, candidate, serverScope, cancellationToken);
