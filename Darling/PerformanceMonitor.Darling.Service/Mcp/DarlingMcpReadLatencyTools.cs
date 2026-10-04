@@ -73,10 +73,10 @@ public sealed class DarlingMcpReadLatencyTools
         + "fallback. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
         + "both are optional and compose (AND) when both are given. Empty means no read was recorded for the "
         + "window/filter, which on a fresh store, or one below schema V148, is the expected answer — not a "
-        + "sign anything is broken. The page is also capped to the shared ~32 KB response budget, whichever is "
-        + "smaller than limit: truncated says either cut bit, reads_returned is the rows sent and reads_total the "
-        + "rows the window held, so reads_total minus reads_returned were left out, always from the end of the "
-        + "order above. Narrow with surface or route to see them.")]
+        + "sign anything is broken. The page is capped at limit rows or the shared ~32 KB response budget, whichever cuts first: "
+        + "truncated says either cut applied, reads_returned is the rows sent and reads_total the rows the window "
+        + "held, so reads_total minus reads_returned were left out, always from the end of the order above. Raise "
+        + "limit (up to the budget) or narrow with surface or route to see them.")]
     public static async Task<string> GetReadLatency(
         NpgsqlDataSource postgres,
         [Description("Hours of history to summarize. Default 24; max 168 (7 days).")] int hours = DefaultHours,
@@ -152,42 +152,55 @@ public sealed class DarlingMcpReadLatencyTools
                 gate_failures = x.Row.GateFailures,
             }).ToArray();
 
-            string Envelope(IReadOnlyList<object> page, bool truncated) => JsonSerializer.Serialize(new
-            {
-                hours,
-                surface,
-                route,
-                note = BucketEstimateNote,
-                truncated,
-                reads_returned = page.Count,
-                reads_total = shaped.Length,
-                reads = page,
-            });
-
-            /* The caller's limit is an upper bound, never a promise: the SERIALIZED response must also fit
-               McpResponseBudget.DefaultBytes. Rows are taken in the total order above until the next one would
-               cross the budget. The envelope is measured once with an empty page and the truncated flag set
-               (the longer spelling), then each row pays its own bytes plus a separating comma. */
-            var page = new List<object>();
-            var running = Encoding.UTF8.GetByteCount(Envelope(Array.Empty<object>(), true));
-            foreach (var row in shaped.Take(limit))
-            {
-                var added = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(row)) + (page.Count == 0 ? 0 : 1);
-                if (page.Count > 0 && running + added > McpResponseBudget.DefaultBytes)
-                {
-                    break;
-                }
-
-                running += added;
-                page.Add(row);
-            }
-
-            var cut = page.Count < shaped.Length;
-            return Envelope(page, cut);
+            return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_read_latency", ex);
         }
+    }
+
+    /// <summary>
+    /// Serializes the page: the first <paramref name="limit"/> rows, further cut to fit <paramref name="budgetBytes"/>.
+    /// Rows are taken greedily in order using each row's own bytes plus a comma, then the REAL final response is
+    /// serialized and, while it is over budget with more than one row, the last row is dropped and it is
+    /// serialized again — the envelope's own digits and the true/false spelling depend on the final page.
+    /// </summary>
+    internal static string BuildResponse(int hours, string? surface, string? route, IReadOnlyList<object> shaped, int limit, int budgetBytes)
+    {
+        string Envelope(IReadOnlyList<object> page, bool truncated) => JsonSerializer.Serialize(new
+        {
+            hours,
+            surface,
+            route,
+            note = BucketEstimateNote,
+            truncated,
+            reads_returned = page.Count,
+            reads_total = shaped.Count,
+            reads = page,
+        });
+
+        var page = new List<object>();
+        var running = Encoding.UTF8.GetByteCount(Envelope(Array.Empty<object>(), true));
+        foreach (var row in shaped.Take(limit))
+        {
+            var added = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(row)) + (page.Count == 0 ? 0 : 1);
+            if (page.Count > 0 && running + added > budgetBytes)
+            {
+                break;
+            }
+
+            running += added;
+            page.Add(row);
+        }
+
+        var result = Envelope(page, page.Count < shaped.Count);
+        while (Encoding.UTF8.GetByteCount(result) > budgetBytes && page.Count > 1)
+        {
+            page.RemoveAt(page.Count - 1);
+            result = Envelope(page, true);
+        }
+
+        return result;
     }
 }
