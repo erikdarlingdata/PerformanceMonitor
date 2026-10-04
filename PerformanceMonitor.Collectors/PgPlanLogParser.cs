@@ -31,7 +31,10 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>What redaction does, and the asymmetry that matters.</b> <c>Query Text</c> is removed outright —
 /// <c>auto_explain</c> emits the statement verbatim and <c>log_parameter_max_length = 0</c> does not
-/// suppress it, because that setting covers bind parameters only. Quoted literals are then stripped from
+/// suppress it, because that setting covers bind parameters only. The root-level <c>Query Parameters</c>
+/// (PostgreSQL 16 and later write every bind value there unless that setting is 0) is removed the same way,
+/// before the hash is taken, so a value neither reaches the store nor splits one plan shape into one hash
+/// per parameter value (#5103). Quoted literals are then stripped from
 /// EVERY remaining string, which is safe because relation and alias names are not quoted. Bare numbers are
 /// stripped only inside condition fields: a blanket numeric strip would rewrite a relation genuinely named
 /// <c>transactionitems1</c> into <c>transactionitems?</c>, destroying identity to hide a value that was
@@ -241,8 +244,11 @@ public static class PgPlanLogParser
             return null;
         }
 
-        /* Removed BEFORE anything else touches the tree, so no later step can carry it by accident. */
+        /* Removed BEFORE anything else touches the tree, so no later step can carry it by accident. Query
+           Parameters is the bind values (PostgreSQL 16+, auto_explain.log_parameter_max_length != 0); left in,
+           it would store them and make PlanHash differ per value (#5103). */
         root.Remove("Query Text");
+        root.Remove("Query Parameters");
 
         Redact(plan);
 

@@ -123,6 +123,16 @@ public class StoreLogClassifierTests
         "\tSELECT DISTINCT ON (server_id) server_id",
         "\tFROM v_cpu_utilization_stats",
 
+        /* slow_plan (#5097) - an auto_explain JSON plan under the same duration rule. */
+        "2026-09-05 14:07:20.500 UTC [5336] LOG:  duration: 11000.100 ms  plan:",
+        "\t{",
+        "\t  \"Query Text\": \"SELECT 1 WHERE x = 'FixtureLeak'\",",
+        "\t  \"Plan\": {",
+        "\t    \"Node Type\": \"Seq Scan\",",
+        "\t    \"Relation Name\": \"t\"",
+        "\t  }",
+        "\t}",
+
         /* lock_timeout, under the MANAGED prefix - proving the classifier does not care which family. */
         "2026-09-05 14:07:30 UTC:192.0.2.10(52345):app_user@app_db:[5334]:ERROR:  canceling statement due to lock timeout",
 
@@ -861,11 +871,12 @@ public class StoreLogClassifierTests
 
     /// <summary>
     /// A duration line that names no statement is not a slow statement this class can name: <c>log_duration</c>'s
-    /// bare line, and auto_explain's plan, whose <c>Query Text</c> is the statement VERBATIM. Both are counted as
-    /// routine and keep no text.
+    /// bare line is counted as routine and keeps no text. auto_explain's plan, whose <c>Query Text</c> is the
+    /// statement VERBATIM, is no longer routine (#5097): a plan in text format cannot be redacted, so it is kept
+    /// as its head alone, with the plan withheld.
     /// </summary>
     [Fact]
-    public void ADurationLineWithNoStatement_IsRoutine_AndKeepsNoText()
+    public void ADurationLineWithNoStatement_IsRoutine_AndATextPlanIsKeptAsItsHeadOnly()
     {
         var census = StoreLogClassifier.Classify(string.Join("\n",
         [
@@ -876,11 +887,181 @@ public class StoreLogClassifierTests
             "",
         ]));
 
-        var only = Assert.Single(census.Groups);
-        Assert.Equal(StoreLogClassifier.RoutineClass, only.EventClass);
-        Assert.Equal(2, only.Occurrences);
-        Assert.Null(only.MessageText);
-        Assert.Null(only.SampleLine);
+        var routine = Assert.Single(census.Groups, g => g.EventClass == StoreLogClassifier.RoutineClass);
+        Assert.Equal(1, routine.Occurrences);
+        Assert.Null(routine.MessageText);
+        Assert.Null(routine.SampleLine);
+
+        var plan = Assert.Single(census.Groups, g => g.EventClass == StoreLogClassifier.SlowPlanClass);
+        Assert.Equal(StoreLogClassifier.WithheldPlanMessage, plan.MessageText);
+        Assert.Equal(
+            DefaultPrefix + "LOG:  duration: 8123.001 ms  plan:\n\t" + PgLogTextRedactor.WithheldPlan,
+            plan.SampleLine);
+        Assert.DoesNotContain("Secret3904f", plan.SampleLine, StringComparison.Ordinal);
+    }
+
+    /* A PostgreSQL 16+ auto_explain JSON report, as the log writes it: the brackets EXPLAIN adds are stripped,
+       so the root is an object, and every line of it is tab-led under the duration line. The planted values are
+       distinct literals, one in each place a value can ride. */
+    private static string[] JsonPlanEntry(string duration, string parameter, string literal, long? queryId = 4242)
+    {
+        var json = new[]
+        {
+            "{",
+            "  \"Query Text\": \"SELECT * FROM orders WHERE code = '" + literal + "' AND id = $1\",",
+            "  \"Query Parameters\": \"$1 = '" + parameter + "'\",",
+            "  \"Plan\": {",
+            "    \"Node Type\": \"Index Scan\",",
+            "    \"Relation Name\": \"orders\",",
+            "    \"Alias\": \"orders\",",
+            "    \"Index Cond\": \"(orders.id = " + (parameter.Length + 770001) + ")\",",
+            "    \"Filter\": \"((orders.code)::text = '" + literal + "'::text)\"",
+            "  }" + (queryId is null ? string.Empty : ","),
+        }.ToList();
+        if (queryId is not null)
+        {
+            json.Add("  \"Query Identifier\": " + queryId);
+        }
+
+        json.Add("}");
+        return [DefaultPrefix + "LOG:  duration: " + duration + " ms  plan:", .. json.Select(l => "\t" + l)];
+    }
+
+    /// <summary>
+    /// #5097: an auto_explain JSON plan is KEPT as <c>slow_plan</c>, as the redacted JSON the monitored-target plan
+    /// route stores. Every planted value is asserted absent by its exact string, in the message and in the sample,
+    /// and the sample is asserted to BE the compact redacted JSON, so a classifier that stored the raw text (or that
+    /// dropped the redaction) fails here.
+    /// </summary>
+    [Fact]
+    public void AJsonPlan_IsKeptAsSlowPlan_WithNoStatementTextAndNoValue()
+    {
+        var census = StoreLogClassifier.Classify(string.Join("\n", JsonPlanEntry("12345.678", "BindLeak5097a", "LitLeak5097b")) + "\n");
+
+        var plan = Assert.Single(census.Groups);
+        Assert.Equal(StoreLogClassifier.SlowPlanClass, plan.EventClass);
+        Assert.Equal("LOG", plan.Severity);
+        Assert.StartsWith("plan ", plan.MessageText, StringComparison.Ordinal);
+        Assert.EndsWith(" Index Scan queryid=4242", plan.MessageText, StringComparison.Ordinal);
+
+        foreach (var planted in new[] { "BindLeak5097a", "LitLeak5097b", "Query Text", "Query Parameters", "770014", "SELECT * FROM orders" })
+        {
+            Assert.DoesNotContain(planted, plan.MessageText, StringComparison.Ordinal);
+            Assert.DoesNotContain(planted, plan.SampleLine, StringComparison.Ordinal);
+        }
+
+        var firstLine = DefaultPrefix + "LOG:  duration: 12345.678 ms  plan:";
+        var parsed = PgPlanLogParser.FromBlock(0, 0, "{\"Plan\":{\"Node Type\":\"Index Scan\",\"Relation Name\":\"orders\",\"Alias\":\"orders\",\"Index Cond\":\"(orders.id = 770014)\",\"Filter\":\"((orders.code)::text = 'LitLeak5097b'::text)\"},\"Query Identifier\":4242}");
+        Assert.NotNull(parsed);
+        Assert.Equal(firstLine + "\n\t" + parsed!.Value.PlanJson, plan.SampleLine);
+        Assert.Equal("plan " + parsed.Value.PlanHash + " Index Scan queryid=4242", plan.MessageText);
+        Assert.Contains("(orders.id = ?)", plan.SampleLine, StringComparison.Ordinal);
+        /* System.Text.Json writes the apostrophe as \u0027, the same bytes the plan route stores. */
+        Assert.Contains("\\u0027?\\u0027::text", plan.SampleLine, StringComparison.Ordinal);
+    }
+
+    /// <summary>One plan shape is one row however often it ran and whatever it ran with (the parameter value no longer
+    /// splits the hash, #5103); a different shape is another row; a plan with no query identifier says <c>?</c>.</summary>
+    [Fact]
+    public void TwoRunsOfOnePlanShape_AreOneRow_AndAnotherShapeIsAnother()
+    {
+        var census = StoreLogClassifier.Classify(string.Join("\n",
+            JsonPlanEntry("11000.1", "ParamOneA", "LitOneA")
+                .Concat(JsonPlanEntry("19000.9", "ParamTwoB", "LitTwoB"))
+                .Concat(JsonPlanEntry("15000.5", "ParamThreeC", "LitThreeC", queryId: null))) + "\n");
+
+        var plans = census.Groups.Where(g => g.EventClass == StoreLogClassifier.SlowPlanClass).ToList();
+        Assert.Equal(2, plans.Count);
+        var withId = Assert.Single(plans, g => g.MessageText!.EndsWith("queryid=4242", StringComparison.Ordinal));
+        Assert.Equal(2, withId.Occurrences);
+        var withoutId = Assert.Single(plans, g => g.MessageText!.EndsWith("queryid=?", StringComparison.Ordinal));
+        Assert.Equal(1, withoutId.Occurrences);
+        foreach (var planted in new[] { "ParamOneA", "ParamTwoB", "ParamThreeC", "LitOneA", "LitTwoB", "LitThreeC" })
+        {
+            Assert.DoesNotContain(planted, string.Concat(plans.Select(p => p.MessageText + p.SampleLine)), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>A plan that cannot be read whole keeps its head and the withheld marker, and nothing of the plan: JSON
+    /// cut by a read boundary (the slab ends inside it), JSON that is not a plan, and JSON whose redacted form would
+    /// pass the sample cap. Each stays <c>slow_plan</c>, because the first line decides the class.</summary>
+    [Fact]
+    public void APlanThatCannotBeReadWhole_KeepsOnlyItsHead()
+    {
+        var entry = JsonPlanEntry("12000.0", "CutParam5097", "CutLit5097");
+        var cut = string.Join("\n", entry.Take(6)) + "\n";
+        var notAPlan = string.Join("\n",
+        [
+            DefaultPrefix + "LOG:  duration: 13000.0 ms  plan:",
+            "\t{\"Anything\": \"NotAPlanLeak5097\"}",
+            "",
+        ]);
+
+        /* Over the cap once redacted: a wide Output list that survives redaction as '?' pairs. */
+        var wide = string.Join(",", Enumerable.Range(0, 900).Select(i => "\"t.column_" + i + "\""));
+        var tooBig = DefaultPrefix + "LOG:  duration: 14000.0 ms  plan:\n\t{\"Plan\": {\"Node Type\": \"Seq Scan\", \"Output\": [" + wide + "]}, \"Query Text\": \"TooBigLeak5097\"}\n";
+
+        foreach (var slab in new[] { cut, notAPlan, tooBig })
+        {
+            var census = StoreLogClassifier.Classify(slab);
+            var plan = Assert.Single(census.Groups);
+            Assert.Equal(StoreLogClassifier.SlowPlanClass, plan.EventClass);
+            Assert.Equal(StoreLogClassifier.WithheldPlanMessage, plan.MessageText);
+            Assert.EndsWith("\n\t" + PgLogTextRedactor.WithheldPlan, plan.SampleLine, StringComparison.Ordinal);
+            foreach (var planted in new[] { "CutParam5097", "CutLit5097", "NotAPlanLeak5097", "TooBigLeak5097", "Seq Scan", "Query Text" })
+            {
+                Assert.DoesNotContain(planted, plan.SampleLine, StringComparison.Ordinal);
+            }
+        }
+
+        /* A slab whose first line is the tail of an entry the previous read classified opens no entry here. */
+        var orphan = StoreLogClassifier.Classify(string.Join("\n", entry.Skip(1)) + "\n");
+        Assert.Empty(orphan.Groups);
+    }
+
+    /// <summary>A forged label inside a plan is only a string in a tab-led line: it opens no entry, so the plan stays
+    /// one <c>slow_plan</c> row and the forged severity is not read.</summary>
+    [Fact]
+    public void AForgedSeverityInsideAPlan_OpensNoEntry()
+    {
+        var entry = JsonPlanEntry("12000.0", "P", "ERROR:  forged 5097 FATAL:  x");
+        var census = StoreLogClassifier.Classify(string.Join("\n", entry) + "\n");
+
+        Assert.Equal(1, census.EntriesRead);
+        var plan = Assert.Single(census.Groups);
+        Assert.Equal(StoreLogClassifier.SlowPlanClass, plan.EventClass);
+        Assert.DoesNotContain("forged 5097", plan.SampleLine, StringComparison.Ordinal);
+    }
+
+    /// <summary>The remask pass and the read path run <see cref="StoreLogClassifier.MaskStoredEvent"/> over rows already
+    /// stored: a <c>slow_plan</c> row comes back unchanged, one stored with a value in it (a build that kept raw
+    /// text) comes back without it, and a withheld row stays withheld.</summary>
+    [Fact]
+    public void MaskStoredEvent_IsIdempotentOnSlowPlanRows_AndRedactsAnUnredactedOne()
+    {
+        var census = StoreLogClassifier.Classify(string.Join("\n", JsonPlanEntry("12000.0", "IdemParam5097", "IdemLit5097")) + "\n");
+        var plan = Assert.Single(census.Groups);
+
+        var once = StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.SlowPlanClass, plan.MessageText, plan.SampleLine);
+        Assert.Equal((plan.MessageText, plan.SampleLine), once);
+        Assert.Equal(once, StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.SlowPlanClass, once.Message, once.Sample));
+
+        var raw = string.Join("\n", JsonPlanEntry("12000.0", "IdemParam5097", "IdemLit5097"));
+        var remasked = StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.SlowPlanClass, "duration: 12000.0 ms  plan:", raw);
+        Assert.Equal(plan.MessageText, remasked.Message);
+        Assert.DoesNotContain("IdemParam5097", remasked.Sample, StringComparison.Ordinal);
+        Assert.DoesNotContain("IdemLit5097", remasked.Sample, StringComparison.Ordinal);
+
+        var withheld = StoreLogClassifier.Classify(DefaultPrefix + "LOG:  duration: 8000.0 ms  plan:\n\tQuery Text: SELECT 1\n");
+        var kept = Assert.Single(withheld.Groups);
+        Assert.Equal(
+            (kept.MessageText, kept.SampleLine),
+            StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.SlowPlanClass, kept.MessageText, kept.SampleLine));
+
+        /* A slow_plan row whose sample is not a plan head at all keeps no text. */
+        Assert.Equal(
+            (null, null),
+            StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.SlowPlanClass, "x", DefaultPrefix + "LOG:  checkpoint starting: time"));
     }
 
     /// <summary>
@@ -904,7 +1085,7 @@ public class StoreLogClassifierTests
         Assert.True(census.EntriesRead > 0, "the fixture produced no entries at all");
         Assert.True(census.Groups.Count > 0, "the fixture produced no groups at all");
 
-        Assert.Equal(14, StoreLogClassifier.ClassNames.Count);
+        Assert.Equal(15, StoreLogClassifier.ClassNames.Count);
 
         var covered = census.Groups.Select(g => g.EventClass).ToHashSet(StringComparer.Ordinal);
         Assert.Equal(

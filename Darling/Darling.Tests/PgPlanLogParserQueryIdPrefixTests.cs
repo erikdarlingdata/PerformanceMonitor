@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using PerformanceMonitor.Collectors;
 using Xunit;
 
@@ -71,6 +72,46 @@ public sealed class PgPlanLogParserQueryIdPrefixTests
 
         var plan = Assert.Single(plans);
         Assert.Equal(987654321, plan.QueryId);
+    }
+
+    /* PostgreSQL 16+ auto_explain writes the bind values at the root, beside Query Text (#5103). */
+    private static string PlanWithParameters(string parameters) =>
+        "{\n  \"Query Text\": \"SELECT 1\",\n  \"Query Parameters\": \"" + parameters + "\",\n"
+        + "  \"Plan\": {\n    \"Node Type\": \"Seq Scan\",\n    \"Relation Name\": \"t\"\n  }\n}";
+
+    /// <summary>
+    /// #5103: two blocks that differ ONLY in their root-level <c>Query Parameters</c> are one plan shape, so they
+    /// hash alike, and neither value reaches the redacted JSON.
+    /// </summary>
+    [Fact]
+    public void QueryParameters_AreRemoved_AndDoNotSplitThePlanHash()
+    {
+        var first = PgPlanLogParser.FromBlock(1, 1, PlanWithParameters("$1 = '''BindLeakAlpha5103'''"));
+        var second = PgPlanLogParser.FromBlock(1, 1, PlanWithParameters("$1 = '''BindLeakBeta5103'''"));
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.Equal(first!.Value.PlanHash, second!.Value.PlanHash);
+        Assert.Equal(first.Value.PlanJson, second.Value.PlanJson);
+        foreach (var json in new[] { first.Value.PlanJson, second.Value.PlanJson })
+        {
+            Assert.DoesNotContain("BindLeakAlpha5103", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("BindLeakBeta5103", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("Query Parameters", json, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>A block with no <c>Query Parameters</c> (PostgreSQL 15 and earlier, or
+    /// <c>log_parameter_max_length = 0</c>) hashes as it did before #5103: the fixture's hash is pinned, and the
+    /// same block with the key added hashes the same.</summary>
+    [Fact]
+    public void ABlockWithoutQueryParameters_KeepsItsPreviousHash()
+    {
+        var plain = PgPlanLogParser.FromBlock(1, 1, PlanJson);
+
+        Assert.NotNull(plain);
+        Assert.Equal("D1C094935D8544AC2B7522473D03B0F7", plain!.Value.PlanHash);
+        Assert.Equal(plain.Value.PlanHash, PgPlanLogParser.FromBlock(1, 1, PlanWithParameters("$1 = '1'"))!.Value.PlanHash);
     }
 
     /// <summary>Direct pin on the decision helper itself, for the three shapes above plus the other two
