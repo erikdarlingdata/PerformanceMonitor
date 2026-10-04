@@ -79,7 +79,9 @@ try {
   }
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
-    'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\nexport function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return ""; }\n'
+    'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n' +
+      /* panels.js imports these since the line-chart zoom (#5092). */
+      'export function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return ""; }\n'
   );
   const out = {};
   for (const name of ["optimization", "high-impact"]) {
