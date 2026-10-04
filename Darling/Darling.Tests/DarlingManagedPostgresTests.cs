@@ -2709,7 +2709,7 @@ public sealed class DarlingManagedPostgresTests
             Assert.Equal("timescaledb,pg_stat_statements,auto_explain", LastConfAssignment(first, "shared_preload_libraries"));
             Assert.Equal("10s", LastSettingValue(first, "auto_explain.log_min_duration"));
 
-            var logged = Assert.Single(logger.Lines, l => l.Contains("v18", StringComparison.Ordinal));
+            var logged = Assert.Single(logger.Lines, l => l.Contains("Appended v18 slow-statement plans", StringComparison.Ordinal));
             Assert.StartsWith("Information: ", logged, StringComparison.Ordinal);
             Assert.Contains("next start it owns", logged, StringComparison.Ordinal);
 
@@ -2775,10 +2775,13 @@ public sealed class DarlingManagedPostgresTests
         {
             var code = System.Text.RegularExpressions.Regex.Replace(region, @"/\*.*?\*/", string.Empty, System.Text.RegularExpressions.RegexOptions.Singleline);
             code = System.Text.RegularExpressions.Regex.Replace(code, @"//[^\r\n]*", string.Empty);
-            foreach (var forbidden in new[] { "pg_ctl restart", "pg_ctl stop", "pg_reload_conf", "reload", "StopAsync", "RestartAsync" })
+            foreach (var forbidden in new[] { "pg_ctl restart", "pg_ctl stop", "pg_reload_conf", "StopAsync", "RestartAsync" })
             {
                 Assert.DoesNotContain(forbidden, code, StringComparison.OrdinalIgnoreCase);
             }
+
+            /* "reload" as the start of a word: the identifier EffectivePreloadList contains it mid-word. */
+            Assert.DoesNotMatch(@"(?<![A-Za-z])reload", code);
         }
     }
 
