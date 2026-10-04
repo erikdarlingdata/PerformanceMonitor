@@ -457,6 +457,34 @@ Object.assign(scenarios, {
     const other = modules.panels.renderPanel({ ...cpuPanel, params: { server: "SRV2", hours: 4 } });
     return [chart, latency, other];
   },
+  // A read wider than the store keeps is asked again for the hours it keeps: the retry keeps the range's end, draws only
+  // the part of the range the store holds, and the notice says so.
+  customKeptHistory: async () => {
+    answer = (url) => (Number(asked(url)) > 4 ? refusal(asked(url), 4, 0) : data({ samples: cpuRows }));
+    modules.util.setActiveRange({ server: "SRV1", hours: 24, startMs: Date.parse("2026-01-01T11:15:00.000Z"), endMs: Date.parse(T1), asOf: T1 });
+    return [modules.panels.renderPanel({ ...cpuPanel, params: { server: "SRV1", hours: 24 } })];
+  },
+  // Aggregate rows stamped with their last sample survive the trim; per-point series rows do not.
+  customAggregateRows: async () => {
+    const latch = [{ latch_class: "A", captured_at: "2026-01-02T06:45:00" }, { latch_class: "B", captured_at: "2026-01-02T09:00:00" }];
+    answer = (url) => data(tool(url) === "get_latch_stats" ? { latches: latch } : { samples: cpuRows });
+    modules.util.setActiveRange({ server: "SRV1", hours: 4, startMs: Date.parse(T0), endMs: Date.parse(T1), asOf: T1 });
+    const lat = await modules.util.readTool("get_latch_stats", { server: "SRV1", hours: 4 });
+    const cpu = await modules.util.readTool("get_cpu_utilization", { server: "SRV1", hours: 4 });
+    found = { latchRows: lat.data.latches.length, seriesRows: cpu.data.samples.length };
+    return [];
+  },
+  // The label says where totals begin when the span is not whole hours.
+  customRoundedLabel: async () => {
+    answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
+    await customServerPage("SRV1");
+    const ctx = (a, b) => {
+      modules.server.applyCustomRange("SRV1", Date.parse(a), Date.parse(b), NOW);
+      return modules.server.rangeContext(NOW).label;
+    };
+    found = { rounded: ctx(T0, T1), whole: ctx("2026-01-02T06:30:00.000Z", T1) };
+    return [];
+  },
 });
 
 const chosen = scenarios[scenario];

@@ -187,7 +187,9 @@ export async function readWithinKeptHistory(fetchWith, params) {
   const kept = keptHoursOf(res.message);
   const asked = Number(params && params.hours);
   if (kept == null || !(kept >= 1 && asked > kept)) return res;
-  const retry = await fetchWith({ ...params, hours: kept });
+  /* The narrowed ask remembers the hours it replaces (NARROWED_FROM, a symbol, so it never reaches the query string):
+     a custom range on the server page carries through the retry instead of the read falling back to "ending now". */
+  const retry = await fetchWith({ ...params, hours: kept, [NARROWED_FROM]: asked });
   return retry.kind === "data" || retry.kind === "empty" ? { ...retry, keptHours: kept } : retry;
 }
 
@@ -202,6 +204,9 @@ export function keptWindowStrip(res) {
     return noticeStrip("This panel shows the last " + res.presetHours + " hours, not the custom range: its read takes no end time.");
   }
   if (!res || !res.keptHours) return null;
+  if (res.keptCustom) {
+    return noticeStrip(readLimitText(res.keptHours) + ", so it shows the part of the custom range the store still holds.");
+  }
   return noticeStrip(readLimitText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
 }
 
@@ -345,6 +350,10 @@ export function windowFromHours(hours) {
   if (!isFinite(h) || h < 1) return null;
   /* A custom range's own reads span the exact pair the reader picked, not the whole hours they were fetched over. */
   if (liveRange() && h === activeRange.hours) return { windowStart: activeRange.startMs, windowEnd: activeRange.endMs };
+  /* A read narrowed to the kept history draws the part of the custom range that history holds. */
+  if (liveRange() && h === activeRange.narrowedTo) {
+    return { windowStart: Math.max(activeRange.startMs, activeRange.endMs - h * 3600000), windowEnd: activeRange.endMs };
+  }
   const windowEnd = Date.now();
   return { windowStart: windowEnd - h * 3600000, windowEnd };
 }
@@ -740,9 +749,10 @@ export function setActiveRange(range) {
 const READS_WITHOUT_AS_OF = new Set(["get_fleet_overview", "get_read_latency", "get_finops"]);
 
 /* The row fields that stamp one sample, event or run at an instant. A list under a read's answer whose rows carry one of
-   these is cut to the exact range. Fields that say when something last happened (last_execution_time and its kin) are
-   left alone: those rows are totals over the window, not points in it. */
-const INSTANT_FIELDS = ["sample_time", "time", "collection_time", "event_time", "occurred_at", "deadlock_time", "change_time", "captured_at", "measured_at", "time_bucket"];
+   these is cut to the exact range. Fields that say when something last happened (last_execution_time and its kin, and
+   the captured_at / measured_at that some aggregate reads stamp with their LAST sample) are left alone: those rows are
+   totals over the window, not points in it. */
+const INSTANT_FIELDS = ["sample_time", "time", "collection_time", "event_time", "occurred_at", "deadlock_time", "change_time", "time_bucket"];
 
 /* The range belongs to the server page: a read from any other page is never anchored by it. */
 function liveRange() {
@@ -750,17 +760,28 @@ function liveRange() {
   return activeRange && (hash === "" || hash.startsWith("#/server/")) ? activeRange : null;
 }
 
+/* Marks the retry readWithinKeptHistory sends for fewer hours, with the hours the read first asked for. */
+const NARROWED_FROM = Symbol("narrowedFrom");
+
 function planCustomRange(tool, params) {
   const range = liveRange();
-  if (!range || !params || params.server !== range.server || Number(params.hours) !== range.hours || params.as_of != null) {
+  const narrowedFrom = params ? params[NARROWED_FROM] : undefined;
+  const asked = narrowedFrom != null ? Number(narrowedFrom) : Number(params && params.hours);
+  if (!range || !params || params.server !== range.server || asked !== range.hours || params.as_of != null) {
     return { params, range: null, ignored: false };
   }
   if (READS_WITHOUT_AS_OF.has(tool)) return { params, range: null, ignored: true };
-  return { params: range.asOf ? { ...params, as_of: range.asOf } : params, range, ignored: false };
+  const withEnd = range.asOf ? { ...params, as_of: range.asOf } : params;
+  if (narrowedFrom == null) return { params: withEnd, range, ignored: false };
+  /* The kept-history retry: the same end, the hours the store keeps, and only the part of the range those hours reach. */
+  const kept = Number(params.hours);
+  range.narrowedTo = kept;
+  return { params: withEnd, range: { ...range, startMs: Math.max(range.startMs, range.endMs - kept * 3600000) }, ignored: false, narrowed: true };
 }
 
 function finishCustomRange(res, plan) {
   if (plan.ignored) return res && (res.kind === "data" || res.kind === "empty") ? { ...res, presetHours: Number(plan.params.hours) } : res;
+  if (plan.narrowed && res && (res.kind === "data" || res.kind === "empty")) res = { ...res, keptCustom: true };
   if (!plan.range || !res || res.kind !== "data") return res;
   return { ...res, data: trimToRange(res.data, plan.range.startMs, plan.range.asOf ? plan.range.endMs : Infinity, 0) };
 }

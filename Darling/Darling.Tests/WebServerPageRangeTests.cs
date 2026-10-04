@@ -228,9 +228,14 @@ public sealed class WebServerPageRangeTests
     public void TheReadsWithoutAsOf_AreTheCatalogsWindowedReadsThatTakeNone()
     {
         var catalog = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
-        var windowedWithoutAsOf = Regex.Matches(catalog, @"\[""(\w+)""\] = R\((.*)")
-            .Where(m => m.Groups[2].Value.Contains("PHours(", System.StringComparison.Ordinal) && !m.Groups[2].Value.Contains("PAsOf()", System.StringComparison.Ordinal))
-            .Select(m => m.Groups[1].Value)
+        /* An entry runs from its `["name"] = R(` to the next entry's start (or the end of the file), so one that wraps
+           over several lines is read whole. */
+        var starts = Regex.Matches(catalog, @"\[""(\w+)""\] = R\(").ToArray();
+        var entries = starts.Select((m, i) => (Name: m.Groups[1].Value, Body: catalog[m.Index..(i + 1 < starts.Length ? starts[i + 1].Index : catalog.Length)])).ToArray();
+        Assert.True(entries.Length > 100, "The read catalog's entries were not found.");
+        var windowedWithoutAsOf = entries
+            .Where(e => e.Body.Contains("PHours(", System.StringComparison.Ordinal) && !e.Body.Contains("PAsOf()", System.StringComparison.Ordinal))
+            .Select(e => e.Name)
             .OrderBy(n => n, System.StringComparer.Ordinal)
             .ToArray();
         Assert.NotEmpty(windowedWithoutAsOf);
@@ -240,5 +245,44 @@ public sealed class WebServerPageRangeTests
         Assert.True(set.Success, "util.js no longer declares READS_WITHOUT_AS_OF.");
         var declared = Regex.Matches(set.Groups[1].Value, @"""(\w+)""").Select(m => m.Groups[1].Value).OrderBy(n => n, System.StringComparer.Ordinal).ToArray();
         Assert.Equal(windowedWithoutAsOf, declared);
+    }
+
+    /// <summary>A read wider than the store keeps is asked again for the hours it keeps. On a custom range that retry keeps the
+    /// range's end (<c>as_of</c>), the chart draws only the part of the range the store holds, and the notice says so.</summary>
+    [Fact]
+    public void ANarrowedRead_OnACustomRange_KeepsTheEndAndSaysItShowsThePartTheStoreHolds()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("customKeptHistory", out var r)) return;
+
+        var fetches = Strings(r, "fetches");
+        Assert.Contains("/api/read/get_cpu_utilization?server=SRV1&hours=24&as_of=2026-01-02T10%3A30%3A00.000Z", fetches);
+        Assert.Contains("/api/read/get_cpu_utilization?server=SRV1&hours=4&as_of=2026-01-02T10%3A30%3A00.000Z", fetches);
+        Assert.DoesNotContain("/api/read/get_cpu_utilization?server=SRV1&hours=4", fetches.Where(f => !f.Contains("as_of=", System.StringComparison.Ordinal)));
+        /* 06:30 to 10:30 is the part of 07:15-yesterday to 10:30 a 4-hour store holds: 07:30, 09:00 and 10:00 are in, 06:00 is out. */
+        Assert.Equal(new[] { 3 }, r.GetProperty("chartPoints").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Contains("the part of the custom range the store still holds", Assert.Single(Strings(r, "notices")));
+    }
+
+    /// <summary>The trim cuts per-point series. A row that stamps its LAST sample (the latch read's <c>captured_at</c>) is a total over
+    /// the window and stays, even when that stamp falls in the rounded-up slack before the picked start.</summary>
+    [Fact]
+    public void TheTrim_LeavesAggregateRowsAlone()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("customAggregateRows", out var r)) return;
+
+        var found = r.GetProperty("found");
+        Assert.Equal(2, found.GetProperty("latchRows").GetInt32());
+        Assert.Equal(3, found.GetProperty("seriesRows").GetInt32());
+    }
+
+    /// <summary>A span that is not a whole number of hours says where totals and rankings begin; a whole-hour span adds nothing.</summary>
+    [Fact]
+    public void ARoundedRange_SaysWhereTheAggregatesBegin()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("customRoundedLabel", out var r)) return;
+
+        var found = r.GetProperty("found");
+        Assert.Contains("aggregate from", found.GetProperty("rounded").GetString());
+        Assert.DoesNotContain("aggregate from", found.GetProperty("whole").GetString());
     }
 }

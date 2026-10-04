@@ -139,7 +139,7 @@ export function applyCustomRange(server, startMs, endMs, nowMs = Date.now()) {
 
 /** The {hours,label} context every tab build() is given. A custom range also hands the util module its exact pair, so
  *  every read of this server inside it is anchored and trimmed there. */
-function rangeContext(nowMs = Date.now()) {
+export function rangeContext(nowMs = Date.now()) {
   const custom = current.server ? customRanges.get(current.server) : null;
   if (custom) {
     const endMs = custom.live ? nowMs : custom.endMs;
@@ -147,7 +147,11 @@ function rangeContext(nowMs = Date.now()) {
     const r = resolveCustomRange(startMs, endMs, nowMs);
     if (!r.error) {
       setActiveRange({ server: current.server, hours: r.hours, startMs, endMs, asOf: r.asOf });
-      return { hours: r.hours, label: "custom: " + localTime(new Date(startMs).toISOString()) + " to " + (custom.live ? "now" : localTime(new Date(endMs).toISOString())), custom: true };
+      /* Totals and rankings are read over whole hours back from the end, so they can begin earlier than the picked start:
+         when the span is not a whole number of hours the label says where they begin. */
+      const aggregateFrom = endMs - r.hours * HOUR_MS;
+      const rounded = aggregateFrom < startMs ? "; totals and rankings aggregate from " + localTime(new Date(aggregateFrom).toISOString()) : "";
+      return { hours: r.hours, label: "custom: " + localTime(new Date(startMs).toISOString()) + " to " + (custom.live ? "now" : localTime(new Date(endMs).toISOString())) + rounded, custom: true };
     }
     customRanges.delete(current.server);
   }
@@ -173,7 +177,8 @@ export function renderServer(main, server, tabId, opts) {
   const custom = customRanges.get(server);
   /* A fixed custom range cannot change under the poll, so the poll keeps the panels it already drew (same server, same
      tab) instead of reading the same hours again. A live range, a preset and a tab or server click rebuild as before. */
-  keepGrid = isPoll && !!custom && !custom.live && !!gridNode && gridKey === server + "|" + (tabId || "");
+  const keep = isPoll && !!custom && !custom.live && !!gridNode && gridKey === server + "|" + (tabId || "");
+  keepGrid = false;
   current = { server, tab: null };
 
   const dot = el("span", { class: "dot" });
@@ -193,7 +198,7 @@ export function renderServer(main, server, tabId, opts) {
 
   /* The bar and the note share one slot because both are decided by the same card. */
   const tabsSlot = el("div", { class: "subtabs-slot" }, [loadingStrip()]);
-  if (!keepGrid) gridNode = el("div", { class: "panel-grid" });
+  if (!keep) gridNode = el("div", { class: "panel-grid" });
   mount(main, [head, whySlot, tabsSlot, gridNode]);
 
   /* Seen this server before? Then its engine is already known and the page paints now — no loading strip, and
@@ -203,7 +208,7 @@ export function renderServer(main, server, tabId, opts) {
   let painted = null;
   if (remembered) {
     fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, remembered.card, remembered.reason);
-    painted = paintTabs(tabsSlot, server, tabId, remembered.card);
+    painted = paintTabsKeeping(keep, tabsSlot, server, tabId, remembered.card);
   }
 
   /* /api/fleet is fetched again only to place a server this page has no card for yet, or on the poll's real
@@ -224,9 +229,21 @@ export function renderServer(main, server, tabId, opts) {
          the two registries are module constants, so that comparison is exact. A null card never repaints over a
          painted page: a fleet read that failed says nothing about which engine this server runs. */
       if (!painted || (card && serverTabsFor(card) !== painted)) {
-        painted = paintTabs(tabsSlot, server, tabId, card);
+        painted = paintTabsKeeping(keep && !painted, tabsSlot, server, tabId, card);
       }
     });
+  }
+}
+
+/* paintTabs, leaving the panels the previous render drew in place when `keep`. The flag is raised only for this one
+   paint and always lowered after it, so a render that never paints (a failed fleet read) cannot leave it set for the
+   next Apply or preset redraw to swallow. */
+function paintTabsKeeping(keep, tabsSlot, server, tabId, card) {
+  keepGrid = keep;
+  try {
+    return paintTabs(tabsSlot, server, tabId, card);
+  } finally {
+    keepGrid = false;
   }
 }
 
@@ -301,19 +318,26 @@ function rangeControl() {
   };
   const start = input("Range start", saved ? saved.startMs : null);
   const end = input("Range end", saved ? (saved.live ? Date.now() : saved.endMs) : null);
+  /* An end the form filled in as "now" stays "now" however long the form sits open: Apply then reads the clock again.
+     Typing in the end box makes it the reader's own. */
+  let endIsNow = !saved || saved.live;
+  end.addEventListener("input", () => { endIsNow = false; });
   const message = el("span", { class: "range-custom-error", role: "alert" });
   const apply = el("button", { type: "button", class: "btn range-custom-apply", text: "Apply" });
   const form = el("span", { class: "range-custom" }, [start, el("span", { text: "to" }), end, apply, message]);
   form.hidden = sel.value !== CUSTOM;
 
   apply.addEventListener("click", () => {
-    const err = applyCustomRange(server, new Date(start.value).getTime(), new Date(end.value).getTime());
+    const err = applyCustomRange(server, new Date(start.value).getTime(), endIsNow ? Date.now() : new Date(end.value).getTime());
     message.textContent = err || "";
   });
   sel.addEventListener("change", () => {
     if (sel.value === CUSTOM) {
       form.hidden = false;
-      if (!end.value) end.value = localInputValue(Date.now());
+      if (!end.value) {
+        end.value = localInputValue(Date.now());
+        endIsNow = true;
+      }
       if (!start.value) start.value = localInputValue(Date.now() - 24 * HOUR_MS);
       return;
     }
