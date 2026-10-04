@@ -27,7 +27,7 @@ public sealed partial class DarlingMcpFinOpsTools
         "index_analysis: index cleanup findings and reclaimable space.";
 
     internal const string IndexAnalysisViewGuide =
-        "index_analysis runs the monitor-side sp_IndexCleanup reproduction over the latest collected index snapshot; hours_back other than 24 is refused. overall and databases are the reclaimable-space roll-ups in GB (3 decimals); workload counters are per database only. recommendations is ordered by index size, then name; limit caps it, recommendation_count and counts_by_action count all findings, and truncated says when rows were cut. databases lists at most 13, largest total_max_savings_gb first, and databases_truncated says when more exist; database_name reads any database, including one outside those 13. script and original_index_definition are cut to 300 characters unless full_text=true, which returns them in full with no size cap; the *_truncated flags say so. notes carries the uptime and dedupe-only caveats and the analyzer's stated limitations. REVIEW rows carry no script. Text numbers use the invariant culture.";
+        "index_analysis runs the monitor-side sp_IndexCleanup reproduction over each database's newest collected index snapshot; each databases entry carries captured_at, when that snapshot was collected (a database that left collection scope shows an older one), and overall carries none; hours_back other than 24 is refused. overall and databases are the reclaimable-space roll-ups in GB (3 decimals); workload counters are per database only. recommendations is ordered by index size, then name; limit caps it, recommendation_count and counts_by_action count all findings, and truncated says when rows were cut. databases lists at most 13, largest total_max_savings_gb first, and databases_truncated says when more exist; database_name reads any database, including one outside those 13. script and original_index_definition are cut to 300 characters unless full_text=true, which returns them in full with no size cap; the *_truncated flags say so. notes carries the uptime and dedupe-only caveats and the analyzer's stated limitations. REVIEW rows carry no script. Text numbers use the invariant culture.";
 
     /// <summary>The longest <c>script</c> or <c>original_index_definition</c> text kept when <c>full_text</c> is false.</summary>
     internal const int IndexAnalysisTextCap = 300;
@@ -108,7 +108,7 @@ public sealed partial class DarlingMcpFinOpsTools
         Math.Round(IndexCleanupRollupFigures.AverageWaitMs(waitInMs, waitCount), 2, MidpointRounding.AwayFromZero);
 
     /// <summary>One roll-up row; the workload counters are included only for a per-database row.</summary>
-    internal static object IndexAnalysisRollupRow(IndexCleanupRollup r, bool withWorkload)
+    internal static object IndexAnalysisRollupRow(IndexCleanupRollup r, bool withWorkload, DateTime? capturedAt = null)
     {
         if (!withWorkload)
         {
@@ -133,6 +133,8 @@ public sealed partial class DarlingMcpFinOpsTools
         return new
         {
             database_name = r.DatabaseName,
+            /* When this database's newest snapshot was collected (null only if the read named no such database). */
+            captured_at = capturedAt is { } at ? McpHelpers.FormatEffectiveStart(at) : null,
             tables_analyzed = r.TablesAnalyzed,
             index_count = r.IndexCount,
             total_size_gb = Gb(r.TotalSizeGb),
@@ -197,7 +199,8 @@ public sealed partial class DarlingMcpFinOpsTools
     /// roll-ups. A null <paramref name="emptyStatus"/> falls back to the generic empty message.
     /// </summary>
     internal static string BuildIndexAnalysisPayload(
-        string serverName, IndexCleanupAnalysisResult result, int limit, string? databaseName, bool fullText, string? emptyStatus)
+        string serverName, IndexCleanupAnalysisResult result, int limit, string? databaseName, bool fullText, string? emptyStatus,
+        IReadOnlyDictionary<string, DateTime>? snapshotTimes = null)
     {
         if (result.DatabaseRollups.Count == 0)
         {
@@ -246,7 +249,7 @@ public sealed partial class DarlingMcpFinOpsTools
             overall_workload_reason = filtered ? null : "workload counters are reported per database only, as sp_IndexCleanup does",
             database_count = dbs.Count,
             databases_truncated = dbs.Count > MaxIndexAnalysisDatabases,
-            databases = dbs.Take(MaxIndexAnalysisDatabases).Select(d => IndexAnalysisRollupRow(d, true)).ToList(),
+            databases = dbs.Take(MaxIndexAnalysisDatabases).Select(d => IndexAnalysisRollupRow(d, true, SnapshotTimeOf(snapshotTimes, d.DatabaseName))).ToList(),
             recommendation_count = ordered.Count,
             truncated = ordered.Count > limit,
             limit,
@@ -255,16 +258,27 @@ public sealed partial class DarlingMcpFinOpsTools
         }, McpHelpers.JsonOptions);
     }
 
+    private static DateTime? SnapshotTimeOf(IReadOnlyDictionary<string, DateTime>? times, string? databaseName)
+    {
+        if (times == null || databaseName == null || !times.TryGetValue(databaseName, out var at))
+        {
+            return null;
+        }
+
+        return at;
+    }
+
     private static async Task<string> ReadIndexAnalysisAsync(
         NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit,
         string? databaseName, bool fullText, CancellationToken ct)
     {
         if (hoursBack != 24)
             return McpHelpers.Refusal("hours_back",
-                $"Invalid hours_back value '{hoursBack}': view {IndexAnalysisView} reads the latest collected index snapshot; hours_back does not apply. Omit it or pass 24.");
+                $"Invalid hours_back value '{hoursBack}': view {IndexAnalysisView} reads each database's newest collected index snapshot; hours_back does not apply. Omit it or pass 24.");
 
-        var result = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(
+        var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(
             postgres, resolved.ServerId, McpCommandDeadlines.ReadSeconds, ct);
+        var result = read.Result;
         string? notCollected = null;
         if (result.DatabaseRollups.Count == 0)
         {
@@ -272,6 +286,6 @@ public sealed partial class DarlingMcpFinOpsTools
                 postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", ct);
         }
 
-        return BuildIndexAnalysisPayload(resolved.ServerName, result, limit, databaseName, fullText, notCollected);
+        return BuildIndexAnalysisPayload(resolved.ServerName, result, limit, databaseName, fullText, notCollected, read.SnapshotTimes);
     }
 }

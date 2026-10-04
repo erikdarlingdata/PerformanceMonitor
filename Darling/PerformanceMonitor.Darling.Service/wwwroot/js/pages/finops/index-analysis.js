@@ -43,6 +43,7 @@ const ROLLUP_COLUMNS = [
   { key: "avg_lock_wait_ms", label: "Avg Lock Wait ms", format: "num2" },
   { key: "latch_wait_count", label: "Latch Waits", format: "int" },
   { key: "avg_latch_wait_ms", label: "Avg Latch Wait ms", format: "num2" },
+  { key: "captured_at", label: "Collected", format: "time" },
 ];
 
 const RECOMMENDATION_COLUMNS = [
@@ -94,7 +95,7 @@ function noticeText(data, n, db) {
   const cut = data.databases_truncated ? " Showing the largest databases of " + data.database_count + "." : "";
   const workload = data.overall_workload_reason ? " Overall row: " + data.overall_workload_reason + "." : "";
   const filter = db ? " Database " + db + "." : "";
-  return count + filter + cut + " Analyzed from the latest collected snapshot." + workload;
+  return count + filter + cut + " Analyzed from each database's newest collected snapshot." + workload;
 }
 
 export const tab = {

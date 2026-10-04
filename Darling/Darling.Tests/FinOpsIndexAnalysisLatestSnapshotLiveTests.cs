@@ -9,9 +9,13 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
@@ -86,10 +90,72 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
         Assert.DoesNotContain((DbX, "i2"), a.Keys);
         Assert.DoesNotContain((DbY, "j2"), a.Keys);
 
+        /* #5082: the last column is each database's own anchor: X at T, Y (left scope) at T-3d. */
+        var stamps = await ReadStampsAsync(connection, ServerA, ct);
+        Assert.Equal(new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc), stamps[DbX]);
+        Assert.Equal(new DateTime(2026, 1, 12, 12, 0, 0, DateTimeKind.Utc), stamps[DbY]);
+
         var b = await ReadAsync(connection, ServerB, ct);
         Assert.Equal(2, b.Count);
         Assert.Equal(99, b[(DbX, "b1")]);
         Assert.Equal(98, b[(DbY, "b2")]);
+    }
+
+    /// <summary>The reader's naive-UTC snapshot time per database, and the same time through get_finops index_analysis:
+    /// captured_at on each databases entry, none on overall. Fixed anchors, never the wall clock.</summary>
+    [Fact]
+    public async Task EachDatabasesSnapshotTime_ReachesTheReaderAndGetFinOps_AScopedOutDatabaseOlder()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the latest-snapshot live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerA, "srv", ct);
+        var t = new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Unspecified);
+        await Insert(connection, ServerA, DbX, 1, "i1", t, 1, 10, ct);
+        await Insert(connection, ServerA, DbY, 1, "j1", t.AddDays(-3), 2, 30, ct);
+        /* The analyzer drops rows with no type, key or size, so give both indexes a body. */
+        await Exec(connection, "UPDATE index_object_stats SET index_type_desc = 'NONCLUSTERED', key_columns = '[a]', reserved_mb = 100, total_rows = 1000, "
+            + "is_unique = false, is_primary_key = false, is_disabled = false, user_seeks = 0, user_scans = 0, user_lookups = 0, user_updates = 5", ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(ds, ServerA, 30, ct);
+        Assert.Equal(new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc), read.SnapshotTimes["db5"]);
+        Assert.Equal(new DateTime(2026, 1, 12, 12, 0, 0, DateTimeKind.Utc), read.SnapshotTimes["db6"]);
+
+        var payload = await DarlingMcpFinOpsTools.GetFinOps(ds, "index_analysis", "srv", 24, 10, cancellationToken: ct);
+        using var doc = JsonDocument.Parse(payload);
+        var root = doc.RootElement;
+        Assert.True(root.TryGetProperty("overall", out var overall), payload);
+        Assert.False(overall.TryGetProperty("captured_at", out _), "overall spans databases and carries no single time");
+        var stamped = new Dictionary<string, string?>();
+        foreach (var d in root.GetProperty("databases").EnumerateArray())
+        {
+            stamped[d.GetProperty("database_name").GetString()!] = d.GetProperty("captured_at").GetString();
+        }
+
+        Assert.Equal(McpHelpers.FormatEffectiveStart(new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc)), stamped["db5"]);
+        Assert.Equal(McpHelpers.FormatEffectiveStart(new DateTime(2026, 1, 12, 12, 0, 0, DateTimeKind.Utc)), stamped["db6"]);
+        Assert.EndsWith("T12:00:00.0000000Z", stamped["db6"]);
+    }
+
+    private static async Task<Dictionary<int, DateTime>> ReadStampsAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
+    {
+        var stamps = new Dictionary<int, DateTime>();
+        await using var command = new NpgsqlCommand(DarlingFinOpsIndexAnalysisReader.IndexObjectStatsLatestSql, connection);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            /* Ordinal 40 is collection_time, the last column of the read contract. */
+            stamps[reader.GetInt32(1)] = DateTime.SpecifyKind(reader.GetDateTime(40), DateTimeKind.Utc);
+        }
+
+        return stamps;
     }
 
     private static async Task<Dictionary<(int Db, string Index), long>> ReadAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)

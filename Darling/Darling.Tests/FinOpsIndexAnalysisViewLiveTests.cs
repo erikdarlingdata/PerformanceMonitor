@@ -107,7 +107,8 @@ public sealed class FinOpsIndexAnalysisViewLiveTests
         await using var pg = NpgsqlDataSource.Create(scratch.ConnectionString);
         var id = ServerIdHelper.GetDeterministicHashCode(server);
 
-        var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(pg, id, 30, ct);
+        var withTimes = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(pg, id, 30, ct);
+        var read = withTimes.Result;
         using var doc = await ToolAsync(pg, server, limit: 50, ct: ct);
         var root = doc.RootElement;
 
@@ -115,7 +116,7 @@ public sealed class FinOpsIndexAnalysisViewLiveTests
         var dbs = DarlingMcpFinOpsTools.OrderIndexAnalysisDatabases(read.DatabaseRollups);
         Assert.Equal(dbs.Count, root.GetProperty("databases").GetArrayLength());
         for (var i = 0; i < dbs.Count; i++)
-            AssertSame(Elem(DarlingMcpFinOpsTools.IndexAnalysisRollupRow(dbs[i], true)), root.GetProperty("databases")[i], "database " + i);
+            AssertSame(Elem(DarlingMcpFinOpsTools.IndexAnalysisRollupRow(dbs[i], true, withTimes.SnapshotTimes[dbs[i].DatabaseName!])), root.GetProperty("databases")[i], "database " + i);
         var recs = DarlingMcpFinOpsTools.OrderIndexAnalysisRecommendations(read.Recommendations);
         Assert.True(recs.Count > 0);
         Assert.Equal(recs.Count, root.GetProperty("recommendation_count").GetInt32());

@@ -525,7 +525,7 @@ public sealed class McpLatestSnapshotStampTests
     /// for the server) — a "current" read IS a latest read, and the name had kept it out of the sweep.
     /// </summary>
     private static readonly Regex LatestReaderCall = new(
-        @"\.(GetLatest\w+Async|Get\w+LatestAsync|Get\w+SnapshotAsync|GetCurrent\w+Async|GetPlanCacheBloatAsync|GetCpuSchedulerPressureAsync|GetServerSummaryAsync|GetIndexUsageAsync|GetIndexLockingAsync|GetObjectSizeGrowthAsync|GetObjectIndexDetailAsync|GetRunningJobsAsync)\(",
+        @"\.(GetLatest\w+Async|Get\w+LatestAsync|Get\w+SnapshotAsync|GetCurrent\w+Async|GetPlanCacheBloatAsync|GetCpuSchedulerPressureAsync|GetServerSummaryAsync|GetIndexUsageAsync|GetIndexLockingAsync|GetObjectSizeGrowthAsync|GetObjectIndexDetailAsync|GetIndexAnalysisWithSnapshotTimesAsync|GetRunningJobsAsync)\(",
         RegexOptions.Compiled);
 
     /* ───────────────────────── the readers ───────────────────────── */
@@ -676,6 +676,8 @@ public sealed class McpLatestSnapshotStampTests
         Assert.DoesNotMatch(LatestReaderCall, "            var rows = await DarlingPgServerConfigReader.GetConfigChangesAsync(");
         /* #5070: the Storage Growth index drill is a latest read too, and so is held to the stamped dialect. */
         Assert.Matches(LatestReaderCall, "        var indexes = await DarlingFinOpsStorageGrowthReader.GetObjectIndexDetailAsync(");
+        /* #5082: so is the Index Analysis read, which answers each database's newest snapshot. */
+        Assert.Matches(LatestReaderCall, "        var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(");
     }
 
     /// <summary>
@@ -692,6 +694,22 @@ public sealed class McpLatestSnapshotStampTests
         Assert.Contains("GetObjectIndexDetailAsync(", source, StringComparison.Ordinal);
         Assert.Matches(CapturedAtKey, source);
         Assert.Contains("captured_at = indexes.Count == 0 ? null : McpHelpers.FormatEffectiveStart(indexes[0].CollectionTime)", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Same reason as above for <c>index_analysis</c> (#5082): its partial file has no tool mark, so this pins the read and
+    /// the per-database stamp directly. The patterns run against the file's own source.
+    /// </summary>
+    [Fact]
+    public void IndexAnalysis_StampsEachDatabase_FromItsOwnSnapshot_AndNotTheOverallRow()
+    {
+        var source = Strip(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.IndexAnalysis.cs"));
+        Assert.Matches(LatestReaderCall, source);
+        Assert.Matches(CapturedAtKey, source);
+        Assert.Contains("captured_at = capturedAt is { } at ? McpHelpers.FormatEffectiveStart(at) : null,", source, StringComparison.Ordinal);
+        Assert.Contains("IndexAnalysisRollupRow(d, true, SnapshotTimeOf(snapshotTimes, d.DatabaseName))", source, StringComparison.Ordinal);
+        /* The overall row spans databases and is built without a time. */
+        Assert.Contains("IndexAnalysisRollupRow(result.OverallRollup, false)", source, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── plumbing ───────────────────────── */
