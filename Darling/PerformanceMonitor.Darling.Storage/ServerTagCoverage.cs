@@ -106,6 +106,24 @@ public static class ServerTagCoverage
         return Diff(snapshot, after);
     }
 
+    /// <summary>The most rules a delete warning names before it says "and N more".</summary>
+    public const int DeleteWarningMaxNamed = 5;
+
+    /// <summary>The sentence a delete confirmation appends when <paramref name="rules"/> are scoped to the tag or a
+    /// child tag: empty for none, else a leading space then the rule names and ids, the first
+    /// <see cref="DeleteWarningMaxNamed"/> and then "and N more".</summary>
+    public static string DeleteWarning(IReadOnlyList<TagScopedRule> rules)
+    {
+        if (rules.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var named = string.Join(", ", rules.Take(DeleteWarningMaxNamed).Select(r => $"'{r.Name}' (#{r.RuleId})"));
+        var more = rules.Count > DeleteWarningMaxNamed ? $", and {rules.Count - DeleteWarningMaxNamed} more" : string.Empty;
+        return " Custom alert rules scoped to this tag or a child tag will stop matching any server: " + named + more;
+    }
+
     /// <summary>The rules scoped to <paramref name="tagId"/> or a tag under it, enabled or not: the ones a delete
     /// of the tag would leave matching no server.</summary>
     public static IReadOnlyList<TagScopedRule> RulesScopedInSubtree(ServerTagSnapshot snapshot, int tagId)
