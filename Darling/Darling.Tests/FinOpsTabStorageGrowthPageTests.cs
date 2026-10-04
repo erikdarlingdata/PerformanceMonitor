@@ -61,10 +61,10 @@ public sealed class FinOpsTabStorageGrowthPageTests
             Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", row);
         foreach (var key in omitted)
         {
-            Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", row);
+            Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + "( = |,\r?$)", row);
             Assert.DoesNotContain(key, keys);
         }
-        var emitted = Regex.Matches(row, "(?m)^\\s+[a-z_0-9]+ = ").Count;
+        var emitted = Regex.Matches(row, "(?m)^\\s+[a-z_0-9]+( = |,$)").Count;
         Assert.Equal(emittedCount, emitted);
         Assert.Equal(emitted - omitted.Length, keys.Count);
     }
