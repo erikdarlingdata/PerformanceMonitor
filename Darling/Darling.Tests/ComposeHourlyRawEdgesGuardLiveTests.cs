@@ -23,14 +23,21 @@ namespace Darling.Tests;
 /// <summary>
 /// #4605: the live exactness proof for the hourly-raw-edges Compose route, first half. Each fact seeds its own scratch
 /// store (a fresh data source too, so the per-data-source rollup and coverage cache cannot leak between facts), refreshes
-/// <c>collect.query_stats_interval_hourly</c> up to the current hour, and runs a fleet Ranked SUM of <c>query_worker_us</c>
-/// through <see cref="DarlingWebEndpoints.RunComposedPanelAsync"/> over an explicit 24-hour window that ends now. Every
+/// <c>collect.query_stats_interval_hourly</c> up to the anchor's hour, and runs a fleet Ranked SUM of <c>query_worker_us</c>
+/// through <see cref="DarlingWebEndpoints.RunComposedPanelAsync"/> over a 24-hour window that ends at the anchor. Every
 /// fact then asserts two things: the payload SQL names <c>query_stats_interval_hourly AS mid</c> (the hybrid really was
 /// taken, so the comparison is not raw against raw), and the payload rows, serialized as JSON, equal byte for byte the rows
 /// of the SAME panel compiled with no verdict (the raw route) and run on its own connection. The raw side is produced by
 /// <see cref="ComposeCompiler.Compile"/> on a <see cref="ComposeRunContext"/> built from the same window, rollups and
-/// coverage, and its rows are serialized with the runner's own value mapping (copied below, since the runner's helper is
-/// private). Seeds are placed relative to the whole-hour middle <c>[h1, h2)</c> computed here the way the router does.
+/// coverage, and its rows are serialized with the runner's own value mapping (<see cref="DarlingWebEndpoints.DbValueToJson"/>).
+/// Seeds are placed relative to the whole-hour middle <c>[h1, h2)</c> computed here the way the router does.
+///
+/// <para>The whole class runs on ONE fixed anchor (<see cref="Anchor"/>), passed to the runner as its <c>nowUtc</c> seam. The
+/// seeds, the aggregate refresh range, h1 and h2, the window and the raw compile's context are all built from it, so no fact
+/// waits for an hour edge or races the hour turning over, and a slow migration cannot push the run past the router's one-minute
+/// end slack. Two things on the compose path still read the real clock: the rollup-probe cache lifetime and the coverage
+/// floor-reuse lifetime. Every fact opens a fresh data source, so a fact's probe is always a first probe and neither lifetime
+/// can change which route is taken. A pin below keeps this class from reading the wall clock or sleeping.</para>
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every fact reaches DARLING_TEST_PG only to CREATE and
    DROP its own database through ScratchPostgres, then works entirely inside it. */
@@ -48,11 +55,28 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
     private const string PanelByDatabaseAndObject =
         "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":50,\"groupBy\":[\"database_name\",\"object_name\"],\"viz\":\"table\"}";
 
-    private static long s_collectionId = DateTime.UtcNow.Ticks;
+    /// <summary>The one instant every fact runs at: 37 minutes and 21 seconds into an hour, so the window's start is not on an
+    /// hour and h1 is the next whole hour (23 whole hours of middle). Its kind is Unspecified on purpose: the guard binds the
+    /// router's hour instants to timestamp-without-time-zone parameters, and Npgsql refuses a Kind=Utc value there.</summary>
+    private static readonly DateTime Anchor = new(2026, 1, 5, 12, 37, 21, DateTimeKind.Unspecified);
 
-    /// <summary>Where the hours fall: the window ends within [h2 + 3 s, h2 + 57 min], so every seed offset below stays
-    /// inside the window and the hour does not turn over between the seed and the run.</summary>
-    private readonly record struct Layout(DateTime H1, DateTime H2);
+    /// <summary>The on-the-hour variant: the 24-hour window starts exactly on an hour, so h1 equals the window's start.</summary>
+    private static readonly DateTime OnTheHourAnchor = new(2026, 1, 5, 12, 0, 0, DateTimeKind.Unspecified);
+
+    private static long s_collectionId = Anchor.Ticks;
+
+    /// <summary>Where the hours fall for an anchor and a 24-hour window: h1 is the first whole hour at or after the window's
+    /// start, h2 the last whole hour at or before its end (the router's CeilHour and FloorHour).</summary>
+    private readonly record struct Layout(DateTime H1, DateTime H2)
+    {
+        public static Layout For(DateTime anchor)
+        {
+            var h2 = FloorHour(anchor);
+            var start = anchor.AddHours(-24);
+            var h1 = start == FloorHour(start) ? start : FloorHour(start).AddHours(1);
+            return new Layout(h1, h2);
+        }
+    }
 
     [Fact]
     public async Task RestartRowsOnly_InTheMiddle_GiveNullValues_TheHybridKeeps_AsRawDoes()
@@ -286,6 +310,66 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
         Assert.False(raw.ToJsonString() == hybridRows(hybrid), Premise);
     }
 
+    [Fact]
+    public async Task AScopedPanel_TakesTheRoute_WhenOnlyAnotherServerMismatches_AndTheFleetPanelDoesNot()
+    {
+        await using var store = await StoreAsync();
+        await SeedMixedAsync(store);
+
+        /* one more measured row in a middle hour for server B ONLY, after the refresh: B's count now disagrees with its
+           aggregate, A's does not */
+        await QsAsync(store, ServerB, "MixedDb", "HM", "0xM", store.Layout.H2.AddHours(-1).AddMinutes(20), 123456, 300);
+
+        /* scoped to A: the guard binds a non-null text[] for $3, finds no mismatch in A's scope, and the route is taken */
+        var (scoped, scopedRaw) = await RunBothAsync(store, PanelByDatabase, ServerA);
+        AssertHybridTaken(scoped);
+        Assert.Equal(scopedRaw.ToJsonString(), hybridRows(scoped));
+        Assert.Equal(5000 + 7 + 4000 + 2500 + 90 + 6000, ValueOf(scopedRaw, "MixedDb"), 6);
+
+        /* the converse, same store and same panel at fleet scope: B's mismatch is now in scope, so the route is NOT taken
+           and the answer is raw's, including the late row */
+        var fleet = await RunAsync(store, PanelByDatabase);
+        Assert.True(fleet.Error is null, $"compose run failed: {fleet.Error}");
+        Assert.DoesNotContain("_interval_hourly", (string)fleet.Payload!["sql"]!, StringComparison.Ordinal);
+        var (_, fleetRaw) = await RunBothAsync(store, PanelByDatabase, null);
+        Assert.Equal(fleetRaw.ToJsonString(), hybridRows(fleet.Payload!));
+        Assert.Equal(5000 + 7 + 4000 + 3 + 2500 + 90 + 6000 + 123456, ValueOf(fleetRaw, "MixedDb"), 6);
+    }
+
+    [Fact]
+    public async Task AWindowStartingExactlyOnTheHour_TakesTheRoute_WithH1EqualToTheStart_AndMatchesRaw()
+    {
+        /* hours = 24 at a whole-hour anchor: start is exactly on an hour. CeilHour leaves an exact hour alone, so h1 == start;
+           FloorHour of an exact-hour end is the end itself, so h2 == end. */
+        await using var store = await StoreAsync(OnTheHourAnchor);
+        var (h1, h2) = (store.Layout.H1, store.Layout.H2);
+        Assert.Equal(store.WindowStart, h1);
+        Assert.Equal(store.WindowEnd, h2);
+
+        await SeedAnchorAsync(store);
+        await QsAsync(store, ServerA, "OnHourDb", "HH", "0xH", h1.AddSeconds(-1), 5000, 300);
+        await QsAsync(store, ServerA, "OnHourDb", "HH", "0xH", h1, 10, 300);
+        await QsAsync(store, ServerA, "OnHourDb", "HH", "0xH", h2, 20, 300);
+        await store.RefreshAsync();
+
+        var (hybrid, raw) = await RunBothAsync(store, PanelByDatabase, relativeWindow: true);
+                AssertHybridTaken(hybrid);
+        Assert.Equal(raw.ToJsonString(), hybridRows(hybrid));
+        /* the row one second before the start is outside the window; the rows exactly on the start and on the end are inside */
+        Assert.Equal(10 + 20, ValueOf(raw, "OnHourDb"), 6);
+    }
+
+    [Fact]
+    public void ThisClass_ReadsNoWallClock_AndNeverWaits()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "Darling.Tests", "ComposeHourlyRawEdgesGuardLiveTests.cs");
+        /* the needles are assembled so this pin does not match itself */
+        foreach (var needle in new[] { "Utc" + "Now", "Date" + "Time.Now", "Offset" + ".Now", "Task." + "Delay", "Thread." + "Sleep", "Time" + "Provider" })
+        {
+            Assert.DoesNotContain(needle, source, StringComparison.Ordinal);
+        }
+    }
+
     /* ---- helpers ---- */
 
     private static string hybridRows(JsonObject payload) => payload["rows"]!.ToJsonString();
@@ -302,9 +386,9 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
 
     /// <summary>Runs the panel through the runner and through a raw compile of the same window, and returns both payloads'
     /// rows: the runner's payload, and the raw rows as a JSON array.</summary>
-    private static async Task<(JsonObject Hybrid, JsonArray Raw)> RunBothAsync(Store store, string panelJson)
+    private static async Task<(JsonObject Hybrid, JsonArray Raw)> RunBothAsync(Store store, string panelJson, string? scope = null, bool relativeWindow = false)
     {
-        var outcome = await RunAsync(store, panelJson);
+        var outcome = await RunAsync(store, panelJson, scope, relativeWindow);
         Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
 
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(store.DataSource, store.Ct);
@@ -312,12 +396,12 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
         Assert.True(parseError is null, parseError);
 
         /* the route must have been a candidate for exactly the hours this test computed, or the layout is wrong */
-        var candidate = ComposeSourceRouter.HourlyRawEdgesCandidate(plan!, DateTime.UtcNow, store.WindowStart, store.WindowEnd, rollups, coverage);
+        var candidate = ComposeSourceRouter.HourlyRawEdgesCandidate(plan!, store.Anchor, store.WindowStart, store.WindowEnd, rollups, coverage);
         Assert.NotNull(candidate);
         Assert.Equal(store.Layout.H1, candidate!.HourStartUtc);
         Assert.Equal(store.Layout.H2, candidate.HourEndUtc);
 
-        var rawContext = new ComposeRunContext(null, store.WindowStart, store.WindowEnd, ComposeRunContext.NoVariables, rollups, DateTime.UtcNow, coverage);
+        var rawContext = new ComposeRunContext(scope is null ? null : new[] { scope }, store.WindowStart, store.WindowEnd, ComposeRunContext.NoVariables, rollups, store.Anchor, coverage);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, rawContext);
         Assert.True(compileError is null, compileError);
         Assert.DoesNotContain("_interval_hourly", compiled!.Sql, StringComparison.Ordinal);
@@ -336,7 +420,7 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
             var row = new JsonObject();
             for (var i = 0; i < reader.FieldCount; i++)
             {
-                row[reader.GetName(i)] = reader.IsDBNull(i) ? null : ToJson(reader.GetValue(i));
+                row[reader.GetName(i)] = reader.IsDBNull(i) ? null : DarlingWebEndpoints.DbValueToJson(reader.GetValue(i));
             }
 
             rows.Add(row);
@@ -346,31 +430,28 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
         return (outcome.Payload!, rows);
     }
 
-    /* A copy of the runner's private DbValueToJson, so the raw rows serialize the way the payload's do. */
-    private static JsonValue? ToJson(object value) => value switch
+    /// <summary>Runs the panel at the store's anchor. By default the window is the explicit pair; with
+    /// <paramref name="relativeWindow"/> the body carries <c>hours = 24</c> instead, and the runner computes the same window
+    /// itself (end = the anchor, start = 24 h before it). A scope puts the server name in the body's <c>server</c> field.</summary>
+    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(Store store, string panelJson, string? scope = null, bool relativeWindow = false)
     {
-        DateTime dt => JsonValue.Create(dt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture)),
-        double d => JsonValue.Create(d),
-        float f => JsonValue.Create((double)f),
-        decimal m => JsonValue.Create((double)m),
-        long l => JsonValue.Create(l),
-        int n => JsonValue.Create(n),
-        short s => JsonValue.Create((int)s),
-        bool b => JsonValue.Create(b),
-        string str => JsonValue.Create(str),
-        _ => JsonValue.Create(value.ToString()),
-    };
-
-    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(Store store, string panelJson)
-    {
-        var body = new JsonObject
+        var body = new JsonObject { ["panel"] = JsonNode.Parse(panelJson) };
+        if (relativeWindow)
         {
-            ["panel"] = JsonNode.Parse(panelJson),
-            ["windowStart"] = store.WindowStart.ToString("o", CultureInfo.InvariantCulture),
-            ["windowEnd"] = store.WindowEnd.ToString("o", CultureInfo.InvariantCulture),
-        };
+            body["hours"] = 24;
+        }
+        else
+        {
+            body["windowStart"] = store.WindowStart.ToString("o", CultureInfo.InvariantCulture);
+            body["windowEnd"] = store.WindowEnd.ToString("o", CultureInfo.InvariantCulture);
+        }
 
-        return DarlingWebEndpoints.RunComposedPanelAsync(store.DataSource, body, store.Ct);
+        if (scope is not null)
+        {
+            body["server"] = scope;
+        }
+
+        return DarlingWebEndpoints.RunComposedPanelAsync(store.DataSource, body, store.Ct, nowUtc: store.Anchor);
     }
 
     /// <summary>One non-restart row per hour in [h1, h2), on the anchor group, so the successor has a bucket at h1 and a
@@ -420,22 +501,14 @@ VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $8, 1, 300)", store.Connection);
         await insert.ExecuteNonQueryAsync(store.Ct);
     }
 
-    private static async Task<Store> StoreAsync()
+    private static async Task<Store> StoreAsync(DateTime? anchor = null)
     {
         var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the #4605 hourly-raw-edges live test.");
         var ct = TestContext.Current.CancellationToken;
 
-        /* The window must end between three seconds and 57 minutes into an hour; wait out the rare start of an hour. */
-        var now = DateTime.UtcNow;
-        while ((now - FloorHour(now)) < TimeSpan.FromSeconds(3) || (now - FloorHour(now)) > TimeSpan.FromMinutes(57))
-        {
-            await Task.Delay(TimeSpan.FromSeconds(2), ct);
-            now = DateTime.UtcNow;
-        }
-
-        var h2 = FloorHour(now);
-        var layout = new Layout(h2.AddHours(-23), h2);
+        var at = anchor ?? Anchor;
+        var layout = Layout.For(at);
 
         var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         NpgsqlConnection? connection = null;
@@ -454,7 +527,7 @@ VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $8, 1, 300)", store.Connection);
 
             /* a FRESH data source per fact: the rollup and coverage probe is cached per data source */
             dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
-            return new Store(scratch, connection, dataSource, layout, ct);
+            return new Store(scratch, connection, dataSource, at, layout, ct);
         }
         catch
         {
@@ -479,21 +552,22 @@ VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $8, 1, 300)", store.Connection);
     {
         private readonly ScratchPostgres _scratch;
 
-        public Store(ScratchPostgres scratch, NpgsqlConnection connection, NpgsqlDataSource dataSource, Layout layout, CancellationToken ct)
+        public Store(ScratchPostgres scratch, NpgsqlConnection connection, NpgsqlDataSource dataSource, DateTime anchor, Layout layout, CancellationToken ct)
         {
             _scratch = scratch;
             Connection = connection;
             DataSource = dataSource;
             Layout = layout;
             Ct = ct;
-            /* the explicit window: 24 h ending now, whole milliseconds, so the test and the runner bind the same instants */
-            var now = DateTime.UtcNow;
-            WindowEnd = new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerMillisecond), DateTimeKind.Utc);
-            WindowStart = WindowEnd.AddHours(-24);
+            /* the window: 24 h ending at the anchor, so the test and the runner bind the same instants */
+            Anchor = anchor;
+            WindowEnd = anchor;
+            WindowStart = anchor.AddHours(-24);
         }
 
         public NpgsqlConnection Connection { get; }
         public NpgsqlDataSource DataSource { get; }
+        public DateTime Anchor { get; }
         public Layout Layout { get; }
         public CancellationToken Ct { get; }
         public DateTime WindowStart { get; }
