@@ -45,9 +45,10 @@ const ALERT_COLUMNS = [
 ];
 
 /* The Mute column exists only for a seat whose session reports can_edit (the server enforces the write gate;
-   this is only the affordance). Both links open the Mute Rules create form pre-filled from the row, using the
-   row's OWN server spelling: engine alerts carry the registry hostname and the self-alert family the display
-   name, and a rule matches server_name exactly. "Mute similar" leaves the server blank (this metric anywhere). */
+   this is only the affordance). Both links open the Mute Rules create form pre-filled from the row. "Mute this
+   alert" keys on the row's store id when it has one and otherwise on the stored server spelling, and fills the
+   database / wait / job / query dimensions from the detail text (js/mute-context.js); the display name in
+   server_name is never what a rule matches. "Mute similar" leaves the server blank (this metric anywhere). */
 let canMute = false;
 const MUTE_COLUMN = { key: "mute", label: "Mute", render: (a) => muteCell(a) };
 function alertColumns() {
