@@ -1103,3 +1103,13 @@ pre.code {
 .finops-tabs { flex-wrap: wrap; overflow-x: visible; }
 .finops-body { display: block; }
 .finops-panel { min-width: 0; }
+
+/* Storage Growth heatmap (#4843): one accent shade per service band, 0 (smallest) to 7 (largest). */
+.heat-band-0 { background: rgba(46, 174, 241, 0.10); }
+.heat-band-1 { background: rgba(46, 174, 241, 0.21); }
+.heat-band-2 { background: rgba(46, 174, 241, 0.32); }
+.heat-band-3 { background: rgba(46, 174, 241, 0.43); }
+.heat-band-4 { background: rgba(46, 174, 241, 0.54); }
+.heat-band-5 { background: rgba(46, 174, 241, 0.65); }
+.heat-band-6 { background: rgba(46, 174, 241, 0.76); }
+.heat-band-7 { background: rgba(46, 174, 241, 0.87); }
