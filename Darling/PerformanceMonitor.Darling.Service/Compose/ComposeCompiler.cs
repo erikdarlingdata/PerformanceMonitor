@@ -312,6 +312,18 @@ public static class ComposeCompiler
             + $" FROM {table} AS {FactAlias} WHERE {window}) AS k WHERE true{hashKey}{residual})";
     }
 
+    /// <summary>True when two normalized server scopes are the same set under ordinal comparison (the case rule of
+    /// SQL <c>= ANY</c>); both null is the fleet matching the fleet.</summary>
+    private static bool SameServerScope(IReadOnlyList<string>? proved, IReadOnlyList<string>? run)
+    {
+        if (proved is null || run is null)
+        {
+            return proved is null && run is null;
+        }
+
+        return new HashSet<string>(proved, StringComparer.Ordinal).SetEquals(run);
+    }
+
     /// <summary>
     /// Compiles <paramref name="plan"/> against <paramref name="context"/>. Returns the parameterized SQL,
     /// or a caller-facing error for the one runtime-only check (the window×resolution bucket ceiling).
@@ -350,7 +362,8 @@ public static class ComposeCompiler
             && ComposeSourceRouter.HourlyRawEdgesCandidate(plan, context.NowUtc, context.StartUtc, context.EndUtc, context.Rollups, context.Coverage) is { } candidate
             && string.Equals(verdict.SourceTable, candidate.SourceTable, StringComparison.Ordinal)
             && verdict.HourStartUtc == candidate.HourStartUtc
-            && verdict.HourEndUtc == candidate.HourEndUtc)
+            && verdict.HourEndUtc == candidate.HourEndUtc
+            && SameServerScope(ComposeSourceRouter.NormalizeServerScope(verdict.Servers), ComposeSourceRouter.NormalizeServerScope(context.Servers)))
         {
             route = new ComposeRoute(ComposeSourceTier.HourlyRawEdges, candidate.SuccessorView, null, null, candidate.HourStartUtc, candidate.HourEndUtc);
         }

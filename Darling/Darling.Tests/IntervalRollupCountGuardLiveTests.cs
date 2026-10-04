@@ -109,7 +109,17 @@ public sealed class IntervalRollupCountGuardLiveTests
             /* A third server, outside the scope array: invisible with the array, counted with NULL. */
             await PlantAsync(connection, ct, ServerC, NameC, H1.AddHours(1).AddMinutes(10), 3600, "0xGC1");
             Assert.Equal(0L, await GuardAsync(connection, scope, ct));
-            Assert.True(await GuardAsync(connection, null, ct) >= 1L);
+            Assert.Equal(1L, await GuardAsync(connection, null, ct));
+
+            /* Start is inclusive. One row exactly at H1, planted after the refresh: raw counts it (>= $1), the
+               rollup does not have it yet, so exactly one pair disagrees. A raw side written as > $1 would not
+               count it either, and the guard would read 0 here. Then refresh and it matches again. */
+            await RefreshAsync(connection, H1, H2, ct);
+            Assert.Equal(0L, await GuardAsync(connection, null, ct));
+            await PlantAsync(connection, ct, ServerB, NameB, H1, 3600, "0xGB4");
+            Assert.Equal(1L, await GuardAsync(connection, scope, ct));
+            await RefreshAsync(connection, H1, H2, ct);
+            Assert.Equal(0L, await GuardAsync(connection, scope, ct));
 
             bodySucceeded = true;
         }

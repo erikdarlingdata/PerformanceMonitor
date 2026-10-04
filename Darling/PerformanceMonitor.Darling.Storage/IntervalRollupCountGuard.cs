@@ -20,6 +20,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// and a row with a NULL interval counts on both. Restart rows need no guard: the route reads them live from raw
 /// (<see cref="IntervalRollupRestartRows"/>). An hour with no non-restart rows has no row on either side and counts as
 /// a match.</para>
+/// <para>A count guard is exact only while raw <c>query_stats</c> rows are append-only. Late rows are fine: equal
+/// counts on a growing table are closed by reading the guard and the panel in one snapshot. But an in-place UPDATE,
+/// or a row moved to another hour, keeps the counts equal and passes unseen. The route relies on the collector's
+/// COPY-only writes and whole-row retention, and a live pin in the runner change records that dependency (#4605).</para>
 /// <para>Every instant is bound: <c>$1</c> is the start, inclusive, and <c>$2</c> the end, exclusive, both naive UTC
 /// <c>timestamp</c>; <c>$3</c> is a <c>text[]</c> of server names, or NULL for every server. Both sides filter on
 /// <c>server_name</c> per row.</para>

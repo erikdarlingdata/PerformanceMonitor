@@ -650,6 +650,26 @@ public sealed class ComposeSourceRouterTests
     }
 
     [Fact]
+    public void HourlyRawEdges_ARatioMeasure_IsNull_ByTheExplicitKindCheck()
+    {
+        /* A Ratio's AggregationColumn is null already, so a bare ratio would be refused by the column gate. Giving it
+           a mapped column proves the refusal comes from the explicit Kind check, not from that gate. */
+        var ratio = Measure("query_avg_cpu_us") with { Archetype = MeasureArchetype.Cumulative, DeltaColumn = "delta_worker_time" };
+        Assert.Equal(MeasureKind.Ratio, ratio.Kind);
+        Assert.Equal("delta_worker_time", ratio.AggregationColumn);
+        Assert.Null(Edge(plan: EdgePlan() with { Measure = ratio }));
+    }
+
+    [Fact]
+    public void NormalizeServerScope_NullAndEmptyAreTheFleet_AnythingElseIsTheList()
+    {
+        var list = new[] { "A", "B" };
+        Assert.Null(ComposeSourceRouter.NormalizeServerScope(null));
+        Assert.Null(ComposeSourceRouter.NormalizeServerScope(Array.Empty<string>()));
+        Assert.Same(list, ComposeSourceRouter.NormalizeServerScope(list));
+    }
+
+    [Fact]
     public void HourlyRawEdges_AMeasureColumnTheSuccessorLacks_IsNull()
     {
         var unmapped = Measure("query_worker_us") with { DeltaColumn = "delta_rows" };

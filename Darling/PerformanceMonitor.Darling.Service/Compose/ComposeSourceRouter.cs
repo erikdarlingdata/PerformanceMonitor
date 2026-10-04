@@ -92,8 +92,11 @@ internal static class ComposeHybridColumns
 public sealed record ComposeHourlyEdgesCandidate(string SourceTable, string SuccessorView, DateTime HourStartUtc, DateTime HourEndUtc);
 
 /// <summary>A count guard's proof for one candidate: the successor's per-(server, hour) row counts matched raw's
-/// over <c>[HourStartUtc, HourEndUtc)</c>. The route is taken only when the verdict matches the candidate.</summary>
-public sealed record ComposeHourlyEdgesVerdict(string SourceTable, DateTime HourStartUtc, DateTime HourEndUtc);
+/// over <c>[HourStartUtc, HourEndUtc)</c>. The route is taken only when the verdict matches the candidate.
+/// <c>Servers</c> is the server scope the guard proved: a proof for one scope says nothing about another, so the
+/// compiler also requires it to equal the run's scope (see <see cref="ComposeSourceRouter.NormalizeServerScope"/>).
+/// Null means the whole fleet.</summary>
+public sealed record ComposeHourlyEdgesVerdict(string SourceTable, DateTime HourStartUtc, DateTime HourEndUtc, IReadOnlyList<string>? Servers);
 
 /// <summary>One raw table's continuous-aggregate coverage: its hourly (and optional daily) rollup view names and
 /// the dimensions those rollups are grouped by — the set a panel's group-by/filter dimensions must be a subset of
@@ -534,8 +537,16 @@ public static class ComposeSourceRouter
         return new ComposeHourlyEdgesCandidate(source, successor, hStart, hEnd);
     }
 
+    /// <summary>The one reading of a server scope for the hourly-raw-edges proof: null or empty is the whole fleet
+    /// (null), anything else is the list as given. The runner binds the count guard's <c>$3</c> from this in a later
+    /// change, and the compiler matches a verdict's scope against the run's scope with it now, so an empty array can
+    /// never be proven as "no servers" and then read as the fleet.</summary>
+    public static IReadOnlyList<string>? NormalizeServerScope(IReadOnlyList<string>? servers) =>
+        servers is { Count: > 0 } ? servers : null;
+
     private static bool IsHourlyEdgesMeasure(ComposeMeasure measure) =>
-        measure.Archetype == MeasureArchetype.Cumulative
+        measure.Kind != MeasureKind.Ratio
+        && measure.Archetype == MeasureArchetype.Cumulative
         && measure.AggregationColumn is string column
         && ComposeHybridColumns.Measures.ContainsKey(column);
 

@@ -582,7 +582,7 @@ public sealed class ComposeParameterCoverageTests
             {
                 var edgeContext = new ComposeRunContext(
                     servers, edgeNow.AddHours(-24), edgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, edgeNow, edgeCoverage,
-                    HourlyEdges: new ComposeHourlyEdgesVerdict(edgeCandidate!.SourceTable, edgeCandidate.HourStartUtc, edgeCandidate.HourEndUtc));
+                    HourlyEdges: new ComposeHourlyEdgesVerdict(edgeCandidate!.SourceTable, edgeCandidate.HourStartUtc, edgeCandidate.HourEndUtc, servers));
                 var (edgeCompiled, edgeError) = ComposeCompiler.Compile(edgePlan!, edgeContext);
                 Assert.True(edgeError is null, edgeError);
                 Assert.Contains("UNION ALL", edgeCompiled!.Sql, StringComparison.Ordinal);

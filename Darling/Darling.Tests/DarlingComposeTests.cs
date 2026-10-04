@@ -3494,7 +3494,7 @@ public sealed class DarlingComposeTests
         Assert.NotNull(candidate);
         return new ComposeRunContext(
             servers, start, EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, coverage,
-            HourlyEdges: withVerdict ? new ComposeHourlyEdgesVerdict(candidate!.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc) : null);
+            HourlyEdges: withVerdict ? new ComposeHourlyEdgesVerdict(candidate!.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc, servers) : null);
     }
 
     private static ComposeCompiled CompileEdge(PanelPlan plan, ComposeRunContext context)
@@ -3614,10 +3614,10 @@ public sealed class DarlingComposeTests
         var offered = ComposeSourceRouter.HourlyRawEdgesCandidate(ValidPlan(EdgePanelJson), EdgeNow, start, EdgeNow, RollupAvailability.All, coverage)!;
         var given = kind switch
         {
-            0 => new ComposeHourlyEdgesVerdict(offered.SourceTable, offered.HourStartUtc.AddHours(1), offered.HourEndUtc),
-            1 => new ComposeHourlyEdgesVerdict(offered.SourceTable, offered.HourStartUtc, offered.HourEndUtc.AddHours(-1)),
-            2 => new ComposeHourlyEdgesVerdict("procedure_stats", offered.HourStartUtc, offered.HourEndUtc),
-            _ => new ComposeHourlyEdgesVerdict(plan.Measure.SourceTable, offered.HourStartUtc, offered.HourEndUtc),
+            0 => new ComposeHourlyEdgesVerdict(offered.SourceTable, offered.HourStartUtc.AddHours(1), offered.HourEndUtc, null),
+            1 => new ComposeHourlyEdgesVerdict(offered.SourceTable, offered.HourStartUtc, offered.HourEndUtc.AddHours(-1), null),
+            2 => new ComposeHourlyEdgesVerdict("procedure_stats", offered.HourStartUtc, offered.HourEndUtc, null),
+            _ => new ComposeHourlyEdgesVerdict(plan.Measure.SourceTable, offered.HourStartUtc, offered.HourEndUtc, null),
         };
 
         var plain = new ComposeRunContext(null, start, EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, coverage);
@@ -3629,6 +3629,59 @@ public sealed class DarlingComposeTests
         Assert.Equal(expected!.Sql, actual!.Sql);
         Assert.Equal(expected.Parameters.Count, actual.Parameters.Count);
         Assert.DoesNotContain("UNION ALL", actual.Sql, StringComparison.Ordinal);
+    }
+
+    private static ComposeHourlyEdgesVerdict EdgeVerdict(IReadOnlyList<string>? servers)
+    {
+        var offered = ComposeSourceRouter.HourlyRawEdgesCandidate(ValidPlan(EdgePanelJson), EdgeNow, EdgeNow.AddHours(-24), EdgeNow, RollupAvailability.All, EdgeCoverage())!;
+        return new ComposeHourlyEdgesVerdict(offered.SourceTable, offered.HourStartUtc, offered.HourEndUtc, servers);
+    }
+
+    private static (string? Plain, string? Given) EdgeSqlPair(IReadOnlyList<string>? runServers, ComposeHourlyEdgesVerdict verdict)
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var plain = new ComposeRunContext(runServers, EdgeNow.AddHours(-24), EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, EdgeCoverage());
+        var (expected, expectedError) = ComposeCompiler.Compile(plan, plain);
+        var (actual, actualError) = ComposeCompiler.Compile(plan, plain with { HourlyEdges = verdict });
+        Assert.True(expected is not null, expectedError);
+        Assert.True(actual is not null, actualError);
+        return (expected!.Sql, actual!.Sql);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_AFleetVerdictOnAScopedRun_IsByteIdenticalToNoVerdict()
+    {
+        var (plain, given) = EdgeSqlPair(new[] { "A" }, EdgeVerdict(null));
+        Assert.Equal(plain, given);
+        Assert.DoesNotContain("UNION ALL", given, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_AScopedVerdictOnAFleetRun_IsByteIdenticalToNoVerdict()
+    {
+        var (plain, given) = EdgeSqlPair(null, EdgeVerdict(new[] { "A" }));
+        Assert.Equal(plain, given);
+        Assert.DoesNotContain("UNION ALL", given, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_AnEmptyVerdictScopeIsTheFleet_AndASubsetScopeIsNotTheRunsScope()
+    {
+        var (plainFleet, givenFleet) = EdgeSqlPair(null, EdgeVerdict(Array.Empty<string>()));
+        Assert.NotEqual(plainFleet, givenFleet);
+        Assert.Contains("UNION ALL", givenFleet, StringComparison.Ordinal);
+
+        var (plainScoped, givenScoped) = EdgeSqlPair(new[] { "A", "B" }, EdgeVerdict(new[] { "A" }));
+        Assert.Equal(plainScoped, givenScoped);
+        Assert.DoesNotContain("UNION ALL", givenScoped, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_AMatchingScopedVerdictInAnotherOrder_TakesTheRoute()
+    {
+        var (plain, given) = EdgeSqlPair(new[] { "A", "B" }, EdgeVerdict(new[] { "B", "A" }));
+        Assert.NotEqual(plain, given);
+        Assert.Contains("UNION ALL", given, StringComparison.Ordinal);
     }
 
     [Fact]
