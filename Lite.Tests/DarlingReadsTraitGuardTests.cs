@@ -39,7 +39,7 @@ namespace Lite.Tests;
 /// bare segment <c>"Darling"</c> handed to <c>Path.Combine</c> or a segment array. A path assembled from a
 /// constant declared in ANOTHER file is not visible to this scan; the read is then found where the constant's
 /// text sits only if that file is itself a test class, which is the limit of a source scan. A class that
-/// enumerates files RECURSIVELY from the repo root (<c>RepoRoot()</c>, or a variable assigned from it, as the
+/// enumerates files RECURSIVELY from the repo root (<c>RepoRoot()</c>, or a variable set from it, as the
 /// first argument of <c>EnumerateFiles</c>/<c>GetFiles</c> with <c>AllDirectories</c> or a recursive
 /// <c>EnumerationOptions</c>) reads every Darling file without naming one, so it counts as a Darling read
 /// too.</para>
@@ -248,7 +248,7 @@ public sealed class DarlingReadsTraitGuardTests
 
     /// <summary>Whether a call such as <c>Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)</c>
     /// starts at the repo root. The first argument counts when it is a repo-root call (<c>RepoRoot()</c>) or a
-    /// variable the file assigns from one; the call is recursive when its arguments say
+    /// variable the file sets from one; the call is recursive when its arguments say
     /// <c>AllDirectories</c> or pass an options value and the file sets <c>RecurseSubdirectories = true</c>.</summary>
     private static bool EnumeratesTheRepoRootRecursively(string text)
     {
