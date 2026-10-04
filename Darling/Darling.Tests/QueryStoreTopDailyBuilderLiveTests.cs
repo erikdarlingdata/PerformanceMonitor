@@ -344,12 +344,38 @@ GROUP BY server_id, database_name, query_id, plan_id, query_hash, execution_type
             Assert.Equal(first, (DateTime)(await ScalarAsync(connection, "SELECT min(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
             Assert.Equal(first.AddDays(QueryStoreTopDaily.MaxBuildsPerTick - 1), (DateTime)(await ScalarAsync(connection, "SELECT max(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
 
-            /* The next tick is oldest-first too: those same days are already past their final-build time, so it
-               rebuilds them at pass 2 before it reaches any newer day. */
-            var second = await QueryStoreTopDaily.RunTickAsync(source, now, Retention, NullLogger.Instance, ct);
-            Assert.Equal(QueryStoreTopDaily.MaxBuildsPerTick, second.BuiltPass2);
+            /* Every one of those days was already past its final-build time, so each was built once, at pass 2. */
             Assert.Equal((long)QueryStoreTopDaily.MaxBuildsPerTick, Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built WHERE pass = 2", ct)));
-            Assert.Equal(first.AddDays(QueryStoreTopDaily.MaxBuildsPerTick - 1), (DateTime)(await ScalarAsync(connection, "SELECT max(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
+            Assert.Equal(0, result.BuiltPass1);
+        });
+    }
+
+    [Fact]
+    public async Task ABacklogPastTheFinalThreshold_BuildsEachDayOnceAtPassTwo_AndTheNextTickReachesNewerDays()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await CoverAsync(connection, 1, ct);
+            await using var source = DataSource(scratch);
+            var now = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Unspecified);
+            const int Retention = 150;
+            var cap = QueryStoreTopDaily.MaxBuildsPerTick;
+            var first = (now - TimeSpan.FromDays(Retention)).Date.AddDays(1);
+
+            var one = await QueryStoreTopDaily.RunTickAsync(source, now, Retention, NullLogger.Instance, ct);
+            Assert.Equal(cap, one.BuiltPass2);
+            Assert.Equal(0, one.BuiltPass1);
+            var firstBuiltAt = (DateTime)(await ScalarAsync(connection, "SELECT built_at FROM collect.query_store_top_daily_built WHERE day = DATE '" + At(first)[..10] + "'", ct))!;
+
+            var two = await QueryStoreTopDaily.RunTickAsync(source, now, Retention, NullLogger.Instance, ct);
+            Assert.Equal(0, two.Failed);
+            Assert.Equal(0, two.BuiltPass1);
+            Assert.Equal(cap, two.BuiltPass2);
+
+            /* The second tick built the next days; it did not redo the oldest ones. */
+            Assert.Equal((long)(2 * cap), Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built WHERE pass = 2", ct)));
+            Assert.Equal(first.AddDays(2 * cap - 1), (DateTime)(await ScalarAsync(connection, "SELECT max(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
+            Assert.Equal(firstBuiltAt, (DateTime)(await ScalarAsync(connection, "SELECT built_at FROM collect.query_store_top_daily_built WHERE day = DATE '" + At(first)[..10] + "'", ct))!);
         });
     }
 

@@ -34,6 +34,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// collector's catch-up has settled. Pass 2 rebuilds it once D+1 00:00 plus <see cref="FinalBuildAfter"/> has passed,
 /// which is longer than any interval can span (<see cref="QueryStoreIntervalWide.IntervalSpanMargin"/>) plus the
 /// longest catch-up (<see cref="WatermarkPolicy.MaxCatchup"/>), so no row can still move into or out of D by then.
+/// A day first seen after that threshold has already passed (a store's first tick, or a long outage) is built once,
+/// straight at pass 2: a pass 1 would only be redone a tick later.
 /// <c>collect.query_store_top_daily_built</c> records which pass each day is at. A build is one transaction: the day's
 /// rows are deleted and re-inserted whole, and the built row is upserted with them, so a reader never sees a half-built
 /// day marked as built.</para>
@@ -124,11 +126,13 @@ SET pass = EXCLUDED.pass,
     /// <summary>
     /// The builds due now, oldest day first. $1 now, $2 retention days, $3 <see cref="BuildAfter"/>,
     /// $4 <see cref="FinalBuildAfter"/>, $5 the cap. Servers are those with a wide-table coverage claim; days run from
-    /// the retention horizon's next day through yesterday. A day with no built row is due for pass 1 once its end plus
-    /// $3 has passed; a day built at pass 1 is due for pass 2 once its end plus $4 has passed.
+    /// the retention horizon's next day through yesterday. A day with no built row is due once its end plus $3 has
+    /// passed, at pass 1, or straight at pass 2 when its end plus $4 has passed too (nothing more could change it); a day
+    /// built at pass 1 is due for pass 2 once its end plus $4 has passed. Oldest day first, so a backlog works through the
+    /// oldest days once each and the next tick reaches newer ones.
     /// </summary>
     public const string PlanSql = @"
-SELECT s.server_id, d.day, CASE WHEN b.server_id IS NULL THEN 1 ELSE 2 END AS pass
+SELECT s.server_id, d.day, CASE WHEN b.server_id IS NULL AND d.day + interval '1 day' + $4 > $1 THEN 1 ELSE 2 END AS pass
 FROM (SELECT server_id FROM collect.query_store_interval_wide_coverage WHERE filled_since IS NOT NULL) AS s
 CROSS JOIN LATERAL
 (
