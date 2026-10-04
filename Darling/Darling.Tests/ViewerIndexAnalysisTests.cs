@@ -36,11 +36,16 @@ public sealed class ViewerIndexAnalysisTests
         var sql = ViewerDataService.IndexObjectStatsLatestSql;
 
         Assert.Contains("FROM v_index_object_stats", sql, StringComparison.Ordinal);
-        /* Latest snapshot per index identity — never the whole history, and keyed on the index (not a single
-           server-wide MAX(collection_time)) so per-database cycles with different times still dedupe right. */
-        Assert.Contains("DISTINCT ON (database_id, object_id, index_id)", sql, StringComparison.Ordinal);
+        /* Each database's newest snapshot (#5072): a per-database max(collection_time) anchor, the rows joined on
+           (database_id, anchor), lower-bounded by the oldest anchor so the join stays on the newest chunks. */
+        Assert.Contains("max(collection_time) AS t", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY database_id", sql, StringComparison.Ordinal);
+        Assert.Contains("JOIN anchor AS a ON a.database_id = s.database_id AND a.t = s.collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("s.collection_time >= (SELECT min(t) FROM anchor)", sql, StringComparison.Ordinal);
+        Assert.Contains("DISTINCT ON (s.database_id, s.object_id, s.index_id)", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_id, object_id, index_id, collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE s.server_id = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY s.database_id, s.object_id, s.index_id, s.collection_time DESC", sql, StringComparison.Ordinal);
     }
 
     [Fact]

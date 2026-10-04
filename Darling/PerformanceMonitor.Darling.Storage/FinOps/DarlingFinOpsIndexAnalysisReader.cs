@@ -27,62 +27,77 @@ namespace PerformanceMonitor.Darling.Storage.FinOps;
 public static class DarlingFinOpsIndexAnalysisReader
 {
     /// <summary>
-    /// The latest collected snapshot of EVERY index for one server: DISTINCT ON keeps the newest row per
-    /// (database_id, object_id, index_id) so the analyzer sees each index exactly once (never the whole
-    /// history). Per-database collection cycles can carry different collection_times, so the dedupe keys on the
-    /// index identity, not a single server-wide MAX(collection_time). $1 server_id. Column order is the read
-    /// contract for <see cref="ReadIndexObjectStatsRow"/>. Two rows for one index can share a collection_time
-    /// (a re-run in the same instant), so the final ORDER BY key is collection_id DESC: the newest-written row
-    /// wins the tie deterministically instead of whichever row PostgreSQL happens to return first.
+    /// Each database's newest collected snapshot of its indexes for one server: for every database the read
+    /// anchors on that database's own max(collection_time) and returns the index rows stamped at exactly that
+    /// instant, so the analyzer sees each index once. An index that is missing from its database's newest
+    /// snapshot was dropped: the collector reads every user index of each database it sweeps, so a row that
+    /// only an older cycle carries describes an index that no longer exists and is not shown. A database that
+    /// left collection scope still shows its last snapshot, and a server that stopped collecting still shows
+    /// its last cycle. The lower bound (the oldest per-database anchor) exists to keep the join on the newest
+    /// chunks instead of every retained one. DISTINCT ON still dedupes on the index identity, and two rows for
+    /// one index can share a collection_time (a re-run in the same instant), so the final ORDER BY key is
+    /// collection_id DESC: the newest-written row wins the tie deterministically. $1 server_id. Column order
+    /// is the read contract for <see cref="ReadIndexObjectStatsRow"/>.
     /// </summary>
     public const string IndexObjectStatsLatestSql = @"
-SELECT DISTINCT ON (database_id, object_id, index_id)
-    database_name,
-    database_id,
-    schema_name,
-    object_id,
-    table_name,
-    index_id,
-    index_name,
-    index_type_desc,
-    key_columns,
-    included_columns,
-    filter_definition,
-    is_unique,
-    is_unique_constraint,
-    is_primary_key,
-    is_foreign_key,
-    is_foreign_key_reference,
-    is_disabled,
-    is_indexed_view,
-    data_compression_desc,
-    optimize_for_sequential_key,
-    fill_factor,
-    is_padded,
-    allow_page_locks,
-    allow_row_locks,
-    user_seeks,
-    user_scans,
-    user_lookups,
-    user_updates,
-    reserved_mb,
-    total_rows,
-    partition_count,
-    sqlserver_start_time,
+WITH anchor AS MATERIALIZED
+(
+    SELECT
+        database_id,
+        max(collection_time) AS t
+    FROM v_index_object_stats
+    WHERE server_id = $1
+    GROUP BY database_id
+)
+SELECT DISTINCT ON (s.database_id, s.object_id, s.index_id)
+    s.database_name,
+    s.database_id,
+    s.schema_name,
+    s.object_id,
+    s.table_name,
+    s.index_id,
+    s.index_name,
+    s.index_type_desc,
+    s.key_columns,
+    s.included_columns,
+    s.filter_definition,
+    s.is_unique,
+    s.is_unique_constraint,
+    s.is_primary_key,
+    s.is_foreign_key,
+    s.is_foreign_key_reference,
+    s.is_disabled,
+    s.is_indexed_view,
+    s.data_compression_desc,
+    s.optimize_for_sequential_key,
+    s.fill_factor,
+    s.is_padded,
+    s.allow_page_locks,
+    s.allow_row_locks,
+    s.user_seeks,
+    s.user_scans,
+    s.user_lookups,
+    s.user_updates,
+    s.reserved_mb,
+    s.total_rows,
+    s.partition_count,
+    s.sqlserver_start_time,
     /* Operational lock/latch counters (dm_db_index_operational_stats), appended after the pre-existing
        columns so ordinals 0-31 are unchanged. Feed the reclaimable-space rollup's workload-impact columns
        (Lock Waits / Latch Waits), the same collected data the FinOps Locking sub-tab already reads. */
-    row_lock_wait_count,
-    row_lock_wait_in_ms,
-    page_lock_wait_count,
-    page_lock_wait_in_ms,
-    page_latch_wait_count,
-    page_latch_wait_in_ms,
-    page_io_latch_wait_count,
-    page_io_latch_wait_in_ms
-FROM v_index_object_stats
-WHERE server_id = $1
-ORDER BY database_id, object_id, index_id, collection_time DESC, collection_id DESC";
+    s.row_lock_wait_count,
+    s.row_lock_wait_in_ms,
+    s.page_lock_wait_count,
+    s.page_lock_wait_in_ms,
+    s.page_latch_wait_count,
+    s.page_latch_wait_in_ms,
+    s.page_io_latch_wait_count,
+    s.page_io_latch_wait_in_ms
+FROM v_index_object_stats AS s
+JOIN anchor AS a ON a.database_id = s.database_id AND a.t = s.collection_time
+WHERE s.server_id = $1
+AND   s.collection_time >= (SELECT min(t) FROM anchor)
+ORDER BY s.database_id, s.object_id, s.index_id, s.collection_time DESC, s.collection_id DESC";
 
     /// <summary>
     /// The server's latest edition / version / start-time facts for the analyzer options — the same three

@@ -22,7 +22,7 @@ public sealed class FinOpsIndexAnalysisLatestTiebreakTests
     public void IndexObjectStatsLatestSql_BreaksACollectionTimeTieWithCollectionIdDesc()
     {
         var sql = DarlingFinOpsIndexAnalysisReader.IndexObjectStatsLatestSql;
-        Assert.EndsWith("collection_time DESC, collection_id DESC", sql.TrimEnd());
+        Assert.EndsWith("s.collection_time DESC, s.collection_id DESC", sql.TrimEnd());
     }
 
     [Fact]

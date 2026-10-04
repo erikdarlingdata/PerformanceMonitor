@@ -6821,6 +6821,8 @@ CREATE INDEX IF NOT EXISTS idx_default_trace_events_time ON collect.default_trac
     /// it does NOT replace the V1 index (the anomaly-detector self-joins in <c>PgAnomalyDetector</c> key
     /// <c>database_name</c>, which that index still serves) — the two readers diverged on the database key, so
     /// each gets its own index.
+    /// Since #5072 Index Analysis no longer runs that unbounded read: it takes each database's newest snapshot
+    /// (<c>DarlingFinOpsIndexAnalysisReader.IndexObjectStatsLatestSql</c>).
     ///
     /// <para><c>index_object_stats</c> is a TimescaleDB hypertable (every collector table is —
     /// <c>TimescaleSupport.HypertableTables</c>), so a plain <c>CREATE INDEX</c> is applied across every chunk
