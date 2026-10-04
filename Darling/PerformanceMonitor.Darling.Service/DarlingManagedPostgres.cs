@@ -667,6 +667,16 @@ public sealed class DarlingManagedPostgres
     /// store keeps its owner's settings. Any later change to a value above needs a NEW marker (the
     /// v11/v14/v15/v16/v17 precedent): the block heals by its marker's absence, so an edited value in an
     /// already-marked file would never be seen.</para>
+    ///
+    /// <para><b>A missing library.</b> A missing <c>auto_explain</c> library (<c>lib\auto_explain.dll</c> in
+    /// the bundled runtime) stops the store at its next start. The pre-start <c>postgres -C</c> validation
+    /// returns before PostgreSQL loads its preload libraries, so it cannot catch this. The guard is the
+    /// runtime packaging check in <c>Darling/tools/fetch-pg-runtime.ps1</c>, which fails a runtime that lacks
+    /// the file. <c>pg_stat_statements</c> already has the same dependency.</para>
+    ///
+    /// <para><b>Major-version upgrade.</b> The new cluster's conf carries this block too, so
+    /// <c>auto_explain</c> is loaded while <c>pg_upgrade</c> runs. A restore statement over the threshold logs
+    /// a plan, which is harmless.</para>
     /// </summary>
     public const string ConfMarkerV18 = "# Managed by PerformanceMonitor Darling (v18 slow-statement plans) -- do not remove this block";
 
