@@ -1114,3 +1114,7 @@ pre.code {
 .heat-band-5 { color: var(--bg); background: rgba(46, 174, 241, 0.65); }
 .heat-band-6 { color: var(--bg); background: rgba(46, 174, 241, 0.76); }
 .heat-band-7 { color: var(--bg); background: rgba(46, 174, 241, 0.87); }
+
+.page-refresh-control { margin-top: 0.6rem; flex-wrap: wrap; }
+.page-refresh-control .auto-refresh-toggle { margin-top: 0; }
+.page-refresh-control[hidden] { display: none; }

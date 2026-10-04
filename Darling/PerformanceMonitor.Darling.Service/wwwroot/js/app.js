@@ -47,7 +47,8 @@ import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderAlertRuleList } from "./pages/alert-rules.js";
 import { renderViewList, renderView, currentViewRefresh, onViewRefreshChange, clearViewRefresh } from "./pages/views.js";
-import { REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel } from "./refresh-policy.js";
+import { REFRESH_CHOICES, PAGE_REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel, loadPageRefreshChoice, savePageRefreshChoice } from "./refresh-policy.js";
+import { buildPageRefreshControl } from "./refresh-control.js";
 import { renderTriage } from "./pages/triage.js";
 import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
@@ -379,10 +380,46 @@ function pageIntervalMs() {
     const choice = currentViewRefresh() || defaultRefreshChoice(name === "notebook");
     return REFRESH_CHOICES[choice] ?? 0;
   }
+  if (isPickerRoute(name)) return PAGE_REFRESH_CHOICES[pageRefreshChoice] ?? POLL_MS;
   return POLL_MS;
 }
 
+/* The server and FinOps pages carry the shell's interval selector and Refresh button (persisted in localStorage). */
+let pageRefreshChoice = loadPageRefreshChoice(localStorage);
+let pageRefreshControl = null;
+
+function isPickerRoute(routeName) {
+  return routeName === "server" || routeName === "finops";
+}
+
+function syncPageRefreshControl(routeName) {
+  if (!pageRefreshControl) return;
+  pageRefreshControl.root.hidden = !isPickerRoute(routeName);
+}
+
+/* The Refresh button: one shell refresh and one immediate page re-render. The page's in-flight check has to run
+   BEFORE the shell's reads start (they count as in flight too), and a page still loading ignores the click. */
+function refreshPageNow() {
+  if (isSessionExpired()) return;
+  const busy = hasInFlightReads();
+  refreshShell();
+  if (!busy && !isNoPollRoute(currentRoute().name)) route({ poll: true });
+}
+
+function initPageRefreshControl() {
+  const anchor = document.getElementById("auto-refresh-toggle");
+  if (!anchor || !anchor.parentNode) return;
+  pageRefreshControl = buildPageRefreshControl(pageRefreshChoice, (choice) => {
+    pageRefreshChoice = savePageRefreshChoice(localStorage, choice);
+    if (!pageRendering) scheduleNextPageRefresh(Date.now());
+    else updateRefreshHint();
+  }, refreshPageNow);
+  anchor.parentNode.appendChild(pageRefreshControl.root);
+  syncPageRefreshControl(currentRoute().name);
+}
+
 function markPageRenderStart(routeName, isPoll) {
+  syncPageRefreshControl(routeName);
   if (!isPoll && (routeName === "view" || routeName === "notebook")) clearViewRefresh();
   if (isNoPollRoute(routeName)) {
     pageRendering = false;
@@ -453,7 +490,9 @@ function schedulerTick() {
     updateRefreshHint();
     return;
   }
-  if (now - shellLastRefreshAt >= POLL_MS) refreshShell();
+  /* Off on a server or FinOps page means no reads at all, the shell's own roll-up included. */
+  const quiet = isPickerRoute(currentRoute().name) && pageIntervalMs() === 0;
+  if (!quiet && now - shellLastRefreshAt >= POLL_MS) refreshShell();
   if (pageIsDue(now)) refreshPage();
   updateRefreshHint();
 }
@@ -472,7 +511,8 @@ function updateRefreshHint() {
   else if (isBackedOff(interval, pageLastRenderMs) && Number.isFinite(pageNextRefreshAt)) {
     text = "Next refresh " + hhmm(pageNextRefreshAt) + " (slow page)";
   } else {
-    const choice = Object.keys(REFRESH_CHOICES).find((k) => REFRESH_CHOICES[k] === interval);
+    const choices = isPickerRoute(currentRoute().name) ? PAGE_REFRESH_CHOICES : REFRESH_CHOICES;
+    const choice = Object.keys(choices).find((k) => choices[k] === interval);
     text = "Auto-refresh: " + (choice ? refreshLabel(choice) : "1 min");
   }
   hint.textContent = text;
@@ -548,6 +588,7 @@ function start() {
   setInterval(schedulerTick, SCHEDULER_TICK_MS);
   onSessionExpired(showSignedOutState);
   initAutoRefreshToggle();
+  initPageRefreshControl();
 
   refreshSidebar();
   refreshViewList();
