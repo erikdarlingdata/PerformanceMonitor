@@ -80,11 +80,11 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
     {
         var service = new LocalDataService(_duckDb);
         floorOf ??= relation => service.GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc);
-        var start = await LiteBlockingLaneDataStart.StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars);
+        /* The real note step, end to end, on an STA thread: the banner is a WPF object. No sync context there, so the blocking wait is safe. */
         return OnStaThread(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
-            ServerTab.ApplyWindowFloorToBanner(banner, start, startUtc, TimeZoneInfo.Utc);
+            LiteBlockingLaneDataStart.ShowAsync(banner, floorOf, startUtc, endUtc, blockingBars, deadlockBars, TimeZoneInfo.Utc).GetAwaiter().GetResult();
             return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text);
         });
     }
