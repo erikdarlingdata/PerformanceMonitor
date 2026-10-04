@@ -101,6 +101,23 @@ public sealed class PgPlanLogParserQueryIdPrefixTests
         }
     }
 
+    /// <summary>Numbers in a run condition, an index ORDER BY and a table-function call are literals too: none reaches
+    /// the stored JSON.</summary>
+    [Theory]
+    [InlineData("Run Condition", "(row_number() OVER (?) <= 918273)")]
+    [InlineData("Order By", "(t.embedding <-> '[918273,2]'::vector)")]
+    [InlineData("Table Function Call", "generate_series(1, 918273)")]
+    public void ANumberInAConditionLikeField_IsMasked(string field, string value)
+    {
+        var block = "{\n  \"Plan\": {\n    \"Node Type\": \"Seq Scan\",\n    \"" + field + "\": \"" + value + "\"\n  }\n}";
+
+        var parsed = PgPlanLogParser.FromBlock(1, 1, block);
+
+        Assert.NotNull(parsed);
+        Assert.DoesNotContain("918273", parsed!.Value.PlanJson, StringComparison.Ordinal);
+        Assert.Contains(field, parsed.Value.PlanJson, StringComparison.Ordinal);
+    }
+
     /// <summary>A block with no <c>Query Parameters</c> (PostgreSQL 15 and earlier, or
     /// <c>log_parameter_max_length = 0</c>) hashes as it did before #5103: the fixture's hash is pinned, and the
     /// same block with the key added hashes the same.</summary>

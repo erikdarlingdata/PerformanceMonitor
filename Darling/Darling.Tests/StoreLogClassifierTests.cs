@@ -982,6 +982,53 @@ public class StoreLogClassifierTests
         }
     }
 
+    /// <summary>A plan that parsed but is over the sample cap keeps its hash, top node and query id, and a size marker
+    /// in place of the JSON: it still groups, and nothing of it is kept.</summary>
+    [Fact]
+    public void AParsedPlanOverTheCap_KeepsItsKey_AndASizeMarker()
+    {
+        var wide = string.Join(",", Enumerable.Range(0, 900).Select(i => "\"t.column_" + i + "\""));
+        var tooBig = DefaultPrefix + "LOG:  duration: 14000.0 ms  plan:\n\t{\"Plan\": {\"Node Type\": \"Seq Scan\", \"Output\": [" + wide
+            + "]}, \"Query Identifier\": 777, \"Query Text\": \"TooBigLeak5097\"}\n";
+
+        var plan = Assert.Single(StoreLogClassifier.Classify(tooBig).Groups);
+
+        Assert.Equal(StoreLogClassifier.SlowPlanClass, plan.EventClass);
+        Assert.Matches("^plan [0-9A-F]{32} Seq Scan queryid=777$", plan.MessageText);
+        Assert.Contains(StoreLogClassifier.PlanTooLargeMarker, plan.SampleLine, StringComparison.Ordinal);
+        Assert.Matches(@"plan too large to keep: \d+ characters$", plan.SampleLine);
+        Assert.True(plan.SampleLine!.Length <= StoreLogClassifier.MaxSampleLength);
+        foreach (var planted in new[] { "TooBigLeak5097", "Seq Scan", "Query Text", "column_5" })
+        {
+            Assert.DoesNotContain(planted, plan.SampleLine, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>A tab-led body that parses as JSON but breaks an assumption of the reader (a non-string
+    /// <c>Node Type</c>) is withheld and throws nothing.</summary>
+    [Fact]
+    public void APlanBodyThatThrowsInTheReader_IsWithheld_NotThrown()
+    {
+        var slab = DefaultPrefix + "LOG:  duration: 15000.0 ms  plan:\n\t{\"Plan\": {\"Node Type\": 1}}\n";
+
+        var plan = Assert.Single(StoreLogClassifier.Classify(slab).Groups);
+
+        Assert.Equal(StoreLogClassifier.WithheldPlanMessage, plan.MessageText);
+        Assert.EndsWith("\n\t" + PgLogTextRedactor.WithheldPlan, plan.SampleLine, StringComparison.Ordinal);
+    }
+
+    /// <summary>A legacy <c>slow_statement</c> row whose sample is a plan head is emptied, as it was before plans were
+    /// kept; it is not relabelled while staying in the slow-statement class.</summary>
+    [Fact]
+    public void ALegacySlowStatementRowHoldingAPlanHead_RemasksToNothing()
+    {
+        var sample = JsonPlanEntry("12345.678", "BindLeak5097c", "LitLeak5097d").Aggregate((a, b) => a + "\n" + b);
+
+        Assert.Equal(
+            ((string?)null, (string?)null),
+            StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.SlowStatementClass, "duration: 12345.678 ms  plan:", sample));
+    }
+
     /// <summary>A plan that cannot be read whole keeps its head and the withheld marker, and nothing of the plan: JSON
     /// cut by a read boundary (the slab ends inside it), JSON that is not a plan, and JSON whose redacted form would
     /// pass the sample cap. Each stays <c>slow_plan</c>, because the first line decides the class.</summary>
@@ -997,18 +1044,14 @@ public class StoreLogClassifierTests
             "",
         ]);
 
-        /* Over the cap once redacted: a wide Output list that survives redaction as '?' pairs. */
-        var wide = string.Join(",", Enumerable.Range(0, 900).Select(i => "\"t.column_" + i + "\""));
-        var tooBig = DefaultPrefix + "LOG:  duration: 14000.0 ms  plan:\n\t{\"Plan\": {\"Node Type\": \"Seq Scan\", \"Output\": [" + wide + "]}, \"Query Text\": \"TooBigLeak5097\"}\n";
-
-        foreach (var slab in new[] { cut, notAPlan, tooBig })
+        foreach (var slab in new[] { cut, notAPlan })
         {
             var census = StoreLogClassifier.Classify(slab);
             var plan = Assert.Single(census.Groups);
             Assert.Equal(StoreLogClassifier.SlowPlanClass, plan.EventClass);
             Assert.Equal(StoreLogClassifier.WithheldPlanMessage, plan.MessageText);
             Assert.EndsWith("\n\t" + PgLogTextRedactor.WithheldPlan, plan.SampleLine, StringComparison.Ordinal);
-            foreach (var planted in new[] { "CutParam5097", "CutLit5097", "NotAPlanLeak5097", "TooBigLeak5097", "Seq Scan", "Query Text" })
+            foreach (var planted in new[] { "CutParam5097", "CutLit5097", "NotAPlanLeak5097", "Seq Scan", "Query Text" })
             {
                 Assert.DoesNotContain(planted, plan.SampleLine, StringComparison.Ordinal);
             }
