@@ -170,7 +170,7 @@ function fanout(read, params, specs) {
       const body = shells[i].body;
       if (hidesPanel(spec, res, shells[i], keys[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
+      if (res.kind === "empty") return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), emptyStrip(res.message)]);
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
            hand vizLine the fetch's `hours` as `windowHours` — otherwise a fanout line panel (Current Waits,
@@ -987,6 +987,7 @@ export const SERVER_TABS = [
           title: "Memory Grants",
           subtitle: "newest snapshot in " + ctx.label + ", per resource pool - a moment, not the window",
           viz: "table",
+          windowNote: false,
           rowsKey: "grants",
           columns: GRANT_COLUMNS,
           emptyText: "No memory grant snapshot in this window.",
@@ -1005,6 +1006,7 @@ export const SERVER_TABS = [
           title: "Resource Semaphore",
           subtitle: "newest snapshot in " + ctx.label + ", per semaphore and pool - a moment, not the window",
           viz: "table",
+          windowNote: false,
           rowsKey: "grants",
           columns: SEMAPHORE_COLUMNS,
           emptyText: "No resource-semaphore snapshot in this window.",
@@ -1355,6 +1357,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label + ", per database, worst first",
           viz: "table",
           rowsKey: "databases",
+          floorKey: "window",
           columns: QS_CLUTTER_COLUMNS,
           noteKey: "server_note",
           emptyText:
@@ -1366,6 +1369,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label,
           viz: "table",
           rowsKey: "qs_overhead.wait_stats.included",
+          floorKey: "window",
           columns: QS_OVERHEAD_WAIT_COLUMNS,
           noteKey: "qs_overhead.wait_stats.excluded_note",
           emptyText:
@@ -1427,6 +1431,7 @@ export const SERVER_TABS = [
           subtitle: SNAPSHOT,
           span: 1,
           viz: "table",
+          windowNote: false,
           rowsKey: "automatic_tuning",
           columns: AUTO_TUNING_COLUMNS,
           emptyText: "No per-database FORCE_LAST_GOOD_PLAN state recorded.",
