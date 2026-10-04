@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -63,18 +64,28 @@ public sealed class FinOpsRecommendationsGoldenLiveTests
             await SeedAsync(connection, ct);
         }
 
-        await using var viewer = new ViewerDataService(scratch.ConnectionString);
-        var map = new Dictionary<string, object?>();
-        foreach (var (key, id) in new[] { ("a", ServerIdA), ("b", ServerIdB), ("c", ServerIdC) })
+        /* The fixture holds en-US formatted text ("13,080 MB", "20%"), so read and serialize under en-US. */
+        var savedCulture = CultureInfo.CurrentCulture;
+        try
         {
-            map[key] = new Dictionary<string, object?>
+            CultureInfo.CurrentCulture = new CultureInfo("en-US");
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+            var map = new Dictionary<string, object?>();
+            foreach (var (key, id) in new[] { ("a", ServerIdA), ("b", ServerIdB), ("c", ServerIdC) })
             {
-                ["monthly1000"] = await viewer.GetRecommendationsAsync(id, 1000m, ct),
-                ["monthly0"] = await viewer.GetRecommendationsAsync(id, 0m, ct),
-            };
-        }
+                map[key] = new Dictionary<string, object?>
+                {
+                    ["monthly1000"] = await viewer.GetRecommendationsAsync(id, 1000m, ct),
+                    ["monthly0"] = await viewer.GetRecommendationsAsync(id, 0m, ct),
+                };
+            }
 
-        AssertGolden(FinOpsOptimizationGoldenLiveTests.Serialize(anchor, map));
+            AssertGolden(FinOpsOptimizationGoldenLiveTests.Serialize(anchor, map));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = savedCulture;
+        }
     }
 
     private static async Task SeedAsync(NpgsqlConnection c, CancellationToken ct)
