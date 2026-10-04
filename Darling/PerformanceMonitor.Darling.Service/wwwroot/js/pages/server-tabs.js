@@ -1387,6 +1387,7 @@ export const SERVER_TABS = [
         SNAPSHOT,
         "No database configuration snapshot yet."
       ),
+      scopedConfigPanel(server),
       table(
         "Query Store Health",
         "get_query_store_health",
@@ -3156,23 +3157,64 @@ const SERVER_CONFIG_COLUMNS = [
   { key: "is_advanced", label: "Advanced", format: "bool" },
 ];
 
+/* The WPF Database Configuration grid's columns in its order and wording, less its per-row Collected column:
+   the read stamps one captured_at on the whole snapshot, so the panel subtitle carries it instead. */
 const DB_CONFIG_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "state", label: "State" },
-  { key: "compatibility_level", label: "Compat", format: "int" },
-  { key: "recovery_model", label: "Recovery" },
+  { key: "compatibility_level", label: "Compat Level", format: "int" },
+  { key: "collation", label: "Collation" },
+  { key: "recovery_model", label: "Recovery Model" },
+  { key: "read_only", label: "Read Only", format: "bool" },
   { key: "rcsi", label: "RCSI", format: "bool" },
-  { key: "snapshot_isolation", label: "SI", format: "bool" },
-  { key: "auto_close", label: "Auto close", format: "bool" },
-  { key: "auto_shrink", label: "Auto shrink", format: "bool" },
-  { key: "auto_create_stats", label: "Auto create stats", format: "bool" },
-  { key: "auto_update_stats", label: "Auto update stats", format: "bool" },
-  { key: "query_store", label: "Query Store" },
-  { key: "page_verify", label: "Page verify" },
+  { key: "snapshot_isolation", label: "Snapshot Isolation" },
+  { key: "auto_create_stats", label: "Auto Create Stats", format: "bool" },
+  { key: "auto_update_stats", label: "Auto Update Stats", format: "bool" },
+  { key: "auto_update_stats_async", label: "Async Stats Update", format: "bool" },
+  { key: "parameterization_forced", label: "Forced Parameterization", format: "bool" },
+  { key: "query_store", label: "Query Store", format: "bool" },
+  { key: "encrypted", label: "Encrypted", format: "bool" },
+  { key: "trustworthy", label: "Trustworthy", format: "bool" },
+  { key: "db_chaining", label: "DB Chaining", format: "bool" },
+  { key: "broker_enabled", label: "Broker", format: "bool" },
+  { key: "cdc_enabled", label: "CDC", format: "bool" },
+  { key: "mixed_page_allocation", label: "Mixed Pages", format: "bool" },
+  { key: "log_reuse_wait", label: "Log Reuse Wait" },
+  { key: "auto_close", label: "Auto Close", format: "bool" },
+  { key: "auto_shrink", label: "Auto Shrink", format: "bool" },
+  { key: "page_verify", label: "Page Verify" },
+  { key: "target_recovery_time_seconds", label: "Target Recovery (s)", format: "int" },
+  { key: "delayed_durability", label: "Delayed Durability" },
   { key: "accelerated_database_recovery", label: "ADR", format: "bool" },
-  { key: "optimized_locking", label: "Optimized locking", format: "bool" },
-  { key: "log_reuse_wait", label: "Log reuse wait" },
+  { key: "memory_optimized", label: "Memory Optimized", format: "bool" },
+  { key: "optimized_locking", label: "Optimized Locking", format: "bool" },
 ];
+
+/* The WPF Scoped Configuration grid: one row per database setting; Collected is the snapshot's captured_at. */
+const SCOPED_CONFIG_COLUMNS = [
+  { key: "database_name", label: "Database" },
+  { key: "name", label: "Setting" },
+  { key: "value", label: "Value" },
+  { key: "value_for_secondary", label: "Value for Secondary" },
+  { key: "captured_at", label: "Collected", format: "time" },
+];
+
+/* The scoped-configuration read groups settings under each database; the grid wants one row per setting. The
+   rows live in the panel's closure, not module state, so the 60 s repaint rebuilds them from the read. */
+function scopedConfigPanel(server) {
+  const { panel, body } = panelShell("Database Scoped Configuration", "sys.database_scoped_configurations, newest connect-time snapshot");
+  (async () => {
+    const res = await readTool("get_database_scoped_config", { server });
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+    const rows = [];
+    for (const db of res.data.databases || [])
+      for (const st of db.settings || [])
+        rows.push({ database_name: db.database_name, ...st, captured_at: res.data.captured_at });
+    mount(body, VIZ.table({ rows }, { rowsKey: "rows", columns: SCOPED_CONFIG_COLUMNS, emptyText: "No database-scoped configuration snapshot yet." }));
+  })();
+  return panel;
+}
 
 const QS_HEALTH_COLUMNS = [
   { key: "database_name", label: "Database" },
