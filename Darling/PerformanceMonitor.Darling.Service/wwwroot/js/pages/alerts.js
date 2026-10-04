@@ -7,8 +7,10 @@
  */
 
 /*
- * Alert History page (#1562) — the fleet-wide alert log from get_alert_history (server omitted = whole fleet,
- * each row naming its server). A filter box narrows the already-fetched rows by server name client-side (no
+ * Alert History page (#1562) — the alert log from get_alert_history (server omitted = whole fleet, each row naming
+ * its server). A range, a row limit, a server and a Show dismissed choice (module-scope, so they survive the 60 s
+ * poll) set what is read; a reply the tool cut at the row limit says so above the table.
+ * A filter box narrows the already-fetched rows by server name client-side (no
  * re-fetch). Every value is untrusted and reaches the DOM through el()/textContent (R4 — never innerHTML),
  * the expanders included (B2): the channel / sent / muted / delivery-error columns collapse into one compact
  * Status column, and the Detail column shows a truncated one-liner that expands to the full payload (structured
@@ -21,7 +23,7 @@
  * every 60s. Sort order, filters and every rendered field are unchanged.
  */
 
-import { el, mount, readTool, buildQuery, loadingStrip, errorStrip, emptyStrip, disclosure,
+import { el, mount, readTool, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
          ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { mutePrefillParams } from "../mute-context.js";
@@ -244,7 +246,7 @@ function alertKey(a) {
  * without duplicating them, and without vizTable itself having to know about incremental refresh. */
 function alertRowNode(row) {
   const wrap = VIZ.table({ alerts: [row] }, { rowsKey: "alerts", columns: alertColumns() });
-  return wrap.querySelector("tbody tr");
+  return markDismissed(wrap.querySelector("tbody tr"), row);
 }
 
 /* #4194: app.js's route() calls renderAlerts(main) fresh on every 60s poll tick as well as on first navigation
@@ -277,6 +279,83 @@ function reconcileRows(tbody, rows, rowMap) {
   }
 }
 
+/* The four read choices, kept at module scope so the 60 s poll (which calls renderAlerts again) and a visit to
+ * another page and back keep them. The windows are the desktop Alert History's, less "All": the tool refuses
+ * more than 168 hours, and a choice it would refuse is not offered. The row limits stop at the dispatch
+ * layer's 1000-row ceiling. The server is the registry's server_name ("" = the whole fleet). */
+const WINDOW_CHOICES = [
+  { hours: 1, label: "Last 1 Hour" },
+  { hours: 4, label: "Last 4 Hours" },
+  { hours: 24, label: "Last 24 Hours" },
+  { hours: 168, label: "Last 7 Days" },
+];
+const LIMIT_CHOICES = [200, 500, 1000];
+const choices = { hours: 24, limit: 200, server: "", dismissed: false };
+
+/* The get_alert_history parameters the current choices ask for. server_name and include_dismissed are left out
+ * (buildQuery drops empty values) when they are at their defaults. */
+function readParams() {
+  return {
+    hours_back: choices.hours,
+    limit: choices.limit,
+    server_name: choices.server || null,
+    include_dismissed: choices.dismissed ? "true" : null,
+  };
+}
+
+function windowLabel() {
+  return (WINDOW_CHOICES.find((w) => w.hours === choices.hours) || WINDOW_CHOICES[2]).label.toLowerCase();
+}
+
+/* The server names list_servers reported on the last successful read; the picker keeps the chosen server in the
+ * list even when that read fails or no longer names it, so the choice stays visible. */
+let serverNames = [];
+
+function serverRowsOf(data) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.servers)) return data.servers;
+  return [];
+}
+
+async function loadServerNames() {
+  const res = await readTool("list_servers", {});
+  if (res.kind === "error" || res.kind === "empty") return;
+  serverNames = serverRowsOf(res.data)
+    .map((r) => ({ name: r.server_name, label: r.display_name || r.server_name }))
+    .filter((r) => r.name);
+}
+
+function pickerOptions(items, chosen) {
+  return items.map((i) => el("option", { value: String(i.value), text: i.label }));
+}
+
+function picker(label, items, chosen) {
+  const sel = el("select", { class: "range-select-inline", "aria-label": label }, pickerOptions(items, chosen));
+  sel.value = String(chosen);
+  return sel;
+}
+
+function control(label, select) {
+  return el("label", { class: "range-control" }, [el("span", { text: label }), select]);
+}
+
+function serverItems() {
+  const items = [{ value: "", label: "All servers" }].concat(serverNames.map((r) => ({ value: r.name, label: r.label })));
+  if (choices.server && !serverNames.some((r) => r.name === choices.server)) items.push({ value: choices.server, label: choices.server });
+  return items;
+}
+
+/* A dismissed row (include_dismissed) renders muted and struck through, so it reads as acknowledged beside the
+ * live ones; the class is set where each row node is built, and the title says what it means. */
+function markDismissed(tr, row) {
+  if (!tr || !row) return tr;
+  if (row.dismissed === true) {
+    tr.className = ((tr.className || "") + " alert-dismissed").trim();
+    tr.setAttribute("title", "Dismissed");
+  }
+  return tr;
+}
+
 /* Remembers the last mount so a poll tick landing on the SAME still-open page can reconcile in place instead of
  * rebuilding (module-level: renderAlerts gets no state of its own from app.js's route(), which just calls it
  * again). `headEl.isConnected` tells a poll tick apart from a fresh navigation: mount() on any OTHER page
@@ -290,6 +369,7 @@ export async function renderAlerts(main) {
   }
 
   canMute = !!(await getSession()).can_edit;
+  await loadServerNames();
   const filter = el("input", {
     class: "filter-box",
     type: "text",
@@ -297,37 +377,63 @@ export async function renderAlerts(main) {
     "aria-label": "Filter alerts by server",
   });
 
+  const windowSel = picker("Time range", WINDOW_CHOICES.map((w) => ({ value: w.hours, label: w.label })), choices.hours);
+  const limitSel = picker("Row limit", LIMIT_CHOICES.map((n) => ({ value: n, label: n + " rows" })), choices.limit);
+  const serverSel = picker("Server", serverItems(), choices.server);
+  const dismissedBox = el("input", { type: "checkbox", "aria-label": "Show dismissed alerts" });
+  dismissedBox.checked = choices.dismissed;
+
+  const meta = el("div", { class: "meta", text: "" });
+  const noticeBox = el("div", {});
   const tableBox = el("div", {});
   const headEl = el("div", { class: "page-head" }, [
     el("h2", { text: "Alert History" }),
-    el("div", { class: "meta", text: "fleet-wide · last 24h" }),
+    meta,
     el("div", { class: "spacer" }),
+    control("Range", windowSel),
+    control("Rows", limitSel),
+    control("Server", serverSel),
+    el("label", { class: "range-control" }, [dismissedBox, el("span", { text: "Show dismissed" })]),
     filter,
   ]);
-  mount(main, [headEl, tableBox]);
+  mount(main, [headEl, noticeBox, tableBox]);
+
+  live = { main, headEl, meta, noticeBox, tableBox, filter, alerts: [], tbody: null, rowMap: null, seq: 0 };
+  /* A changed choice refetches and reconciles the table that is already drawn, the same path a poll tick takes. */
+  const changed = () => refreshAlerts(live);
+  windowSel.addEventListener("change", () => { choices.hours = Number(windowSel.value); changed(); });
+  limitSel.addEventListener("change", () => { choices.limit = Number(limitSel.value); changed(); });
+  serverSel.addEventListener("change", () => { choices.server = serverSel.value; changed(); });
+  dismissedBox.addEventListener("change", () => { choices.dismissed = !!dismissedBox.checked; changed(); });
+  filter.addEventListener("input", () => drawAlerts(live));
 
   mount(tableBox, loadingStrip("Loading alerts…"));
-  const res = await readTool("get_alert_history", { hours_back: 24, limit: 200 });
-  if (res.kind === "error") return mount(tableBox, errorStrip(res.message));
-  if (res.kind === "empty") return mount(tableBox, emptyStrip(res.message));
-
-  live = { main, headEl, tableBox, filter, alerts: res.data.alerts || [], tbody: null, rowMap: null };
-  filter.addEventListener("input", () => drawAlerts(live));
-  drawAlerts(live);
+  await refreshAlerts(live);
 }
 
-/* A background poll tick: re-fetch, then hand the new alerts to drawAlerts() to reconcile in place. Unlike the
- * first mount, this never shows the loading strip - the previous table stays exactly as it is until the new
- * page is ready, so a healthy 60s tick with no new alert produces no visible change and no DOM churn at all. */
+/* Re-fetches with the current choices, then hands the new alerts to drawAlerts() to reconcile in place. Unlike
+ * the first mount, a poll tick never shows the loading strip - the previous table stays exactly as it is until
+ * the new page is ready, so a healthy 60s tick with no new alert produces no visible change and no DOM churn at
+ * all. A changed window or server reconciles the same way: rows that left the window are removed, new ones land
+ * in order. A reply that arrives after a newer request was made is dropped. */
 async function refreshAlerts(state) {
-  const res = await readTool("get_alert_history", { hours_back: 24, limit: 200 });
+  const seq = ++state.seq;
+  const res = await readTool("get_alert_history", readParams());
+  if (seq !== state.seq) return;
+  state.meta.textContent = (choices.server ? choices.server : "fleet-wide") + " · " + windowLabel();
+  mount(state.noticeBox, []);
   if (res.kind === "error" || res.kind === "empty") {
+    state.alerts = [];
     state.tbody = null;
     state.rowMap = null;
     mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyStrip(res.message));
     return;
   }
   state.alerts = res.data.alerts || [];
+  if (res.data.truncated === true) {
+    mount(state.noticeBox, noticeStrip(
+      "More alerts exist than shown: the newest " + state.alerts.length + " are listed. Raise the row limit or narrow the range to see the rest."));
+  }
   drawAlerts(state);
 }
 
@@ -354,7 +460,11 @@ function drawAlerts(state) {
   mount(state.tableBox, table);
   const tbody = table.querySelector("tbody");
   const rowMap = new Map();
-  [...tbody.children].forEach((tr) => rowMap.set(alertKey(gridRowOf(tr)), tr));
+  [...tbody.children].forEach((tr) => {
+    const row = gridRowOf(tr);
+    markDismissed(tr, row);
+    rowMap.set(alertKey(row), tr);
+  });
   state.tbody = tbody;
   state.rowMap = rowMap;
 }
