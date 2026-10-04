@@ -252,6 +252,77 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
     }
 
     [Fact]
+    public async Task APastAsOf_ReadsTheRunsBeforeIt_WhateverIsStoredAfterIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            /* More runs after as_of than any fetch limit: 2100 one-second successful outcomes of the same job, local
+               16:00 onward on alpha (UTC-5), so 21:00Z onward - all after as_of 20:00Z. */
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                @"INSERT INTO job_history (job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name, job_enabled,
+                                           category_name, step_id, step_name, run_status, run_status_desc, run_datetime, run_duration_seconds,
+                                           retries_attempted, message)
+                  SELECT 4843200000 + g, $1, $2, $3, 4843200000 + g, 'job-Nightly-ETL', 'Nightly ETL', true,
+                         'Data Maintenance', 0, '(Job outcome)', 1, 'The job succeeded.', $4 + g * interval '1 minute', 1, 0, NULL
+                  FROM generate_series(1, 2100) AS g",
+                new DateTime(2026, 3, 10, 12, 0, 0, DateTimeKind.Unspecified), ServerA, NameA, new DateTime(2026, 3, 10, 16, 0, 0, DateTimeKind.Unspecified));
+
+            const string pastAsOf = "2026-03-10T20:00:00Z";
+            var limited = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, limit: 3, as_of: pastAsOf, cancellationToken: ct)).RootElement;
+            Assert.Equal(3, limited.GetProperty("shown").GetInt32());
+            Assert.True(limited.GetProperty("truncated").GetBoolean());
+            Assert.All(limited.GetProperty("runs").EnumerateArray(),
+                r => Assert.True(DateTime.Parse(r.GetProperty("run_time").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal) <= new DateTime(2026, 3, 10, 20, 0, 0, DateTimeKind.Utc)));
+
+            var all = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, limit: 10, as_of: pastAsOf, cancellationToken: ct)).RootElement;
+            Assert.Equal(4, all.GetProperty("shown").GetInt32());
+            Assert.False(all.GetProperty("truncated").GetBoolean());
+            foreach (var run in all.GetProperty("runs").EnumerateArray().Where(r => r.GetProperty("job_name").GetString() == "Nightly ETL"))
+            {
+                /* The success stats stop at as_of too: the 13:00Z success is the last one, and its 600 s is the average. */
+                Assert.Equal(new DateTime(2026, 3, 10, 13, 0, 0, DateTimeKind.Utc), DateTime.Parse(run.GetProperty("last_success").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal));
+                Assert.False(run.GetProperty("is_long_running").GetBoolean());
+            }
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
+    public async Task AnAzureSqlDatabaseServerWithNoRuns_AnswersNotCollected_NotEmpty()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET sql_engine_edition = 5 WHERE server_id = $1", ServerC);
+            var body = await DarlingMcpJobTools.GetJobHistory(postgres, NameC, as_of: AsOfText, cancellationToken: ct);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(body));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
     public async Task Filters_AndFleetMode_AndLimit()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");

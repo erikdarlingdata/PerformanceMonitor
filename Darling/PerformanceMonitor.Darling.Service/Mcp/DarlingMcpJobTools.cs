@@ -142,14 +142,12 @@ public sealed class DarlingMcpJobTools
             var filter = new JobHistoryFilter(
                 string.IsNullOrWhiteSpace(job_name) ? null : job_name.Trim(),
                 string.IsNullOrWhiteSpace(status) ? null : Array.FindIndex(HistoryStatuses, s => string.Equals(s, status.Trim(), StringComparison.OrdinalIgnoreCase)),
-                string.IsNullOrWhiteSpace(category) ? null : category.Trim());
+                string.IsNullOrWhiteSpace(category) ? null : category.Trim(),
+                windowEnd);
 
             var requestedStart = windowEnd.AddHours(-hours_back);
-            /* The read has no upper bound, so a past as_of reads extra rows to cut the runs after it away. */
-            var fetchLimit = string.IsNullOrWhiteSpace(as_of) ? limit + 1 : Math.Max(limit + 1, 2000);
             var fetched = await DarlingJobHistoryReader.GetAsync(
-                postgres, requestedStart, scope?.ServerId, fetchLimit, McpCommandDeadlines.ReadSeconds, filter, cancellationToken);
-            fetched = fetched.Where(r => r.RunDateTimeUtc is { } t && t <= windowEnd).ToList();
+                postgres, requestedStart, scope?.ServerId, limit + 1, McpCommandDeadlines.ReadSeconds, filter, cancellationToken);
             var truncated = fetched.Count > limit;
             var rows = fetched.Take(limit).ToList();
 
@@ -192,7 +190,7 @@ public sealed class DarlingMcpJobTools
                 retries = r.RetriesAttempted,
                 last_success = McpHelpers.FormatEffectiveStart(r.LastSuccessfulRunUtc),
                 is_long_running = r.IsLongRunning,
-                message = McpHelpers.Truncate(r.Message, 2000)
+                message = McpHelpers.Truncate(r.Message, 500)
             }).ToList();
 
             return JsonSerializer.Serialize(new

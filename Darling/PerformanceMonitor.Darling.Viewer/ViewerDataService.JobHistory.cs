@@ -84,6 +84,16 @@ public sealed class ViewerJobHistoryRow
         };
     }
 
+    /// <summary>The store row for a viewer row, the inverse of <see cref="From"/>.</summary>
+    internal static DarlingJobHistoryRow ToDto(ViewerJobHistoryRow row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        return new DarlingJobHistoryRow(
+            row.ServerId, row.ServerName, row.InstanceId, row.JobId, row.JobName, row.JobEnabled, row.CategoryName,
+            row.StepId, row.StepName, row.RunStatus, row.RunStatusDesc, row.RunDateTimeUtc, row.RunDurationSeconds,
+            row.RetriesAttempted, row.Message, row.LastSuccessfulRunUtc, row.IsLongRunning);
+    }
+
     /// <summary>
     /// <see cref="RunDateTimeUtc"/> in the current display mode, as the plain wall time and never with the repeated-hour
     /// UTC offset that <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> adds (#4766). That offset is only
@@ -171,28 +181,8 @@ public sealed partial class ViewerDataService
     /// </summary>
     internal static List<ViewerJobHistoryRow> ApplyJobHistoryWindow(List<ViewerJobHistoryRow> rows, DateTime sinceUtc, int limit)
     {
-        var since = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified);
-        var kept = new List<ViewerJobHistoryRow>(rows.Count);
-        foreach (var row in rows)
-        {
-            if (row.RunDateTimeUtc is { } runUtc && runUtc >= since)
-            {
-                kept.Add(row);
-            }
-        }
-
-        kept.Sort(static (a, b) =>
-        {
-            var byTime = Nullable.Compare(b.RunDateTimeUtc, a.RunDateTimeUtc);
-            return byTime != 0 ? byTime : b.InstanceId.CompareTo(a.InstanceId);
-        });
-
-        if (limit >= 0 && kept.Count > limit)
-        {
-            kept.RemoveRange(limit, kept.Count - limit);
-        }
-
-        return kept;
+        var kept = DarlingJobHistoryReader.ApplyWindow(rows.ConvertAll(ViewerJobHistoryRow.ToDto), sinceUtc, limit);
+        return kept.ConvertAll(ViewerJobHistoryRow.From);
     }
 
     /// <summary>

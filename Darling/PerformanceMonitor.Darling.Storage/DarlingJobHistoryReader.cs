@@ -43,10 +43,14 @@ public sealed record DarlingJobHistoryRow(
 /// <summary>
 /// Optional filters on the job-history read, applied inside the per-server top-N so the row limit counts only
 /// matching rows. The viewer passes none (it filters on the grid); the MCP tool passes what the caller asked for.
-/// Job name and category match exactly, ignoring case.
+/// Job name and category match exactly, ignoring case. <paramref name="UntilUtc"/> (naive UTC) is an optional end
+/// instant: the SQL bounds the newest runs by it (widened by an hour, like the start) and the job stats exactly,
+/// and <see cref="DarlingJobHistoryReader.GetAsync"/> then cuts the runs exactly in C#.
 /// </summary>
-public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null)
+public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null, DateTime? UntilUtc = null)
 {
+    private int UntilParam(int firstParam) => firstParam + (JobName is null ? 0 : 1) + (RunStatus is null ? 0 : 1) + (Category is null ? 0 : 1);
+
     /// <summary>The <c>AND</c> clauses for the set filters, numbering their parameters from <paramref name="firstParam"/>.</summary>
     public string Clauses(int firstParam)
     {
@@ -64,11 +68,20 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
 
         if (Category is not null)
         {
-            sql += $"\n        AND   lower(jh.category_name) = lower(${next})";
+            sql += $"\n        AND   lower(jh.category_name) = lower(${next++})";
+        }
+
+        if (UntilUtc is not null)
+        {
+            sql += $"\n        AND   jh.run_datetime < ${next} + make_interval(mins => so.offset_minutes) + interval '1 hour'";
         }
 
         return sql;
     }
+
+    /// <summary>The job-stats clause for the end instant: exact (no widening), so a stat never names a run after it.</summary>
+    internal string StatsClause(int firstParam) =>
+        UntilUtc is null ? string.Empty : $"\n        AND   jh.run_datetime < ${UntilParam(firstParam)} + make_interval(mins => so.offset_minutes)";
 
     internal IEnumerable<NpgsqlParameter> Parameters()
     {
@@ -85,6 +98,11 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
         if (Category is not null)
         {
             yield return new NpgsqlParameter<string> { TypedValue = Category };
+        }
+
+        if (UntilUtc is not null)
+        {
+            yield return new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(UntilUtc.Value, DateTimeKind.Unspecified) };
         }
     }
 }
@@ -139,22 +157,24 @@ public static class DarlingJobHistoryReader
             rows.Add(ReadRow(reader, clocks));
         }
 
-        return ApplyWindow(rows, sinceUtc, limit);
+        return ApplyWindow(rows, sinceUtc, limit, filter?.UntilUtc);
     }
 
     /// <summary>
     /// The exact window, after the server-local to UTC conversion: keeps the runs at or after
-    /// <paramref name="sinceUtc"/> (the SQL pre-filter is widened by an hour), orders them newest first by their real
+    /// <paramref name="sinceUtc"/> (the SQL pre-filter is widened by an hour) and, when given, at or before
+    /// <paramref name="untilUtc"/>, orders them newest first by their real
     /// UTC time, and keeps the newest <paramref name="limit"/> (#4766).
     /// </summary>
-    public static List<DarlingJobHistoryRow> ApplyWindow(List<DarlingJobHistoryRow> rows, DateTime sinceUtc, int limit)
+    public static List<DarlingJobHistoryRow> ApplyWindow(List<DarlingJobHistoryRow> rows, DateTime sinceUtc, int limit, DateTime? untilUtc = null)
     {
         ArgumentNullException.ThrowIfNull(rows);
         var since = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified);
+        var until = untilUtc is { } u ? DateTime.SpecifyKind(u, DateTimeKind.Unspecified) : (DateTime?)null;
         var kept = new List<DarlingJobHistoryRow>(rows.Count);
         foreach (var row in rows)
         {
-            if (row.RunDateTimeUtc is { } runUtc && runUtc >= since)
+            if (row.RunDateTimeUtc is { } runUtc && runUtc >= since && (until is null || runUtc <= until))
             {
                 kept.Add(row);
             }
@@ -228,6 +248,7 @@ public static class DarlingJobHistoryReader
         var floorParam = scopedToServer ? "$3" : "$2";
         var limitParam = scopedToServer ? "$4" : "$3";
         var filterSql = filter is null ? string.Empty : filter.Clauses(scopedToServer ? 5 : 4);
+        var statsUntilSql = filter is null ? string.Empty : filter.StatsClause(scopedToServer ? 5 : 4);
 
         return $@"
 WITH svr AS (
@@ -320,7 +341,7 @@ job_stats AS (
         AND   jh.step_id = 0
         AND   jh.run_status = 1
         AND   jh.collection_time >= {floorParam}
-        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)
+        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes){statsUntilSql}
         AND   jh.job_id IN (SELECT job_id FROM base WHERE base.server_id = so.server_id)
         GROUP BY jh.job_id
     ) AS js
