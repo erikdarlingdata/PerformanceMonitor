@@ -61,3 +61,6 @@ table.data th .sort-ind { display: inline-block; min-width: 1em; font-size: 0.8e
 .mute-rules-field-error { display: block; color: var(--err); font-size: 12px; }
 .mute-actions .btn { margin-right: 4px; }
 tr.mute-rules-highlight { outline: 2px solid var(--accent); }
+
+/* Status bar: a collection state that is not ok reads as a warning. */
+#statusbar .sb-warn { color: var(--warn, #e0a030); font-weight: 600; }
