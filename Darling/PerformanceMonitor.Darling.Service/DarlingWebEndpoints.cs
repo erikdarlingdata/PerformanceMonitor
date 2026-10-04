@@ -1023,6 +1023,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var outcome = await AlertDismissStore.DismissKeysAsync(
                     postgres, keys, McpCommandDeadlines.ReadSeconds, context.RequestAborted);
 
+                /* Who dismissed is not stored on the row; this line is the only record. Counts only, no alert text. */
+                logger.LogInformation(
+                    "Alert dismiss by {Principal}: requested {Requested}, dismissed {Dismissed}, known {Known}",
+                    DarlingWebSeat.FromContext(context).EditorPrincipal, outcome.Requested, outcome.Dismissed, outcome.Known);
+
                 return JsonNodeResult(new JsonObject
                 {
                     ["requested"] = outcome.Requested,
@@ -1062,7 +1067,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return false;
         }
 
-        if (root is not JsonObject obj || obj["alerts"] is not JsonArray alerts)
+        /* A duplicate property name makes the JsonObject indexer throw ArgumentException; that is a caller's
+           malformed body (400), not a server fault. */
+        JsonNode? alertsNode = null;
+        try
+        {
+            alertsNode = (root as JsonObject)?["alerts"];
+        }
+        catch (ArgumentException)
+        {
+            refusal = "Request body must be a JSON object with one alerts array.";
+            return false;
+        }
+
+        if (root is not JsonObject || alertsNode is not JsonArray alerts)
         {
             refusal = "Request body must be {\"alerts\": [{\"alert_time\", \"server_id\", \"metric_name\"}, ...]}.";
             return false;

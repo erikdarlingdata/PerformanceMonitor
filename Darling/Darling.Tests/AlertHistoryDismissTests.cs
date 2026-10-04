@@ -77,6 +77,7 @@ public sealed class AlertHistoryDismissTests
     [InlineData("""{"alerts":[{"alert_time":"2026-10-04T10:00:00","server_id":1,"metric_name":""}]}""")]
     [InlineData("""{"alerts":[{"alert_time":"2026-10-04T10:00:00","server_id":1}]}""")]
     [InlineData("""{"alerts":[7]}""")]
+    [InlineData("""{"alerts":[],"alerts":[]}""")]
     public void ParseDismissBody_RefusesABadBody(string body)
     {
         Assert.False(DarlingWebEndpoints.ParseDismissBody(body, out _, out var refusal));
@@ -134,7 +135,7 @@ public sealed class AlertHistoryDismissTests
         {
             await owner.OpenAsync(ct);
             await PgMigrations.MigrateAsync(owner, ct);
-            await ProvisionDismissOnlyRoleAsync(owner, ct);
+            await CreateDismissOnlyRoleAsync(owner, ct);
             await Exec(owner, SeedSql, ct);
         }
 
@@ -144,15 +145,30 @@ public sealed class AlertHistoryDismissTests
             await using var role = new NpgsqlConnection(RoleConnectionString(scratch.ConnectionString));
             await role.OpenAsync(ct);
 
+            /* Negative control: the same role, same statement, BEFORE the shipped grant, is refused. This is what
+               makes the success below attributable to the grant and not to a role that could always write. */
+            var dismissKey = new AlertDismissKey(new DateTime(2026, 10, 4, 10, 0, 0), -7001, "High CPU");
+            await using (var before = AlertDismissStore.CreateDismissCommand(
+                NpgsqlDataSource.Create(RoleConnectionString(scratch.ConnectionString)), new[] { dismissKey }, 30))
+            {
+                var refused = await Assert.ThrowsAsync<PostgresException>(() => before.ExecuteNonQueryAsync(ct));
+                Assert.Equal("42501", refused.SqlState);
+            }
+
+            await using (var owner = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await owner.OpenAsync(ct);
+                await GrantDismissedColumnAsync(owner, ct);
+            }
+
             /* The WPF read-only probe, verbatim, as the grant-only role: a column grant is not a table grant. */
             Assert.False(await Scalar<bool>(role, "SELECT has_table_privilege('config_alert_log', 'UPDATE')", ct));
             Assert.True(await Scalar<bool>(role, "SELECT has_column_privilege('config_alert_log', 'dismissed', 'UPDATE')", ct));
             Assert.False(await Scalar<bool>(role, "SELECT has_column_privilege('config_alert_log', 'muted', 'UPDATE')", ct));
 
             /* The shared write core, as that role. */
-            var key = new AlertDismissKey(new DateTime(2026, 10, 4, 10, 0, 0), -7001, "High CPU");
             await using (var command = AlertDismissStore.CreateDismissCommand(
-                NpgsqlDataSource.Create(RoleConnectionString(scratch.ConnectionString)), new[] { key }, 30))
+                NpgsqlDataSource.Create(RoleConnectionString(scratch.ConnectionString)), new[] { dismissKey }, 30))
             {
                 Assert.Equal(1, await command.ExecuteNonQueryAsync(ct));
             }
@@ -235,6 +251,7 @@ public sealed class AlertHistoryDismissTests
             Assert.Equal(StatusCodes.Status415UnsupportedMediaType, (await Post(null, "{}")).Status);
             Assert.Equal(StatusCodes.Status400BadRequest, (await Post("application/json", "nope")).Status);
             Assert.Equal(StatusCodes.Status400BadRequest, (await Post("application/json", "{\"alerts\":[]}")).Status);
+            Assert.Equal(StatusCodes.Status400BadRequest, (await Post("application/json", "{\"alerts\":[],\"alerts\":[]}")).Status);
 
             /* Two real rows (one duplicated), one unknown key. */
             var first = await Post("application/json; charset=utf-8", "{\"alerts\":[" + string.Join(",",
@@ -280,20 +297,28 @@ INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, c
  ('2026-10-04 10:05:00', -7001, 'srv', 'Blocking', 5, 1),
  ('2026-10-04 10:10:00', -7001, 'srv', 'Deadlocks', 2, 1)";
 
-    /// <summary>A login role with the managed viewer's reads on config plus ONLY the managed viewer's alert-log
-    /// grant, lifted from the managed provisioning SQL so the test runs the shipped statement.</summary>
-    private static async Task ProvisionDismissOnlyRoleAsync(NpgsqlConnection owner, CancellationToken ct)
+    private static Task CreateDismissOnlyRoleAsync(NpgsqlConnection owner, CancellationToken ct) =>
+        Exec(owner, $@"
+CREATE ROLE {DismissRole} LOGIN NOSUPERUSER PASSWORD '{RolePassword}';
+GRANT USAGE ON SCHEMA config TO {DismissRole};
+GRANT SELECT ON config.config_alert_log TO {DismissRole};", ct);
+
+    /// <summary>Gives the role ONLY the managed viewer's alert-log grant, lifted from the managed provisioning SQL
+    /// so the test runs the shipped statement.</summary>
+    private static async Task GrantDismissedColumnAsync(NpgsqlConnection owner, CancellationToken ct)
     {
         var managed = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15);
         var grant = Regex.Match(managed, @"GRANT UPDATE \(dismissed\) ON config\.config_alert_log TO viewer;");
         Assert.True(grant.Success, "the managed provisioning SQL no longer grants viewer the dismissed column");
 
-        await Exec(owner, $@"
-CREATE ROLE {DismissRole} LOGIN NOSUPERUSER PASSWORD '{RolePassword}';
-GRANT USAGE ON SCHEMA config TO {DismissRole};
-GRANT SELECT ON config.config_alert_log TO {DismissRole};
-{grant.Value.Replace(" TO viewer;", " TO " + DismissRole + ";", StringComparison.Ordinal)}", ct);
+        await Exec(owner, grant.Value.Replace(" TO viewer;", " TO " + DismissRole + ";", StringComparison.Ordinal), ct);
+    }
+
+    private static async Task ProvisionDismissOnlyRoleAsync(NpgsqlConnection owner, CancellationToken ct)
+    {
+        await CreateDismissOnlyRoleAsync(owner, ct);
+        await GrantDismissedColumnAsync(owner, ct);
     }
 
     private static Task DropRoleAsync(NpgsqlConnection owner, CancellationToken ct) =>
