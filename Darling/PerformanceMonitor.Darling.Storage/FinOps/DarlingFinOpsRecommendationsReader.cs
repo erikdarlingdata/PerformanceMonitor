@@ -7,7 +7,22 @@
  */
 
 
+using System;
+using System.Globalization;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+
 namespace PerformanceMonitor.Darling.Storage.FinOps;
+
+/// <summary>
+/// The server's latest collected edition facts for the license audit: edition, product major version, logical CPU count,
+/// Availability Group replica role and the Always On master switch.
+/// </summary>
+public readonly record struct FinOpsEditionFacts(
+    string Edition, int MajorVersion, int CpuCount, string AgReplicaRole, bool IsHadrEnabled);
 
 /// <summary>
 /// The SQL behind the FinOps recommendation checks. Each statement reads already-collected Postgres data; the
@@ -116,4 +131,75 @@ FROM server_properties
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
+
+    /// <summary>Reads the server's latest collected edition / product-version-major / CPU count + AG role / HADR flag, or null when no server_properties row exists yet.</summary>
+    public static async Task<FinOpsEditionFacts?> GetEditionFactsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        await using var command = dataSource.CreateCommand(EditionFactsSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        var edition = reader.IsDBNull(0) ? "" : reader.GetString(0);
+        var productVersion = reader.IsDBNull(1) ? null : reader.GetString(1);
+        var cpuCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture);
+        /* The collected AG state: ServerPropertiesCollector resolves ag_replica_role live from
+           sys.dm_hadr_availability_replica_states, and is_hadr_enabled is SERVERPROPERTY('IsHadrEnabled').
+           Absent/NULL (non-AG platforms, Azure SQL DB, nothing collected yet) => the Standalone / feature-off
+           fallback — exactly Lite's own behaviour where the AG DMVs are unavailable. */
+        var agReplicaRole = reader.IsDBNull(3) ? "Standalone" : reader.GetString(3);
+        var isHadrEnabled = !reader.IsDBNull(4) && reader.GetBoolean(4);
+        return new FinOpsEditionFacts(edition, DarlingFinOpsIndexAnalysisReader.ParseMajorVersion(productVersion), cpuCount, agReplicaRole, isHadrEnabled);
+    }
+
+    /// <summary>
+    /// The server's latest collected engine edition, or <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
+    /// when nothing is collected yet (or the row carries no edition).
+    /// </summary>
+    public static async Task<int> GetEngineEditionAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        await using var command = dataSource.CreateCommand(EngineEditionSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0)
+            ? Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture)
+            : CollectorEngineCapability.UnknownEngineEdition;
+    }
+
+    /// <summary>True once the server's query stats reach back to the start of the 7-day window. The advice text claims 7 days, so the data must cover all 7: the first sample has to be at or before the cutoff, with no slack.</summary>
+    public static async Task<bool> HasQueryStatsCoverageAsync(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        await using var command = dataSource.CreateCommand(QueryStatsFirstSampleSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        var first = await command.ExecuteScalarAsync(cancellationToken);
+        return first is DateTime firstSample && firstSample <= cutoff;
+    }
+
+    /// <summary>Reads the 7-day P95 Total Server Memory (MB) + sample count (shared by the memory + VM right-sizing checks).</summary>
+    public static async Task<(int P95Mb, long SampleCount, string Window)> GetMemoryP95Async(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        await using var command = dataSource.CreateCommand(MemoryP95Sql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            var p95Mb = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
+            var sampleCount = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
+            var window = RightSizingWindow.Describe(reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture), reader.IsDBNull(2) || reader.IsDBNull(3) ? TimeSpan.Zero : reader.GetDateTime(3) - reader.GetDateTime(2));
+            return (p95Mb, sampleCount, window);
+        }
+
+        return (0, 0L, RightSizingWindow.Describe(0, TimeSpan.Zero));
+    }
 }

@@ -88,7 +88,7 @@ public sealed class FinOpsRecommendationsGoldenLiveTests
         }
     }
 
-    private static async Task SeedAsync(NpgsqlConnection c, CancellationToken ct)
+    internal static async Task SeedAsync(NpgsqlConnection c, CancellationToken ct)
     {
         await DarlingMcpTestData.RegisterServerAsync(c, ServerIdA, ServerNameA, ct);
         await DarlingMcpTestData.RegisterServerAsync(c, ServerIdB, ServerNameB, ct);
