@@ -2128,6 +2128,8 @@ internal static class DarlingDataReader
                 postgres, serverId, startUtc, endUtc, top, databaseName, executionType, moduleName, cancellationToken);
             if (table is var (tableRows, tablePlan))
             {
+                ReadScope.NoteSource(ReadScope.SourceIntervalTable);
+                ReadScope.NoteRows(tableRows.Count);
                 return new QueryStoreTopRead(tableRows, tablePlan);
             }
         }
@@ -2146,6 +2148,8 @@ internal static class DarlingDataReader
             rows.Add(ReadQueryStoreTopRow(reader));
         }
 
+        ReadScope.NoteSource(ReadScope.SourceRaw);
+        ReadScope.NoteRows(rows.Count);
         return new QueryStoreTopRead(rows, null);
     }
 

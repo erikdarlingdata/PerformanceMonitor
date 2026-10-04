@@ -73,6 +73,7 @@ public sealed class McpToolLatencyFilter
 
             var stopwatch = Stopwatch.StartNew();
             using var readScope = ReadScope.Open(_logger);
+            readScope.Scope.CaptureStatements = true;
             try
             {
                 var result = await next(request, cancellationToken);

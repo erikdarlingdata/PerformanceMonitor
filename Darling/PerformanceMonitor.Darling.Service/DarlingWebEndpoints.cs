@@ -372,6 +372,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var stopwatch = Stopwatch.StartNew();
                 string result;
                 using var readScope = ReadScope.Open(logger);
+                readScope.Scope.CaptureStatements = true;
                 try
                 {
                     /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
@@ -1467,6 +1468,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
         using var readScope = ReadScope.Open(readLatency?.Logger);
+        readScope.Scope.CaptureStatements = true;
         var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc);
         RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken, readScope.Fallback);
         return outcome;
@@ -1681,6 +1683,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             return ComposeRunOutcome.BadRequest(compileError);
         }
+
+        ReadScope.NoteSource(
+            queryStoreWideEligible ? ReadScope.SourceIntervalTable : snapshot?.Verdict is not null ? ReadScope.SourceHourlyEdges : ReadScope.SourceRaw);
 
         try
         {

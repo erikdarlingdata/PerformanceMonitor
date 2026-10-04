@@ -491,6 +491,9 @@ builder.Services.AddSingleton<BaselineCache>();
    flush and the web host's recording are separate hosted services in the one process. */
 builder.Services.AddSingleton<ReadLatencyAccumulator>();
 
+/* #5097: the per-statement timing listener for reads; samples only inside a ReadScope that asked for capture. */
+ReadStatementCapture.Register();
+
 builder.Services.AddHostedService<DarlingWorker>();
 
 /* AN4: the analysis MCP tools over Streamable HTTP — registered always, self-gating on
