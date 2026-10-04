@@ -68,6 +68,9 @@ a:hover { text-decoration: underline; }
 }
 .auto-refresh-toggle:hover { color: var(--fg); border-color: var(--accent); }
 .auto-refresh-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.page-refresh-control { margin-top: 0.6rem; flex-wrap: wrap; }
+.page-refresh-control .auto-refresh-toggle { margin-top: 0; }
+.page-refresh-control[hidden] { display: none; }
 
 .refresh-control { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--muted); }
 .refresh-control .refresh-select { font-size: 0.82rem; }
@@ -781,6 +784,8 @@ table.data td.sev-Healthy { color: var(--ok); }
   z-index: 20;
 }
 #statusbar .sb-sep { color: var(--border); }
+/* A collection state that is not ok reads as a warning. */
+#statusbar .sb-warn { color: var(--warn, #e0a030); font-weight: 600; }
 #server-list { padding-bottom: 34px; }
 
 /* ─────────────────────────── alert status cell (collapsed channel/sent/muted/error) ─────────────────────────── */
@@ -1115,6 +1120,9 @@ pre.code {
 .heat-band-6 { color: var(--bg); background: rgba(46, 174, 241, 0.76); }
 .heat-band-7 { color: var(--bg); background: rgba(46, 174, 241, 0.87); }
 
-.page-refresh-control { margin-top: 0.6rem; flex-wrap: wrap; }
-.page-refresh-control .auto-refresh-toggle { margin-top: 0; }
-.page-refresh-control[hidden] { display: none; }
+/* ─────────────────────────── analysis Recommendations tab ─────────────────────────── */
+
+.reco-group { margin-bottom: 0.6rem; }
+.reco-card { margin: 0.5rem 0; }
+.reco-fix { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-dark); padding: 0.6rem; border-radius: 4px; }
+.reco-actions { display: flex; gap: 0.5rem; margin-top: 0.4rem; }

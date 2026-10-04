@@ -3255,8 +3255,8 @@ CREATE TABLE IF NOT EXISTS config.custom_views (
     ///
     /// <para><b>Nesting.</b> <c>parent_id</c> is a self-reference; NULL = a root tag. Depth is capped
     /// app-side at 4 levels — Postgres cannot express that without a trigger, and the tag table is tiny
-    /// (dozens of rows), so the Viewer loads it whole, builds the tree in memory, and checks both the cap
-    /// and cycle-freedom there. No recursive CTE, no ltree extension, no closure table.
+    /// (dozens of rows), so <c>ServerTagRules</c> (Storage) enforces both the cap and cycle-freedom for every
+    /// writer. No recursive CTE, no ltree extension, no closure table.
     /// <c>ON DELETE CASCADE</c> on the self-reference means deleting a tag removes its whole subtree and
     /// (via the map's own cascade) those assignments — the folder mental model. It can never reach
     /// <c>config_monitored_servers</c>: there is no FK to it, so no server row, credential blob, or
@@ -3270,8 +3270,8 @@ CREATE TABLE IF NOT EXISTS config.custom_views (
     /// operator-entered names.</para>
     ///
     /// <para><b>NO <c>config_bump_version</c> trigger</b>, same reasoning as V31: tags feed the VIEWER's
-    /// sidebar, never the collector/service loop, so there is nothing for the service to reload and a
-    /// beacon bump would only cost a needless fleet reconcile. <c>id</c> is
+    /// sidebar and never the collector loop. The alert evaluator reads them, but through its own cache refresh,
+    /// so a beacon is still unnecessary and a bump would only cost a needless fleet reconcile. <c>id</c> is
     /// <c>GENERATED ALWAYS AS IDENTITY</c> so INSERTs need no sequence USAGE grant. No explicit grant is
     /// added: both tables are picked up by the blanket <c>GRANT ... ON ALL TABLES IN SCHEMA config</c>
     /// statements that provisioning re-runs on EVERY service start. Note it is those, not
@@ -3698,9 +3698,9 @@ ALTER TABLE config.config_alert_settings
     /// by running V32 then V50 in order, the same path an upgraded store takes; nothing else needs editing.
     /// <para>Deliberately nullable with NO backfill: existing tags stay NULL and render as a neutral pill
     /// until a user picks a colour, while newly-created tags get a palette colour assigned at creation time
-    /// (rotated by tag id, in the viewer). Stored as <c>#RRGGBB</c> text — the viewer's only concern, the
-    /// service never reads server_tags — so no CHECK constraint is imposed here; the viewer writes only
-    /// palette values or a user pick.</para>
+    /// (rotated by tag id, in the viewer). Stored as <c>#RRGGBB</c> text — read by the service's tag-scoped alert
+    /// rules since #3350 and validated by <c>ServerTagRules</c> — so no CHECK constraint is imposed here; writers
+    /// store only palette values or a user pick.</para>
     /// </summary>
     private const string V50Sql = @"
 ALTER TABLE config.server_tags

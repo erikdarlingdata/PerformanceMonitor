@@ -115,6 +115,15 @@ public sealed class WebPageRefreshIntervalBehaviourTests
     }
 
     [Fact]
+    public void OnAFixedCustomRange_ThePollReadsNothing_AndTheRefreshButtonReReadsThePage()
+    {
+        var r = Run();
+        Assert.True(r.GetProperty("fixedRangeApplyError").ValueKind == JsonValueKind.Null, "the fixed range was not taken");
+        Assert.Equal(0, r.GetProperty("fixedRangePollReads").GetInt32());
+        Assert.True(r.GetProperty("fixedRangeRefreshReads").GetInt32() > 0, "Refresh did not re-read the fixed range");
+    }
+
+    [Fact]
     public void ThirtySeconds_RespectsTheSlowPageBackoff_AndNeverStacksRenders()
     {
         var r = Run();
@@ -123,10 +132,9 @@ public sealed class WebPageRefreshIntervalBehaviourTests
         // Reads that take 20 s are more than half of 30 s, so the next render waits 4x the render time, not 30 s.
         var gaps = r.GetProperty("backoffGaps").EnumerateArray().Select(e => e.GetInt32()).ToArray();
         Assert.True(gaps[0] >= 80, "the slow page re-rendered after " + gaps[0] + " s");
-        // Every later gap is at least the 30 s interval. It is not asserted at 4x: the shared fetch helpers
-        // (apiGetFleet/fetchBody) do not register their reads as in flight, so a render whose reads are all fleet reads
-        // is timed shorter than it ran. That predates this selector and lives in util.js.
-        Assert.All(gaps, g => Assert.True(g >= 30, "a render started " + g + " s after the previous one"));
+        // Every later gap is held to the same backoff: the fleet read counts as in flight, so the render is timed for
+        // the whole 20 s its reads ran.
+        Assert.All(gaps, g => Assert.True(g >= 80, "a render started " + g + " s after the previous one"));
         Assert.True(r.GetProperty("backoffHintSaysSlow").GetBoolean());
         // Reads that never finish inside the window: the one render only, no stacked second one.
         Assert.Equal(1, r.GetProperty("stackedRenders").GetInt32());

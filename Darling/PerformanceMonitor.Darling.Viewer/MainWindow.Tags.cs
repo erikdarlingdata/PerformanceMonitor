@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -22,9 +23,6 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public partial class MainWindow
 {
-    /// <summary>Four levels: a tag at depth 0..2 may take a child; depth 3 (the fourth) may not.</summary>
-    private const int MaxTagDepth = 4;
-
     private List<DarlingTag> _tags = new();
 
     /// <summary>serverId → its assigned tag ids, for the quick submenu's check marks.</summary>
@@ -201,7 +199,7 @@ public partial class MainWindow
             return;
         }
 
-        if (TagDepth(header.Tag.Id) >= MaxTagDepth - 1)
+        if (TagDepth(header.Tag.Id) >= ServerTagRules.MaxDepth - 1)
         {
             StatusText.Text = "Tags can nest at most four levels deep.";
             return;
@@ -252,8 +250,9 @@ public partial class MainWindow
         var hasChildren = _tags.Any(t => t.ParentId == header.Tag.Id);
         var childNote = hasChildren ? " and all of its child tags" : string.Empty;
 
+        var ruleNote = await ReadDeleteRuleNoteAsync(header.Tag.Id);
         var confirm = MessageBox.Show(this,
-            $"Delete ‘{header.Tag.Name}’{childNote}? Server assignments are removed; collected data is not affected.",
+            $"Delete ‘{header.Tag.Name}’{childNote}? Server assignments are removed; collected data is not affected.{ruleNote}",
             "Delete Tag", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
         if (confirm != MessageBoxResult.OK)
         {
@@ -270,6 +269,21 @@ public partial class MainWindow
         {
             ViewerLogger.Error("Tags", "Delete tag failed", ex);
             StatusText.Text = $"Could not delete the tag: {ex.Message}";
+        }
+    }
+
+    /// <summary>The alert-rule sentence for the delete confirmation. A failed read is logged and yields no
+    /// sentence, so it never blocks the delete.</summary>
+    private async Task<string> ReadDeleteRuleNoteAsync(int tagId)
+    {
+        try
+        {
+            return ServerTagCoverage.DeleteWarning(await _dataService!.GetServerTagDeleteImpactAsync(tagId));
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Error("Tags", "Delete impact read failed", ex);
+            return string.Empty;
         }
     }
 
@@ -325,7 +339,7 @@ public partial class MainWindow
         var guard = 0;
         while (current?.ParentId is int parentId
                && byId.TryGetValue(parentId, out var parent)
-               && guard++ < MaxTagDepth + 2)
+               && guard++ < ServerTagRules.MaxDepth + 2)
         {
             depth++;
             current = parent;

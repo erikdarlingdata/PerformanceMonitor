@@ -155,6 +155,24 @@ out.next5m = await secondsToNextRead("5m");
   out.refreshAfterOffReads = renders - rendersBefore;
 }
 
+// A fixed custom range: the automatic poll keeps the panels on screen (no page reads); the Refresh button re-reads.
+{
+  // The range lives in server.js, which every scenario shares, so it uses a server of its own.
+  await fresh("1m", "#/server/fixedrange");
+  await advance(2);
+  const serverPage = await import(pathToFileURL(path.join(jsDir, "pages", "server.js")).href);
+  const endMs = -86_400_000; // a window long past, against the nowMs given below
+  const err = serverPage.applyCustomRange("fixedrange", endMs - 7_200_000, endMs, endMs + 3 * 86_400_000);
+  await settle();
+  const base = renders;
+  await advance(130); // two 1-minute poll ticks
+  out.fixedRangeApplyError = err;
+  out.fixedRangePollReads = renders - base;
+  const afterPoll = renders;
+  await clickRefresh();
+  out.fixedRangeRefreshReads = renders - afterPoll;
+}
+
 // Refresh while reads are running is a no-op: a double-click sends one shell refresh and one render.
 {
   await fresh("off");
