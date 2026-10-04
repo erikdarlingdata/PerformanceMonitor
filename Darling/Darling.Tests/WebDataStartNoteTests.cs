@@ -106,7 +106,7 @@ public sealed class WebDataStartNoteTests
         Assert.Same(Rows, await Run("get_waiting_tasks", "sql01", 0, Rows));
 
         // An envelope that keeps its own message (unavailable, not_collected), an error, text that is not an object, and a tool that
-        // already reports its own floor. The empty envelope is not here any more (#4966): it says the read looked and found nothing,
+        // already reports its own floor (not on the listed reads any more: see below). The empty envelope is not here any more (#4966): it says the read looked and found nothing,
         // so it reaches the store like rows do (WebDataStartNoteConfigAndLogTests holds that, read by read).
         const string Empty = "{\"status\":\"unavailable\",\"message\":\"No waiting tasks in this window.\"}";
         const string NotCollected = "{\"status\":\"not_collected\",\"message\":\"This engine has no waiting tasks.\"}";
@@ -119,7 +119,11 @@ public sealed class WebDataStartNoteTests
         Assert.Same(Failed, await Run("get_waiting_tasks", "sql01", 168, Failed));
         Assert.Same("[1,2]", await Run("get_waiting_tasks", "sql01", 168, "[1,2]"));
         Assert.Same("not json", await Run("get_waiting_tasks", "sql01", 168, "not json"));
-        Assert.Same(Own, await Run("get_waiting_tasks", "sql01", 168, Own));
+        /* A tool's own window-floor keys on a LISTED read no longer end the web's decision (#4966: get_waiting_tasks writes them
+           itself): they are stripped and the note is decided as if they were absent, so this answer reaches the store like rows do.
+           A read outside the list is untouched whatever it carries. */
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Run("get_waiting_tasks", "sql01", 168, Own));
+        Assert.Same(Own, await Run("get_query_store_top", "sql01", 168, Own));
     }
 
     /// <summary>

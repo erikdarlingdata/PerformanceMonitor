@@ -331,9 +331,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
     private static async Task DeleteWindowServerAsync(NpgsqlConnection connection, string name, System.Threading.CancellationToken ct)
     {
         var serverId = ServerIdHelper.GetDeterministicHashCode(name);
-        await DarlingMcpTestData.ExecAsync(connection, ct,
-            "DELETE FROM query_snapshots WHERE server_id = $1; DELETE FROM waiting_tasks WHERE server_id = $1; DELETE FROM collection_log WHERE server_id = $1; DELETE FROM servers WHERE server_id = $1;",
-            serverId);
+        foreach (var table in new[] { "query_snapshots", "waiting_tasks", "collection_log", "servers" })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM {table} WHERE server_id = $1", serverId);
+        }
     }
 
     /// <summary>Runs <paramref name="body"/> for each window tool against its own seeded server, then removes what it seeded.</summary>
@@ -415,7 +416,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
 
             Assert.False(root.GetProperty("window_truncated").GetBoolean(), tool);
             Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
-            Assert.Equal(McpHelpers.FormatEffectiveStart(end.AddHours(-168)), root.GetProperty("effective_start").GetString());
+            /* The asked start: an anchor within the client-clock allowance of now reads as now, so it is the call's own clock
+               a few seconds past the seeded minute, never earlier than the window and never later than the first row. */
+            var effectiveStart = DateTime.Parse(root.GetProperty("effective_start").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+            Assert.InRange((effectiveStart - end.AddHours(-168)).TotalSeconds, 0, 120);
         });
     }
 

@@ -164,6 +164,13 @@ public sealed class DarlingMcpSessionTools
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, filter, blocking_only, cancellationToken);
             var rows = page.Rows;
 
+            /* #4966: where the store's coverage of the window starts, in the three keys every window-floor tool writes. An answer
+               with rows over a window of 90 minutes or less needs no probe; an empty one is always probed. */
+            var windowStart = now.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "query_snapshots", resolved.ServerName, windowStart, now, cancellationToken),
+                windowStart, now, "query_snapshots", emptyAnswer: rows.Count == 0);
+
             if (rows.Count == 0)
             {
                 /* A filtered miss is not a collection miss: with the filters in the query, an empty page under
@@ -174,11 +181,12 @@ public sealed class DarlingMcpSessionTools
                         "empty",
                         $"No active query snapshots on {resolved.ServerName} in the last {hours_back} hour(s) matched "
                         + DescribeActiveQueryFilters(filter, blocking_only)
-                        + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.");
+                        + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
+                        notice.AsHints());
                 }
 
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
+                    ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.", notice.AsHints());
             }
 
             var truncated = rows.Count > limit;
@@ -222,6 +230,12 @@ public sealed class DarlingMcpSessionTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: the window floor, always present on a data answer (false and null when the store covered the window). No
+                   effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart for the window
+                   floor (McpPayloadContractCensusTests), so the reach is the instant. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 filters_applied = new
                 {
                     database_name = filter,
@@ -296,9 +310,15 @@ public sealed class DarlingMcpSessionTools
                signal. The reader's LIMIT 500 was invisible, and the envelope stated no bound at all. */
             var rows = await DarlingSessionReader.GetWaitingTasksAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
+
+            /* #4966: the window floor, as get_active_queries writes it (see there). */
+            var windowStart = now.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "waiting_tasks", resolved.ServerName, windowStart, now, cancellationToken),
+                windowStart, now, "waiting_tasks", emptyAnswer: rows.Count == 0);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.");
+                    ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.", notice.AsHints());
 
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
@@ -320,6 +340,10 @@ public sealed class DarlingMcpSessionTools
                 /* #3541 A3: the envelope was bare — server and rows, no window, no count, no bound. Now the
                    span requested, the page described as a page, and the span the page covers. */
                 hours_back,
+                /* #4966: the window floor, always present on a data answer; no effective_hours_back, for the reason given on get_active_queries. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 tasks_returned = page.Count,
                 truncated,
                 /* #4966: where the page's rows stop describes the window the page covers, so it prints like
