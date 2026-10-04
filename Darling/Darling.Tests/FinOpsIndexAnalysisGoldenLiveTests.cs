@@ -147,11 +147,15 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
     {
         var old = anchor.AddDays(-3).AddHours(2);
         var recent = anchor.AddDays(-1).AddHours(2);
+        /* sqlserver_start_time is the target's LOCAL wall clock and the reader compares it with the host's local now
+           (DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync), so seed it on the local calendar day. Seeding it from
+           the UTC anchor made the uptime 399 between 00:00 UTC and local midnight on a zone behind UTC. */
+        var longUptimeStart = DateTime.SpecifyKind(DateTime.Now.Date.AddDays(-400), DateTimeKind.Unspecified);
         const string props = "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, engine_edition, product_version, sqlserver_start_time) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
         await DarlingMcpTestData.ExecAsync(connection, ct, props,
-            CollectionIdGenerator.Next(), old, ServerIdC, ServerNameC, "Standard Edition", 2, "12.0.2000.8", anchor.AddDays(-400));
+            CollectionIdGenerator.Next(), old, ServerIdC, ServerNameC, "Standard Edition", 2, "12.0.2000.8", longUptimeStart);
         await DarlingMcpTestData.ExecAsync(connection, ct, props,
-            CollectionIdGenerator.Next(), recent, ServerIdC, ServerNameC, "Standard Edition", 2, "16.0.1000.6", anchor.AddDays(-400));
+            CollectionIdGenerator.Next(), recent, ServerIdC, ServerNameC, "Standard Edition", 2, "16.0.1000.6", longUptimeStart);
 
         await InsertIndexAsync(connection, old, "SalesDb", 1, 100, 1, "PK_Orders", "CLUSTERED", "[OrderId]", null, true, true, 900m, 50000, 10, 5, 0, 700, ct, ServerIdC, ServerNameC);
         await InsertIndexAsync(connection, recent, "SalesDb", 1, 100, 1, "PK_Orders", "CLUSTERED", "[OrderId]", null, true, true, 910.5m, 51000, 12, 6, 1, 800, ct, ServerIdC, ServerNameC);
