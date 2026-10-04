@@ -109,8 +109,16 @@ public sealed class DarlingMcpQueryHeatmapTools
             var rows = await DarlingQueryHeatmapReader.GetQueryHeatmapAsync(
                 postgres, resolved.ServerId, parsedMetric, start, end, database_name, bucket_minutes, limit + 1, previewLength, cancellationToken);
 
+            /* #4966: where this server's query_stats start, read ahead of the empty answers, which carry it too: an empty grid
+               over a window the table does not reach back to is not a report that nothing ran. A window of 90 minutes or
+               less that answered cells is covered without a probe. Unfiltered by database_name (the floor is a property of
+               the table). */
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "query_stats", resolved.ServerName, start, end, cancellationToken),
+                start, end, "query_stats", emptyAnswer: rows.Count == 0);
+
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, hours_back, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, hours_back, notice, cancellationToken);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
@@ -145,6 +153,11 @@ public sealed class DarlingMcpQueryHeatmapTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* The window floor, always present (false and null when the table covered the window). No effective_hours_back:
+                   this payload carries a page `truncated`, and the census holds that key apart for the window floor. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 metric = DarlingQueryHeatmapReader.MetricName(parsedMetric),
                 metric_unit = DarlingQueryHeatmapReader.MetricUnit(parsedMetric),
                 database_name,
@@ -205,7 +218,7 @@ public sealed class DarlingMcpQueryHeatmapTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, string serverName, int serverId, DateTime start, DateTime end, int hours_back,
-        CancellationToken cancellationToken)
+        McpWindowNotice notice, CancellationToken cancellationToken)
     {
         var (hasAny, hasInWindow) = await DarlingQueryHeatmapReader.GetCoverageAsync(postgres, serverId, start, end, cancellationToken);
 
@@ -221,11 +234,13 @@ public sealed class DarlingMcpQueryHeatmapTools
         {
             return McpHelpers.Status(
                 "empty",
-                $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.");
+                $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+                notice.AsHints());
         }
 
         return McpHelpers.Status(
             "empty",
-            $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.");
+            $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
+            notice.AsHints());
     }
 }
