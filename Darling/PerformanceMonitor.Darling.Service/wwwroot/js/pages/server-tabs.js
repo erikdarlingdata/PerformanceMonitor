@@ -3161,8 +3161,7 @@ function deadlockProcessesCell(server, row) {
     /* The shared page row budget can cut every row of a deadlock; say so and how to get them, rather than a bare dash. */
     const cut = Number(row.processes_truncated) || 0;
     if (cut <= 0) return document.createTextNode("—");
-    const how = row.dedup_key ? "ask get_deadlock_detail for dedup_key " + row.dedup_key : "narrow the window to this deadlock";
-    return document.createTextNode(cut + (cut === 1 ? " process" : " processes") + " not sent (page row limit); " + how + " to see them");
+    return document.createTextNode(cut + (cut === 1 ? " process" : " processes") + " not sent (page row limit); pick Custom… in the time range and narrow it to this deadlock to see them");
   }
   const key = deadlockProcessKey(server, row);
   const more = row.processes_truncated > 0 ? " (+" + row.processes_truncated + " more in the graph)" : "";

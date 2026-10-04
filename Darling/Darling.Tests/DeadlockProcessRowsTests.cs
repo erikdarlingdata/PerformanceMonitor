@@ -276,7 +276,8 @@ public sealed class DeadlockProcessRowsTests
         Assert.Equal(1, r.GetProperty("subgrids").GetInt32());
         var text = r.GetProperty("text").GetString()!;
         Assert.Contains("6 processes not sent (page row limit)", text, StringComparison.Ordinal);
-        Assert.Contains("dedup_key k5", text, StringComparison.Ordinal);
+        Assert.Contains("pick Custom… in the time range and narrow it to this deadlock", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("dedup_key", text, StringComparison.Ordinal);
     }
 
     [Fact]
