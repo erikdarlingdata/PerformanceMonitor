@@ -43,7 +43,8 @@ Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText
 
 const fetches = [];
 let body = "{}";
-globalThis.fetch = async (url) => { fetches.push(String(url)); return { status: 200, ok: true, text: async () => body }; };
+const signals = [];
+globalThis.fetch = async (url, opts) => { fetches.push(String(url)); signals.push(opts && opts.signal ? opts.signal : null); return { status: 200, ok: true, text: async () => body }; };
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "analysis-findings-"));
 try {
@@ -63,13 +64,13 @@ try {
     finding({ finding_id: 1, severity: 0.9, advice: { headline: "Minor", investigation: "i", remediation: "r" } }),
     finding({ finding_id: 2, severity: 2.1, advice: { headline: "Major", investigation: "i", remediation: "r" } }),
     finding({ finding_id: 3, severity: 0.2, incident_id: "", advice: { headline: "Solo info", investigation: "i", remediation: "r" } }),
-    finding({ finding_id: 4, severity: 1.6, incident_id: "inc-2", remediation_command: FIX, structured_remediation: { eligible: true }, advice: { headline: "Config", investigation: "i", remediation: "r" } }),
+    finding({ finding_id: 4, severity: 1.6, incident_id: "inc-2", remediation_command: FIX, structured_remediation: null, is_config_fix: true, advice: { headline: "Config", investigation: "i", remediation: "r" } }),
   ];
   const settle = () => new Promise((r) => setTimeout(r, 20));
-  const run = async (server) => {
+  const run = async (server, payload, ctx) => {
     fetches.length = 0;
-    body = JSON.stringify({ findings: sample });
-    const root = mod.analysisFindingsTab.build(server, { hours: 24, label: "last 24 hours" });
+    body = JSON.stringify(payload || { findings: sample });
+    const root = mod.analysisFindingsTab.build(server, ctx || { hours: 24, label: "last 24 hours" });
     await settle();
     return root[0];
   };
@@ -104,6 +105,26 @@ try {
     link: async () => {
       const root = await run("srv-a");
       return byTag(root, "a").map((a) => a.attrs.href);
+    },
+    linkKinds: async () => {
+      // A force-plan incident carries structured_remediation but is not a config fix; a config fix carries is_config_fix.
+      const forcePlan = finding({ finding_id: 1, incident_id: "a", structured_remediation: { eligible: true }, is_config_fix: false, advice: { headline: "ForcePlan", investigation: "i", remediation: "r" } });
+      const config = finding({ finding_id: 2, incident_id: "b", structured_remediation: null, is_config_fix: true, advice: { headline: "ConfigFix", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [forcePlan, config] });
+      return groupsOf(root).map((g) => ({ head: sum(g), links: byTag(g, "a").length }));
+    },
+    nullSeverity: async () => {
+      const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: null })] });
+      return { text: root.textContent };
+    },
+    truncation: async () => {
+      const root = await run("srv-a", { findings: sample, truncated: true, truncation_note: "READ-CAP-NOTE", findings_truncated: true, findings_truncated_note: "PAGE-NOTE" });
+      return { text: root.textContent };
+    },
+    signal: async () => {
+      const ac = new AbortController();
+      await run("srv-a", null, { hours: 24, label: "x", signal: ac.signal });
+      return { passed: signals[0] != null };
     },
     rebuild: async () => {
       let root = await run("srv-a");

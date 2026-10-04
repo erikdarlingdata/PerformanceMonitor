@@ -29,7 +29,7 @@ public sealed class AnalysisFindingsTabTests
     public void TheTab_ReadsGetAnalysisFindings_WithTheServerWindowAndFullText()
     {
         var src = ReadRepoFile(Tab());
-        Assert.Contains("readToolWithinKeptHistory(\"get_analysis_findings\", { server, hours: ctx.hours, limit: 50, full_text: true })", src, StringComparison.Ordinal);
+        Assert.Contains("readToolWithinKeptHistory(\"get_analysis_findings\", { server, hours: ctx.hours, limit: 50, full_text: true }, ctx && ctx.signal)", src, StringComparison.Ordinal);
         Assert.DoesNotContain("innerHTML", src, StringComparison.Ordinal);
         Assert.DoesNotContain("analyze_server", src, StringComparison.Ordinal);
     }
@@ -113,6 +113,49 @@ public sealed class AnalysisFindingsTabTests
         var links = Strings(Run("link"));
         Assert.Equal(3, links.Length);
         Assert.All(links, l => Assert.Equal("#/server/srv-a/queries", l));
+    }
+
+    [Fact]
+    public void AForcePlanIncident_KeepsTheLink_AndAConfigFix_DoesNot()
+    {
+        var groups = Run("linkKinds").EnumerateArray().ToDictionary(g => g.GetProperty("head").GetString()!, g => g.GetProperty("links").GetInt32());
+        Assert.Equal(1, groups.Single(g => g.Key.StartsWith("ForcePlan", StringComparison.Ordinal)).Value);
+        Assert.Equal(0, groups.Single(g => g.Key.StartsWith("ConfigFix", StringComparison.Ordinal)).Value);
+    }
+
+    [Fact]
+    public void ANullSeverity_RendersTheLabelAlone_NotNaN()
+    {
+        var text = Run("nullSeverity").GetProperty("text").GetString()!;
+        Assert.DoesNotContain("NaN", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0.00", text, StringComparison.Ordinal);
+        Assert.Contains("INFO", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheReadCapNote_AndThePageNote_AreBothShown()
+    {
+        var text = Run("truncation").GetProperty("text").GetString()!;
+        Assert.Contains("READ-CAP-NOTE", text, StringComparison.Ordinal);
+        Assert.Contains("PAGE-NOTE", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheTabsAbortSignal_ReachesTheRead()
+    {
+        Assert.True(Run("signal").GetProperty("passed").GetBoolean());
+    }
+
+    [Fact]
+    public void TheReadsConfigFixFlag_IsTheDesktopsRule_AndIsSharedWithTheViewer()
+    {
+        var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs");
+        Assert.Contains("is_config_fix = FactRemediation.IsConfigFix(f.Remediation)", tools, StringComparison.Ordinal);
+        var vm = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "RecommendationsViewModel.cs");
+        Assert.Contains("HasStructuredFixAction => FactRemediation.IsConfigFix(Item.Remediation)", vm, StringComparison.Ordinal);
+        var js = ReadRepoFile(Tab());
+        Assert.Contains("!f.is_config_fix", js, StringComparison.Ordinal);
+        Assert.DoesNotContain("f.structured_remediation", js, StringComparison.Ordinal);
     }
 
     [Fact]

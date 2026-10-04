@@ -1286,7 +1286,9 @@ public sealed class DarlingMcpTools
                         // carry this tool's cut.
                         remediation_command = remediationCommand,
                         // #2138: the machine-first projection — see analyze_server's twin field.
-                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote)
+                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote),
+                        // A standing config fix (database/RCSI/autogrowth/server config), not an incident: the viewer's rule.
+                        is_config_fix = FactRemediation.IsConfigFix(f.Remediation)
                     };
                 })
             }, McpHelpers.JsonOptions);

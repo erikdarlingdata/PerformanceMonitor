@@ -40,9 +40,9 @@ function badgeClass(label) {
   return "badge " + bandClass(label === "Info" ? "Unknown" : label);
 }
 
-/** An incident finding: not a standing config fix, with a time window to point at. */
+/** An incident finding: not a standing config fix (the read's is_config_fix, the desktop's rule; force-plan stays an incident), with a time window to point at. */
 export function showsActiveQueriesLink(f) {
-  return !f.structured_remediation && !!(f.time_range && f.time_range.start && f.time_range.end);
+  return !f.is_config_fix && !!(f.time_range && f.time_range.start && f.time_range.end);
 }
 
 /**
@@ -131,12 +131,18 @@ function copyButton(text) {
 
 /* ─────────────────────────── rendering ─────────────────────────── */
 
+/** The score after the label, or nothing when the row carries no numeric severity. */
+function severityText(severity) {
+  const n = severity == null || severity === "" ? NaN : Number(severity);
+  return Number.isFinite(n) ? " " + n.toFixed(2) : "";
+}
+
 function card(server, f) {
   const label = severityLabel(f.severity);
   const advice = f.advice || {};
   const kids = [
     el("div", { class: "reco-head" }, [
-      el("span", { class: badgeClass(label), text: label.toUpperCase() + " " + Number(f.severity).toFixed(2) }),
+      el("span", { class: badgeClass(label), text: label.toUpperCase() + severityText(f.severity) }),
       f.category ? el("span", { class: "muted", text: " " + f.category }) : null,
     ]),
     el("h4", { text: findingTitle(f) }),
@@ -176,6 +182,7 @@ export function renderFindings(server, res) {
   if (!groups.length) return [keptWindowStrip(res), emptyStrip("No findings in this window.")];
   return [
     keptWindowStrip(res),
+    typeof data.truncation_note === "string" && data.truncation_note ? noticeStrip(data.truncation_note) : null,
     typeof data.findings_truncated_note === "string" && data.findings_truncated_note ? noticeStrip(data.findings_truncated_note) : null,
     ...groups.map((g) => groupNode(server, g)),
   ];
@@ -188,7 +195,7 @@ export const analysisFindingsTab = {
   build: (server, ctx) => {
     const body = el("div", { class: "panel-body" }, [loadingStrip()]);
     (async () => {
-      const res = await readToolWithinKeptHistory("get_analysis_findings", { server, hours: ctx.hours, limit: 50, full_text: true });
+      const res = await readToolWithinKeptHistory("get_analysis_findings", { server, hours: ctx.hours, limit: 50, full_text: true }, ctx && ctx.signal);
       if (res.kind === "aborted") return;
       while (body.firstChild) body.removeChild(body.firstChild);
       for (const n of renderFindings(server, res)) if (n) body.appendChild(n);
