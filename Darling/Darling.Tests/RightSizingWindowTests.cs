@@ -62,8 +62,8 @@ public sealed class RightSizingWindowTests
         Assert.Matches(new Regex(@"memRatio\s*<\s*0\.50m\s*&&\s*targetMb\s*/\s*1024\s*<\s*util\.PhysicalMemoryMb\s*/\s*1024"), source);
         Assert.Matches(new Regex(@"targetCores\s*>\s*0\s*&&\s*targetCores\s*<\s*cpuCount"), source);
         Assert.DoesNotMatch(new Regex(@"targetMb\s*<\s*physMb\s*&&"), source);
-        Assert.Contains("under 3ms across {storageWindow}", raw, StringComparison.Ordinal);
-        Assert.DoesNotContain("under 3ms over 7 days", raw, StringComparison.Ordinal);
+        Assert.Contains("under 3ms across {storageWindow}", storageRaw, StringComparison.Ordinal);
+        Assert.DoesNotContain("under 3ms over 7 days", storageRaw, StringComparison.Ordinal);
         Assert.Contains("HasQueryStatsCoverageAsync(", raw, StringComparison.Ordinal);
     }
 
@@ -87,7 +87,9 @@ public sealed class RightSizingWindowTests
         Assert.Matches(new Regex(@"reader\.IsDBNull\(4\)\s*\?\s*0L\s*:\s*Convert\.ToInt64\(reader\.GetValue\(4\),\s*CultureInfo\.InvariantCulture\),\s*reader\.IsDBNull\(2\)\s*\|\|\s*reader\.IsDBNull\(3\)\s*\?\s*TimeSpan\.Zero\s*:\s*reader\.GetDateTime\(3\)\s*-\s*reader\.GetDateTime\(2\)"), raw);
         Assert.Matches(new Regex(@"cpuReader\.IsDBNull\(3\)\s*\?\s*0L\s*:\s*Convert\.ToInt64\(cpuReader\.GetValue\(3\),\s*CultureInfo\.InvariantCulture\),\s*cpuReader\.IsDBNull\(1\)\s*\|\|\s*cpuReader\.IsDBNull\(2\)\s*\?\s*TimeSpan\.Zero\s*:\s*cpuReader\.GetDateTime\(2\)\s*-\s*cpuReader\.GetDateTime\(1\)"), raw);
         Assert.Contains("var cpuWindow = \"recent samples\"", raw, StringComparison.Ordinal);
-        Assert.Contains("storageSamples += reader.IsDBNull(7)", raw, StringComparison.Ordinal);
+        Assert.Contains("reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)", raw, StringComparison.Ordinal);
+        var storageRaw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs");
+        Assert.Contains("storageSamples += row.WindowSamples", storageRaw, StringComparison.Ordinal);
     }
 
     [Fact]

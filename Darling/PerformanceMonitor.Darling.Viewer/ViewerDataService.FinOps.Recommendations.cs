@@ -301,28 +301,19 @@ public sealed partial class ViewerDataService
                 : new List<IdleDatabaseRow>();
             if (idleDbs.Count > 0)
             {
-                var totalSizeGb = idleDbs.Sum(d => d.TotalSizeMb) / 1024m;
-                var dbNames = string.Join(", ", idleDbs.Take(5).Select(d => d.DatabaseName));
-                var costShare = 0m;
+                var allocatedTotalMb = 0m;
                 if (monthlyCost > 0)
                 {
                     var allDbSizes = await GetDatabaseSizeLatestAsync(serverId, cancellationToken);
                     var totalMb = DatabaseSizeRow.AllocatedTotalMb(allDbSizes);
                     if (totalMb > 0)
-                        costShare = (idleDbs.Sum(d => d.TotalSizeMb) / totalMb) * monthlyCost;
+                        allocatedTotalMb = totalMb;
                 }
 
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Databases",
-                    Severity = idleDbs.Count >= 3 ? "High" : "Medium",
-                    Confidence = "High",
-                    Finding = $"{idleDbs.Count} idle database(s) consuming {totalSizeGb:N1}GB",
-                    Detail = $"No query activity in 7 days: {dbNames}" +
-                             (idleDbs.Count > 5 ? $" and {idleDbs.Count - 5} more" : "") +
-                             ". Consider archiving or removing these databases.",
-                    EstMonthlySavings = costShare > 0 ? costShare : null
-                });
+                var dormantRecommendation = FinOpsRecommendationFigures.Dormant(
+                    idleDbs.Select(d => (d.DatabaseName, d.TotalSizeMb)).ToList(), allocatedTotalMb, monthlyCost);
+                if (dormantRecommendation != null)
+                    recommendations.Add(RecommendationRow.From(dormantRecommendation));
             }
         }
         catch (Exception ex)
@@ -335,19 +326,9 @@ public sealed partial class ViewerDataService
         {
             var configRows = await GetLatestDatabaseConfigAsync(serverId, cancellationToken: cancellationToken);
             var devDbs = MatchDevTestDatabases(configRows.Select(r => r.DatabaseName));
-            if (devDbs.Count > 0)
-            {
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Environment",
-                    Severity = "Medium",
-                    Confidence = "Low",
-                    Finding = $"{devDbs.Count} possible dev/test database(s) on production server",
-                    Detail = $"Databases matching dev/test patterns: {string.Join(", ", devDbs.Take(10))}" +
-                             (devDbs.Count > 10 ? $" and {devDbs.Count - 10} more" : "") +
-                             ". If these are non-production workloads, consider moving to a lower-cost tier or separate server."
-                });
-            }
+            var devTestRecommendation = FinOpsRecommendationFigures.DevTest(devDbs);
+            if (devTestRecommendation != null)
+                recommendations.Add(RecommendationRow.From(devTestRecommendation));
         }
         catch (Exception ex)
         {
@@ -371,16 +352,8 @@ public sealed partial class ViewerDataService
                 var avgHistorical = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture);
                 var timesLong = reader.IsDBNull(5) ? 0 : Convert.ToInt32(reader.GetValue(5), CultureInfo.InvariantCulture);
 
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Maintenance",
-                    Severity = timesLong >= 5 ? "Medium" : "Low",
-                    Confidence = "High",
-                    Finding = $"{jobName} ran long {timesLong} times in 7 days",
-                    Detail = $"Average duration: {FormatDuration(avgDuration)}, max: {FormatDuration(maxDuration)}, " +
-                             $"historical average: {FormatDuration(avgHistorical)}. " +
-                             "Review whether this job's schedule or operations need tuning."
-                });
+                recommendations.Add(RecommendationRow.From(FinOpsRecommendationFigures.MaintenanceJob(
+                    new MaintenanceJobRun(jobName, avgDuration, maxDuration, avgHistorical, timesLong))));
             }
         }
         catch (Exception ex)
@@ -437,10 +410,7 @@ public sealed partial class ViewerDataService
         // 13. Storage tier optimization — databases with low I/O latency (collected file_io_stats).
         try
         {
-            var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
-            var storageMin = DateTime.MaxValue;
-            var storageMax = DateTime.MinValue;
-            long storageSamples = 0;
+            var storageRows = new List<StorageTierIo>();
 
             await using (var command = _dataSource.CreateCommand(RecommendationsStorageTierSql))
             {
@@ -457,38 +427,16 @@ public sealed partial class ViewerDataService
                     var totalWrites = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture);
                     var totalStallWrite = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture);
 
-                    var avgReadMs = totalReads > 0 ? (decimal)totalStallRead / totalReads : 0m;
-                    var avgWriteMs = totalWrites > 0 ? (decimal)totalStallWrite / totalWrites : 0m;
-
-                    if (avgReadMs < 5m && avgWriteMs < 3m)
-                    {
-                        lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
-                        storageSamples += reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7), CultureInfo.InvariantCulture);
-                        if (!reader.IsDBNull(5) && !reader.IsDBNull(6))
-                        {
-                            storageMin = reader.GetDateTime(5) < storageMin ? reader.GetDateTime(5) : storageMin;
-                            storageMax = reader.GetDateTime(6) > storageMax ? reader.GetDateTime(6) : storageMax;
-                        }
-                    }
+                    storageRows.Add(new StorageTierIo(dbName, totalReads, totalStallRead, totalWrites, totalStallWrite,
+                        reader.IsDBNull(5) ? null : reader.GetDateTime(5),
+                        reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                        reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7), CultureInfo.InvariantCulture)));
                 }
             }
 
-            if (lowLatencyDbs.Count > 0)
-            {
-                var storageWindow = RightSizingWindow.Describe(storageSamples, storageMax > storageMin ? storageMax - storageMin : TimeSpan.Zero);
-                var detail = string.Join("; ", lowLatencyDbs.Take(10)
-                    .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Storage",
-                    Severity = "Low",
-                    Confidence = "Medium",
-                    Finding = $"{lowLatencyDbs.Count} database(s) with low IO latency — standard storage may suffice",
-                    Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
-                             (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
-                             ". Premium/high-performance storage may not be needed."
-                });
-            }
+            var storageRecommendation = FinOpsRecommendationFigures.StorageTier(storageRows);
+            if (storageRecommendation != null)
+                recommendations.Add(RecommendationRow.From(storageRecommendation));
         }
         catch (Exception ex)
         {

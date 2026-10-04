@@ -7,7 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Globalization;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
 
@@ -181,6 +184,186 @@ public sealed class FinOpsRecommendationFiguresTests
             Assert.Equal("Low", high.Severity);
             Assert.Null(high.EstMonthlySavings);
             Assert.Equal("Medium", FinOpsRecommendationFigures.ReservedCapacity(100m, 15m)!.Confidence);
+        });
+    }
+
+    // ── Dormant (original :302 any idle, :304 GB total, :305 top 5, :308-314 share, :318 severity, :322 "and N more", :325 savings) ──
+
+    private static List<(string DatabaseName, decimal TotalSizeMb)> Idle(int count, decimal eachMb) =>
+        Enumerable.Range(1, count).Select(i => ($"db{i}", eachMb)).ToList();
+
+    [Fact]
+    public void Dormant_NoIdleDatabases_IsNull()
+    {
+        Assert.Null(FinOpsRecommendationFigures.Dormant(new List<(string, decimal)>(), 1000m, 1000m));
+    }
+
+    [Fact]
+    public void Dormant_ShowsFiveNames_AndTheMoreCountFromSix()
+    {
+        InEnUs(() =>
+        {
+            var five = FinOpsRecommendationFigures.Dormant(Idle(5, 1024m), 0m, 0m)!;
+            Assert.Equal("No query activity in 7 days: db1, db2, db3, db4, db5. Consider archiving or removing these databases.", five.Detail);
+            var seven = FinOpsRecommendationFigures.Dormant(Idle(7, 1024m), 0m, 0m)!;
+            Assert.Equal("No query activity in 7 days: db1, db2, db3, db4, db5 and 2 more. Consider archiving or removing these databases.", seven.Detail);
+        });
+    }
+
+    [Fact]
+    public void Dormant_FindingCarriesTheGbTotal_AndSeverityIsHighFromThree()
+    {
+        InEnUs(() =>
+        {
+            var two = FinOpsRecommendationFigures.Dormant(Idle(2, 1536m), 0m, 0m)!;
+            Assert.Equal("2 idle database(s) consuming 3.0GB", two.Finding);
+            Assert.Equal("Medium", two.Severity);
+            Assert.Equal("High", two.Confidence);
+            Assert.Equal("Databases", two.Category);
+            Assert.Equal("High", FinOpsRecommendationFigures.Dormant(Idle(3, 1024m), 0m, 0m)!.Severity);
+        });
+    }
+
+    [Fact]
+    public void Dormant_ShareNeedsAnAllocatedTotal_AndACost()
+    {
+        InEnUs(() =>
+        {
+            Assert.Null(FinOpsRecommendationFigures.Dormant(Idle(2, 1024m), 0m, 1000m)!.EstMonthlySavings);
+            Assert.Null(FinOpsRecommendationFigures.Dormant(Idle(2, 1024m), 8192m, 0m)!.EstMonthlySavings);
+            // 2048 idle MB of 8192 allocated, at a monthly cost of 1000.
+            Assert.Equal(250m, FinOpsRecommendationFigures.Dormant(Idle(2, 1024m), 8192m, 1000m)!.EstMonthlySavings);
+        });
+    }
+
+    // ── Dev/test (original :338 any, :345 count, :346 top 10, :347 "and N more") ──
+
+    [Fact]
+    public void DevTest_NoDatabases_IsNull()
+    {
+        Assert.Null(FinOpsRecommendationFigures.DevTest(new List<string>()));
+    }
+
+    [Fact]
+    public void DevTest_ShowsTenNames_AndTheMoreCountFromEleven()
+    {
+        InEnUs(() =>
+        {
+            var names = Enumerable.Range(1, 11).Select(i => $"dev{i}").ToList();
+            var row = FinOpsRecommendationFigures.DevTest(names)!;
+            Assert.Equal("11 possible dev/test database(s) on production server", row.Finding);
+            Assert.Equal("Databases matching dev/test patterns: dev1, dev2, dev3, dev4, dev5, dev6, dev7, dev8, dev9, dev10 and 1 more" +
+                         ". If these are non-production workloads, consider moving to a lower-cost tier or separate server.", row.Detail);
+            Assert.Equal("Environment", row.Category);
+            Assert.Equal("Medium", row.Severity);
+            Assert.Equal("Low", row.Confidence);
+            Assert.DoesNotContain("more", FinOpsRecommendationFigures.DevTest(names.Take(10).ToList())!.Detail, StringComparison.Ordinal);
+        });
+    }
+
+    // ── Maintenance (original :376-385 severity at 5, finding, detail) and FormatDuration ──
+
+    [Theory]
+    [InlineData(0L, "0s")]
+    [InlineData(59L, "59s")]
+    [InlineData(60L, "1m 0s")]
+    [InlineData(3600L, "1h 0m 0s")]
+    public void FormatDuration_AtTheBoundaries(long seconds, string expected)
+    {
+        Assert.Equal(expected, FinOpsRecommendationFigures.FormatDuration(seconds));
+    }
+
+    [Fact]
+    public void MaintenanceJob_RanLongThreeTimes_IsLow_AndFourIsLowToo_FiveIsMedium()
+    {
+        InEnUs(() =>
+        {
+            var row = FinOpsRecommendationFigures.MaintenanceJob(new MaintenanceJobRun("Nightly Index Job", 3600L, 60L, 59L, 3));
+            Assert.Equal("Nightly Index Job ran long 3 times in 7 days", row.Finding);
+            Assert.Equal("Average duration: 1h 0m 0s, max: 1m 0s, historical average: 59s. Review whether this job's schedule or operations need tuning.", row.Detail);
+            Assert.Equal("Maintenance", row.Category);
+            Assert.Equal("Low", row.Severity);
+            Assert.Equal("High", row.Confidence);
+            Assert.Equal("Low", FinOpsRecommendationFigures.MaintenanceJob(new MaintenanceJobRun("j", 0L, 0L, 0L, 4)).Severity);
+            Assert.Equal("Medium", FinOpsRecommendationFigures.MaintenanceJob(new MaintenanceJobRun("j", 0L, 0L, 0L, 5)).Severity);
+        });
+    }
+
+    // ── Storage tier (original :460-464 averages and the 5 ms / 3 ms limits, :466-472 window totals, :478-489 text, take 10) ──
+
+    private static StorageTierIo Io(string name, long reads, long readStall, long writes, long writeStall,
+        DateTime? first = null, DateTime? last = null, long samples = 0L) =>
+        new(name, reads, readStall, writes, writeStall, first, last, samples);
+
+    [Fact]
+    public void StorageTier_NoRows_IsNull()
+    {
+        Assert.Null(FinOpsRecommendationFigures.StorageTier(new List<StorageTierIo>()));
+    }
+
+    [Fact]
+    public void StorageTier_ReadAverageOfExactlyFive_IsOut_JustUnderIsIn()
+    {
+        InEnUs(() =>
+        {
+            Assert.Null(FinOpsRecommendationFigures.StorageTier(new[] { Io("a", 100, 500, 100, 0) }));
+            var row = FinOpsRecommendationFigures.StorageTier(new[] { Io("a", 1000, 4999, 100, 0) })!;
+            Assert.Equal("1 database(s) with low IO latency — standard storage may suffice", row.Finding);
+            Assert.Contains("a (read 5.0ms, write 0.0ms)", row.Detail, StringComparison.Ordinal);
+            Assert.Equal("Storage", row.Category);
+            Assert.Equal("Low", row.Severity);
+            Assert.Equal("Medium", row.Confidence);
+        });
+    }
+
+    [Fact]
+    public void StorageTier_WriteAverageOfExactlyThree_IsOut_JustUnderIsIn()
+    {
+        InEnUs(() =>
+        {
+            Assert.Null(FinOpsRecommendationFigures.StorageTier(new[] { Io("a", 100, 0, 100, 300) }));
+            Assert.NotNull(FinOpsRecommendationFigures.StorageTier(new[] { Io("a", 100, 0, 1000, 2999) }));
+        });
+    }
+
+    [Fact]
+    public void StorageTier_ZeroOperationsCountAsZeroLatency()
+    {
+        InEnUs(() =>
+        {
+            Assert.NotNull(FinOpsRecommendationFigures.StorageTier(new[] { Io("idle", 0, 0, 0, 0) }));
+        });
+    }
+
+    [Fact]
+    public void StorageTier_ListsTenDatabases_AndTheMoreCountFromEleven()
+    {
+        InEnUs(() =>
+        {
+            var rows = Enumerable.Range(1, 11).Select(i => Io($"d{i}", 100, 0, 100, 0)).ToList();
+            var row = FinOpsRecommendationFigures.StorageTier(rows)!;
+            Assert.Equal("11 database(s) with low IO latency — standard storage may suffice", row.Finding);
+            Assert.Contains("d10 (read 0.0ms, write 0.0ms) and 1 more. Premium", row.Detail, StringComparison.Ordinal);
+            Assert.DoesNotContain("d11", row.Detail, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public void StorageTier_WindowTotalsCoverQualifyingDatabasesOnly()
+    {
+        InEnUs(() =>
+        {
+            var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var rows = new[]
+            {
+                Io("in1", 100, 0, 100, 0, t0.AddHours(1), t0.AddHours(2), 10L),
+                Io("in2", 100, 0, 100, 0, t0.AddHours(3), t0.AddHours(4), 20L),
+                // Out on read latency: its early first sample, late last sample and 1000 samples must not count.
+                Io("out", 100, 5000, 100, 0, t0.AddDays(-30), t0.AddDays(30), 1000L)
+            };
+            var row = FinOpsRecommendationFigures.StorageTier(rows)!;
+            Assert.Contains("across " + RightSizingWindow.Describe(30L, TimeSpan.FromHours(3)) + ":", row.Detail, StringComparison.Ordinal);
+            Assert.DoesNotContain("out (", row.Detail, StringComparison.Ordinal);
         });
     }
 }

@@ -412,4 +412,123 @@ public static class FinOpsRecommendationFigures
         }
         return null;
     }
+
+    /// <summary>The dormant-database advice: the idle databases with their combined size, and the share of the monthly cost when the allocated total is known (0 means no share), or null when none is idle.</summary>
+    public static FinOpsRecommendation? Dormant(IReadOnlyList<(string DatabaseName, decimal TotalSizeMb)> idleDbs, decimal allocatedTotalMb, decimal monthlyCost)
+    {
+        if (idleDbs.Count > 0)
+        {
+            var totalSizeGb = idleDbs.Sum(d => d.TotalSizeMb) / 1024m;
+            var dbNames = string.Join(", ", idleDbs.Take(5).Select(d => d.DatabaseName));
+            var costShare = 0m;
+            if (monthlyCost > 0)
+            {
+                var totalMb = allocatedTotalMb;
+                if (totalMb > 0)
+                    costShare = (idleDbs.Sum(d => d.TotalSizeMb) / totalMb) * monthlyCost;
+            }
+
+            return new FinOpsRecommendation
+            {
+                Category = "Databases",
+                Severity = idleDbs.Count >= 3 ? "High" : "Medium",
+                Confidence = "High",
+                Finding = $"{idleDbs.Count} idle database(s) consuming {totalSizeGb:N1}GB",
+                Detail = $"No query activity in 7 days: {dbNames}" +
+                         (idleDbs.Count > 5 ? $" and {idleDbs.Count - 5} more" : "") +
+                         ". Consider archiving or removing these databases.",
+                EstMonthlySavings = costShare > 0 ? costShare : null
+            };
+        }
+        return null;
+    }
+
+    /// <summary>The dev/test advice for the database names that match a dev or test pattern, or null when none do.</summary>
+    public static FinOpsRecommendation? DevTest(IReadOnlyList<string> devDbs)
+    {
+        if (devDbs.Count > 0)
+        {
+            return new FinOpsRecommendation
+            {
+                Category = "Environment",
+                Severity = "Medium",
+                Confidence = "Low",
+                Finding = $"{devDbs.Count} possible dev/test database(s) on production server",
+                Detail = $"Databases matching dev/test patterns: {string.Join(", ", devDbs.Take(10))}" +
+                         (devDbs.Count > 10 ? $" and {devDbs.Count - 10} more" : "") +
+                         ". If these are non-production workloads, consider moving to a lower-cost tier or separate server."
+            };
+        }
+        return null;
+    }
+
+    /// <summary>The maintenance-window advice for one job that ran long.</summary>
+    public static FinOpsRecommendation MaintenanceJob(MaintenanceJobRun run)
+    {
+        var jobName = run.JobName;
+        var avgDuration = run.AvgDurationSeconds;
+        var maxDuration = run.MaxDurationSeconds;
+        var avgHistorical = run.AvgHistoricalSeconds;
+        var timesLong = run.TimesRanLong;
+        return new FinOpsRecommendation
+        {
+            Category = "Maintenance",
+            Severity = timesLong >= 5 ? "Medium" : "Low",
+            Confidence = "High",
+            Finding = $"{jobName} ran long {timesLong} times in 7 days",
+            Detail = $"Average duration: {FormatDuration(avgDuration)}, max: {FormatDuration(maxDuration)}, " +
+                     $"historical average: {FormatDuration(avgHistorical)}. " +
+                     "Review whether this job's schedule or operations need tuning."
+        };
+    }
+
+    /// <summary>The storage-tier advice for the databases whose average read latency is under 5 ms and write latency under 3 ms, or null when none qualify. The window and sample totals cover the qualifying databases only.</summary>
+    public static FinOpsRecommendation? StorageTier(IEnumerable<StorageTierIo> rows)
+    {
+        var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
+        var storageMin = DateTime.MaxValue;
+        var storageMax = DateTime.MinValue;
+        long storageSamples = 0;
+
+        foreach (var row in rows)
+        {
+            var dbName = row.DatabaseName;
+            var totalReads = row.TotalReads;
+            var totalStallRead = row.TotalStallReadMs;
+            var totalWrites = row.TotalWrites;
+            var totalStallWrite = row.TotalStallWriteMs;
+
+            var avgReadMs = totalReads > 0 ? (decimal)totalStallRead / totalReads : 0m;
+            var avgWriteMs = totalWrites > 0 ? (decimal)totalStallWrite / totalWrites : 0m;
+
+            if (avgReadMs < 5m && avgWriteMs < 3m)
+            {
+                lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
+                storageSamples += row.WindowSamples;
+                if (row.FirstSample.HasValue && row.LastSample.HasValue)
+                {
+                    storageMin = row.FirstSample.Value < storageMin ? row.FirstSample.Value : storageMin;
+                    storageMax = row.LastSample.Value > storageMax ? row.LastSample.Value : storageMax;
+                }
+            }
+        }
+
+        if (lowLatencyDbs.Count > 0)
+        {
+            var storageWindow = RightSizingWindow.Describe(storageSamples, storageMax > storageMin ? storageMax - storageMin : TimeSpan.Zero);
+            var detail = string.Join("; ", lowLatencyDbs.Take(10)
+                .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
+            return new FinOpsRecommendation
+            {
+                Category = "Storage",
+                Severity = "Low",
+                Confidence = "Medium",
+                Finding = $"{lowLatencyDbs.Count} database(s) with low IO latency — standard storage may suffice",
+                Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
+                         (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
+                         ". Premium/high-performance storage may not be needed."
+            };
+        }
+        return null;
+    }
 }
