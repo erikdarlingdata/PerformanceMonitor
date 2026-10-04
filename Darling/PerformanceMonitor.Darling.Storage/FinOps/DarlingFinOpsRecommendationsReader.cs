@@ -8,6 +8,7 @@
 
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -201,5 +202,97 @@ LIMIT 1";
         }
 
         return (0, 0L, RightSizingWindow.Describe(0, TimeSpan.Zero));
+    }
+
+    /// <summary>Reads the SQL Agent jobs that ran long at least 3 times in the window, in read order (most long runs first), one row per job.</summary>
+    public static async Task<List<MaintenanceJobRun>> GetMaintenanceJobRunsAsync(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        var runs = new List<MaintenanceJobRun>();
+        await using var command = dataSource.CreateCommand(MaintenanceWindowSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var jobName = reader.IsDBNull(0) ? "" : reader.GetString(0);
+            var avgDuration = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture);
+            var maxDuration = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture);
+            var avgHistorical = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture);
+            var timesLong = reader.IsDBNull(5) ? 0 : Convert.ToInt32(reader.GetValue(5), CultureInfo.InvariantCulture);
+
+            runs.Add(new MaintenanceJobRun(jobName, avgDuration, maxDuration, avgHistorical, timesLong));
+        }
+
+        return runs;
+    }
+
+    /// <summary>Reads the 7-day P95 SQL Server CPU utilization and the window its samples cover, or null when the window holds no CPU sample.</summary>
+    public static async Task<(decimal P95CpuPct, string Window)?> GetCpuP95Async(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        await using var cpuCommand = dataSource.CreateCommand(CpuP95Sql);
+        cpuCommand.CommandTimeout = commandTimeoutSeconds;
+        cpuCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        cpuCommand.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+
+        await using var cpuReader = await cpuCommand.ExecuteReaderAsync(cancellationToken);
+        if (await cpuReader.ReadAsync(cancellationToken) && !cpuReader.IsDBNull(0))
+        {
+            var p95Cpu7d = Convert.ToDecimal(cpuReader.GetValue(0), CultureInfo.InvariantCulture);
+            var cpuWindow = RightSizingWindow.Describe(cpuReader.IsDBNull(3) ? 0L : Convert.ToInt64(cpuReader.GetValue(3), CultureInfo.InvariantCulture), cpuReader.IsDBNull(1) || cpuReader.IsDBNull(2) ? TimeSpan.Zero : cpuReader.GetDateTime(2) - cpuReader.GetDateTime(1));
+            return (p95Cpu7d, cpuWindow);
+        }
+
+        return null;
+    }
+
+    /// <summary>Reads the per-database aggregate read/write I/O + stall over the window, in read order, for the storage-tier check.</summary>
+    public static async Task<List<StorageTierIo>> GetStorageTierIoAsync(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        var storageRows = new List<StorageTierIo>();
+
+        await using (var command = dataSource.CreateCommand(StorageTierSql))
+        {
+            command.CommandTimeout = commandTimeoutSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var dbName = reader.IsDBNull(0) ? "" : reader.GetString(0);
+                var totalReads = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
+                var totalStallRead = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture);
+                var totalWrites = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture);
+                var totalStallWrite = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture);
+
+                storageRows.Add(new StorageTierIo(dbName, totalReads, totalStallRead, totalWrites, totalStallWrite,
+                    reader.IsDBNull(5) ? null : reader.GetDateTime(5),
+                    reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                    reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7), CultureInfo.InvariantCulture)));
+            }
+        }
+
+        return storageRows;
+    }
+
+    /// <summary>Reads the CPU utilization mean + standard deviation over the window (reserved-capacity stability), or null when the window holds too few samples (under 24) or no mean.</summary>
+    public static async Task<(decimal AvgCpuPct, decimal StddevCpuPct)?> GetReservedCapacityAsync(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        await using var command = dataSource.CreateCommand(ReservedCapacitySql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
+        {
+            var avgCpu = Convert.ToDecimal(reader.GetValue(0), CultureInfo.InvariantCulture);
+            var stddevCpu = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1), CultureInfo.InvariantCulture);
+            return (avgCpu, stddevCpu);
+        }
+
+        return null;
     }
 }
