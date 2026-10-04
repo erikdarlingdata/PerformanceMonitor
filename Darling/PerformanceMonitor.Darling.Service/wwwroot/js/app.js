@@ -47,7 +47,8 @@ import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderAlertRuleList } from "./pages/alert-rules.js";
 import { renderViewList, renderView, currentViewRefresh, onViewRefreshChange, clearViewRefresh } from "./pages/views.js";
-import { REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel } from "./refresh-policy.js";
+import { REFRESH_CHOICES, PAGE_REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel, loadPageRefreshChoice, savePageRefreshChoice, PAGE_REFRESH_KEY } from "./refresh-policy.js";
+import { buildPageRefreshControl } from "./refresh-control.js";
 import { renderTriage } from "./pages/triage.js";
 import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
@@ -476,10 +477,60 @@ function pageIntervalMs() {
     const choice = currentViewRefresh() || defaultRefreshChoice(name === "notebook");
     return REFRESH_CHOICES[choice] ?? 0;
   }
+  if (isPickerRoute(name)) return PAGE_REFRESH_CHOICES[pageRefreshChoice] ?? POLL_MS;
   return POLL_MS;
 }
 
+/* The server and FinOps pages carry the shell's interval selector and Refresh button (persisted in localStorage). */
+let pageRefreshChoice = loadPageRefreshChoice(localStorage);
+let pageRefreshControl = null;
+
+function isPickerRoute(routeName) {
+  return routeName === "server" || routeName === "finops";
+}
+
+function syncPageRefreshControl(routeName) {
+  if (!pageRefreshControl) return;
+  pageRefreshControl.root.hidden = !isPickerRoute(routeName);
+}
+
+/* The Refresh button: one shell refresh and one immediate page re-render. While any read is outstanding it does
+   nothing (the button is disabled and marked busy until they settle), so a double-click sends one refresh. */
+function syncRefreshBusy() {
+  if (pageRefreshControl) pageRefreshControl.setBusy(hasInFlightReads());
+}
+
+function refreshPageNow() {
+  if (isSessionExpired() || hasInFlightReads()) return;
+  refreshShell();
+  if (!isNoPollRoute(currentRoute().name)) route({ poll: true, manual: true });
+  syncRefreshBusy();
+}
+
+/* Another tab saved a different interval: take it here too. */
+function onPageRefreshStorage(event) {
+  if (event.key !== null && event.key !== PAGE_REFRESH_KEY) return;
+  pageRefreshChoice = loadPageRefreshChoice(localStorage);
+  if (pageRefreshControl) pageRefreshControl.setChoice(pageRefreshChoice);
+  if (!pageRendering) scheduleNextPageRefresh(Date.now());
+  else updateRefreshHint();
+}
+
+function initPageRefreshControl() {
+  const anchor = document.getElementById("auto-refresh-toggle");
+  if (!anchor || !anchor.parentNode) return;
+  pageRefreshControl = buildPageRefreshControl(pageRefreshChoice, (choice) => {
+    pageRefreshChoice = savePageRefreshChoice(localStorage, choice);
+    if (!pageRendering) scheduleNextPageRefresh(Date.now());
+    else updateRefreshHint();
+  }, refreshPageNow);
+  anchor.parentNode.appendChild(pageRefreshControl.root);
+  window.addEventListener("storage", onPageRefreshStorage);
+  syncPageRefreshControl(currentRoute().name);
+}
+
 function markPageRenderStart(routeName, isPoll) {
+  syncPageRefreshControl(routeName);
   if (!isPoll && (routeName === "view" || routeName === "notebook")) clearViewRefresh();
   if (isNoPollRoute(routeName)) {
     pageRendering = false;
@@ -546,10 +597,12 @@ function schedulerTick() {
      "(slow page)", and pageIsDue never fired because it needs !pageRendering. Settling here stamps the end at
      the first tick that sees no reads outstanding and schedules the next refresh from that moment. */
   if (pageRendering && !hasInFlightReads()) settlePageRender(now);
+  syncRefreshBusy();
   if (document.hidden || isAutoRefreshPaused() || isSessionExpired()) {
     updateRefreshHint();
     return;
   }
+  /* Off pauses only the page's own render; the shell roll-up (sidebar, status bar, session check) keeps running. */
   if (now - shellLastRefreshAt >= POLL_MS) refreshShell();
   if (pageIsDue(now)) refreshPage();
   updateRefreshHint();
@@ -569,7 +622,8 @@ function updateRefreshHint() {
   else if (isBackedOff(interval, pageLastRenderMs) && Number.isFinite(pageNextRefreshAt)) {
     text = "Next refresh " + hhmm(pageNextRefreshAt) + " (slow page)";
   } else {
-    const choice = Object.keys(REFRESH_CHOICES).find((k) => REFRESH_CHOICES[k] === interval);
+    const choices = isPickerRoute(currentRoute().name) ? PAGE_REFRESH_CHOICES : REFRESH_CHOICES;
+    const choice = Object.keys(choices).find((k) => choices[k] === interval);
     text = "Auto-refresh: " + (choice ? refreshLabel(choice) : "1 min");
   }
   hint.textContent = text;
@@ -645,6 +699,7 @@ function start() {
   setInterval(schedulerTick, SCHEDULER_TICK_MS);
   onSessionExpired(showSignedOutState);
   initAutoRefreshToggle();
+  initPageRefreshControl();
 
   refreshSidebar();
   refreshViewList();

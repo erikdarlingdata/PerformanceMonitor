@@ -51,8 +51,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "(web/compose/mcp) and route filter. Empty means no read recorded in the window, not a failure. "
         + "<<GUIDE>> "
         + "Gets the monitoring tool's OWN read-latency history — how long the web dashboard's `/api/read/*` "
-        + "reads and the composed-panel runner take, and (once the MCP per-tool wrapper ships) the MCP surface "
-        + "too. This is the tool measuring itself, NOT a monitored SQL Server or PostgreSQL target. The service "
+        + "reads, the composed-panel runner and every MCP tool call take. This is the tool measuring itself, NOT a monitored SQL Server or PostgreSQL target. The service "
         + "records every finished read into an in-process histogram keyed by (surface, route, outcome) and "
         + "flushes an hourly aggregate: run count, total and max duration in ms, and a fixed log-scale bucket "
         + "histogram (about 24 bounds, 10 ms to 120 s, plus an overflow bucket for anything past 120 s). This "
@@ -64,8 +63,12 @@ public sealed class DarlingMcpReadLatencyTools
         + "this many ms\", flagged with \"≥ <bound>\" on the rare row whose true value only proven to exceed "
         + "the last finite bucket. timeouts is the run_count of samples whose outcome was a caught statement "
         + "timeout (57014) for that route — a route that answers fast most of the time but times out on a heavy "
-        + "case shows both figures side by side. Sorted by p95 descending, then by count, so the worst tail "
-        + "leads. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
+        + "case shows both figures side by side. Sorted by p95 descending, then by count, then surface and route, so the worst tail "
+        + "leads. fallbacks is the run_count of reads whose interval-table path faulted "
+        + "and were answered from raw (outcome fallback_raw); gate_failures is the run_count of reads whose "
+        + "source decision itself faulted, so they read raw without one (outcome gate_failed). Both are counted "
+        + "inside count and the percentiles, and a fallback that then timed out counts as a timeout, not a "
+        + "fallback. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
         + "both are optional and compose (AND) when both are given. Empty means no read was recorded for the "
         + "window/filter, which on a fresh store, or one below schema V148, is the expected answer — not a "
         + "sign anything is broken.")]
@@ -122,6 +125,8 @@ public sealed class DarlingMcpReadLatencyTools
                bucket always carries at least one count) sorts last. */
             .OrderByDescending(x => x.P95?.UpperBoundMs ?? -1)
             .ThenByDescending(x => x.Row.RunCount)
+            .ThenBy(x => x.Row.Surface, StringComparer.Ordinal)
+            .ThenBy(x => x.Row.Route, StringComparer.Ordinal)
             .Take(limit)
             .ToArray();
 
@@ -145,6 +150,8 @@ public sealed class DarlingMcpReadLatencyTools
                     p99_ms = x.P99?.UpperBoundMs,
                     p99_is_at_least = x.P99?.IsAtLeast ?? false,
                     timeouts = x.Row.Timeouts,
+                    fallbacks = x.Row.Fallbacks,
+                    gate_failures = x.Row.GateFailures,
                 }),
             });
         }

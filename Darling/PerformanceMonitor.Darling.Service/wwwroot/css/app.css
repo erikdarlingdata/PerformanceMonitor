@@ -68,6 +68,9 @@ a:hover { text-decoration: underline; }
 }
 .auto-refresh-toggle:hover { color: var(--fg); border-color: var(--accent); }
 .auto-refresh-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.page-refresh-control { margin-top: 0.6rem; flex-wrap: wrap; }
+.page-refresh-control .auto-refresh-toggle { margin-top: 0; }
+.page-refresh-control[hidden] { display: none; }
 
 .refresh-control { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--muted); }
 .refresh-control .refresh-select { font-size: 0.82rem; }
@@ -226,6 +229,16 @@ a:hover { text-decoration: underline; }
 .range-select { display: inline-flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
 .range-custom { display: inline-flex; align-items: center; gap: 0.35rem; }
 .range-custom-n { width: 4.5rem; }
+/* Multi-select picker (multi-picker.js): Wait Stats' checkbox list over a multi-series chart. */
+.multi-picker { margin: 8px 0; }
+.mp-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.mp-label { font-size: 12px; opacity: 0.8; }
+.mp-search { min-width: 160px; }
+.mp-count { font-size: 12px; opacity: 0.8; margin-left: auto; }
+.mp-hint { display: block; font-size: 12px; color: var(--warn); }
+.mp-list { display: flex; flex-wrap: wrap; gap: 4px 16px; max-height: 160px; overflow-y: auto; margin-top: 6px; }
+.mp-item { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; white-space: nowrap; }
+.mp-none, .mp-metric-note { font-size: 12px; opacity: 0.7; }
 
 .panel > h3 {
   margin: 0 0 0.6rem;
@@ -423,6 +436,12 @@ table.data td.mono { font-family: var(--mono); font-size: 0.78rem; }
 table.data td.sev-Warning { color: var(--warn); }
 table.data td.sev-Critical { color: var(--err); }
 table.data td.sev-Healthy { color: var(--ok); }
+
+/* Copy and CSV strip above a data table (#4843). */
+.grid-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
+.grid-tools .grid-tool { font-size: 12px; padding: 2px 8px; }
+.grid-tools-status { font-size: 12px; opacity: 0.8; margin-left: 6px; }
+td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* ─────────────────────────── band list ─────────────────────────── */
 

@@ -38,6 +38,7 @@ namespace Lite.Tests;
 /// miss a tool that relied on framework-derived naming.
 /// </para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class CrossAppMcpToolInventoryPinTests
 {
     private const string LiteMcpDir = "Lite/Mcp";
@@ -330,6 +331,9 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
         "list_custom_alert_templates",
+        /* #4843: Darling-only for now, not by architecture: the per-server trend reads (waits, CPU scheduler,
+           memory clerks, plan cache) have local DuckDB twins, so Lite could serve this tool later. */
+        "get_server_trend",
         /* #5085: the fleet server-tag write tools (create/update/delete/assign/unassign_server_tag) write
            config.server_tags and config.server_tag_map in the central Postgres store, the same Darling-ONLY kind
            of entry as the custom-alert-rule tools above: Lite keeps its tags in its own local config. */
