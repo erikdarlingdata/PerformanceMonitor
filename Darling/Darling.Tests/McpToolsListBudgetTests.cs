@@ -207,7 +207,8 @@ public sealed class McpToolsListBudgetTests
     // get_finops storage_growth view (view line, view name, object_name parameter, database_name wording), re-measured: 178,646 -> 178,855; tool get_finops 550 -> 614, view 127 -> 143, database_name 52 -> 63, new object_name 69.
     // get_finops storage_growth review answers (guide sentences after the marker, a rename, a switch arm), re-measured: 178,855 -> 178,855; tool get_finops 614, view 143, database_name 63, object_name 69 unchanged.
     // get_finops_recommendations (the FinOps recommendations tool) adds 547 bytes: 178,855 -> 179,402.
-    private const int TotalCeilingBytes = 179_402;
+    // get_deadlock_detail (processes[] and the page row budget, with the graph guidance kept in the head), re-measured: 179,402 -> 179,419; tool 652 -> 786, dedup_key 272 -> 165.
+    private const int TotalCeilingBytes = 179_419;
 
 
 

@@ -2973,7 +2973,7 @@ const LONG_QUERY_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "object_name", label: "Object" },
   { key: "session_id", label: "SPID", format: "int" },
-  { key: "client_app_name", label: "Application" },
+  { key: "client_app_name", label: "App" },
   { key: "server_principal_name", label: "Login" },
   { key: "query_hash", label: "Query Hash" },
 ];
@@ -3026,7 +3026,7 @@ const ACTIVE_COLUMNS = [
   { key: "wait_type", label: "Wait" },
   { key: "blocking_session_id", label: "Blocked by", format: "int" },
   { key: "dop", label: "DOP", format: "int" },
-  { key: "program_name", label: "Application" },
+  { key: "program_name", label: "App" },
   { key: "login_name", label: "Login" },
 ];
 
@@ -3053,28 +3053,28 @@ const DEADLOCK_COLUMNS = [
   { key: "has_deadlock_xml", label: "Graph", format: "bool" },
 ];
 
-/* The per-process rows of one deadlock, the desktop Deadlocks grid's columns. The service parses the graph and sends
+/* The per-process rows of one deadlock, the desktop Deadlocks grid's columns and header text, plus Log Used and Status, which the web adds. The service parses the graph and sends
    processes[] (absent values left off), so the browser never reads the XML. */
 const DEADLOCK_PROCESS_COLUMNS = [
   { key: "deadlock_type", label: "Type" },
   { key: "victim", label: "Victim", render: (r) => document.createTextNode(r.victim ? "Victim" : "") },
   { key: "spid", label: "SPID", format: "int" },
   { key: "database_name", label: "Database" },
-  { key: "object_names", label: "Objects", wrap: true },
+  { key: "object_names", label: "Object(s)", wrap: true },
   { key: "proc_name", label: "Procedure" },
   { key: "lock_mode", label: "Lock Mode" },
   { key: "owner_mode", label: "Owner Mode" },
   { key: "waiter_mode", label: "Waiter Mode" },
   { key: "wait_resource", label: "Wait Resource", wrap: true },
-  { key: "wait_time_ms", label: "Wait", format: "ms" },
+  { key: "wait_time_ms", label: "Wait (ms)", format: "ms" },
   { key: "isolation_level", label: "Isolation" },
-  { key: "transaction_name", label: "Transaction" },
-  { key: "transaction_count", label: "Trans", format: "int" },
+  { key: "transaction_name", label: "Tran Name" },
+  { key: "transaction_count", label: "Tran Count", format: "int" },
   { key: "priority", label: "Priority", format: "int" },
   { key: "log_used", label: "Log Used", format: "int" },
   { key: "login_name", label: "Login" },
   { key: "host_name", label: "Host" },
-  { key: "client_app", label: "Application", wrap: true },
+  { key: "client_app", label: "App", wrap: true },
   { key: "status", label: "Status" },
   { key: "sql_text", label: "Statement", render: (r) => codeDisclosure(r.sql_text) },
 ];
@@ -3090,7 +3090,13 @@ function deadlockProcessKey(server, row) {
 /** The expandable per-process sub-grid for one deadlock row of get_deadlock_detail. */
 function deadlockProcessesCell(server, row) {
   const rows = Array.isArray(row.processes) ? row.processes : [];
-  if (!rows.length) return document.createTextNode("—");
+  if (!rows.length) {
+    /* The shared page row budget can cut every row of a deadlock; say so and how to get them, rather than a bare dash. */
+    const cut = Number(row.processes_truncated) || 0;
+    if (cut <= 0) return document.createTextNode("—");
+    const how = row.dedup_key ? "ask get_deadlock_detail for dedup_key " + row.dedup_key : "narrow the window to this deadlock";
+    return document.createTextNode(cut + (cut === 1 ? " process" : " processes") + " not sent (page row limit); " + how + " to see them");
+  }
   const key = deadlockProcessKey(server, row);
   const more = row.processes_truncated > 0 ? " (+" + row.processes_truncated + " more in the graph)" : "";
   const node = disclosure(rows.length + (rows.length === 1 ? " process" : " processes") + more, [
@@ -3314,7 +3320,7 @@ const TRACE_FLAG_CHANGE_COLUMNS = [
 ];
 
 const APPLICATION_COLUMNS = [
-  { key: "program_name", label: "Application" },
+  { key: "program_name", label: "App" },
   { key: "connections", label: "Connections", format: "int" },
   { key: "running", label: "Running", format: "int" },
   { key: "sleeping", label: "Sleeping", format: "int" },
@@ -3800,7 +3806,7 @@ const PG_LOG_EVENT_COLUMNS = [
   { key: "sqlstate", label: "SQLSTATE", small: true },
   { key: "database_name", label: "Database" },
   { key: "user_name", label: "User" },
-  { key: "application_name", label: "Application" },
+  { key: "application_name", label: "App" },
   { key: "pid", label: "PID", format: "int", small: true },
   { key: "message", label: "Message" },
   { key: "detail", label: "Detail" },
@@ -4054,7 +4060,7 @@ const PG_BLOCKING_CHAIN_COLUMNS = [
   { key: "root_pid", label: "Root PID", format: "int" },
   { key: "databases", label: "Databases", render: (row) => listCell(row.databases) },
   { key: "root_username", label: "User" },
-  { key: "root_application", label: "Application", wrap: true },
+  { key: "root_application", label: "App", wrap: true },
   { key: "root_state", label: "Root State" },
   { key: "root_is_idle_in_transaction", label: "Idle in Txn", format: "bool" },
   { key: "root_xact_duration_ms", label: "Txn Age", render: sentinelDuration("root_xact_duration_ms") },
@@ -4074,7 +4080,7 @@ const PG_BLOCKING_CYCLE_COLUMNS = [
   { key: "participant_count", label: "Participants", format: "int" },
   { key: "pids", label: "PIDs", render: (row) => listCell(row.pids) },
   { key: "database", label: "Database" },
-  { key: "application", label: "Application", wrap: true },
+  { key: "application", label: "App", wrap: true },
   { key: "blocked_behind_count", label: "Queued Behind", format: "int" },
   { key: "blocked_behind_pids", label: "Queued PIDs", render: (row) => listCell(row.blocked_behind_pids) },
   { key: "finding", label: "Finding", wrap: true },
@@ -4278,7 +4284,7 @@ const PG_SESSION_STATE_COLUMNS = [
   { key: "severity", label: "Severity", sevKey: "severity" },
   { key: "database", label: "Database" },
   { key: "username", label: "User" },
-  { key: "application_name", label: "Application" },
+  { key: "application_name", label: "App" },
   { key: "client_addr", label: "Client" },
   { key: "backend_type", label: "Backend Type" },
   { key: "last_state", label: "State" },

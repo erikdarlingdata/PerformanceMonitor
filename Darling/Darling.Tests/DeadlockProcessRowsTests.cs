@@ -51,13 +51,24 @@ public sealed class DeadlockProcessRowsTests
 
     /// <summary>The same XML gives the same rows through the viewer's grid path and the service path.</summary>
     [Fact]
-    public void TheServicePathAndTheViewerPath_GiveTheSameRowsForTheSameGraph()
+    public void TheServicePathAndTheViewerPath_GiveTheSameRowsForTheSameGraph() => AssertSameRows(Graph);
+
+    /// <summary>A graph naming two victims: both rows carry the victim flag, on both paths.</summary>
+    [Fact]
+    public void TheServicePathAndTheViewerPath_AgreeOnAGraphWithTwoVictims()
+    {
+        var twoVictims = Graph.Replace("<victimProcess id=\"process1\" />", "<victimProcess id=\"process1\" /><victimProcess id=\"process2\" />", StringComparison.Ordinal);
+        AssertSameRows(twoVictims);
+        Assert.All(DarlingDeadlockProcessRows.Parse(twoVictims, When), r => Assert.True(r.IsVictim));
+    }
+
+    private static void AssertSameRows(string graph)
     {
         var viewer = DeadlockProcessDetail.ParseFromRows(new List<ViewerDeadlockRow>
         {
-            new() { DeadlockTime = When, VictimProcessId = "process1", DeadlockGraphXml = Graph },
+            new() { DeadlockTime = When, VictimProcessId = "process1", DeadlockGraphXml = graph },
         });
-        var service = DarlingDeadlockProcessRows.Parse(Graph, When);
+        var service = DarlingDeadlockProcessRows.Parse(graph, When);
 
         Assert.Equal(viewer.Count, service.Count);
         for (var i = 0; i < viewer.Count; i++)
@@ -207,7 +218,7 @@ public sealed class DeadlockProcessRowsTests
     private static bool[] Bools(JsonElement node) => node.EnumerateArray().Select(e => e.GetBoolean()).ToArray();
 
     [Fact]
-    public void EachDeadlock_GetsACollapsedSubGrid_WithTheDesktopColumns()
+    public void EachDeadlock_GetsACollapsedSubGrid_WithTheDesktopColumnsPlusLogUsedAndStatus()
     {
         if (!TryRun("closed", out var r)) return;
 
@@ -216,6 +227,8 @@ public sealed class DeadlockProcessRowsTests
         var headers = r.GetProperty("subHeaders")[0].EnumerateArray().Select(e => e.GetString()!).ToArray();
         Assert.Equal(21, headers.Length);
         Assert.Contains("Victim", headers);
+        foreach (var h in new[] { "Object(s)", "Wait (ms)", "Tran Name", "Tran Count", "App", "Log Used", "Status" })
+            Assert.Contains(h, headers);
         Assert.Contains("Statement", headers);
         var first = r.GetProperty("subRows")[0][0].EnumerateArray().Select(e => e.GetString()!).ToArray();
         Assert.Contains("Victim", first);
@@ -253,6 +266,17 @@ public sealed class DeadlockProcessRowsTests
         if (!TryRun("noprocesses", out var r)) return;
 
         Assert.Equal(0, r.GetProperty("subgrids").GetInt32());
+    }
+
+    [Fact]
+    public void ADeadlockWhoseEveryRowThePageBudgetCut_SaysSo_AndHowToGetThem()
+    {
+        if (!TryRun("allcut", out var r)) return;
+
+        Assert.Equal(1, r.GetProperty("subgrids").GetInt32());
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Contains("6 processes not sent (page row limit)", text, StringComparison.Ordinal);
+        Assert.Contains("dedup_key k5", text, StringComparison.Ordinal);
     }
 
     [Fact]

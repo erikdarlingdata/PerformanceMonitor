@@ -111,6 +111,7 @@ const DEADLOCK = (key, processes, truncated = 0) => ({
 const bodies = {
   two: { server: "SRV1", deadlocks: [DEADLOCK("k1", PROCESSES), DEADLOCK("k2", PROCESSES.slice(0, 1))] },
   noprocesses: { server: "SRV1", deadlocks: [DEADLOCK("k1", [])] },
+  allcut: { server: "SRV1", deadlocks: [DEADLOCK("k1", PROCESSES), DEADLOCK("k5", [], 6)] },
   capped: { server: "SRV1", deadlocks: [DEADLOCK("k1", PROCESSES, 3)] },
 };
 
@@ -175,6 +176,10 @@ if (scenario === "closed") {
   out.otherServerOpen = state(root.children.find((n) => n.textContent.startsWith("Deadlock Graphs"))).open;
 } else if (scenario === "noprocesses") {
   const panel = await buildPanel(bodies.noprocesses);
+  out.subgrids = processDetails(panel).length;
+  out.text = panel.textContent;
+} else if (scenario === "allcut") {
+  const panel = await buildPanel(bodies.allcut);
   out.subgrids = processDetails(panel).length;
   out.text = panel.textContent;
 } else if (scenario === "capped") {

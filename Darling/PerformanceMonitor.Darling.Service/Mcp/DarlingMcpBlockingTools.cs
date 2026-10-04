@@ -410,13 +410,13 @@ public sealed class DarlingMcpBlockingTools
     /// </summary>
     private const int DeadlockGraphPreviewLength = 2000;
 
-    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the deadlock graph XML for a specific time range, NEWEST FIRST, with each deadlock's parsed per-process rows in processes[] (absent values left off; processes_truncated counts rows past the cap; sql_text is a preview). Only deadlocks that CARRY a graph count against limit; deadlocks_returned, truncated and oldest/newest_returned_deadlock_time describe the page as get_deadlocks does. deadlock_graph_xml is a preview (deadlock_graph_xml_truncated: true) unless full_graph; a dedup_key call gets the whole graph and longer sql_text.")]
+    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the deadlock graph XML for a specific time range, NEWEST FIRST, for lock resources, process details and deadlock chains, with each deadlock's parsed per-process rows in processes[] (absent values left off; sql_text is a preview). processes[] holds at most 12 rows per deadlock and a default page shares 24 rows across its deadlocks; processes_truncated counts the rows cut. Only deadlocks that CARRY a graph count against limit; deadlocks_returned, truncated and oldest/newest_returned_deadlock_time describe the page as get_deadlocks does, and truncated means the window held more graphs than limit. deadlock_graph_xml is a preview (deadlock_graph_xml_truncated: true) unless full_graph; a dedup_key call gets the whole graph, every process row up to the cap, and longer sql_text.")]
     public static async Task<string> GetDeadlockDetail(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum deadlocks WITH a graph to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
-        [Description("Optional alert fingerprint (the alert's Dedup Key), scoped to the server's display name and the incident's objects. Returns only that incident.")] string? dedup_key = null,
+        [Description("Optional alert fingerprint (the alert's Dedup Key); paste it straight from an alert. Returns only that incident, scoped to the server's display name and its objects.")] string? dedup_key = null,
         [Description("Return each graph's full XML instead of a 2000-character preview. Default false. A dedup_key call ignores this and always returns the full graph.")] bool full_graph = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
