@@ -82,7 +82,8 @@ public readonly record struct StallWaitRow(string WaitType, long WaitingTasks, l
 /// </param>
 /// <param name="DistinctWaitTypes">How many distinct wait types those tasks span, again before the cut.</param>
 /// <param name="TopWaitType">
-/// The wait type holding the most total wait time, or <c>null</c> when nothing on the instance was waiting.
+/// The wait type holding the most total wait time among USER-task waits (background system sessions are not
+/// ranked, see <see cref="StallWaitProbePolicy.QueryText"/>), or <c>null</c> when no user task was waiting.
 /// A NULL here beside a positive <paramref name="SchedulerCount"/> is a real finding — an instance answering
 /// a trivial query in milliseconds, producing rows 50x slowly, and waiting on nothing.
 /// </param>
@@ -92,6 +93,14 @@ public readonly record struct StallWaitRow(string WaitType, long WaitingTasks, l
 /// the result set did not describe an instance, and <see cref="StallWaitProbePolicy.OutcomeNoSample"/> says so
 /// rather than storing a row of zeros that reads as a measured all-clear.
 /// </param>
+/// <param name="BackgroundWaitingTasks">Waiting tasks owned by background system sessions, counted in
+/// <paramref name="WaitingTaskCount"/> but left out of the ranking.</param>
+/// <param name="BackgroundWaitTypes">Distinct wait types among those background tasks.</param>
+/// <param name="CollectorSessions">How many sessions matching this service's application name and client host
+/// have a request; 0 when none is visible.</param>
+/// <param name="CollectorWaitType">The oldest such request's current wait, or <c>null</c> while it is running.</param>
+/// <param name="CollectorWaitMs">That wait's duration in milliseconds, or <c>null</c> when no session is visible.</param>
+/// <param name="CollectorLastWaitType">That request's last wait type.</param>
 public sealed record StallWaitSample(
     long WaitingTaskCount,
     int DistinctWaitTypes,
@@ -103,7 +112,13 @@ public sealed record StallWaitSample(
     long RunnableTasks,
     long WorkQueueLength,
     long PendingDiskIo,
-    int MaxRunnableTasks);
+    int MaxRunnableTasks,
+    long BackgroundWaitingTasks = 0,
+    int BackgroundWaitTypes = 0,
+    long CollectorSessions = 0,
+    string? CollectorWaitType = null,
+    long? CollectorWaitMs = null,
+    string? CollectorLastWaitType = null);
 
 /// <summary>
 /// The out-of-band server-wide wait sample #2880 asks for: the bounds it runs under, the condition that fires
@@ -124,8 +139,10 @@ public sealed record StallWaitSample(
 /// producer-side and payload-independent: in the body before each abandoned run the four cheapest collectors
 /// (sub-5 KB payloads, <c>drain_ms: 0</c>) showed <c>open_ms</c> degraded 3x to 152x against their own
 /// baselines, 9 of 9 across both affected servers. Everything on the instance is slow to produce rows, so our
-/// session is one victim among many and its own wait would most likely read <c>ASYNC_NETWORK_IO</c>, which a
-/// stalled drain generates by definition and which therefore cannot establish direction.</para>
+/// session is one victim among many. The server-wide view stays the headline, and this service's own session
+/// is sampled BESIDE it, matched by application name and client host rather than by id: an
+/// <c>ASYNC_NETWORK_IO</c> there means the instance was waiting on this service's client, which the
+/// server-wide ranking alone cannot show.</para>
 /// </summary>
 public static class StallWaitProbePolicy
 {
@@ -387,23 +404,38 @@ public static class StallWaitProbePolicy
     /// <summary>
     /// The server-wide sample, as one result set of at most <see cref="TopWaitTypeCount"/> rows.
     ///
-    /// <para><b>Two DMV scans and no temp table, deliberately.</b> Staging the wait aggregate first would give
+    /// <para><b>Five in-memory DMV reads and no temp table, deliberately.</b> Staging the wait aggregate first would give
     /// one consistent snapshot instead of two scans milliseconds apart, and that is the house pattern for a
     /// heavy query — but this one runs against an instance that may be stalled ON tempdb or on IO, and
     /// creating an object there to serve a diagnostic is exactly how a watchdog becomes the second problem.
     /// <c>sys.dm_os_waiting_tasks</c> reads in-memory structures, so the cost of reading it twice is
-    /// negligible and the skew between the totals and the top-N cut is milliseconds on a headline sample.</para>
+    /// negligible and the skew between the totals and the top-N cut is milliseconds on a headline sample. The five
+    /// reads are <c>sys.dm_os_schedulers</c>, <c>sys.dm_os_waiting_tasks</c> twice (totals and ranking, each
+    /// joined to <c>sys.dm_exec_sessions</c>) and <c>sys.dm_exec_sessions</c> with <c>sys.dm_exec_requests</c>
+    /// for this service's own session; all are bounded by <see cref="HardBudget"/>.</para>
     ///
-    /// <para><b>No ignored-wait filter, unlike <see cref="WaitingTasksCollector"/>.</b> That collector feeds a
-    /// trend surface an operator reads all day, so <c>IgnoredWaitDefaults</c> earns its place there. This is a
-    /// forensic sample of an instance that has gone 50x slow at producing rows, and the candidate causes —
-    /// scheduler starvation above all — live squarely among the wait types a trend surface calls benign.
-    /// Filtering here would delete the answer.</para>
+    /// <para><b>No wait TYPE filter, unlike <see cref="WaitingTasksCollector"/>; background TASKS are excluded
+    /// from the ranking and counted.</b> That collector feeds a trend surface an operator reads all day, so
+    /// <c>IgnoredWaitDefaults</c> earns its place there. This is a forensic sample of an instance that has gone
+    /// 50x slow at producing rows, and the candidate causes — scheduler starvation above all — live squarely
+    /// among the wait types a trend surface calls benign, so no wait is dropped by name:
+    /// <c>SOS_SCHEDULER_YIELD</c>, <c>THREADPOOL</c> and <c>ASYNC_NETWORK_IO</c> always rank. What does not
+    /// rank is a wait held by a background system session (<c>is_user_process = 0</c>): a thread parked for
+    /// weeks cannot explain a stall, and on one production server (#5097) five engine-internal idle waits
+    /// outranked everything in all 96 probes over four days. A session the DMV cannot show counts as a user
+    /// session (<c>ISNULL(es.is_user_process, 1) = 1</c>), so the degraded case is the unfiltered ranking, never
+    /// a smaller one. The totals (<c>all_waiting_tasks</c>, <c>distinct_wait_types</c>) stay unfiltered, and
+    /// <c>background_waiting_tasks</c> / <c>background_wait_types</c> say how many tasks the ranking left out.
+    /// The scheduler aggregate, the primary evidence for starvation, is untouched.</para>
     ///
-    /// <para><b>The instance's own sessions are all included; only the probe's is excluded.</b> There is no
-    /// session id to exclude the stalled collector by (see the type comment), and it should not be excluded
-    /// anyway — a server-wide sample that omitted the most interesting session would answer a different
-    /// question.</para>
+    /// <para><b>This service's own session is sampled beside the server-wide view, by program and host name,
+    /// not by session id.</b> The probe connection shares the collector connection's application name and
+    /// client host, so <c>PROGRAM_NAME()</c> and <c>HOST_NAME()</c> match the collector's sessions with no id
+    /// at all (<c>collection_log.target_session_id</c> is not usable for this). <c>collector_sessions</c>
+    /// counts every matching session with a request, apart from the single oldest request that supplies the
+    /// wait columns. Limits: two services on one client host monitoring one server share both names, and a
+    /// concurrent second reader on the same target (the Query Store backfill) can supply the oldest request
+    /// instead of the stalled one; the summary says "oldest of N" when N is above one.</para>
     ///
     /// <para><b><c>OUTER APPLY</c> so the result set has a row even when nothing is waiting.</b> An empty
     /// result and an idle instance would otherwise be the same absence of rows, and "answering trivial
@@ -420,6 +452,9 @@ public static class StallWaitProbePolicy
     public const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+/* Sessionless tasks (dispatcher-pool and on-demand workers) are excluded from both the totals and the
+   ranking, as before, by the explicit session_id IS NOT NULL. The ISNULL(es.is_user_process, 1) fallback
+   applies only to a task whose session id is set but whose session this login cannot see. */
 SELECT /* PerformanceMonitorDarling stall probe */
     wait_type = w.wait_type,
     waiting_tasks = w.waiting_tasks,
@@ -431,7 +466,13 @@ SELECT /* PerformanceMonitorDarling stall probe */
     runnable_tasks = s.runnable_tasks,
     work_queue_length = s.work_queue_length,
     pending_disk_io = s.pending_disk_io,
-    max_runnable_tasks = s.max_runnable_tasks
+    max_runnable_tasks = s.max_runnable_tasks,
+    background_waiting_tasks = t.background_waiting_tasks,
+    background_wait_types = t.background_wait_types,
+    collector_sessions = cs.collector_sessions,
+    collector_wait_type = c.collector_wait_type,
+    collector_wait_ms = c.collector_wait_ms,
+    collector_last_wait_type = c.collector_last_wait_type
 FROM
 (
     SELECT
@@ -447,9 +488,16 @@ CROSS JOIN
 (
     SELECT
         all_waiting_tasks = COUNT_BIG(*),
-        distinct_wait_types = CONVERT(integer, COUNT_BIG(DISTINCT owt.wait_type))
+        distinct_wait_types = CONVERT(integer, COUNT_BIG(DISTINCT owt.wait_type)),
+        background_waiting_tasks =
+            ISNULL(SUM(CASE WHEN es.is_user_process = 0 THEN CONVERT(bigint, 1) ELSE CONVERT(bigint, 0) END), 0),
+        background_wait_types =
+            CONVERT(integer, COUNT_BIG(DISTINCT CASE WHEN es.is_user_process = 0 THEN owt.wait_type END))
     FROM sys.dm_os_waiting_tasks AS owt
+    LEFT JOIN sys.dm_exec_sessions AS es
+      ON es.session_id = owt.session_id
     WHERE owt.wait_type IS NOT NULL
+    AND   owt.session_id IS NOT NULL
     AND   owt.session_id <> @@SPID
 ) AS t
 OUTER APPLY
@@ -460,11 +508,40 @@ OUTER APPLY
         total_wait_ms = SUM(CONVERT(bigint, owt.wait_duration_ms)),
         max_wait_ms = MAX(CONVERT(bigint, owt.wait_duration_ms))
     FROM sys.dm_os_waiting_tasks AS owt
+    LEFT JOIN sys.dm_exec_sessions AS es
+      ON es.session_id = owt.session_id
     WHERE owt.wait_type IS NOT NULL
+    AND   owt.session_id IS NOT NULL
     AND   owt.session_id <> @@SPID
+    AND   ISNULL(es.is_user_process, 1) = 1
     GROUP BY owt.wait_type
     ORDER BY SUM(CONVERT(bigint, owt.wait_duration_ms)) DESC, owt.wait_type ASC
 ) AS w
+OUTER APPLY
+(
+    SELECT
+        collector_sessions = COUNT_BIG(*)
+    FROM sys.dm_exec_sessions AS es
+    JOIN sys.dm_exec_requests AS er
+      ON er.session_id = es.session_id
+    WHERE es.program_name = PROGRAM_NAME()
+    AND   es.host_name = HOST_NAME()
+    AND   es.session_id <> @@SPID
+) AS cs
+OUTER APPLY
+(
+    SELECT TOP (1)
+        collector_wait_type = er.wait_type,
+        collector_wait_ms = CONVERT(bigint, er.wait_time),
+        collector_last_wait_type = er.last_wait_type
+    FROM sys.dm_exec_sessions AS es
+    JOIN sys.dm_exec_requests AS er
+      ON er.session_id = es.session_id
+    WHERE es.program_name = PROGRAM_NAME()
+    AND   es.host_name = HOST_NAME()
+    AND   es.session_id <> @@SPID
+    ORDER BY er.start_time ASC, er.session_id ASC
+) AS c
 ORDER BY w.total_wait_ms DESC, w.wait_type ASC
 OPTION(RECOMPILE);";
 
@@ -489,6 +566,12 @@ OPTION(RECOMPILE);";
         long workQueueLength = 0;
         long pendingDiskIo = 0;
         var maxRunnableTasks = 0;
+        long backgroundWaitingTasks = 0;
+        var backgroundWaitTypes = 0;
+        long collectorSessions = 0;
+        string? collectorWaitType = null;
+        long? collectorWaitMs = null;
+        string? collectorLastWaitType = null;
 
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -501,6 +584,12 @@ OPTION(RECOMPILE);";
                 workQueueLength = reader.IsDBNull(8) ? 0 : reader.GetInt64(8);
                 pendingDiskIo = reader.IsDBNull(9) ? 0 : reader.GetInt64(9);
                 maxRunnableTasks = reader.IsDBNull(10) ? 0 : reader.GetInt32(10);
+                backgroundWaitingTasks = reader.IsDBNull(11) ? 0 : reader.GetInt64(11);
+                backgroundWaitTypes = reader.IsDBNull(12) ? 0 : reader.GetInt32(12);
+                collectorSessions = reader.IsDBNull(13) ? 0 : reader.GetInt64(13);
+                collectorWaitType = reader.IsDBNull(14) ? null : WaitTypeName.Trim(reader.GetString(14));
+                collectorWaitMs = reader.IsDBNull(15) ? null : reader.GetInt64(15);
+                collectorLastWaitType = reader.IsDBNull(16) ? null : WaitTypeName.Trim(reader.GetString(16));
                 haveHeader = true;
             }
 
@@ -511,8 +600,8 @@ OPTION(RECOMPILE);";
                 continue;
             }
 
-            /* Trimmed at the read (see WaitTypeName): this sample applies no ignore filter, so a background
-               waiter can be the top wait, and its trailing space would land in top_wait_type and the summary. */
+            /* Trimmed at the read (see WaitTypeName): a wait name can carry a trailing space (a user-task wait
+               can too), and it would land in top_wait_type and the summary. */
             waits.Add(new StallWaitRow(
                 WaitTypeName.Trim(reader.GetString(0)),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
@@ -533,12 +622,22 @@ OPTION(RECOMPILE);";
             waits.Count > 0 ? top.WaitType : null,
             waits.Count > 0 ? top.TotalWaitMs : 0,
             waits.Count > 0 ? top.MaxWaitMs : 0,
-            waits.Count > 0 ? RenderWaitSummary(waits) : null,
+            waits.Count > 0
+                ? RenderWaitSummary(
+                    waits, backgroundWaitingTasks, backgroundWaitTypes, collectorSessions, collectorWaitType,
+                    collectorWaitMs, collectorLastWaitType)
+                : null,
             schedulerCount,
             runnableTasks,
             workQueueLength,
             pendingDiskIo,
-            maxRunnableTasks);
+            maxRunnableTasks,
+            backgroundWaitingTasks,
+            backgroundWaitTypes,
+            collectorSessions,
+            collectorWaitType,
+            collectorWaitMs,
+            collectorLastWaitType);
     }
 
     /// <summary>
@@ -549,10 +648,47 @@ OPTION(RECOMPILE);";
     /// operator or a read filters on (top wait type, its totals, the scheduler aggregates) each have their own
     /// column, and this carries the BREADTH those cannot — five types in one glance without five more columns.
     /// It is summary only, and nothing keys on parsing it.</para>
+    ///
+    /// <para><b>The tail is reserved first.</b> It reads <c>excluded from ranking: background N tasks/M types;
+    /// ours: WAIT Xms (last L)</c>, with <c>ours (oldest of N)</c> when several sessions match and
+    /// <c>ours: not visible</c> when none does, and the 512-character cap never cuts it: the top entries fill
+    /// what remains, whole entries only.</para>
     /// </summary>
-    public static string RenderWaitSummary(IReadOnlyList<StallWaitRow> waits)
+    public static string RenderWaitSummary(
+        IReadOnlyList<StallWaitRow> waits,
+        long backgroundWaitingTasks = 0,
+        int backgroundWaitTypes = 0,
+        long collectorSessions = 0,
+        string? collectorWaitType = null,
+        long? collectorWaitMs = null,
+        string? collectorLastWaitType = null)
     {
         ArgumentNullException.ThrowIfNull(waits);
+
+        string ours;
+        if (collectorSessions <= 0)
+        {
+            ours = "ours: not visible";
+        }
+        else
+        {
+            ours = string.Format(
+                CultureInfo.InvariantCulture,
+                "{0}: {1} {2}ms (last {3})",
+                collectorSessions > 1
+                    ? string.Format(CultureInfo.InvariantCulture, "ours (oldest of {0})", collectorSessions)
+                    : "ours",
+                string.IsNullOrEmpty(collectorWaitType) ? "running" : collectorWaitType,
+                collectorWaitMs ?? 0,
+                string.IsNullOrEmpty(collectorLastWaitType) ? "none" : collectorLastWaitType);
+        }
+
+        var tail = string.Format(
+            CultureInfo.InvariantCulture,
+            "excluded from ranking: background {0} tasks/{1} types; {2}",
+            backgroundWaitingTasks,
+            backgroundWaitTypes,
+            ours);
 
         var summary = new StringBuilder();
 
@@ -565,8 +701,9 @@ OPTION(RECOMPILE);";
                 wait.WaitingTasks,
                 wait.TotalWaitMs);
 
-            /* Whole entries only. A summary truncated mid-figure would read as a real, smaller number. */
-            if (summary.Length + entry.Length + (summary.Length > 0 ? 2 : 0) > WaitSummaryMaxLength)
+            /* Whole entries only, and the tail stays whole: a summary truncated mid-figure would read as a
+               real, smaller number. */
+            if (summary.Length + entry.Length + (summary.Length > 0 ? 2 : 0) + 2 + tail.Length > WaitSummaryMaxLength)
             {
                 break;
             }
@@ -579,6 +716,12 @@ OPTION(RECOMPILE);";
             summary.Append(entry);
         }
 
+        if (summary.Length > 0)
+        {
+            summary.Append("; ");
+        }
+
+        summary.Append(tail);
         return summary.ToString();
     }
 }

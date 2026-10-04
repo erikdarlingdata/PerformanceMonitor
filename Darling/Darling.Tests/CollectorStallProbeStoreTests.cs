@@ -266,6 +266,19 @@ public class CollectorStallProbeStoreTests
         Assert.Contains("using var stallProbeArm = StallProbeArm.Start(", runner, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The probe query matches this service's own session by <c>PROGRAM_NAME()</c> and <c>HOST_NAME()</c>, so
+    /// it binds no parameters: the runner must send the text as it ships, with none attached.
+    /// </summary>
+    [Fact]
+    public void TheProbeQuery_IsSentWithoutParameters()
+    {
+        var runner = ReadSource("Darling/PerformanceMonitor.Darling.Service/StallWaitProbeRunner.cs");
+
+        Assert.Contains("new CollectorQuery(StallWaitProbePolicy.QueryText)", runner, StringComparison.Ordinal);
+        Assert.DoesNotContain("new CollectorQuery(StallWaitProbePolicy.QueryText,", runner, StringComparison.Ordinal);
+    }
+
     private static string RungSql() => PgMigrations.Scripts.Single(s => s.Version == RungVersion).Sql;
 
     private static bool IsTriggerSideColumn(string name) =>
