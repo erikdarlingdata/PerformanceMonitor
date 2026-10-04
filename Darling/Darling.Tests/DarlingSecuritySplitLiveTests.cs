@@ -548,6 +548,74 @@ END $$;";
         }
     }
 
+    [Fact]
+    public async Task TheFullyProvisionedManagedViewer_ReadsFalseOnTheViewerReadOnlyProbe_YetCanDismiss()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+
+        await using (var owner = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            /* The managed roles carry fixed names and a role is cluster-wide: never adopt or drop a set that
+               belongs to something else on a shared rig. */
+            Assert.SkipWhen(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
+                "A cluster-wide admin/viewer/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
+        }
+
+        var bodySucceeded = false;
+        try
+        {
+            await using (var owner = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await owner.OpenAsync(ct);
+
+                /* The shipped batch, run whole: every grant the managed viewer really holds. The compose target keeps
+                   the database-level revoke and the owner's name out of this scratch database. */
+                var batch = DarlingManagedRoles.BuildProvisioningSql(
+                    ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+                    15, PasswordReassert.All, ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName));
+                await ExecAsync(owner, batch, ct);
+                await ExecAsync(owner,
+                    "INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value) " +
+                    "VALUES ('2026-10-04 10:00:00', -7001, 'srv', 'High CPU', 90, 80)", ct);
+            }
+
+            var viewerString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = "viewer",
+                Password = ProvisioningTestSecrets.ViewerPassword,
+                SearchPath = "collect,config,public",
+                Pooling = false,
+            }.ConnectionString;
+            await using var viewer = new NpgsqlConnection(viewerString);
+            await viewer.OpenAsync(ct);
+
+            /* The product's own probe text, as the fully provisioned role. A table-level grant spelled any way
+               (including ON TABLE ...) flips this to true; the text pins would miss that spelling. */
+            Assert.False(await ScalarAsync<bool>(viewer, PerformanceMonitor.Darling.Viewer.ViewerDataService.ReadOnlyProbeSql, ct));
+
+            /* ... while the column grant really lets it dismiss. */
+            await ExecAsync(viewer, "UPDATE config_alert_log SET dismissed = TRUE WHERE server_id = -7001", ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await ExecAsync(cleanup,
+                    "DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanupCt));
+        }
+    }
+
+    private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return (T)(await command.ExecuteScalarAsync(ct))!;
+    }
+
     private static async Task CreateTestRolesAndGrantsAsync(NpgsqlConnection owner, System.Threading.CancellationToken ct)
     {
         /* Mirrors the DarlingManagedRoles grant model with distinct, disposable role names and no
