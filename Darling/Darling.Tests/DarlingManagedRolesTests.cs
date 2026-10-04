@@ -541,8 +541,13 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("INSERT INTO config_alert_log", sql, StringComparison.Ordinal);
         Assert.Contains("false, 'none', NULL, false,", sql, StringComparison.Ordinal);
 
-        /* NOT the rejected blanket grant: viewer/mcp never get a direct write on the history table. */
-        Assert.DoesNotContain("ON config.config_alert_log TO viewer", sql, StringComparison.Ordinal);
+        /* NOT the rejected blanket grant: viewer/mcp never get a table-level write on the history table. The one
+           privilege on it that viewer holds is the single-column dismiss grant (#4843), so every statement naming
+           the table TO viewer must be exactly that one. */
+        Assert.Equal(
+            new[] { "GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;" },
+            System.Text.RegularExpressions.Regex.Matches(sql, @"GRANT [^;]*? ON config\.config_alert_log TO [^;]*viewer[^;]*;")
+                .Select(m => m.Value).ToArray());
         Assert.DoesNotContain("ON config.config_alert_log TO mcp", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON config_alert_log TO viewer", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON config_alert_log TO mcp", sql, StringComparison.Ordinal);

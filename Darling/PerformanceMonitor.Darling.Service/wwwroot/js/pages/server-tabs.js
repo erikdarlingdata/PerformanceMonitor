@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, windowFromHours, daysText } from "../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { READ_FIELDS } from "../read-fields.js";
@@ -871,16 +871,7 @@ export const SERVER_TABS = [
         "No memory clerks in the latest snapshot — the clerk collector may not have run yet.",
         1
       ),
-      table(
-        "Memory Pressure Events",
-        "get_memory_pressure_events",
-        { server, hours: ctx.hours },
-        "events",
-        PRESSURE_COLUMNS,
-        ctx.label,
-        "No memory pressure events in this window — the healthy state for this read.",
-        1
-      ),
+      ...memoryPressurePanels(server, ctx),
       /* #3653: TWO READS UNDER ONE WINDOW (#3637), rendered as the two things they are. The memory-grant
          pair answers with `grants[]` - the NEWEST snapshot in the window, one row per pool (per semaphore and
          pool on the semaphore lens), every row stamped with the same instant - and `window[]` - one row per
@@ -1871,19 +1862,28 @@ export const POSTGRES_TABS = [
             "No lock cycle was sampled in this window — the healthy state. A cycle has no root blocker to attribute, which is why it is a separate grid rather than a chain with a missing root.",
         },
       ]),
-      table(
-        "Top Query Shapes",
-        "get_pg_top_queries",
-        { server, hours: ctx.hours, limit: 20 },
-        "queries",
-        PG_TOP_QUERY_COLUMNS,
-        ctx.label + ", by total execution time",
-        "No query statistics in this window.",
-        2,
-        /* #4677: the eviction caveat the read builds (null when the counter was read and no pass happened,
-           the unknown sentence when it was never observed), rendered above the rows. */
-        "evictions.note"
-      ),
+      /* One fetch, two panels: the eviction pass count and the statement cap in a tile (the figures the desktop
+         viewer's note names), then the grid. #4677: the caveat the read builds (null when the counter was read and
+         no pass happened, the unknown sentence when it was never observed) renders above the rows. */
+      ...fanout("get_pg_top_queries", { server, hours: ctx.hours, limit: 20 }, [
+        {
+          title: "Statement Evictions",
+          subtitle: ctx.label + ", pg_stat_statements passes",
+          viz: "stat",
+          stats: PG_EVICTION_STATS,
+          span: 1,
+          emptyText: "No eviction figures: the extension's eviction counter was not read in this window.",
+        },
+        {
+          title: "Top Query Shapes",
+          subtitle: ctx.label + ", by total execution time",
+          viz: "table",
+          rowsKey: "queries",
+          columns: PG_TOP_QUERY_COLUMNS,
+          emptyText: "No query statistics in this window.",
+          noteKey: "evictions.note",
+        },
+      ]),
       /* Directly under the query shapes, joined on queryid: a plan only means something beside the
          statement it belongs to. The plan JSON is REDACTED at collection - query text dropped, literals
          replaced - so nothing customer-specific reaches this grid, and the empty text names the usual
@@ -3019,19 +3019,32 @@ const AUTO_TUNING_COLUMNS = [
   { key: "as_of", label: "As of", format: "time" },
 ];
 
+/* The Active Queries grid, in the desktop viewer's column order and wording (Collected and Query Text lead, the anchor rule; the desktop's plan column is not here). */
 const ACTIVE_COLUMNS = [
-  { key: "collection_time", label: "Time", format: "time" },
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
+  { key: "collection_time", label: "Collected", format: "time" },
+  { key: "query_text", label: "Query Text", render: (r) => codeDisclosure(r.query_text) },
   { key: "session_id", label: "SPID", format: "int" },
   { key: "database_name", label: "Database" },
-  { key: "status", label: "Status" },
-  { key: "cpu_time_ms", label: "CPU", format: "ms" },
-  { key: "elapsed_time_formatted", label: "Elapsed" },
-  { key: "wait_type", label: "Wait" },
-  { key: "blocking_session_id", label: "Blocked by", format: "int" },
-  { key: "dop", label: "DOP", format: "int" },
-  { key: "program_name", label: "Application" },
   { key: "login_name", label: "Login" },
+  { key: "host_name", label: "Host" },
+  { key: "program_name", label: "Program" },
+  { key: "status", label: "Status" },
+  { key: "elapsed_time_formatted", label: "Elapsed" },
+  { key: "cpu_time_ms", label: "CPU (ms)", format: "int" },
+  { key: "logical_reads", label: "Logical Reads", format: "int" },
+  { key: "reads", label: "Reads", format: "int" },
+  { key: "writes", label: "Writes", format: "int" },
+  { key: "wait_type", label: "Wait Type" },
+  { key: "wait_time_ms", label: "Wait (ms)", format: "int" },
+  { key: "wait_resource", label: "Wait Resource" },
+  { key: "blocking_session_id", label: "Blocking", format: "int" },
+  { key: "dop", label: "DOP", format: "int" },
+  { key: "parallel_worker_count", label: "Workers", format: "int" },
+  { key: "granted_query_memory_gb", label: "Memory (GB)", format: "num2" },
+  { key: "transaction_isolation_level", label: "Isolation" },
+  { key: "open_transaction_count", label: "Open Tran", format: "int" },
+  { key: "percent_complete", label: "% Done", format: "num1" },
+  { key: "query_hash", label: "Query Hash" },
 ];
 
 const BLOCKING_COLUMNS = [
@@ -3166,6 +3179,108 @@ const PRESSURE_COLUMNS = [
   { key: "memory_indicators_process", label: "Process", format: "int" },
   { key: "memory_indicators_system", label: "System", format: "int" },
 ];
+
+const PG_EVICTION_STATS = [
+  { key: "evictions.eviction_passes_in_window", label: "Eviction passes", format: "int" },
+  { key: "evictions.max_entries", label: "pg_stat_statements.max", format: "int" },
+];
+
+/** Both memory-pressure severities as the desktop chart counts them: indicator 2 is medium, 3 and above severe. */
+const PRESSURE_LINES = [
+  { key: "sql_medium", label: "SQL Server (medium)", color: SERIES_COLORS[0] },
+  { key: "sql_severe", label: "SQL Server (severe)", color: SERIES_COLORS[1] },
+  { key: "os_medium", label: "Operating System (medium)", color: SERIES_COLORS[2] },
+  { key: "os_severe", label: "Operating System (severe)", color: SERIES_COLORS[3] },
+];
+
+const HOUR_MS = 3600000;
+
+/** Said wherever an hour reads as quiet: the read does not say where collection began, so a blank hour may predate it. */
+const PRESSURE_COVERAGE_CAVEAT = "No bar means no event was recorded, which for a server monitored for less than this range includes the hours before collection began.";
+
+/**
+ * The pressure events counted per hour, the way the desktop chart counts them: only samples where SQL Server or the
+ * operating system reads 2 or more are drawn, and each hour holds a count per source and severity. Every hour of the
+ * window is present, an hour with no event as 0, which the stacked-bar chart draws as no bar, as the desktop does. `events` are the read's rows (sample_time is naive UTC); the window is `{ windowStart, windowEnd }` in
+ * epoch ms. Returns `{ points, drawn }`: the hourly rows (`time` is naive-UTC ISO text) and the number of samples counted.
+ */
+export function pressureEventBuckets(events, win) {
+  const counts = new Map();
+  let drawn = 0;
+  for (const e of Array.isArray(events) ? events : []) {
+    const at = parseUtc(e && e.sample_time);
+    if (!at) continue;
+    const process = Number(e.memory_indicators_process);
+    const system = Number(e.memory_indicators_system);
+    if (!(process >= 2 || system >= 2)) continue;
+    drawn++;
+    const hour = Math.floor(at.getTime() / HOUR_MS) * HOUR_MS;
+    const row = counts.get(hour) || { sql_medium: 0, sql_severe: 0, os_medium: 0, os_severe: 0 };
+    if (process === 2) row.sql_medium++;
+    else if (process >= 3) row.sql_severe++;
+    if (system === 2) row.os_medium++;
+    else if (system >= 3) row.os_severe++;
+    counts.set(hour, row);
+  }
+  const hours = new Set(counts.keys());
+  if (win) {
+    for (let h = Math.floor(win.windowStart / HOUR_MS) * HOUR_MS; h <= win.windowEnd; h += HOUR_MS) hours.add(h);
+  }
+  const points = [...hours]
+    .sort((a, b) => a - b)
+    .map((h) => ({ time: new Date(h).toISOString().slice(0, 19), ...(counts.get(h) || { sql_medium: 0, sql_severe: 0, os_medium: 0, os_severe: 0 }) }));
+  return { points, drawn };
+}
+
+/**
+ * The Memory tab's pressure events: an hourly count chart over the read's rows and the rows themselves, from ONE
+ * fetch. The read returns every sample in the window (it has no row cap), so the counts are complete for what the
+ * store holds. It does not say where collection began, so the notice says that a 0 hour is an hour with no event
+ * recorded, which on a server monitored for less than the range includes the hours before collection started.
+ */
+export function memoryPressurePanels(server, ctx) {
+  const chart = panelShell("Memory Pressure Events per Hour", ctx.label, 2);
+  const grid = panelShell("Memory Pressure Events", ctx.label, 1);
+  (async () => {
+    const res = await readToolWithinKeptHistory("get_memory_pressure_events", { server, hours: ctx.hours });
+    if (res.kind === "error") {
+      mount(chart.body, readErrorStrip(res.message));
+      return mount(grid.body, readErrorStrip(res.message));
+    }
+    const empty = "No memory pressure events in this window — the healthy state for this read. " + PRESSURE_COVERAGE_CAVEAT;
+    if (res.kind === "empty") {
+      mount(chart.body, [keptWindowStrip(res), emptyStrip(empty)]);
+      return mount(grid.body, [keptWindowStrip(res), windowFloorStrip(res.data, { viz: "table" }), emptyStrip(res.message)]);
+    }
+    renderInto(chart.body, () => {
+      const hours = res.keptHours || ctx.hours;
+      const { points, drawn } = pressureEventBuckets(res.data.events, windowFromHours(hours));
+      if (!drawn) return [keptWindowStrip(res), emptyStrip("No sample in this window reached medium pressure (an indicator of 2 or more); the table beside this lists every sample the collector stored. " + PRESSURE_COVERAGE_CAVEAT)];
+      const lines = PRESSURE_LINES.filter((l) => points.some((p) => p[l.key] > 0));
+      return [
+        keptWindowStrip(res),
+        noticeStrip(
+          "Samples where an indicator reads 2 or more, counted per hour as stacked bars; an hour with none draws no bar. " + PRESSURE_COVERAGE_CAVEAT
+        ),
+        zoomableLineChart({
+          points,
+          xKey: "time",
+          series: lines,
+          formatValue: (v) => String(Math.round(v)),
+          integerTicks: true,
+          mode: "stacked-bar",
+          unit: "events",
+          ...windowFromHours(hours),
+        }, "memory-pressure-events", chartZoomScope(ctx.hours)),
+      ];
+    });
+    renderInto(grid.body, () => [
+      keptWindowStrip(res),
+      VIZ.table(res.data, { rowsKey: "events", columns: PRESSURE_COLUMNS, emptyText: empty }),
+    ]);
+  })();
+  return [chart.panel, grid.panel];
+}
 
 const CACHE_TYPE_COLUMNS = [
   { key: "cache_type", label: "Cache" },

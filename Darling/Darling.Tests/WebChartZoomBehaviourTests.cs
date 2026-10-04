@@ -191,7 +191,11 @@ public sealed class WebChartZoomBehaviourTests
         }
 
         // The server-tab and FinOps chart callers go through the zoomable wrapper.
-        Assert.Equal(4, Regex.Matches(Js("pages", "server-tabs.js"), @"zoomableLineChart\(").Count);
+        // No fixed count: server-tabs.js draws line charts only through the wrapper (the direct-call scan above already
+        // fails any other file), and it must not call or import the raw renderer, so a new chart there cannot skip the zoom.
+        var serverTabs = Js("pages", "server-tabs.js");
+        Assert.Contains("zoomableLineChart(", serverTabs);
+        Assert.DoesNotMatch(@"(?<![\w.])renderLineChart\s*\(|import\s*\{[^}]*\brenderLineChart\b", serverTabs);
         Assert.Contains("zoomableLineChart(", Js("pages", "finops", "version-store.js"));
         var panels = Js("panels.js");
         var vizLine = panels.Substring(panels.IndexOf("function vizLine(", StringComparison.Ordinal));

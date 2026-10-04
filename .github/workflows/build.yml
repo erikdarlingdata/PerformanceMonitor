@@ -1224,9 +1224,45 @@ jobs:
           Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
           if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
 
-          $shardArgs = foreach ($class in $mine) { '-class'; $class }
-          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @shardArgs -trx TestResults/darling-pr-${{ matrix.shard }}.trx
-          exit $LASTEXITCODE
+          # One runner invocation per chunk, never one for the whole shard: Windows CreateProcess caps the
+          # complete command line at 32,767 characters, and a Darling PG shard's -class list alone reached ~32,660
+          # (#5100). The budget counts only the -class arguments; the other ~170 characters (the dotnet
+          # path, 'run --project ... --no-build --', and the -trx argument) must fit in what is left, and
+          # 'dotnet run' hands the same arguments on to the test host. Every chunk runs even after one
+          # fails, so a failure in an early chunk never hides the rest of the shard's results.
+          $argBudget = 30000
+          $chunks = [System.Collections.Generic.List[string[]]]::new()
+          $current = [System.Collections.Generic.List[string]]::new()
+          $currentLength = 0
+          foreach ($class in $mine) {
+              $cost = '-class'.Length + 1 + $class.Length + 1
+              if ($current.Count -gt 0 -and ($currentLength + $cost) -gt $argBudget) {
+                  $chunks.Add($current.ToArray())
+                  $current = [System.Collections.Generic.List[string]]::new()
+                  $currentLength = 0
+              }
+              $current.Add($class)
+              $currentLength += $cost
+          }
+          if ($current.Count -gt 0) { $chunks.Add($current.ToArray()) }
+
+          # A failing chunk must set $LASTEXITCODE, not throw, or the later chunks would be skipped.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $failedChunks = 0
+          $chunkNumber = 0
+          foreach ($chunk in $chunks) {
+              $chunkNumber++
+              $chunkArgs = foreach ($class in $chunk) { '-class'; $class }
+              $chunkLength = ($chunk | ForEach-Object { '-class'.Length + 1 + $_.Length + 1 } | Measure-Object -Sum).Sum
+              Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count): $($chunk.Count) classes, $chunkLength characters"
+              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @chunkArgs -trx TestResults/darling-pr-${{ matrix.shard }}-$chunkNumber.trx
+              if ($LASTEXITCODE -ne 0) {
+                  $failedChunks++
+                  Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"
+              }
+          }
+          if ($failedChunks -gt 0) { Write-Host "shard ${{ matrix.shard }}: $failedChunks of $($chunks.Count) chunks failed"; exit 1 }
+          exit 0
 
       # #4160: stop all four clusters (the 5541 store plus the three 5542/5543/5544 log-format
       # clusters started above). Each stop is independent and best-effort: a cluster that never
@@ -1714,9 +1750,45 @@ jobs:
           Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
           if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
 
-          $shardArgs = foreach ($class in $mine) { '-class'; $class }
-          dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @shardArgs
-          exit $LASTEXITCODE
+          # One runner invocation per chunk, never one for the whole shard: Windows CreateProcess caps the
+          # complete command line at 32,767 characters, and a Darling PG shard's -class list alone reached ~32,660
+          # (#5100). The budget counts only the -class arguments; the other ~170 characters (the dotnet
+          # path and 'run --project ... --no-build --') must fit in what is left, and
+          # 'dotnet run' hands the same arguments on to the test host. Every chunk runs even after one
+          # fails, so a failure in an early chunk never hides the rest of the shard's results.
+          $argBudget = 30000
+          $chunks = [System.Collections.Generic.List[string[]]]::new()
+          $current = [System.Collections.Generic.List[string]]::new()
+          $currentLength = 0
+          foreach ($class in $mine) {
+              $cost = '-class'.Length + 1 + $class.Length + 1
+              if ($current.Count -gt 0 -and ($currentLength + $cost) -gt $argBudget) {
+                  $chunks.Add($current.ToArray())
+                  $current = [System.Collections.Generic.List[string]]::new()
+                  $currentLength = 0
+              }
+              $current.Add($class)
+              $currentLength += $cost
+          }
+          if ($current.Count -gt 0) { $chunks.Add($current.ToArray()) }
+
+          # A failing chunk must set $LASTEXITCODE, not throw, or the later chunks would be skipped.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $failedChunks = 0
+          $chunkNumber = 0
+          foreach ($chunk in $chunks) {
+              $chunkNumber++
+              $chunkArgs = foreach ($class in $chunk) { '-class'; $class }
+              $chunkLength = ($chunk | ForEach-Object { '-class'.Length + 1 + $_.Length + 1 } | Measure-Object -Sum).Sum
+              Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count): $($chunk.Count) classes, $chunkLength characters"
+              dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @chunkArgs
+              if ($LASTEXITCODE -ne 0) {
+                  $failedChunks++
+                  Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"
+              }
+          }
+          if ($failedChunks -gt 0) { Write-Host "shard ${{ matrix.shard }}: $failedChunks of $($chunks.Count) chunks failed"; exit 1 }
+          exit 0
 
   # The one result branch protection can require. Four matrix legs cannot each be a required check
   # without hard-coding the shard count into repo settings, and a leg that never starts reports
