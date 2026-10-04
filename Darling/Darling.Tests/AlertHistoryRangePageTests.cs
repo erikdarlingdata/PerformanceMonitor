@@ -164,6 +164,31 @@ public sealed class AlertHistoryRangePageTests
     }
 
     [Fact]
+    public void AKeptRowTakesItsDismissedMarkingFromALaterPoll()
+    {
+        var r = Run("dismissedLater");
+        string[] Strings(string n) => r.GetProperty(n).EnumerateArray().Select(e => e.GetString() ?? "").ToArray();
+        Assert.Equal(new[] { "", "" }, Strings("before"));
+        Assert.Equal(new[] { "", "alert-dismissed" }, Strings("after"));
+        Assert.Equal(new[] { "", "Dismissed" }, Strings("afterTitle"));
+        Assert.Equal(new[] { false, true }, r.GetProperty("afterStatus").EnumerateArray().Select(e => e.GetBoolean()).ToArray());
+        Assert.Equal("High CPU 1,High CPU 2", string.Join(",", Strings("order")));
+        Assert.Equal(new[] { "", "" }, Strings("restored"));
+    }
+
+    [Fact]
+    public void TwoServersThatShareADisplayNameKeepBothRows()
+    {
+        Assert.Equal(2, Run("sharedName").GetProperty("rows").GetInt32());
+    }
+
+    [Fact]
+    public void TheRangePickerSaysTheWebReadsAtMostSevenDays()
+    {
+        Assert.Contains("The web reads at most 7 days", Page());
+    }
+
+    [Fact]
     public void ANewWindowReconcilesInPlace_RowsLeaveAndNewOnesLandInOrder()
     {
         var r = Run("reconcile");

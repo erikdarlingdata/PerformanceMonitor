@@ -143,6 +143,8 @@ function statusCell(a) {
        above, so repeating them would read as "No channel configured (unconfigured)". */
     a.notification_type && !STATE_ONLY_CHANNELS.has(a.notification_type)
       ? el("span", { class: "channel", text: a.notification_type }) : null,
+    /* A dismissed row (Show dismissed) says so in words; the dimming alone is the same cue a muted row has. */
+    a.dismissed === true ? el("span", { class: "channel", text: "Dismissed" }) : null,
   ]);
 }
 
@@ -236,9 +238,10 @@ function parseDetailFields(text) {
 }
 
 /* A row's identity for the #4194 keyed refresh: the same (server, metric, fired instant) triple triageCell()
- * above already treats as identifying one alert - there is no surrogate id in get_alert_history's payload. */
+ * above already treats as identifying one alert, with server_id in front so two servers that share a display
+ * name never collide (a row without a server_id keys on its names and time alone) - there is no surrogate id in get_alert_history's payload. */
 function alertKey(a) {
-  return a.server_name + "\u0000" + a.metric_name + "\u0000" + a.alert_time;
+  return (a.server_id == null ? "" : a.server_id) + "\u0000" + a.server_name + "\u0000" + a.metric_name + "\u0000" + a.alert_time;
 }
 
 /* Builds ONE <tr>, styled identically to VIZ.table's own row (same columns, same cell()), by handing it a
@@ -267,6 +270,14 @@ function reconcileRows(tbody, rows, rowMap) {
   for (const row of rows) {
     const key = alertKey(row);
     let tr = rowMap.get(key);
+    /* dismissed is not part of the key, so a kept node whose alert was dismissed (or restored) since the last
+     * read is replaced by a freshly built one. */
+    const old = tr && gridRowOf(tr);
+    if (tr && old && (old.dismissed === true) !== (row.dismissed === true)) {
+      if (tr === anchor) anchor = anchor.nextSibling;
+      tr.remove();
+      tr = null;
+    }
     if (!tr) {
       tr = alertRowNode(row);
       rowMap.set(key, tr);
@@ -325,12 +336,12 @@ async function loadServerNames() {
     .filter((r) => r.name);
 }
 
-function pickerOptions(items, chosen) {
+function pickerOptions(items) {
   return items.map((i) => el("option", { value: String(i.value), text: i.label }));
 }
 
 function picker(label, items, chosen) {
-  const sel = el("select", { class: "range-select-inline", "aria-label": label }, pickerOptions(items, chosen));
+  const sel = el("select", { class: "range-select-inline", "aria-label": label }, pickerOptions(items));
   sel.value = String(chosen);
   return sel;
 }
@@ -345,8 +356,9 @@ function serverItems() {
   return items;
 }
 
-/* A dismissed row (include_dismissed) renders muted and struck through, so it reads as acknowledged beside the
- * live ones; the class is set where each row node is built, and the title says what it means. */
+/* A dismissed row (include_dismissed) renders dimmed and italic, so it reads as acknowledged beside the live
+ * ones; the class is set where each row node is built, the title says what it means, and the Status cell
+ * carries the word. */
 function markDismissed(tr, row) {
   if (!tr || !row) return tr;
   if (row.dismissed === true) {
@@ -378,6 +390,7 @@ export async function renderAlerts(main) {
   });
 
   const windowSel = picker("Time range", WINDOW_CHOICES.map((w) => ({ value: w.hours, label: w.label })), choices.hours);
+  windowSel.setAttribute("title", "The web reads at most 7 days of alert history, so there is no All choice.");
   const limitSel = picker("Row limit", LIMIT_CHOICES.map((n) => ({ value: n, label: n + " rows" })), choices.limit);
   const serverSel = picker("Server", serverItems(), choices.server);
   const dismissedBox = el("input", { type: "checkbox", "aria-label": "Show dismissed alerts" });

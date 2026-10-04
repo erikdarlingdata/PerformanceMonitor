@@ -140,6 +140,28 @@ try {
       await renderAlerts(main);
       out.afterPoll = bodyRows(main).map((tr) => tr.className);
     },
+    async dismissedLater() {
+      alertsReply = { alerts: [row(1), row(2)], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      out.before = bodyRows(main).map((tr) => tr.className);
+      out.beforeStatus = bodyRows(main).map((tr) => tr.textContent.includes("Dismissed"));
+      // the same alerts on the next poll, the second one dismissed in between
+      alertsReply = { alerts: [row(1), row(2, { dismissed: true })], truncated: false };
+      await renderAlerts(main);
+      out.after = bodyRows(main).map((tr) => tr.className);
+      out.afterStatus = bodyRows(main).map((tr) => tr.textContent.includes("Dismissed"));
+      out.afterTitle = bodyRows(main).map((tr) => tr.getAttribute("title"));
+      out.order = metrics(main);
+      // and restored again
+      alertsReply = { alerts: [row(1), row(2)], truncated: false };
+      await renderAlerts(main);
+      out.restored = bodyRows(main).map((tr) => tr.className);
+    },
+    async sharedName() {
+      alertsReply = { alerts: [row(1, { server_id: 1 }), row(1, { server_id: 2 })], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      out.rows = bodyRows(main).length;
+    },
     async reconcile() {
       alertsReply = { alerts: [row(1), row(3), row(5)], truncated: false };
       const main = newMain(); await renderAlerts(main);
