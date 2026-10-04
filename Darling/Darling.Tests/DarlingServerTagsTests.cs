@@ -112,9 +112,9 @@ public sealed class DarlingServerTagsTests
     {
         /* Tagging 100 servers must be one statement. A row-per-server loop is the difference between an
            instant bulk tag and 100 round trips. */
-        Assert.Contains("unnest($1)", ViewerDataService.ServerTagAssignSql, StringComparison.Ordinal);
-        Assert.Contains("ON CONFLICT DO NOTHING", ViewerDataService.ServerTagAssignSql, StringComparison.Ordinal);
-        Assert.Contains("= ANY($1)", ViewerDataService.ServerTagUnassignSql, StringComparison.Ordinal);
+        Assert.Contains("unnest($1)", ServerTagStore.AssignSql, StringComparison.Ordinal);
+        Assert.Contains("ON CONFLICT DO NOTHING", ServerTagStore.AssignSql, StringComparison.Ordinal);
+        Assert.Contains("= ANY($1)", ServerTagStore.UnassignSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -122,7 +122,7 @@ public sealed class DarlingServerTagsTests
     {
         /* server_id is a deterministic hash of host+database+read-only-intent, so a removed-then-re-added
            server gets the SAME id. Orphaned map rows would silently restore its old tags. */
-        Assert.Contains("DELETE FROM server_tag_map WHERE server_id = $1", ViewerDataService.ServerTagClearForServerSql, StringComparison.Ordinal);
+        Assert.Contains("DELETE FROM server_tag_map WHERE server_id = $1", ServerTagStore.ClearForServerSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -132,13 +132,16 @@ public sealed class DarlingServerTagsTests
            config_monitored_servers. Schema-qualifying here would diverge from every sibling write. */
         foreach (var sql in new[]
                  {
-                     ViewerDataService.ServerTagsSelectSql,
-                     ViewerDataService.ServerTagMapSelectSql,
-                     ViewerDataService.ServerTagInsertSql,
-                     ViewerDataService.ServerTagRenameSql,
-                     ViewerDataService.ServerTagSetColourSql,
-                     ViewerDataService.ServerTagReparentSql,
-                     ViewerDataService.ServerTagDeleteSql,
+                     ServerTagStore.SelectTagsSql,
+                     ServerTagStore.SelectAssignmentsSql,
+                     ServerTagStore.InsertSql,
+                     ServerTagStore.RenameSql,
+                     ServerTagStore.SetColourSql,
+                     ServerTagStore.ReparentSql,
+                     ServerTagStore.DeleteSql,
+                     ServerTagStore.GetSql,
+                     ServerTagStore.TagScopedRulesSql,
+                     ServerTagStore.RegisteredServerIdsSql,
                  })
         {
             Assert.DoesNotContain("config.server_tag", sql, StringComparison.Ordinal);
@@ -162,10 +165,10 @@ public sealed class DarlingServerTagsTests
     public void TagColourSql_ReadsAndWritesTheColumn()
     {
         /* The read must SELECT colour (the sidebar swatch + the Overview pills need it); the write targets it. */
-        Assert.Contains("colour", ViewerDataService.ServerTagsSelectSql, StringComparison.Ordinal);
+        Assert.Contains("colour", ServerTagStore.SelectTagsSql, StringComparison.Ordinal);
         Assert.Contains(
             "UPDATE server_tags SET colour = $2 WHERE id = $1",
-            ViewerDataService.ServerTagSetColourSql,
+            ServerTagStore.SetColourSql,
             StringComparison.Ordinal);
     }
 }
