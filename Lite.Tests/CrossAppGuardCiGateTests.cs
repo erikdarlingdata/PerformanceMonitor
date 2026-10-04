@@ -2756,7 +2756,7 @@ public class CrossAppGuardCiGateTests
     }
 
     /// <summary>One step's text inside a job block: from its <c>- name:</c> line to the next step's.</summary>
-    private static string StepBlock(string job, string stepName)
+    internal static string StepBlock(string job, string stepName)
     {
         var at = job.IndexOf("      - name: " + stepName + "\n", StringComparison.Ordinal);
         Assert.True(at >= 0, $"the '{stepName}' step is gone — find where it moved before editing this test");
