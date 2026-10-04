@@ -1508,7 +1508,6 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Service/Targets/SqlServerTargetProvider.cs WithDatabase",
         "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.ServerManagement.cs SelectedTabCollectorScope",
         "Darling/PerformanceMonitor.Darling.Viewer/ManageServersWindow.xaml.cs LastCollectedDisplay",
-        "Darling/PerformanceMonitor.Darling.Viewer/RecommendationsViewModel.cs HasStructuredFixAction",
         "Darling/PerformanceMonitor.Darling.Viewer/SettingsWindow.xaml.cs BuildViewerPreferences",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Blocking.cs EventTimeLocal",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Deadlock.cs DeadlockTimeLocal",
