@@ -170,9 +170,9 @@ internal static class ManagedConfFile
     }
 
     /// <summary>
-    /// The body alone: one <c>key = 'value'</c> line per setting the v1 through v17 blocks set today, in the
+    /// The body alone: one <c>key = 'value'</c> line per setting the v1 through v18 blocks set today, in the
     /// order each key is FIRST introduced (v1 before v2 before v3 ...), holding the value each key has LAST —
-    /// exactly what PostgreSQL itself would read from those seventeen blocks appended in order to one file. Every
+    /// exactly what PostgreSQL itself would read from those eighteen blocks appended in order to one file. Every
     /// value is single-quoted and escaped (<c>DarlingManagedPostgres.EscapeConfValue</c>): PostgreSQL accepts a
     /// quoted string for a numeric or boolean GUC too, and quoting uniformly means no value's own content (a
     /// path with a backslash, say) needs a second escaping rule here.
@@ -232,6 +232,11 @@ internal static class ManagedConfFile
 
         /* v17: a fixed log_line_prefix, appended in the same order as the legacy blocks above. */
         blocks.Append(DarlingManagedPostgres.BuildLogLinePrefixConfAppend());
+
+        /* v18 (part of #5097): auto_explain. Its preload line is the MERGE of the effective list plus
+           pg_stat_statements and auto_explain, so ReduceToLastOccurrence lets it win over v13's, and a list
+           that already names auto_explain renders identically on every start. */
+        blocks.Append(DarlingManagedPostgres.BuildSlowPlanConfAppend(inputs.EffectivePreloadList));
 
         /* Planner page cost: no legacy block and no marker; this file is the only place the setting is written. */
         blocks.Append(DarlingManagedPostgres.BuildPlannerPageCostConfAppend());

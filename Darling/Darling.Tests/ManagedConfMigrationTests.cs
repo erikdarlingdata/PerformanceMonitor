@@ -69,6 +69,77 @@ public sealed class ManagedConfMigrationTests
     }
 
     [Fact]
+    public void ClassifyLines_UntouchedV18Block_IsAllOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildSlowPlanConfAppend("timescaledb,pg_stat_statements");
+        var lines = ClassifyLines(conf);
+
+        var owned = lines.Where(l => l.Key is not null).ToArray();
+        Assert.Equal(8, owned.Length);
+        Assert.All(owned, l =>
+        {
+            Assert.Equal(ConfLineClassification.Ours, l.Classification);
+            Assert.Equal(DarlingManagedPostgres.ConfMarkerV18, l.BlockMarker);
+        });
+        Assert.Contains(owned, l => l.Key == DarlingManagedPostgres.PreloadSetting);
+    }
+
+    [Fact]
+    public void CoveredMarkers_IncludesV18_LastInAppendOrder()
+        => Assert.Equal(DarlingManagedPostgres.ConfMarkerV18, CoveredMarkers[^1]);
+
+    [Fact]
+    public void ClassifyLines_EditedV18LogMinDuration_IsHandEdit_RebuildMismatch()
+    {
+        var edited = DarlingManagedPostgres.BuildSlowPlanConfAppend("timescaledb,pg_stat_statements").Replace(
+            "auto_explain.log_min_duration = 10s", "auto_explain.log_min_duration = 1s", System.StringComparison.Ordinal);
+
+        var duration = FindByText(ClassifyLines(edited), "auto_explain.log_min_duration");
+
+        Assert.Equal(ConfLineClassification.HandEdit, duration.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, duration.Reason);
+    }
+
+    [Fact]
+    public void ClassifyLines_V18PreloadDifferentForm_IsHandEdit_FormMismatch()
+    {
+        var edited = DarlingManagedPostgres.BuildSlowPlanConfAppend("timescaledb,pg_stat_statements").Replace(
+            "shared_preload_libraries = 'timescaledb,pg_stat_statements,auto_explain'",
+            "shared_preload_libraries = 'timescaledb, pg_stat_statements, auto_explain'",
+            System.StringComparison.Ordinal);
+
+        var preload = FindByText(ClassifyLines(edited), DarlingManagedPostgres.PreloadSetting);
+
+        Assert.Equal(ConfLineClassification.HandEdit, preload.Classification);
+        Assert.Equal(HandEditReason.FormMismatch, preload.Reason);
+    }
+
+    /// <summary>A line the v18 block never writes, sitting inside it, is a hand edit.</summary>
+    [Fact]
+    public void ClassifyLines_UnknownKeyInsideV18Block_IsHandEdit()
+    {
+        var edited = DarlingManagedPostgres.BuildSlowPlanConfAppend(null) + "auto_explain.log_buffers = on\n";
+
+        var buffers = FindByText(ClassifyLines(edited), "auto_explain.log_buffers");
+
+        Assert.Equal(ConfLineClassification.HandEdit, buffers.Classification);
+    }
+
+    /// <summary>A v13 block beside a v18 block stays Ours in full: v13's preload line (a different list from
+    /// v18's) and v18's both pass the shared form test.</summary>
+    [Fact]
+    public void ClassifyLines_V13BesideV18_StaysOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildStatementStatisticsConfAppend(null)
+            + DarlingManagedPostgres.BuildSlowPlanConfAppend("timescaledb,pg_stat_statements");
+
+        var owned = ClassifyLines(conf).Where(l => l.Key is not null).ToArray();
+
+        Assert.Equal(10, owned.Length);
+        Assert.All(owned, l => Assert.Equal(ConfLineClassification.Ours, l.Classification));
+    }
+
+    [Fact]
     public void ClassifyLines_UntouchedV13PreloadLine_IsOurs()
     {
         var conf = DarlingManagedPostgres.BuildStatementStatisticsConfAppend(effectivePreloadList: null);
