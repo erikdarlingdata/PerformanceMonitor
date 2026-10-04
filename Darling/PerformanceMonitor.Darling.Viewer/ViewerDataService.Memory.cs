@@ -203,26 +203,7 @@ public sealed partial class ViewerDataService
     /// from one the bucketing merged.</para>
     /// $4.. clerk types, last $ the bucket width in minutes.
     /// </summary>
-    public static string MemoryClerkTrendsSql(int typeCount)
-    {
-        var typeParams = string.Join(", ", Enumerable.Range(0, typeCount).Select(i => "$" + (i + 4)));
-        var widthParam = "$" + (typeCount + 4);
-        return $$"""
-            SELECT
-                clerk_type,
-                GREATEST(date_bin(CAST({{widthParam}} AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
-                CAST(AVG(memory_mb) AS double precision) AS memory_mb,
-                MIN(collection_time) AS first_collection_time,
-                COUNT(*) AS collection_count
-            FROM v_memory_clerks
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   clerk_type IN ({{typeParams}})
-            GROUP BY clerk_type, 2
-            ORDER BY clerk_type, 2
-            """;
-    }
+    public static string MemoryClerkTrendsSql(int typeCount) => ServerTrendSql.MemoryClerks(typeCount);
 
     /// <summary>
     /// The Memory Grants chart data — Lite's <c>GetMemoryGrantChartDataAsync</c> ported to Postgres, then
