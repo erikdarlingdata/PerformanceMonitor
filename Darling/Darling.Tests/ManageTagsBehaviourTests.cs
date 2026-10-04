@@ -271,20 +271,57 @@ public sealed class ManageTagsBehaviourTests
 
     [Theory]
     [InlineData(403, "This session is read-only, so the change was not made.")]
-    [InlineData(404, "No such tag.")]
+    [InlineData(404, "No such tag.")] // an unknown parent, not a gone tag
     [InlineData(415, "Content-Type must be application/json.")]
     [InlineData(500, "Boom.")]
     [InlineData(0, "Network error: connection refused")]
-    public void AFailedWrite_ShowsTheHouseMessage_AndKeepsTheFormWhereItDoesNotMeanTheTagIsGone(int status, string message)
+    public void AFailedWrite_ShowsTheHouseMessage_AndKeepsTheForm(int status, string message)
     {
         if (!TryRun("refusal:" + status, out var r)) return;
 
         Assert.Contains(message, r.GetProperty("text").GetString());
-        if (status != 404)
-        {
-            Assert.Equal(1, r.GetProperty("formOpen").GetInt32());
-            Assert.Equal("Keep me", r.GetProperty("kept").GetString());
-        }
+        Assert.Equal(1, r.GetProperty("formOpen").GetInt32());
+        Assert.Equal("Keep me", r.GetProperty("kept").GetString());
+    }
+
+    [Fact]
+    public void AnEditAnsweredUnknownParent_KeepsTheFormTheNameAndTheTicks_AndResetsTheParent()
+    {
+        if (!TryRun("editParent", out var r)) return;
+
+        Assert.Contains("Parent tag 2 does not exist.", r.GetProperty("text").GetString());
+        Assert.Equal(1, r.GetProperty("formOpen").GetInt32());
+        Assert.Equal("Renamed", r.GetProperty("kept").GetString());
+        Assert.Equal("", r.GetProperty("parent").GetString());
+        Assert.Equal(1, r.GetProperty("sel").GetInt32());
+        Assert.Equal(1, r.GetProperty("apply").GetInt32());
+    }
+
+    [Fact]
+    public void WhileAWriteIsInFlight_CancelAndTheFormOpenersAreDisabled_AndComeBackAfter()
+    {
+        if (!TryRun("busyCancel", out var r)) return;
+
+        Assert.True(r.GetProperty("during").GetProperty("cancel").GetBoolean());
+        Assert.True(r.GetProperty("during").GetProperty("opener").GetBoolean());
+        Assert.False(r.GetProperty("after").GetBoolean());
+    }
+
+    [Fact]
+    public void AfterARefusalSettles_ASecondSaveSendsASecondRequest()
+    {
+        if (!TryRun("secondSave", out var r)) return;
+
+        Assert.Equal(2, r.GetProperty("calls").GetInt32());
+    }
+
+    [Fact]
+    public void WhenTheBaselineGainsTheTickedServerElsewhere_ApplySendsNothing()
+    {
+        if (!TryRun("baselineAgrees", out var r)) return;
+
+        Assert.Equal(0, r.GetProperty("requests").GetInt32());
+        Assert.Contains("No assignment changes", r.GetProperty("text").GetString());
     }
 
     [Theory]

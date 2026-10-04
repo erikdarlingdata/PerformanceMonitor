@@ -118,7 +118,7 @@ export function interpretWrite(status, body) {
   const rules = Array.isArray(b.affected_rules) ? b.affected_rules : [];
   if (status === 401) return { kind: "expired", message: "Your session has expired. Sign in again." };
   if (status === 403) return { kind: "readonly", message: "This session is read-only, so the change was not made." };
-  if (status === 404) return { kind: "notfound", message };
+  if (status === 404) return { kind: "notfound", message, refusal: typeof b.refusal === "string" ? b.refusal : null };
   if (status === 409 && b.status === "confirm_required") return { kind: "confirm", message, rules };
   if (status === 409) return { kind: "conflict", message };
   if (status === 400) return { kind: "invalid", message };
@@ -169,6 +169,23 @@ let notice = null;
 let pendingDelete = null;
 /* True while a write is in flight: a second click on any write control does nothing until it settles. */
 let busy = false;
+/* The buttons that open or replace a form, or cancel one, so they can be disabled while a write is in flight. */
+const lockable = new Set();
+
+function lockButton(props) {
+  const b = el("button", props);
+  b.disabled = busy;
+  lockable.add(b);
+  return b;
+}
+
+function setBusy(value) {
+  busy = value;
+  for (const b of [...lockable]) {
+    if (b.isConnected === false) lockable.delete(b);
+    else b.disabled = value;
+  }
+}
 /* Unsaved checkbox intents, keyed by tag id: { add, remove } server-id sets recorded from the change events.
    Checked = baseline ∪ add − remove. An entry exists only while it holds an id. */
 const edits = new Map();
@@ -180,7 +197,7 @@ export async function renderManageTags(main) {
   }
   const session = await getSession();
   const canEdit = !!session.can_edit;
-  const newRoot = canEdit ? el("button", { class: "btn primary", type: "button", text: "New root tag", onClick: () => openForm({ mode: "create", values: { name: "", colour: "", parent_id: "" } }) }) : null;
+  const newRoot = canEdit ? lockButton({ class: "btn primary", type: "button", text: "New root tag", onClick: () => openForm({ mode: "create", values: { name: "", colour: "", parent_id: "" } }) }) : null;
   const headEl = el("div", { class: "page-head" }, [
     el("h2", { text: "Manage Tags" }),
     el("div", { class: "meta", text: canEdit ? "tags scope custom alert rules" : "read-only sign-in: tags can be viewed, not changed" }),
@@ -227,7 +244,10 @@ function pruneEdits(state) {
 /** Rebuilds only the open form's parent options, in place, so the typed fields keep their element and focus. */
 function refreshParentOptions(state) {
   if (!form || !form.parentSelect) return;
-  mount(form.parentSelect, parentOptions(state).map((o) => el("option", { value: o.value, text: o.label })));
+  const opts = parentOptions(state);
+  /* A parent deleted elsewhere has no option any more: fall back to none rather than send it on the next Save. */
+  if (!opts.some((o) => o.value === form.values.parent_id)) form.values.parent_id = "";
+  mount(form.parentSelect, opts.map((o) => el("option", { value: o.value, text: o.label })));
   form.parentSelect.value = form.values.parent_id;
 }
 
@@ -251,7 +271,7 @@ function drawNotice(state) {
       rulesNode(pendingDelete.rules, "These custom alert rules would match no server:"),
       el("div", { class: "form-actions" }, [
         el("button", { class: "btn primary", type: "button", text: "Delete anyway", onClick: confirmDelete }),
-        el("button", { class: "btn", type: "button", text: "Cancel", onClick: cancelDelete }),
+        lockButton({ class: "btn", type: "button", text: "Cancel", onClick: cancelDelete }),
       ]),
     ]));
   }
@@ -303,8 +323,8 @@ function detailNode(state) {
   if (!tag) return emptyStrip("Select a tag to see and change its servers.");
   const actions = state.canEdit
     ? el("div", { class: "form-actions" }, [
-        el("button", { class: "btn", type: "button", text: "New child tag", onClick: () => openForm({ mode: "create", values: { name: "", colour: "", parent_id: String(tag.id) } }) }),
-        el("button", { class: "btn", type: "button", text: "Edit", onClick: () => openForm({ mode: "edit", id: tag.id, original: tag, values: { name: tag.name, colour: tag.colour || "", parent_id: tag.parent_id == null ? "" : String(tag.parent_id) } }) }),
+        lockButton({ class: "btn", type: "button", text: "New child tag", onClick: () => openForm({ mode: "create", values: { name: "", colour: "", parent_id: String(tag.id) } }) }),
+        lockButton({ class: "btn", type: "button", text: "Edit", onClick: () => openForm({ mode: "edit", id: tag.id, original: tag, values: { name: tag.name, colour: tag.colour || "", parent_id: tag.parent_id == null ? "" : String(tag.parent_id) } }) }),
         el("button", { class: "btn", type: "button", text: "Delete", onClick: () => remove(tag) }),
       ])
     : null;
@@ -365,7 +385,7 @@ function assignmentNode(state, tag) {
 
 async function applyAssignment(tagId) {
   if (busy) return;
-  busy = true;
+  setBusy(true);
   try {
     const intent = edits.get(tagId);
     if (!intent) return setNotice("No assignment changes to apply.", false);
@@ -391,7 +411,7 @@ async function applyAssignment(tagId) {
     edits.delete(tagId);
     await afterWrite("Assignment applied.", rules);
   } finally {
-    busy = false;
+    setBusy(false);
   }
 }
 
@@ -414,27 +434,27 @@ async function afterWrite(message, rules) {
 async function remove(tag) {
   if (busy) return;
   if (!window.confirm("Delete tag \"" + tag.name + "\" and every tag under it?\n\nServers and their data are untouched. This cannot be undone.")) return;
-  busy = true;
+  setBusy(true);
   try {
     notice = null;
     pendingDelete = null;
     const res = await deleteTag(tag.id, false);
     await finishDelete(tag.id, res);
   } finally {
-    busy = false;
+    setBusy(false);
   }
 }
 
 async function confirmDelete() {
   if (busy || !pendingDelete) return;
   const pending = pendingDelete;
-  busy = true;
+  setBusy(true);
   try {
     const res = await deleteTag(pending.id, true);
     if (pendingDelete !== pending) return;
     await finishDelete(pending.id, res);
   } finally {
-    busy = false;
+    setBusy(false);
   }
 }
 
@@ -499,7 +519,7 @@ function formNode() {
     el("div", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Parent" }), parentSelect]),
     el("div", { class: "form-actions" }, [
       el("button", { class: "btn primary", type: "button", text: "Save", onClick: submit }),
-      el("button", { class: "btn", type: "button", text: "Cancel", onClick: closeForm }),
+      lockButton({ class: "btn", type: "button", text: "Cancel", onClick: closeForm }),
     ]),
   ]);
 }
@@ -507,7 +527,7 @@ function formNode() {
 async function submit() {
   if (busy || !form) return;
   const f = form;
-  busy = true;
+  setBusy(true);
   try {
     f.banner = null;
     let res;
@@ -519,6 +539,14 @@ async function submit() {
       res = await patchTag(f.id, patch);
     }
     if (form !== f) return;
+    if (res.kind === "notfound" && res.refusal === "unknown_parent") {
+      /* The chosen parent is gone, not the tag: keep the form and what was typed, reset the parent, re-read. */
+      f.values.parent_id = "";
+      f.banner = res.message;
+      notice = null;
+      await refresh(live);
+      return mount(live.formBox, formNode());
+    }
     if (res.kind === "notfound") {
       /* The tag was deleted elsewhere: close the form and re-read, as a delete does. */
       closeForm();
@@ -538,6 +566,6 @@ async function submit() {
     closeForm();
     await afterWrite(verb, res.rules);
   } finally {
-    busy = false;
+    setBusy(false);
   }
 }

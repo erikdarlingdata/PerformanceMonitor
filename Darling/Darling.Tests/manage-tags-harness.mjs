@@ -329,7 +329,7 @@ try {
     },
     refusal: async () => {
       const status = Number(scenarioParam);
-      responder = () => status === 0 ? { status: 200, body: {} } : { status, body: status === 403 ? { error: "Read-only sign-in." } : status === 404 ? { message: "No such tag." } : status === 415 ? { error: "Content-Type must be application/json." } : { message: "Boom." } };
+      responder = () => status === 0 ? { status: 200, body: {} } : { status, body: status === 403 ? { error: "Read-only sign-in." } : status === 404 ? { status: "not_found", refusal: "unknown_parent", message: "No such tag." } : status === 415 ? { error: "Content-Type must be application/json." } : { message: "Boom." } };
       networkDown = status === 0;
       await mountPage();
       await clickText(main, "New root tag");
@@ -337,6 +337,59 @@ try {
       await clickText(main, "Save");
       const name = field(main, "name");
       return { text: paint(), formOpen: buttons(main, "Save").length, kept: name ? name.value : null };
+    },
+    editParent: async () => {
+      responder = () => ({ status: 404, body: { status: "not_found", refusal: "unknown_parent", message: "Parent tag 2 does not exist." } });
+      await mountPage();
+      await fire(nodeButton(main, 3), "click");
+      await tick(main, box(main, 11), true);
+      await clickText(main, "Edit");
+      await typeInto(main, "name", "Renamed");
+      const sel = field(main, "parent_id");
+      sel.value = "1";
+      await fire(sel, "change");
+      await clickText(main, "Save");
+      const name = field(main, "name");
+      return { text: paint(), formOpen: buttons(main, "Save").length, kept: name ? name.value : null, parent: field(main, "parent_id").value, apply: buttons(main, "Apply").length, sel: all(main, (x) => x.attrs["aria-current"] === "true").length };
+    },
+    busyCancel: async () => {
+      responder = () => ({ status: 201, body: { status: "created", tag: { tag_id: 9 }, affected_rules: [] } });
+      await mountPage();
+      await clickText(main, "New root tag");
+      await typeInto(main, "name", "Slow");
+      const openers = buttons(main, "New root tag");
+      let release;
+      gate = new Promise((r) => { release = r; });
+      const p = Promise.resolve().then(() => buttons(main, "Save")[0].handlers.click[0]());
+      await settle();
+      const during = { cancel: buttons(main, "Cancel")[0].disabled, opener: openers[0].disabled };
+      gate = null;
+      release();
+      await p;
+      await settle();
+      return { during, after: openers[0].disabled };
+    },
+    secondSave: async () => {
+      responder = () => ({ status: 500, body: { message: "Boom." } });
+      await mountPage();
+      await clickText(main, "New root tag");
+      await typeInto(main, "name", "Again");
+      await clickText(main, "Save");
+      await clickText(main, "Save");
+      return { calls: calls.length };
+    },
+    baselineAgrees: async () => {
+      responder = () => ({ status: 200, body: { status: "assigned", affected_rules: [] } });
+      await mountPage();
+      await fire(nodeButton(main, 1), "click");
+      await tick(main, box(main, 11), true);
+      const apply = buttons(main, "Apply")[0];
+      cards = [card(10, "srv-a", [{ id: 1 }]), card(11, "srv-b", [{ id: 1 }]), card(12, "srv-c", [{ id: 1 }])];
+      await page.renderManageTags(main);
+      await settle();
+      const before = calls.length;
+      await fire(apply, "click");
+      return { requests: calls.length - before, text: paint() };
     },
     deleteRefusal: async () => {
       const status = Number(scenarioParam);
