@@ -274,6 +274,7 @@ internal static class ComposeStoreAvailability
         switch (route.Tier)
         {
             case ComposeSourceTier.Raw:
+            case ComposeSourceTier.HourlyRawEdges:
                 retained = TimescaleSupport.RawRetentionSpan;
                 tierName = "raw";
                 measuredOldest = RollupCoverage.RawTableFor(cagg.HourlyView) is string rawTable

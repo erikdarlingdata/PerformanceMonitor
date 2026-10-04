@@ -153,8 +153,20 @@ public sealed class ComposeParameterCoverageTests
         2
         + (serverScoped ? 1 : 0)
         + (PredictsWideStartBind(plan, context) ? 1 : 0)
+        + (PredictsHourlyEdgesBinds(plan, context) ? 2 : 0)
         + plan.Filters.Count
         + (plan.Mode is PanelMode.Ranked or PanelMode.RankedTimeSeries ? 1 : 0);
+
+    /// <summary>The hourly-raw-edges rule from intent alone: a verdict was supplied and it equals the router's
+    /// candidate for this run, so the compiler binds the two edge instants. Not read back from the compiler's parameters.</summary>
+    internal static bool PredictsHourlyEdgesBinds(PanelPlan plan, ComposeRunContext context) =>
+        context.HourlyEdges is { } verdict
+        && ComposeSourceRouter.HourlyRawEdgesCandidate(
+            plan, context.NowUtc, context.StartUtc, context.EndUtc, context.Rollups, context.Coverage) is { } candidate
+        && ComposeSourceRouter.Resolve(plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage).Tier == ComposeSourceTier.Raw
+        && verdict.SourceTable == candidate.SourceTable
+        && verdict.HourStartUtc == candidate.HourStartUtc
+        && verdict.HourEndUtc == candidate.HourEndUtc;
 
     /// <summary>The #4689 rule from intent alone: a wide-eligible run whose common start is later than the
     /// window start, reading the Query Store table. Not read back from the compiler's parameters.</summary>
@@ -333,13 +345,13 @@ public sealed class ComposeParameterCoverageTests
     /// <summary>
     /// <see cref="PredictedParameterCount"/> restates a rule that lives in another file, so it can be
     /// outgrown. This counts the <c>ParamList</c> call sites in <c>ComposeCompiler.cs</c> and pins the
-    /// total: twenty-one, which is the three window/scope binds and one <c>topN</c> per ranked arm in
-    /// <c>Compile</c>, the Query Store wide-start bind in <c>Compile</c> when the run reads the interval table
+    /// total: twenty-three, which is the three window/scope binds and one <c>topN</c> per ranked arm in
+    /// <c>Compile</c>, the two edge-instant binds in <c>Compile</c> when the run takes the hourly-raw-edges route, the Query Store wide-start bind in <c>Compile</c> when the run reads the interval table
     /// from a later start, the seven <c>BuildFilterClause</c> operator arms, the three window/scope binds in
     /// <c>CompileAnnotation</c>, the four offset-stretch arrays in <c>ServerLocalRangeJoin</c> and the server
     /// scope in <c>CompileServerClockRead</c> (#4821; both predicted above).
     ///
-    /// <para>A twenty-second is the "next site someone adds" case, and it reds HERE — where the fix is to decide
+    /// <para>A twenty-fourth is the "next site someone adds" case, and it reds HERE — where the fix is to decide
     /// whether the prediction grows with it — rather than in the sweep, where it would read as a compiler
     /// bug. Comments and string literals are stripped first, because this file's reasoning names
     /// <c>p.AddTextArray</c> in prose.</para>
@@ -358,7 +370,7 @@ public sealed class ComposeParameterCoverageTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
         var sites = Regex.Matches(code, @"\bp\.Add[A-Za-z]+\s*\(").Count;
 
-        Assert.Equal(21, sites);
+        Assert.Equal(23, sites);
     }
 
     /// <summary>
@@ -544,6 +556,46 @@ public sealed class ComposeParameterCoverageTests
                         measure.Key,
                         wide: (true, wideStart));
                 }
+            }
+        }
+
+        /* The hourly-raw-edges route: a window ending now, with a verdict equal to the router's candidate, binds the
+           two edge instants. Fleet and scoped, so the prediction's +2 is in the population. */
+        {
+            var edgeNow = new DateTime(2026, 7, 23, 12, 0, 0, DateTimeKind.Utc);
+            var edgeCoverage = new RollupCoverage(
+                new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.QueryStatsIntervalHourlyView] = edgeNow.AddDays(-3) },
+                new Dictionary<string, DateTime>(StringComparer.Ordinal),
+                RollupAvailability.All,
+                new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.QueryStatsIntervalHourlyView] = edgeNow.AddMinutes(-20) });
+            var (edgePlan, edgeParseError) = ComposeSpec.TryParsePanel(
+                (JsonObject)JsonNode.Parse(
+                    "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,"
+                    + "\"groupBy\":[\"database_name\"],\"viz\":\"table\"}")!,
+                []);
+            Assert.True(edgeParseError is null, edgeParseError);
+            var edgeCandidate = ComposeSourceRouter.HourlyRawEdgesCandidate(
+                edgePlan!, edgeNow, edgeNow.AddHours(-24), edgeNow, RollupAvailability.All, edgeCoverage);
+            Assert.NotNull(edgeCandidate);
+
+            foreach (var servers in new[] { (IReadOnlyList<string>?)null, TwoServers })
+            {
+                var edgeContext = new ComposeRunContext(
+                    servers, edgeNow.AddHours(-24), edgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, edgeNow, edgeCoverage,
+                    HourlyEdges: new ComposeHourlyEdgesVerdict(edgeCandidate!.SourceTable, edgeCandidate.HourStartUtc, edgeCandidate.HourEndUtc));
+                var (edgeCompiled, edgeError) = ComposeCompiler.Compile(edgePlan!, edgeContext);
+                Assert.True(edgeError is null, edgeError);
+                Assert.Contains("UNION ALL", edgeCompiled!.Sql, StringComparison.Ordinal);
+                corpus.Add(new Statement(
+                    $"query_worker_us Ranked ({(servers is null ? "fleet" : "scoped")}) hourly-raw-edges",
+                    edgeCompiled,
+                    PredictedParameterCount(edgePlan!, servers is not null, edgeContext),
+                    edgePlan!.Mode,
+                    servers is not null,
+                    "query_worker_us",
+                    Annotation: null,
+                    FilterOp: null,
+                    UsesVariable: false));
             }
         }
 

@@ -34,6 +34,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="Coverage"/> is the #1759 companion to <see cref="Rollups"/>: existence is not enough, because a
 /// rollup created over pre-existing history serves only what it materialized, so the router also needs each
 /// tier's measured floor to avoid answering an old window with silence.
+/// <see cref="HourlyEdges"/> is an optional count-guard verdict for the hourly-raw-edges route: the compiler takes
+/// that route only when the verdict equals <see cref="ComposeSourceRouter.HourlyRawEdgesCandidate"/> for this run;
+/// null (the default) leaves every compile on its existing route.
 public sealed record ComposeRunContext(
     IReadOnlyList<string>? Servers,
     DateTime StartUtc,
@@ -43,7 +46,8 @@ public sealed record ComposeRunContext(
     DateTime NowUtc,
     RollupCoverage Coverage,
     bool QueryStoreWideEligible = false,
-    DateTime? QueryStoreWideStart = null)
+    DateTime? QueryStoreWideStart = null,
+    ComposeHourlyEdgesVerdict? HourlyEdges = null)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -176,8 +180,35 @@ public static class ComposeCompiler
     /// </summary>
     private static string BuildFactRelation(
         string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null,
-        IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null, bool restrictDedupe = false)
+        IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null, bool restrictDedupe = false,
+        string? edgeStartParam = null, string? edgeEndParam = null, ComposeAggregate aggregate = ComposeAggregate.Sum)
     {
+        if (route.Tier == ComposeSourceTier.HourlyRawEdges)
+        {
+            /* Three arms with one SELECT list: the rollup for the whole-hour middle, the raw restart rows the rollup
+               excludes (literal `sample_interval_seconds = 0`, so the planner can use the partial index), and raw for the
+               edges outside the middle. The window, scope, filters and module join stay outside, on the caller's alias. */
+            var groups = ComposeHybridColumns.GroupColumns[sourceTable];
+            var mid = ComposeRoute.HybridMidAlias;
+            var suffix = aggregate switch
+            {
+                ComposeAggregate.Max => "max",
+                ComposeAggregate.Min => "min",
+                _ => "sum",
+            };
+            var midCols = string.Join(", ", groups.Select(c => $"{mid}.{c}"))
+                + $", {mid}.bucket AS collection_time, "
+                + string.Join(", ", ComposeHybridColumns.Measures.Select(kv => $"{mid}.{kv.Value}_{suffix} AS {kv.Key}"))
+                + ", 1 AS sample_interval_seconds";
+            var rawCols = string.Join(", ", groups) + ", collection_time, "
+                + string.Join(", ", ComposeHybridColumns.Measures.Keys) + ", sample_interval_seconds";
+            return $"(SELECT {midCols} FROM {PgSchemaGenerator.CollectSchema}.{route.CaggRelation} AS {mid} WHERE {mid}.bucket >= {edgeStartParam} AND {mid}.bucket < {edgeEndParam} "
+                + $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+                + $"WHERE collection_time >= {edgeStartParam} AND collection_time < {edgeEndParam} AND sample_interval_seconds = 0 "
+                + $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+                + $"WHERE collection_time >= {startParam} AND collection_time <= {endParam} AND (collection_time < {edgeStartParam} OR collection_time >= {edgeEndParam}))";
+        }
+
         if (route.IsCagg)
         {
             /* #3653 A6: CaggFromClause is the FROM-clause item (decision 2) — either
@@ -312,6 +343,18 @@ public static class ComposeCompiler
             route = ComposeRoute.Raw;
         }
 
+        /* A count-guard verdict that equals the router's candidate for this run swaps a raw route to the
+           hourly-raw-edges route. IsCagg stays false, so everything but the FROM item stays on its raw path. */
+        if (context.HourlyEdges is { } verdict
+            && route.Tier == ComposeSourceTier.Raw
+            && ComposeSourceRouter.HourlyRawEdgesCandidate(plan, context.NowUtc, context.StartUtc, context.EndUtc, context.Rollups, context.Coverage) is { } candidate
+            && string.Equals(verdict.SourceTable, candidate.SourceTable, StringComparison.Ordinal)
+            && verdict.HourStartUtc == candidate.HourStartUtc
+            && verdict.HourEndUtc == candidate.HourEndUtc)
+        {
+            route = new ComposeRoute(ComposeSourceTier.HourlyRawEdges, candidate.SuccessorView, null, null, candidate.HourStartUtc, candidate.HourEndUtc);
+        }
+
         /* Auto resolves to a concrete grain from the window before anything downstream (ceiling + date_trunc);
            a non-Auto bucket passes through unchanged, so existing panels are byte-for-byte identical. */
         var effectiveBucket = plan.TimeBucket;
@@ -347,6 +390,16 @@ public static class ComposeCompiler
         var endParam = p.AddTimestamp(context.EndUtc);
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
+
+        /* The hourly-raw-edges route binds its two edge instants here and no other route binds anything, so every
+           other compile keeps its parameters. wideStartParam below is Query Store only and the hybrid route never
+           serves Query Store, so the two binds never co-occur. */
+        string? edgeStartParam = null, edgeEndParam = null;
+        if (route.Tier == ComposeSourceTier.HourlyRawEdges)
+        {
+            edgeStartParam = p.AddTimestamp(route.EdgeStartUtc!.Value);
+            edgeEndParam = p.AddTimestamp(route.EdgeEndUtc!.Value);
+        }
 
         /* #4689: below raw's floor the interval table is exact only from the runner's common start
            (ComposeRunContext.QueryStoreWideStart, the latest per-server read start), so an eligible Query Store
@@ -386,7 +439,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? $"{FactAlias}.server_name = ANY({serverScopeParam})" : null, restrictDedupe));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? $"{FactAlias}.server_name = ANY({serverScopeParam})" : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a

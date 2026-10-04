@@ -3472,6 +3472,179 @@ public sealed class DarlingComposeTests
         Assert.NotNull(outcome.Error);
         Assert.Contains(expectedFragment, outcome.Error!, StringComparison.OrdinalIgnoreCase);
     }
+
+    /* ─────────────── the hourly-raw-edges route (a count-guard verdict supplied) ─────────────── */
+
+    private static readonly DateTime EdgeNow = new(2026, 7, 23, 12, 0, 0, DateTimeKind.Utc);
+
+    private const string EdgePanelJson =
+        "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\",\"object_name\"],\"viz\":\"table\"}";
+
+    private static RollupCoverage EdgeCoverage() => new(
+        new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.QueryStatsIntervalHourlyView] = EdgeNow.AddDays(-3) },
+        new Dictionary<string, DateTime>(StringComparer.Ordinal),
+        RollupAvailability.All,
+        new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.QueryStatsIntervalHourlyView] = EdgeNow.AddMinutes(-20) });
+
+    private static ComposeRunContext EdgeContext(PanelPlan plan, bool withVerdict, IReadOnlyList<string>? servers = null)
+    {
+        var coverage = EdgeCoverage();
+        var start = EdgeNow.AddHours(-24);
+        var candidate = ComposeSourceRouter.HourlyRawEdgesCandidate(plan, EdgeNow, start, EdgeNow, RollupAvailability.All, coverage);
+        Assert.NotNull(candidate);
+        return new ComposeRunContext(
+            servers, start, EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, coverage,
+            HourlyEdges: withVerdict ? new ComposeHourlyEdgesVerdict(candidate!.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc) : null);
+    }
+
+    private static ComposeCompiled CompileEdge(PanelPlan plan, ComposeRunContext context)
+    {
+        var (compiled, error) = ComposeCompiler.Compile(plan, context);
+        Assert.True(error is null, error);
+        return compiled!;
+    }
+
+    private static string EdgeFrom(string suffix) =>
+        "(SELECT mid.server_id, mid.server_name, mid.database_name, mid.query_hash, mid.sql_handle, mid.bucket AS collection_time, "
+        + $"mid.worker_time_{suffix} AS delta_worker_time, mid.elapsed_time_{suffix} AS delta_elapsed_time, mid.execution_count_{suffix} AS delta_execution_count, "
+        + "1 AS sample_interval_seconds FROM collect.query_stats_interval_hourly AS mid WHERE mid.bucket >= $3 AND mid.bucket < $4 "
+        + "UNION ALL SELECT server_id, server_name, database_name, query_hash, sql_handle, collection_time, delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds "
+        + "FROM collect.query_stats WHERE collection_time >= $3 AND collection_time < $4 AND sample_interval_seconds = 0 "
+        + "UNION ALL SELECT server_id, server_name, database_name, query_hash, sql_handle, collection_time, delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds "
+        + "FROM collect.query_stats WHERE collection_time >= $1 AND collection_time <= $2 AND (collection_time < $3 OR collection_time >= $4))";
+
+    [Fact]
+    public void Compile_HourlyRawEdges_MatchingVerdict_EmitsTheFullPinnedSql()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var compiled = CompileEdge(plan, EdgeContext(plan, withVerdict: true));
+
+        Assert.Equal("WITH m AS (\n"
+            + "    SELECT server_name, sql_handle, object_name, schema_name, database_name\n"
+            + "    FROM (\n"
+            + "        SELECT server_name, sql_handle, object_name, schema_name, database_name,\n"
+            + "               ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle ORDER BY collection_time DESC) AS rn\n"
+            + "        FROM collect.procedure_stats\n"
+            + "        WHERE collection_time >= $1\n"
+            + "          AND collection_time <= $2\n"
+            + "          AND sql_handle IS NOT NULL\n"
+            + "          AND sql_handle <> ''\n"
+            + "    ) ranked_modules\n"
+            + "    WHERE rn = 1\n"
+            + ")\n"
+            + "SELECT f.database_name AS database_name, COALESCE(m.object_name, '(ad hoc)') AS object_name, (CAST(SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS double precision)) * 1.0 / 1000.0 AS value\n"
+            + "FROM " + EdgeFrom("sum") + " AS f\n"
+            + "LEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\n"
+            + "WHERE f.collection_time >= $1\n"
+            + "  AND f.collection_time <= $2\n"
+            + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
+            + "ORDER BY value DESC NULLS LAST\n"
+            + "LIMIT $5", compiled.Sql);
+        Assert.Contains("collect.procedure_stats", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("module_map", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_BindsStartEnd_Scope_HourStart_HourEnd_Filters_ThenTopN_InOrder()
+    {
+        var plan = ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"table\","
+            + "\"filters\":[{\"dimension\":\"database_name\",\"op\":\"eq\",\"value\":\"db1\"}]}");
+        var servers = new[] { "PROD-01" };
+        var compiled = CompileEdge(plan, EdgeContext(plan, true, servers));
+
+        Assert.Equal(7, compiled.Parameters.Count);
+        Assert.Equal(EdgeNow.AddHours(-24), (DateTime)compiled.Parameters[0].Value!);
+        Assert.Equal(EdgeNow, (DateTime)compiled.Parameters[1].Value!);
+        Assert.Equal(servers, (string[])compiled.Parameters[2].Value!);
+        Assert.Equal(EdgeNow.AddHours(-24), (DateTime)compiled.Parameters[3].Value!);
+        Assert.Equal(EdgeNow.AddHours(-1), (DateTime)compiled.Parameters[4].Value!);
+        Assert.Equal(new[] { "db1" }, (string[])compiled.Parameters[5].Value!);
+        Assert.Equal(10, compiled.Parameters[6].Value);
+    }
+
+    [Theory]
+    [InlineData("max")]
+    [InlineData("min")]
+    public void Compile_HourlyRawEdges_MaxAndMin_ProjectTheirOwnRollupColumns(string aggregate)
+    {
+        var plan = ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"" + aggregate + "\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}");
+        var compiled = CompileEdge(plan, EdgeContext(plan, true));
+
+        Assert.Contains("FROM " + EdgeFrom(aggregate) + " AS f\n", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_NoVerdict_IsByteIdenticalToTheRawCompile_AndBindsNoEdges()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var withNone = CompileEdge(plan, EdgeContext(plan, false));
+        var (raw, error) = ComposeCompiler.Compile(
+            plan, new ComposeRunContext(null, EdgeNow.AddHours(-24), EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, EdgeCoverage()));
+
+        Assert.True(error is null, error);
+        Assert.Equal(raw!.Sql, withNone.Sql);
+        Assert.Equal(3, withNone.Parameters.Count);
+        Assert.Contains("FROM collect.query_stats AS f\n", withNone.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNION ALL", withNone.Sql, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("wrong start hour", 0)]
+    [InlineData("wrong end hour", 1)]
+    [InlineData("wrong table", 2)]
+    [InlineData("avg", 3)]
+    [InlineData("ratio", 4)]
+    [InlineData("procedure_stats", 5)]
+    [InlineData("minute-grain time series", 6)]
+    public void Compile_HourlyRawEdges_ANonMatchingVerdict_IsByteIdenticalToNoVerdict(string label, int kind)
+    {
+        var json = kind switch
+        {
+            3 => "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"avg\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}",
+            4 => "{\"source\":\"query_stats\",\"ratio\":\"query_avg_cpu_us\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}",
+            5 => "{\"source\":\"procedure_stats\",\"measure\":\"proc_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"table\"}",
+            6 => "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"viz\":\"line\"}",
+            _ => EdgePanelJson,
+        };
+        var plan = ValidPlan(json);
+        var coverage = EdgeCoverage();
+        var start = EdgeNow.AddHours(-24);
+        var offered = ComposeSourceRouter.HourlyRawEdgesCandidate(ValidPlan(EdgePanelJson), EdgeNow, start, EdgeNow, RollupAvailability.All, coverage)!;
+        var given = kind switch
+        {
+            0 => new ComposeHourlyEdgesVerdict(offered.SourceTable, offered.HourStartUtc.AddHours(1), offered.HourEndUtc),
+            1 => new ComposeHourlyEdgesVerdict(offered.SourceTable, offered.HourStartUtc, offered.HourEndUtc.AddHours(-1)),
+            2 => new ComposeHourlyEdgesVerdict("procedure_stats", offered.HourStartUtc, offered.HourEndUtc),
+            _ => new ComposeHourlyEdgesVerdict(plan.Measure.SourceTable, offered.HourStartUtc, offered.HourEndUtc),
+        };
+
+        var plain = new ComposeRunContext(null, start, EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, coverage);
+        var (expected, expectedError) = ComposeCompiler.Compile(plan, plain);
+        var (actual, actualError) = ComposeCompiler.Compile(plan, plain with { HourlyEdges = given });
+
+        Assert.True(expected is not null, label + ": " + expectedError);
+        Assert.Equal(expectedError, actualError);
+        Assert.Equal(expected!.Sql, actual!.Sql);
+        Assert.Equal(expected.Parameters.Count, actual.Parameters.Count);
+        Assert.DoesNotContain("UNION ALL", actual.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RetentionNotice_HourlyRawEdges_SaysTheRawWording()
+    {
+        var now = EdgeNow;
+        var edgesRoute = new ComposeRoute(ComposeSourceTier.HourlyRawEdges, "query_stats_interval_hourly", null, null, now.AddHours(-23), now.AddHours(-1));
+
+        var edgesNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", edgesRoute, now.AddDays(-10), now, RollupAvailability.All, RollupCoverage.Unknown);
+        var rawNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", ComposeRoute.Raw, now.AddDays(-10), now, RollupAvailability.All, RollupCoverage.Unknown);
+
+        Assert.NotNull(edgesNotice);
+        Assert.Equal(rawNotice, edgesNotice);
+        Assert.Contains("4 days", edgesNotice, StringComparison.Ordinal);
+        Assert.DoesNotContain("daily", edgesNotice, StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 /// <summary>
