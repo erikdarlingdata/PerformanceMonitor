@@ -150,7 +150,7 @@ function loadUtilization(body, server, ctx) {
         el("p", { class: "finops-reason", text: data.verdict_reason }),
         el("details", {}, [
           el("summary", { text: "7-Day Provisioning Trend" }),
-          VIZ.table({ rows: trend }, { rowsKey: "rows", columns: TREND_COLUMNS, emptyText: "No provisioning trend in the last 7 days." }),
+          VIZ.table({ rows: trend }, { rowsKey: "rows", columns: TREND_COLUMNS, sortable: false, emptyText: "No provisioning trend in the last 7 days." }),
         ]),
       ]);
     } catch (e) {

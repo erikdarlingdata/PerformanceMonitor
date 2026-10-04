@@ -23,7 +23,7 @@
 
 import { el, mount, readTool, buildQuery, loadingStrip, errorStrip, emptyStrip, disclosure,
          ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
-import { VIZ } from "../panels.js";
+import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { mutePrefillParams } from "../mute-context.js";
 import { getSession } from "../views-api.js";
 
@@ -32,11 +32,14 @@ import { getSession } from "../views-api.js";
    them - "No channel configured (unconfigured)" is the shape this prevents. */
 const STATE_ONLY_CHANNELS = new Set(Object.keys(ALERT_STATE_LABELS));
 
+/* Most urgent first when ascending, the order the fleet bands use (Critical, Warning, then the calm states). */
+const SEVERITY_RANK = { critical: 0, warning: 1, info: 2, resolution: 3 };
+
 const ALERT_COLUMNS = [
   { key: "alert_time", label: "Time", format: "time" },
   { key: "server_name", label: "Server" },
   { key: "metric_name", label: "Metric" },
-  { key: "severity", label: "Severity", render: (a) => severityCell(a) },
+  { key: "severity", label: "Severity", sortValue: (a) => (a.severity == null ? null : (SEVERITY_RANK[a.severity] ?? 9)), render: (a) => severityCell(a) },
   { key: "current_value", label: "Value", format: "num1" },
   { key: "threshold_value", label: "Threshold", format: "num1" },
   { key: "status", label: "Status", render: (a) => statusCell(a) },
@@ -343,6 +346,7 @@ function drawAlerts(state) {
 
   if (state.tbody) {
     reconcileRows(state.tbody, rows, state.rowMap);
+    reapplyGridSort(state.tbody);
     return;
   }
 
@@ -350,7 +354,7 @@ function drawAlerts(state) {
   mount(state.tableBox, table);
   const tbody = table.querySelector("tbody");
   const rowMap = new Map();
-  [...tbody.children].forEach((tr, i) => rowMap.set(alertKey(rows[i]), tr));
+  [...tbody.children].forEach((tr) => rowMap.set(alertKey(gridRowOf(tr)), tr));
   state.tbody = tbody;
   state.rowMap = rowMap;
 }

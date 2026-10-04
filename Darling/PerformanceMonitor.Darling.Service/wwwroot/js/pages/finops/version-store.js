@@ -29,6 +29,11 @@ const COLUMNS = [
   { key: "offrow_version_cleaner_end_time", label: "Off-row cleaner end", format: "time" },
   { key: "oldest_active_transaction_id", label: "Oldest active transaction id", format: "int" },
   { key: "oldest_aborted_transaction_id", label: "Oldest aborted transaction id", format: "int" },
+  { key: "aborted_transaction_lag", label: "Aborted Lag", format: "int" },
+  { key: "cleanup_state", label: "Cleanup" },
+  { key: "skipped_low_water_mark", label: "Skipped: Secondary", format: "int" },
+  { key: "skipped_min_useful_xts", label: "Skipped: Snapshot", format: "int" },
+  { key: "skipped_oldest_aborted", label: "Skipped: Aborted", format: "int" },
 ];
 
 /* One row per collection time, one column per database, so the chart draws one line per database. */

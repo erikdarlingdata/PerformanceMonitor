@@ -36,6 +36,7 @@ import {
   apiGet,
   buildQuery,
   getPath,
+  parseUtc,
   applyFormat,
   bandClass,
   sevClass,
@@ -179,7 +180,15 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev}] } */
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue}], sortable, sortId }
+
+   Column-header sort (#4843). A header click cycles ascending -> descending -> the server's own order, with a ▲/▼
+   indicator and aria-sort; Enter and Space on the focused header do the same. The comparison reads the RAW row value
+   (never the formatted cell): numbers numerically, `time`/`reltime` columns by the stored instant, text without case,
+   null/undefined/"" last in BOTH directions, and ties keep the server's order. `sortable: false` on the descriptor
+   opts a table out (an order that carries meaning, e.g. a chronological trend the desktop grid also leaves unsorted);
+   on a column it opts that column out. A column's `sortValue(row)` supplies the sort value when the cell is a custom
+   render over a derived value. */
 function vizTable(data, desc) {
   const allCols = Array.isArray(desc.columns) ? desc.columns : [];
   if (!allCols.length) return emptyStrip(NO_FIELDS_MSG);
@@ -188,16 +197,204 @@ function vizTable(data, desc) {
   if (!rows.length) return emptyStrip(desc.emptyText || "No rows in this window.");
   const cols = visibleColumns(allCols, rows);
 
+  const grid = desc.sortable === false ? null : makeGridSort(desc, cols, rows);
+  const bodyRows = rows.map((row) => {
+    const tr = el("tr", {}, cols.map((c) => cell(row, c)));
+    trRow.set(tr, row);
+    return tr;
+  });
+  /* The rows are classified when the body attaches, so the headers are built after the grid has seen them. */
+  const tbody = el("tbody", {}, bodyRows);
+  if (grid) grid.attach(tbody, bodyRows);
   const head = el(
     "tr",
     {},
-    cols.map((c) => el("th", { text: c.label, class: isNumericCol(c) ? "num" : null }))
+    cols.map((c, i) => (grid && grid.eligible[i] ? grid.headerCell(c, i) : headerCell(c)))
   );
-  const bodyRows = rows.map((row) => el("tr", {}, cols.map((c) => cell(row, c))));
+  if (grid) grid.syncHeads();
 
-  return el("div", { class: "table-wrap" }, [
-    el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, bodyRows)]),
-  ]);
+  return el("div", { class: "table-wrap" }, [el("table", { class: "data" }, [el("thead", {}, [head]), tbody])]);
+}
+
+/* An unsortable header cell. The sortable one is built by makeGridSort().headerCell; both are the place a later
+   header affordance (a filter, a menu) attaches. */
+function headerCell(c) {
+  return el("th", { text: c.label, class: isNumericCol(c) ? "num" : null });
+}
+
+/* The sort state of every grid, at MODULE scope so the 60 s poll's rebuild of a page re-applies the chosen sort.
+   Keyed by gridSortKey(): the route (the hash without its query, so a server or tab switch is a different table)
+   plus the descriptor's identity plus its column set. State: { col, dir } with dir "asc" | "desc"; absent means
+   the server's order. */
+const gridSortState = new Map(); // grows by one entry per table the session sorts (routes x tables), so it is bounded and never pruned
+/* tr -> its row object, so a grid whose rows are reconciled in place (Alert History) can re-sort what is in the DOM. */
+const trRow = new WeakMap();
+const tbodyGrid = new WeakMap();
+
+/* The table identity: `desc.sortId`, else `desc.id`, else `desc.title`, else `desc.rowsKey`. Panels built by
+   renderPanel carry a title; the FinOps tabs call VIZ.table with a rowsKey, and two grids of one tab can share one,
+   so the identity also carries the column keys. */
+function gridSortKey(desc, cols) {
+  const route = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash.split("?")[0] : "";
+  const id = desc.sortId ?? desc.id ?? desc.title ?? desc.rowsKey ?? "";
+  return route + "|" + id + "|" + cols.map(colId).join(",");
+}
+
+function colId(c) {
+  return String(c.key ?? "") + "\u0001" + String(c.label ?? "");
+}
+
+function isEmptyValue(v) {
+  return v == null || v === "" || (typeof v === "number" && Number.isNaN(v));
+}
+
+/* "time" | "number" | "text" for a column, from how it declares its format; a column with no format decides from
+   its values (every present one a number is a number). */
+function sortKindOf(c, values) {
+  if (c.format === "time" || c.format === "reltime") return "time";
+  if (c.format === "bool") return "number";
+  if (isNumericCol(c)) return "number";
+  const present = values.filter((v) => !isEmptyValue(v));
+  return present.length && present.every((v) => typeof v === "number") ? "number" : "text";
+}
+
+function sortKeyOf(kind, v) {
+  if (isEmptyValue(v)) return null;
+  if (kind === "time") {
+    const d = v instanceof Date ? v : parseUtc(typeof v === "string" ? v : null);
+    return d && !Number.isNaN(d.getTime()) ? d.getTime() : typeof v === "number" ? v : null;
+  }
+  if (kind === "number") {
+    const n = typeof v === "boolean" ? (v ? 1 : 0) : Number(v);
+    return Number.isNaN(n) ? null : n;
+  }
+  return String(v).toLowerCase();
+}
+
+/** Compare two sort keys (null last, regardless of dir). Exported for the behaviour test. */
+export function compareSortKeys(a, b, dir) {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  const r = a < b ? -1 : a > b ? 1 : 0;
+  return dir === "desc" ? -r : r;
+}
+
+function makeGridSort(desc, cols, rows) {
+  const stateKey = gridSortKey(desc, cols);
+  let kinds = [];
+  let sortable = [];
+  /* A column sorts when it is not opted out, some row has a value to sort on (a custom-render column over a key the
+     rows do not carry has nothing to order), and that value is not an array or object (a list cell has no order
+     unless the column supplies a sortValue). Recomputed from the rows whenever they change. */
+  function classify(rowList) {
+    kinds = cols.map((c) => sortKindOf(c, rowList.map((r) => valueOf(r, c))));
+    sortable = cols.map((c) => {
+      if (c.sortable === false) return false;
+      const present = rowList.map((r) => valueOf(r, c)).filter((v) => !isEmptyValue(v));
+      return present.length > 0 && (typeof c.sortValue === "function" || !present.some((v) => typeof v === "object" && !(v instanceof Date)));
+    });
+    grid.sortable = sortable;
+  }
+  const ths = [];
+  let tbody = null;
+  let moved = false;
+
+  function valueOf(row, c) {
+    return typeof c.sortValue === "function" ? c.sortValue(row) : getPath(row, c.key);
+  }
+
+  function indicate() {
+    const st = gridSortState.get(stateKey);
+    cols.forEach((c, i) => {
+      const th = ths[i];
+      if (!th) return;
+      const live = sortable[i];
+      th.className = live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "";
+      th.setAttribute("tabindex", live ? "0" : "-1");
+      th.setAttribute("title", live ? "Sort by " + c.label : "");
+      const on = live && st && st.col === colId(c);
+      th.setAttribute("aria-sort", on ? (st.dir === "asc" ? "ascending" : "descending") : "none");
+      th.sortInd.textContent = on ? (st.dir === "asc" ? " ▲" : " ▼") : "";
+    });
+  }
+
+  /* Orders `trs` (taken as the server's order) by the current state and puts them in the tbody. */
+  function apply(trs) {
+    const st = gridSortState.get(stateKey);
+    let ordered = trs;
+    const ci = st ? cols.findIndex((c) => colId(c) === st.col) : -1;
+    if (ci >= 0 && sortable[ci]) {
+      const keyed = trs.map((tr, i) => ({ tr, i, k: sortKeyOf(kinds[ci], valueOf(trRow.get(tr), cols[ci])) }));
+      keyed.sort((x, y) => compareSortKeys(x.k, y.k, st.dir) || x.i - y.i);
+      ordered = keyed.map((x) => x.tr);
+    }
+    /* A grid still in the server's order (no sort chosen, none undone) is left as built: the DOM is only touched
+       once a sort has been in play. */
+    if (ordered !== trs || moved) {
+      for (const tr of ordered) tbody.appendChild(tr);
+      moved = ordered !== trs;
+    }
+    indicate();
+  }
+
+  const grid = {
+    sortable: [],
+    /* A header for every column that is not opted out: whether it carries the sort affordance is re-decided by
+       indicate() against the current rows. */
+    eligible: cols.map((c) => c.sortable !== false),
+    headerCell(c, i) {
+      const ind = el("span", { class: "sort-ind", "aria-hidden": "true" });
+      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : ""), tabindex: "0", "aria-sort": "none", title: "Sort by " + c.label }, [c.label, ind]);
+      th.sortInd = ind;
+      const cycle = () => {
+        if (!sortable[i]) return;
+        const st = gridSortState.get(stateKey);
+        const id = colId(c);
+        if (!st || st.col !== id) gridSortState.set(stateKey, { col: id, dir: "asc" });
+        else if (st.dir === "asc") gridSortState.set(stateKey, { col: id, dir: "desc" });
+        else gridSortState.delete(stateKey);
+        apply(grid.serverOrder);
+      };
+      th.addEventListener("click", cycle);
+      th.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          cycle();
+        }
+      });
+      ths[i] = th;
+      return th;
+    },
+    syncHeads: () => indicate(),
+    serverOrder: [],
+    attach(body, trs) {
+      tbody = body;
+      grid.serverOrder = trs.slice();
+      classify(trs.map((tr) => trRow.get(tr)));
+      tbodyGrid.set(body, grid);
+      apply(grid.serverOrder);
+    },
+    /* The tbody's rows were reconciled in place into the server's order: take that as the new server order. */
+    reapply() {
+      grid.serverOrder = [...tbody.children];
+      classify(grid.serverOrder.map((tr) => trRow.get(tr)));
+      apply(grid.serverOrder);
+    },
+  };
+  return grid;
+}
+
+/** The row object a rendered grid row was built from (a sorted grid's DOM order is not the row order). */
+export function gridRowOf(tr) {
+  return trRow.get(tr);
+}
+
+/** For a grid whose rows are reconciled in place (Alert History): after putting the rows back in the server's order,
+    call this with the tbody to re-apply the chosen sort. A tbody that is not a sortable grid is left alone. */
+export function reapplyGridSort(tbody) {
+  const g = tbody && tbodyGrid.get(tbody);
+  if (g) g.reapply();
 }
 
 /* A table column may depend on the rows: `hideWhenEmpty: true` drops it when no row has a value at its key (null,

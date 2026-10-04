@@ -130,4 +130,23 @@ public sealed class DarlingMcpPvsToolsTests
         Assert.DoesNotContain("getdate", sql.ToLowerInvariant());
         Assert.DoesNotContain("[", sql, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void PvsStatsLatestSql_ReadsTheThreeSkippedCounters()
+    {
+        var sql = DarlingPvsReader.PvsStatsLatestSql;
+        Assert.Contains("pvs_off_row_page_skipped_low_water_mark", sql, StringComparison.Ordinal);
+        Assert.Contains("pvs_off_row_page_skipped_min_useful_xts", sql, StringComparison.Ordinal);
+        Assert.Contains("pvs_off_row_page_skipped_oldest_aborted_xdesid", sql, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(97388L, 1244L, 96144L)]
+    [InlineData(97388L, 0L, null)]
+    [InlineData(0L, 1244L, null)]
+    [InlineData(null, 1244L, null)]
+    public void AbortedLag_IsTheGap_ButNullThroughTheZeroSentinel(long? active, long? aborted, long? expected)
+    {
+        Assert.Equal(expected, DarlingMcpPvsTools.AbortedLag(active, aborted));
+    }
 }

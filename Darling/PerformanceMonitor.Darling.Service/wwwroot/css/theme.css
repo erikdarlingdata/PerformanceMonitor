@@ -48,6 +48,11 @@
   color-scheme: dark;
 }
 
+/* Sortable grid headers (#4843): a click or Enter/Space cycles ascending, descending, the server's order. */
+table.data th.sortable { cursor: pointer; user-select: none; }
+table.data th.sortable:hover { color: var(--fg); }
+table.data th.sortable:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: -2px; }
+table.data th .sort-ind { display: inline-block; min-width: 1em; font-size: 0.8em; }
 /* Mute Rules page (#4843) */
 .mute-form { padding: 12px 16px; margin-bottom: 12px; }
 .mute-field { display: block; margin: 6px 0; }
