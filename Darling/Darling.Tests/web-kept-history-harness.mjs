@@ -347,6 +347,14 @@ const scenarios = {
     window_truncated: true, truncation_note: FLOOR_NOTE,
     recommendations: [{ database_name: "db1", query_id: 1 }], automatic_tuning: [{ database_name: "db1" }],
   }),
+  // An empty Plan Corrections answer: the note rides on the envelope. With the flag set it draws; without it, none.
+  floorPlanCorrectionsEmpty: () => tabFloor("queries", "get_plan_corrections", {
+    status: "empty", message: "No plan corrections in this window.", window_truncated: true, truncation_note: FLOOR_NOTE,
+  }),
+  floorPlanCorrectionsEmptyUntruncated: () => tabFloor("queries", "get_plan_corrections", {
+    status: "empty", message: "No plan corrections in this window.",
+  }),
+
   floorClutter: () => tabFloor("queries", "get_query_store_clutter", {
     databases: [{ database_name: "db1" }],
     qs_overhead: { wait_stats: { included: [{ wait_type: "QDS_X" }] }, memory_clerk: { latest_memory_mb: 1 } },

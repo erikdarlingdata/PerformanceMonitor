@@ -408,6 +408,21 @@ public sealed class WebDataStartNoteTests
         Assert.Empty(Strings(r, "errors"));
     }
 
+    /// <summary>An <c>empty</c> Plan Corrections answer carries the note in its envelope: the recommendations panel draws it
+    /// above the empty strip, and Automatic Tuning (<c>windowNote:false</c>) stays quiet. Without the flag, nothing draws.</summary>
+    [Fact]
+    public void AnEmptyPlanCorrectionsAnswer_DrawsTheNote_OnlyWhenTruncated_AndNotOnAutomaticTuning()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorPlanCorrectionsEmpty", out var r)) return;
+        var notice = Assert.Single(Strings(r, "notices"));
+        Assert.StartsWith("Plan Corrections", notice, StringComparison.Ordinal);
+        Assert.Contains("partial window:", notice, StringComparison.Ordinal);
+        Assert.DoesNotContain(Strings(r, "notices"), n => n.StartsWith("Automatic Tuning", StringComparison.Ordinal));
+
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorPlanCorrectionsEmptyUntruncated", out var q)) return;
+        Assert.Empty(Strings(q, "notices"));
+    }
+
     [Fact]
     public void TheQueryStoreClutterTiles_DrawTheNestedWindowNote_OnTheGridAndTheOverheadGrid_ButNotOnTheClerkTile()
     {
