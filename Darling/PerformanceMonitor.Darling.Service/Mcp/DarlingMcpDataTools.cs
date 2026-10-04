@@ -976,7 +976,7 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     private const int QueryTextPreviewLength = 400;
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Long windows may read whole days from a daily summary; approximate: true says so. approximation_note says what the summary can miss; summary_days names the days it covered. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
     public static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -989,6 +989,12 @@ public sealed class DarlingMcpDataTools
         [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         CancellationToken cancellationToken = default) =>
         GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength, cancellationToken);
+
+    /// <summary>The sentence beside <c>approximate: true</c> on get_query_store_top (#5094): whole days of the window came from the
+    /// daily summary, which is built after each day ends.</summary>
+    internal const string QueryStoreApproximationNote =
+        "Whole days in this window came from a daily summary built after each day ends. A row changed after its day was "
+        + "summarized is missed, or for about a day can be counted twice, so treat totals and the ranking as close, not exact.";
 
     /// <summary>
     /// get_query_store_top under an explicit <paramref name="previewLength"/> (#4198): the MCP tool passes
@@ -1091,6 +1097,7 @@ public sealed class DarlingMcpDataTools
                         "queries did not run.");
             }
 
+            var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
@@ -1134,6 +1141,17 @@ public sealed class DarlingMcpDataTools
                    WriteDisclosure); the census fails a bare `truncated` beside `effective_hours_back`. The note
                    beside it keeps its name: it is the prose for THIS flag, and `*_note` is the house idiom. */
                 window_truncated = truncated,
+                /* #5094: the daily summary answered whole days of this window, so the totals and the ranking are close,
+                   not exact. Always present, so a caller reads the flag rather than inferring it from a missing key. */
+                approximate = approximate,
+                approximation_note = approximate ? QueryStoreApproximationNote : null,
+                summary_days = approximate
+                    ? new
+                    {
+                        from = read.DailySpan!.Value.Start.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                        to_exclusive = read.DailySpan!.Value.EndExclusive.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                    }
+                    : null,
                 truncation_note = !truncated
                     ? null
                     : tablePlan is null

@@ -293,6 +293,40 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, 'h' 
         });
     }
 
+    private static async Task<System.Text.Json.JsonElement> ToolAnswerAsync(NpgsqlDataSource source, int hours, CancellationToken ct) =>
+        System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(
+            source, "srv1", hours, Top, null, "2026-01-14T06:00:00Z", null, null, false, 400, ct)).RootElement.Clone();
+
+    [Fact]
+    public async Task TheTool_SaysApproximate_WithTheSummaryDays_WhenABuiltDayWasUsed()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            var answer = await ToolAnswerAsync(source, 72, ct);
+
+            Assert.True(answer.GetProperty("approximate").GetBoolean());
+            Assert.Equal(DarlingMcpDataTools.QueryStoreApproximationNote, answer.GetProperty("approximation_note").GetString());
+            var days = answer.GetProperty("summary_days");
+            Assert.Equal("2026-01-12", days.GetProperty("from").GetString());
+            Assert.Equal("2026-01-14", days.GetProperty("to_exclusive").GetString());
+            await Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task TheTool_SaysNotApproximate_AndCarriesNoNote_WhenNoBuiltDayWasUsed()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            await ExecAsync(connection, "DELETE FROM collect.query_store_top_daily; DELETE FROM collect.query_store_top_daily_built", ct);
+            var answer = await ToolAnswerAsync(source, 72, ct);
+
+            Assert.False(answer.GetProperty("approximate").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, answer.GetProperty("approximation_note").ValueKind);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, answer.GetProperty("summary_days").ValueKind);
+        });
+    }
+
     [Fact]
     public async Task AGapInTheBuiltDays_UsesTheLongestRun_AndStillEqualsTodaysRead()
     {
