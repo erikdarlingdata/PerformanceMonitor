@@ -77,12 +77,27 @@ public sealed class RestartRowIndexLiveTests
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         await Exec(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
 
-        var rawNow = DateTime.UtcNow;
-        var utcNow = DateTime.SpecifyKind(new DateTime(rawNow.Ticks - (rawNow.Ticks % 10)), DateTimeKind.Unspecified);
+        /* A fixed anchor, 23:50 UTC on a fixed past day, not the wall clock. The seed reaches back 7,000 seconds
+           from this instant, and chunks are one day aligned to UTC midnight, so a seed ending at the real "now"
+           straddles two chunks between 00:00 and about 02:00 UTC and leaves the newest, uncompressed chunk
+           nearly empty. There a Seq Scan can cost less than the partial index and the no-heap-scan assertion
+           fails. Ending at 23:50 keeps the whole seed inside one day. */
+        var utcNow = new DateTime(2026, 1, 15, 23, 50, 0, DateTimeKind.Unspecified);
         var windowStart = utcNow.AddHours(-2);
 
         await SeedAsync(connection, "collect.query_stats", utcNow, ct);
         await SeedAsync(connection, "collect.procedure_stats", utcNow, ct);
+
+        /* The uncompressed chunk is the one the plan assertion is about; keep it a realistic size so a seed
+           change cannot bring back a near-empty chunk. */
+        foreach (var table in new[] { "collect.query_stats", "collect.procedure_stats" })
+        {
+            await using var newest = new NpgsqlCommand("SELECT count(*) FROM " + table + " WHERE collection_time >= $1", connection);
+            newest.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = utcNow.Date });
+            var newestRows = Convert.ToInt64(await newest.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+            Assert.True(newestRows >= 1000, table + " holds only " + newestRows + " rows in its newest chunk; it must be a realistic day, not a near-empty chunk");
+        }
+
         await TuningStartPasses.ConvergeAsync(connection, ct);
         await Exec(connection, "ANALYZE collect.query_stats", ct);
         await Exec(connection, "ANALYZE collect.procedure_stats", ct);
@@ -193,9 +208,9 @@ public sealed class RestartRowIndexLiveTests
         var heapScans = new List<string>();
         Collect(doc.RootElement[0].GetProperty("Plan"), reads, heapScans);
 
-        Assert.NotEmpty(reads);
+        Assert.True(reads.Count > 0, "no index read found in the plan:\n" + json);
         Assert.All(reads, r => Assert.Contains(indexName, r.Index, StringComparison.Ordinal));
-        Assert.Empty(heapScans);
+        Assert.True(heapScans.Count == 0, "the plan scans the heap (" + string.Join(", ", heapScans) + "):\n" + json);
     }
 
     /// <summary>
