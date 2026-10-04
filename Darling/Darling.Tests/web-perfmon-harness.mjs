@@ -89,7 +89,8 @@ try {
   fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
   fs.copyFileSync(path.join(jsDir, "panels.js"), path.join(scratch, "panels.js"));
   fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
-  fs.copyFileSync(path.join(jsDir, "pages", "analysis-findings.js"), path.join(scratch, "pages", "analysis-findings.js"));
+  const findings = path.join("pages", "analysis-findings.js");
+  if (fs.existsSync(path.join(jsDir, findings))) fs.copyFileSync(path.join(jsDir, findings), path.join(scratch, findings));
   fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
   fs.copyFileSync(path.join(jsDir, "charts.js"), path.join(scratch, "charts-real.js"));
   fs.writeFileSync(
