@@ -98,7 +98,7 @@ try {
       "  const format = opts.formatValue || ((v) => String(v));\n" +
       "  const node = drawLineChart({ ...opts, formatValue: (v) => { const text = format(v); if (drawing) axis.push(text); return text; } });\n" +
       "  drawing = false;\n" +
-      "  chartCalls.push({ series: (opts.series || []).map((s) => ({ key: s.key, label: s.label })), unit: opts.unit == null ? null : opts.unit, points: opts.points, windowStart: opts.windowStart, windowEnd: opts.windowEnd, axis, node });\n" +
+      "  chartCalls.push({ series: (opts.series || []).map((s) => ({ key: s.key, label: s.label })), unit: opts.unit == null ? null : opts.unit, mode: opts.mode || null, points: opts.points, windowStart: opts.windowStart, windowEnd: opts.windowEnd, axis, node });\n" +
       "  return node;\n" +
       "}\n" +
       "export function zoomableLineChart(opts) { return renderLineChart(opts); }\n"
@@ -155,7 +155,7 @@ const table = all(root, "table")[0] || null;
 const calls = modules.charts.chartCalls;
 
 console.log(JSON.stringify({
-  charts: calls.map((c) => ({ series: c.series, unit: c.unit, points: c.points.map((p) => [p.time, p.sql_medium, p.sql_severe, p.os_medium, p.os_severe]), windowStart: c.windowStart, windowEnd: c.windowEnd })),
+  charts: calls.map((c) => ({ series: c.series, unit: c.unit, mode: c.mode, points: c.points.map((p) => [p.time, p.sql_medium, p.sql_severe, p.os_medium, p.os_severe]), windowStart: c.windowStart, windowEnd: c.windowEnd })),
   tableRows: table ? all(table, "tr").map((tr) => all(tr, "td").map((td) => td.textContent)).filter((cells) => cells.length).length : 0,
   notices: all(root, "div").filter((n) => n.className === "strip notice").map((n) => n.textContent),
   empties: all(root, "div").filter((n) => n.className === "strip empty").map((n) => n.textContent),

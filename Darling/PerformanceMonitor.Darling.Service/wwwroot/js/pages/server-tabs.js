@@ -3178,11 +3178,13 @@ const PRESSURE_LINES = [
 
 const HOUR_MS = 3600000;
 
+/** Said wherever an hour reads as quiet: the read does not say where collection began, so a blank hour may predate it. */
+const PRESSURE_COVERAGE_CAVEAT = "No bar means no event was recorded, which for a server monitored for less than this range includes the hours before collection began.";
+
 /**
  * The pressure events counted per hour, the way the desktop chart counts them: only samples where SQL Server or the
  * operating system reads 2 or more are drawn, and each hour holds a count per source and severity. Every hour of the
- * window is present, an hour with no event as 0, so the line falls to 0 between events instead of joining two
- * distant ones. `events` are the read's rows (sample_time is naive UTC); the window is `{ windowStart, windowEnd }` in
+ * window is present, an hour with no event as 0, which the stacked-bar chart draws as no bar, as the desktop does. `events` are the read's rows (sample_time is naive UTC); the window is `{ windowStart, windowEnd }` in
  * epoch ms. Returns `{ points, drawn }`: the hourly rows (`time` is naive-UTC ISO text) and the number of samples counted.
  */
 export function pressureEventBuckets(events, win) {
@@ -3228,7 +3230,7 @@ export function memoryPressurePanels(server, ctx) {
       mount(chart.body, readErrorStrip(res.message));
       return mount(grid.body, readErrorStrip(res.message));
     }
-    const empty = "No memory pressure events in this window — the healthy state for this read.";
+    const empty = "No memory pressure events in this window — the healthy state for this read. " + PRESSURE_COVERAGE_CAVEAT;
     if (res.kind === "empty") {
       mount(chart.body, [keptWindowStrip(res), emptyStrip(empty)]);
       return mount(grid.body, [keptWindowStrip(res), windowFloorStrip(res.data, { viz: "table" }), emptyStrip(res.message)]);
@@ -3236,13 +3238,12 @@ export function memoryPressurePanels(server, ctx) {
     renderInto(chart.body, () => {
       const hours = res.keptHours || ctx.hours;
       const { points, drawn } = pressureEventBuckets(res.data.events, windowFromHours(hours));
-      if (!drawn) return [keptWindowStrip(res), emptyStrip("No sample in this window reached medium pressure (an indicator of 2 or more); the table beside this lists every sample the collector stored.")];
+      if (!drawn) return [keptWindowStrip(res), emptyStrip("No sample in this window reached medium pressure (an indicator of 2 or more); the table beside this lists every sample the collector stored. " + PRESSURE_COVERAGE_CAVEAT)];
       const lines = PRESSURE_LINES.filter((l) => points.some((p) => p[l.key] > 0));
       return [
         keptWindowStrip(res),
         noticeStrip(
-          "Samples where an indicator reads 2 or more, counted per hour; an hour with none shows 0. A 0 means no event was recorded, " +
-            "which for a server monitored for less than this range includes the hours before collection began."
+          "Samples where an indicator reads 2 or more, counted per hour as stacked bars; an hour with none draws no bar. " + PRESSURE_COVERAGE_CAVEAT
         ),
         zoomableLineChart({
           points,
@@ -3250,6 +3251,7 @@ export function memoryPressurePanels(server, ctx) {
           series: lines,
           formatValue: (v) => String(Math.round(v)),
           integerTicks: true,
+          mode: "stacked-bar",
           unit: "events",
           ...windowFromHours(hours),
         }, "memory-pressure-events", chartZoomScope(ctx.hours)),

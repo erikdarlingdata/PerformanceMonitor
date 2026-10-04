@@ -77,6 +77,7 @@ public sealed class WebMemoryPressureChartBehaviourTests
         Assert.Equal(2, rows.Count(r => r.Sum() > 0));
         Assert.Equal(4, chart.GetProperty("series").GetArrayLength());
         Assert.Equal("events", chart.GetProperty("unit").GetString());
+        Assert.Equal("stacked-bar", chart.GetProperty("mode").GetString());
     }
 
     [Fact]
@@ -90,7 +91,7 @@ public sealed class WebMemoryPressureChartBehaviourTests
         var zero = points.EnumerateArray().Count(p => p.EnumerateArray().Skip(1).All(v => v.GetInt32() == 0));
         Assert.True(zero >= 4, "empty hours must be present as 0");
         var notice = Assert.Single(r.GetProperty("notices").EnumerateArray()).GetString()!;
-        Assert.Contains("an hour with none shows 0", notice, StringComparison.Ordinal);
+        Assert.Contains("an hour with none draws no bar", notice, StringComparison.Ordinal);
         Assert.Contains("before collection began", notice, StringComparison.Ordinal);
     }
 
@@ -100,7 +101,8 @@ public sealed class WebMemoryPressureChartBehaviourTests
         var r = Run("quiet");
         Assert.Empty(r.GetProperty("charts").EnumerateArray());
         Assert.Equal(2, r.GetProperty("tableRows").GetInt32());
-        Assert.Contains(r.GetProperty("empties").EnumerateArray(), e => e.GetString()!.Contains("reached medium pressure", StringComparison.Ordinal));
+        Assert.Contains(r.GetProperty("empties").EnumerateArray(), e => e.GetString()!.Contains("reached medium pressure", StringComparison.Ordinal)
+            && e.GetString()!.Contains("before collection began", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -108,6 +110,8 @@ public sealed class WebMemoryPressureChartBehaviourTests
     {
         var r = Run("empty");
         Assert.Empty(r.GetProperty("charts").EnumerateArray());
+        Assert.Contains(r.GetProperty("empties").EnumerateArray(), e => e.GetString()!.Contains("healthy state", StringComparison.Ordinal)
+            && e.GetString()!.Contains("before collection began", StringComparison.Ordinal));
         Assert.Single(r.GetProperty("fetches").EnumerateArray());
     }
 }
