@@ -115,10 +115,55 @@ public sealed class GridSortBehaviourTests
     }
 
     [Fact]
+    public void AReconciledGrid_ReappliesTheSortToTheNewRow_AndAClearedSortGoesBackToTheServersOrder()
+    {
+        if (!TryRun("reapply", out var r)) return;
+        // Sorted ascending by N, every tr still maps to the row it was built from.
+        Assert.Equal(new[] { "", "Alpha", "beta", "alpha", null }, r.GetProperty("rowsOf").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(new[] { "50", "2", "9", "10", "100", "—" }, S(r, "serverOrder"));
+        Assert.Equal(new[] { "2", "9", "10", "50", "100", "—" }, S(r, "sorted"));
+        Assert.Equal("gamma", r.GetProperty("freshRow").GetString());
+        // After desc then clear, the grid is back to the server order, and a reapply keeps it.
+        Assert.Equal(new[] { "50", "2", "9", "10", "100", "—" }, S(r, "cleared"));
+        Assert.Equal(S(r, "cleared"), S(r, "clearedAfterReapply"));
+    }
+
+    [Fact]
+    public void ASortValueDecidesTheOrder_ListColumnsGetNoSort_AndAColumnFilledLaterBecomesSortable()
+    {
+        if (!TryRun("columns", out var r)) return;
+        Assert.Contains("sortable", S(r, "cls")[0]);
+        Assert.DoesNotContain("sortable", S(r, "cls")[1]);
+        Assert.Equal(new[] { "99.000", "1,234.500", "2,000.000" }, S(r, "sizeAsc"));
+        // Max size descending: the unlimited row (raw -1) is the largest, so it comes first.
+        Assert.Equal("99.000", S(r, "maxDesc")[0]);
+        Assert.DoesNotContain("sortable", r.GetProperty("laterBefore").GetString());
+        Assert.Contains("sortable", r.GetProperty("laterAfter").GetString());
+        Assert.Equal(new[] { "alpha", "zeta" }, S(r, "laterSorted"));
+    }
+
+    [Fact]
+    public void ANumericColumnOverPreformattedText_MustCarryASortValueOnTheRawNumber()
+    {
+        var js = PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js");
+        var offenders = new System.Collections.Generic.List<string>();
+        foreach (var file in System.IO.Directory.EnumerateFiles(js, "*.js", System.IO.SearchOption.AllDirectories))
+        {
+            foreach (var line in System.IO.File.ReadAllLines(file))
+            {
+                if (!System.Text.RegularExpressions.Regex.IsMatch(line, "key: *\"[a-z_0-9.]*_text\"")) continue;
+                var numeric = line.Contains("align: \"right\"") || System.Text.RegularExpressions.Regex.IsMatch(line, "format: *\"(int|num1|num2|rate|ms|mb|pct)\"");
+                if (numeric && !line.Contains("sortValue:")) offenders.Add(System.IO.Path.GetFileName(file) + ": " + line.Trim());
+            }
+        }
+        Assert.Empty(offenders);
+    }
+
+    [Fact]
     public void AnOptedOutColumnOrTable_GetsNoSortAffordance()
     {
         if (!TryRun("optOut", out var r)) return;
-        Assert.Equal("", r.GetProperty("fixedCls").GetString());
+        Assert.DoesNotContain("sortable", r.GetProperty("fixedCls").GetString());
         Assert.Equal(JsonValueKind.Null, r.GetProperty("fixedTab").ValueKind);
         Assert.All(S(r, "offCls"), c => Assert.DoesNotContain("sortable", c));
     }

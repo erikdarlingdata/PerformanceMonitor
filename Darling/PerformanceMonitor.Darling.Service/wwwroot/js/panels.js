@@ -198,18 +198,20 @@ function vizTable(data, desc) {
   const cols = visibleColumns(allCols, rows);
 
   const grid = desc.sortable === false ? null : makeGridSort(desc, cols, rows);
-  const head = el(
-    "tr",
-    {},
-    cols.map((c, i) => (grid && grid.sortable[i] ? grid.headerCell(c, i) : headerCell(c)))
-  );
   const bodyRows = rows.map((row) => {
     const tr = el("tr", {}, cols.map((c) => cell(row, c)));
     trRow.set(tr, row);
     return tr;
   });
+  /* The rows are classified when the body attaches, so the headers are built after the grid has seen them. */
   const tbody = el("tbody", {}, bodyRows);
   if (grid) grid.attach(tbody, bodyRows);
+  const head = el(
+    "tr",
+    {},
+    cols.map((c, i) => (grid && grid.eligible[i] ? grid.headerCell(c, i) : headerCell(c)))
+  );
+  if (grid) grid.syncHeads();
 
   return el("div", { class: "table-wrap" }, [el("table", { class: "data" }, [el("thead", {}, [head]), tbody])]);
 }
@@ -224,7 +226,7 @@ function headerCell(c) {
    Keyed by gridSortKey(): the route (the hash without its query, so a server or tab switch is a different table)
    plus the descriptor's identity plus its column set. State: { col, dir } with dir "asc" | "desc"; absent means
    the server's order. */
-const gridSortState = new Map();
+const gridSortState = new Map(); // grows by one entry per table the session sorts (routes x tables), so it is bounded and never pruned
 /* tr -> its row object, so a grid whose rows are reconciled in place (Alert History) can re-sort what is in the DOM. */
 const trRow = new WeakMap();
 const tbodyGrid = new WeakMap();
@@ -280,10 +282,20 @@ export function compareSortKeys(a, b, dir) {
 
 function makeGridSort(desc, cols, rows) {
   const stateKey = gridSortKey(desc, cols);
-  const kinds = cols.map((c) => sortKindOf(c, rows.map((r) => valueOf(r, c))));
-  /* A column sorts when it is not opted out and some row has a value to sort on (a custom-render column over a key
-     the rows do not carry has nothing to order). */
-  const sortable = cols.map((c) => c.sortable !== false && rows.some((r) => !isEmptyValue(valueOf(r, c))));
+  let kinds = [];
+  let sortable = [];
+  /* A column sorts when it is not opted out, some row has a value to sort on (a custom-render column over a key the
+     rows do not carry has nothing to order), and that value is not an array or object (a list cell has no order
+     unless the column supplies a sortValue). Recomputed from the rows whenever they change. */
+  function classify(rowList) {
+    kinds = cols.map((c) => sortKindOf(c, rowList.map((r) => valueOf(r, c))));
+    sortable = cols.map((c) => {
+      if (c.sortable === false) return false;
+      const present = rowList.map((r) => valueOf(r, c)).filter((v) => !isEmptyValue(v));
+      return present.length > 0 && (typeof c.sortValue === "function" || !present.some((v) => typeof v === "object" && !(v instanceof Date)));
+    });
+    grid.sortable = sortable;
+  }
   const ths = [];
   let tbody = null;
   let moved = false;
@@ -297,7 +309,11 @@ function makeGridSort(desc, cols, rows) {
     cols.forEach((c, i) => {
       const th = ths[i];
       if (!th) return;
-      const on = st && st.col === colId(c);
+      const live = sortable[i];
+      th.className = live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "";
+      th.setAttribute("tabindex", live ? "0" : "-1");
+      th.setAttribute("title", live ? "Sort by " + c.label : "");
+      const on = live && st && st.col === colId(c);
       th.setAttribute("aria-sort", on ? (st.dir === "asc" ? "ascending" : "descending") : "none");
       th.sortInd.textContent = on ? (st.dir === "asc" ? " ▲" : " ▼") : "";
     });
@@ -323,12 +339,16 @@ function makeGridSort(desc, cols, rows) {
   }
 
   const grid = {
-    sortable,
+    sortable: [],
+    /* A header for every column that is not opted out: whether it carries the sort affordance is re-decided by
+       indicate() against the current rows. */
+    eligible: cols.map((c) => c.sortable !== false),
     headerCell(c, i) {
       const ind = el("span", { class: "sort-ind", "aria-hidden": "true" });
       const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : ""), tabindex: "0", "aria-sort": "none", title: "Sort by " + c.label }, [c.label, ind]);
       th.sortInd = ind;
       const cycle = () => {
+        if (!sortable[i]) return;
         const st = gridSortState.get(stateKey);
         const id = colId(c);
         if (!st || st.col !== id) gridSortState.set(stateKey, { col: id, dir: "asc" });
@@ -346,16 +366,19 @@ function makeGridSort(desc, cols, rows) {
       ths[i] = th;
       return th;
     },
+    syncHeads: () => indicate(),
     serverOrder: [],
     attach(body, trs) {
       tbody = body;
       grid.serverOrder = trs.slice();
+      classify(trs.map((tr) => trRow.get(tr)));
       tbodyGrid.set(body, grid);
       apply(grid.serverOrder);
     },
     /* The tbody's rows were reconciled in place into the server's order: take that as the new server order. */
     reapply() {
       grid.serverOrder = [...tbody.children];
+      classify(grid.serverOrder.map((tr) => trRow.get(tr)));
       apply(grid.serverOrder);
     },
   };

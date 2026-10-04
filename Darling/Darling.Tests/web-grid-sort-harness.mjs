@@ -23,7 +23,7 @@ globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (
 globalThis.location = { hash: "#/server/a/queries" };
 
 const root = process.argv[2];
-const { VIZ } = await import(pathToFileURL(root + "/panels.js").href);
+const { VIZ, reapplyGridSort, gridRowOf } = await import(pathToFileURL(root + "/panels.js").href);
 
 const cols = [
   { key: "name", label: "Name" },
@@ -80,10 +80,58 @@ const scenarios = {
     location.hash = "#/server/a/queries?x=1";
     out.sameRouteWithQuery = bodyCol(build(), 1);
   },
+  /* Alert History's shape: the body is reconciled in place into the server's order, then the sort is re-applied. */
+  reapply() {
+    const w = build(); click(w, 1); // ascending by N
+    const tbody = w.find("table").children[1];
+    out.rowsOf = tbody.children.map((tr) => gridRowOf(tr).name);
+    const mk = (row) => { const t = VIZ.table({ rows: [row] }, { rowsKey: "rows", columns: cols, title: "T9" }); return t.find("table").children[1].children[0]; };
+    // the server now sends the new row (n=50) first; the reconcile puts every tr back in that order
+    const fresh = mk({ name: "gamma", n: 50, t: null, locked: 6 });
+    const trs = [...tbody.children];
+    for (const tr of [fresh, ...trs]) tbody.appendChild(tr);
+    out.serverOrder = bodyCol(w, 1);
+    reapplyGridSort(tbody);
+    out.sorted = bodyCol(w, 1);
+    out.freshRow = gridRowOf(fresh).name;
+    click(w, 1); click(w, 1); // desc, then cleared
+    out.cleared = bodyCol(w, 1);
+    reapplyGridSort(tbody);
+    out.clearedAfterReapply = bodyCol(w, 1);
+    reapplyGridSort({}); // not a grid: ignored
+  },
+  /* sortValue wins over a text-typed key; object-valued and later-filled columns decide per the rows. */
+  columns() {
+    const c2 = [
+      { key: "size_text", label: "Size", align: "right", sortValue: (r) => r.size },
+      { key: "max", label: "Max", align: "right", sortValue: (r) => (r.max === -1 ? Infinity : r.max), render: (r) => new FakeText(String(r.max)) },
+      { key: "list", label: "List" },
+      { key: "later", label: "Later" },
+    ];
+    const rs = [
+      { size_text: "1,234.500", size: 1234.5, max: 5, list: ["a"], later: null },
+      { size_text: "99.000", size: 99, max: -1, list: ["b"], later: null },
+      { size_text: "2,000.000", size: 2000, max: 10, list: { x: 1 }, later: null },
+    ];
+    const w = VIZ.table({ rows: rs }, { rowsKey: "rows", columns: c2.filter((c) => c.key !== "max"), title: "C1" });
+    out.cls = ths(w).map((t) => t.className);
+    click(w, 0); out.sizeAsc = bodyCol(w, 0);
+    const m = VIZ.table({ rows: rs }, { rowsKey: "rows", columns: [c2[1], c2[0]], title: "C2" });
+    click(m, 0); click(m, 0); out.maxDesc = bodyCol(m, 1);
+    // a column empty on the first mount becomes sortable once the reconciled rows carry values
+    const first = VIZ.table({ rows: [{ later: null, k: 1 }, { later: null, k: 2 }] }, { rowsKey: "rows", columns: [{ key: "k", label: "K", format: "int" }, { key: "later", label: "Later" }], title: "C3" });
+    out.laterBefore = ths(first)[1].className;
+    const tb = first.find("table").children[1];
+    tb.children.forEach((tr, i) => { gridRowOf(tr).later = i === 0 ? "zeta" : "alpha"; });
+    reapplyGridSort(tb);
+    out.laterAfter = ths(first)[1].className;
+    click(first, 1);
+    out.laterSorted = first.find("table").children[1].children.map((tr) => gridRowOf(tr).later);
+  },
   optOut() {
-    const w = build(); out.fixedCls = ths(w)[3].attrs.class || ""; out.fixedTab = ths(w)[3].getAttribute("tabindex") ?? null;
+    const w = build(); out.fixedCls = ths(w)[3].className; out.fixedTab = ths(w)[3].getAttribute("tabindex") ?? null;
     const off = build({ sortable: false });
-    out.offCls = ths(off).map((t) => t.attrs.class || "");
+    out.offCls = ths(off).map((t) => t.className);
   },
 };
 scenarios[process.argv[3]]();
