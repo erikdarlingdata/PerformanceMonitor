@@ -84,13 +84,13 @@ public sealed class McpWindowNoticeEventToolTests : IDisposable
 
     /* ───────────────────────── per-tool wiring ───────────────────────── */
 
-    private Task<string> CallAsync(EventTool tool) => tool switch
+    private Task<string> CallAsync(EventTool tool, int hoursBack = HoursBack, int? limit = null) => tool switch
     {
-        EventTool.Deadlocks => McpBlockingTools.GetDeadlocks(Service(), _serverManager, ServerName, HoursBack, as_of: AsOf),
-        EventTool.DeadlockDetail => McpBlockingTools.GetDeadlockDetail(Service(), _serverManager, ServerName, HoursBack, as_of: AsOf),
-        EventTool.BlockedProcessReports => McpBlockingTools.GetBlockedProcessReports(Service(), _serverManager, ServerName, HoursBack, as_of: AsOf),
-        EventTool.BlockedProcessXml => McpBlockingTools.GetBlockedProcessXml(Service(), _serverManager, ServerName, HoursBack, as_of: AsOf),
-        EventTool.LongQueryCompletions => McpLongQueryTools.GetLongQueryCompletions(Service(), _serverManager, ServerName, HoursBack, as_of: AsOf),
+        EventTool.Deadlocks => McpBlockingTools.GetDeadlocks(Service(), _serverManager, ServerName, hoursBack, limit: limit ?? 20, as_of: AsOf),
+        EventTool.DeadlockDetail => McpBlockingTools.GetDeadlockDetail(Service(), _serverManager, ServerName, hoursBack, limit: limit ?? 5, as_of: AsOf),
+        EventTool.BlockedProcessReports => McpBlockingTools.GetBlockedProcessReports(Service(), _serverManager, ServerName, hoursBack, limit: limit ?? 15, as_of: AsOf),
+        EventTool.BlockedProcessXml => McpBlockingTools.GetBlockedProcessXml(Service(), _serverManager, ServerName, hoursBack, limit: limit ?? 5, as_of: AsOf),
+        EventTool.LongQueryCompletions => McpLongQueryTools.GetLongQueryCompletions(Service(), _serverManager, ServerName, hoursBack, limit: limit ?? 30, as_of: AsOf),
         _ => throw new ArgumentOutOfRangeException(nameof(tool))
     };
 
@@ -176,7 +176,9 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
 
     /// <summary>
     /// The event-time rule: a first run stores events from before itself, so the oldest event on the page can be older
-    /// than the probe's floor. The collector's first run is 100 minutes into the window (past the 90-minute slack, so the
+    /// than the probe's floor. Only the long-query case exercises the helper's event input: its probe reads
+    /// <c>collection_time</c>, while the deadlock and blocked-process probes already read the event column, so for those
+    /// four the probe alone gives the same answer. The collector's first run is 100 minutes into the window (past the 90-minute slack, so the
     /// probe alone would call the window cut), but it stored an event from 30 minutes in. The notice names the earlier of
     /// the two, which is inside the slack: no cut, and <c>effective_start</c> is that event.
     /// </summary>
@@ -199,16 +201,21 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
         AssertCoveredFrom(root, backfilled);
     }
 
-    /// <summary>The page cut and the window floor are separate: <c>truncated</c> is the page's, <c>window_truncated</c> the store's.</summary>
-    [Fact]
-    public async Task ADataAnswer_CarriesTheKeysRightAfterHoursBack()
+    /// <summary>The page cut and the window floor are separate: the three keys sit right after <c>hours_back</c>, in this order, on every tool.</summary>
+    [Theory]
+    [InlineData(EventTool.Deadlocks)]
+    [InlineData(EventTool.DeadlockDetail)]
+    [InlineData(EventTool.BlockedProcessReports)]
+    [InlineData(EventTool.BlockedProcessXml)]
+    [InlineData(EventTool.LongQueryCompletions)]
+    public async Task ADataAnswer_CarriesTheKeysRightAfterHoursBack(EventTool tool)
     {
         await _duckDb.InitializeAsync();
-        await SeedLogRunsAsync("deadlocks", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
-        await SeedEventAsync(EventTool.Deadlocks, Anchor.AddDays(-2));
+        await SeedLogRunsAsync(CollectorOf(tool), Anchor.AddDays(-2), Anchor, everyMinutes: 30);
+        await SeedEventAsync(tool, Anchor.AddDays(-2));
 
         var names = new System.Collections.Generic.List<string>();
-        foreach (var property in Root(await CallAsync(EventTool.Deadlocks)).EnumerateObject())
+        foreach (var property in Root(await CallAsync(tool)).EnumerateObject())
         {
             names.Add(property.Name);
         }
@@ -218,26 +225,76 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
         Assert.Equal(new[] { "effective_start", "window_truncated", "truncation_note" }, names.GetRange(hoursBack + 1, 3));
     }
 
+    /// <summary>A window of 90 minutes or less with rows starts no probe: no collector run is logged, yet the answer is covered at the requested start, not at the event.</summary>
+    [Theory]
+    [InlineData(EventTool.Deadlocks)]
+    [InlineData(EventTool.DeadlockDetail)]
+    [InlineData(EventTool.BlockedProcessReports)]
+    [InlineData(EventTool.BlockedProcessXml)]
+    [InlineData(EventTool.LongQueryCompletions)]
+    public async Task AShortWindowWithRows_StartsNoProbe_AndIsCoveredAtTheRequestedStart(EventTool tool)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedEventAsync(tool, Anchor.AddMinutes(-30));
+
+        var root = Root(await CallAsync(tool, hoursBack: 1));
+
+        AssertCovered(root, Anchor.AddHours(-1));
+    }
+
+    /// <summary>A truncated page (<c>limit: 1</c> of two events) sits next to a window floor: the page cut does not change the notice.</summary>
+    [Theory]
+    [InlineData(EventTool.Deadlocks)]
+    [InlineData(EventTool.DeadlockDetail)]
+    [InlineData(EventTool.BlockedProcessReports)]
+    [InlineData(EventTool.BlockedProcessXml)]
+    [InlineData(EventTool.LongQueryCompletions)]
+    public async Task ATruncatedPage_NextToAWindowFloor_LeavesTheNoticeUnchanged(EventTool tool)
+    {
+        await _duckDb.InitializeAsync();
+        var floor = Anchor.AddDays(-2);
+        await SeedLogRunsAsync(CollectorOf(tool), floor, Anchor, everyMinutes: 30);
+        await SeedEventAsync(tool, floor);
+        await SeedEventAsync(tool, Anchor.AddDays(-1));
+
+        var root = Root(await CallAsync(tool, limit: 1));
+
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        AssertTruncatedAt(root, floor, TableOf(tool));
+    }
+
     /* ───────────────────────── the blocked process reports' second collector ───────────────────────── */
 
     /// <summary>
     /// The Blocked Process Reports relation is also covered by the always-on DMV blocking snapshots
     /// (<see cref="LocalDataService.QueryWindowRelationAlsoCoveredBy"/>), and <see cref="LocalDataService.GetQueryWindowFloorAsync"/>
-    /// takes the earlier of the two itself, so the tools apply nothing more: with the XE collector off and the DMV collector running
-    /// from before the window, the first report two days in is not a cut.
+    /// takes the earlier of the two itself, so <c>get_blocked_process_reports</c>, whose grid lists the DMV rows too, applies nothing
+    /// more: with the XE collector off and the DMV collector running from before the window, the first report two days in is not a
+    /// cut. <c>get_blocked_process_xml</c> reads the XE arm only, so it probes the XE collector alone (<c>includeAlsoCovered: false</c>)
+    /// and the same store gets a notice at the XE floor.
     /// </summary>
-    [Theory]
-    [InlineData(EventTool.BlockedProcessReports)]
-    [InlineData(EventTool.BlockedProcessXml)]
-    public async Task BlockedProcessReports_TheDmvCollectorCoveredTheWindow_IsCovered(EventTool tool)
+    [Fact]
+    public async Task BlockedProcessReports_TheDmvCollectorCoveredTheWindow_IsCovered()
     {
         await _duckDb.InitializeAsync();
         await SeedLogRunsAsync("dmv_blocking_snapshot", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
-        await SeedEventAsync(tool, Anchor.AddDays(-2));
+        await SeedEventAsync(EventTool.BlockedProcessReports, Anchor.AddDays(-2));
 
-        var root = Root(await CallAsync(tool));
+        var root = Root(await CallAsync(EventTool.BlockedProcessReports));
 
         AssertCovered(root, WindowStart);
+    }
+
+    [Fact]
+    public async Task BlockedProcessXml_TheDmvCollectorCoveredTheWindow_StillNamesTheXeFloor()
+    {
+        await _duckDb.InitializeAsync();
+        await SeedLogRunsAsync("dmv_blocking_snapshot", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
+        await SeedEventAsync(EventTool.BlockedProcessXml, Anchor.AddDays(-2));
+
+        var root = Root(await CallAsync(EventTool.BlockedProcessXml));
+
+        AssertTruncatedAt(root, Anchor.AddDays(-2), "blocked_process_report");
     }
 
     /* ───────────────────────── an empty answer says where the data starts too ───────────────────────── */

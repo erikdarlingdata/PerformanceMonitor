@@ -1143,8 +1143,9 @@ public sealed class McpQueryTools
     /// <summary>
     /// #4966: <see cref="WindowNoticeAsync"/> for an EVENT list (deadlocks, blocked process reports, long query
     /// completions), where a first run of the collector can store events from before itself: the coverage probe
-    /// reads the collector's runs and the rows' own time column, but a page can still show an event older than
-    /// the probe's floor, and a notice that names a start later than a row it shows is wrong on its face. On a data
+    /// reads the collector's runs and the rows' own time column, but where that column is collection_time
+    /// (long query completions) a page can still show an event older than the probe's floor (the deadlock and
+    /// blocked-process probes already read the event column), and a notice that names a start later than a row it shows is wrong on its face. On a data
     /// answer the floor is the EARLIER of the probe's and <paramref name="oldestEventShown"/> (the oldest event
     /// time on the page; null when the page holds none, as on an empty answer). The comparison runs inside the
     /// probe delegate, so a window the probe is skipped for (90 minutes or less, with rows) stays covered at the

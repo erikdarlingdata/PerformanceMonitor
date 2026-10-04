@@ -358,15 +358,16 @@ public sealed class McpBlockingTools
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report")
                     ?? McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.",
                         (await McpQueryTools.EventWindowNoticeAsync(
-                            () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
+                            () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, includeAlsoCovered: false),
                             null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints());
             }
 
-            /* #4966: where this server's blocked_process_report data starts for the window. An event list, so the floor is the
+            /* #4966: the XML exists only in the XE arm, so the probe is the XE collector's alone (the DMV snapshots are not
+               a source of these rows). Where this server's blocked_process_report data starts for the window. An event list, so the floor is the
                earlier of the coverage probe and the oldest event the page shows. */
             var requestedStart = windowEnd.AddHours(-hours_back);
             var notice = await McpQueryTools.EventWindowNoticeAsync(
-                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, requestedStart, windowEnd),
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, requestedStart, windowEnd, includeAlsoCovered: false),
                 withXml.Min(r => r.EventTime), requestedStart, windowEnd, "blocked_process_report");
 
             var result = withXml.Select(r => new

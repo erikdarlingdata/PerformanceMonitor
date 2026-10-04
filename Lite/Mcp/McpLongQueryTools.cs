@@ -63,7 +63,9 @@ public sealed class McpLongQueryTools
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
             /* #4966: where this server's long_query_completions data starts for the window. An event list, so the floor is the
-               earlier of the coverage probe and the oldest event the page shows. */
+               earlier of the coverage probe and the oldest event the page shows. The page is the slowest N, so its oldest
+               event depends on limit; that cannot make a false notice, as the helper only moves the floor earlier and a
+               first run reads back 10 minutes, well inside the 90-minute slack. */
             var requestedStart = windowEnd.AddHours(-hours_back);
             var notice = await McpQueryTools.EventWindowNoticeAsync(
                 () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, resolved.ServerId, requestedStart, windowEnd),
