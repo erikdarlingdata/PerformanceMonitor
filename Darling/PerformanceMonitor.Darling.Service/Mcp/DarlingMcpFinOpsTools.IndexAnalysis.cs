@@ -42,14 +42,32 @@ public sealed partial class DarlingMcpFinOpsTools
 
     private static readonly string[] IndexAnalysisActions = ["COMPRESS", "DISABLE", "DROP CONSTRAINT", "MAKE UNIQUE", "MERGE", "REVIEW"];
 
-    /// <summary>Refuses <c>database_name</c> and <c>full_text</c> on every view except index_analysis.</summary>
-    internal static (string Parameter, string Message)? IndexAnalysisOnlyParamMisuse(string view, string? databaseName, bool fullText)
+    /// <summary>Each optional parameter and the only views that accept it; every other view refuses it.</summary>
+    private static readonly (string Parameter, string[] Views)[] OptionalParamViews =
+    [
+        ("database_name", [IndexAnalysisView, StorageGrowthView]),
+        ("full_text", [IndexAnalysisView]),
+        ("object_name", [StorageGrowthView]),
+    ];
+
+    /// <summary>
+    /// Refuses <c>database_name</c>, <c>full_text</c> and <c>object_name</c> on every view that does not accept them,
+    /// in that order, naming the views that do.
+    /// </summary>
+    internal static (string Parameter, string Message)? OptionalParamMisuse(string view, string? databaseName, bool fullText, string? objectName = null)
     {
-        if (view == IndexAnalysisView) return null;
-        if (databaseName != null)
-            return ("database_name", $"database_name applies only to view {IndexAnalysisView}; omit it for view {view}.");
-        if (fullText)
-            return ("full_text", $"full_text applies only to view {IndexAnalysisView}; omit it for view {view}.");
+        foreach (var (parameter, views) in OptionalParamViews)
+        {
+            var given = parameter switch
+            {
+                "database_name" => databaseName != null,
+                "full_text" => fullText,
+                _ => objectName != null,
+            };
+            if (!given || views.Contains(view)) continue;
+            var only = views.Length == 1 ? $"view {views[0]}" : $"views {string.Join(" and ", views)}";
+            return (parameter, $"{parameter} applies only to {only}; omit it for view {view}.");
+        }
         return null;
     }
 

@@ -46,6 +46,7 @@ public sealed partial class DarlingMcpFinOpsTools
         DatabaseResourcesView,
         ApplicationConnectionsView,
         OptimizationView,
+        StorageGrowthView,
         // FinOps web parity (#4843), set B ends.
     ];
 
@@ -65,9 +66,9 @@ public sealed partial class DarlingMcpFinOpsTools
     //
     //
     // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
-    internal const string SetBViewLines = " " + HighImpactViewLine + " " + DatabaseResourcesViewLine + " " + ApplicationConnectionsViewLine + " " + OptimizationViewLine;
-    internal const string SetBValid = HighImpactView + ", " + DatabaseResourcesView + ", " + ApplicationConnectionsView + ", " + OptimizationView;
-    internal const string SetBGuides = " " + HighImpactViewGuide + " " + DatabaseResourcesViewGuide + " " + ApplicationConnectionsViewGuide + " " + OptimizationViewGuide;
+    internal const string SetBViewLines = " " + HighImpactViewLine + " " + DatabaseResourcesViewLine + " " + ApplicationConnectionsViewLine + " " + OptimizationViewLine + " " + StorageGrowthViewLine;
+    internal const string SetBValid = HighImpactView + ", " + DatabaseResourcesView + ", " + ApplicationConnectionsView + ", " + OptimizationView + ", " + StorageGrowthView;
+    internal const string SetBGuides = " " + HighImpactViewGuide + " " + DatabaseResourcesViewGuide + " " + ApplicationConnectionsViewGuide + " " + OptimizationViewGuide + " " + StorageGrowthViewGuide;
     // FinOps web parity (#4843), set B ends.
 
     private const int DefaultLimit = 10;
@@ -81,8 +82,9 @@ public sealed partial class DarlingMcpFinOpsTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to read, ending now (default 24).")] int hours_back = 24,
         [Description("Most rows per top-N list the view keeps (1-50, default 10).")] int limit = DefaultLimit,
-        [Description("Database to limit the view to (index_analysis only).")] string? database_name = null,
+        [Description("Database to limit the view to (index_analysis, storage_growth).")] string? database_name = null,
         [Description("Return full script and definition text (index_analysis only; default false).")] bool full_text = false,
+        [Description("schema.table of one object (storage_growth only, with database_name).")] string? object_name = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -100,7 +102,8 @@ public sealed partial class DarlingMcpFinOpsTools
             return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {MaxLimit}.");
 
         database_name = NormalizeIndexAnalysisDatabaseName(database_name);
-        var misuse = IndexAnalysisOnlyParamMisuse(normalized, database_name, full_text);
+        object_name = NormalizeIndexAnalysisDatabaseName(object_name);
+        var misuse = OptionalParamMisuse(normalized, database_name, full_text, object_name);
         if (misuse is { } m) return McpHelpers.Refusal(m.Parameter, m.Message);
 
         try
@@ -131,6 +134,8 @@ public sealed partial class DarlingMcpFinOpsTools
                     return await ReadApplicationConnectionsAsync(postgres, resolved, hours_back, limit, cancellationToken);
                 case OptimizationView:
                     return await ReadOptimizationAsync(postgres, resolved, hours_back, limit, cancellationToken);
+                case StorageGrowthView:
+                    return await ReadStorageGrowthAsync(postgres, resolved, hours_back, limit, database_name, object_name, cancellationToken);
                 // FinOps web parity (#4843), set B ends.
                 default:
                     return McpHelpers.Refusal("view", $"Invalid view value '{view}'. Valid views: {string.Join(", ", Views)}.");

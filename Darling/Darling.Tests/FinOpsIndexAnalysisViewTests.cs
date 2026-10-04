@@ -83,10 +83,10 @@ public sealed class FinOpsIndexAnalysisViewTests
         var one = Build(r, db: "d");
         Assert.Equal(JsonValueKind.Null, one.GetProperty("overall").ValueKind);
         Assert.Equal(JsonValueKind.Null, one.GetProperty("overall_workload_reason").ValueKind);
-        Assert.Null(DarlingMcpFinOpsTools.IndexAnalysisOnlyParamMisuse("utilization", DarlingMcpFinOpsTools.NormalizeIndexAnalysisDatabaseName(""), false));
+        Assert.Null(DarlingMcpFinOpsTools.OptionalParamMisuse("utilization", DarlingMcpFinOpsTools.NormalizeIndexAnalysisDatabaseName(""), false));
         var tool = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.cs").ReplaceLineEndings("\n");
         Assert.True(tool.IndexOf("database_name = NormalizeIndexAnalysisDatabaseName(database_name);", StringComparison.Ordinal)
-            < tool.IndexOf("IndexAnalysisOnlyParamMisuse(normalized", StringComparison.Ordinal));
+            < tool.IndexOf("OptionalParamMisuse(normalized", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -205,19 +205,34 @@ public sealed class FinOpsIndexAnalysisViewTests
     }
 
     [Fact]
-    public void OtherViews_RefuseDatabaseNameAndFullText_IndexAnalysisAccepts()
+    public void OtherViews_RefuseDatabaseNameFullTextAndObjectName_OnlyTheNamedViewsAccept()
     {
-        foreach (var view in new[] { "utilization", "high_impact", "database_resources", "optimization" })
+        foreach (var view in new[] { "utilization", "high_impact", "database_resources", "application_connections", "optimization", "storage_growth" })
         {
-            var db = DarlingMcpFinOpsTools.IndexAnalysisOnlyParamMisuse(view, "d", false);
-            Assert.Equal("database_name", db!.Value.Parameter);
-            Assert.Contains(view, db.Value.Message, StringComparison.Ordinal);
-            var text = DarlingMcpFinOpsTools.IndexAnalysisOnlyParamMisuse(view, null, true);
+            var text = DarlingMcpFinOpsTools.OptionalParamMisuse(view, null, true);
             Assert.Equal("full_text", text!.Value.Parameter);
-            Assert.Null(DarlingMcpFinOpsTools.IndexAnalysisOnlyParamMisuse(view, null, false));
+            Assert.Contains(view, text.Value.Message, StringComparison.Ordinal);
+            Assert.Null(DarlingMcpFinOpsTools.OptionalParamMisuse(view, null, false));
         }
 
-        Assert.Null(DarlingMcpFinOpsTools.IndexAnalysisOnlyParamMisuse("index_analysis", "d", true));
+        foreach (var view in new[] { "utilization", "high_impact", "database_resources", "application_connections", "optimization" })
+        {
+            var db = DarlingMcpFinOpsTools.OptionalParamMisuse(view, "d", false);
+            Assert.Equal("database_name", db!.Value.Parameter);
+            Assert.Contains(view, db.Value.Message, StringComparison.Ordinal);
+            Assert.Contains("views index_analysis and storage_growth", db.Value.Message, StringComparison.Ordinal);
+        }
+
+        foreach (var view in new[] { "utilization", "high_impact", "database_resources", "application_connections", "optimization", "index_analysis" })
+        {
+            var obj = DarlingMcpFinOpsTools.OptionalParamMisuse(view, null, false, "dbo.t");
+            Assert.Equal("object_name", obj!.Value.Parameter);
+            Assert.Contains("applies only to view storage_growth", obj.Value.Message, StringComparison.Ordinal);
+            Assert.Contains(view, obj.Value.Message, StringComparison.Ordinal);
+        }
+
+        Assert.Null(DarlingMcpFinOpsTools.OptionalParamMisuse("index_analysis", "d", true));
+        Assert.Null(DarlingMcpFinOpsTools.OptionalParamMisuse("storage_growth", "d", false, "dbo.t"));
     }
 
     [Fact]
@@ -225,7 +240,7 @@ public sealed class FinOpsIndexAnalysisViewTests
     {
         var tool = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.cs").ReplaceLineEndings("\n");
         Assert.Contains("if (misuse is { } m) return McpHelpers.Refusal(m.Parameter, m.Message);", tool, StringComparison.Ordinal);
-        Assert.True(tool.IndexOf("IndexAnalysisOnlyParamMisuse(normalized", StringComparison.Ordinal)
+        Assert.True(tool.IndexOf("OptionalParamMisuse(normalized", StringComparison.Ordinal)
             < tool.IndexOf("switch (normalized)", StringComparison.Ordinal));
         var partial = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.IndexAnalysis.cs");
         Assert.DoesNotContain("CurrentCulture", partial, StringComparison.Ordinal);
