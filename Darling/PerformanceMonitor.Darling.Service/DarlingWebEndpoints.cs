@@ -1204,6 +1204,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.CreateServerTagCore(store, name, parentId, colour, context.RequestAborted);
+            LogServerTagWrite(logger, context, "create", null, result, 0);
             return ServerTagToolResult(result, "/api/server-tags", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created);
         });
 
@@ -1214,8 +1215,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return UnsupportedMediaTypeResult();
             }
 
+            string changes;
+            try
+            {
+                changes = await ReadBoundedBodyAsync(context, MaxServerTagBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
             var stopwatch = Stopwatch.StartNew();
-            var result = await Mcp.DarlingMcpServerTagTools.UpdateServerTagCore(store, id, await ReadBodyAsync(context), context.RequestAborted);
+            var result = await Mcp.DarlingMcpServerTagTools.UpdateServerTagCore(store, id, changes, context.RequestAborted);
+            LogServerTagWrite(logger, context, "update", id, result, 0);
             return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
 
@@ -1227,14 +1239,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var confirmText = context.Request.Query["confirm"].ToString();
-            if (confirmText.Length > 0 && !bool.TryParse(confirmText, out _))
+            if (confirmText.Length > 0 && !string.Equals(confirmText, "true", StringComparison.Ordinal))
             {
-                return ErrorResult("confirm must be true or false.", StatusCodes.Status400BadRequest);
+                return ErrorResult("confirm must be true, or omitted.", StatusCodes.Status400BadRequest);
             }
 
-            var confirm = confirmText.Length > 0 && bool.Parse(confirmText);
+            var confirm = confirmText.Length > 0;
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.DeleteServerTagCore(store, id, confirm, context.RequestAborted);
+            LogServerTagWrite(logger, context, "delete", id, result, 0);
             return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
 
@@ -1253,6 +1266,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.AssignServerTagCore(store, id, serverIds, context.RequestAborted);
+            LogServerTagWrite(logger, context, "assign", id, result, serverIds.Count);
             return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds);
         });
 
@@ -1271,6 +1285,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.UnassignServerTagCore(store, id, serverIds, context.RequestAborted);
+            LogServerTagWrite(logger, context, "unassign", id, result, serverIds.Count);
             return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds);
         });
     }
@@ -1278,15 +1293,54 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>Parses the request body as one JSON object, or names why it is not.</summary>
     private static async Task<(JsonObject? Body, string? Error)> ReadJsonObjectAsync(HttpContext context)
     {
+        string text;
         try
         {
-            var root = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
-            return root is JsonObject body ? (body, null) : (null, "Request body must be a JSON object.");
+            text = await ReadBoundedBodyAsync(context, MaxServerTagBodyBytes);
+        }
+        catch (InvalidDataException)
+        {
+            return (null, "Request body is too large.");
+        }
+
+        try
+        {
+            var root = JsonNode.Parse(text);
+            if (root is not JsonObject body)
+            {
+                return (null, "Request body must be a JSON object.");
+            }
+
+            /* A duplicate property name throws ArgumentException on the first enumeration; force it here so it
+               answers 400 (a caller's malformed body), like the dismiss route. */
+            _ = body.Count;
+            return (body, null);
         }
         catch (JsonException)
         {
             return (null, "Request body is not valid JSON.");
         }
+        catch (ArgumentException)
+        {
+            return (null, "Request body has a duplicate field.");
+        }
+    }
+
+    /// <summary>The most request-body bytes a server-tag write route reads before it answers 400 (1000 ids is about 12 KB).</summary>
+    internal const int MaxServerTagBodyBytes = 64 * 1024;
+
+    /// <summary>Who changed tag scope is not stored on the row; this line is the only record. Verb, tag id and
+    /// counts only, never a tag name or body text. Logged for a successful write (not invalid / refused).</summary>
+    private static void LogServerTagWrite(ILogger logger, HttpContext context, string verb, int? tagId, string result, int serverCount)
+    {
+        if (ServerTagEnvelopeStatus(result) is < 200 or >= 300)
+        {
+            return;
+        }
+
+        logger.LogInformation(
+            "Server tag {Verb} by {Principal}: tag {TagId}, servers {ServerCount}",
+            verb, DarlingWebSeat.FromContext(context).EditorPrincipal, tagId, serverCount);
     }
 
     /// <summary>Reads <c>{name, parent_id?, colour?}</c>: only those keys, with their JSON types, so a stray or
@@ -1402,7 +1456,25 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
         }
 
-        return MuteRuleEnvelopeStatus(result, successStatus);
+        var mapped = MuteRuleEnvelopeStatus(result, successStatus);
+        if (mapped != successStatus)
+        {
+            return mapped;
+        }
+
+        /* Allow-list: only a known success status answers 2xx; a status a future verb adds is a 500 until it is
+           mapped here, never a silent 200. */
+        try
+        {
+            var status = JsonNode.Parse(result) is JsonObject envelope ? TryGetString(envelope, "status") : null;
+            return status is "created" or "updated" or "unchanged" or "deleted" or "assigned" or "unassigned"
+                ? successStatus
+                : StatusCodes.Status500InternalServerError;
+        }
+        catch (JsonException)
+        {
+            return StatusCodes.Status500InternalServerError;
+        }
     }
 
     /// <summary>The envelope pass-through the server-tag routes share: <see cref="MuteRuleToolResult"/>'s error
