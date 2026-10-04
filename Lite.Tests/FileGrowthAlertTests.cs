@@ -23,6 +23,7 @@ namespace Lite.Tests;
 /// fires on the consequence, by which point a restart is overdue, and cannot attribute the space to one file.
 /// Between them sits a file that has grown large but has not yet filled its disk.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public class FileGrowthAlertTests
 {
     private const string Server = "SQLPROD01";

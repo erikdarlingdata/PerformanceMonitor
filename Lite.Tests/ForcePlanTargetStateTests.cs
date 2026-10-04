@@ -37,6 +37,7 @@ namespace Lite.Tests;
 /// <c>query_store_stats</c> + <c>plan_correction</c> rows, plus the parity pin holding Darling's Postgres
 /// twin to the same text.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 3652;

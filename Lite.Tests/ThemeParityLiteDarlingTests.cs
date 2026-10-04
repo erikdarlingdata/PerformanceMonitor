@@ -38,6 +38,7 @@ namespace PerformanceMonitorLite.Tests;
 /// Text-parses the XAML (no WPF apartment needed) and locates both projects via
 /// <see cref="CallerFilePathAttribute"/>.
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class ThemeParityLiteDarlingTests
 {
     private static readonly XNamespace X = "http://schemas.microsoft.com/winfx/2006/xaml";
