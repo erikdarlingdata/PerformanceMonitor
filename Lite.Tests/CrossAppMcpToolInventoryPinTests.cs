@@ -328,6 +328,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
         "list_custom_alert_templates",
+        /* #4843: Darling-only for now, not by architecture: the per-server trend reads (waits, CPU scheduler,
+           memory clerks, plan cache) have local DuckDB twins, so Lite could serve this tool later. */
         "get_server_trend",
         // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
         "get_finops_inventory",

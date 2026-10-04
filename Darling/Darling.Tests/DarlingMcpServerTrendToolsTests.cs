@@ -75,6 +75,35 @@ public sealed class DarlingMcpServerTrendToolsTests
     }
 
     [Fact]
+    public void EveryFieldNameANoteMentions_IsAFieldThatMetricEmits()
+    {
+        var allowedParameters = new[] { "bucket_minutes", "hours_back" };
+        foreach (var metric in DarlingMcpServerTrendTools.Metrics)
+        {
+            var emitted = DarlingMcpServerTrendTools.Fields(metric);
+            Assert.NotEmpty(emitted);
+            var note = DarlingMcpServerTrendTools.Note(metric, 5, false, 120);
+            var words = System.Text.RegularExpressions.Regex.Matches(note, "[a-z]+(?:_[a-z]+)+").Select(m => m.Value).Distinct().ToArray();
+            Assert.DoesNotContain(words, w => w.StartsWith("peak_", StringComparison.Ordinal) || w.StartsWith("worst_", StringComparison.Ordinal));
+            Assert.All(words, w => Assert.True(emitted.Contains(w) || allowedParameters.Contains(w), $"{metric}: the note names '{w}', which the metric does not emit"));
+        }
+
+        Assert.Contains("wait_time_ms_per_second", DarlingMcpServerTrendTools.Note("total_waits", 5, false, 120), StringComparison.Ordinal);
+        Assert.Contains("averages as 0", DarlingMcpServerTrendTools.Note("cpu_scheduler", 5, false, 120), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheDescription_SaysClerkNamesAreExact_AndWhereTheUnmatchedOnesAreReported()
+    {
+        var method = typeof(DarlingMcpServerTrendTools).GetMethods().First(m => m.Name == "GetServerTrend" && m.IsPublic);
+        var text = method.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
+        Assert.Contains("missing_clerk_types", text, StringComparison.Ordinal);
+        Assert.Contains("matched exactly", text, StringComparison.Ordinal);
+        var param = method.GetParameters().First(p => p.Name == "clerk_types").GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
+        Assert.Contains("exact case", param, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ParseClerks_TrimsAndDeduplicates_InGivenOrder()
     {
         Assert.Equal(["B", "A"], DarlingMcpServerTrendTools.ParseClerks(" B, A ,,B"));
@@ -208,6 +237,21 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
             Assert.Equal([40000.0, 40001.0], clerks.GetProperty("series")[0].GetProperty("trend").EnumerateArray().Select(p => p.GetProperty("memory_mb").GetDouble()).ToArray());
             var one = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "memory_clerks", ServerName, 1, asOf, clerk_types: "CLERK_MID")).RootElement;
             Assert.Single(one.GetProperty("series").EnumerateArray());
+            Assert.False(one.TryGetProperty("missing_clerk_types", out _));
+
+            // A named type the window never recorded is reported, and the types that were found still come back.
+            var partial = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "memory_clerks", ServerName, 1, asOf, clerk_types: "CLERK_MID, clerk_mid, CLERK_NOPE")).RootElement;
+            Assert.Equal(["CLERK_MID"], partial.GetProperty("series").EnumerateArray().Select(sr => sr.GetProperty("clerk_type").GetString()).ToArray());
+            Assert.Equal(["clerk_mid", "CLERK_NOPE"], partial.GetProperty("missing_clerk_types").EnumerateArray().Select(x => x.GetString()).ToArray());
+
+            // None found: not "quiet" - a distinct note, the misses, and the heaviest types the window did record.
+            var none = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "memory_clerks", ServerName, 1, asOf, clerk_types: "CLERK_NOPE")).RootElement;
+            Assert.Equal("empty", none.GetProperty("status").GetString());
+            var noneMessage = none.GetProperty("message").GetString()!;
+            Assert.Contains("None of the named clerk types", noneMessage, StringComparison.Ordinal);
+            Assert.DoesNotContain("genuinely quiet", noneMessage, StringComparison.Ordinal);
+            Assert.Equal(["CLERK_NOPE"], none.GetProperty("hints").GetProperty("missing_clerk_types").EnumerateArray().Select(x => x.GetString()).ToArray());
+            Assert.Equal(["CLERK_BIG", "CLERK_MID", "CLERK_SMALL"], none.GetProperty("hints").GetProperty("heaviest_clerk_types").EnumerateArray().Select(x => x.GetString()).ToArray());
 
             // plan_cache: single-use is 400 + 50 (Adhoc + Proc), +1 on the second collection; multi-use 100 + 450.
             var plan = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "plan_cache", ServerName, 1, asOf)).RootElement;

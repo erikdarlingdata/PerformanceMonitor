@@ -31,7 +31,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// (<see cref="ServerTrendSql"/>), windowed on both sides, bucketed to the same width ladder as the other trend tools
 /// (<see cref="TrendBuckets"/>), and ends with the shared <c>discontinuities[]</c> block.
 ///
-/// <para>Points are stamped at the bucket's start. A field with no value is omitted rather than written as null.
+/// <para>Points are stamped at the bucket's start. A field with no value is omitted rather than written as null,
+/// except a cpu_scheduler count, which the shared SQL averages as 0 when a collection did not report it.
 /// An empty window is a status envelope that tells a quiet window from a collector that never ran, and a
 /// gated engine from both.</para>
 /// </summary>
@@ -51,7 +52,7 @@ public sealed class DarlingMcpServerTrendTools
     internal const int MaxClerkCount = 10;
 
     private const string TrendGuide =
-        " total_waits is every wait type summed into one wait_time_ms_per_second rate (summed wait time over the seconds it covered); a collection whose interval was unknowable is left out, not drawn as 0. cpu_scheduler points average the runnable, blocked and queued task counts. memory_clerks gives one series per clerk type, in MB; clerk_types names them (comma-separated, up to 10), default the 5 heaviest in the window. plan_cache gives single-use and multi-use plan cache MB. All but total_waits are levels, averaged per bucket.";
+        " total_waits is every wait type summed into one wait_time_ms_per_second rate (summed wait time over the seconds it covered); a collection whose interval was unknowable is left out, not drawn as 0. cpu_scheduler points average the runnable, blocked and queued task counts; a count a collection did not report averages as 0, not as missing. memory_clerks gives one series per clerk type, in MB; clerk_types names them (comma-separated, up to 10, matched exactly), default the 5 heaviest in the window; named types with no samples in the window come back in missing_clerk_types. plan_cache gives single-use and multi-use plan cache MB. All but total_waits are levels, averaged per bucket.";
 
     [McpServerTool(Name = "get_server_trend"), Description(
         "Gets one instance trend over time in buckets, ending at as_of. metric is one of total_waits, cpu_scheduler, memory_clerks, plan_cache. A quiet window answers empty; unavailable means the collector has never run; not_collected covers a gated engine. <<GUIDE>>" + TrendGuide + BaselineDiscontinuities.DescriptionSentence)]
@@ -62,7 +63,7 @@ public sealed class DarlingMcpServerTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
-        [Description("memory_clerks only: clerk types, comma-separated. Default the 5 heaviest.")] string? clerk_types = null,
+        [Description("memory_clerks only: clerk types, comma-separated, exact case. Default the 5 heaviest.")] string? clerk_types = null,
         CancellationToken cancellationToken = default) =>
         GetServerTrend(postgres, metric, server_name, hours_back, as_of, bucket_minutes, clerk_types, TrendBudget.Mcp(MaxPoints), cancellationToken);
 
@@ -129,17 +130,24 @@ public sealed class DarlingMcpServerTrendTools
                 ["hours_back"] = hours_back,
                 ["bucket"] = TrendBuckets.Word(bucketMinutes),
                 ["bucket_minutes"] = bucketMinutes,
-                ["aggregate_note"] = name == "total_waits"
-                    ? TrendBuckets.AggregateNote(bucketMinutes, bucket_minutes is not null, budget.AutoPoints)
-                    : TrendBuckets.LevelNote(bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
+                ["aggregate_note"] = Note(name, bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
             };
 
             if (name == "memory_clerks")
             {
                 var series = await ReadClerkSeriesAsync(postgres, resolved.ServerId, clerks, start, end, bucketMinutes, cancellationToken);
+                var named = !string.IsNullOrWhiteSpace(clerk_types);
                 if (series.Count == 0)
                 {
-                    return await EmptyAsync(postgres, resolved, name, hours_back, cancellationToken);
+                    return named
+                        ? await NoNamedClerksAsync(postgres, resolved, clerks, start, end, hours_back, cancellationToken)
+                        : await EmptyAsync(postgres, resolved, name, hours_back, cancellationToken);
+                }
+
+                var missing = named ? clerks.Where(c => !series.ContainsKey(c)).ToList() : [];
+                if (missing.Count > 0)
+                {
+                    envelope["missing_clerk_types"] = missing;
                 }
 
                 envelope["series"] = clerks
@@ -173,6 +181,49 @@ public sealed class DarlingMcpServerTrendTools
         string.IsNullOrWhiteSpace(clerkTypes)
             ? []
             : clerkTypes.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Distinct(StringComparer.Ordinal).ToList();
+
+    /// <summary>The fields each metric's points carry, in column order after the bucket stamp. Notes may name only these.</summary>
+    internal static string[] Fields(string metric) => metric switch
+    {
+        "total_waits" => ["wait_time_ms_per_second"],
+        "cpu_scheduler" => ["runnable_tasks", "blocked_tasks", "queued_requests"],
+        "memory_clerks" => ["memory_mb"],
+        _ => ["single_use_mb", "multi_use_mb"],
+    };
+
+    /// <summary>The note that tells a reader how each point was rolled up. It names only fields the metric emits.</summary>
+    internal static string Note(string metric, int bucketMinutes, bool requested, int budgetPoints)
+    {
+        var stamp = $"is stamped at the bucket's start (the first point at the window's start). ";
+        if (metric == "total_waits")
+        {
+            return $"Each point summarizes the collections in one {TrendBuckets.Adjective(bucketMinutes)} bucket and {stamp}"
+                + "wait_time_ms_per_second is recomputed from the summed wait time over the seconds the collections covered, never averaged from per-collection rates, so a bucket the window cuts short still holds a true rate. "
+                + TrendBuckets.Sizing(requested, budgetPoints);
+        }
+
+        var zero = metric == "cpu_scheduler" ? " A count a collection did not report averages as 0." : string.Empty;
+        return $"Each point averages the samples in one {TrendBuckets.Adjective(bucketMinutes)} bucket and {stamp}"
+            + $"A level is averaged, never summed, so a spike inside a bucket is smoothed into its average; narrow the bucket to see it.{zero} "
+            + TrendBuckets.Sizing(requested, budgetPoints);
+    }
+
+    /// <summary>Clerk types were named and none has a sample in the window: say so, and list what the window did record.</summary>
+    private static async Task<string> NoNamedClerksAsync(
+        NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, List<string> named, DateTime start, DateTime end,
+        int hoursBack, CancellationToken cancellationToken)
+    {
+        var heaviest = await ReadTopClerksAsync(postgres, resolved.ServerId, start, end, cancellationToken);
+        if (heaviest.Count == 0)
+        {
+            return await EmptyAsync(postgres, resolved, "memory_clerks", hoursBack, cancellationToken);
+        }
+
+        return McpHelpers.Status(
+            "empty",
+            $"None of the named clerk types were recorded for {resolved.ServerName} in the last {hoursBack} hour(s). Clerk types are matched exactly, so check the spelling and case. The window does hold other clerk types: heaviest_clerk_types lists the heaviest of them.",
+            new Dictionary<string, object?> { ["missing_clerk_types"] = named, ["heaviest_clerk_types"] = heaviest });
+    }
 
     private static (string Sql, string Collector, string EverSql, string What) Describe(string metric) => metric switch
     {
@@ -256,7 +307,7 @@ public sealed class DarlingMcpServerTrendTools
             }
 
             var point = new Dictionary<string, object?> { ["time"] = Stamp(reader.GetDateTime(1)) };
-            AddNumber(point, "memory_mb", reader, 2);
+            AddNumber(point, Fields("memory_clerks")[0], reader, 2);
             list.Add(point);
         }
 
@@ -267,12 +318,7 @@ public sealed class DarlingMcpServerTrendTools
         NpgsqlDataSource postgres, string metric, int serverId, DateTime start, DateTime end, int bucketMinutes,
         CancellationToken cancellationToken)
     {
-        string[] fields = metric switch
-        {
-            "total_waits" => ["wait_time_ms_per_second"],
-            "cpu_scheduler" => ["runnable_tasks", "blocked_tasks", "queued_requests"],
-            _ => ["single_use_mb", "multi_use_mb"],
-        };
+        var fields = Fields(metric);
 
         var items = new List<Dictionary<string, object?>>();
         await using var command = postgres.CreateCommand(Describe(metric).Sql);
