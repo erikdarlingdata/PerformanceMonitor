@@ -267,7 +267,7 @@ public class CollectorStallProbeStoreTests
     }
 
     /// <summary>
-    /// The probe query matches this service's own session by <c>PROGRAM_NAME()</c> and <c>HOST_NAME()</c>, so
+    /// The probe query matches this service's own session by <c>APP_NAME()</c> and <c>HOST_NAME()</c>, so
     /// it binds no parameters: the runner must send the text as it ships, with none attached.
     /// </summary>
     [Fact]

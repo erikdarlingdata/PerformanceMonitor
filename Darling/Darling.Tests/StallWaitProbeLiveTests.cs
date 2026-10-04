@@ -62,7 +62,7 @@ public class StallWaitProbeLiveTests
             var sample = await StallWaitProbePolicy.ReadAsync(reader, ct);
 
             Assert.NotNull(sample);
-            Assert.True(sample!.BackgroundWaitingTasks > 0, "every instance has idle background waiters");
+            Assert.True(sample!.BackgroundWaitingTasks > 0, "every instance has idle background waiters when the login holds VIEW SERVER STATE; a login without that permission sees none");
             Assert.NotNull(sample.WaitSummary);
             Assert.Contains("WAITFOR:", sample.WaitSummary, StringComparison.Ordinal);
             Assert.True(sample.CollectorSessions >= 1, "our planted session should be visible by program and host");

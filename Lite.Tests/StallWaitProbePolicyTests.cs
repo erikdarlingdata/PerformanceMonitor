@@ -672,6 +672,9 @@ public class StallWaitProbePolicyTests
         Assert.Equal(0, idle!.WaitingTaskCount);
         Assert.Null(idle.TopWaitType);
         Assert.Equal(8, idle.SchedulerCount);
+        Assert.Equal(
+            "excluded from ranking: background 0 tasks/0 types; ours: not visible",
+            idle.WaitSummary);
 
         /* The same shape with zero schedulers is not an instance, and must not be credited as a sample. */
         var notAnInstance = await StallWaitProbePolicy.ReadAsync(
@@ -779,6 +782,9 @@ public class StallWaitProbePolicyTests
         var totals = sql.Substring(crossJoin, firstApply - crossJoin);
         var ranking = sql.Substring(firstApply, sql.IndexOf("OUTER APPLY", firstApply + 1, StringComparison.Ordinal) - firstApply);
 
+        /* A session the DMV cannot show must stay in the totals and keep the ranking's fail-safe. */
+        Assert.Contains("LEFT JOIN sys.dm_exec_sessions AS es", totals, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN sys.dm_exec_sessions AS es", ranking, StringComparison.Ordinal);
         Assert.Contains("TOP (5)", ranking, StringComparison.Ordinal);
         Assert.Contains(predicate, ranking, StringComparison.Ordinal);
 
@@ -799,8 +805,10 @@ public class StallWaitProbePolicyTests
     {
         var sql = StallWaitProbePolicy.QueryText;
 
-        Assert.Contains("es.program_name = PROGRAM_NAME()", sql, StringComparison.Ordinal);
+        Assert.Contains("es.program_name = APP_NAME()", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("PROGRAM_NAME", sql, StringComparison.Ordinal);
         Assert.Contains("es.host_name = HOST_NAME()", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT_BIG(DISTINCT es.session_id)", sql, StringComparison.Ordinal);
         Assert.Contains("sys.dm_exec_requests", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("target_session_id", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("@session_id", sql, StringComparison.Ordinal);
@@ -861,12 +869,46 @@ public class StallWaitProbePolicyTests
     {
         var waits = new[] { new StallWaitRow("SOS_SCHEDULER_YIELD", 25, 9_931, 61) };
 
-        var summary = StallWaitProbePolicy.RenderWaitSummary(waits, 600, 9, 2, null, 120, "PAGEIOLATCH_SH");
+        var summary = StallWaitProbePolicy.RenderWaitSummary(waits, 600, 9, 2, null, 0, "PAGEIOLATCH_SH");
 
         Assert.EndsWith(
-            "ours (oldest of 2): running 120ms (last PAGEIOLATCH_SH)",
+            "ours (oldest of 2): running (last PAGEIOLATCH_SH)",
             summary,
             StringComparison.Ordinal);
+    }
+
+    /// <summary>Only background sessions wait: nothing ranks, and the summary is just the tail.</summary>
+    [Fact]
+    public async Task ReadAsync_WithOnlyBackgroundWaits_KeepsTheTailAsTheWholeSummary()
+    {
+        var sample = await StallWaitProbePolicy.ReadAsync(
+            new FakeSampleReader(new object?[][]
+            {
+                [null, null, null, null, 600L, 9, 8, 97L, 3L, 12L, 21, 600L, 9, 1L, "ASYNC_NETWORK_IO", 41_000L, "ASYNC_NETWORK_IO"],
+            }),
+            CancellationToken.None);
+
+        Assert.NotNull(sample);
+        Assert.Null(sample!.TopWaitType);
+        Assert.Equal(
+            "excluded from ranking: background 600 tasks/9 types; ours: ASYNC_NETWORK_IO 41000ms (last ASYNC_NETWORK_IO)",
+            sample.WaitSummary);
+    }
+
+    /// <summary>The worst-case tail (maximum counts, 60-character names, 40 long entries) stays inside the cap.</summary>
+    [Fact]
+    public void RenderWaitSummary_TheWorstCaseTail_FitsTheCap()
+    {
+        var name = new string('W', 60);
+        var many = Enumerable.Range(0, 40).Select(_ => new StallWaitRow(name, long.MaxValue, long.MaxValue, 1)).ToArray();
+
+        var summary = StallWaitProbePolicy.RenderWaitSummary(many, long.MaxValue, int.MaxValue, long.MaxValue, name, long.MaxValue, name);
+        var alone = StallWaitProbePolicy.RenderWaitSummary(
+            Array.Empty<StallWaitRow>(), long.MaxValue, int.MaxValue, long.MaxValue, name, long.MaxValue, name);
+
+        Assert.True(summary.Length <= 512);
+        Assert.True(alone.Length <= 512);
+        Assert.StartsWith("excluded from ranking:", alone, StringComparison.Ordinal);
     }
 
     /// <summary>The tail is reserved first, so 40 long entries cannot push it off the 512-character cap.</summary>

@@ -96,7 +96,7 @@ public readonly record struct StallWaitRow(string WaitType, long WaitingTasks, l
 /// <param name="BackgroundWaitingTasks">Waiting tasks owned by background system sessions, counted in
 /// <paramref name="WaitingTaskCount"/> but left out of the ranking.</param>
 /// <param name="BackgroundWaitTypes">Distinct wait types among those background tasks.</param>
-/// <param name="CollectorSessions">How many sessions matching this service's application name and client host
+/// <param name="CollectorSessions">How many distinct sessions matching this service's application name and client host
 /// have a request; 0 when none is visible.</param>
 /// <param name="CollectorWaitType">The oldest such request's current wait, or <c>null</c> while it is running.</param>
 /// <param name="CollectorWaitMs">That wait's duration in milliseconds, or <c>null</c> when no session is visible.</param>
@@ -192,7 +192,7 @@ public static class StallWaitProbePolicy
     ///
     /// <para><b>Generous against what the probe actually has to do.</b> The same forensics measured the four
     /// cheapest collectors completing in 128-448 ms INSIDE a degraded body, and the one open measured on a
-    /// stalled connection was 104 ms. Two DMV scans on a fresh connection is that shape of work, so 10 s is
+    /// stalled connection was 104 ms. A handful of in-memory DMV reads on a fresh connection is that shape of work, so 10 s is
     /// roughly 20x the observed cost of a comparable query on a comparably degraded instance — not a tight
     /// bound the probe is expected to brush against, a ceiling for the case where the instance has stopped
     /// answering at all.</para>
@@ -404,15 +404,16 @@ public static class StallWaitProbePolicy
     /// <summary>
     /// The server-wide sample, as one result set of at most <see cref="TopWaitTypeCount"/> rows.
     ///
-    /// <para><b>Five in-memory DMV reads and no temp table, deliberately.</b> Staging the wait aggregate first would give
+    /// <para><b>Six in-memory DMV reads and no temp table, deliberately.</b> Staging the wait aggregate first would give
     /// one consistent snapshot instead of two scans milliseconds apart, and that is the house pattern for a
     /// heavy query — but this one runs against an instance that may be stalled ON tempdb or on IO, and
     /// creating an object there to serve a diagnostic is exactly how a watchdog becomes the second problem.
     /// <c>sys.dm_os_waiting_tasks</c> reads in-memory structures, so the cost of reading it twice is
-    /// negligible and the skew between the totals and the top-N cut is milliseconds on a headline sample. The five
+    /// negligible and the skew between the totals and the top-N cut is milliseconds on a headline sample. The six
     /// reads are <c>sys.dm_os_schedulers</c>, <c>sys.dm_os_waiting_tasks</c> twice (totals and ranking, each
-    /// joined to <c>sys.dm_exec_sessions</c>) and <c>sys.dm_exec_sessions</c> with <c>sys.dm_exec_requests</c>
-    /// for this service's own session; all are bounded by <see cref="HardBudget"/>.</para>
+    /// joined to <c>sys.dm_exec_sessions</c>), and <c>sys.dm_exec_sessions</c> with <c>sys.dm_exec_requests</c>
+    /// twice for this service's own session (once to count its sessions, once for the oldest request); each
+    /// is in-memory and all are bounded by <see cref="HardBudget"/>.</para>
     ///
     /// <para><b>No wait TYPE filter, unlike <see cref="WaitingTasksCollector"/>; background TASKS are excluded
     /// from the ranking and counted.</b> That collector feeds a trend surface an operator reads all day, so
@@ -430,9 +431,10 @@ public static class StallWaitProbePolicy
     ///
     /// <para><b>This service's own session is sampled beside the server-wide view, by program and host name,
     /// not by session id.</b> The probe connection shares the collector connection's application name and
-    /// client host, so <c>PROGRAM_NAME()</c> and <c>HOST_NAME()</c> match the collector's sessions with no id
+    /// client host, so <c>APP_NAME()</c> and <c>HOST_NAME()</c> match the collector's sessions with no id
     /// at all (<c>collection_log.target_session_id</c> is not usable for this). <c>collector_sessions</c>
-    /// counts every matching session with a request, apart from the single oldest request that supplies the
+    /// counts every distinct matching session with a request (under MARS one session can carry several
+    /// requests), apart from the single oldest request that supplies the
     /// wait columns. Limits: two services on one client host monitoring one server share both names, and a
     /// concurrent second reader on the same target (the Query Store backfill) can supply the oldest request
     /// instead of the stalled one; the summary says "oldest of N" when N is above one.</para>
@@ -520,11 +522,11 @@ OUTER APPLY
 OUTER APPLY
 (
     SELECT
-        collector_sessions = COUNT_BIG(*)
+        collector_sessions = COUNT_BIG(DISTINCT es.session_id)
     FROM sys.dm_exec_sessions AS es
     JOIN sys.dm_exec_requests AS er
       ON er.session_id = es.session_id
-    WHERE es.program_name = PROGRAM_NAME()
+    WHERE es.program_name = APP_NAME()
     AND   es.host_name = HOST_NAME()
     AND   es.session_id <> @@SPID
 ) AS cs
@@ -537,7 +539,7 @@ OUTER APPLY
     FROM sys.dm_exec_sessions AS es
     JOIN sys.dm_exec_requests AS er
       ON er.session_id = es.session_id
-    WHERE es.program_name = PROGRAM_NAME()
+    WHERE es.program_name = APP_NAME()
     AND   es.host_name = HOST_NAME()
     AND   es.session_id <> @@SPID
     ORDER BY er.start_time ASC, er.session_id ASC
@@ -616,17 +618,18 @@ OPTION(RECOMPILE);";
 
         var top = waits.Count > 0 ? waits[0] : default;
 
+        /* The summary renders whenever the header was read, even with nothing ranked: the exclusion tail is
+           the evidence on an instance where only background sessions wait or nothing waits at all. */
+
         return new StallWaitSample(
             allWaitingTasks,
             distinctWaitTypes,
             waits.Count > 0 ? top.WaitType : null,
             waits.Count > 0 ? top.TotalWaitMs : 0,
             waits.Count > 0 ? top.MaxWaitMs : 0,
-            waits.Count > 0
-                ? RenderWaitSummary(
-                    waits, backgroundWaitingTasks, backgroundWaitTypes, collectorSessions, collectorWaitType,
-                    collectorWaitMs, collectorLastWaitType)
-                : null,
+            RenderWaitSummary(
+                waits, backgroundWaitingTasks, backgroundWaitTypes, collectorSessions, collectorWaitType,
+                collectorWaitMs, collectorLastWaitType),
             schedulerCount,
             runnableTasks,
             workQueueLength,
@@ -650,9 +653,10 @@ OPTION(RECOMPILE);";
     /// It is summary only, and nothing keys on parsing it.</para>
     ///
     /// <para><b>The tail is reserved first.</b> It reads <c>excluded from ranking: background N tasks/M types;
-    /// ours: WAIT Xms (last L)</c>, with <c>ours (oldest of N)</c> when several sessions match and
+    /// ours: WAIT Xms (last L)</c> (<c>ours: running (last L)</c> while the request has no current wait), with <c>ours (oldest of N)</c> when several sessions match and
     /// <c>ours: not visible</c> when none does, and the 512-character cap never cuts it: the top entries fill
-    /// what remains, whole entries only.</para>
+    /// what remains, whole entries only. With nothing ranked the summary is the tail alone. The tail's worst case is
+    /// about 300 characters (19-digit counts and two 60-character wait names), so it always fits the cap.</para>
     /// </summary>
     public static string RenderWaitSummary(
         IReadOnlyList<StallWaitRow> waits,
@@ -672,15 +676,15 @@ OPTION(RECOMPILE);";
         }
         else
         {
-            ours = string.Format(
-                CultureInfo.InvariantCulture,
-                "{0}: {1} {2}ms (last {3})",
-                collectorSessions > 1
-                    ? string.Format(CultureInfo.InvariantCulture, "ours (oldest of {0})", collectorSessions)
-                    : "ours",
-                string.IsNullOrEmpty(collectorWaitType) ? "running" : collectorWaitType,
-                collectorWaitMs ?? 0,
-                string.IsNullOrEmpty(collectorLastWaitType) ? "none" : collectorLastWaitType);
+            var label = collectorSessions > 1
+                ? string.Format(CultureInfo.InvariantCulture, "ours (oldest of {0})", collectorSessions)
+                : "ours";
+            var last = string.IsNullOrEmpty(collectorLastWaitType) ? "none" : collectorLastWaitType;
+
+            ours = string.IsNullOrEmpty(collectorWaitType)
+                ? string.Format(CultureInfo.InvariantCulture, "{0}: running (last {1})", label, last)
+                : string.Format(
+                    CultureInfo.InvariantCulture, "{0}: {1} {2}ms (last {3})", label, collectorWaitType, collectorWaitMs ?? 0, last);
         }
 
         var tail = string.Format(
