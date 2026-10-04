@@ -229,11 +229,11 @@ public sealed class DarlingMcpSessionTools
                 query_text_truncated = queryTextPreviewLength.HasValue && (r.QueryText?.Length ?? 0) > queryTextPreviewLength.Value
             }).ToList();
 
-            return JsonSerializer.Serialize(new
+            var payload = new
             {
                 server = resolved.ServerName,
                 hours_back,
-                /* #4966: the window floor, always present on a data answer (false and null when the store covered the window). No
+                /* #4966: the window floor. Written only when the store did NOT cover the window (see below). No
                    effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart for the window
                    floor (McpPayloadContractCensusTests), so the reach is the instant. */
                 effective_start = notice.EffectiveStart,
@@ -254,7 +254,19 @@ public sealed class DarlingMcpSessionTools
                 oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(shown[^1].CollectionTime),
                 newest_returned_collection_time = McpHelpers.FormatEffectiveStart(shown[0].CollectionTime),
                 queries = result
-            }, McpHelpers.JsonOptions);
+            };
+
+            /* The house omit-false rule: a covered window carries none of the three keys, so a default call stays inside
+               McpResponseBudget.DefaultBytes (they cost ~110 bytes). A cut window carries all three, in place. */
+            var node = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
+            if (!notice.WindowTruncated)
+            {
+                node.Remove("effective_start");
+                node.Remove("window_truncated");
+                node.Remove("truncation_note");
+            }
+
+            return node.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

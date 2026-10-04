@@ -414,6 +414,16 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
 
             var root = Parse(await CallAsync(postgres, tool, name, 168, end));
 
+            if (tool == "get_active_queries")
+            {
+                /* The house omit-false rule: a covered default call stays inside the response budget, so the three keys
+                   are written only when the window was cut. get_waiting_tasks keeps them always, like the other raw-tier tools. */
+                Assert.False(root.TryGetProperty("window_truncated", out _), tool);
+                Assert.False(root.TryGetProperty("effective_start", out _), tool);
+                Assert.False(root.TryGetProperty("truncation_note", out _), tool);
+                return;
+            }
+
             Assert.False(root.GetProperty("window_truncated").GetBoolean(), tool);
             Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
             /* The asked start: an anchor within the client-clock allowance of now reads as now, so it is the call's own clock
