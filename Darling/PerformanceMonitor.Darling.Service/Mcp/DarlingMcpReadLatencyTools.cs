@@ -63,7 +63,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "this many ms\", flagged with \"≥ <bound>\" on the rare row whose true value only proven to exceed "
         + "the last finite bucket. timeouts is the run_count of samples whose outcome was a caught statement "
         + "timeout (57014) for that route — a route that answers fast most of the time but times out on a heavy "
-        + "case shows both figures side by side. Sorted by p95 descending, then by count, so the worst tail "
+        + "case shows both figures side by side. Sorted by p95 descending, then by count, then surface and route, so the worst tail "
         + "leads. fallbacks is the run_count of reads whose interval-table path faulted "
         + "and were answered from raw (outcome fallback_raw); gate_failures is the run_count of reads whose "
         + "source decision itself faulted, so they read raw without one (outcome gate_failed). Both are counted "

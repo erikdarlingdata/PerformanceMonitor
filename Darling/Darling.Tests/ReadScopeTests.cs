@@ -104,10 +104,28 @@ public sealed class ReadScopeTests
         var logger = new CapturingTestLogger();
         using var scope = ReadScope.Open(logger);
 
-        ReadScope.NoteFallback(ReadFallback.FallbackRaw, "a site", new InvalidOperationException("boom"));
+        var thrown = new InvalidOperationException("boom");
+        ReadScope.NoteFallback(ReadFallback.FallbackRaw, "a site", thrown);
 
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
         Assert.Contains("a site", logger.Joined, StringComparison.Ordinal);
+        var logged = Assert.Single(logger.ExceptionsAtLevel(LogLevel.Warning));
+        Assert.Same(thrown, logged);
+    }
+
+    [Fact]
+    public void ANoteWithNoLog_RecordsTheFallback_AndWritesNothing()
+    {
+        var logger = new CapturingTestLogger();
+        using var scope = ReadScope.Open(logger);
+
+        ReadScope.Note(ReadFallback.FallbackRaw);
+        Assert.Equal(ReadFallback.FallbackRaw, scope.Fallback);
+        ReadScope.Note(ReadFallback.GateFailed);
+        ReadScope.Note(ReadFallback.FallbackRaw);
+
+        Assert.Equal(ReadFallback.GateFailed, scope.Fallback);
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
     }
 
     [Fact]
@@ -165,6 +183,25 @@ public sealed class ReadScopeTests
         await Assert.ThrowsAnyAsync<Exception>(() => DarlingWebEndpoints.ResolveHourlyEdgesVerdictAsync(
             connection, candidate, null, 30, TestContext.Current.CancellationToken));
 
+        Assert.Equal(ReadFallback.GateFailed, scope.Fallback);
+    }
+
+    [Fact]
+    public async Task AGuardFaultPlusARollbackFault_LogsTwoWarnings_AndTheSnapshotStartAddsNoThird()
+    {
+        var logger = new CapturingTestLogger();
+        await using var connection = new NpgsqlConnection(RefusedConnectionString);
+        var hour = new DateTime(2026, 9, 15, 3, 0, 0, DateTimeKind.Utc);
+        var candidate = new ComposeHourlyEdgesCandidate("query_store_stats", "query_store_stats_hourly", hour, hour.AddHours(1));
+
+        using var scope = ReadScope.Open(logger);
+        var fault = await Assert.ThrowsAnyAsync<Exception>(() => DarlingWebEndpoints.ResolveHourlyEdgesVerdictAsync(
+            connection, candidate, null, 30, TestContext.Current.CancellationToken));
+        Assert.Equal(2, logger.CountAtLevel(LogLevel.Warning));
+
+        DarlingWebEndpoints.NoteHourlyEdgesSnapshotStartFault(fault);
+
+        Assert.Equal(2, logger.CountAtLevel(LogLevel.Warning));
         Assert.Equal(ReadFallback.GateFailed, scope.Fallback);
     }
 }

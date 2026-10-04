@@ -1868,7 +1868,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 {
                     if (plan.DecisionFailed)
                     {
-                        ReadScope.NoteFallback(ReadFallback.GateFailed, "#4605 compose Query Store wide-table source decision", null);
+                        ReadScope.Note(ReadFallback.GateFailed);
                     }
 
                     return default;
@@ -2066,6 +2066,23 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
     }
 
+    /// <summary>The <see cref="Exception.Data"/> key marking a guard rollback fault that was already logged.</summary>
+    private const string HourlyEdgesLoggedKey = "pm.hourly-edges.logged";
+
+    /// <summary>Notes a fault that abandoned the snapshot start. A guard rollback fault was already logged by the verdict path, so
+    /// it is only noted; any other fault is noted and logged.</summary>
+    internal static void NoteHourlyEdgesSnapshotStartFault(Exception ex)
+    {
+        if (ex.Data.Contains(HourlyEdgesLoggedKey))
+        {
+            ReadScope.Note(ReadFallback.GateFailed);
+        }
+        else
+        {
+            ReadScope.NoteFallback(ReadFallback.GateFailed, "#4605 compose hourly-edges snapshot start", ex);
+        }
+    }
+
     /// <summary>Opens the run's connection, begins the snapshot transaction and runs the count guard in it. A failed OPEN throws
     /// <see cref="ComposeStoreOpenException"/> to the caller. A fault after the open (the begin, the read-only step, a guard
     /// rollback that itself failed) returns null and the panel opens a fresh connection and reads raw; a guard fault that was
@@ -2087,7 +2104,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ReadScope.NoteFallback(ReadFallback.GateFailed, "#4605 compose hourly-edges snapshot start", ex);
+            NoteHourlyEdgesSnapshotStartFault(ex);
             if (transaction is not null)
             {
                 await transaction.DisposeAsync();
@@ -2166,6 +2183,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
             {
                 ReadScope.Warn("#4605 compose hourly-edges guard rollback failed", rollbackEx);
+                rollbackEx.Data[HourlyEdgesLoggedKey] = true;
 
                 /* The transaction cannot be trusted (the client timer may have broken the connection): rethrow to the snapshot
                    begin, which disposes it and returns no snapshot, so the panel reads raw on a fresh connection. */

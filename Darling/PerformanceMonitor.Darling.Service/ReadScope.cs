@@ -91,15 +91,31 @@ internal sealed class ReadScope
 
         if (scope?.Logger is { } logger)
         {
-#pragma warning disable CA2254 // the site is a fixed literal per call site
             logger.LogWarning(ex, "{Site} fell back to raw ({Kind})", site, kind);
-#pragma warning restore CA2254
         }
         else
         {
             System.Diagnostics.Trace.TraceWarning(ex is null
                 ? $"{site} fell back to raw ({kind})"
-                : $"{site} fell back to raw ({kind}): {ex.GetType().Name}: {ex.Message}");
+                : $"{site} fell back to raw ({kind}): {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>Notes a fallback with no log line, for a caller whose callee already logged the fault.</summary>
+    internal static void Note(ReadFallback kind)
+    {
+        var scope = s_current.Value;
+        if (scope is null)
+        {
+            return;
+        }
+
+        lock (scope._gate)
+        {
+            if (scope._fallback is not ReadFallback.GateFailed)
+            {
+                scope._fallback = kind;
+            }
         }
     }
 
@@ -108,13 +124,11 @@ internal sealed class ReadScope
     {
         if (s_current.Value?.Logger is { } logger)
         {
-#pragma warning disable CA2254 // a fixed literal per call site
             logger.LogWarning(ex, "{Message}", message);
-#pragma warning restore CA2254
         }
         else
         {
-            System.Diagnostics.Trace.TraceWarning(ex is null ? message : $"{message}: {ex.GetType().Name}: {ex.Message}");
+            System.Diagnostics.Trace.TraceWarning(ex is null ? message : $"{message}: {ex.GetType().Name}");
         }
     }
 

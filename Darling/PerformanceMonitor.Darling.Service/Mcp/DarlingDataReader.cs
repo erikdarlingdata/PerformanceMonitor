@@ -2193,7 +2193,7 @@ internal static class DarlingDataReader
             {
                 if (plan.DecisionFailed)
                 {
-                    ReadScope.NoteFallback(ReadFallback.GateFailed, "#3953 MCP top-queries source decision", null);
+                    ReadScope.Note(ReadFallback.GateFailed);
                 }
 
                 return null;
@@ -2893,8 +2893,8 @@ FROM config.config_collector_schedules";
     /// #4999: reads <see cref="ScheduleOverridesSql"/> for one server, or <see cref="AllScheduleOverridesSql"/> when
     /// <paramref name="serverId"/> is null. A failure to read costs the roll-up nothing but the
     /// overrides: every row then keeps the shipped cadence it was judged by before, and the health read still
-    /// answers. This surface has no logger reachable from a static method, so Trace is the seam, as it is for
-    /// the top-queries table fallback above. A cancellation is not swallowed.
+    /// answers. The warning goes through <see cref="ReadScope"/>: the recorder's logger when a scope is open,
+    /// Trace otherwise. A cancellation is not swallowed.
     /// </summary>
     internal static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(
         NpgsqlDataSource postgres, int? serverId, CancellationToken cancellationToken)
