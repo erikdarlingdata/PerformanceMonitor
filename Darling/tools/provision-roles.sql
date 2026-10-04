@@ -303,6 +303,10 @@ GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO mcp;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
+-- #5085: the fleet server-tag write tools run as mcp; these two single-table grants are the admin gate. Both
+--     tables are non-secret with no beacon trigger, and server_tags.id is an identity column (no sequence grant).
+GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;
+GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
 
 -- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as viewer) and the MCP rule
 --     tools (as mcp) create, edit and delete config.custom_alert_rules -- non-secret rule JSON, the same

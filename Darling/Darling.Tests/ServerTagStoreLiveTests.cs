@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -137,6 +138,50 @@ public sealed class ServerTagStoreLiveTests
 
         var found = await store.FindRegisteredServerIdsAsync([1, 2, 3], ct);
         Assert.Empty(found);
+    }
+
+    /// <summary>The five tool cores against a real <see cref="ServerTagStore"/> (the product path, no fake): the
+    /// depth and cycle refusals, then the delete that needs confirm because a tag-scoped rule points at the
+    /// subtree, then the confirmed delete that leaves the rule orphaned.</summary>
+    [Fact]
+    public async Task ServerTagToolCores_OverTheRealStore_RefuseDepthAndCycle_AndGateTheDeleteOnTheRules()
+    {
+        var opened = await OpenAsync();
+        var (scratch, source, store) = opened!.Value;
+        await using var _ = scratch;
+        await using var __ = source;
+        var ct = TestContext.Current.CancellationToken;
+
+        static System.Text.Json.Nodes.JsonObject Parse(string json) => (System.Text.Json.Nodes.JsonObject)System.Text.Json.Nodes.JsonNode.Parse(json)!;
+
+        var ids = new System.Collections.Generic.List<int>();
+        int? parent = null;
+        foreach (var name in new[] { "Level1", "Level2", "Level3", "Level4" })
+        {
+            var made = Parse(await DarlingMcpServerTagTools.CreateServerTagCore(store, name, parent, null, ct));
+            Assert.Equal("created", (string?)made["status"]);
+            parent = (int)made["tag"]!["tag_id"]!;
+            ids.Add(parent.Value);
+        }
+
+        var tooDeep = Parse(await DarlingMcpServerTagTools.CreateServerTagCore(store, "Level5", ids[3], null, ct));
+        Assert.Equal("depth_limit", (string?)tooDeep["refusal"]);
+
+        var cycle = Parse(await DarlingMcpServerTagTools.UpdateServerTagCore(store, ids[0], $"{{\"parent_id\":{ids[2]}}}", ct));
+        Assert.Equal("cycle", (string?)cycle["refusal"]);
+
+        await ExecAsync(source, "INSERT INTO custom_alert_rules (name, definition, enabled, version, created_at, updated_at, updated_by) VALUES "
+            + $"('tag-rule', '{{\"scope\":{{\"mode\":\"tag\",\"tagId\":{ids[2]}}}}}', true, 1, now(), now(), 'test')");
+
+        var needsConfirm = Parse(await DarlingMcpServerTagTools.DeleteServerTagCore(store, ids[1], false, ct));
+        Assert.Equal("confirm_required", (string?)needsConfirm["status"]);
+        Assert.Equal("tag-rule", (string?)needsConfirm["affected_rules"]![0]!["name"]);
+        Assert.Equal(4, (await store.ReadTagsAsync(ct)).Count);
+
+        var deleted = Parse(await DarlingMcpServerTagTools.DeleteServerTagCore(store, ids[1], true, ct));
+        Assert.Equal("deleted", (string?)deleted["status"]);
+        Assert.Equal("orphaned", (string?)deleted["affected_rules"]![0]!["effect"]);
+        Assert.Single(await store.ReadTagsAsync(ct));
     }
 
     [Fact]

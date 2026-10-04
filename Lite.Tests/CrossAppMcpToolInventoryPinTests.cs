@@ -328,6 +328,14 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
         "list_custom_alert_templates",
+        /* #5085: the fleet server-tag write tools (create/update/delete/assign/unassign_server_tag) write
+           config.server_tags and config.server_tag_map in the central Postgres store, the same Darling-ONLY kind
+           of entry as the custom-alert-rule tools above: Lite keeps its tags in its own local config. */
+        "create_server_tag",
+        "update_server_tag",
+        "delete_server_tag",
+        "assign_server_tag",
+        "unassign_server_tag",
         // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
         "get_finops_inventory",
         "get_finops_recommendations",

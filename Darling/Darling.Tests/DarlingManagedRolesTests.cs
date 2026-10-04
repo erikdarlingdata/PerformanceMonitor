@@ -348,6 +348,9 @@ public sealed class DarlingManagedRolesTests
            alert-settings row (never INSERT/DELETE — the row is a fixed singleton the service seeds). */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO mcp;", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT UPDATE ON config.config_alert_settings TO mcp;", sql, StringComparison.Ordinal);
+        /* The fleet server-tag write tools (#5085): the admin gate is exactly these two single-table grants. */
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSERT, UPDATE, DELETE ON config.config_alert_settings", sql, StringComparison.Ordinal);
 
         /* The beacon caveat: a config_alert_settings write fires the SECURITY INVOKER bump trigger, which UPDATEs
