@@ -368,6 +368,7 @@ public sealed class QueryStoreTopDailyRungTests
             foreach (var role in roles)
             {
                 await ExecAsync(connection, $"SET ROLE {role}", ct);
+                var roleBodySucceeded = false;
                 try
                 {
                     Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily", ct));
@@ -376,10 +377,13 @@ public sealed class QueryStoreTopDailyRungTests
                     var refused = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(connection,
                         "DELETE FROM collect.query_store_top_daily", ct));
                     Assert.Equal("42501", refused.SqlState);
+                    roleBodySucceeded = true;
                 }
                 finally
                 {
-                    await ExecAsync(connection, "RESET ROLE", ct);
+                    /* RESET ROLE is a session setting: it has to run on the very session that took SET ROLE. */
+                    await LiveStoreCleanup.RunOwnedAsync(roleBodySucceeded, async () =>
+                        await ExecAsync(connection, "RESET ROLE", ct));
                 }
             }
 
