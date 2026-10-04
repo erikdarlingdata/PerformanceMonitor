@@ -301,11 +301,10 @@ public sealed class WatermarkPolicyTests
 
         /* The sharded step runs only when the scope step says this leg has work, which for a Darling-only
            diff is the `reads` selection in shard 0. */
-        var run = yaml.IndexOf("- name: Run Lite tests (shard)\n", job, StringComparison.Ordinal);
-        Assert.True(run > 0, "the 'Run Lite tests (shard)' step is gone — find where it moved before editing this test");
+        var run = CrossAppGuardCiGateTests.StepBlock(yaml[job..], "Run Lite tests (shard)");
         Assert.Contains(
             "\n        if: steps.scope.outputs.run == 'true'\n",
-            yaml[run..(run + 200)],
+            run,
             StringComparison.Ordinal);
     }
 
