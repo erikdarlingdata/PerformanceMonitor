@@ -47,6 +47,7 @@ public sealed partial class DarlingMcpFinOpsTools
         ApplicationConnectionsView,
         OptimizationView,
         StorageGrowthView,
+        DatabaseSizesView,
         // FinOps web parity (#4843), set B ends.
     ];
 
@@ -67,8 +68,8 @@ public sealed partial class DarlingMcpFinOpsTools
     //
     // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
     internal const string SetBViewLines = " " + HighImpactViewLine + " " + DatabaseResourcesViewLine + " " + ApplicationConnectionsViewLine + " " + OptimizationViewLine + " " + StorageGrowthViewLine;
-    internal const string SetBValid = HighImpactView + ", " + DatabaseResourcesView + ", " + ApplicationConnectionsView + ", " + OptimizationView + ", " + StorageGrowthView;
-    internal const string SetBGuides = " " + HighImpactViewGuide + " " + DatabaseResourcesViewGuide + " " + ApplicationConnectionsViewGuide + " " + OptimizationViewGuide + " " + StorageGrowthViewGuide;
+    internal const string SetBValid = HighImpactView + ", " + DatabaseResourcesView + ", " + ApplicationConnectionsView + ", " + OptimizationView + ", " + StorageGrowthView + ", " + DatabaseSizesView;
+    internal const string SetBGuides = " " + HighImpactViewGuide + " " + DatabaseResourcesViewGuide + " " + ApplicationConnectionsViewGuide + " " + OptimizationViewGuide + " " + StorageGrowthViewGuide + " " + DatabaseSizesViewGuide;
     // FinOps web parity (#4843), set B ends.
 
     private const int DefaultLimit = 10;
@@ -98,8 +99,9 @@ public sealed partial class DarlingMcpFinOpsTools
 
         var validation = McpHelpers.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
-        if (limit < 1 || limit > MaxLimit)
-            return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {MaxLimit}.");
+        var maxLimit = normalized == DatabaseSizesView ? MaxDatabaseSizeRows : MaxLimit;
+        if (limit < 1 || limit > maxLimit)
+            return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {maxLimit}.");
 
         database_name = NormalizeOptionalText(database_name);
         object_name = NormalizeOptionalText(object_name);
@@ -136,6 +138,8 @@ public sealed partial class DarlingMcpFinOpsTools
                     return await ReadOptimizationAsync(postgres, resolved, hours_back, limit, cancellationToken);
                 case StorageGrowthView:
                     return await ReadStorageGrowthAsync(postgres, resolved, hours_back, limit, database_name, object_name, cancellationToken);
+                case DatabaseSizesView:
+                    return await ReadDatabaseSizesAsync(postgres, resolved, limit, cancellationToken);
                 // FinOps web parity (#4843), set B ends.
                 default:
                     return McpHelpers.Refusal("view", $"Invalid view value '{view}'. Valid views: {string.Join(", ", Views)}.");
