@@ -139,6 +139,11 @@ public static class DarlingWebEndpoints
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
         "list_custom_alert_templates",
+        "create_server_tag",
+        "update_server_tag",
+        "delete_server_tag",
+        "assign_server_tag",
+        "unassign_server_tag",
         "get_tool_guide",
     };
 

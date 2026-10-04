@@ -45,6 +45,7 @@ namespace Lite.Tests;
 /// same path whichever project compiles it. The namespace stays <c>Lite.Tests</c> in both assemblies, the
 /// way the walker keeps <c>Darling.Tests</c> when Lite compiles it.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class CrossSkuSurfaceSourceTests
 {
     /// <summary>

@@ -82,6 +82,31 @@ public sealed class EffectiveStartUtcTests
     }
 
     /// <summary>
+    /// #4966: the five Lite event-list tools write <c>effective_start</c> from the shared notice
+    /// (<c>McpQueryTools.EventWindowNoticeAsync</c> -> <c>WindowNotice</c>, which prints through
+    /// <see cref="McpHelpers.FormatEffectiveStart(DateTime)"/>), never from a bare <c>ToString("o")</c> of the store's naive floor.
+    /// Each data answer writes the key once, from <c>notice.EffectiveStart</c>, and its empty answer carries the same notice under hints.
+    /// </summary>
+    [Theory]
+    [InlineData("McpBlockingTools.cs", 4)]
+    [InlineData("McpLongQueryTools.cs", 1)]
+    public void EveryLiteEventListWindowFloorWrite_ComesFromTheSharedNotice(string file, int expectedTools)
+    {
+        var source = RepoFile.ReadRepoFile("Lite", "Mcp", file);
+        var writes = source
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("effective_start = ", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(expectedTools, writes.Count);
+        Assert.All(writes, line => Assert.Equal("effective_start = notice.EffectiveStart,", line));
+        /* Two calls per tool: the data answer's, and the empty answer's. */
+        Assert.Equal(expectedTools * 2, Regex.Matches(source, @"EventWindowNoticeAsync\(\s*\(\) => dataService\.GetQueryWindowFloorAsync").Count);
+        Assert.Equal(expectedTools, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)").Count);
+    }
+
+    /// <summary>
     /// #4966, #5015: where a page's rows stop and start (<c>oldest_returned_*</c> and <c>newest_returned_*</c>: collection,
     /// event, deadlock and alert time) describe the window the page covers, so every tool that carries them prints them the
     /// same way as <c>effective_start</c>: UTC, with the Z, through the shared formatter, in both apps. The sweep reads

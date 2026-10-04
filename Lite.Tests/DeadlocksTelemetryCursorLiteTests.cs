@@ -26,6 +26,7 @@ namespace Lite.Tests;
 /// (<c>database_name = 'master'</c>) almost never finds a row and every run re-reads the last ten minutes.
 /// The arm keeps its own cursor in collector state: the newest <c>deadlock_time</c> the arm itself returned.
 /// </summary>
+[Trait("Reads", "Darling")]
 public class DeadlocksTelemetryCursorLiteTests
 {
     private const string Key = "dl_telemetry_cursor";

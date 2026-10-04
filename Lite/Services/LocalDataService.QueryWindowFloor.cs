@@ -279,12 +279,13 @@ public partial class LocalDataService
     /// <para><b>A grid fed by two collectors (the Blocked Process Reports grid, #4966).</b> The grid lists the XE collector's
     /// reports and, beside them, the always-on DMV blocking snapshots, so for it the answer is the earlier of the two
     /// collectors' (<see cref="QueryWindowRelationAlsoCoveredBy"/>, <see cref="EarlierCoverageFloor"/>): a null answer from
-    /// one (no row and no logged run of that collector in the window) gives way to the other's.</para>
+    /// one (no row and no logged run of that collector in the window) gives way to the other's. A tool that reads only the
+    /// first collector's rows (the report XML) passes <c>includeAlsoCovered: false</c> to probe that collector alone.</para>
     /// </summary>
-    public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock = null)
+    public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock = null, bool includeAlsoCovered = true)
     {
         var own = await GetOwnQueryWindowFloorAsync(relation, serverId, startUtc, endUtc, serverClock);
-        return QueryWindowRelationAlsoCoveredBy(relation) is QueryWindowRelation also
+        return includeAlsoCovered && QueryWindowRelationAlsoCoveredBy(relation) is QueryWindowRelation also
             ? EarlierCoverageFloor(own, await GetOwnQueryWindowFloorAsync(also, serverId, startUtc, endUtc, serverClock))
             : own;
     }

@@ -82,6 +82,7 @@ namespace Lite.Tests;
 /// EQUALITY against what the filter could not reach, and honoured only while
 /// <see cref="WholeTreeBackstopIsIntact"/> holds.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public class CrossAppGuardCiGateTests
 {
     /* Which filter gates which suite, per build.yml's "Run Lite tests (shard)" / "Run Darling tests"
@@ -1333,15 +1334,17 @@ public class CrossAppGuardCiGateTests
                whether the suite runs on a pull request. The copy is pinned byte-equal to the build
                job's 'lite' by TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs, so reading
                either set here asserts the same reachability. */
-            filterName: "lite_shard",
-            gatingStep: "Run Lite tests (shard)",
+            filterNames: new[] { "lite_shard", "darling_reads_shard" },
+            gatingStep: "Decide how much of the Lite suite runs",
+            gatingWindow: 1600,
             backstopped: null);
 
         Check(repo, yaml, failures,
             scannedProject: DarlingTestsDir,
             other: LiteTrees,
-            filterName: "darling",
+            filterNames: new[] { "darling" },
             gatingStep: "Run Darling tests",
+            gatingWindow: 400,
             /* This arm alone, because this arm alone has a backstop: darling-tree-guards runs the whole
                Darling suite exactly when the darling filter did not fire. There is no counterpart for
                Lite.Tests, so the Lite arm gets no exemptions at all rather than an empty list that would
@@ -1376,11 +1379,20 @@ public class CrossAppGuardCiGateTests
     {
         var yaml = ReadBuildYaml(RepoRoot());
 
-        foreach (var (original, copy) in new[]
-                 { ("lite", "lite_shard"), ("core", "core_shard"), ("root", "root_shard") })
+        /* The build job's 'lite' set is carried in two blocks here: lite_shard (Lite and Lite.Tests, which
+           run the whole suite) followed by darling_reads_shard (the three Darling trees Lite.Tests reads as
+           source, which run only the classes tagged as reading them). Their concatenation, in order, is the
+           copy. */
+        foreach (var (original, copies) in new[]
+                 {
+                     ("lite", new[] { "lite_shard", "darling_reads_shard" }),
+                     ("core", new[] { "core_shard" }),
+                     ("root", new[] { "root_shard" }),
+                 })
         {
+            var copy = string.Join(" + ", copies);
             var originalPatterns = FilterPatterns(yaml, original);
-            var copiedPatterns = FilterPatterns(yaml, copy);
+            var copiedPatterns = copies.SelectMany(c => FilterPatterns(yaml, c)).ToList();
 
             /* Anti-vacuity on BOTH sides: a renamed or moved block returns an empty list, and two empty
                lists are equal — which is exactly the green that would mean this pin had stopped reading the
@@ -1464,22 +1476,35 @@ public class CrossAppGuardCiGateTests
         List<string> failures,
         string scannedProject,
         SkuTrees other,
-        string filterName,
+        string[] filterNames,
         string gatingStep,
+        int gatingWindow,
         IReadOnlyDictionary<string, string>? backstopped)
     {
-        var patterns = FilterPatterns(yaml, filterName);
-        Assert.True(
-            patterns.Count > 0,
-            $"build.yml's '{filterName}' path filter is gone — find where it moved before editing this test");
+        /* A suite can be gated by more than one filter block: the Lite suite's Darling entries live in
+           their own block so a diff that reaches only them can run a narrower selection. The union is what
+           decides whether a read is reachable at all. */
+        var filterName = string.Join("' + '", filterNames);
+        var patterns = new List<string>();
+        foreach (var name in filterNames)
+        {
+            var named = FilterPatterns(yaml, name);
+            Assert.True(
+                named.Count > 0,
+                $"build.yml's '{name}' path filter is gone — find where it moved before editing this test");
+            patterns.AddRange(named);
+        }
 
-        /* The step must actually consume the filter, or the entries are decoration. */
+        /* The step must actually consume every filter, or the entries are decoration. */
         var step = yaml.IndexOf("name: " + gatingStep, StringComparison.Ordinal);
         Assert.True(step > 0, $"the '{gatingStep}' step is gone — find where it moved before editing this test");
-        Assert.Contains(
-            $"steps.filter.outputs.{filterName} == 'true'",
-            yaml[step..Math.Min(step + 400, yaml.Length)],
-            StringComparison.Ordinal);
+        foreach (var name in filterNames)
+        {
+            Assert.Contains(
+                $"steps.filter.outputs.{name}",
+                yaml[step..Math.Min(step + gatingWindow, yaml.Length)],
+                StringComparison.Ordinal);
+        }
 
         var scan = Scan(repo, scannedProject, other);
 
@@ -2718,6 +2743,119 @@ public class CrossAppGuardCiGateTests
 
         rx.Append('$');
         return Regex.IsMatch(path, rx.ToString());
+    }
+
+    /// <summary>One job's text from build.yml: from its two-space-indented key to the next job's.</summary>
+    private static string JobBlock(string yaml, string jobKey)
+    {
+        var at = yaml.IndexOf("\n  " + jobKey + ":\n", StringComparison.Ordinal);
+        Assert.True(at >= 0, $"build.yml's '{jobKey}' job is gone — find where it moved before editing this test");
+        var rest = yaml[(at + 1)..];
+        var next = Regex.Match(rest[3..], "\n  [a-z][a-z0-9-]*:\n");
+        return next.Success ? rest[..(next.Index + 3)] : rest;
+    }
+
+    /// <summary>One step's text inside a job block: from its <c>- name:</c> line to the next step's.</summary>
+    private static string StepBlock(string job, string stepName)
+    {
+        var at = job.IndexOf("      - name: " + stepName + "\n", StringComparison.Ordinal);
+        Assert.True(at >= 0, $"the '{stepName}' step is gone — find where it moved before editing this test");
+        var rest = job[at..];
+        var next = rest.IndexOf("\n      - ", 1, StringComparison.Ordinal);
+        return next < 0 ? rest : rest[..next];
+    }
+
+    /// <summary>
+    /// The Lite shard job's four work steps all run on the scope step's answer and on nothing else, the scope
+    /// step picks <c>reads</c> only for a pull request whose diff reaches just the Darling trees, and only
+    /// shard 0 runs in that mode. These are the lines that make the narrow run narrow, so each is pinned as
+    /// text: a step that dropped its <c>if</c> would run the whole suite in every shard on a Darling-only
+    /// diff, and one that gated on a different condition would skip real work.
+    /// </summary>
+    [Fact]
+    public void TheLiteShardJob_GatesEveryWorkStepOnTheScopeStep_AndNarrowsOnlyOnAPullRequestInShardZero()
+    {
+        var job = JobBlock(ReadBuildYaml(RepoRoot()), "lite-tests");
+
+        foreach (var name in new[] { "Setup .NET 10.0", "Restore Lite.Tests", "Build Lite.Tests", "Run Lite tests (shard)" })
+        {
+            Assert.Contains(
+                "\n        if: steps.scope.outputs.run == 'true'\n",
+                StepBlock(job, name),
+                StringComparison.Ordinal);
+        }
+
+        var scope = StepBlock(job, "Decide how much of the Lite suite runs");
+        Assert.Contains("id: scope", scope, StringComparison.Ordinal);
+
+        /* The ladder, in order: any Lite, core, root or linked-file change is the full suite; a Darling-only
+           diff is full on anything but a pull request and `reads` on a pull request; otherwise nothing. */
+        var ladder = new[]
+        {
+            "if [ \"${LITE}\" = \"true\" ] || [ \"${CORE}\" = \"true\" ] || [ \"${ROOT}\" = \"true\" ] || [ \"${LINKED}\" = \"true\" ]; then\n            mode=full",
+            "elif [ \"${DARLING_READS}\" = \"true\" ] && [ \"${EVENT_NAME}\" != \"pull_request\" ]; then\n            mode=full",
+            "elif [ \"${DARLING_READS}\" = \"true\" ]; then\n            mode=reads",
+            "else\n            mode=none",
+        };
+        var position = -1;
+        foreach (var rung in ladder)
+        {
+            var found = scope.IndexOf(rung, StringComparison.Ordinal);
+            Assert.True(found > position, $"the scope step's mode ladder lost or reordered this rung:\n{rung}");
+            position = found;
+        }
+
+        /* Shard 0 alone runs the narrow selection; every shard runs a full one. */
+        Assert.Contains("run=false\n", scope, StringComparison.Ordinal);
+        Assert.Contains(
+            "if [ \"${mode}\" = \"full\" ] || { [ \"${mode}\" = \"reads\" ] && [ \"${SHARD}\" = \"0\" ]; }; then\n            run=true",
+            scope,
+            StringComparison.Ordinal);
+        Assert.Contains("SHARD: ${{ matrix.shard }}", scope, StringComparison.Ordinal);
+
+        /* And the run step honours the mode: the trait selection only in `reads`, the hash cut otherwise. */
+        var run = StepBlock(job, "Run Lite tests (shard)");
+        Assert.Contains("LITE_SCOPE_MODE: ${{ steps.scope.outputs.mode }}", run, StringComparison.Ordinal);
+        Assert.Contains("if ($env:LITE_SCOPE_MODE -eq 'reads')", run, StringComparison.Ordinal);
+        Assert.Contains("Get-LiteClasses @('-trait', 'Reads=Darling')", run, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A pull request whose CI the gate declined (a draft, or one carrying the merge-train label) must not
+    /// read as passing: a skipped job counts as a pass for a required check. <c>build</c> still starts and
+    /// fails its first step, and both result jobs exit 1 on a pull request whose gate output is not true.
+    /// </summary>
+    [Fact]
+    public void ADeclinedRun_FailsBuildAndBothResultJobs_InsteadOfReadingAsGreen()
+    {
+        var yaml = ReadBuildYaml(RepoRoot());
+        const string message =
+            "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). "
+          + "It can be merged only by an admin override after a merge train covered it.";
+
+        foreach (var jobKey in new[] { "darling-pg-result", "lite-tests-result" })
+        {
+            var job = JobBlock(yaml, jobKey);
+            Assert.Contains("GATE_RUN: ${{ needs.gate.outputs.run }}", job, StringComparison.Ordinal);
+            Assert.Contains("EVENT_NAME: ${{ github.event_name }}", job, StringComparison.Ordinal);
+            Assert.Contains(
+                "if [ \"${EVENT_NAME}\" = \"pull_request\" ] && [ \"${GATE_RUN}\" != \"true\" ]; then\n"
+              + "            echo \"" + message + "\"\n            exit 1\n          fi\n",
+                job,
+                StringComparison.Ordinal);
+            Assert.Contains("needs: [gate, ", job, StringComparison.Ordinal);
+        }
+
+        /* `build` is a required check that would otherwise be merely skipped. It must start whatever the
+           gate said, and its first step must fail when the gate declined the run. */
+        var build = JobBlock(yaml, "build");
+        Assert.Contains("\n    if: ${{ !cancelled() }}\n", build, StringComparison.Ordinal);
+        var first = build[build.IndexOf("    steps:\n", StringComparison.Ordinal)..];
+        first = first[..first.IndexOf("\n      - uses: actions/checkout@v7", StringComparison.Ordinal)];
+        Assert.Contains("- name: Fail when CI did not run", first, StringComparison.Ordinal);
+        Assert.Contains("if: ${{ needs.gate.outputs.run != 'true' }}", first, StringComparison.Ordinal);
+        Assert.Contains(message, first, StringComparison.Ordinal);
+        Assert.Contains("exit 1", first, StringComparison.Ordinal);
     }
 
     private static string ReadBuildYaml(string repo) =>

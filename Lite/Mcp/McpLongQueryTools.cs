@@ -53,11 +53,23 @@ public sealed class McpLongQueryTools
                        is missing. The precondition answer names that state instead of quietly blaming a knob
                        that is already switched on. */
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")
-                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range. The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.");
+                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range. The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
+                        (await McpQueryTools.EventWindowNoticeAsync(
+                            () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
+                            null, windowEnd.AddHours(-hours_back), windowEnd, "long_query_completions", emptyAnswer: true)).AsHints());
             }
 
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
+
+            /* #4966: where this server's long_query_completions data starts for the window. An event list, so the floor is the
+               earlier of the coverage probe and the oldest event the page shows. The page is the slowest N, so its oldest
+               event depends on limit; that cannot make a false notice, as the helper only moves the floor earlier and a
+               first run reads back 10 minutes, well inside the 90-minute slack. */
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var notice = await McpQueryTools.EventWindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, resolved.ServerId, requestedStart, windowEnd),
+                page.Min(r => r.EventTime), requestedStart, windowEnd, "long_query_completions");
 
             var result = page
                 .Select(r => new
@@ -86,6 +98,13 @@ public sealed class McpLongQueryTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where the store's data starts, always present (false and null when the store covered the
+                   window). The floor is the earlier of the coverage probe and the oldest event this page shows: a
+                   first run of the collector can store events from before itself. No effective_hours_back: this
+                   payload carries a page `truncated`, and the census holds that key apart for the window floor. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 /* #3541 A3: the page described as a page, on Darling's names. Under a duration RANKING the
                    two stamps bound the slowest runs, not the reach — the description says so. */
                 completions_returned = page.Count,

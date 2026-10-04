@@ -34,6 +34,7 @@ namespace Lite.Tests;
 /// cry-wolf outcome #1852 exists to prevent. So the never-produced row is asserted to keep its EXISTING
 /// band by name, not merely to differ from the regressed one.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class RegressedFromProductiveTests
 {
     private static readonly DateTime Now = DateTime.UtcNow;
