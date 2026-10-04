@@ -67,7 +67,10 @@ public enum QueryWindowRelation
     MemoryPressureEvents,
 
     /* The Job History tab (#4966): the run history copied from msdb. */
-    JobHistory
+    JobHistory,
+
+    LatchStats,
+    SpinlockStats
 }
 
 public partial class LocalDataService
