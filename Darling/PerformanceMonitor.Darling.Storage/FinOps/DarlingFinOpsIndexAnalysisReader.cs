@@ -31,7 +31,9 @@ public static class DarlingFinOpsIndexAnalysisReader
     /// (database_id, object_id, index_id) so the analyzer sees each index exactly once (never the whole
     /// history). Per-database collection cycles can carry different collection_times, so the dedupe keys on the
     /// index identity, not a single server-wide MAX(collection_time). $1 server_id. Column order is the read
-    /// contract for <see cref="ReadIndexObjectStatsRow"/>.
+    /// contract for <see cref="ReadIndexObjectStatsRow"/>. Two rows for one index can share a collection_time
+    /// (a re-run in the same instant), so the final ORDER BY key is collection_id DESC: the newest-written row
+    /// wins the tie deterministically instead of whichever row PostgreSQL happens to return first.
     /// </summary>
     public const string IndexObjectStatsLatestSql = @"
 SELECT DISTINCT ON (database_id, object_id, index_id)
@@ -80,7 +82,7 @@ SELECT DISTINCT ON (database_id, object_id, index_id)
     page_io_latch_wait_in_ms
 FROM v_index_object_stats
 WHERE server_id = $1
-ORDER BY database_id, object_id, index_id, collection_time DESC";
+ORDER BY database_id, object_id, index_id, collection_time DESC, collection_id DESC";
 
     /// <summary>
     /// The server's latest edition / version / start-time facts for the analyzer options — the same three
@@ -95,7 +97,7 @@ SELECT
     sqlserver_start_time
 FROM server_properties
 WHERE server_id = $1
-ORDER BY collection_time DESC
+ORDER BY collection_time DESC, collection_id DESC
 LIMIT 1";
 
     /// <summary>
