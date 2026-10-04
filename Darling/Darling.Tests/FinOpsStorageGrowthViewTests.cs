@@ -61,6 +61,15 @@ public sealed class FinOpsStorageGrowthViewTests
     }
 
     [Fact]
+    public void GuideTail_NoLongerSaysTheHeatmapAndGridCanDiffer()
+    {
+        var tail = McpToolGuideTests.Served("get_finops").Tail;
+        Assert.NotNull(tail);
+        Assert.DoesNotContain("can differ from the grid", tail, StringComparison.Ordinal);
+        Assert.Contains("a table created in the window counts its whole size", tail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ViewsAllowList_ContainsTheView() =>
         Assert.Contains("storage_growth", DarlingMcpFinOpsTools.Views);
 
@@ -440,25 +449,26 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         {
             await c.OpenAsync(ct);
             var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
-            /* 15 tables that shrink (growth below 0) and 5 new tables with one sample only (growth null, counted as 0). */
+            /* 14 tables that shrink (growth below 0), 5 new tables with one sample only (absent from the earliest snapshot, so growth is their whole size) and dbo.ZNull, whose size is unknown at the latest instant (the SQL sorts its null growth last; the desktop's order counts it as 0). */
             for (var i = 0; i < 20; i++)
             {
-                var table = (i < 15 ? "Shrink" : "New") + i.ToString("D2");
-                foreach (var d in i < 15 ? new[] { 29, 0 } : new[] { 0 })
+                var table = i == 14 ? "ZNull" : (i < 14 ? "Shrink" : "New") + i.ToString("D2");
+                foreach (var d in i < 14 ? new[] { 29, 0 } : new[] { 0 })
                 {
                     await DarlingMcpTestData.ExecAsync(c, ct,
                         @"INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates)
                           VALUES ($1,$2,$3,$4,'Gamma','dbo',$5,$6,1,'PK','CLUSTERED',$7,$7,1000,0,0,0,0)",
-                        CollectionIdGenerator.Next(), now.Date.AddDays(-d).AddMinutes(10), ServerId, ServerName, 500 + i, table, d == 29 ? 500m + i : 100m + i);
+                        CollectionIdGenerator.Next(), now.Date.AddDays(-d).AddMinutes(10), ServerId, ServerName, 500 + i, table, i == 14 ? (decimal?)null : d == 29 ? 500m + i : 100m + i);
                 }
             }
         }
 
         using var doc = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Gamma", cancellationToken: ct));
         var objects = doc.RootElement.GetProperty("objects");
-        /* The desktop's order: the 5 new tables (0) above the 15 shrinking ones, key ordinal inside each tie; the first 10 are the 5 new and the 5 least-shrunk. */
-        var expected = Enumerable.Range(15, 5).Select(i => "dbo.New" + i.ToString("D2"))
-            .Concat(new[] { "dbo.Shrink00", "dbo.Shrink01", "dbo.Shrink02", "dbo.Shrink03", "dbo.Shrink04" }).ToArray();
+        /* The desktop's order counts the unknown size as 0: the 5 new tables by size (115..119), then dbo.ZNull (0), then the 14 shrinking ones (all -400, key ordinal inside the tie); the first 10 are the 5 new, largest first, dbo.ZNull and the 4 least shrunk.
+           The SQL order alone puts the null growth last, so without the re-rank dbo.ZNull would not be among the first 10. */
+        var expected = Enumerable.Range(15, 5).Reverse().Select(i => "dbo.New" + i.ToString("D2"))
+            .Concat(new[] { "dbo.ZNull", "dbo.Shrink00", "dbo.Shrink01", "dbo.Shrink02", "dbo.Shrink03" }).ToArray();
         Assert.Equal(expected, objects.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("object_name").GetString()).ToArray());
         Assert.Equal(20, objects.GetProperty("object_count").GetInt32());
         Assert.True(objects.GetProperty("truncated").GetBoolean());

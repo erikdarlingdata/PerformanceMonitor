@@ -22,8 +22,9 @@ public sealed record StorageGrowthDto(
     string DatabaseName, decimal CurrentSizeMb, decimal? Size7dAgoMb, decimal? Size30dAgoMb, decimal? Growth7dMb,
     decimal? Growth30dMb, decimal? DailyGrowthRateMb, decimal? GrowthPct30d, bool HasSiblingRow, bool HasLogServiceFile);
 
-/// <summary>One table in the ranked object-growth summary. The growth figures are null when the table has no earlier
-/// sample to compare with.</summary>
+/// <summary>One table in the ranked object-growth summary. The growth figures are null when the database has only one
+/// snapshot in the window, so there is nothing to compare with. A table missing from the earliest snapshot was created
+/// since, and counts its whole current size as growth (its percent stays null, because it grew from nothing).</summary>
 public sealed record ObjectSizeGrowthDto(
     string SchemaName, string TableName, decimal CurrentReservedMb, decimal CurrentUsedMb, long TotalRows, int IndexCount,
     decimal? Growth30dMb, decimal? DailyGrowthRateMb, decimal? GrowthPct30d);
@@ -377,7 +378,7 @@ SELECT
     l.cur_used_mb,
     l.cur_rows,
     l.index_count,
-    l.cur_reserved_mb - e.e_reserved_mb AS growth_mb
+    l.cur_reserved_mb - COALESCE(e.e_reserved_mb, 0) AS growth_mb
 FROM latest l
 LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
 ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
@@ -399,10 +400,10 @@ earliest AS (
 ),
 ranked AS (
     SELECT l.schema_name, l.table_name,
-        l.cur_reserved_mb - COALESCE(e.e_reserved_mb, l.cur_reserved_mb) AS growth_mb
+        l.cur_reserved_mb - COALESCE(e.e_reserved_mb, 0) AS growth_mb
     FROM latest l
     LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
-    ORDER BY growth_mb DESC, l.schema_name, l.table_name
+    ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
     LIMIT $6
 )
 SELECT
@@ -468,7 +469,7 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
             while (await reader.ReadAsync(cancellationToken))
             {
                 var current = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2));
-                /* No earlier sample for this table (new table, or one snapshot only): null, not 0. */
+                /* One snapshot only: null, not 0. A table missing from the earliest snapshot was created since and counts its whole size (its percent stays null: it grew from nothing); an existing table whose earliest size is NULL also counts its whole current size, because COALESCE treats it like a new table, and that is rare. */
                 decimal? growth = reader.IsDBNull(6) || latest == earliest ? null : Convert.ToDecimal(reader.GetValue(6));
                 objects.Add(new ObjectSizeGrowthDto(
                     SchemaName: reader.IsDBNull(0) ? "" : reader.GetString(0),
