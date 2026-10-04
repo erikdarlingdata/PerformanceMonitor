@@ -56,7 +56,7 @@ public sealed class FinOpsStorageGrowthViewTests
     {
         var tail = McpToolGuideTests.Served("get_finops").Tail;
         Assert.NotNull(tail);
-        foreach (var fact in new[] { "fixed 30 days", "is refused above 20", "up to 100 rows", "up to 40 rows", "[mb, band]", "log1p(mb)", "not UTC", "object_name without database_name" })
+        foreach (var fact in new[] { "fixed 30 days", "is refused above 20", "up to 50 rows", "up to 30 rows", "[mb, band]", "log1p(mb)", "not UTC", "object_name without database_name" })
             Assert.Contains(fact, tail, StringComparison.Ordinal);
     }
 
@@ -133,10 +133,10 @@ public sealed class FinOpsStorageGrowthViewTests
         var indexesBytes = Encoding.UTF8.GetByteCount(DarlingMcpFinOpsTools.BuildStorageGrowthIndexesPayload(new string('s', 128), 24, DarlingMcpFinOpsTools.StorageGrowthDatabaseSection(dbs, dbs[0].DatabaseName, null), ixs, null));
 
         Console.WriteLine($"storage_growth worst case bytes: databases {databases}, objects {objectsBytes}, indexes {indexesBytes}");
-        /* The object level fits the budget at its worst case. The database and index lists are capped by row count (100 and 40), and 128-character names with maximum-width figures and both notes run past the budget at those caps; their measured sizes are printed above. */
+        /* The object level fits the budget at its worst case. The database and index lists are capped by row count (50 and 30) to fit it too. */
         Assert.True(objectsBytes <= 32768, $"objects {objectsBytes}");
-        Assert.True(databases <= 55000, $"databases {databases}");
-        Assert.True(indexesBytes <= 40000, $"indexes {indexesBytes}");
+        Assert.True(databases <= 32768, $"databases {databases}");
+        Assert.True(indexesBytes <= 32768, $"indexes {indexesBytes}");
     }
 }
 
@@ -286,5 +286,193 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         /* log1p(100) between log1p(5) (the matrix minimum) and log1p(390): t = 0.676 -> band 5; Flat's 5 is band 0. */
         Assert.Equal(5, cells[0][1].GetInt32());
         Assert.Equal(0, rows[3].GetProperty("cells")[0][1].GetInt32());
+    }
+
+    [Fact]
+    public async Task IndexesLevel_ReadsFieldByField_AgainstLiteralValues()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var doc = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Alpha", object_name: "dbo.Big", cancellationToken: ct));
+        var root = doc.RootElement;
+        Assert.Equal("indexes", root.GetProperty("level").GetString());
+        Assert.Equal("ok", root.GetProperty("database").GetProperty("status").GetString());
+        var section = root.GetProperty("indexes");
+        Assert.Equal("ok", section.GetProperty("status").GetString());
+        Assert.Equal(2, section.GetProperty("index_count").GetInt32());
+        Assert.False(section.GetProperty("truncated").GetBoolean());
+        var rows = section.GetProperty("rows");
+        Assert.Equal(new[] { "PK_Big", "IX_Big_Cold" }, rows.EnumerateArray().Select(r => r.GetProperty("index_name").GetString()).ToArray());
+
+        var pk = rows[0];
+        Assert.Equal("Alpha", pk.GetProperty("database_name").GetString());
+        Assert.Equal("dbo", pk.GetProperty("schema_name").GetString());
+        Assert.Equal("Big", pk.GetProperty("table_name").GetString());
+        Assert.Equal("NONCLUSTERED", pk.GetProperty("index_type_desc").GetString());
+        Assert.Equal(1, pk.GetProperty("index_id").GetInt32());
+        Assert.Equal(350m, pk.GetProperty("reserved_mb").GetDecimal());
+        Assert.Equal(1000L, pk.GetProperty("total_rows").GetInt64());
+        Assert.Equal(5L, pk.GetProperty("user_seeks").GetInt64());
+        Assert.Equal(0L, pk.GetProperty("user_scans").GetInt64());
+        Assert.Equal(0L, pk.GetProperty("user_lookups").GetInt64());
+        Assert.Equal(5L, pk.GetProperty("total_reads").GetInt64());
+        Assert.Equal(2L, pk.GetProperty("user_updates").GetInt64());
+        Assert.Equal("2026-09-30T08:07:06", pk.GetProperty("last_user_access_server_local").GetString());
+        Assert.Equal("Active", pk.GetProperty("classification").GetString());
+
+        var cold = rows[1];
+        Assert.Equal("IX_Big_Cold", cold.GetProperty("index_name").GetString());
+        Assert.Equal(2, cold.GetProperty("index_id").GetInt32());
+        Assert.Equal(40m, cold.GetProperty("reserved_mb").GetDecimal());
+        Assert.Equal(0L, cold.GetProperty("user_seeks").GetInt64());
+        Assert.Equal(0L, cold.GetProperty("total_reads").GetInt64());
+        Assert.Equal(0L, cold.GetProperty("user_updates").GetInt64());
+        Assert.Equal(JsonValueKind.Null, cold.GetProperty("last_user_access_server_local").ValueKind);
+        Assert.Equal("Unused", cold.GetProperty("classification").GetString());
+    }
+
+    [Fact]
+    public async Task EveryLevel_EqualsTheReadersRows_MappedThroughTheRowFunctions()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+        string Json(object o) => JsonSerializer.Serialize(o, McpHelpers.JsonOptions);
+        var now = DateTime.UtcNow;
+
+        var dbs = await DarlingFinOpsStorageGrowthReader.GetStorageGrowthAsync(ds, ServerId, now, 60, ct);
+        using var level1 = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, cancellationToken: ct));
+        Assert.Equal(Json(DarlingMcpFinOpsTools.OrderStorageGrowthDatabases(dbs).Select(DarlingMcpFinOpsTools.StorageGrowthDatabaseRow).ToList()),
+            level1.RootElement.GetProperty("databases").GetProperty("rows").GetRawText());
+
+        var windowStart = DateTime.SpecifyKind(now.AddDays(-30), DateTimeKind.Unspecified);
+        var (objects, samples) = await DarlingFinOpsStorageGrowthReader.GetObjectGrowthHeatmapDataAsync(ds, ServerId, "Alpha", windowStart, 30, 11, 60, ct);
+        var (ranked, _) = DarlingMcpFinOpsTools.RankStorageGrowthObjects(objects, 10);
+        var (days, objectRows) = DarlingMcpFinOpsTools.StorageGrowthObjectRows(ranked, samples);
+        using var level2 = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Alpha", cancellationToken: ct));
+        Assert.Equal(Json(objectRows), level2.RootElement.GetProperty("objects").GetProperty("rows").GetRawText());
+        Assert.Equal(Json(days), level2.RootElement.GetProperty("objects").GetProperty("days").GetRawText());
+
+        var ixs = await DarlingFinOpsStorageGrowthReader.GetObjectIndexDetailAsync(ds, ServerId, "Alpha", "dbo", "Big", 60, ct);
+        using var level3 = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Alpha", object_name: "dbo.Big", cancellationToken: ct));
+        Assert.Equal(Json(DarlingMcpFinOpsTools.OrderStorageGrowthIndexes(ixs).Select(DarlingMcpFinOpsTools.StorageGrowthIndexRow).ToList()),
+            level3.RootElement.GetProperty("indexes").GetProperty("rows").GetRawText());
+    }
+
+    [Fact]
+    public async Task Refusals_AreEachPinnedExactly()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        Assert.Equal(
+            McpHelpers.Refusal("object_name", "object_name 'dbo.Nope' is not among the 20 fastest-growing objects of database 'Alpha'. Read the objects level (database_name only) and pass an object_name from its rows."),
+            await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Alpha", object_name: "dbo.Nope", cancellationToken: ct));
+        Assert.Equal(
+            McpHelpers.Refusal("object_name", "object_name needs database_name: dbo.Big is a table in one database. Pass database_name too, or omit object_name."),
+            await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, object_name: "dbo.Big", cancellationToken: ct));
+        Assert.Equal(
+            McpHelpers.Refusal("hours_back", "Invalid hours_back value '48': view storage_growth reads a fixed 30 days; hours_back does not apply. Omit it or pass 24."),
+            await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 48, 10, cancellationToken: ct));
+        Assert.Equal(
+            McpHelpers.Refusal("limit", "Invalid limit value '21': the objects level of view storage_growth returns at most 20 objects."),
+            await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 21, "Alpha", cancellationToken: ct));
+        Assert.Equal(
+            McpHelpers.Refusal("limit", "limit applies only to the objects level (database_name without object_name) of view storage_growth; omit it for the databases level."),
+            await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 5, cancellationToken: ct));
+    }
+
+    [Fact]
+    public async Task ServerWithNoRows_IsExactlyEmpty()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        Assert.Equal(
+            McpHelpers.Status("empty", "No database size snapshot was found for this server, so there is no storage growth to show."),
+            await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", EmptyServerName, 24, 10, cancellationToken: ct));
+        Assert.Equal(
+            McpHelpers.Status("empty", "No database size snapshot or object size data was found for this server, so there is no storage growth to show."),
+            await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", EmptyServerName, 24, 10, "Alpha", cancellationToken: ct));
+    }
+
+    [Fact]
+    public async Task PostgresServer_IsExactlyNotCollected()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var expected = await DarlingEngineCapability.NotCollectedStatusAsync(ds, PostgresServerId, PostgresServerName, "database_size_stats", ct);
+        Assert.Equal("not_collected", JsonDocument.Parse(expected!).RootElement.GetProperty("status").GetString());
+        Assert.Equal(expected, await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", PostgresServerName, 24, 10, cancellationToken: ct));
+        Assert.Equal(expected, await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", PostgresServerName, 24, 10, "Alpha", cancellationToken: ct));
+    }
+
+    [Fact]
+    public async Task DatabaseNotInTheSnapshot_HasAnEmptyDatabaseSection()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var doc = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "NoSuchDb", cancellationToken: ct));
+        Assert.Equal("objects", doc.RootElement.GetProperty("level").GetString());
+        Assert.Equal("empty", doc.RootElement.GetProperty("database").GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("database").GetProperty("row").ValueKind);
+        Assert.Equal("empty", doc.RootElement.GetProperty("objects").GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task ReadRoute_ReturnsTheToolsBody_AtAllThreeLevels()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service"),
+            WebRootPath = "wwwroot",
+        });
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        builder.Services.AddSingleton(ds);
+        await using var app = builder.Build();
+        DarlingWebEndpoints.MapAll(app, ds, new CollectorRuntimeState(), new CapturingTestLogger());
+        await app.StartAsync(ct);
+        using var server = app.GetTestServer();
+
+        async Task<string> Route(string extra)
+        {
+            var context = await server.SendAsync(request =>
+            {
+                request.Request.Method = "GET";
+                request.Request.Path = "/api/read/get_finops";
+                request.Request.QueryString = new QueryString($"?server={ServerName}&view=storage_growth&hours=24{extra}");
+                request.Request.Headers.Host = "localhost";
+            });
+            Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+            using var reader = new StreamReader(context.Response.Body);
+            return await reader.ReadToEndAsync(ct);
+        }
+
+        foreach (var (extra, database, objectName) in new (string, string?, string?)[]
+        {
+            ("", null, null),
+            ("&database_name=Alpha", "Alpha", null),
+            ("&database_name=Alpha&object_name=dbo.Big", "Alpha", "dbo.Big"),
+        })
+        {
+            var body = await Route(extra);
+            var tool = await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, database, object_name: objectName, cancellationToken: ct);
+            using var actual = JsonDocument.Parse(body);
+            using var expected = JsonDocument.Parse(tool);
+            Assert.True(JsonElement.DeepEquals(expected.RootElement, actual.RootElement), $"route and tool differ at {extra}");
+        }
     }
 }

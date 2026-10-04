@@ -531,7 +531,7 @@ public sealed class EngineCapabilityReadWiringTests
     }
 
     /// <summary>get_finops lives in DarlingMcpFinOpsTools.cs and its views ask their questions through helpers in the
-    /// partials DarlingMcpFinOpsTools.Utilization.cs (set A) and DarlingMcpFinOpsTools.HighImpact.cs and DarlingMcpFinOpsTools.DatabaseResources.cs and DarlingMcpFinOpsTools.ApplicationConnections.cs and DarlingMcpFinOpsTools.Optimization.cs (set B); the scan
+    /// partials DarlingMcpFinOpsTools.Utilization.cs (set A) and DarlingMcpFinOpsTools.HighImpact.cs and DarlingMcpFinOpsTools.DatabaseResources.cs and DarlingMcpFinOpsTools.ApplicationConnections.cs and DarlingMcpFinOpsTools.Optimization.cs and DarlingMcpFinOpsTools.StorageGrowth.cs (set B); the scan
     /// reads all the parts as one source.</summary>
     [Fact]
     public void GetFinOps_IsWiredToItsViewsCollectors_AcrossThePartialClass()
