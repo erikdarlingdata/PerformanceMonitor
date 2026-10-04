@@ -379,6 +379,9 @@ namespace PerformanceMonitor.Common
         /// <summary>Database this rollup covers; null for the overall (all-databases) rollup.</summary>
         public string? DatabaseName { get; init; }
 
+        /// <summary>The database id the analyzer grouped this rollup by; null on the overall rollup and for any caller that does not fill it. Names can repeat across ids (a dropped and recreated database), the id cannot.</summary>
+        public int? DatabaseId { get; init; }
+
         /// <summary>Distinct tables analyzed.</summary>
         public int TablesAnalyzed { get; init; }
 

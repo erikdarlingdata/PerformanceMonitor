@@ -309,6 +309,7 @@
     "DatabaseRollups": [
       {
         "DatabaseName": "OpsDb",
+        "DatabaseId": 2,
         "TablesAnalyzed": 1,
         "IndexCount": 2,
         "TotalSizeGb": 0.00732421875,
@@ -333,6 +334,7 @@
       },
       {
         "DatabaseName": "SalesDb",
+        "DatabaseId": 1,
         "TablesAnalyzed": 1,
         "IndexCount": 4,
         "TotalSizeGb": 1.18505859375,
@@ -358,6 +360,7 @@
     ],
     "OverallRollup": {
       "DatabaseName": null,
+      "DatabaseId": null,
       "TablesAnalyzed": 2,
       "IndexCount": 6,
       "TotalSizeGb": 1.19238281250,
@@ -389,6 +392,7 @@
   },
   "recommendationRows": [
     {
+      "CollectionTimeUtc": "anchor-0.9167d[Utc]",
       "DatabaseName": "SalesDb",
       "SchemaName": "dbo",
       "TableName": "T100",
@@ -410,6 +414,7 @@
   ],
   "rollupRows": [
     {
+      "CollectionTimeUtc": null,
       "Scope": "ALL DATABASES",
       "TablesAnalyzed": 2,
       "IndexCount": 6,
@@ -437,6 +442,7 @@
       "AvgLatchWaitMsSort": -1
     },
     {
+      "CollectionTimeUtc": "anchor-0.9167d[Utc]",
       "Scope": "OpsDb",
       "TablesAnalyzed": 1,
       "IndexCount": 2,
@@ -464,6 +470,7 @@
       "AvgLatchWaitMsSort": 0
     },
     {
+      "CollectionTimeUtc": "anchor-0.9167d[Utc]",
       "Scope": "SalesDb",
       "TablesAnalyzed": 1,
       "IndexCount": 4,
@@ -493,6 +500,7 @@
   ],
   "rollupRowsNoData": [
     {
+      "CollectionTimeUtc": null,
       "Scope": "ALL DATABASES",
       "TablesAnalyzed": 0,
       "IndexCount": 0,
@@ -866,6 +874,7 @@
       "DatabaseRollups": [
         {
           "DatabaseName": "OpsDb",
+          "DatabaseId": 2,
           "TablesAnalyzed": 1,
           "IndexCount": 2,
           "TotalSizeGb": 0.00732421875,
@@ -890,6 +899,7 @@
         },
         {
           "DatabaseName": "SalesDb",
+          "DatabaseId": 1,
           "TablesAnalyzed": 1,
           "IndexCount": 4,
           "TotalSizeGb": 1.184326171875,
@@ -915,6 +925,7 @@
       ],
       "OverallRollup": {
         "DatabaseName": null,
+        "DatabaseId": null,
         "TablesAnalyzed": 2,
         "IndexCount": 6,
         "TotalSizeGb": 1.191650390625,
@@ -946,6 +957,7 @@
     },
     "recommendationRows": [
       {
+        "CollectionTimeUtc": "anchor-0.9167d[Utc]",
         "DatabaseName": "OpsDb",
         "SchemaName": "dbo",
         "TableName": "T200",
@@ -965,6 +977,7 @@
         "Script": "ALTER INDEX [IX_Jobs_State] ON [OpsDb].[dbo].[T200] DISABLE;"
       },
       {
+        "CollectionTimeUtc": "anchor-0.9167d[Utc]",
         "DatabaseName": "SalesDb",
         "SchemaName": "dbo",
         "TableName": "T100",
@@ -984,6 +997,7 @@
         "Script": "ALTER INDEX [IX_Orders_Cust_Dup] ON [SalesDb].[dbo].[T100] DISABLE;"
       },
       {
+        "CollectionTimeUtc": "anchor-0.9167d[Utc]",
         "DatabaseName": "SalesDb",
         "SchemaName": "dbo",
         "TableName": "T100",
@@ -1005,6 +1019,7 @@
     ],
     "rollupRows": [
       {
+        "CollectionTimeUtc": null,
         "Scope": "ALL DATABASES",
         "TablesAnalyzed": 2,
         "IndexCount": 6,
@@ -1032,6 +1047,7 @@
         "AvgLatchWaitMsSort": -1
       },
       {
+        "CollectionTimeUtc": "anchor-0.9167d[Utc]",
         "Scope": "OpsDb",
         "TablesAnalyzed": 1,
         "IndexCount": 2,
@@ -1059,6 +1075,7 @@
         "AvgLatchWaitMsSort": 0
       },
       {
+        "CollectionTimeUtc": "anchor-0.9167d[Utc]",
         "Scope": "SalesDb",
         "TablesAnalyzed": 1,
         "IndexCount": 4,

@@ -51,17 +51,19 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
             var inputs = await viewer.GetIndexCleanupInputsAsync(ServerIdA, ct);
             var options = await viewer.GetIndexCleanupOptionsAsync(ServerIdA, ct);
             var noProps = await viewer.GetIndexCleanupOptionsAsync(ServerIdB, ct);
-            var result = await viewer.GetIndexAnalysisAsync(ServerIdA, ct);
+            var timed = await viewer.GetIndexAnalysisWithSnapshotTimesAsync(ServerIdA, ct);
+            var result = timed.Result;
             var empty = await viewer.GetIndexAnalysisAsync(ServerIdB, ct);
             var longInputs = await viewer.GetIndexCleanupInputsAsync(ServerIdC, ct);
             var longOptions = await viewer.GetIndexCleanupOptionsAsync(ServerIdC, ct);
-            var longResult = await viewer.GetIndexAnalysisAsync(ServerIdC, ct);
+            var longTimed = await viewer.GetIndexAnalysisWithSnapshotTimesAsync(ServerIdC, ct);
+            var longResult = longTimed.Result;
             return Serialize(anchor,
                 new object[] { inputs, options, noProps, result,
-                    ViewerDataService.ProjectRecommendations(result), ViewerDataService.ProjectRollups(result),
+                    ViewerDataService.ProjectRecommendations(result, timed.SnapshotTimes), ViewerDataService.ProjectRollups(result, timed.SnapshotTimes),
                     ViewerDataService.ProjectRollups(empty) },
                 new object[] { longInputs, longOptions, longResult,
-                    ViewerDataService.ProjectRecommendations(longResult), ViewerDataService.ProjectRollups(longResult) });
+                    ViewerDataService.ProjectRecommendations(longResult, longTimed.SnapshotTimes), ViewerDataService.ProjectRollups(longResult, longTimed.SnapshotTimes) });
         });
 
     [Fact]
@@ -72,17 +74,19 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
             var inputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, ServerIdA, 30, ct);
             var options = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdA, 30, cancellationToken: ct);
             var noProps = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdB, 30, cancellationToken: ct);
-            var result = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(dataSource, ServerIdA, 30, ct);
+            var timed = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(dataSource, ServerIdA, 30, ct);
+            var result = timed.Result;
             var empty = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(dataSource, ServerIdB, 30, ct);
             var longInputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, ServerIdC, 30, ct);
             var longOptions = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdC, 30, cancellationToken: ct);
-            var longResult = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(dataSource, ServerIdC, 30, ct);
+            var longTimed = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(dataSource, ServerIdC, 30, ct);
+            var longResult = longTimed.Result;
             return Serialize(anchor,
                 new object[] { inputs, options, noProps, result,
-                    ViewerDataService.ProjectRecommendations(result), ViewerDataService.ProjectRollups(result),
+                    ViewerDataService.ProjectRecommendations(result, timed.SnapshotTimes), ViewerDataService.ProjectRollups(result, timed.SnapshotTimes),
                     ViewerDataService.ProjectRollups(empty) },
                 new object[] { longInputs, longOptions, longResult,
-                    ViewerDataService.ProjectRecommendations(longResult), ViewerDataService.ProjectRollups(longResult) });
+                    ViewerDataService.ProjectRecommendations(longResult, longTimed.SnapshotTimes), ViewerDataService.ProjectRollups(longResult, longTimed.SnapshotTimes) });
         });
 
     private static async Task RunAsync(Func<string, DateTime, CancellationToken, Task<string>> read)
@@ -234,6 +238,8 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
                 writer.WriteStartObject();
                 foreach (var p in value.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
                              .Where(p => p.GetMethod is { IsPublic: true } && p.GetIndexParameters().Length == 0)
+                             /* #5082: the Collected text is the display-zone rendering of CollectionTimeUtc, which is pinned anchor-relative. */
+                             .Where(p => p.Name != "CollectionTime" || p.PropertyType != typeof(string))
                              .OrderBy(p => p.MetadataToken))
                 {
                     writer.WritePropertyName(p.Name);

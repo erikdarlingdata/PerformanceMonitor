@@ -152,6 +152,20 @@ public sealed class FinOpsTabIndexAnalysisPageTests
     }
 
     [Fact]
+    public void TheCollectedColumnIsLast_AndTheNoticeNamesEachDatabasesSnapshot()
+    {
+        var tab = Tab();
+        Assert.Contains("{ key: \"captured_at\", label: \"Collected\", format: \"time\" },\n];", tab);
+        Assert.Contains("Analyzed from each database's newest collected snapshot.", tab);
+        Assert.DoesNotContain("latest collected snapshot", tab);
+        /* The overall row is built with no captured_at, so its cell stays blank. */
+        Assert.DoesNotContain("captured_at", DatabaseRowSliceOverall());
+    }
+
+    private static string DatabaseRowSliceOverall() =>
+        Slice("if (!withWorkload)", "        return new");
+
+    [Fact]
     public void AFilteredNoticeNamesTheDatabase()
     {
         Assert.Contains("\" Database \" + db + \".\"", Tab());
@@ -165,8 +179,8 @@ public sealed class FinOpsTabIndexAnalysisPageTests
         var row = DatabaseRowSlice();
         foreach (var key in keys.Where(k => !derived.Contains(k)))
             Assert.Matches(KeyPattern(key), row);
-        Assert.Equal(23, Regex.Matches(row, "(?m)^\\s+[a-z_]+ = ").Count);
-        Assert.Equal(20, keys.Count);
+        Assert.Equal(24, Regex.Matches(row, "(?m)^\\s+[a-z_]+ = ").Count);
+        Assert.Equal(21, keys.Count);
     }
 
     [Fact]
@@ -190,7 +204,7 @@ public sealed class FinOpsTabIndexAnalysisPageTests
         Assert.Equal(
             "database_name,tables_analyzed,index_count,total_size_gb,total_rows,indexes_to_disable,indexes_to_merge,compressable_indexes,"
             + "unused_indexes,unused_size_gb,compression_min_savings_gb,compression_max_savings_gb,total_min_savings_gb,total_max_savings_gb,"
-            + "reads_breakdown,writes,lock_wait_count,avg_lock_wait_ms,latch_wait_count,avg_latch_wait_ms",
+            + "reads_breakdown,writes,lock_wait_count,avg_lock_wait_ms,latch_wait_count,avg_latch_wait_ms,captured_at",
             string.Join(",", Keys("ROLLUP_COLUMNS")));
         Assert.Equal(
             "action,result_kind,consolidation_rule,database_name,schema_name,table_name,index_name,index_size_gb_text,index_rows,"

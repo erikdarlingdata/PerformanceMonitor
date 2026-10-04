@@ -10,7 +10,7 @@
    roll-up (the overall row first, then one row per database) and the cleanup recommendations.
    Rows stay in payload order: recommendations largest index first, databases by total maximum savings. At most LIMIT
    recommendations and the first databases come back, and the notice says so. Differences from the desktop grid:
-   the overall row has no workload figures, so those cells show "—"; an average wait of none shows 0.00; script and
+   the overall row has no workload figures, so those cells show "—", and its Collected cell shows "—" too (the desktop leaves it blank); an average wait of none shows 0.00; script and
    definition text is cut by the read unless the "Full script and definition text" box is ticked; analyzer notes sit in a
    collapsed block; there are no tooltips. A Database box (any name; the list suggests the databases shown by the last
    unfiltered read) and that box re-read the view; the controls stay put and only the content below them is remounted.
@@ -43,6 +43,7 @@ const ROLLUP_COLUMNS = [
   { key: "avg_lock_wait_ms", label: "Avg Lock Wait ms", format: "num2" },
   { key: "latch_wait_count", label: "Latch Waits", format: "int" },
   { key: "avg_latch_wait_ms", label: "Avg Latch Wait ms", format: "num2" },
+  { key: "captured_at", label: "Collected", format: "time" },
 ];
 
 const RECOMMENDATION_COLUMNS = [
@@ -94,7 +95,7 @@ function noticeText(data, n, db) {
   const cut = data.databases_truncated ? " Showing the largest databases of " + data.database_count + "." : "";
   const workload = data.overall_workload_reason ? " Overall row: " + data.overall_workload_reason + "." : "";
   const filter = db ? " Database " + db + "." : "";
-  return count + filter + cut + " Analyzed from the latest collected snapshot." + workload;
+  return count + filter + cut + " Analyzed from each database's newest collected snapshot." + workload;
 }
 
 export const tab = {

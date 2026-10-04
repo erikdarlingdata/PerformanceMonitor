@@ -165,21 +165,55 @@ public sealed partial class ViewerDataService
         DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(
             _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
-    /// <summary>Projects the analyzer recommendations into the detail-grid view-models.</summary>
-    public static List<IndexCleanupRecommendationRow> ProjectRecommendations(IndexCleanupAnalysisResult result) =>
-        result.Recommendations.Select(r => new IndexCleanupRecommendationRow(r)).ToList();
+    /// <summary>
+    /// The analysis plus when each database's snapshot was collected (naive UTC, keyed by database id). The times
+    /// ride beside the result because the analyzer's types are shared with Lite, which has no stored snapshot to date.
+    /// </summary>
+    public Task<IndexAnalysisWithSnapshotTimes> GetIndexAnalysisWithSnapshotTimesAsync(int serverId, CancellationToken cancellationToken = default) =>
+        DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(
+            _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>Projects the analyzer recommendations into the detail-grid view-models; <paramref name="snapshotTimes"/> (when given) dates each row by its database's snapshot.</summary>
+    public static List<IndexCleanupRecommendationRow> ProjectRecommendations(IndexCleanupAnalysisResult result, IReadOnlyDictionary<int, DateTime>? snapshotTimes = null)
+    {
+        /* A recommendation carries only the database NAME, and names can repeat across ids. Resolve it through this read's
+           rollups (which carry the id): the time is used only when exactly one id owns the name (Ordinal), else null. */
+        var idByName = new Dictionary<string, int?>(StringComparer.Ordinal);
+        foreach (var rollup in result.DatabaseRollups)
+        {
+            if (rollup.DatabaseName == null)
+            {
+                continue;
+            }
+
+            idByName[rollup.DatabaseName] = idByName.ContainsKey(rollup.DatabaseName) ? null : rollup.DatabaseId;
+        }
+
+        return result.Recommendations.Select(r => new IndexCleanupRecommendationRow(
+            r, r.DatabaseName != null && idByName.TryGetValue(r.DatabaseName, out var id) ? SnapshotTimeOf(snapshotTimes, id) : null)).ToList();
+    }
+
+    private static DateTime? SnapshotTimeOf(IReadOnlyDictionary<int, DateTime>? times, int? databaseId)
+    {
+        if (times == null || databaseId == null || !times.TryGetValue(databaseId.Value, out var at))
+        {
+            return null;
+        }
+
+        return at;
+    }
 
     /// <summary>
     /// Projects the analyzer rollups into the summary-grid view-models: the overall "ALL DATABASES" total first,
     /// then one row per database.
     /// </summary>
-    public static List<IndexCleanupRollupRow> ProjectRollups(IndexCleanupAnalysisResult result)
+    public static List<IndexCleanupRollupRow> ProjectRollups(IndexCleanupAnalysisResult result, IReadOnlyDictionary<int, DateTime>? snapshotTimes = null)
     {
         var rows = new List<IndexCleanupRollupRow>
         {
             new(result.OverallRollup, "ALL DATABASES"),
         };
-        rows.AddRange(result.DatabaseRollups.Select(r => new IndexCleanupRollupRow(r, r.DatabaseName ?? "")));
+        rows.AddRange(result.DatabaseRollups.Select(r => new IndexCleanupRollupRow(r, r.DatabaseName ?? "", SnapshotTimeOf(snapshotTimes, r.DatabaseId))));
         return rows;
     }
 }
@@ -195,10 +229,17 @@ public sealed class IndexCleanupRecommendationRow
 {
     private readonly IndexCleanupRecommendation _rec;
 
-    public IndexCleanupRecommendationRow(IndexCleanupRecommendation rec)
+    public IndexCleanupRecommendationRow(IndexCleanupRecommendation rec, DateTime? collectionTimeUtc = null)
     {
         _rec = rec;
+        CollectionTimeUtc = collectionTimeUtc;
     }
+
+    /// <summary>When this row's database's snapshot was collected, naive UTC (kind Utc); null when unknown. The Collected column sorts by it.</summary>
+    public DateTime? CollectionTimeUtc { get; }
+
+    /// <summary>That instant to the second in the display zone: the Collected column's text.</summary>
+    public string CollectionTime => PgDisplay.SnapshotTime(CollectionTimeUtc);
 
     public string DatabaseName => _rec.DatabaseName;
     public string SchemaName => _rec.SchemaName;
@@ -236,11 +277,18 @@ public sealed class IndexCleanupRollupRow
 {
     private readonly IndexCleanupRollup _rollup;
 
-    public IndexCleanupRollupRow(IndexCleanupRollup rollup, string scope)
+    public IndexCleanupRollupRow(IndexCleanupRollup rollup, string scope, DateTime? collectionTimeUtc = null)
     {
         _rollup = rollup;
         Scope = scope;
+        CollectionTimeUtc = collectionTimeUtc;
     }
+
+    /// <summary>When this database's newest snapshot was collected, naive UTC (kind Utc); null on the overall row, which spans databases. The Collected column sorts by it.</summary>
+    public DateTime? CollectionTimeUtc { get; }
+
+    /// <summary>That instant to the second in the display zone: the Collected column's text; blank on the overall row.</summary>
+    public string CollectionTime => PgDisplay.SnapshotTime(CollectionTimeUtc);
 
     /// <summary>Database name, or "ALL DATABASES" for the overall total.</summary>
     public string Scope { get; }

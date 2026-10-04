@@ -1101,6 +1101,8 @@
                                     <DataGridTextColumn Header="Avg Lock Wait ms" Binding="{Binding AvgLockWaitMs}" SortMemberPath="AvgLockWaitMsSort" Width="120" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Latch Waits" Binding="{Binding LatchWaitCount}" SortMemberPath="LatchWaitCountSort" Width="95" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Avg Latch Wait ms" Binding="{Binding AvgLatchWaitMs}" SortMemberPath="AvgLatchWaitMsSort" Width="130" ElementStyle="{StaticResource NumericCell}"/>
+                                    <!-- When this database's newest snapshot was collected; blank on the overall row, which spans databases. -->
+                                    <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTime}" Width="150" SortMemberPath="CollectionTimeUtc"/>
                                 </DataGrid.Columns>
                             </DataGrid>
 
@@ -1134,6 +1136,7 @@
                                     <DataGridTextColumn Header="Script" Binding="{Binding Script}" Width="320">
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding Script}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTime}" Width="150" SortMemberPath="CollectionTimeUtc"/>
                                 </DataGrid.Columns>
                             </DataGrid>
 

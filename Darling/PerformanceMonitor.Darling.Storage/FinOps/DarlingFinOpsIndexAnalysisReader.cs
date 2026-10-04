@@ -24,6 +24,9 @@ namespace PerformanceMonitor.Darling.Storage.FinOps;
  * Shared by the viewer and any other reader of the store. SQL kept in public const so tests pin it.
  */
 
+/// <summary>An index analysis and, per database name (case-insensitive), the naive-UTC instant its snapshot was collected.</summary>
+public sealed record IndexAnalysisWithSnapshotTimes(IndexCleanupAnalysisResult Result, IReadOnlyDictionary<int, DateTime> SnapshotTimes);
+
 public static class DarlingFinOpsIndexAnalysisReader
 {
     /// <summary>
@@ -37,7 +40,7 @@ public static class DarlingFinOpsIndexAnalysisReader
     /// chunks instead of every retained one. DISTINCT ON still dedupes on the index identity, and two rows for
     /// one index can share a collection_time (a re-run in the same instant), so the final ORDER BY key is
     /// collection_id DESC: the newest-written row wins the tie deterministically. $1 server_id. Column order
-    /// is the read contract for <see cref="ReadIndexObjectStatsRow"/>.
+    /// is the read contract for <see cref="ReadIndexObjectStatsRow"/>; collection_time is the last column (ordinal 40).
     /// </summary>
     public const string IndexObjectStatsLatestSql = @"
 WITH anchor AS MATERIALIZED
@@ -92,7 +95,8 @@ SELECT DISTINCT ON (s.database_id, s.object_id, s.index_id)
     s.page_latch_wait_count,
     s.page_latch_wait_in_ms,
     s.page_io_latch_wait_count,
-    s.page_io_latch_wait_in_ms
+    s.page_io_latch_wait_in_ms,
+    s.collection_time
 FROM v_index_object_stats AS s
 JOIN anchor AS a ON a.database_id = s.database_id AND a.t = s.collection_time
 WHERE s.server_id = $1
@@ -163,6 +167,10 @@ LIMIT 1";
         public long? PageLatchWaitInMs { get; init; }
         public long? PageIoLatchWaitCount { get; init; }
         public long? PageIoLatchWaitInMs { get; init; }
+
+        /// <summary>The snapshot's own stamp, naive UTC (kind Utc): the per-database anchor the read resolved on,
+        /// projected last (ordinal 40) so every earlier ordinal is unchanged.</summary>
+        public DateTime CollectionTime { get; init; }
     }
 
     /// <summary>Maps a collected snapshot row into the analyzer's per-index input contract (nullable flag -&gt; false).</summary>
@@ -336,13 +344,22 @@ LIMIT 1";
             PageLatchWaitInMs = L(37),
             PageIoLatchWaitCount = L(38),
             PageIoLatchWaitInMs = L(39),
+            /* collection_time is the store's naive UTC stamp; the anchor join makes it non-null. */
+            CollectionTime = DateTime.SpecifyKind(reader.GetDateTime(40), DateTimeKind.Utc),
         };
     }
 
     /// <summary>Reads the latest per-index snapshot for the server and maps each row to the analyzer input contract.</summary>
     public static async Task<List<IndexCleanupIndexInput>> GetIndexCleanupInputsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
-        var inputs = new List<IndexCleanupIndexInput>();
+        var rows = await ReadIndexObjectStatsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+        return rows.ConvertAll(MapToIndexInput);
+    }
+
+    /// <summary>Runs <see cref="IndexObjectStatsLatestSql"/> and returns its rows with their snapshot stamps.</summary>
+    private static async Task<List<IndexObjectStatsDto>> ReadIndexObjectStatsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var inputs = new List<IndexObjectStatsDto>();
 
         await using var command = dataSource.CreateCommand(IndexObjectStatsLatestSql);
         command.CommandTimeout = commandTimeoutSeconds;
@@ -351,7 +368,7 @@ LIMIT 1";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            inputs.Add(MapToIndexInput(ReadIndexObjectStatsRow(reader)));
+            inputs.Add(ReadIndexObjectStatsRow(reader));
         }
 
         return inputs;
@@ -395,6 +412,29 @@ LIMIT 1";
         var inputs = await GetIndexCleanupInputsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
         var options = await GetIndexCleanupOptionsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken: cancellationToken);
         return await Task.Run(() => IndexCleanupAnalyzer.Analyze(inputs, options), cancellationToken);
+    }
+
+    /// <summary>
+    /// <see cref="GetIndexAnalysisAsync"/> plus when each database's snapshot was collected. The time rides beside the
+    /// analysis result (the Common types are shared with Lite, which has no stored snapshot to date): a map from
+    /// database id to the naive-UTC instant of that database's newest snapshot. It is keyed by id, as the analyzer
+    /// groups by id (<see cref="IndexCleanupRollup.DatabaseId"/>): a database that left collection scope keeps its last
+    /// snapshot, so a dropped-and-recreated (or restored-as-new) database can leave two ids sharing one name, and each
+    /// must carry its own time. Each id's newest cycle carries exactly one, so the map has no collisions.
+    /// </summary>
+    public static async Task<IndexAnalysisWithSnapshotTimes> GetIndexAnalysisWithSnapshotTimesAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        var rows = await ReadIndexObjectStatsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+        var options = await GetIndexCleanupOptionsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken: cancellationToken);
+        var times = new Dictionary<int, DateTime>();
+        foreach (var row in rows)
+        {
+            times[row.DatabaseId] = row.CollectionTime;
+        }
+
+        var inputs = rows.ConvertAll(MapToIndexInput);
+        var result = await Task.Run(() => IndexCleanupAnalyzer.Analyze(inputs, options), cancellationToken);
+        return new IndexAnalysisWithSnapshotTimes(result, times);
     }
 
     /// <summary>The single filterable operation label mirroring sp_IndexCleanup's script buckets: MAKE UNIQUE wins over its MERGE bucket; otherwise the result kind names the bucket.</summary>
