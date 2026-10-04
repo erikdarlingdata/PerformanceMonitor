@@ -62,6 +62,11 @@ table.data th .sort-ind { display: inline-block; min-width: 1em; font-size: 0.8e
 .mute-actions .btn { margin-right: 4px; }
 tr.mute-rules-highlight { outline: 2px solid var(--accent); }
 
+/* Server page custom range (#4843) */
+.range-custom { display: inline-flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
+.range-custom[hidden] { display: none; }
+.range-custom-input { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 0.15rem 0.3rem; font-size: 0.78rem; }
+.range-custom-error { color: var(--err); font-size: 0.78rem; }
 /* Copy and CSV strip above a data table (#4843). */
 .grid-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
 .grid-tools .grid-tool { font-size: 12px; padding: 2px 8px; }
