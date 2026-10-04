@@ -45,6 +45,7 @@ public sealed class EffectiveStartUtcTests
     [Theory]
     [InlineData("DarlingMcpDataTools.cs", 5)]
     [InlineData("DarlingMcpQueryStoreClutterTools.cs", 1)]
+    [InlineData("DarlingMcpSessionTools.cs", 2)]
     public void EveryWindowFloorWrite_RoutesThroughTheSharedFormatter(string file, int minimumRouted)
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
@@ -54,11 +55,28 @@ public sealed class EffectiveStartUtcTests
             .Where(line => line.StartsWith("effective_start = ", StringComparison.Ordinal))
             .ToList();
 
-        var routed = writes.Count(line => line.StartsWith("effective_start = McpHelpers.FormatEffectiveStart(", StringComparison.Ordinal));
-        var others = writes.Where(line => !line.StartsWith("effective_start = McpHelpers.FormatEffectiveStart(", StringComparison.Ordinal)).ToList();
+        /* #4966: a tool that writes the shared notice (DarlingMcpWindowNotice) writes the value the helper formatted, and the
+           helper's own formatting is pinned below. */
+        bool IsRouted(string line) =>
+            line.StartsWith("effective_start = McpHelpers.FormatEffectiveStart(", StringComparison.Ordinal)
+            || line == "effective_start = notice.EffectiveStart,";
+        var routed = writes.Count(IsRouted);
+        var others = writes.Where(line => !IsRouted(line)).ToList();
 
         Assert.True(routed >= minimumRouted, $"{file} writes effective_start through McpHelpers.FormatEffectiveStart {routed} time(s); expected at least {minimumRouted}.");
         Assert.All(others, line => Assert.Equal("effective_start = (string?)null,", line));
+    }
+
+    /// <summary>
+    /// #4966: the shared notice formats its <c>effective_start</c> through <see cref="McpHelpers.FormatEffectiveStart"/>, so every
+    /// tool that writes <c>notice.EffectiveStart</c> prints UTC with the Z.
+    /// </summary>
+    [Fact]
+    public void TheSharedNotice_FormatsItsEffectiveStart_ThroughTheSharedFormatter()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpWindowNotice.cs");
+        Assert.Contains("McpHelpers.FormatEffectiveStart(RawWindowFloor.EffectiveStart(floor, requestedStart))", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(".ToString(\"o\"", source, StringComparison.Ordinal);
     }
 
     /// <summary>
