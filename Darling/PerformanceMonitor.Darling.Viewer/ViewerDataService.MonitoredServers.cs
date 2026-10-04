@@ -15,6 +15,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -499,13 +500,21 @@ ORDER BY COALESCE(s.display_name, c.name)";
         return sameIdentity ? MonitoredServerAddOutcome.Duplicate : MonitoredServerAddOutcome.Collides;
     }
 
-    /// <summary>Removes a server definition by id (the Remove action).</summary>
+    /// <summary>Removes a server definition by id (the Remove action), and the server's tag assignments in the
+    /// same transaction, so a re-added server (same id) does not get its old tags back.</summary>
     public async Task DeleteMonitoredServerAsync(int serverId, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(MonitoredServerDeleteSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        await ExecuteWriteAsync(command, cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        foreach (var sql in new[] { MonitoredServerDeleteSql, ServerTagStore.ClearForServerSql })
+        {
+            await using var command = new NpgsqlCommand(sql, connection, transaction);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            await ExecuteWriteAsync(command, cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
     }
 
     /// <summary>Toggles a server's <c>is_enabled</c> flag without rewriting its other columns.</summary>

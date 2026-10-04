@@ -237,20 +237,17 @@ public sealed class DarlingMcpServerTagTools
             var scoped = ServerTagCoverage.RulesScopedInSubtree(before, tagId);
             if (scoped.Count > 0 && !confirm)
             {
-                var names = string.Join(", ", scoped.Select(r => $"'{r.Name}'"));
-                return Serialize(new JsonObject
-                {
-                    ["status"] = "confirm_required",
-                    ["refusal"] = RulesAffectedCode,
-                    ["message"] = string.Create(
-                        CultureInfo.InvariantCulture,
-                        $"Deleting tag {tagId} and its subtree would leave {scoped.Count} custom alert rule(s) scoped to it matching no server: {names}. Nothing was deleted. Repeat with confirm=true to proceed."),
-                    ["tag_id"] = tagId,
-                    ["affected_rules"] = RulesNode(ServerTagCoverage.SimulateDelete(before, tagId), before, before),
-                });
+                return ConfirmRequiredEnvelope(tagId, scoped.Count, scoped, before);
             }
 
-            var written = await store.DeleteAsync(tagId, ct);
+            // The store re-reads the rules under its delete lock, so a rule scoped in since the snapshot above
+            // still stops an unconfirmed delete.
+            var written = await store.DeleteAsync(tagId, confirm, ct);
+            if (written is ServerTagWriteResult.ConfirmRequired locked)
+            {
+                return ConfirmRequiredEnvelope(tagId, locked.Rules.Count, locked.Rules, before, locked.Message);
+            }
+
             if (written is not ServerTagWriteResult.Ok ok)
             {
                 return FromWriteResult(written, null)!;
@@ -279,6 +276,22 @@ public sealed class DarlingMcpServerTagTools
         {
             return McpHelpers.FormatError("delete_server_tag", ex);
         }
+    }
+
+    private static string ConfirmRequiredEnvelope(
+        int tagId, int count, IReadOnlyList<TagScopedRule> rules, ServerTagSnapshot before, string? message = null)
+    {
+        var names = string.Join(", ", rules.Select(r => $"'{r.Name}'"));
+        return Serialize(new JsonObject
+        {
+            ["status"] = "confirm_required",
+            ["refusal"] = RulesAffectedCode,
+            ["message"] = message ?? string.Create(
+                CultureInfo.InvariantCulture,
+                $"Deleting tag {tagId} and its subtree would leave {count} custom alert rule(s) scoped to it matching no server: {names}. Nothing was deleted. Repeat with confirm=true to proceed."),
+            ["tag_id"] = tagId,
+            ["affected_rules"] = RulesNode(ServerTagCoverage.SimulateDelete(before, tagId), before, before),
+        });
     }
 
     /// <summary>assign_server_tag's body over the store seam.</summary>
@@ -316,7 +329,14 @@ public sealed class DarlingMcpServerTagTools
             IReadOnlyList<int> added = Array.Empty<int>();
             if (pending.Count > 0)
             {
-                added = await store.AssignAsync(tagId, pending, ct);
+                try
+                {
+                    added = await store.AssignAsync(tagId, pending, ct);
+                }
+                catch (ServerTagGoneException)
+                {
+                    return ConcurrentlyGone(tagId);
+                }
             }
 
             var after = await store.ReadSnapshotAsync(ct);

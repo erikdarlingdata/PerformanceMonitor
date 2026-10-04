@@ -138,10 +138,16 @@ public static class ServerTagRules
             return new ServerTagWriteResult.Refused(BadName, "Tag name contains a control character.");
         }
 
+        // Format characters (zero-width, bidi overrides) render as nothing, so two names could look identical.
+        if (cleanName.Any(c => char.GetUnicodeCategory(c) == UnicodeCategory.Format))
+        {
+            return new ServerTagWriteResult.Refused(BadName, "Tag name contains an invisible formatting character.");
+        }
+
         return null;
     }
 
-    /// <summary>Validates a colour and upper-cases it. Null passes through as null (clear, or the palette
+    /// <summary>Trims, validates and upper-cases a colour. Null passes through as null (clear, or the palette
     /// default on create); an empty string or anything but <c>#RRGGBB</c> is refused.</summary>
     public static ServerTagWriteResult.Refused? CheckColour(string? colour, out string? cleanColour)
     {
@@ -151,6 +157,7 @@ public static class ServerTagRules
             return null;
         }
 
+        colour = colour.Trim();
         if (colour.Length == 0 || !TagColours.IsValidStoredColour(colour))
         {
             return new ServerTagWriteResult.Refused(BadColour, BadColourMessage);

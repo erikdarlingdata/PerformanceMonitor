@@ -91,7 +91,7 @@ internal sealed class InMemoryServerTagStore : IServerTagStore
         return Task.FromResult<ServerTagWriteResult>(new ServerTagWriteResult.Ok(row));
     }
 
-    public Task<ServerTagWriteResult> DeleteAsync(int tagId, CancellationToken ct = default)
+    public Task<ServerTagWriteResult> DeleteAsync(int tagId, bool confirm, CancellationToken ct = default)
     {
         var refusal = ServerTagRules.CheckDelete(Tags, tagId);
         if (refusal is not null)

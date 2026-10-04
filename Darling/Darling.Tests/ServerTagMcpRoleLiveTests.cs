@@ -67,14 +67,24 @@ public sealed class ServerTagMcpRoleLiveTests
         try
         {
             await ExecAsync(owner, $"GRANT USAGE ON SCHEMA config TO {RoleName}; GRANT SELECT ON ALL TABLES IN SCHEMA config TO {RoleName};", ct);
-            foreach (var grant in tagGrants)
-            {
-                await ExecAsync(owner, grant, ct);
-            }
+
+            /* Exactly the two tag-table write grants come out of the product's SQL; a renamed or dropped line
+               would otherwise leave this test granting nothing and still passing. */
+            Assert.Equal(2, tagGrants.Count);
 
             var asMcp = new NpgsqlConnectionStringBuilder(ownerString) { Username = RoleName, Password = RolePassword }.ConnectionString;
             await using var source = NpgsqlDataSource.Create(asMcp);
             var store = new ServerTagStore(source, 30);
+
+            /* Before the grants the same role can read but not write: the insufficient-privilege answer proves the
+               grants below are what lets the writes through. */
+            var denied = await Assert.ThrowsAsync<PostgresException>(() => store.CreateAsync("Prod", null, null, ct));
+            Assert.Equal("42501", denied.SqlState);
+
+            foreach (var grant in tagGrants)
+            {
+                await ExecAsync(owner, grant, ct);
+            }
 
             var created = Assert.IsType<ServerTagWriteResult.Ok>(await store.CreateAsync("Prod", null, null, ct));
             var tagId = created.Tag!.Id;
@@ -83,7 +93,7 @@ public sealed class ServerTagMcpRoleLiveTests
                 await store.UpdateAsync(tagId, new ServerTagEdit(true, "Production", false, null, false, null), ct));
             Assert.Equal("Production", updated.Tag!.Name);
             Assert.Equal(new[] { 4 }, await store.UnassignAsync(tagId, new[] { 4 }, ct));
-            var deleted = Assert.IsType<ServerTagWriteResult.Ok>(await store.DeleteAsync(tagId, ct));
+            var deleted = Assert.IsType<ServerTagWriteResult.Ok>(await store.DeleteAsync(tagId, confirm: true, ct));
             Assert.Equal(1, deleted.RemovedAssignments);
             Assert.Empty(await store.ReadTagsAsync(ct));
         }

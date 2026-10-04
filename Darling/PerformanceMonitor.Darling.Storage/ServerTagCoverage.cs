@@ -60,14 +60,22 @@ public static class ServerTagCoverage
     }
 
     /// <summary>Every rule in <paramref name="before"/> whose coverage differs in <paramref name="after"/>.
-    /// A rule whose scope tag is gone in <paramref name="after"/> is <see cref="Orphaned"/> and loses every
-    /// server it had.</summary>
+    /// A rule whose scope tag is gone in <paramref name="after"/> (but was present in <paramref name="before"/>)
+    /// is <see cref="Orphaned"/> and loses every server it had.</summary>
     public static IReadOnlyList<RuleCoverageEffect> Diff(ServerTagSnapshot before, ServerTagSnapshot after)
     {
         var afterTagIds = after.Tags.Select(t => t.Id).ToHashSet();
+        var beforeTagIds = before.Tags.Select(t => t.Id).ToHashSet();
         var effects = new List<RuleCoverageEffect>();
         foreach (var rule in before.Rules)
         {
+            // A rule whose scope tag was already gone before the write matches nothing and this write did not
+            // change that, so it is not an effect of this write.
+            if (!beforeTagIds.Contains(rule.ScopeTagId))
+            {
+                continue;
+            }
+
             var was = Members(before, rule.ScopeTagId);
             if (!afterTagIds.Contains(rule.ScopeTagId))
             {
