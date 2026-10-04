@@ -168,6 +168,124 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
         AssertHybridTaken(outcome.Payload!);
     }
 
+    private const string PanelMax =
+        "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"max\",\"topN\":50,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}";
+
+    private const string PanelMin =
+        "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"min\",\"topN\":50,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}";
+
+    private const string PanelRankedSeriesAtHour =
+        "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":50,\"groupBy\":[\"database_name\"],\"viz\":\"line\"}";
+
+    private const string PanelScalar =
+        "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"viz\":\"stat\"}";
+
+    /// <summary>The seed every aggregate and mode variant shares: edge rows on both sides, middle rows at distinct values
+    /// (so Max and Min each have a different winner than Sum), a restart-only group, a NULL interval, and the row exactly
+    /// on each middle boundary.</summary>
+    private static async Task SeedMixedAsync(Store store)
+    {
+        var (h1, h2) = (store.Layout.H1, store.Layout.H2);
+        await SeedAnchorAsync(store);
+        await QsAsync(store, ServerA, "MixedDb", "HM", "0xM", h1.AddSeconds(-1), 5000, 300);
+        await QsAsync(store, ServerA, "MixedDb", "HM", "0xM", h1, 7, 300);
+        await QsAsync(store, ServerA, "MixedDb", "HM", "0xM", h1.AddHours(3).AddMinutes(10), 4000, 300);
+        await QsAsync(store, ServerB, "MixedDb", "HM", "0xM", h1.AddHours(9).AddMinutes(12), 3, 300);
+        await QsAsync(store, ServerA, "MixedDb", "HM", "0xM", h1.AddHours(9).AddMinutes(30), 2500, null);
+        await QsAsync(store, ServerA, "MixedDb", "HM", "0xM", h2.AddSeconds(-1), 90, 300);
+        await QsAsync(store, ServerA, "MixedDb", "HM", "0xM", h2, 6000, 300);
+        await QsAsync(store, ServerA, "RestartDb", "HR", "0xR", h1.AddHours(4).AddMinutes(5), 777, 0);
+        await QsAsync(store, ServerB, "EdgeDb", "HE", "0xE", h2.AddSeconds(2), 11, 300);
+        await QsAsync(store, ServerA, "EdgeDb", "HE", "0xE", h1.AddMinutes(-30), 13, 300);
+        await store.RefreshAsync();
+    }
+
+    [Fact]
+    public async Task AMaxPanel_TakesTheHybridRoute_AndMatchesRaw()
+    {
+        await using var store = await StoreAsync();
+        await SeedMixedAsync(store);
+
+        var (hybrid, raw) = await RunBothAsync(store, PanelMax);
+        AssertHybridTaken(hybrid);
+        Assert.Equal(raw.ToJsonString(), hybridRows(hybrid));
+        Assert.Equal(6000, ValueOf(raw, "MixedDb"), 6);
+    }
+
+    [Fact]
+    public async Task AMinPanel_TakesTheHybridRoute_AndMatchesRaw()
+    {
+        await using var store = await StoreAsync();
+        await SeedMixedAsync(store);
+
+        var (hybrid, raw) = await RunBothAsync(store, PanelMin);
+        AssertHybridTaken(hybrid);
+        Assert.Equal(raw.ToJsonString(), hybridRows(hybrid));
+        Assert.Equal(3, ValueOf(raw, "MixedDb"), 6);
+    }
+
+    [Fact]
+    public async Task ARankedTimeSeriesPanel_AtHourGrain_TakesTheHybridRoute_AndMatchesRaw()
+    {
+        await using var store = await StoreAsync();
+        await SeedMixedAsync(store);
+
+        var (hybrid, raw) = await RunBothAsync(store, PanelRankedSeriesAtHour);
+        AssertHybridTaken(hybrid);
+        Assert.Equal(raw.ToJsonString(), hybridRows(hybrid));
+        Assert.True(raw.Count > 1, "an hourly series over the seeded window has more than one bucket");
+    }
+
+    [Fact]
+    public async Task AScalarPanel_TakesTheHybridRoute_AndMatchesRaw()
+    {
+        await using var store = await StoreAsync();
+        await SeedMixedAsync(store);
+
+        var (hybrid, raw) = await RunBothAsync(store, PanelScalar);
+        AssertHybridTaken(hybrid);
+        Assert.Equal(raw.ToJsonString(), hybridRows(hybrid));
+        Assert.Single(raw);
+    }
+
+    [Fact]
+    public async Task ALateNonRestartRow_AfterTheRefresh_MakesTheGuardRefuse_AndTheRowsStillMatchRaw()
+    {
+        await using var store = await StoreAsync();
+        await SeedMixedAsync(store);
+
+        /* one more measured row in the last middle hour, written after the aggregate was refreshed: raw now holds one
+           row the aggregate does not, the counts disagree, and the guard must send the panel down the raw route */
+        await QsAsync(store, ServerA, "MixedDb", "HM", "0xM", store.Layout.H2.AddHours(-1).AddMinutes(20), 123456, 300);
+
+        var (hybrid, raw) = await RunBothAsync(store, PanelByDatabase);
+        Assert.DoesNotContain("_interval_hourly", (string)hybrid["sql"]!, StringComparison.Ordinal);
+        Assert.Equal(raw.ToJsonString(), hybridRows(hybrid));
+        Assert.Equal(5000 + 7 + 4000 + 3 + 2500 + 90 + 6000 + 123456, ValueOf(raw, "MixedDb"), 6);
+    }
+
+    /// <summary>The premise pin for the whole route. The guard compares row COUNTS, so it can only see rows that appear
+    /// or disappear. An in-place UPDATE keeps the count, passes the guard, and the hybrid serves the aggregate's stale
+    /// value. This fact documents that on purpose: the route is only exact because raw query_stats is append-only.</summary>
+    [Fact]
+    public async Task APlantedInPlaceUpdate_PassesTheCountGuard_AndTheHybridDiffersFromRaw_ThePremisePin()
+    {
+        await using var store = await StoreAsync();
+        await SeedMixedAsync(store);
+
+        await using (var update = new NpgsqlCommand(
+            "UPDATE collect.query_stats SET delta_worker_time = delta_worker_time + 1000000 WHERE database_name = 'MixedDb' AND collection_time = $1", store.Connection))
+        {
+            update.Parameters.AddWithValue(DateTime.SpecifyKind(store.Layout.H1.AddHours(3).AddMinutes(10), DateTimeKind.Unspecified));
+            Assert.Equal(1, await update.ExecuteNonQueryAsync(store.Ct));
+        }
+
+        var (hybrid, raw) = await RunBothAsync(store, PanelByDatabase);
+        const string Premise = "the hourly-raw-edges route relies on raw query_stats being append-only (COPY-only writes, whole-row retention); an in-place UPDATE passes the count guard unseen. If this ever starts failing because the rows match, the premise or the guard changed: re-check both.";
+        Assert.True(((string)hybrid["sql"]!).Contains(Hybrid, StringComparison.Ordinal), Premise);
+        Assert.False(raw.ToJsonString() == hybridRows(hybrid), Premise);
+    }
+
     /* ---- helpers ---- */
 
     private static string hybridRows(JsonObject payload) => payload["rows"]!.ToJsonString();
