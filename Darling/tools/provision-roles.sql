@@ -304,6 +304,10 @@ GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO mcp;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
+-- #5085: the fleet server-tag write tools run as mcp; these two single-table grants are the admin gate. Both
+--     tables are non-secret with no beacon trigger, and server_tags.id is an identity column (no sequence grant).
+GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;
+GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
 
 -- 3d-2. Alert History dismiss (#4843): the web dashboard's POST /api/alert-history/dismiss runs as viewer and
 --     writes `UPDATE config_alert_log SET dismissed = TRUE`. Column-level on exactly that one column, so viewer
