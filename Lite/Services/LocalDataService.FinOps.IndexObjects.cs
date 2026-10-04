@@ -730,8 +730,8 @@ public class IndexUsageRow
     /// <summary>When that snapshot was collected, to the second, in the display zone: the index drill's Collected column,
     /// which sorts by <see cref="CollectionTime"/>. The drill reads the database's latest snapshot with no time bound,
     /// so this is how old the figures can be. <c>collection_time</c> is the collector's own UTC stamp, so it is worded
-    /// from the instant like the other Collected columns.</summary>
-    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
+    /// from the instant like the other Collected columns. Empty when the row did not come from the index drill.</summary>
+    public string CollectionTimeLocal => CollectionTime == DateTime.MinValue ? "" : ServerTimeHelper.FormatServerTime(CollectionTime);
 }
 
 /// <summary>Per-index locking/latch contention.</summary>

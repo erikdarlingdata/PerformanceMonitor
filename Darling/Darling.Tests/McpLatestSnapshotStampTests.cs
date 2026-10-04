@@ -688,7 +688,7 @@ public sealed class McpLatestSnapshotStampTests
     public void StorageGrowthIndexDrill_IsStamped_FromTheRowsOwnAnchor()
     {
         var source = Strip(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.StorageGrowth.cs"));
-        Assert.Matches(LatestReaderCall, "        var indexes = await DarlingFinOpsStorageGrowthReader.GetObjectIndexDetailAsync(");
+        Assert.Matches(LatestReaderCall, source);
         Assert.Contains("GetObjectIndexDetailAsync(", source, StringComparison.Ordinal);
         Assert.Matches(CapturedAtKey, source);
         Assert.Contains("captured_at = indexes.Count == 0 ? null : McpHelpers.FormatEffectiveStart(indexes[0].CollectionTime)", source, StringComparison.Ordinal);
