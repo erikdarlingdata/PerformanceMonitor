@@ -242,8 +242,8 @@ public sealed class FinOpsRecommendationsReadsLiveTests
             Assert.Equal((decimal.GetBits(viewedTotal)[3] >> 16) & 0xFF, (decimal.GetBits(storedTotal)[3] >> 16) & 0xFF);
         }
 
-        /* Server A's latest capture: the four seeded databases plus NullFlagA, ordered by name (ordinal order of these
-           names matches the store's ordering). OldOnlyA is only in the older capture, so it is absent. The NULL flag
+        /* Server A's latest capture: the four seeded databases plus NullFlagA, compared as a set (the store's text ordering depends on its collation; the ordered
+           parity check against the viewer above pins that order). OldOnlyA is only in the older capture, so it is absent. The NULL flag
            reads as not encrypted. Servers B and C carry no configuration rows. */
         var a = await DarlingFinOpsRecommendationsReader.GetDatabaseEncryptionFactsAsync(dataSource, idA, TimeoutSeconds, ct);
         Assert.DoesNotContain(a, f => f.DatabaseName == "OldOnlyA");
@@ -256,7 +256,7 @@ public sealed class FinOpsRecommendationsReadsLiveTests
                 new DatabaseEncryptionFact("app_dev_a", "ONLINE", false),
                 new DatabaseEncryptionFact("qa1_a", "ONLINE", false),
             }.OrderBy(f => f.DatabaseName, StringComparer.Ordinal).ToArray(),
-            a.ToArray());
+            a.OrderBy(f => f.DatabaseName, StringComparer.Ordinal).ToArray());
         Assert.Empty(await DarlingFinOpsRecommendationsReader.GetDatabaseEncryptionFactsAsync(dataSource, idB, TimeoutSeconds, ct));
         Assert.Empty(await DarlingFinOpsRecommendationsReader.GetDatabaseEncryptionFactsAsync(dataSource, idC, TimeoutSeconds, ct));
     }

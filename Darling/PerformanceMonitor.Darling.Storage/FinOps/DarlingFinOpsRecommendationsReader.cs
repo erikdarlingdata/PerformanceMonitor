@@ -137,10 +137,10 @@ LIMIT 1";
 
     /// <summary>
     /// Every database's collected state and encryption flag at the server's latest <c>database_config</c> capture,
-    /// ordered by name. Same snapshot the viewer's database-configuration read returns. $1 server_id.
+    /// ordered by name. Same snapshot the viewer's database-configuration read returns. The capture time is projected so the read names the instant it anchors on. $1 server_id.
     /// </summary>
     public const string DatabaseEncryptionFactsSql = @"
-SELECT database_name, state_desc, is_encrypted
+SELECT database_name, state_desc, is_encrypted, capture_time
 FROM v_database_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
