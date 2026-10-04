@@ -196,6 +196,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         {
             _crosshairManager?.PrepareForRefresh();
 
+            /* #4966: the UTC window the blocking and deadlock reads below take (their own GetTimeRange call), for the data-start note. */
+            var (windowStartUtc, windowEndUtc) = LocalDataService.GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
             var cpuTask = Task.Run(() => _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate, frame: CpuTimeFrame.Utc));
             var waitTask = Task.Run(() => _dataService.GetTotalWaitTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var blockingTask = Task.Run(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate));
@@ -346,6 +349,14 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                the render set when the chart refreshes. */
             _crosshairManager?.ReattachVLines();
             SyncXAxes(hoursBack, fromDate, toDate);
+
+            /* #4966: the blocking chart draws event counts, so an empty stretch reads as "nothing happened" and the chart says
+               where its data starts. The note comes last, after every lane and the ghost lines are drawn and synced, and on its
+               own: the probes are not part of the reads' WhenAll above, and a probe that fails costs the note, never the bars. */
+            await ShowBlockingLaneDataStartAsync(
+                windowStartUtc, windowEndUtc,
+                blockingTask.IsCompletedSuccessfully ? blockingTask.Result : [],
+                deadlockTask.IsCompletedSuccessfully ? deadlockTask.Result : []);
         }
         finally
         {
@@ -355,6 +366,21 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             _crosshairManager?.EnsureVLinesAttached();
             _isRefreshing = false;
         }
+    }
+
+    /// <summary>
+    /// Raises or hides the blocking chart's "Showing since" note (#4966). The chart's two series, blocking and deadlocks, are
+    /// event counts: an empty stretch before a series starts reads as "nothing happened". A window of 90 minutes or less
+    /// starts no probe (<see cref="ServerTab.ProbeWindowFloorOrNullAsync"/>). The text goes through the shared banner step in
+    /// the lanes' own clock (<c>_displayZone</c>, which is the tab's <c>GetPickerZone</c>), to the second.
+    /// </summary>
+    private async Task ShowBlockingLaneDataStartAsync(
+        DateTime startUtc, DateTime endUtc, IReadOnlyList<TrendPoint> blockingBars, IReadOnlyList<TrendPoint> deadlockBars)
+    {
+        await LiteBlockingLaneDataStart.ShowAsync(
+            BlockingLaneDataStartBanner,
+            relation => Task.Run(() => _dataService!.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc)),
+            startUtc, endUtc, blockingBars, deadlockBars, _displayZone());
     }
 
     private void UpdateBlockingLane(List<(double Time, double Value)> blockingData,
