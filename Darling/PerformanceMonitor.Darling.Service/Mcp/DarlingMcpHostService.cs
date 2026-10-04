@@ -941,6 +941,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                the collected memory / perfmon / file-io / query-stats series, no live hit). Each mirrors
                the viewer's proven chart read; the shape follows Lite where the SKUs diverge. */
             .WithGeminiCompatibleTools<DarlingMcpTrendTools>()
+            .WithGeminiCompatibleTools<DarlingMcpServerTrendTools>()
             /* The fleet-triage quick-win reads the fleet edition previously lacked — the alerts family
                (get_alert_history over config_alert_log, get_alert_settings over config_alert_settings,
                get_mute_rules via the service-side PgMuteRuleStore), the CURRENT-config snapshot trio
