@@ -152,6 +152,23 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
         Assert.Equal(SinceText(from), text);
     }
 
+    /// <summary>A failed blocking probe with a late bar names no start; the covered deadlock series starts at the window start, so no note.</summary>
+    [Fact]
+    public async Task AFailedProbe_WithALateBar_AndACoveredOtherSeries_ShowsNoNote()
+    {
+        await _duckDb.InitializeAsync();
+        await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
+        var service = new LocalDataService(_duckDb);
+
+        var (visible, text) = await NoteAsync(End.AddDays(-7), End, [Bar(End.AddHours(-1))], [],
+            relation => relation == QueryWindowRelation.BlockedProcessReports
+                ? Task.FromException<DateTime?>(new InvalidOperationException("probe failed"))
+                : service.GetQueryWindowFloorAsync(relation, ServerId, End.AddDays(-7), End));
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
     /// <summary>A window of 90 minutes or less starts no probe, even on a store that would earn a note.</summary>
     [Fact]
     public async Task AShortWindow_StartsNoProbe_AndShowsNoNote()

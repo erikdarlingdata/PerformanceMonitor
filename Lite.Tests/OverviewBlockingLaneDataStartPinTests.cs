@@ -75,9 +75,10 @@ public sealed class OverviewBlockingLaneDataStartPinTests
     public void TheStep_ProbesBothRelations_ThroughTheShortWindowGuard_AndWordsTheBanner()
     {
         var step = Between(Step(), "internal static async Task ShowAsync(", "/// <summary>One series' start:");
-        Assert.Contains("floorOf(QueryWindowRelation.BlockedProcessReports)", step, StringComparison.Ordinal);
-        Assert.Contains("floorOf(QueryWindowRelation.Deadlocks)", step, StringComparison.Ordinal);
-        Assert.Equal(2, Regex.Matches(step, @"ServerTab\.ProbeWindowFloorOrNullAsync\(").Count);
+        Assert.DoesNotContain("ProbeWindowFloorOrNullAsync", step, StringComparison.Ordinal);
+        Assert.True(step.IndexOf("McpQueryTools.CanWindowBeTruncated(startUtc, endUtc)", StringComparison.Ordinal)
+            < step.IndexOf("Probe(floorOf, QueryWindowRelation.BlockedProcessReports)", StringComparison.Ordinal));
+        Assert.Contains("Probe(floorOf, QueryWindowRelation.Deadlocks)", step, StringComparison.Ordinal);
         Assert.Contains("StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars)", step, StringComparison.Ordinal);
         Assert.Contains("ChooseAsync(blockingProbe, deadlockProbe, blockingBars, deadlockBars)", step, StringComparison.Ordinal);
         Assert.Contains("ServerTab.ApplyWindowFloorToBanner(banner, start, startUtc, zone)", step, StringComparison.Ordinal);

@@ -68,8 +68,17 @@ public sealed class OverviewBlockingLaneDataStartTests
     {
         var failed = Task.FromException<DateTime?>(new InvalidOperationException("the store went away"));
         Assert.Equal(Day.AddDays(2), await LiteBlockingLaneDataStart.ChooseAsync(failed, Answer(Day.AddDays(2)), NoBars, NoBars));
-        Assert.Equal(Day, await LiteBlockingLaneDataStart.ChooseAsync(failed, Task.FromException<DateTime?>(new TimeoutException()), [Bar(Day)], [Bar(Day)]));
+        Assert.Null(await LiteBlockingLaneDataStart.ChooseAsync(failed, Task.FromException<DateTime?>(new TimeoutException()), [Bar(Day)], [Bar(Day)]));
         Assert.Null(await LiteBlockingLaneDataStart.ChooseAsync(failed, Task.FromException<DateTime?>(new TimeoutException()), NoBars, NoBars));
+    }
+
+    /// <summary>A failed blocking probe gives no start even with a late bar; the deadlock series answers alone, so its start (the window start) is named.</summary>
+    [Fact]
+    public async Task AFailedProbe_WithALateBar_DoesNotRaiseTheNote()
+    {
+        var failed = Task.FromException<DateTime?>(new InvalidOperationException("the store went away"));
+        var result = await LiteBlockingLaneDataStart.ChooseAsync(failed, Answer(Day), [Bar(Day.AddDays(5))], NoBars);
+        Assert.Equal(Day, result);
     }
 
     /// <summary>The probing half of the step: both relations are asked over the window given, and the later floor wins.</summary>
@@ -84,6 +93,15 @@ public sealed class OverviewBlockingLaneDataStartTests
         Assert.Equal(Day.AddDays(3), start);
         Assert.Contains(QueryWindowRelation.BlockedProcessReports, asked);
         Assert.Contains(QueryWindowRelation.Deadlocks, asked);
+    }
+
+    /// <summary>A window of 90 minutes or less calls neither probe.</summary>
+    [Fact]
+    public async Task StartAsync_ShortWindow_CallsNeitherProbe()
+    {
+        var calls = 0;
+        Assert.Null(await LiteBlockingLaneDataStart.StartAsync(_ => { calls++; return Task.FromResult<DateTime?>(Day); }, Day, Day.AddMinutes(90), [Bar(Day)], [Bar(Day)]));
+        Assert.Equal(0, calls);
     }
 
     /// <summary>A window of 90 minutes or less starts no probe, and a probe that throws drops only its series.</summary>
