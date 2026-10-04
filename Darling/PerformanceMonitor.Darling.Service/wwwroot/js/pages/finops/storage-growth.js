@@ -75,7 +75,11 @@ const INDEX_COLUMNS = [
   { key: "total_reads", label: "Total reads", format: "int" },
   { key: "user_updates", label: "Updates", format: "int" },
   { key: "last_user_access_server_local", label: "Last access (server time)" },
+  { key: "captured_at", label: "Collected", format: "time" },
 ];
+
+// The desktop's line above the object grid (FinOpsTab.xaml ~:565).
+const OBJECT_GROWTH_NOTE = "Object / reserved footprint (daily). This is per-object reservation, not file allocation \u2014 it may not fully explain a database's file-level growth (log / free space).";
 
 function databaseNotice(s) {
   const n = (s.rows || []).length;
@@ -220,11 +224,11 @@ export const tab = {
           const s = data.objects || {};
           const parts = [el("h3", { text: "Objects by Growth" })];
           if (data.database && data.database.status === "empty") parts.push(noticeStrip("This database is not in the latest snapshot."));
-          if (s.status === "ok") parts.push(noticeStrip(objectNotice(s)), heatmap(s), VIZ.table(s, { rowsKey: "rows", columns: [drillColumn("Show indexes", openIndexes), ...OBJECT_COLUMNS], emptyText: "No object size data for this database yet." }));
+          if (s.status === "ok") parts.push(noticeStrip(objectNotice(s)), noticeStrip(OBJECT_GROWTH_NOTE), heatmap(s), VIZ.table(s, { rowsKey: "rows", columns: [drillColumn("Show indexes", openIndexes), ...OBJECT_COLUMNS], emptyText: "No object size data for this database yet." }));
           else parts.push(...sectionContent(s, OBJECT_COLUMNS, "No object size data for this database yet.", objectNotice));
           chrome(parts);
         } else {
-          chrome([el("h3", { text: "Indexes" }), ...sectionContent(data.indexes && data.indexes.rows ? { ...data.indexes, rows: data.indexes.rows.map((r) => ({ ...r, last_user_access_server_local: accessText(r.last_user_access_server_local) })) } : data.indexes, INDEX_COLUMNS, "No index detail for this object.", indexNotice)]);
+          chrome([el("h3", { text: "Indexes" }), ...sectionContent(data.indexes && data.indexes.rows ? { ...data.indexes, rows: data.indexes.rows.map((r) => ({ ...r, last_user_access_server_local: accessText(r.last_user_access_server_local), captured_at: data.indexes.captured_at ?? null })) } : data.indexes, INDEX_COLUMNS, "No index detail for this object.", indexNotice)]);
         }
       } catch (e) {
         if (e?.name !== "AbortError" && mine === seq) chrome([errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e)))]);

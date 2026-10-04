@@ -1722,17 +1722,34 @@
                         <TabItem Header="Trends">
                             <Grid>
                                 <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <Border Grid.Row="0" Margin="0,0,0,4">
+                                <!-- One "Showing since" note per chart (#4966): the three charts draw from three different floors
+                                     (wait_stats, the blocked-process-report sources, deadlocks), so no one note is true of all of them. -->
+                                <TextBlock x:Name="LockWaitTrendTruncationBanner" Grid.Row="0" Visibility="Collapsed"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                                <Border Grid.Row="1" Margin="0,0,0,4">
                                     <ScottPlot:WpfPlot x:Name="LockWaitTrendChart"/>
                                 </Border>
-                                <Border Grid.Row="1" Margin="0,4,0,4">
+                                <TextBlock x:Name="BlockingTrendTruncationBanner" Grid.Row="2" Visibility="Collapsed"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                                <Border Grid.Row="3" Margin="0,4,0,4">
                                     <ScottPlot:WpfPlot x:Name="BlockingTrendChart"/>
                                 </Border>
-                                <Border Grid.Row="2" Margin="0,4,0,0">
+                                <TextBlock x:Name="DeadlockTrendTruncationBanner" Grid.Row="4" Visibility="Collapsed"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                                <Border Grid.Row="5" Margin="0,4,0,0">
                                     <ScottPlot:WpfPlot x:Name="DeadlockTrendChart"/>
                                 </Border>
                             </Grid>
@@ -2001,7 +2018,9 @@
                                  spans both columns below. -->
                             <Grid>
                                 <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                     <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
@@ -2009,19 +2028,28 @@
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
-                                <Border Grid.Row="0" Grid.Column="0" Margin="0,0,4,4">
+                                <!-- One note per chart pair (#4966): blocking pair from the blocked-process-report sources, deadlock pair from deadlocks. -->
+                                <TextBlock x:Name="BlockingStatsBlockingTruncationBanner" Grid.Row="0" Grid.ColumnSpan="2" Visibility="Collapsed"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                                <Border Grid.Row="1" Grid.Column="0" Margin="0,0,4,4">
                                     <ScottPlot:WpfPlot x:Name="BlockingDurationChart"/>
                                 </Border>
-                                <Border Grid.Row="0" Grid.Column="1" Margin="4,0,0,4">
+                                <Border Grid.Row="1" Grid.Column="1" Margin="4,0,0,4">
                                     <ScottPlot:WpfPlot x:Name="BlockingTotalDurationChart"/>
                                 </Border>
-                                <Border Grid.Row="1" Grid.Column="0" Margin="0,4,4,0">
+                                <TextBlock x:Name="BlockingStatsDeadlockTruncationBanner" Grid.Row="2" Grid.ColumnSpan="2" Visibility="Collapsed"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                                <Border Grid.Row="3" Grid.Column="0" Margin="0,4,4,0">
                                     <ScottPlot:WpfPlot x:Name="DeadlockWaitChart"/>
                                 </Border>
-                                <Border Grid.Row="1" Grid.Column="1" Margin="4,4,0,0">
+                                <Border Grid.Row="3" Grid.Column="1" Margin="4,4,0,0">
                                     <ScottPlot:WpfPlot x:Name="DeadlockTotalWaitChart"/>
                                 </Border>
-                                <Border Grid.Row="2" Grid.ColumnSpan="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
+                                <Border Grid.Row="4" Grid.ColumnSpan="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                                         <TextBlock Text="Blocking Events:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                         <TextBlock x:Name="BlockingStatsEventCountText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
@@ -2437,15 +2465,18 @@
             <TabItem Header="Latches &amp; Spinlocks">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
                     <!-- Latch wait-time trend (top 5 classes by delta wait) + per-class latest-snapshot grid. -->
-                    <ScottPlot:WpfPlot Grid.Row="0" x:Name="LatchStatsChart"/>
-                    <Expander Grid.Row="1" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
+                    <TextBlock Grid.Row="0" x:Name="LatchStatsWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                    <ScottPlot:WpfPlot Grid.Row="1" x:Name="LatchStatsChart"/>
+                    <Expander Grid.Row="2" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                         <DataGrid x:Name="LatchStatsGrid"
                                   AutoGenerateColumns="False" IsReadOnly="True"
                                   RowStyle="{StaticResource GridRowStyle}"
@@ -2484,8 +2515,9 @@
                     </Expander>
 
                     <!-- Spinlock collisions trend (top 5 spinlocks by delta collisions) + per-spinlock snapshot grid. -->
-                    <ScottPlot:WpfPlot Grid.Row="2" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
-                    <Expander Grid.Row="3" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
+                    <TextBlock Grid.Row="3" x:Name="SpinlockStatsWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" Margin="0,8,0,0" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                    <ScottPlot:WpfPlot Grid.Row="4" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
+                    <Expander Grid.Row="5" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                         <DataGrid x:Name="SpinlockStatsGrid"
                                   AutoGenerateColumns="False" IsReadOnly="True"
                                   RowStyle="{StaticResource GridRowStyle}"

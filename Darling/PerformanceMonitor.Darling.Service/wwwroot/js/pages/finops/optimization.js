@@ -7,13 +7,41 @@
  */
 
 /* FinOps "Optimization" tab: idle databases, tempdb pressure, wait time by category, the most expensive statements by CPU
-   and daily memory-grant efficiency, from one get_finops read (view optimization). Each section reads its own status:
+   and daily memory-grant efficiency, from one get_finops read (view optimization). The picker moves the wait categories, the expensive statements and the cost
+   share; the other sections keep their own fixed windows. Each section reads its own status:
    ok shows its table, empty shows an empty strip, not_collected shows the section's message. */
 
 import { VIZ } from "../../panels.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat } from "../../util.js";
 
+// The default window.
 const HOURS = 24;
+
+// The desktop's window choices (FinOpsTab.xaml ~:791 Wait Stats and ~:818 Expensive Queries), as hours. The desktop has a
+// picker for each of those two sections; the web keeps ONE picker that moves both. The other sections stay fixed, as on
+// the desktop.
+const WINDOWS = [
+  { value: 1, label: "Last 1 hour" },
+  { value: 4, label: "Last 4 hours" },
+  { value: 12, label: "Last 12 hours" },
+  { value: 24, label: "Last 24 hours" },
+  { value: 168, label: "Last 7 days" },
+];
+
+// The chosen window per server, kept here so the 60 s rebuild of the tab does not put it back to 24 hours.
+const chosenHours = new Map();
+
+// A labelled <select> (the server-tabs.js pickerControl pattern); every value goes through el()'s text and attribute paths.
+function pickerControl(label, options, selected, onPick) {
+  const sel = el(
+    "select",
+    { class: "range-select-inline", "aria-label": label },
+    options.map((o) => el("option", { value: o.value, text: o.label }))
+  );
+  sel.value = String(selected);
+  sel.addEventListener("change", () => onPick(Number(sel.value)));
+  return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
+}
 const LIMIT = 20;
 
 const IDLE_COLUMNS = [
@@ -77,14 +105,23 @@ function windowNotice(s) {
 }
 
 function queryNotice(s) {
-  let text = "Top " + (s.rows || []).length + " by CPU, last " + (s.window_hours ?? HOURS) + " hours";
+  const hours = s.window_hours ?? HOURS;
+  const start = s.effective_start ? Date.parse(s.effective_start) : NaN;
+  // The service cuts this section to the window query text is kept for, so a start later than the asked window began
+  // means the window was shortened: say what is shown, with the length taken from the start.
+  if (Number.isFinite(start) && start > Date.now() - hours * 3600000 + 60000) {
+    const days = Math.max(1, Math.round((Date.now() - start) / 86400000));
+    return "Top " + (s.rows || []).length + " by CPU, showing the last " + days + " days; query text and plans are not retained beyond that.";
+  }
+  let text = "Top " + (s.rows || []).length + " by CPU, last " + hours + " hours";
   if (s.effective_start) text += ", from " + applyFormat("time", s.effective_start) + " (local time)";
   return text + ".";
 }
 
 function costLine(data) {
+  const hours = data.hours_back ?? HOURS;
   return data.monthly_cost_usd != null
-    ? "Est. cost shares split the server's $" + applyFormat("num2", data.monthly_cost_usd) + " monthly cost pro-rated to this window (" + HOURS + " hours); they are an attribution, not a measured cost."
+    ? "Est. cost shares split the server's $" + applyFormat("num2", data.monthly_cost_usd) + " monthly cost pro-rated to this window (" + hours + " hours); they are an attribution, not a measured cost."
     : (data.cost_reason ?? "monthly cost not set") + ", so Est. cost share is blank.";
 }
 
@@ -107,9 +144,14 @@ export const tab = {
   label: "Optimization",
   build(server, ctx) {
     const body = el("div", {}, [loadingStrip()]);
-    (async () => {
+    let seq = 0;
+    const load = async (hours) => {
+      const mine = ++seq;
+      chosenHours.set(server, hours);
+      mount(body, loadingStrip());
       try {
-        const res = await readTool("get_finops", { server, view: "optimization", hours: HOURS, limit: LIMIT }, ctx && ctx.signal);
+        const res = await readTool("get_finops", { server, view: "optimization", hours, limit: LIMIT }, ctx && ctx.signal);
+        if (mine !== seq) return;
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
         if (res.kind === "empty") return mount(body, emptyStrip(res.message));
@@ -123,9 +165,12 @@ export const tab = {
           sectionView("Memory Grant Efficiency", data.memory_grant_efficiency, GRANT_COLUMNS, "No memory grant data available", windowNotice),
         ]);
       } catch (e) {
-        if (e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
+        if (mine === seq && e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
       }
-    })();
-    return body;
+    };
+    const start = chosenHours.get(server) ?? HOURS;
+    const root = el("div", {}, [pickerControl("Window", WINDOWS, start, (hours) => load(hours)), body]);
+    load(start);
+    return root;
   },
 };
