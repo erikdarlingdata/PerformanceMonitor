@@ -481,7 +481,7 @@ LIMIT {topN}";
             while (await reader.ReadAsync())
             {
                 var current = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2));
-                /* One snapshot only: null, not 0. A table missing from the earliest snapshot was created since and counts its whole size (its percent stays null: it grew from nothing). */
+                /* One snapshot only: null, not 0. A table missing from the earliest snapshot was created since and counts its whole size (its percent stays null: it grew from nothing); an existing table whose earliest size is NULL also counts its whole current size, because COALESCE treats it like a new table, and that is rare. */
                 decimal? growth = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6));
                 objects.Add(new ObjectSizeGrowthRow
                 {
