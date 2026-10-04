@@ -43,6 +43,7 @@ import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorSt
 import { renderPanel, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { READ_FIELDS } from "../read-fields.js";
+import { analysisFindingsTab } from "./analysis-findings.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -1642,6 +1643,9 @@ export const SERVER_TABS = [
       ),
     ],
   },
+
+  /* #4843: the desktop viewer's analysis Recommendations view (pages/analysis-findings.js). */
+  analysisFindingsTab,
 ];
 
 /* ─────────────────────────── the PostgreSQL tabs ─────────────────────────── */
