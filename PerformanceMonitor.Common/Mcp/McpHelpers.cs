@@ -289,14 +289,15 @@ internal static class McpHelpers
     /// with that outcome. Without it the read fell through to the "Query Store may not be enabled" guess, which
     /// is the one thing the unfiltered rows prove false. Shared so both SKUs say it in the same words.
     /// </summary>
-    public static string QueryStoreExecutionTypeEmpty(string executionType, int hoursBack, string? databaseName)
+    public static string QueryStoreExecutionTypeEmpty(string executionType, int hoursBack, string? databaseName, object? hints = null)
     {
         var scope = string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'";
         return Status(
             "empty",
             $"No {executionType} executions{scope} in the {hoursBack}-hour window searched. The same read without "
             + "execution_type returns rows, so Query Store is collecting and this is a measured zero, not missing "
-            + "data. Omit execution_type to see the other outcomes.");
+            + "data. Omit execution_type to see the other outcomes.",
+            hints);
     }
 
     /// <summary>

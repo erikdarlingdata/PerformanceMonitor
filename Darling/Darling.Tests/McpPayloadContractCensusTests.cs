@@ -1802,7 +1802,7 @@ public sealed class McpPayloadContractCensusTests
            holds; plus (#4231) get_top_queries_by_cpu's and get_top_procedures_by_cpu's payloads, the same
            disclosure over query_stats and procedure_stats; plus get_top_queries_by_cpu's
            empty min_dop/parallel_only status, which hands back the window it read. */
-        ("DarlingMcpDataTools.cs", "initializer", 6),
+        ("DarlingMcpDataTools.cs", "initializer", 7),
         ("DarlingMcpQueryStoreClutterTools.cs", "initializer", 1),
         ("DarlingMcpTrendTools.cs", "envelope", 1),
         ("DarlingMcpTrendTools.cs", "initializer", 1),

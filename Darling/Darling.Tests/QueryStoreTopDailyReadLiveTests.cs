@@ -142,15 +142,16 @@ FROM
     }
 
     /// <summary>One extra wide-table row for query <paramref name="queryId"/> with a duration large enough to rank first.</summary>
-    private static async Task InsertRowAsync(NpgsqlConnection connection, DateTime collectionTime, long queryId, CancellationToken ct, long duration = 90_000_000)
+    private static async Task InsertRowAsync(NpgsqlConnection connection, DateTime collectionTime, long queryId, CancellationToken ct, long duration = 90_000_000, DateTime? firstExecution = null)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO collect.query_store_interval_wide
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
  query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
  avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
-VALUES (@ct, 1, 'db0', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, 'h' || @q, 1000, @dur, 5, 5, 5, 5, 5, 'late', @q, @ct - interval '10 minutes')", connection);
+VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minutes'), @ct, 'h' || @q, 1000, @dur, 5, 5, 5, 5, 5, 'late', @q, @ct - interval '10 minutes')", connection);
         command.Parameters.Add(new NpgsqlParameter("ct", NpgsqlDbType.Timestamp) { Value = collectionTime });
+        command.Parameters.Add(new NpgsqlParameter("fet", NpgsqlDbType.Timestamp) { Value = (object?)firstExecution ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter("q", NpgsqlDbType.Bigint) { Value = queryId });
         command.Parameters.Add(new NpgsqlParameter("dur", NpgsqlDbType.Bigint) { Value = duration });
         await command.ExecuteNonQueryAsync(ct);
@@ -378,8 +379,16 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, 'h' 
             await InsertRowAsync(connection, End.AddSeconds(1), 9105, ct);         // past $3: in neither
             await InsertRowAsync(connection, End.AddHours(-72).AddSeconds(-1), 9106, ct); // before ReadStart: in neither
 
-            var route = await RouteAsync(source, End.AddHours(-72), End, null, null, null, ct);
+            var readStart = End.AddHours(-72);
+            await InsertRowAsync(connection, readStart, 9107, ct);                 // exactly ReadStart ($2 inclusive): read, by both routes
+            /* The oldest first_execution_time the invariant allows for a row collected at E + 1 h (the stricter trailing floor). */
+            var trailing = new DateTime(2026, 1, 14, 1, 0, 0);
+            await InsertRowAsync(connection, trailing, 9108, ct,
+                firstExecution: trailing - (QueryStoreIntervalWide.IntervalSpanMargin + PerformanceMonitor.Collectors.WatermarkPolicy.MaxCatchup) + TimeSpan.FromSeconds(1));
+
+            var route = await RouteAsync(source, readStart, End, null, null, null, ct);
             Assert.Equal((new DateOnly(2026, 1, 12), new DateOnly(2026, 1, 14)), route.DailySpan);
+            Assert.Equal(readStart, route.Table!.Value.ReadStart);
             var ids = route.Rows.Select(r => r.QueryId).ToHashSet();
             Assert.Contains(9101L, ids);
             Assert.DoesNotContain(9102L, ids);
@@ -387,6 +396,8 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, 'h' 
             Assert.Contains(9104L, ids);
             Assert.DoesNotContain(9105L, ids);
             Assert.DoesNotContain(9106L, ids);
+            Assert.Contains(9107L, ids);
+            Assert.Contains(9108L, ids);
 
             /* Today's read has everything the window holds except the two outside it. */
             var today = (await RunSqlAsync(connection, DarlingDataReader.QueryStoreTopTableSql, route.Table!.Value.ReadStart, End, null, null, null, null, ct))
@@ -394,6 +405,69 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, 'h' 
             Assert.Contains(9102L, today);
             Assert.DoesNotContain(9105L, today);
             Assert.DoesNotContain(9106L, today);
+            Assert.Contains(9107L, today);
+            Assert.Contains(9108L, today);
+        });
+    }
+
+    [Fact]
+    public async Task ARowMovedFromABuiltDayIntoTheTrailingEdge_IsCountedInBothByTheRoute_AndOnceByTodaysRead()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            /* Day 13 is rebuilt with the row in it (pass 1), then the interval resumes and the row's collection_time moves to
+               the next day, which is the trailing edge (read from the wide table). The summary still holds it for day 13. */
+            await InsertRowAsync(connection, new DateTime(2026, 1, 13, 23, 30, 0), 9201, ct);
+            await ExecAsync(connection, "DELETE FROM collect.query_store_top_daily WHERE day = DATE '2026-01-13'; DELETE FROM collect.query_store_top_daily_built WHERE day = DATE '2026-01-13'", ct);
+            var tick = await QueryStoreTopDaily.RunTickAsync(source, BuildNow, RetentionDays, NullLogger.Instance, ct);
+            Assert.Equal(0, tick.Failed);
+            Assert.Equal(1, tick.Built);
+            await ExecAsync(connection, "UPDATE collect.query_store_interval_wide SET collection_time = TIMESTAMP '2026-01-14 00:30:00' WHERE query_id = 9201", ct);
+
+            var route = await RouteAsync(source, End.AddHours(-72), End, null, null, null, ct);
+            var today = (await RunSqlAsync(connection, DarlingDataReader.QueryStoreTopTableSql, route.Table!.Value.ReadStart, End, null, null, null, null, ct))
+                .Select(ToRow).Single(r => r.QueryId == 9201);
+
+            Assert.Equal(1000L, today.TotalExecutions);
+            Assert.Equal(2000L, route.Rows.Single(r => r.QueryId == 9201).TotalExecutions);
+        });
+    }
+
+    private static async Task<System.Text.Json.JsonElement> FilteredToolAnswerAsync(NpgsqlDataSource source, string? outcome, string? module, CancellationToken ct) =>
+        System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(
+            source, "srv1", 72, Top, null, "2026-01-14T06:00:00Z", outcome, module, false, 400, ct)).RootElement.Clone();
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheEmptyAnswers_CarryTheApproximateFlag_OnlyWhenBuiltDaysWereUsed(bool withBuiltDays)
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            if (!withBuiltDays)
+                await ExecAsync(connection, "DELETE FROM collect.query_store_top_daily; DELETE FROM collect.query_store_top_daily_built", ct);
+
+            var module = await FilteredToolAnswerAsync(source, null, "dbo.nothing_matches_this", ct);
+            var outcome = await FilteredToolAnswerAsync(source, "Exception", null, ct);
+
+            Assert.Equal("empty", module.GetProperty("status").GetString());
+            Assert.Equal("empty", outcome.GetProperty("status").GetString());
+            if (withBuiltDays)
+            {
+                var hints = module.GetProperty("hints");
+                Assert.True(hints.GetProperty("approximate").GetBoolean());
+                Assert.Equal(DarlingMcpDataTools.QueryStoreApproximationNote, hints.GetProperty("approximation_note").GetString());
+                hints = outcome.GetProperty("hints");
+                Assert.True(hints.GetProperty("approximate").GetBoolean());
+                Assert.Equal(DarlingMcpDataTools.QueryStoreApproximationNote, hints.GetProperty("approximation_note").GetString());
+            }
+            else
+            {
+                Assert.False(module.GetProperty("hints").TryGetProperty("approximate", out _));
+                Assert.False(module.GetProperty("hints").TryGetProperty("approximation_note", out _));
+                Assert.False(outcome.TryGetProperty("hints", out _));
+            }
+            await Task.CompletedTask;
         });
     }
 

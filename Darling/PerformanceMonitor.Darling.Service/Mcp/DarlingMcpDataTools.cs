@@ -994,7 +994,8 @@ public sealed class DarlingMcpDataTools
     /// daily summary, which is built after each day ends.</summary>
     internal const string QueryStoreApproximationNote =
         "Whole days in this window came from a daily summary built after each day ends. A row changed after its day was "
-        + "summarized is missed, or for about a day can be counted twice, so treat totals and the ranking as close, not exact.";
+        + "summarized is missed, or for about a day can be counted twice, and rows from a server whose clock runs more than an hour "
+        + "ahead are left out, so treat totals and the ranking as close, not exact.";
 
     /// <summary>
     /// get_query_store_top under an explicit <paramref name="previewLength"/> (#4198): the MCP tool passes
@@ -1068,15 +1069,27 @@ public sealed class DarlingMcpDataTools
                 if ((execution_type != null || module_name != null)
                     && (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, 1, database_name, cancellationToken)).Count > 0)
                     return module_name is null
-                        ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name)
+                        /* #5094: whole days from the daily summary make a zero here "close, not exact" (a late write the
+                           summary missed), so the empty answer carries the same flag as a populated one. */
+                        ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name,
+                            read.DailyDaysUsed > 0 ? new { approximate = true, approximation_note = QueryStoreApproximationNote } : null)
                         /* The module miss hands back the window it read: "did not run" is a claim about that window,
                            and the raw tier may not reach the whole of the one asked for. */
-                        : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, new
-                        {
-                            effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
-                            effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
-                            window_truncated = truncated
-                        });
+                        : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, read.DailyDaysUsed > 0
+                            ? new
+                            {
+                                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
+                                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                                window_truncated = truncated,
+                                approximate = true,
+                                approximation_note = QueryStoreApproximationNote
+                            }
+                            : (object)new
+                            {
+                                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
+                                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                                window_truncated = truncated
+                            });
 
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it has to, because the
