@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -23,11 +25,23 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal readonly record struct McpWindowNotice(string? EffectiveStart, bool WindowTruncated, string? TruncationNote)
 {
     /// <summary>
+    /// The notice a failed coverage probe leaves (#4966): there is no verdict on the window, so a tool answers without the
+    /// three keys (a data answer) or without hints (an empty one). A failed probe costs the notice, never the rows, the rule
+    /// the web's own note follows. Not <see cref="WindowTruncated"/>, so a tool that writes its keys only for a cut window
+    /// writes none.
+    /// </summary>
+    internal static McpWindowNotice Unavailable { get; } = new(null, false, null) { IsUnavailable = true };
+
+    /// <summary>True for <see cref="Unavailable"/>: the probe failed, so no key and no hint may be written.</summary>
+    internal bool IsUnavailable { get; init; }
+
+    /// <summary>
     /// The same three keys, with the same values and wording, for an <c>empty</c> status, which carries them under
     /// <c>hints</c>: an empty answer over a window the store does not reach back to is not a true negative, and without
     /// them it read as one. A status that says the collector never ran (<c>not_collected</c>) does not carry them.
+    /// A notice from a failed probe has no hints (null), which <see cref="McpHelpers.Status"/> leaves out.
     /// </summary>
-    internal object AsHints() => new { effective_start = EffectiveStart, window_truncated = WindowTruncated, truncation_note = TruncationNote };
+    internal object? AsHints() => IsUnavailable ? null : new { effective_start = EffectiveStart, window_truncated = WindowTruncated, truncation_note = TruncationNote };
 }
 
 /// <summary>
@@ -77,13 +91,49 @@ internal static class DarlingMcpWindowNotice
     /// later than the start by more than the slack, so the answer is covered whatever it would read. The probe is a
     /// delegate and is not started for such a window. An EMPTY answer is always probed, whatever the window's length:
     /// nothing was read, so nothing else says the store held the window at all.
+    ///
+    /// <para>A probe that throws, other than because the CALLER cancelled, is logged at Warning and answers
+    /// <see cref="McpWindowNotice.Unavailable"/>: the probe is a second read on a shared store, and it must not turn a page
+    /// of rows that was already read into an error.</para>
     /// </summary>
     internal static async Task<McpWindowNotice> ReadAsync(
-        Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null, bool emptyAnswer = false)
+        Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null, bool emptyAnswer = false,
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(probe);
-        var floor = emptyAnswer || windowEnd - requestedStart > DurationTrendRouting.TruncationSlack ? await probe() : null;
-        return Build(floor, requestedStart, table, tail, emptyAnswer);
+        try
+        {
+            var floor = emptyAnswer || windowEnd - requestedStart > DurationTrendRouting.TruncationSlack ? await probe() : null;
+            return Build(floor, requestedStart, table, tail, emptyAnswer);
+        }
+        catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
+        {
+            logger?.LogWarning(ex, "The coverage probe of {Table} failed; the answer goes without its window-floor notice.", table);
+            return McpWindowNotice.Unavailable;
+        }
+    }
+
+    /// <summary>
+    /// A payload already serialized with the three window-floor keys, without them: what a tool answers when its probe failed
+    /// (<see cref="McpWindowNotice.IsUnavailable"/>). Only top-level keys are touched, and the order of the rest is kept.
+    /// </summary>
+    internal static string WithoutKeys(string json)
+    {
+        var node = JsonNode.Parse(json)!.AsObject();
+        node.Remove("effective_start");
+        node.Remove("window_truncated");
+        node.Remove("truncation_note");
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>A test's stand-in for the coverage probe, per async flow (null: the store is asked).</summary>
+    private static readonly AsyncLocal<Func<Task<DateTime?>>?> s_testOnlyProbe = new();
+
+    /// <summary>Test seam: while set, <see cref="Probe(NpgsqlDataSource, DataWindowFloor.Source, string, DateTime, DateTime, CancellationToken)"/> runs this instead of the store read.</summary>
+    internal static Func<Task<DateTime?>>? TestOnlyProbe
+    {
+        get => s_testOnlyProbe.Value;
+        set => s_testOnlyProbe.Value = value;
     }
 
     /// <summary>The coverage probe for one collector table and one server over [<paramref name="start"/>, <paramref name="end"/>].</summary>
@@ -93,6 +143,14 @@ internal static class DarlingMcpWindowNotice
 
     /// <summary>The coverage probe over a source the caller built (the collection log, one collector's runs, a stitched read).</summary>
     internal static Task<DateTime?> Probe(
-        NpgsqlDataSource postgres, DataWindowFloor.Source source, string serverName, DateTime start, DateTime end, CancellationToken cancellationToken) =>
-        DataWindowFloor.GetAsync(postgres, [source], [serverName], start, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+        NpgsqlDataSource postgres, DataWindowFloor.Source source, string serverName, DateTime start, DateTime end, CancellationToken cancellationToken)
+    {
+        var stub = TestOnlyProbe;
+        if (stub != null)
+        {
+            return stub();
+        }
+
+        return DataWindowFloor.GetAsync(postgres, [source], [serverName], start, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+    }
 }

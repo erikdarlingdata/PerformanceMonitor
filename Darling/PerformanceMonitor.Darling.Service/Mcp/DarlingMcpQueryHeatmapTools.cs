@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -67,6 +68,7 @@ public sealed class DarlingMcpQueryHeatmapTools
         [Description("Maximum CELLS to return, most recent bins first. Default 100. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultCellLimit,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Return each cell's top query at full length instead of an 80-character preview. Default false.")] bool full_text = false,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -115,7 +117,7 @@ public sealed class DarlingMcpQueryHeatmapTools
                the table). */
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "query_stats", resolved.ServerName, start, end, cancellationToken),
-                start, end, "query_stats", emptyAnswer: rows.Count == 0);
+                start, end, "query_stats", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
                 return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, hours_back, notice, cancellationToken);
@@ -149,7 +151,7 @@ public sealed class DarlingMcpQueryHeatmapTools
 
             var labels = DarlingQueryHeatmapReader.BucketLabels[parsedMetric];
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -198,6 +200,9 @@ public sealed class DarlingMcpQueryHeatmapTools
                     top_query_text_truncated = c.TopQueryTextTruncated,
                 }),
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the cells (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

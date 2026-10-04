@@ -331,6 +331,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
     private static async Task DeleteWindowServerAsync(NpgsqlConnection connection, string name, System.Threading.CancellationToken ct)
     {
         var serverId = ServerIdHelper.GetDeterministicHashCode(name);
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "DELETE FROM config_collector_schedules WHERE server_id = $1 AND collector_name IN ('query_snapshots', 'waiting_tasks')", serverId);
         foreach (var table in new[] { "query_snapshots", "waiting_tasks", "collection_log", "servers" })
         {
             await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM {table} WHERE server_id = $1", serverId);
@@ -349,6 +351,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        /* The coverage probe measures the purge edge from the collector's retention, and a fleet-wide override row in
+           config_collector_schedules for either collector (another test's leftover on a shared store) moves that edge off the
+           seven days these cases assume. The cases are about the default, so the fleet rows for the two collectors go. */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "DELETE FROM config_collector_schedules WHERE server_id IS NULL AND collector_name IN ('query_snapshots', 'waiting_tasks')");
 
         var bodySucceeded = false;
         try
@@ -400,6 +408,42 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             var names = root.EnumerateObject().Select(p => p.Name).ToList();
             var at = names.IndexOf("hours_back");
             Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(at + 1).Take(3));
+        });
+    }
+
+    /// <summary>
+    /// #4966: a coverage probe that throws costs the notice, never the rows. The seam stands in for the probe on a window that
+    /// needs one (168 hours): the rows come back WITHOUT the three keys, and an empty answer WITHOUT hints.
+    /// </summary>
+    [Fact]
+    public async Task AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachWindowToolAsync("probefail", async (connection, postgres, tool, name, end) =>
+        {
+            await SeedWindowServerAsync(connection, tool, name, end.AddDays(-2), end.AddDays(-2), 30, end.AddDays(-1), end, ct);
+
+            DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
+            try
+            {
+                var root = Parse(await CallAsync(postgres, tool, name, 168, end));
+
+                Assert.False(root.TryGetProperty("status", out _), tool);
+                Assert.False(root.TryGetProperty("error", out _), tool);
+                Assert.Equal(3, root.GetProperty(tool == "get_active_queries" ? "queries" : "tasks").GetArrayLength());
+                Assert.False(root.TryGetProperty("effective_start", out _), tool);
+                Assert.False(root.TryGetProperty("window_truncated", out _), tool);
+                Assert.False(root.TryGetProperty("truncation_note", out _), tool);
+
+                /* An empty answer: the same failed probe leaves the status without its hints. */
+                var empty = Parse(await CallAsync(postgres, tool, name, 1, end.AddDays(-5)));
+                Assert.Equal("empty", empty.GetProperty("status").GetString());
+                Assert.False(empty.TryGetProperty("hints", out _), tool);
+            }
+            finally
+            {
+                DarlingMcpWindowNotice.TestOnlyProbe = null;
+            }
         });
     }
 

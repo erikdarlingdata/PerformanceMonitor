@@ -223,7 +223,11 @@ internal static class WebDataStartNote
     /// <para>A listed read's tool may write the same three keys itself (#4966: <c>effective_start</c>,
     /// <c>window_truncated</c>, <c>truncation_note</c>, the MCP dialect, in UTC). The page draws its own note from the
     /// fields this method adds, in the browser's zone, so the tool's three are removed first and the note is decided as
-    /// it was before the tool wrote them: the page gets the same answer, capped or coverage, byte for byte.</para>
+    /// it was before the tool wrote them: the page gets the same answer, capped or coverage. When a note is added, the
+    /// payload that carries it is the stripped one, so the tool's three keys are gone from it. When no note is added
+    /// (every early return: covered, a short window, a failed probe, a capped page that reaches the start), the string
+    /// goes back as the tool wrote it, and still holds the tool's keys. That is harmless today: the tool and this method run
+    /// the same probe over the same window, so their verdicts agree.</para>
     /// </summary>
     internal static async Task<string> AddAsync(
         NpgsqlDataSource postgres, string tool, string? server, int? hoursBack, string? asOf, string result,
@@ -248,6 +252,7 @@ internal static class WebDataStartNote
             return result;
         }
 
+        /* Strips the parsed copy only: the early returns below send `result` itself, keys and all. */
         StripToolWindowFloor(payload);
 
         /* Rows, or the answer that says the read looked and found nothing (#4966, NothingFoundStatusByRead): an empty span

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -199,6 +200,52 @@ public sealed class RawWindowFloorEffectiveStartTests
         var notice = await DarlingMcpWindowNotice.ReadAsync(
             () => { probes++; return Task.FromResult(floor); }, s_start, s_start + window, "query_snapshots", tail, emptyAnswer);
         return (notice, probes);
+    }
+
+    /// <summary>#4966: a probe that throws costs the notice, never the answer: no verdict, no hints, and a Warning.</summary>
+    [Fact]
+    public async Task AProbeThatThrows_AnswersNoNotice_AndLogsAWarning()
+    {
+        var logger = new CapturingLogger();
+        var notice = await DarlingMcpWindowNotice.ReadAsync(
+            () => throw new TimeoutException("deadline"), s_start, s_start + TimeSpan.FromDays(7), "query_snapshots", logger: logger);
+
+        Assert.True(notice.IsUnavailable);
+        Assert.False(notice.WindowTruncated);
+        Assert.Null(notice.EffectiveStart);
+        Assert.Null(notice.AsHints());
+        Assert.Equal([LogLevel.Warning], logger.Levels);
+
+        /* An empty answer fails the same way. */
+        Assert.True((await DarlingMcpWindowNotice.ReadAsync(
+            () => throw new TimeoutException("deadline"), s_start, s_start + TimeSpan.FromHours(1), "query_snapshots", emptyAnswer: true)).IsUnavailable);
+    }
+
+    /// <summary>#4966: only the CALLER's cancellation goes through; the probe's own deadline is a failed probe.</summary>
+    [Fact]
+    public async Task ACancelledCaller_StillCancels_ButAProbeDeadlineDoesNot()
+    {
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingMcpWindowNotice.ReadAsync(
+            () => throw new OperationCanceledException(cts.Token), s_start, s_start + TimeSpan.FromDays(7), "query_snapshots", cancellationToken: cts.Token));
+
+        var notice = await DarlingMcpWindowNotice.ReadAsync(
+            () => throw new OperationCanceledException("the probe's own deadline"), s_start, s_start + TimeSpan.FromDays(7), "query_snapshots",
+            cancellationToken: CancellationToken.None);
+        Assert.True(notice.IsUnavailable);
+    }
+
+    private sealed class CapturingLogger : ILogger
+    {
+        public List<LogLevel> Levels { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Levels.Add(logLevel);
     }
 
     /// <summary>#4966: an answer with rows over a window of 90 minutes or less never asks the store, and is covered at the start that was asked for.</summary>

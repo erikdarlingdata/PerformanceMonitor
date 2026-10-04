@@ -380,7 +380,7 @@ ORDER BY ordinal_position", connection))
         /// <summary>What the web mirror answers for the grid: the tool's own payload, then the data-start note.</summary>
         public async Task<JsonObject> AskAsync(string server, int hours, CancellationToken ct)
         {
-            var payload = await DarlingMcpSessionTools.GetWaitingTasks(DataSource, server, hours, PageCap, null, ct);
+            var payload = await DarlingMcpSessionTools.GetWaitingTasks(DataSource, server, hours, PageCap, null, cancellationToken: ct);
             var answered = await WebDataStartNote.AddAsync(DataSource, "get_waiting_tasks", server, hours, null, payload, null, ct);
             return Assert.IsType<JsonObject>(JsonNode.Parse(answered));
         }

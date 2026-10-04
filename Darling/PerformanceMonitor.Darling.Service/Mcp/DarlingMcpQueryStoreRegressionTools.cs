@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -53,6 +54,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
         [Description("Maximum rows to return, worst first. Default 30, sized to keep a default call under the shared response budget. Read truncated to know whether the window held more.")] int limit = 30,
         [Description("Return each row's full query text instead of a 240-character preview. Default false.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -86,7 +88,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 () => DarlingMcpWindowNotice.Probe(postgres, "query_store_stats", resolved.ServerName, baselineStart, end, cancellationToken),
                 baselineStart, end, "query_store_stats",
                 "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.",
-                emptyAnswer: rows.Count == 0);
+                emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
                 return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, baselineStart, hours_back, database_name, notice, cancellationToken);
@@ -94,7 +96,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             var truncated = rows.Count > limit;
             var shown = rows.Take(limit);
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -155,6 +157,9 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                     query_text_truncated = !full_text && r.QueryTextSample.Length > QueryTextPreviewLength,
                 }),
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
