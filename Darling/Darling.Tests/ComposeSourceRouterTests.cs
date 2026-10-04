@@ -626,7 +626,13 @@ public sealed class ComposeSourceRouterTests
     [Fact]
     public void HourlyRawEdges_ProcedureStats_IsNull()
     {
-        Assert.Null(Edge(plan: EdgePlan("proc_worker_us")));
+        /* Coverage for the procedure successor is complete, so only the enabled set can refuse it. */
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.ProcedureStatsIntervalHourlyView] = Now.AddDays(-3) },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.ProcedureStatsIntervalHourlyView] = Now.AddMinutes(-20) });
+        Assert.Null(Edge(plan: EdgePlan("proc_worker_us"), coverage: coverage));
     }
 
     [Fact]
