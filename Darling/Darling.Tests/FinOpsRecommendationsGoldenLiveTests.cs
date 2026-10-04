@@ -119,7 +119,60 @@ public sealed class FinOpsRecommendationsGoldenLiveTests
         /* Feeds the compression candidates: a 2 GB uncompressed index and a compressed one. */
         await Index(c, ct, now.AddHours(-2), 1, "BigUncompressed", 2048m, "NONE");
         await Index(c, ct, now.AddHours(-2), 2, "BigCompressed", 3072m, "PAGE");
+
+        /* Feeds the idle-database builder. Its coverage gate wants the server's oldest query_stats row at or before
+           the 7-day cutoff, so one row is eight days old. SalesA also has a row inside the window, so it is active;
+           ArchiveA has size rows and no query activity, so it is the one idle database. The server's allocated total
+           (50000 + 2048 MB) is larger than the idle share, which gives the cost share a non-trivial divisor. */
+        await Size(c, ct, now.AddHours(-2), "SalesA", 50000m);
+        await Size(c, ct, now.AddHours(-2), "ArchiveA", 2048m);
+        await Query(c, ct, now.AddDays(-8), "SalesA", "0xA1");
+        await Query(c, ct, now.AddHours(-5), "SalesA", "0xA2");
+
+        /* Feeds the maintenance-window builder: one job that ran long five times and one three times, so the order
+           is clear. The three-time job averages 100.67 seconds, which pins the integer conversion of a fractional
+           average. A job that ran long twice stays under the threshold. */
+        for (var i = 0; i < 5; i++)
+            await Job(c, ct, now.AddHours(-(3 + 4 * i)), "WeeklyRebuildA", 4000, true);
+        long[] nightly = { 100, 101, 101 };
+        for (var i = 0; i < 3; i++)
+            await Job(c, ct, now.AddHours(-(4 + 5 * i)), "NightlyLoadA", nightly[i], true);
+        for (var i = 0; i < 2; i++)
+            await Job(c, ct, now.AddHours(-(6 + 5 * i)), "HourlyPurgeA", 500, true);
+
+        /* Feeds the storage-tier builder. OrdersA is the one database with over 1000 reads and low latency
+           (read 2 ms, write 1 ms). SalesA reads slowly (20 ms) with fast writes, so only the read limit excludes it, and ArchiveA has under 1000
+           reads so the aggregate filter drops it. The query has no ORDER BY, so only one database may qualify. */
+        for (var i = 0; i < 6; i++)
+        {
+            var at = now.AddHours(-(2 + 3 * i));
+            await FileIo(c, ct, at, "OrdersA", 400, 2, 200, 1);
+            await FileIo(c, ct, at, "SalesA", 400, 20, 200, 1);
+        }
+
+        await FileIo(c, ct, now.AddHours(-2), "ArchiveA", 500, 2, 100, 1);
     }
+
+    private static Task Size(NpgsqlConnection c, CancellationToken ct, DateTime at, string db, decimal sizeMb) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, total_size_mb) VALUES ($1, $2, $3, $4, $5, $6)",
+            CollectionIdGenerator.Next(), at, ServerIdA, ServerNameA, db, sizeMb);
+
+    private static Task Query(NpgsqlConnection c, CancellationToken ct, DateTime at, string db, string handle) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, query_text, delta_worker_time, delta_execution_count, delta_logical_reads, sample_interval_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7,'SELECT 1',1000,1,1,60)",
+            CollectionIdGenerator.Next(), at, ServerIdA, ServerNameA, db, "0xQ" + handle, handle);
+
+    private static Task Job(NpgsqlConnection c, CancellationToken ct, DateTime at, string job, long currentSeconds, bool runningLong) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, start_time, current_duration_seconds, avg_duration_seconds, p95_duration_seconds, percent_of_average, is_running_long) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+            at, ServerIdA, ServerNameA, job, "id-" + job, at.AddSeconds(-currentSeconds), currentSeconds, 60L, 90L, 300.0m, runningLong);
+
+    private static Task FileIo(NpgsqlConnection c, CancellationToken ct, DateTime at, string db, long reads, long readStallPerRead,
+        long writes, long writeStallPerWrite) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb, num_of_reads, num_of_writes, read_bytes, write_bytes, io_stall_read_ms, io_stall_write_ms, io_stall_queued_read_ms, io_stall_queued_write_ms, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, delta_stall_queued_read_ms, delta_stall_queued_write_ms) VALUES ($1,$2,$3,$4,$5,'data.mdf','ROWS','/data/data.mdf',100,10,5,8192,4096,50,25,0,0,$6,$7,8192,4096,$8,$9,0,0)",
+            CollectionIdGenerator.Next(), at, ServerIdA, ServerNameA, db, reads, writes, reads * readStallPerRead, writes * writeStallPerWrite);
 
     private static Task Props(NpgsqlConnection c, CancellationToken ct, int id, string name, DateTime at, string edition,
         string version, int engineEdition, int cpuCount, int physicalMemoryMb) =>
