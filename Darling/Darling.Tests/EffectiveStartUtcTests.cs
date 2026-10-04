@@ -87,6 +87,35 @@ public sealed class EffectiveStartUtcTests
     }
 
     /// <summary>
+    /// #4966: the six Lite config and log tools (three config-change tools, the one-server <c>get_collection_log</c>,
+    /// <c>get_plan_corrections</c> and <c>get_memory_pressure_events</c>) write <c>effective_start</c> from the shared notice
+    /// (<c>McpQueryTools.WindowNoticeAsync</c> -> <c>WindowNotice</c>, which prints through
+    /// <see cref="McpHelpers.FormatEffectiveStart(DateTime)"/>), never from a bare <c>ToString("o")</c> of the store's naive floor.
+    /// Each data answer writes the key once, from <c>notice.EffectiveStart</c>; <paramref name="expectedHints"/> counts the
+    /// <c>empty</c> answers that carry the same notice under hints (<c>get_collection_log</c> has two: the filtered one and the quiet window).
+    /// None of them uses the event-time form: their probes read the column the rows are stamped on.
+    /// </summary>
+    [Theory]
+    [InlineData("McpConfigHistoryTools.cs", 3, 3)]
+    [InlineData("McpHealthTools.cs", 1, 2)]
+    [InlineData("McpPlanCorrectionTools.cs", 1, 1)]
+    [InlineData("McpMemoryTools.cs", 1, 1)]
+    public void EveryLiteConfigAndLogWindowFloorWrite_ComesFromTheSharedNotice(string file, int expectedWrites, int expectedHints)
+    {
+        var source = RepoFile.ReadRepoFile("Lite", "Mcp", file);
+        var writes = source
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("effective_start = ", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(expectedWrites, writes.Count);
+        Assert.All(writes, line => Assert.Equal("effective_start = notice.EffectiveStart,", line));
+        Assert.Equal(expectedHints, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)").Count);
+        Assert.DoesNotContain("EventWindowNoticeAsync", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #4966, #5015: where a page's rows stop and start (<c>oldest_returned_*</c> and <c>newest_returned_*</c>: collection,
     /// event, deadlock and alert time) describe the window the page covers, so every tool that carries them prints them the
     /// same way as <c>effective_start</c>: UTC, with the Z, through the shared formatter, in both apps. The sweep reads

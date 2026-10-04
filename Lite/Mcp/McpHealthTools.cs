@@ -963,6 +963,18 @@ public sealed class McpHealthTools
 
             var filtered = !string.IsNullOrWhiteSpace(collector_name) || min_duration_ms is not null;
 
+            /* #4966: where this server's run log starts for the window. The probe reads the log itself (v_collection_log, on
+               collection_time; the relation names no collector, so it is the row-only probe) over the window the read took, and it
+               ignores the collector, duration and status filters on purpose: the notice says where the LOG starts, not where one
+               collector's or one status's runs do. A run is stamped with its own time, so no run can be older than the probe's
+               floor: the plain notice fits, not the event-time form. The window is uncapped, so one past the log's retention is
+               exactly what this reports. The fleet form (server_name omitted or "*") names no server and carries no notice: there
+               is no one server's start to give (see GetCollectionLogFleetAsync). */
+            var requestedStart = windowEnd.AddHours(-hours);
+            Task<McpQueryTools.McpWindowNotice> NoticeAsync(bool emptyAnswer) => McpQueryTools.WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.CollectionLog, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "collection_log", emptyAnswer: emptyAnswer);
+
             if (rows.Count == 0)
             {
                 /*
@@ -1000,13 +1012,17 @@ public sealed class McpHealthTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.ServerName} in the last {hours} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.");
+                        $"No collector runs on {resolved.ServerName} in the last {hours} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.",
+                        (await NoticeAsync(emptyAnswer: true)).AsHints());
                 }
 
                 return McpHelpers.Status(
                     "empty",
-                    $"No collector runs recorded for {resolved.ServerName} in the last {hours} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.");
+                    $"No collector runs recorded for {resolved.ServerName} in the last {hours} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.",
+                    (await NoticeAsync(emptyAnswer: true)).AsHints());
             }
+
+            var notice = await NoticeAsync(emptyAnswer: false);
 
             var result = rows.Select(r => new
             {
@@ -1035,6 +1051,11 @@ public sealed class McpHealthTools
                 server = resolved.ServerName,
                 /* The span REQUESTED, and no longer the only span reported -- see the two timestamps. */
                 hours_back = hours,
+                /* #4966: where the run log starts, always present (false and null when the log covered the window). No
+                   effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart for the window floor. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 run_count = rows.Count,
                 truncated,
                 /*
@@ -1089,6 +1110,8 @@ public sealed class McpHealthTools
     /// The FLEET-WIDE form of <see cref="GetCollectionLog"/> (#4199), Darling's twin exactly: same
     /// validations, same filters, same truncated/ordering contract, merged across every ENABLED server
     /// instead of scoped to one, each row carrying which server it came from.
+    /// <para>#4966: no window-floor notice here. The one-server form says where THAT server's run log starts; this form
+    /// names no server and merges every enabled server's runs, so there is no single start to give.</para>
     /// </summary>
     private static async Task<string> GetCollectionLogFleetAsync(
         LocalDataService dataService,
