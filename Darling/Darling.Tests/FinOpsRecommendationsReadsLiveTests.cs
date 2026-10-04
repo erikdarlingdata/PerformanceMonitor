@@ -11,6 +11,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Storage.FinOps;
@@ -196,4 +197,89 @@ public sealed class FinOpsRecommendationsReadsLiveTests
         Assert.Equal(builtCpu.Detail, viewedCpu.Detail);
         Assert.Equal(builtCpu.EstMonthlySavings, viewedCpu.EstMonthlySavings);
     }
+
+    [Fact]
+    public async Task DatabaseEncryptionFactsAndAllocatedTotal_MatchTheViewer_ForServersAbAndC()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live FinOps recommendation reads test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await FinOpsRecommendationsGoldenLiveTests.SeedAsync(connection, ct);
+
+            /* Two extra server A rows, in this test's own store only: a database that exists only in a capture 30 hours
+               before the latest one, and a database in the latest capture whose encryption flag is NULL. */
+            await using var latestCommand = new NpgsqlCommand("SELECT MAX(capture_time) FROM database_config WHERE server_id = $1", connection);
+            latestCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = FinOpsRecommendationsGoldenLiveTests.ServerIdA });
+            var latest = (DateTime)(await latestCommand.ExecuteScalarAsync(ct))!;
+            await InsertConfigAsync(connection, ct, latest.AddHours(-30), "OldOnlyA", true);
+            await InsertConfigAsync(connection, ct, latest, "NullFlagA", null);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        var idA = FinOpsRecommendationsGoldenLiveTests.ServerIdA;
+        var idB = FinOpsRecommendationsGoldenLiveTests.ServerIdB;
+        var idC = FinOpsRecommendationsGoldenLiveTests.ServerIdC;
+
+        foreach (var id in new[] { idA, idB, idC })
+        {
+            var stored = await DarlingFinOpsRecommendationsReader.GetDatabaseEncryptionFactsAsync(dataSource, id, TimeoutSeconds, ct);
+            var viewed = (await viewer.GetLatestDatabaseConfigAsync(id, cancellationToken: ct))
+                .Select(r => new DatabaseEncryptionFact(r.DatabaseName, r.StateDesc, r.IsEncrypted)).ToList();
+            Assert.Equal(viewed, stored);
+
+            /* Allocated total and its decimal scale. */
+            var storedTotal = (await FinOpsUtilizationFigures.GetLatestStorageTotalsAsync(dataSource, id, TimeoutSeconds, ct))?.AllocatedMb ?? 0m;
+            var viewedTotal = DatabaseSizeRow.AllocatedTotalMb(await viewer.GetDatabaseSizeLatestAsync(id, ct));
+            Assert.Equal(viewedTotal, storedTotal);
+            Assert.Equal((decimal.GetBits(viewedTotal)[3] >> 16) & 0xFF, (decimal.GetBits(storedTotal)[3] >> 16) & 0xFF);
+        }
+
+        /* Server A's latest capture: the four seeded databases plus NullFlagA, ordered by name (ordinal order of these
+           names matches the store's ordering). OldOnlyA is only in the older capture, so it is absent. The NULL flag
+           reads as not encrypted. Servers B and C carry no configuration rows. */
+        var a = await DarlingFinOpsRecommendationsReader.GetDatabaseEncryptionFactsAsync(dataSource, idA, TimeoutSeconds, ct);
+        Assert.DoesNotContain(a, f => f.DatabaseName == "OldOnlyA");
+        Assert.Equal(
+            new[]
+            {
+                new DatabaseEncryptionFact("NullFlagA", "ONLINE", false),
+                new DatabaseEncryptionFact("OrdersA", "ONLINE", true),
+                new DatabaseEncryptionFact("SalesA", "ONLINE", true),
+                new DatabaseEncryptionFact("app_dev_a", "ONLINE", false),
+                new DatabaseEncryptionFact("qa1_a", "ONLINE", false),
+            }.OrderBy(f => f.DatabaseName, StringComparer.Ordinal).ToArray(),
+            a.ToArray());
+        Assert.Empty(await DarlingFinOpsRecommendationsReader.GetDatabaseEncryptionFactsAsync(dataSource, idB, TimeoutSeconds, ct));
+        Assert.Empty(await DarlingFinOpsRecommendationsReader.GetDatabaseEncryptionFactsAsync(dataSource, idC, TimeoutSeconds, ct));
+    }
+
+    private static Task InsertConfigAsync(NpgsqlConnection c, CancellationToken ct, DateTime at, string db, bool? encrypted) =>
+        DarlingMcpTestData.ExecAsync(c, ct, @"
+INSERT INTO database_config
+    (config_id, capture_time, server_id, server_name, database_name,
+     state_desc, compatibility_level, collation_name, recovery_model, is_read_only,
+     is_auto_close_on, is_auto_shrink_on, is_auto_create_stats_on, is_auto_update_stats_on,
+     is_auto_update_stats_async_on, is_read_committed_snapshot_on, snapshot_isolation_state,
+     is_parameterization_forced, is_query_store_on, is_encrypted, is_trustworthy_on, is_db_chaining_on,
+     is_broker_enabled, is_cdc_enabled, is_mixed_page_allocation_on, log_reuse_wait_desc, page_verify_option,
+     target_recovery_time_seconds, delayed_durability, is_accelerated_database_recovery_on,
+     is_memory_optimized_enabled, is_optimized_locking_on)
+VALUES ($1, $2, $3, $4, $5,
+        'ONLINE', 140, 'SQL_Latin1_General_CP1_CI_AS', 'FULL', FALSE,
+        FALSE, FALSE, TRUE, TRUE,
+        FALSE, TRUE, 'OFF',
+        FALSE, TRUE, $6, FALSE, FALSE,
+        FALSE, FALSE, FALSE, 'NOTHING', 'CHECKSUM',
+        60, 'DISABLED', FALSE,
+        FALSE, FALSE)",
+            CollectionIdGenerator.Next(), at, FinOpsRecommendationsGoldenLiveTests.ServerIdA, FinOpsRecommendationsGoldenLiveTests.ServerNameA, db,
+            encrypted.HasValue ? encrypted.Value : (object)DBNull.Value);
 }

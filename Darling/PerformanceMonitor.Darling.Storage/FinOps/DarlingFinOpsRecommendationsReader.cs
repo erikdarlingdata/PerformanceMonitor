@@ -133,6 +133,17 @@ WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
 
+    /// <summary>
+    /// Every database's collected state and encryption flag at the server's latest <c>database_config</c> capture,
+    /// ordered by name. Same snapshot the viewer's database-configuration read returns. $1 server_id.
+    /// </summary>
+    public const string DatabaseEncryptionFactsSql = @"
+SELECT database_name, state_desc, is_encrypted
+FROM v_database_config
+WHERE server_id = $1
+AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
+ORDER BY database_name";
+
     /// <summary>Reads the server's latest collected edition / product-version-major / CPU count + AG role / HADR flag, or null when no server_properties row exists yet.</summary>
     public static async Task<FinOpsEditionFacts?> GetEditionFactsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
@@ -294,5 +305,25 @@ LIMIT 1";
         }
 
         return null;
+    }
+
+    /// <summary>Reads each database's state and encryption flag at the server's latest configuration capture, ordered by name; empty when nothing was captured. A NULL state reads as empty and a NULL flag as not encrypted.</summary>
+    public static async Task<List<DatabaseEncryptionFact>> GetDatabaseEncryptionFactsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        var facts = new List<DatabaseEncryptionFact>();
+        await using var command = dataSource.CreateCommand(DatabaseEncryptionFactsSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            facts.Add(new DatabaseEncryptionFact(
+                reader.GetString(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                !reader.IsDBNull(2) && reader.GetBoolean(2)));
+        }
+
+        return facts;
     }
 }
