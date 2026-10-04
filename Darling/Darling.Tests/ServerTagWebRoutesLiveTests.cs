@@ -29,8 +29,7 @@ namespace Darling.Tests;
 /* #1776 own-store: this class mints its own scratch database through ScratchPostgres and touches nothing on the
    shared one, so it is not serialized against the live-postgres collection. */
 
-/// <summary>The server-tag web routes through a real host over a scratch store (#5085), and the server removal
-/// </summary>
+/// <summary>The server-tag web routes through a real host over a scratch store (#5085).</summary>
 public sealed class ServerTagWebRoutesLiveTests
 {
     private static async Task<(ScratchPostgres Scratch, NpgsqlDataSource Source)> OpenAsync()
