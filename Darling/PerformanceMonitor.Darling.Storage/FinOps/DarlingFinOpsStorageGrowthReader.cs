@@ -30,11 +30,12 @@ public sealed record ObjectSizeGrowthDto(
     decimal? Growth30dMb, decimal? DailyGrowthRateMb, decimal? GrowthPct30d);
 
 /// <summary>One index of one table at its database's latest snapshot. <see cref="LastUserAccess"/> is the monitored
-/// server's own wall clock, read verbatim.</summary>
+/// server's own wall clock, read verbatim. <see cref="CollectionTime"/> is the snapshot's own stamp, naive UTC: the
+/// anchor the read resolved on, projected on the row statement so it names the instant the rows came from.</summary>
 public sealed record IndexUsageDto(
     string DatabaseName, string SchemaName, string TableName, string IndexName, string IndexTypeDesc, int IndexId,
     decimal ReservedMb, long TotalRows, long UserSeeks, long UserScans, long UserLookups, long TotalReads, long UserUpdates,
-    DateTime? LastUserAccess, string Classification);
+    DateTime? LastUserAccess, string Classification, DateTime CollectionTime);
 
 /// <summary>
 /// The FinOps Storage Growth reads and the database-size snapshot probes they share with the viewer's database-size
@@ -531,7 +532,8 @@ SELECT
         WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
              AND COALESCE(user_updates, 0) > 0 THEN 'Write-only'
         ELSE 'Active'
-    END AS classification
+    END AS classification,
+    collection_time
 FROM v_index_object_stats
 WHERE server_id = $1
 AND   database_name = $2
@@ -574,7 +576,9 @@ ORDER BY index_id";
                    store, not naive UTC, so this GREATEST is read verbatim like Lite — NOT through
                    ViewerTimeHelper.ForDisplay (which assumes naive UTC and, in Local/Server mode, would shift it). */
                 LastUserAccess: reader.IsDBNull(13) ? null : reader.GetDateTime(13),
-                Classification: reader.IsDBNull(14) ? "" : reader.GetString(14)));
+                Classification: reader.IsDBNull(14) ? "" : reader.GetString(14),
+                /* collection_time is the store's naive UTC stamp; the anchor equality makes it non-null. */
+                CollectionTime: DateTime.SpecifyKind(reader.GetDateTime(15), DateTimeKind.Utc)));
         }
         return items;
     }

@@ -1268,13 +1268,10 @@ public sealed class McpPayloadContractCensusTests
     /// <summary>
     /// The Darling reader SQL constants whose outer statement anchors on <c>= (SELECT MAX(collection_time |
     /// capture_time) …)</c> — a latest-snapshot read — and do NOT project the anchor column, so the tool above
-    /// them cannot stamp the snapshot's time (#3541 A10, "latest is a time"). Three, all known:
+    /// them cannot stamp the snapshot's time (#3541 A10, "latest is a time"). Two, both known:
     /// <c>IndexUsageSql</c> is the object-stats residual <see cref="McpLatestSnapshotStampTests.UnstampedLatestReadsPendingA10"/>
     /// already holds, and <c>IndexUsageMatchCountSql</c> is a <c>COUNT(*)</c> over the same anchor with no row
-    /// to stamp. <c>ObjectIndexDetailSql</c> (the FinOps Storage Growth index drill, in a Storage subfolder the scan
-    /// only reaches since it went recursive) is per-index rows like <c>IndexUsageSql</c>, but anchored on the
-    /// DATABASE's latest snapshot with no time bound, so a database that left collection scope answers with an old
-    /// snapshot and nothing says when it was taken (#5070).
+    /// to stamp.
     ///
     /// <para><b>This roster GREW once, in #3879, and #3880 shrank it back by ruling.</b> It is written
     /// shrink-only, on the reasoning that a read either projects its anchor or is waiting for the A10 lane to
@@ -1292,10 +1289,11 @@ public sealed class McpPayloadContractCensusTests
     /// entries it held before #3879 — the shrink-only direction restored, with the growth episode kept on the
     /// record here rather than quietly erased.</para>
     ///
-    /// <para><b>It grew again in #5069, to three,</b> and not because a read became unstamped: the read moved
-    /// into the Storage <c>FinOps</c> subfolder in #5050, and this census could not see it until #5069 made the
-    /// reader scan recursive. <c>ObjectIndexDetailSql</c> waits on #5070, which projects its anchor and stamps
-    /// <c>get_finops</c> <c>storage_growth</c> at the indexes level; it leaves this list then.</para>
+    /// <para><b>It grew again in #5069, to three, and #5070 shrank it back to two.</b> The growth was not a read
+    /// becoming unstamped: the FinOps Storage Growth index drill (<c>ObjectIndexDetailSql</c>) moved into the Storage
+    /// <c>FinOps</c> subfolder in #5050, and this census could not see it until #5069 made the reader scan recursive.
+    /// #5070 projects its anchor and <c>get_finops</c> <c>storage_growth</c> publishes it at the indexes level as
+    /// <c>captured_at</c>, so the row left this list.</para>
     ///
     /// <para>The original two are not the same kind of gap. <c>IndexUsageSql</c> is a genuine A10 residual:
     /// projecting its anchor and stamping <c>get_index_usage</c> is the same small edit #3880 made next door,
@@ -1305,7 +1303,6 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly string[] LatestAnchoredReadsWithoutTheirStamp =
     [
-        "DarlingFinOpsStorageGrowthReader.cs ObjectIndexDetailSql",
         "DarlingObjectStatsReader.cs IndexUsageMatchCountSql",
         "DarlingObjectStatsReader.cs IndexUsageSql",
     ];

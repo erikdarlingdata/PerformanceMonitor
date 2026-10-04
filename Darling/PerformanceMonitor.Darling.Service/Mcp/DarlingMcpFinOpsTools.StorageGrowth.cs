@@ -218,6 +218,10 @@ public sealed partial class DarlingMcpFinOpsTools
             {
                 status = SectionStatus(indexGate, indexes.Count),
                 message = indexGate == null ? null : NotCollectedMessage(indexGate),
+                /* The snapshot every row came from: one anchor, so one stamp for the section. The read has no time bound,
+                   so a database that left collection scope answers with an old snapshot and this says how old. Absent
+                   when no row came back. */
+                captured_at = indexes.Count == 0 ? null : McpHelpers.FormatEffectiveStart(indexes[0].CollectionTime),
                 index_count = ordered.Count,
                 truncated = ordered.Count > MaxStorageGrowthIndexes,
                 rows = ordered.Take(MaxStorageGrowthIndexes).Select(StorageGrowthIndexRow).ToList(),

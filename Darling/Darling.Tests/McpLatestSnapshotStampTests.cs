@@ -21,6 +21,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -524,7 +525,7 @@ public sealed class McpLatestSnapshotStampTests
     /// for the server) — a "current" read IS a latest read, and the name had kept it out of the sweep.
     /// </summary>
     private static readonly Regex LatestReaderCall = new(
-        @"\.(GetLatest\w+Async|Get\w+LatestAsync|Get\w+SnapshotAsync|GetCurrent\w+Async|GetPlanCacheBloatAsync|GetCpuSchedulerPressureAsync|GetServerSummaryAsync|GetIndexUsageAsync|GetIndexLockingAsync|GetObjectSizeGrowthAsync|GetRunningJobsAsync)\(",
+        @"\.(GetLatest\w+Async|Get\w+LatestAsync|Get\w+SnapshotAsync|GetCurrent\w+Async|GetPlanCacheBloatAsync|GetCpuSchedulerPressureAsync|GetServerSummaryAsync|GetIndexUsageAsync|GetIndexLockingAsync|GetObjectSizeGrowthAsync|GetObjectIndexDetailAsync|GetRunningJobsAsync)\(",
         RegexOptions.Compiled);
 
     /* ───────────────────────── the readers ───────────────────────── */
@@ -552,6 +553,8 @@ public sealed class McpLatestSnapshotStampTests
        having here: the anchor column rides the row statement, so the instant published is the instant the
        returned rows came from, never a fresher capture a second MAX() read happened to see. */
     [InlineData(nameof(DarlingObjectStatsReader.IndexLockingSql), "collection_time")]
+    /* #5070: the Storage Growth index drill, stamped the same way. */
+    [InlineData(nameof(DarlingFinOpsStorageGrowthReader.ObjectIndexDetailSql), "collection_time")]
     public void EveryStampedRead_SelectsItsStampColumn_OnTheRowStatement(string sqlName, string column)
     {
         var sql = ReaderSql(sqlName);
@@ -671,6 +674,24 @@ public sealed class McpLatestSnapshotStampTests
            beside it in the same reader, which must stay outside. */
         Assert.Matches(LatestReaderCall, "            var rows = await DarlingPgServerConfigReader.GetCurrentConfigAsync(");
         Assert.DoesNotMatch(LatestReaderCall, "            var rows = await DarlingPgServerConfigReader.GetConfigChangesAsync(");
+        /* #5070: the Storage Growth index drill is a latest read too, and so is held to the stamped dialect. */
+        Assert.Matches(LatestReaderCall, "        var indexes = await DarlingFinOpsStorageGrowthReader.GetObjectIndexDetailAsync(");
+    }
+
+    /// <summary>
+    /// The sweep above slices a file at its <c>[McpServerTool</c> marks, so it cannot see <c>get_finops</c>'s
+    /// <c>storage_growth</c> view, which lives in a partial file with no mark of its own (#5070). This pins the one
+    /// latest read in that file directly: the call that reads the index drill and the stamp built from the row
+    /// statement's own anchor sit in the same file, and the stamp goes through the shared UTC formatter.
+    /// </summary>
+    [Fact]
+    public void StorageGrowthIndexDrill_IsStamped_FromTheRowsOwnAnchor()
+    {
+        var source = Strip(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.StorageGrowth.cs"));
+        Assert.Matches(LatestReaderCall, source);
+        Assert.Contains("GetObjectIndexDetailAsync(", source, StringComparison.Ordinal);
+        Assert.Matches(CapturedAtKey, source);
+        Assert.Contains("captured_at = indexes.Count == 0 ? null : McpHelpers.FormatEffectiveStart(indexes[0].CollectionTime)", source, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── plumbing ───────────────────────── */
@@ -696,6 +717,7 @@ public sealed class McpLatestSnapshotStampTests
     private static string ReaderSql(string sqlName) => sqlName switch
     {
         nameof(DarlingDataReader.LatestMemoryClerksSql) => DarlingDataReader.LatestMemoryClerksSql,
+        nameof(DarlingFinOpsStorageGrowthReader.ObjectIndexDetailSql) => DarlingFinOpsStorageGrowthReader.ObjectIndexDetailSql,
         nameof(DarlingDataReader.LatestFileIoStatsSql) => DarlingDataReader.LatestFileIoStatsSql,
         nameof(DarlingDataReader.LatestPerfmonStatsSql) => DarlingDataReader.LatestPerfmonStatsSql,
         nameof(DarlingCurrentConfigReader.ServerConfigSql) => DarlingCurrentConfigReader.ServerConfigSql,

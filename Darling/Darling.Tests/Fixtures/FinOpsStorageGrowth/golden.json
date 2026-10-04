@@ -208,7 +208,8 @@
         "TotalReads": 5120,
         "UserUpdates": 400,
         "LastUserAccess": "anchor-0.083333d",
-        "Classification": "Active"
+        "Classification": "Active",
+        "CollectionTimeUtc": "anchor-0.375d"
       },
       {
         "DatabaseName": "HeatDb",
@@ -225,7 +226,8 @@
         "TotalReads": 0,
         "UserUpdates": 0,
         "LastUserAccess": null,
-        "Classification": "Unused"
+        "Classification": "Unused",
+        "CollectionTimeUtc": "anchor-0.375d"
       },
       {
         "DatabaseName": "HeatDb",
@@ -242,7 +244,8 @@
         "TotalReads": 0,
         "UserUpdates": 9,
         "LastUserAccess": null,
-        "Classification": "Write-only"
+        "Classification": "Write-only",
+        "CollectionTimeUtc": "anchor-0.375d"
       }
     ],
     "indexDetailHeap": [
@@ -261,7 +264,8 @@
         "TotalReads": 3,
         "UserUpdates": 0,
         "LastUserAccess": null,
-        "Classification": "Active"
+        "Classification": "Active",
+        "CollectionTimeUtc": "anchor-0.375d"
       }
     ],
     "indexDetailMissing": []

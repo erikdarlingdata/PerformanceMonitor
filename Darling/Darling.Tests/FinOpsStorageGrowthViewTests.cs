@@ -92,7 +92,7 @@ public sealed class FinOpsStorageGrowthViewTests
     [Fact]
     public void OrderIndexes_ByIndexId_ThenNameOrdinal_FromAReversedInput()
     {
-        IndexUsageDto Ix(int id, string n) => new("d", "s", "t", n, "NONCLUSTERED", id, 1m, 1, 0, 0, 0, 0, 0, null, "Unused");
+        IndexUsageDto Ix(int id, string n) => new("d", "s", "t", n, "NONCLUSTERED", id, 1m, 1, 0, 0, 0, 0, 0, null, "Unused", new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
         var ordered = DarlingMcpFinOpsTools.OrderStorageGrowthIndexes(new[] { Ix(2, "b"), Ix(2, "a"), Ix(1, "z") }.Reverse());
         Assert.Equal(new[] { "z", "a", "b" }, ordered.Select(i => i.IndexName).ToArray());
     }
@@ -168,7 +168,7 @@ public sealed class FinOpsStorageGrowthViewTests
         var samples = objs.SelectMany(o => Enumerable.Range(0, 30).Select(d => new FinOpsObjectDaySample($"{o.SchemaName}.{o.TableName}", new DateTime(2026, 9, 1).AddDays(d), 12345678.9 + d))).ToList();
         var objectsBytes = Encoding.UTF8.GetByteCount(DarlingMcpFinOpsTools.BuildStorageGrowthObjectsPayload(new string('s', 128), 24, DarlingMcpFinOpsTools.StorageGrowthDatabaseSection(dbs, dbs[0].DatabaseName, null), objs, 21, samples, null));
 
-        var ixs = Enumerable.Range(0, 60).Select(i => new IndexUsageDto(name, name, name, name + i, "NONCLUSTERED COLUMNSTORE", i, 99999999.9m, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, new DateTime(2026, 9, 1, 1, 2, 3), "Write-only")).ToList();
+        var ixs = Enumerable.Range(0, 60).Select(i => new IndexUsageDto(name, name, name, name + i, "NONCLUSTERED COLUMNSTORE", i, 99999999.9m, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, 9_999_999_999L, new DateTime(2026, 9, 1, 1, 2, 3), "Write-only", new DateTime(2026, 9, 1, 4, 5, 6, DateTimeKind.Utc))).ToList();
         var indexesBytes = Encoding.UTF8.GetByteCount(DarlingMcpFinOpsTools.BuildStorageGrowthIndexesPayload(new string('s', 128), 24, DarlingMcpFinOpsTools.StorageGrowthDatabaseSection(dbs, dbs[0].DatabaseName, null), ixs, null));
 
         Console.WriteLine($"storage_growth worst case bytes: databases {databases}, objects {objectsBytes}, indexes {indexesBytes}");
@@ -370,6 +370,31 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         Assert.Equal(0L, cold.GetProperty("user_updates").GetInt64());
         Assert.Equal(JsonValueKind.Null, cold.GetProperty("last_user_access_server_local").ValueKind);
         Assert.Equal("Unused", cold.GetProperty("classification").GetString());
+    }
+
+    [Fact]
+    public async Task IndexesLevel_PublishesTheSnapshotInstant_AFixedOldOne()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        /* A database that left collection scope five days ago: its daily index snapshots stop at a day boundary the seed
+           fixes (the seed's own UTC midnight, never a later clock read), so the newest one is five days old. */
+        var last = DarlingMcpTestData.Naive(DateTime.UtcNow).Date.AddDays(-5).AddMinutes(10);
+        for (var d = 24; d >= 0; d--)
+        {
+            await Obj(c, ct, last.AddDays(-d), "Gone", "Old", 1, "PK_Old", 10m + (24 - d), 1, 1, null);
+            await Obj(c, ct, last.AddDays(-d), "Gone", "Old", 2, "IX_Old", 5m, 0, 0, null);
+        }
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var doc = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, "Gone", object_name: "dbo.Old", cancellationToken: ct));
+        var section = doc.RootElement.GetProperty("indexes");
+        Assert.Equal("ok", section.GetProperty("status").GetString());
+        Assert.Equal(McpHelpers.FormatEffectiveStart(last), section.GetProperty("captured_at").GetString());
+        Assert.EndsWith("T00:10:00.0000000Z", section.GetProperty("captured_at").GetString());
+        Assert.Equal(2, section.GetProperty("index_count").GetInt32());
     }
 
     [Fact]

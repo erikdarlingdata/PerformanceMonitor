@@ -88,6 +88,7 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
         { "Controls/ServerTab.xaml", "QueryStoreHealthGrid", "CaptureTimeLocal", Name(typeof(QueryStoreHealthRow)), "CaptureTime" },
         { "Controls/ServerTab.xaml", "TraceFlagsGrid", "CaptureTimeLocal", Name(typeof(TraceFlagRow)), "CaptureTime" },
         { "Controls/ServerTab.xaml", "RunningJobsGrid", "CollectionTimeLocal", Name(typeof(RunningJobRow)), "CollectionTime" },
+        { "Controls/FinOpsTab.xaml", "ObjectIndexDetailGrid", "CollectionTimeLocal", Name(typeof(IndexUsageRow)), "CollectionTime" },
         { "Controls/ServerTab.xaml", "SchedulerIssuesGrid", "EventTimeLocal", Name(typeof(SchedulerIssueRow)), "EventTime" },
         { "Controls/ServerTab.xaml", "SevereErrorsGrid", "EventTimeLocal", Name(typeof(SevereErrorRow)), "EventTime" },
         { "Controls/ServerTab.xaml", "MemoryConditionsGrid", "EventTimeLocal", Name(typeof(MemoryConditionsRow)), "EventTime" },
