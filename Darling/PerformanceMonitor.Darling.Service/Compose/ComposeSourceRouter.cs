@@ -541,8 +541,10 @@ public static class ComposeSourceRouter
     /// (null), anything else is the list as given. The runner binds the count guard's <c>$3</c> from this in a later
     /// change, and the compiler matches a verdict's scope against the run's scope with it now, so an empty array can
     /// never be proven as "no servers" and then read as the fleet.</summary>
-    public static IReadOnlyList<string>? NormalizeServerScope(IReadOnlyList<string>? servers) =>
-        servers is { Count: > 0 } ? servers : null;
+    public static IReadOnlyList<string>? NormalizeServerScope(IReadOnlyList<string>? servers)
+    {
+        return servers is { Count: > 0 } ? servers : null;
+    }
 
     private static bool IsHourlyEdgesMeasure(ComposeMeasure measure) =>
         measure.Kind != MeasureKind.Ratio
