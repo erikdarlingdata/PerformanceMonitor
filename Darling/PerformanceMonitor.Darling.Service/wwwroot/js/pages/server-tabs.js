@@ -41,7 +41,8 @@
 
 import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
-import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
+import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 
@@ -192,17 +193,27 @@ function fanout(read, params, specs) {
   return shells.map((s) => s.panel);
 }
 
+/** The most waits the Wait Stats chart draws at once: one read each, and the palette has ten colors. */
+const MAX_WAITS_CHARTED = 10;
+
+/** The metrics the wait trend read carries. It has no waits-per-interval count, so the desktop's ms/wait is not offered. */
+const WAIT_METRICS = [
+  { value: "wait_time_ms_per_second", label: "Wait ms/s" },
+  { value: "signal_wait_time_ms_per_second", label: "Signal wait ms/s" },
+];
+
 /**
- * Wait Stats table + a trend for ONE wait type, chosen from a picker seeded with the heaviest.
+ * Wait Stats table + a multi-series trend over the waits the reader checks.
  *
- * The desktop viewer's Wait Stats tab is a checkbox list of wait types over a multi-series chart. This is the
- * single-select version of the same idea: the picker's options are the rows of the table directly above it,
- * heaviest first, so the reader is choosing from what they can already see rather than from a second list that
- * may disagree with it. That is also why get_wait_types is NOT read here — it returns the full distinct set,
- * which would offer wait types absent from the table and make the two disagree.
+ * The desktop viewer's Wait Stats tab is a checkbox list of wait types over a multi-series chart; this is the same
+ * idea. The picker's options are the rows of the table directly above it, heaviest first, so the reader is choosing
+ * from what they can already see rather than from a second list that may disagree with it. That is also why
+ * get_wait_types is NOT read here — it returns the full distinct set, which would offer wait types absent from the
+ * table and make the two disagree. Each checked wait is one get_wait_trend read; the checked set, the search text and
+ * the metric live in multi-picker.js's module state keyed by server, so the 60 s rebuild keeps them.
  */
 export function waitsPanel(server, ctx) {
-  const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the wait you pick");
+  const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the waits you check");
   (async () => {
     const res = await readToolWithinKeptHistory("get_wait_stats", { server, hours: ctx.hours, limit: 20 });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -214,13 +225,19 @@ export function waitsPanel(server, ctx) {
 
     if (waits.length) {
       const chartSlot = el("div", {}, [loadingStrip()]);
-      const picker = pickerControl(
-        "Trend",
-        waits.map((w) => w.wait_type),
-        (waitType) => drawWaitTrend(chartSlot, server, ctx, waitType)
-      );
-      parts.push(el("div", { class: "picker-row" }, [picker]), chartSlot);
-      drawWaitTrend(chartSlot, server, ctx, waits[0].wait_type);
+      const picker = multiPicker({
+        key: "waits|" + server,
+        label: "Waits",
+        options: waits.map((w) => w.wait_type),
+        max: MAX_WAITS_CHARTED,
+        metrics: WAIT_METRICS,
+        onChange: (checked, metric) => drawWaitTrends(chartSlot, server, ctx, checked, metric),
+      });
+      parts.push(picker.node, chartSlot);
+      drawWaitTrends(chartSlot, server, ctx, picker.checked(), picker.metric());
+      mount(body, parts);
+      picker.restoreFocus();
+      return;
     }
     mount(body, parts);
   })();
@@ -246,32 +263,75 @@ function discontinuityNotes(data) {
   );
 }
 
-async function drawWaitTrend(slot, server, ctx, waitType) {
-  mount(slot, loadingStrip());
-  const trend = await readToolWithinKeptHistory("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours });
-  if (trend.kind !== "data") {
-    mount(slot, trend.kind === "empty" ? [keptWindowStrip(trend), emptyStrip(trend.message)] : readErrorStrip(trend.message));
+/* The newest draw's AbortController per server (the 60 s rebuild makes a new chart slot, so the slot is no key). A new
+   draw aborts the previous one's reads, and a read that finishes after that is dropped. */
+const waitDraws = new Map();
+
+export async function drawWaitTrends(slot, server, ctx, checked, metric) {
+  const waitTypes = checked.slice(0, MAX_WAITS_CHARTED);
+  const previous = waitDraws.get(server);
+  if (previous) previous.abort();
+  const mine = new AbortController();
+  waitDraws.set(server, mine);
+  if (!waitTypes.length) {
+    mount(slot, emptyStrip("Check at least one wait to chart its trend."));
     return;
   }
-  /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the chart whose step a restart or
-     failover most directly manufactures; the payload's discontinuities render as a notice above it. */
-  const notes = discontinuityNotes(trend.data);
+  mount(slot, loadingStrip());
+  const results = await Promise.all(
+    waitTypes.map((waitType) => readToolWithinKeptHistory("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours }, mine.signal))
+  );
+  if (waitDraws.get(server) !== mine || mine.signal.aborted) return;
+
+  const drawn = [];
+  const notes = [];
+  const kept = [];
+  let keptHours = 0;
+  const seenNotes = new Set();
+  let failed = 0;
+  results.forEach((trend, i) => {
+    const waitType = waitTypes[i];
+    if (trend.kind !== "data") {
+      if (trend.kind !== "empty") failed++;
+      notes.push(waitType + ": " + (trend.message || (trend.kind === "empty" ? "no trend data." : "the read failed.")));
+      return;
+    }
+    if (trend.keptHours) {
+      keptHours = Math.max(keptHours, trend.keptHours);
+      kept.push(trend);
+    }
+    /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the chart whose step a restart or
+       failover most directly manufactures; the payload's discontinuities render as a notice above it. They are
+       about the server, not the wait, so the same sentence from two waits shows once. */
+    for (const n of discontinuityNotes(trend.data)) seenNotes.add(n);
+    drawn.push({ key: "w" + i, label: waitType, rows: trend.data.trend || [], color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] });
+  });
+
+  const failures = notes.map((n) => noticeStrip(n));
+  if (!drawn.length && !failed) {
+    mount(slot, emptyStrip("None of the " + waitTypes.length + " checked waits has trend data in this window."));
+    return;
+  }
+  if (!drawn.length) {
+    mount(slot, [failures.length ? failures : null, errorStrip("None of the " + waitTypes.length + " checked waits returned a trend.")]);
+    return;
+  }
+  const metricLabel = (WAIT_METRICS.find((m) => m.value === metric) || WAIT_METRICS[0]).label;
   mount(slot, [
-    keptWindowStrip(trend),
-    notes.length ? noticeStrip(notes.join(" ")) : null,
+    kept.length ? keptWindowStrip(kept[0]) : null,
+    seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
+    ...failures,
     zoomableLineChart({
-      points: trend.data.trend || [],
+      points: mergeSeriesRows(drawn, "time", metric),
       xKey: "time",
-      series: [
-        { key: "wait_time_ms_per_second", label: "Wait ms/s", color: SERIES_COLORS[0] },
-        { key: "signal_wait_time_ms_per_second", label: "Signal ms/s", color: SERIES_COLORS[1] },
-      ],
+      series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
       formatValue: (v) => Math.round(v).toLocaleString(),
       unit: "ms/s",
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
-      ...windowFromHours(trend.keptHours || ctx.hours),
-    }, "wait-trend|" + waitType, chartZoomScope(ctx.hours)),
+      ...windowFromHours(keptHours || ctx.hours),
+    }, "wait-trend|" + server + "|" + metric, chartZoomScope(ctx.hours)),
+    el("div", { class: "mp-metric-note", text: metricLabel + ", one line per checked wait." }),
   ]);
 }
 

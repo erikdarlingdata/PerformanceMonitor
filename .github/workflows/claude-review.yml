@@ -114,9 +114,13 @@ jobs:
   # a file the pull request can edit would sit outside that check while steering the review job,
   # whose Claude step uses the OAuth token. The decision is a step of this file for that reason.
   decide:
-    # No runner for a draft, or for a label other than re-review. The script below repeats both rules
-    # in its first lines, so a dry run of it covers the whole table; this line only saves the runner.
-    if: github.event.pull_request.draft == false && (github.event.action != 'labeled' || github.event.label.name == 're-review')
+    # No runner for a draft, for a label other than re-review, or for a pull request carrying the
+    # `merge-train` label. A train member is marked ready and merged straight away, and the train run
+    # already covered it, so a review of the ready_for_review event would be paid for and never read.
+    # The label is read from the event payload, so it has to be on the pull request BEFORE it is marked
+    # ready. The script below repeats the first two rules in its first lines, so a dry run of it covers
+    # that part of the table; this line only saves the runner.
+    if: github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, 'merge-train') && (github.event.action != 'labeled' || github.event.label.name == 're-review')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

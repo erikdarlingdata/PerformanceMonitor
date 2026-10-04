@@ -50,6 +50,7 @@ namespace PerformanceMonitorLite.Tests;
 /// exists for. Comments and string literals are stripped FIRST at every such site, because these
 /// files carry comments naming the very calls being searched for.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public class EntraDeviceCodeTests
 {
     // ---- The connection string ------------------------------------------------------------
