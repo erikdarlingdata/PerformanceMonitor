@@ -64,6 +64,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
            nothing for a Lite twin to read. If Lite ever gains a PostgreSQL target, port these and delete
            them from here; the ratchet only shrinks. */
         "get_pg_wait_stats",
+        /* #4843: fleet-wide Agent job history. Lite has a Job History tab but no MCP read of it yet. */
+        "get_job_history",
         /* #2719: instance CPU via AWS Performance Insights. Same reason again, and doubly so — this reads
            the AWS RDS/Aurora SDK directly rather than a database connection at all, which Lite (a
            standalone desktop app with no AWS credentials of its own) has no route to regardless of target. */

@@ -60,6 +60,15 @@ internal static class DarlingSessionReader
         /// <summary>For a victim: its blocker also passes the caller's filters, so it is in the population the
         /// page is drawn from (it may still be past the page — the tool checks that).</summary>
         public bool BlockerInPopulation { get; init; }
+
+        /// <summary>The lock or page the request waits on (the stored wait_resource); null when none.</summary>
+        public string? WaitResource { get; init; }
+
+        /// <summary>Progress of a long-running command (the stored percent_complete); null when the engine reports none.</summary>
+        public double? PercentComplete { get; init; }
+
+        /// <summary>The request's query hash as captured; null when absent.</summary>
+        public string? QueryHash { get; init; }
     }
 
     /// <summary>One waiting-task snapshot row.</summary>
@@ -175,7 +184,10 @@ internal static class DarlingSessionReader
                 login_name,
                 host_name,
                 program_name,
-                query_text
+                query_text,
+                wait_resource,
+                CAST(percent_complete AS double precision) AS percent_complete,
+                query_hash
             FROM query_snapshots
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -236,7 +248,10 @@ internal static class DarlingSessionReader
                 WHERE q.collection_time = p.collection_time
                 AND   q.session_id = p.blocking_session_id
             ) AS blocker_in_population,
-            COUNT(*) OVER () AS population_count
+            COUNT(*) OVER () AS population_count,
+            p.wait_resource,
+            p.percent_complete,
+            p.query_hash
         FROM population AS p
         ORDER BY p.collection_time DESC, p.cpu_time_ms DESC
         LIMIT $4
@@ -293,6 +308,9 @@ internal static class DarlingSessionReader
                 IsHeadBlocker = !reader.IsDBNull(22) && reader.GetBoolean(22),
                 BlockerInCapture = !reader.IsDBNull(23) && reader.GetBoolean(23),
                 BlockerInPopulation = !reader.IsDBNull(24) && reader.GetBoolean(24),
+                WaitResource = reader.IsDBNull(26) ? null : reader.GetString(26),
+                PercentComplete = reader.IsDBNull(27) ? null : reader.GetDouble(27),
+                QueryHash = reader.IsDBNull(28) ? null : reader.GetString(28),
             });
             populationCount = reader.GetInt64(25);
         }
