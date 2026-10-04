@@ -302,7 +302,7 @@ internal static class TrendBuckets
         + Sizing(requested, budgetPoints);
 
     /// <summary>The closing sentence both notes share: where the width came from, and how to ask for another.</summary>
-    private static string Sizing(bool requested, int budgetPoints) =>
+    public static string Sizing(bool requested, int budgetPoints) =>
         requested
             ? "The width is the bucket_minutes you passed."
             : $"The width was chosen to keep this answer near {budgetPoints.ToString(CultureInfo.InvariantCulture)} points; pass bucket_minutes (1-{MaxBucketMinutes}) for another width, or narrow hours_back for finer points.";
