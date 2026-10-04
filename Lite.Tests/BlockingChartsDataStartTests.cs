@@ -243,6 +243,24 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
         return result;
     }
 
+    /// <summary>The wiring: each step calls each note with its relation, banner and drawn-point argument.</summary>
+    [Theory]
+    [InlineData("RefreshBlockingTrendsBannersAsync", "WaitStats", "LockWaitTrendTruncationBanner", "")]
+    [InlineData("RefreshBlockingTrendsBannersAsync", "BlockedProcessReports", "BlockingTrendTruncationBanner", ", EarliestBlockingTrendPointDrawn(blocking)")]
+    [InlineData("RefreshBlockingTrendsBannersAsync", "Deadlocks", "DeadlockTrendTruncationBanner", ", EarliestBlockingTrendPointDrawn(deadlocks)")]
+    [InlineData("RefreshBlockingStatsBannersAsync", "BlockedProcessReports", "BlockingStatsBlockingTruncationBanner", ", EarliestBlockingStatsPointDrawn(durationStats)")]
+    [InlineData("RefreshBlockingStatsBannersAsync", "Deadlocks", "BlockingStatsDeadlockTruncationBanner", ", EarliestDeadlockStatsPointDrawn(deadlockSeverity)")]
+    public void BlockingBannerSteps_CallEachNote_WithItsRelation(string step, string relation, string banner, string drawn)
+    {
+        var src = File.ReadAllText(ControlsFile("ServerTab.BlockingChartsDataStart.cs")).Replace("\r\n", "\n");
+        var start = src.IndexOf($"private async System.Threading.Tasks.Task {step}(", StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{step} is missing");
+        var body = src[start..src.IndexOf("\n    }\n", start, StringComparison.Ordinal)];
+
+        var call = $"await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.{relation}, {banner}, start, end{drawn});";
+        Assert.True(body.Contains(call, StringComparison.Ordinal), $"{step} must contain: {call}");
+    }
+
     private static string ControlsFile(string name, [CallerFilePath] string thisFile = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", "Controls", name));
 }
