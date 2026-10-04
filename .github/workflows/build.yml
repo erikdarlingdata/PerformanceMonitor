@@ -1225,7 +1225,7 @@ jobs:
           if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
 
           # One runner invocation per chunk, never one for the whole shard: Windows CreateProcess caps the
-          # complete command line at 32,767 characters, and a shard's -class list alone reached ~32,660
+          # complete command line at 32,767 characters, and a Darling PG shard's -class list alone reached ~32,660
           # (#5100). The budget counts only the -class arguments; the other ~170 characters (the dotnet
           # path, 'run --project ... --no-build --', and the -trx argument) must fit in what is left, and
           # 'dotnet run' hands the same arguments on to the test host. Every chunk runs even after one
@@ -1246,6 +1246,8 @@ jobs:
           }
           if ($current.Count -gt 0) { $chunks.Add($current.ToArray()) }
 
+          # A failing chunk must set $LASTEXITCODE, not throw, or the later chunks would be skipped.
+          $PSNativeCommandUseErrorActionPreference = $false
           $failedChunks = 0
           $chunkNumber = 0
           foreach ($chunk in $chunks) {
@@ -1749,9 +1751,9 @@ jobs:
           if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
 
           # One runner invocation per chunk, never one for the whole shard: Windows CreateProcess caps the
-          # complete command line at 32,767 characters, and a shard's -class list alone reached ~32,660
+          # complete command line at 32,767 characters, and a Darling PG shard's -class list alone reached ~32,660
           # (#5100). The budget counts only the -class arguments; the other ~170 characters (the dotnet
-          # path, 'run --project ... --no-build --', and the -trx argument) must fit in what is left, and
+          # path and 'run --project ... --no-build --') must fit in what is left, and
           # 'dotnet run' hands the same arguments on to the test host. Every chunk runs even after one
           # fails, so a failure in an early chunk never hides the rest of the shard's results.
           $argBudget = 30000
@@ -1770,6 +1772,8 @@ jobs:
           }
           if ($current.Count -gt 0) { $chunks.Add($current.ToArray()) }
 
+          # A failing chunk must set $LASTEXITCODE, not throw, or the later chunks would be skipped.
+          $PSNativeCommandUseErrorActionPreference = $false
           $failedChunks = 0
           $chunkNumber = 0
           foreach ($chunk in $chunks) {

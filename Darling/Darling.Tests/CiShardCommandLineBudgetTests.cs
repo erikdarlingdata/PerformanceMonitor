@@ -11,7 +11,7 @@ using System.IO;
 using System.Text.RegularExpressions;
 using Xunit;
 
-namespace PerformanceMonitor.Darling.Tests;
+namespace Darling.Tests;
 
 /// <summary>
 /// #5100: the sharded test steps in <c>build.yml</c> pass every class of the shard as a <c>-class</c>
@@ -77,6 +77,30 @@ public sealed class CiShardCommandLineBudgetTests
     {
         var step = ReadStep("Run Darling PG tests");
         Assert.Contains("TestResults/darling-pr-${{ matrix.shard }}-$chunkNumber.trx", step);
+    }
+
+    [Fact]
+    public void ShardSteps_ChunkingBlockIsIdentical_AndNativeErrorPreferenceIsOff()
+    {
+        var darling = ReadStep("Run Darling PG tests");
+        var lite = ReadStep("Run Lite tests (shard)");
+        Assert.Equal(ChunkBlock(darling), ChunkBlock(lite), StringComparer.Ordinal);
+
+        foreach (var step in new[] { darling, lite })
+        {
+            var pref = step.IndexOf("$PSNativeCommandUseErrorActionPreference = $false", StringComparison.Ordinal);
+            var loop = step.IndexOf("foreach ($chunk in $chunks)", StringComparison.Ordinal);
+            Assert.True(pref >= 0 && pref < loop, "the step must turn the native-command error preference off before the chunk loop.");
+        }
+    }
+
+    private static string ChunkBlock(string step)
+    {
+        var start = step.IndexOf("$argBudget =", StringComparison.Ordinal);
+        const string endMarker = "if ($current.Count -gt 0) { $chunks.Add($current.ToArray()) }";
+        var end = step.IndexOf(endMarker, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start, "the step has no chunking block.");
+        return step.Substring(start, end + endMarker.Length - start).Replace("\r\n", "\n");
     }
 
     private static string ReadStep(string stepName)
