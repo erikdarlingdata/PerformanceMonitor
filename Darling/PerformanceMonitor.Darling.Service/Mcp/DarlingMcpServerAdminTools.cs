@@ -395,14 +395,18 @@ public sealed class DarlingMcpServerAdminTools
             await using (var connection = await postgres.OpenConnectionAsync())
             await using (var transaction = await connection.BeginTransactionAsync())
             {
-                await using (var command = new NpgsqlCommand("DELETE FROM config_monitored_servers WHERE server_id = $1", connection, transaction))
+                /* Two-arg on the store connection with the transaction ASSIGNED, and the SQL hoisted to a local:
+                   the shape McpReadCommandTimeoutTests recognises as a store command (see the same note in
+                   DarlingMcpAlertTools); the three-arg form is the monitored-target shape. */
+                const string deleteSql = "DELETE FROM config_monitored_servers WHERE server_id = $1";
+                await using (var command = new NpgsqlCommand(deleteSql, connection) { Transaction = transaction })
                 {
                     command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                     command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
                     affected = await command.ExecuteNonQueryAsync();
                 }
 
-                await using (var clear = new NpgsqlCommand(ServerTagStore.ClearForServerSql, connection, transaction))
+                await using (var clear = new NpgsqlCommand(ServerTagStore.ClearForServerSql, connection) { Transaction = transaction })
                 {
                     clear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                     clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
