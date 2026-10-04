@@ -128,6 +128,15 @@ function panelShell(title, subtitle, span = 2) {
  * less history than the page's Range answers for the hours it keeps, every panel it feeds says so through
  * keptWindowStrip, and a line spec is windowed over those hours rather than the Range.
  */
+/* `hideWhenNoRows`: a spec that reports a problem is not drawn at all when its rows are absent, as the desktop viewer
+   collapses its section; an unreadable payload hides it too, since the panels beside it on the same read say so. */
+function hidesPanel(spec, res, shell) {
+  if (!spec.hideWhenNoRows || (res.kind === "data" && (getPath(res.data, spec.rowsKey) || []).length)) return false;
+  shell.panel.style.display = "none";
+  mount(shell.body, []);
+  return true;
+}
+
 function fanout(read, params, specs) {
   for (const spec of specs) {
     if ((spec.viz === "table" || spec.viz === "line") && !spec.emptyText) {
@@ -139,6 +148,7 @@ function fanout(read, params, specs) {
     const res = await readToolWithinKeptHistory(read, params);
     specs.forEach((spec, i) => {
       const body = shells[i].body;
+      if (hidesPanel(spec, res, shells[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
       if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
       try {
@@ -1610,6 +1620,7 @@ export const SERVER_TABS = [
            panel assert a window it did not measure. Shared const so the SQL Server and PostgreSQL tabs cannot
            drift apart on it. */
         ALERT_READ_PANEL,
+        COLLECTION_CAVEATS_PANEL,
         {
           title: "Collectors",
           subtitle: "trailing 7 days",
@@ -1756,6 +1767,7 @@ export const POSTGRES_TABS = [
            panel assert a window it did not measure. Shared const so the SQL Server and PostgreSQL tabs cannot
            drift apart on it. */
         ALERT_READ_PANEL,
+        COLLECTION_CAVEATS_PANEL,
         {
           title: "Collectors",
           subtitle: "trailing 7 days",
@@ -2676,6 +2688,25 @@ const ALERT_READ_PANEL = {
   subtitle: "since this service started \u2014 NOT the trailing 7 days",
   viz: "stat",
   stats: ALERT_READ_STATS,
+};
+
+/* #4843: the data families the scheduled analysis pass could not read on this server, from the same
+   get_collection_health read as the panels beside it (its `collection_caveats` array, which the service omits when the
+   store records none). The desktop viewer's "Analysis could not read these data families" grid, same four columns, and
+   hidden when empty like it. Shared const so the SQL Server and PostgreSQL tabs cannot drift apart on it. */
+const COLLECTION_CAVEATS_PANEL = {
+  title: "Analysis could not read these data families",
+  subtitle: "as of the latest analysis pass",
+  viz: "table",
+  rowsKey: "collection_caveats",
+  hideWhenNoRows: true,
+  columns: [
+    { key: "family", label: "Family" },
+    { key: "reason", label: "Reason", wrap: true },
+    { key: "first_seen_utc", label: "Since", format: "time" },
+    { key: "last_seen_utc", label: "Last seen", format: "time" },
+  ],
+  emptyText: "The analysis pass read every data family.",
 };
 
 const SWEEP_STATS = [
