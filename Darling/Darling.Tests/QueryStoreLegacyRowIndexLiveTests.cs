@@ -62,8 +62,12 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
             await Exec(connection, "SELECT set_chunk_time_interval('collect.query_store_stats', INTERVAL '1 day')", ct);
         }
 
-        var rawNow = DateTime.UtcNow;
-        var utcNow = DateTime.SpecifyKind(new DateTime(rawNow.Ticks - (rawNow.Ticks % 10)), DateTimeKind.Unspecified);
+        /* A fixed anchor, 23:50 UTC on a fixed past day, not the wall clock. Chunks align to UTC midnight and
+           the newest chunk is the one left uncompressed, so a seed ending at the real "now" leaves that chunk
+           holding only the hours since midnight. A near-empty chunk is a single heap page, where the Index Only
+           Scan and the Seq Scan cost within a fraction of a point of each other (about 1.7 against 2.1), so a
+           little statistics or visibility-map drift can flip the plan. Ending at 23:50 gives it a full day. */
+        var utcNow = new DateTime(2026, 1, 15, 23, 50, 0, DateTimeKind.Unspecified);
         var windowStart = utcNow.AddDays(-3);
 
         /* Per-pass contiguous batches, one server after the other, every 30 minutes for three days. */
@@ -81,6 +85,18 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
             Assert.True(compressed > 0, "no chunk was compressed; the compressed-chunk half of the pin did not run");
             Assert.True(await CountChunksAsync(connection, compressedOnly: false, ct) > 0,
                 "every chunk was compressed; the uncompressed-chunk half of the pin did not run");
+        }
+
+        if (timescaleEnabled)
+        {
+            /* The uncompressed chunk is the one the plan assertion is about; keep it a realistic size so a seed
+               change cannot bring back the near-empty chunk, where a Seq Scan beats the index. */
+            await using var newest = new NpgsqlCommand(
+                "SELECT count(*) FROM collect.query_store_stats WHERE collection_time >= $1", connection);
+            newest.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = utcNow.Date });
+            var newestRows = Convert.ToInt64(await newest.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+            Assert.True(newestRows >= 1000,
+                "the newest (uncompressed) chunk holds only " + newestRows + " rows; it must be a realistic day, not a near-empty chunk");
         }
 
         await Exec(connection, "ANALYZE collect.query_store_stats", ct);
@@ -188,7 +204,7 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
             && (n.Label.Contains("query_store_stats", StringComparison.Ordinal)
                 || n.Label.Contains("_hyper_", StringComparison.Ordinal))
             && !n.Label.Contains("_compressed", StringComparison.Ordinal)).ToList();
-        Assert.NotEmpty(scans);
+        Assert.True(scans.Count > 0, "no scan of query_store_stats found in the plan:\n" + plan);
 
         /* Which index read the planner picks depends on visibility-map state and the platform; any read of
            the partial index is the fix. A Bitmap Heap Scan counts when its child is a Bitmap Index Scan on it. */
@@ -198,7 +214,7 @@ public sealed class QueryStoreLegacyRowIndexLiveTests
             && (n.Label.StartsWith("Index Only Scan using ", StringComparison.Ordinal)
                 || n.Label.StartsWith("Index Scan using ", StringComparison.Ordinal)
                 || n.Label.StartsWith("Bitmap Index Scan on ", StringComparison.Ordinal))).ToList();
-        Assert.NotEmpty(indexReads);
+        Assert.True(indexReads.Count > 0, "no scan reads the partial index " + idx + ":\n" + plan);
 
         foreach (var scan in scans)
         {
