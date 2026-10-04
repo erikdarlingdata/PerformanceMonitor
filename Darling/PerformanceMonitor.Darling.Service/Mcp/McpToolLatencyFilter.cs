@@ -72,15 +72,16 @@ public sealed class McpToolLatencyFilter
             }
 
             var stopwatch = Stopwatch.StartNew();
+            using var readScope = ReadScope.Open(_logger);
             try
             {
                 var result = await next(request, cancellationToken);
-                Record(toolName, ClassifyResult(result, cancellationToken), stopwatch.ElapsedMilliseconds);
+                Record(toolName, ReadScope.Resolve(ClassifyResult(result, cancellationToken), readScope.Fallback), stopwatch.ElapsedMilliseconds);
                 return result;
             }
             catch (Exception ex)
             {
-                Record(toolName, ReadOutcomeClassifier.Classify(ex, cancellationToken), stopwatch.ElapsedMilliseconds);
+                Record(toolName, ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, cancellationToken), readScope.Fallback), stopwatch.ElapsedMilliseconds);
                 throw;
             }
         };
