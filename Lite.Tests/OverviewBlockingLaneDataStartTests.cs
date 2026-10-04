@@ -71,4 +71,31 @@ public sealed class OverviewBlockingLaneDataStartTests
         Assert.Equal(Day, await LiteBlockingLaneDataStart.ChooseAsync(failed, Task.FromException<DateTime?>(new TimeoutException()), [Bar(Day)], [Bar(Day)]));
         Assert.Null(await LiteBlockingLaneDataStart.ChooseAsync(failed, Task.FromException<DateTime?>(new TimeoutException()), NoBars, NoBars));
     }
+
+    /// <summary>The probing half of the step: both relations are asked over the window given, and the later floor wins.</summary>
+    [Fact]
+    public async Task StartAsync_AsksBothRelations_AndNamesTheLaterFloor()
+    {
+        var asked = new List<QueryWindowRelation>();
+        var start = await LiteBlockingLaneDataStart.StartAsync(
+            relation => { asked.Add(relation); return Task.FromResult<DateTime?>(relation == QueryWindowRelation.Deadlocks ? Day.AddDays(3) : Day.AddDays(1)); },
+            Day, Day.AddDays(7), NoBars, NoBars);
+
+        Assert.Equal(Day.AddDays(3), start);
+        Assert.Contains(QueryWindowRelation.BlockedProcessReports, asked);
+        Assert.Contains(QueryWindowRelation.Deadlocks, asked);
+    }
+
+    /// <summary>A window of 90 minutes or less starts no probe, and a probe that throws drops only its series.</summary>
+    [Fact]
+    public async Task StartAsync_ShortWindowStartsNoProbe_AndAThrowingProbeDropsOneSeries()
+    {
+        var probes = 0;
+        Assert.Null(await LiteBlockingLaneDataStart.StartAsync(_ => { probes++; return Task.FromResult<DateTime?>(Day); }, Day, Day.AddMinutes(90), NoBars, NoBars));
+        Assert.Equal(0, probes);
+
+        Assert.Equal(Day.AddDays(2), await LiteBlockingLaneDataStart.StartAsync(
+            relation => relation == QueryWindowRelation.Deadlocks ? Task.FromResult<DateTime?>(Day.AddDays(2)) : throw new InvalidOperationException("probe failed"),
+            Day, Day.AddDays(7), NoBars, NoBars));
+    }
 }
