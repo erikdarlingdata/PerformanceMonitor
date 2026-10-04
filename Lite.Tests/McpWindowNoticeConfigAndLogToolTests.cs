@@ -364,7 +364,9 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         var root = Root(await CallAsync(Tool.PlanCorrections, hoursBack: 1));
 
         Assert.False(root.TryGetProperty("status", out _));
-        AssertTruncatedAt(root, floor, "plan_correction");
+        var text = root.GetProperty("effective_start").GetString()!;
+        Assert.True(Math.Abs((ParseUtc(text) - floor).TotalSeconds) < 5,
+            $"effective_start {text} should be the probe's floor {floor:o}, not the asked start {Anchor.AddHours(-1):o}");
     }
 
     /// <summary>A status filter that matches nothing, over a window with runs, is a filtered-empty answer, not a quiet window.</summary>
@@ -375,7 +377,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         await SeedLogRunsAsync("wait_stats", Anchor.AddHours(-20), Anchor, everyMinutes: 30);
 
         var root = Root(await McpHealthTools.GetCollectionLog(
-            Service(), _serverManager, ServerName, 24, as_of: AsOf, status: "FAILED"));
+            Service(), _serverManager, ServerName, 24, as_of: AsOf, status: "ERROR"));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
