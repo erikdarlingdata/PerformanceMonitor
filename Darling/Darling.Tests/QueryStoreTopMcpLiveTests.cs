@@ -45,6 +45,52 @@ public sealed class QueryStoreTopMcpLiveTests
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
+    public async Task ATableReadThatFaultsAfterTheGateSaidTable_AnswersFromRaw_AndNotesFallbackRaw()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5097 fallback live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+
+        await QueryStoreIntervalWideGridLiveTests.SeedGridAsync(runner, ServerId, WindowStart, ct);
+        await ForceFilledSinceAsync(connection, WindowStart.AddDays(-1), ct);
+        await RegisterServerAsync(connection, ct);
+        var appliedThrough = await ScalarDateTimeAsync(connection,
+            "SELECT applied_through FROM collect.query_store_interval_wide_coverage WHERE server_id = @server_id", ct);
+        var queryEnd = appliedThrough > WindowEnd ? appliedThrough : WindowEnd;
+
+        var logger = new CapturingTestLogger();
+        using var scope = ReadScope.Open(logger);
+
+        var viaTable = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, ServerId, WindowStart, queryEnd, TestTop, null, null, null, ct);
+        Assert.NotNull(viaTable.Table);
+        Assert.Null(scope.Fallback);
+
+        DarlingDataReader.TestOnlyTableReadFault.Value = () => new InvalidOperationException("injected table read fault");
+        try
+        {
+            var viaFallback = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, ServerId, WindowStart, queryEnd, TestTop, null, null, null, ct);
+
+            Assert.Null(viaFallback.Table);
+            var rawKeys = await RawTopKeysAsync(connection, WindowStart, queryEnd, null, null, ct);
+            Assert.True(rawKeys.Count > 0, "the seed produced no raw rows; the comparison would be vacuous");
+            Assert.Equal(
+                rawKeys.OrderBy(k => k).ToList(),
+                viaFallback.Rows.Select(r => (r.DatabaseName, r.QueryId, r.PlanId, r.ExecutionTypeDesc, r.ReplicaRole, r.TotalExecutions)).OrderBy(k => k).ToList());
+            Assert.Equal(ReadFallback.FallbackRaw, scope.Fallback);
+            Assert.True(logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning) >= 1, logger.Joined);
+        }
+        finally
+        {
+            DarlingDataReader.TestOnlyTableReadFault.Value = null;
+        }
+    }
+
+    [Fact]
     public async Task TheTableRead_EqualsRaw_UnfilteredAndFiltered_EndToEnd_ThroughMcpAndWebDispatch_AndTheLiveGate()
     {
         var baseCs = BaseConnectionString;
