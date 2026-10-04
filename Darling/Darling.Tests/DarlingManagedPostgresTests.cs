@@ -2632,7 +2632,7 @@ public sealed class DarlingManagedPostgresTests
     [InlineData("timescaledb,pg_stat_statements", "timescaledb,pg_stat_statements,auto_explain")]
     [InlineData("timescaledb,pg_prewarm", "timescaledb,pg_prewarm,pg_stat_statements,auto_explain")]
     [InlineData("timescaledb,auto_explain", "timescaledb,auto_explain,pg_stat_statements")]
-    [InlineData("timescaledb,AUTO_EXPLAIN,PG_STAT_STATEMENTS", "timescaledb,AUTO_EXPLAIN,PG_STAT_STATEMENTS")]
+    [InlineData("timescaledb,Auto_Explain,PG_STAT_STATEMENTS", "timescaledb,Auto_Explain,PG_STAT_STATEMENTS")]
     [InlineData("\"timescaledb\" , pg_stat_statements", "timescaledb,pg_stat_statements,auto_explain")]
     public void SlowPlanConfAppend_MergesThePreloadList(string? effective, string expected)
         => Assert.Equal(expected, LastSettingValue(DarlingManagedPostgres.BuildSlowPlanConfAppend(effective), "shared_preload_libraries")?.Trim('\''));
