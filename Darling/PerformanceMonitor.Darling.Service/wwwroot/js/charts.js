@@ -27,6 +27,7 @@ const H = 320;
 const M = { l: 58, r: 16, t: 26, b: 30 };
 const PLOT_H = H - M.t - M.b;
 const Y_TICKS = 4;
+let clipSeq = 0;
 
 function svg(tag, attrs) {
   const node = document.createElementNS(SVG_NS, tag);
@@ -165,6 +166,13 @@ export function renderLineChart(spec) {
   const baseY = plotY(0);
 
   const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img" });
+  /* The series clip to the plot box. A zoomed chart keeps one neighbour point just outside each edge of the span
+     (applyChartZoom) so the line reaches the axis edge; this clip cuts that segment off at the edge. */
+  const clipId = "plot-clip-" + (++clipSeq);
+  const clipDef = svg("clipPath", { id: clipId });
+  clipDef.appendChild(svg("rect", { x: M.l, y: M.t, width: plotW, height: PLOT_H }));
+  root.appendChild(clipDef);
+  const clipAttr = `url(#${clipId})`;
 
   /* Horizontal gridlines + y labels (on the nice tick values). */
   const axis = svg("g", { class: "axis" });
@@ -299,6 +307,7 @@ export function renderLineChart(spec) {
         root.appendChild(
           svg("polygon", {
             class: "series-area",
+            "clip-path": clipAttr,
             points: top.concat(bottom).join(" "),
             fill: normalizeColor(series[k].color),
             "fill-opacity": "0.72",
@@ -329,13 +338,14 @@ export function renderLineChart(spec) {
         root.appendChild(
           svg("polygon", {
             class: "series-area",
+            "clip-path": clipAttr,
             points: `${first},${baseY} ${linePts.join(" ")} ${last},${baseY}`,
             fill: normalizeColor(s.color),
             "fill-opacity": "0.15",
           })
         );
       }
-      root.appendChild(svg("polyline", { class: "series-line", points: linePts.join(" "), stroke: normalizeColor(s.color) }));
+      root.appendChild(svg("polyline", { class: "series-line", "clip-path": clipAttr, points: linePts.join(" "), stroke: normalizeColor(s.color) }));
     }
   }
 
@@ -355,7 +365,7 @@ export function renderLineChart(spec) {
       const [cx, cy] = pts2[0].split(",");
       root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(series2.color) }));
     } else if (pts2.length >= 2) {
-      root.appendChild(svg("polyline", { class: "series-line series-line-overlay", points: pts2.join(" "), stroke: normalizeColor(series2.color) }));
+      root.appendChild(svg("polyline", { class: "series-line series-line-overlay", "clip-path": clipAttr, points: pts2.join(" "), stroke: normalizeColor(series2.color) }));
     }
   }
 
@@ -463,15 +473,18 @@ export function renderLineChart(spec) {
     if (dragFromX != null) return; /* brushing — the band owns the pointer */
     const rect = root.getBoundingClientRect();
     const vbX = ((ev.clientX - rect.left) / rect.width) * W;
-    let idx = 0;
+    let idx = -1;
     let best = Infinity;
     for (let i = 0; i < xs.length; i++) {
+      /* A zoom's off-plot neighbour points exist only to carry the line to the edge; they are not hoverable. */
+      if (xs[i] < M.l - 0.5 || xs[i] > plotRight + 0.5) continue;
       const d = Math.abs(xs[i] - vbX);
       if (d < best) {
         best = d;
         idx = i;
       }
     }
+    if (idx < 0) return;
     const { t, r } = rows[idx];
     const px = xs[idx];
 
@@ -921,7 +934,9 @@ const chartZooms = new Map();
 /** The scope a chart's zoom is held under: the page address (server + tab, or the FinOps tab) plus the page's
  *  preset range in hours. A different server, tab or range is a different scope, so its charts start unzoomed. */
 export function chartZoomScope(hours) {
-  return (typeof location !== "undefined" && location.hash ? location.hash : "") + "|" + String(hours);
+  /* The `?…` query is not part of the scope (the same strip the grid sort state uses): a query-only change keeps the zoom. */
+  const hash = typeof location !== "undefined" && location.hash ? location.hash.split("?")[0] : "";
+  return hash + "|" + String(hours);
 }
 
 /** The zoom held for chart `id` under `scope`, or null. A different scope clears the entry. */
@@ -948,11 +963,20 @@ export function setChartZoom(id, scope, fromMs, toMs) {
  */
 export function applyChartZoom(spec, zoom) {
   if (!zoom) return { spec, zoomed: false };
-  const inside = (spec.points || []).filter((r) => {
+  const timed = [];
+  for (const r of spec.points || []) {
     const d = parseUtc(r[spec.xKey]);
-    return d && d.getTime() >= zoom.from && d.getTime() <= zoom.to;
-  });
-  if (!inside.length) return { spec, zoomed: false };
+    if (d) timed.push({ ms: d.getTime(), r });
+  }
+  timed.sort((a, b) => a.ms - b.ms);
+  const first = timed.findIndex((p) => p.ms >= zoom.from && p.ms <= zoom.to);
+  if (first < 0) return { spec, zoomed: false };
+  let last = first;
+  while (last + 1 < timed.length && timed[last + 1].ms <= zoom.to) last++;
+  /* One neighbour on each side of the span, so the line runs to both axis edges (the plot clips it there). */
+  const lo = first > 0 ? first - 1 : first;
+  const hi = last + 1 < timed.length ? last + 1 : last;
+  const inside = timed.slice(lo, hi + 1).map((p) => p.r);
   return { spec: { ...spec, points: inside, windowStart: zoom.from, windowEnd: zoom.to }, zoomed: true };
 }
 
@@ -985,11 +1009,16 @@ export function zoomableLineChart(spec, id, scope) {
   const host = el("div", { class: "zoomable-chart" });
   const draw = () => {
     const { spec: shown, zoomed } = applyChartZoom(spec, getChartZoom(id, scope));
+    /* A held zoom that no longer holds a loaded point (the span aged out of the window) is dropped, not kept dormant. */
+    if (!zoomed && getChartZoom(id, scope)) setChartZoom(id, scope, null, null);
     const chart = renderLineChart({
       ...shown,
       onZoom: (fromMs, toMs) => {
-        setChartZoom(id, scope, fromMs, toMs);
-        draw();
+        /* Only a span that holds a loaded point is kept; an empty brush stores nothing, so a later poll cannot zoom unasked. */
+        if (applyChartZoom(spec, { from: fromMs, to: toMs }).zoomed) {
+          setChartZoom(id, scope, fromMs, toMs);
+          draw();
+        }
       },
     });
     const z = zoomed ? getChartZoom(id, scope) : null;

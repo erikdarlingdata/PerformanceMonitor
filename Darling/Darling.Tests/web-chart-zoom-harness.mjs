@@ -144,4 +144,37 @@ out.clickHeld = charts.getChartZoom("c3", scope) !== null;
 brush(charts.zoomableLineChart(specFor(), "c4", scope), 10, 30);
 out.otherRange = shown(charts.zoomableLineChart(specFor(), "c4", charts.chartZoomScope(24)));
 
+// 7. a brush over a span with no loaded point stores nothing, and a later rebuild with a point there does not zoom
+const sparse = (pts) => ({ points: pts, xKey: "t", series: [{ key: "v", label: "v", color: "#fff" }], windowStart: T0, windowEnd: T0 + 100 * MIN });
+const mk = (minutes) => minutes.map((m) => ({ t: new Date(T0 + m * MIN).toISOString().slice(0, 19), v: m }));
+const e = charts.zoomableLineChart(sparse(mk([0, 5, 90, 100])), "c5", scope);
+brush(e, 30, 50);
+out.emptyHeld = charts.getChartZoom("c5", scope) !== null;
+out.emptyChip = shown(e).chip;
+const late = charts.zoomableLineChart(sparse(mk([0, 5, 40, 90, 100])), "c5", scope);
+out.emptyLater = shown(late);
+out.emptyLaterBaseline = shown(charts.zoomableLineChart(sparse(mk([0, 5, 40, 90, 100])), "c5b", scope));
+
+// 8. a held zoom whose span has no point any more is dropped when the chart is drawn
+charts.setChartZoom("c6", scope, T0 + 30 * MIN, T0 + 50 * MIN);
+const f = charts.zoomableLineChart(sparse(mk([0, 5, 90, 100])), "c6", scope);
+out.agedOutHeld = charts.getChartZoom("c6", scope) !== null;
+out.agedOutChip = shown(f).chip;
+
+// 9. the zoomed line keeps one neighbour point each side and the plot clips at the edge
+const g = charts.applyChartZoom(specFor(), { scope, from: T0 + 20.5 * MIN, to: T0 + 40.5 * MIN });
+out.edgeMinutes = g.spec.points.map((r) => (Date.parse(r.t + "Z") - T0) / MIN);
+const gh = charts.zoomableLineChart(specFor(), "c7", scope);
+brush(gh, 20.5, 40.5);
+const line = find(gh, (n) => n.tag === "polyline" && String(n.attrs.class).includes("series-line"))[0];
+out.lineClipped = !!line && /^url\(#.+\)$/.test(line.attrs["clip-path"] || "");
+const clipRect = find(gh, (n) => n.tag === "clipPath").map((n) => n.children[0].attrs);
+out.clipRect = clipRect.length ? { x: Number(clipRect[0].x), w: Number(clipRect[0].width) } : null;
+out.lineXs = line ? line.attrs.points.split(" ").map((p) => Number(p.split(",")[0])) : [];
+
+// 10. a query-only change of the page address keeps the zoom scope
+globalThis.location.hash = "#/server/A/waits?x=1";
+out.scopeQueryStripped = charts.chartZoomScope(4) === scope;
+globalThis.location.hash = "#/server/A/waits";
+
 console.log(JSON.stringify(out));

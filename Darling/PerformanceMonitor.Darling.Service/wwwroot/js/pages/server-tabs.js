@@ -152,7 +152,7 @@ function fanout(read, params, specs) {
            all pages of a population - the aggregate one beside a capped row list is exactly the pairing
            where only one of them needs saying so. */
         const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
-        const rendered = VIZ[spec.viz](res.data, { ...spec, windowHours: res.keptHours || (params && params.hours) });
+        const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours) });
 
         mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {

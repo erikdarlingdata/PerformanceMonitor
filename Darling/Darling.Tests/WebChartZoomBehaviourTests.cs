@@ -71,7 +71,8 @@ public sealed class WebChartZoomBehaviourTests
         // The drag ran from minute 20 to minute 40; the held span is that, to within a pixel of the 8 px floor.
         Assert.InRange(r.GetProperty("zoom").GetProperty("from").GetDouble(), 19.9, 20.1);
         Assert.InRange(r.GetProperty("zoom").GetProperty("to").GetDouble(), 39.9, 40.1);
-        Assert.Equal(21, r.GetProperty("appliedPoints").GetInt32());
+        // 21 points inside the span plus one neighbour each side, so the line reaches both axis edges.
+        Assert.Equal(23, r.GetProperty("appliedPoints").GetInt32());
         Assert.InRange(r.GetProperty("appliedWindow")[0].GetDouble(), 19.9, 20.1);
         Assert.InRange(r.GetProperty("appliedWindow")[1].GetDouble(), 39.9, 40.1);
         var zoomed = r.GetProperty("zoomed");
@@ -112,6 +113,45 @@ public sealed class WebChartZoomBehaviourTests
         Assert.False(Run().GetProperty("clickHeld").GetBoolean());
     }
 
+    [Fact]
+    public void AnEmptySpanBrush_StoresNothing_AndALaterPointInTheSpanDoesNotZoom()
+    {
+        var r = Run();
+        Assert.False(r.GetProperty("emptyHeld").GetBoolean());
+        Assert.False(r.GetProperty("emptyChip").GetBoolean());
+        Assert.False(r.GetProperty("emptyLater").GetProperty("chip").GetBoolean());
+        Assert.Equal(Labels(r.GetProperty("emptyLaterBaseline")), Labels(r.GetProperty("emptyLater")));
+    }
+
+    [Fact]
+    public void AHeldZoom_ThatNoLongerHoldsAPoint_IsDroppedAtDraw()
+    {
+        var r = Run();
+        Assert.False(r.GetProperty("agedOutHeld").GetBoolean());
+        Assert.False(r.GetProperty("agedOutChip").GetBoolean());
+    }
+
+    [Fact]
+    public void TheZoomedLine_KeepsOneNeighbourEachSide_AndThePlotClipsAtTheEdge()
+    {
+        var r = Run();
+        var minutes = r.GetProperty("edgeMinutes").EnumerateArray().Select(e => e.GetDouble()).ToArray();
+        Assert.Equal(20d, minutes.First());
+        Assert.Equal(41d, minutes.Last());
+        Assert.Equal(22, minutes.Length);
+        Assert.True(r.GetProperty("lineClipped").GetBoolean());
+        var clip = r.GetProperty("clipRect");
+        var xs = r.GetProperty("lineXs").EnumerateArray().Select(e => e.GetDouble()).ToArray();
+        Assert.True(xs.First() < clip.GetProperty("x").GetDouble());
+        Assert.True(xs.Last() > clip.GetProperty("x").GetDouble() + clip.GetProperty("w").GetDouble());
+    }
+
+    [Fact]
+    public void TheScope_IgnoresTheHashQuery()
+    {
+        Assert.True(Run().GetProperty("scopeQueryStripped").GetBoolean());
+    }
+
     private static string Js(params string[] parts) =>
         ReadRepoFile(new[] { "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js" }.Concat(parts).ToArray())
             .ReplaceLineEndings("\n");
@@ -134,7 +174,13 @@ public sealed class WebChartZoomBehaviourTests
         {
             var name = Path.GetFileName(file);
             var text = File.ReadAllText(file).ReplaceLineEndings("\n");
-            var calls = Regex.Matches(text, @"(?<![\w.])renderLineChart\(\{").Count;
+            var calls = Regex.Matches(text, @"(?<![\w.])renderLineChart\s*\(").Count;
+            if (name == "charts.js")
+            {
+                // The declaration, and the wrapper's own call.
+                calls -= 2;
+                Assert.True(calls >= 0, "charts.js lost the renderLineChart declaration or the wrapper's call.");
+            }
             if (calls == 0)
             {
                 continue;
