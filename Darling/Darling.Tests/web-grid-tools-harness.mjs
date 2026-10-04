@@ -114,8 +114,40 @@ const scenarios = {
     out.stringClass = tbodyOf(s).children.map((tr) => tr.className);
     out.noTools = s.tag; // the bare table-wrap, no strip
   },
+  async columnOptions() {
+    setNav({ clipboard: { writeText: async (t) => { texts.push(t); } } });
+    const texts = [];
+    const drows = [{ id: "a", summary: "short…", full: "line one\nline two", link: "x" }, { id: "b", summary: "s2", full: "=cmd", link: "y" }];
+    const dcols = [
+      { key: "id", label: "Id" },
+      { key: "summary", label: "Detail", copyValue: (r) => r.full },
+      { key: "link", label: "Open", csv: false, render: (r) => document.createTextNode("Open " + r.link) },
+    ];
+    const w = VIZ.table({ rows: drows }, { rowsKey: "rows", columns: dcols, title: "Opts" });
+    btn(w, "Export CSV").click();
+    out.csv = await csvOf();
+    const tb = tbodyOf(w);
+    tb.fire("click", { target: tb.children[0].children[1] });
+    btn(w, "Copy cell").click(); await flush();
+    btn(w, "Copy row").click(); await flush();
+    out.texts = texts;
+  },
+  async pickSurvivesRebuild() {
+    const texts = [];
+    setNav({ clipboard: { writeText: async (t) => { texts.push(t); } } });
+    const w1 = build();
+    const tb1 = tbodyOf(w1);
+    tb1.fire("click", { target: tb1.children[1].children[1] }); // N = 5
+    const w2 = build(); // the 60 s repaint: a new table over the same rows
+    out.marked = tbodyOf(w2).children[1].children[1].className;
+    btn(w2, "Copy cell").click(); await flush();
+    const gone = VIZ.table({ rows: rows.slice(2) }, { rowsKey: "rows", columns: cols, title: "Slow Queries" });
+    btn(gone, "Copy cell").click(); await flush();
+    out.texts = texts;
+    out.goneStatus = status(gone);
+  },
   async helpers() {
-    out.field = [tools.csvField("a,b"), tools.csvField('q"q'), tools.csvField("=1+1"), tools.csvField("+x"), tools.csvField("@y"), tools.csvField(-5), tools.csvField(null), tools.csvField("plain")];
+    out.field = [tools.csvField("a,b"), tools.csvField('q"q'), tools.csvField("=1+1"), tools.csvField("+x"), tools.csvField("@y"), tools.csvField(-5), tools.csvField("-5"), tools.csvField("+3.5e-2"), tools.csvField("-5x"), tools.csvField(null), tools.csvField("plain")];
     out.name = tools.csvFileName("Wait Stats / Top 10!", new Date("2026-01-05T14:30:07Z"));
     out.nameEmpty = tools.csvFileName("", new Date("2026-01-05T14:30:07Z"));
   },

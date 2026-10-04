@@ -114,6 +114,7 @@ export const READ_FIELDS = {
   get_cpu_scheduler_pressure: {
     table: {
       rowsKey: ".",
+      tools: false,
       emptyText: "No scheduler snapshot in this window.",
       columns: [
         { key: "pressure_level", label: "Pressure" },
@@ -500,6 +501,7 @@ export const READ_FIELDS = {
     /* One object, so the table draws it as one row (rowsKey "."); the stat part is the same keys as tiles. */
     table: {
       rowsKey: ".",
+      tools: false,
       emptyText: "No server summary is available.",
       columns: [
         { key: "cpu_percent", label: "CPU", format: "pct" },

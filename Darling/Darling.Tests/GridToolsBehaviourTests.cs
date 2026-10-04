@@ -129,9 +129,42 @@ public sealed class GridToolsBehaviourTests
     public void TheHelpers_QuoteNeutraliseAndNameFiles()
     {
         var r = Run("helpers");
-        Assert.Equal(new[] { "\"a,b\"", "\"q\"\"q\"", "'=1+1", "'+x", "'@y", "-5", "", "plain" },
+        Assert.Equal(new[] { "\"a,b\"", "\"q\"\"q\"", "'=1+1", "'+x", "'@y", "-5", "-5", "+3.5e-2", "'-5x", "", "plain" },
             r.GetProperty("field").EnumerateArray().Select(e => e.GetString()!).ToArray());
         Assert.Equal("wait-stats-top-10-20260105-143007.csv", Str(r, "name"));
         Assert.Equal("table-20260105-143007.csv", Str(r, "nameEmpty"));
+    }
+
+    [Fact]
+    public void ColumnOptions_CsvFalseLeavesAColumnOut_AndCopyValueSuppliesTheFullText()
+    {
+        var r = Run("columnOptions");
+        // The link-only column is out of the CSV; the Detail column exports the full value, newline quoted, formula guarded.
+        Assert.Equal("Id,Detail\r\na,\"line one\nline two\"\r\nb,'=cmd", Str(r, "csv"));
+        var texts = r.GetProperty("texts").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        // Copy cell and Copy row use the full value too (a newline collapses to a space inside a tab-separated row).
+        Assert.Equal("line one\nline two", texts[0]);
+        Assert.Equal("a\tline one line two\tOpen x", texts[1]);
+    }
+
+    [Fact]
+    public void ThePickedCell_SurvivesARebuild_AndSaysSoWhenItsRowIsGone()
+    {
+        var r = Run("pickSurvivesRebuild");
+        Assert.Contains("cell-picked", Str(r, "marked"));
+        var texts = r.GetProperty("texts").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(new[] { "5" }, texts);
+        Assert.Equal("Click a cell first, then choose Copy cell.", Str(r, "goneStatus"));
+    }
+
+    [Fact]
+    public void AlertHistory_KeepsTheStripOnTheGrid_NotOnItsPerRowBuilder_AndFlagsLinkColumnsOutOfTheCsv()
+    {
+        var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "alerts.js").ReplaceLineEndings("\n");
+        Assert.Contains("{ rowsKey: \"alerts\", columns: alertColumns(), tools: false }", js);
+        Assert.Contains("{ rowsKey: \"alerts\", columns: alertColumns() });", js);
+        Assert.Contains("label: \"Triage\", csv: false", js);
+        Assert.Contains("label: \"Mute\", csv: false", js);
+        Assert.Contains("copyValue: (a) => detailFullText(a)", js);
     }
 }

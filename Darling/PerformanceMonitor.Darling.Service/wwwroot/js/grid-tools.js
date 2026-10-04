@@ -20,14 +20,16 @@ export function toTsv(rows) {
 }
 
 /* A spreadsheet runs a cell that starts with one of these as a formula. A leading apostrophe makes it text. A real
-   number is left alone (a negative value is data, not a formula); only a string is neutralised. */
+   number is left alone (a negative value is data, not a formula), and so is a string that is only a number
+   ("-5", "+3", "1e-3"); any other string is neutralised. */
 const FORMULA_LEAD = /^[=+\-@\t\r]/;
+const PLAIN_NUMBER = /^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$/;
 
 /** One CSV field, RFC 4180: quoted when it holds a comma, quote, CR or LF, with quotes doubled. */
 export function csvField(v) {
   if (v == null) return "";
   let s = v instanceof Date ? v.toISOString() : String(v);
-  if (typeof v === "string" && FORMULA_LEAD.test(s)) s = "'" + s;
+  if (typeof v === "string" && FORMULA_LEAD.test(s) && !PLAIN_NUMBER.test(s)) s = "'" + s;
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
@@ -67,6 +69,8 @@ export async function copyText(text) {
   }
 }
 
+const REVOKE_AFTER_MS = 10000;
+
 /** Hands CSV text to the browser as a file download (UTF-8 with a byte-order mark so a spreadsheet reads unicode). */
 export function downloadCsv(fileName, csv) {
   const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
@@ -78,5 +82,6 @@ export function downloadCsv(fileName, csv) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  /* Some browsers cancel the download if the URL is revoked before it has started. */
+  setTimeout(() => URL.revokeObjectURL(url), REVOKE_AFTER_MS);
 }

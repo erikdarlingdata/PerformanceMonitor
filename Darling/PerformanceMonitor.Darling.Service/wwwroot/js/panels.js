@@ -181,7 +181,7 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
 
    Column-header sort (#4843). A header click cycles ascending -> descending -> the server's own order, with a ▲/▼
    indicator and aria-sort; Enter and Space on the focused header do the same. The comparison reads the RAW row value
@@ -225,24 +225,42 @@ function vizTable(data, desc) {
    in-place reconcile. Copy puts what the user sees on the clipboard: the cells' text, tab-separated, with a header
    row on Copy All. The CSV carries RAW values (the stored ISO instant, the unformatted number) under the column
    labels, quoted per RFC 4180 and with a leading ' on a text cell a spreadsheet would run as a formula. A column
-   whose values are arrays or objects has no one-cell form, so the CSV leaves it out (Copy keeps it: it copies the
+   whose values are arrays or objects has no one-cell form, so the CSV leaves it out, and so does `csv: false` on a column (a link-only cell); a column's `copyValue(row)` supplies the full text for Copy and the CSV when its cell shows a summary (Copy keeps it: it copies the
    cell's text). A custom-render column over a key the rows do not carry has no raw value, so its CSV cell is the
    text it shows. Set `tools: false` on the descriptor to draw a table without the strip. */
 function gridTools(desc, cols, tbody) {
   const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
-  let lastCell = null;
-  let lastCellText = null;
+  const key = gridSortKey(desc, cols);
   const say = (m) => {
     status.textContent = m;
   };
   const trs = () => [...tbody.children];
-  const textRows = (list) => list.map((tr) => [...tr.children].map((td) => td.textContent));
+  /* The text a cell copies: the column's copyValue(row) when it has one (a custom-render cell whose visible text is a
+     summary), else the text shown. */
+  const textOf = (tr, i) => {
+    const c = cols[i];
+    const row = trRow.get(tr);
+    return c && typeof c.copyValue === "function" && row ? String(c.copyValue(row) ?? "") : tr.children[i].textContent;
+  };
+  const textRows = (list) => list.map((tr) => [...tr.children].map((_, i) => textOf(tr, i)));
+  /* The picked cell is remembered as the row's text plus the column, at module scope under the table's key, so the
+     60 s repaint (a new tbody, new cells) and an in-place reconcile both resolve it against what is on screen now;
+     a row that is gone resolves to nothing. */
+  const rowSig = (tr) => textRows([tr])[0].join("\u0001");
+  const pickedCell = () => {
+    const pick = gridPicked.get(key);
+    const tr = pick ? trs().find((t) => rowSig(t) === pick.sig) : null;
+    return tr && tr.children[pick.col] ? { tr, td: tr.children[pick.col], col: pick.col } : null;
+  };
+  const initial = pickedCell();
+  if (initial && initial.td.classList) initial.td.classList.add("cell-picked");
   tbody.addEventListener("click", (e) => {
     const td = e && e.target && typeof e.target.closest === "function" ? e.target.closest("td") : null;
-    if (!td) return;
-    if (lastCell && lastCell.classList) lastCell.classList.remove("cell-picked");
-    lastCell = td;
-    lastCellText = td.textContent;
+    const tr = td && td.parentNode;
+    if (!tr) return;
+    const prev = pickedCell();
+    if (prev && prev.td.classList) prev.td.classList.remove("cell-picked");
+    gridPicked.set(key, { sig: rowSig(tr), col: [...tr.children].indexOf(td) });
     if (td.classList) td.classList.add("cell-picked");
   });
   const finish = async (text, what) => {
@@ -250,13 +268,14 @@ function gridTools(desc, cols, tbody) {
     say(r.ok ? "Copied " + what + "." : r.message);
   };
   const copyCell = () => {
-    if (!lastCell) return say("Click a cell first, then choose Copy cell.");
-    return finish(lastCellText, "the cell");
+    const p = pickedCell();
+    if (!p) return say("Click a cell first, then choose Copy cell.");
+    return finish(textOf(p.tr, p.col), "the cell");
   };
   const copyRow = () => {
-    const tr = lastCell && lastCell.parentNode;
-    if (!tr) return say("Click a cell in the row first, then choose Copy row.");
-    return finish(toTsv(textRows([tr])), "the row");
+    const p = pickedCell();
+    if (!p) return say("Click a cell first, then choose Copy row.");
+    return finish(toTsv(textRows([p.tr])), "the row");
   };
   const copyAll = () => finish(toTsv([cols.map((c) => c.label), ...textRows(trs())]), "the table");
   const exportCsv = () => {
@@ -264,7 +283,9 @@ function gridTools(desc, cols, tbody) {
     const objs = list.map((tr) => trRow.get(tr));
     const keep = cols
       .map((c, i) => {
-        const raw = objs.map((r) => (r ? getPath(r, c.key) : undefined));
+        if (c.csv === false) return null;
+        const hasCopy = typeof c.copyValue === "function";
+        const raw = objs.map((r) => (r ? (hasCopy ? c.copyValue(r) : getPath(r, c.key)) : undefined));
         if (raw.some(isListValue)) return null;
         const textOnly = typeof c.render === "function" && raw.every((v) => v === undefined);
         return { i, c, raw, textOnly };
@@ -302,6 +323,8 @@ const gridSortState = new Map(); // grows by one entry per table the session sor
 /* tr -> its row object, so a grid whose rows are reconciled in place (Alert History) can re-sort what is in the DOM. */
 const trRow = new WeakMap();
 const tbodyGrid = new WeakMap();
+/* The cell each grid's Copy cell / Copy row act on (see gridTools), keyed like the sort state. */
+const gridPicked = new Map(); // one entry per table the session clicks in; bounded by routes x tables
 
 /* The table identity: `desc.sortId`, else `desc.id`, else `desc.title`, else `desc.rowsKey`. Panels built by
    renderPanel carry a title; the FinOps tabs call VIZ.table with a rowsKey, and two grids of one tab can share one,
