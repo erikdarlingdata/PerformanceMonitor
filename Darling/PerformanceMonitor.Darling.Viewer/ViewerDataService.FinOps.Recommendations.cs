@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage.FinOps;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -47,98 +48,31 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>The four system databases (master/model/msdb/tempdb) — Lite's <c>database_id &gt; 4</c> filter by name.</summary>
-    private static readonly HashSet<string> RecommendationsSystemDatabases =
-        new(StringComparer.OrdinalIgnoreCase) { "master", "model", "msdb", "tempdb" };
+    private static readonly IReadOnlySet<string> RecommendationsSystemDatabases = FinOpsRecommendationFigures.SystemDatabases;
 
     /// <summary>
     /// The server's latest collected edition / product version / logical CPU count for the license audit, plus the
     /// collected AG replica role + Always On master switch that drive the AG-aware branches. $1 server_id.
     /// </summary>
-    public const string RecommendationsEditionFactsSql = @"
-SELECT
-    edition,
-    product_version,
-    cpu_count,
-    ag_replica_role,
-    is_hadr_enabled
-FROM server_properties
-WHERE server_id = $1
-ORDER BY collection_time DESC
-LIMIT 1";
+    public const string RecommendationsEditionFactsSql = DarlingFinOpsRecommendationsReader.EditionFactsSql;
 
     /// <summary>7-day P95 of Total Server Memory (MB) + sample count, for the memory right-sizing checks. $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string RecommendationsMemoryP95Sql = @"
-SELECT
-    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
-    COUNT(*) AS sample_count,
-    MIN(collection_time) AS first_sample,
-    MAX(collection_time) AS last_sample,
-    COUNT(total_server_memory_mb) AS window_samples
-FROM v_memory_stats
-WHERE server_id = $1
-AND   collection_time >= $2";
+    public const string RecommendationsMemoryP95Sql = DarlingFinOpsRecommendationsReader.MemoryP95Sql;
 
     /// <summary>7-day P95 of SQL Server CPU utilization, for the VM right-sizing CPU prescription. $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string RecommendationsCpuP95Sql = @"
-SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu,
-       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample,
-       COUNT(sqlserver_cpu_utilization) AS window_samples
-FROM v_cpu_utilization_stats
-WHERE server_id = $1
-AND   collection_time >= $2";
+    public const string RecommendationsCpuP95Sql = DarlingFinOpsRecommendationsReader.CpuP95Sql;
 
     /// <summary>SQL Agent jobs that ran long at least 3 times in the window (maintenance-window efficiency). $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string RecommendationsMaintenanceWindowSql = @"
-SELECT
-    job_name,
-    COUNT(*) AS run_count,
-    AVG(current_duration_seconds) AS avg_duration_seconds,
-    MAX(current_duration_seconds) AS max_duration_seconds,
-    AVG(avg_duration_seconds) AS avg_historical,
-    SUM(CASE WHEN is_running_long THEN 1 ELSE 0 END) AS times_ran_long
-FROM v_running_jobs
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   avg_duration_seconds > 0
-GROUP BY job_name
-HAVING SUM(CASE WHEN is_running_long THEN 1 ELSE 0 END) >= 3
-ORDER BY times_ran_long DESC
-LIMIT 10";
+    public const string RecommendationsMaintenanceWindowSql = DarlingFinOpsRecommendationsReader.MaintenanceWindowSql;
 
     /// <summary>Per-database aggregate read/write I/O + stall over the window (storage-tier optimization). $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string RecommendationsStorageTierSql = @"
-SELECT
-    database_name,
-    SUM(delta_reads) AS total_reads,
-    SUM(delta_stall_read_ms) AS total_stall_read_ms,
-    SUM(delta_writes) AS total_writes,
-    SUM(delta_stall_write_ms) AS total_stall_write_ms,
-    MIN(collection_time) AS first_sample,
-    MAX(collection_time) AS last_sample,
-    COUNT(*) AS window_samples
-FROM v_file_io_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   delta_reads > 0
-GROUP BY database_name
-HAVING SUM(delta_reads) > 1000";
+    public const string RecommendationsStorageTierSql = DarlingFinOpsRecommendationsReader.StorageTierSql;
 
     /// <summary>Oldest query-stats sample for the server (idle-database advice waits until it is at or before the 7-day cutoff). $1 server_id.</summary>
-    public const string RecommendationsQueryStatsFirstSampleSql = @"
-SELECT MIN(collection_time)
-FROM v_query_stats
-WHERE server_id = $1";
+    public const string RecommendationsQueryStatsFirstSampleSql = DarlingFinOpsRecommendationsReader.QueryStatsFirstSampleSql;
 
     /// <summary>CPU utilization mean + standard deviation + sample count (reserved-capacity stability). $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string RecommendationsReservedCapacitySql = @"
-SELECT
-    AVG(sqlserver_cpu_utilization) AS avg_cpu,
-    STDDEV(sqlserver_cpu_utilization) AS stddev_cpu,
-    COUNT(*) AS sample_count
-FROM v_cpu_utilization_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-HAVING COUNT(*) >= 24";
+    public const string RecommendationsReservedCapacitySql = DarlingFinOpsRecommendationsReader.ReservedCapacitySql;
 
     /// <summary>
     /// The server's latest collected edition facts for the license audit (null when nothing collected yet), including
@@ -178,12 +112,7 @@ HAVING COUNT(*) >= 24";
     /// apply to Azure SQL Database. Same row Lite reads (<c>GetSqlEngineEditionAsync</c>): the newest collected
     /// <c>server_properties</c> row. $1 server_id.
     /// </summary>
-    public const string RecommendationsEngineEditionSql = @"
-SELECT engine_edition
-FROM server_properties
-WHERE server_id = $1
-ORDER BY collection_time DESC
-LIMIT 1";
+    public const string RecommendationsEngineEditionSql = DarlingFinOpsRecommendationsReader.EngineEditionSql;
 
     /// <summary>
     /// The server's latest collected engine edition, or <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
@@ -208,31 +137,16 @@ LIMIT 1";
     /// excluded, mirroring Lite's probe. Ordered by name for stable output.
     /// </summary>
     public static List<string> SelectTdeDatabaseNames(IEnumerable<DatabaseConfigRow> configRows) =>
-        configRows
-            .Where(r => r.IsEncrypted
-                && string.Equals(r.StateDesc, "ONLINE", StringComparison.OrdinalIgnoreCase)
-                && !RecommendationsSystemDatabases.Contains(r.DatabaseName))
-            .Select(r => r.DatabaseName)
-            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        FinOpsRecommendationFigures.SelectTdeDatabaseNames(
+            configRows.Select(r => new DatabaseEncryptionFact(r.DatabaseName, r.StateDesc, r.IsEncrypted)));
 
     /// <summary>
     /// Matches the collected database names against Lite's dev/test name patterns (<c>%dev% / %test% / %staging% /
     /// %qa%</c>, case-insensitive) excluding the system databases (Lite's <c>database_id &gt; 4</c>). Pure so the
     /// pattern logic is unit-testable without a store.
     /// </summary>
-    public static List<string> MatchDevTestDatabases(IEnumerable<string> databaseNames)
-    {
-        static bool IsDevTest(string name) =>
-            name.Contains("dev", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("test", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("staging", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("qa", StringComparison.OrdinalIgnoreCase);
-
-        return databaseNames
-            .Where(n => !RecommendationsSystemDatabases.Contains(n) && IsDevTest(n))
-            .ToList();
-    }
+    public static List<string> MatchDevTestDatabases(IEnumerable<string> databaseNames) =>
+        FinOpsRecommendationFigures.MatchDevTestDatabases(databaseNames);
 
     /// <summary>
     /// Builds the Edition / license audit recommendations from the collected facts (check 1 + Lite's check 10
@@ -257,122 +171,9 @@ LIMIT 1";
         string agReplicaRole,
         bool isHadrEnabled)
     {
-        var recommendations = new List<RecommendationRow>();
-
-        if (!edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase))
-        {
-            return recommendations;
-        }
-
-        var agRole = string.IsNullOrWhiteSpace(agReplicaRole) ? "Standalone" : agReplicaRole.Trim();
-        var isSecondary = string.Equals(agRole, "Secondary", StringComparison.OrdinalIgnoreCase);
-
-        /* Lite computes advancedAgCount = GetAdvancedAgCountAsync() (COUNT of sys.availability_groups WHERE
-           basic_features = 0) and skips the probe on a secondary. Darling's collected stand-in: an Enterprise
-           instance acting as an AG PRIMARY with Always On enabled — a Basic AG is a Standard-Edition-only feature,
-           so an Enterprise-hosted AG is effectively always advanced. Secondary gets its own branch below (Lite
-           forces advancedAgCount = 0 there); Standalone / feature-off => no caveat, no confidence downgrade. */
-        var hasAdvancedAg = !isSecondary
-            && string.Equals(agRole, "Primary", StringComparison.OrdinalIgnoreCase)
-            && isHadrEnabled;
-
-        /* Standard Edition offers only Basic Availability Groups, so caveat any edition-downgrade guidance when this
-           instance hosts an (advanced) AG: a downgrade would force the workload onto Basic AG limitations (#1085).
-           Lite names the advanced-AG count; Darling has only the collected role, so it names the primary replica. */
-        var agDowngradeCaveat = hasAdvancedAg
-            ? " Note: this instance is the primary replica of an Always On Availability Group. Standard Edition " +
-              "supports only Basic Availability Groups, which are limited to two replicas, a single database per " +
-              "group, and provide no readable secondary or backups on the secondary " +
-              "(see https://learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/basic-availability-groups-always-on-availability-groups#limitations). " +
-              "Factor this into any downgrade decision."
-            : "";
-
-        if (isSecondary)
-        {
-            /* On an Availability Group secondary, a "downgrade to Standard to save money" recommendation is
-               misleading: every replica in an AG must run the same SQL Server edition, so the decision belongs to
-               the AG as a whole and must be evaluated on the primary. Emit an informational note instead and skip
-               the savings estimates (#980). */
-            recommendations.Add(new RecommendationRow
-            {
-                Category = "Licensing",
-                Severity = "Low",
-                Confidence = "High",
-                Finding = "Enterprise Edition — Availability Group secondary replica",
-                Detail = "This instance is currently a secondary replica in an Availability Group. " +
-                         "Every replica in an AG must run the same SQL Server edition, so edition and " +
-                         "licensing decisions apply to the whole group and should be evaluated on the " +
-                         "primary replica. A secondary used only for failover may also be covered by " +
-                         "Software Assurance rather than separately licensed."
-            });
-        }
-        // SQL Server 2019 (major version 15) moved TDE to Standard Edition, so on 2019+ we give
-        // version-appropriate guidance rather than a TDE-specific check.
-        else if (majorVersion >= 15)
-        {
-            recommendations.Add(new RecommendationRow
-            {
-                Category = "Licensing",
-                Severity = "High",
-                Confidence = hasAdvancedAg ? "Low" : "Medium",
-                Finding = "Enterprise Edition may not be required",
-                Detail = "Starting with SQL Server 2019, most previously Enterprise-only features " +
-                         "(including TDE, compression, partitioning, and columnstore) are available " +
-                         "in Standard Edition. Review whether remaining Enterprise-only features " +
-                         "(such as Always On availability groups with multiple secondaries) are in use " +
-                         "before considering a downgrade to Standard Edition." + agDowngradeCaveat,
-                EstMonthlySavings = monthlyCost > 0 ? monthlyCost * 0.40m : null
-            });
-        }
-        else if (tdeDbNames.Count == 0)
-        {
-            // Pre-2019: TDE is the only commonly-used feature still restricted to Enterprise since 2016 SP1.
-            recommendations.Add(new RecommendationRow
-            {
-                Category = "Licensing",
-                Severity = "High",
-                Confidence = hasAdvancedAg ? "Medium" : "High",
-                Finding = hasAdvancedAg
-                    ? "Enterprise Edition — review Availability Group requirements before downgrading"
-                    : "Enterprise Edition with no Enterprise-only features detected",
-                Detail = "No databases use Transparent Data Encryption (TDE), the only feature " +
-                         "still restricted to Enterprise Edition since SQL Server 2016 SP1. " +
-                         "Review whether Standard Edition would meet workload requirements for potential license savings." +
-                         agDowngradeCaveat,
-                EstMonthlySavings = monthlyCost > 0 ? monthlyCost * 0.40m : null
-            });
-        }
-        else
-        {
-            recommendations.Add(new RecommendationRow
-            {
-                Category = "Licensing",
-                Severity = "Low",
-                Confidence = "High",
-                Finding = "TDE in use — Enterprise Edition downgrade blocker",
-                Detail = $"The following databases use Transparent Data Encryption: {string.Join(", ", tdeDbNames.Take(20))}" +
-                         (tdeDbNames.Count > 20 ? $" and {tdeDbNames.Count - 20} more" : "") +
-                         ". TDE must be removed before downgrading to Standard Edition."
-            });
-
-            // Check 10: license cost impact estimate (only when features ARE in use).
-            if (cpuCount > 0)
-            {
-                var monthlySavings = cpuCount * 5000m / 12m;
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Licensing",
-                    Severity = "Low",
-                    Confidence = "Low",
-                    Finding = $"Enterprise to Standard would save ~${monthlySavings:N0}/mo at list pricing ({cpuCount} cores)",
-                    Detail = "Based on list pricing differential of ~$5,000/core/year between Enterprise and Standard. " +
-                             "Actual savings depend on your licensing agreement. See Enterprise feature audit for downgrade blockers.",
-                    EstMonthlySavings = monthlySavings
-                });
-            }
-        }
-
-        return recommendations;
+        return FinOpsRecommendationFigures.EditionAudit(
+            edition, majorVersion, cpuCount, tdeDbNames, monthlyCost, agReplicaRole, isHadrEnabled)
+            .Select(RecommendationRow.From).ToList();
     }
 
     /// <summary>
@@ -383,32 +184,8 @@ LIMIT 1";
     /// </summary>
     public static RecommendationRow? BuildCompressionRecommendation(IEnumerable<IndexCleanupIndexInput> indexes)
     {
-        var candidates = indexes
-            .Where(i => string.Equals(i.DataCompressionDesc, "NONE", StringComparison.OrdinalIgnoreCase)
-                && (i.ReservedMb ?? 0m) >= 1024m)
-            .OrderByDescending(i => i.ReservedMb ?? 0m)
-            .ToList();
-
-        if (candidates.Count == 0)
-        {
-            return null;
-        }
-
-        var totalGb = candidates.Sum(c => c.ReservedMb ?? 0m) / 1024m;
-        var topItems = candidates.Take(5)
-            .Select(c => $"{c.SchemaName}.{c.TableName} ({(c.ReservedMb ?? 0m) / 1024m:N1}GB)")
-            .ToList();
-
-        return new RecommendationRow
-        {
-            Category = "Storage",
-            Severity = totalGb > 50 ? "High" : totalGb > 10 ? "Medium" : "Low",
-            Confidence = "High",
-            Finding = $"{candidates.Count} uncompressed object(s) >= 1GB ({totalGb:N1}GB total)",
-            Detail = $"Large uncompressed tables/indexes: {string.Join("; ", topItems)}" +
-                     (candidates.Count > 5 ? $" and {candidates.Count - 5} more" : "") +
-                     ". Consider PAGE or ROW compression to reduce storage and improve I/O."
-        };
+        var recommendation = FinOpsRecommendationFigures.Compression(indexes);
+        return recommendation == null ? null : RecommendationRow.From(recommendation);
     }
 
     /// <summary>
@@ -420,23 +197,8 @@ LIMIT 1";
     /// </summary>
     internal static RecommendationRow? BuildCpuRightSizingRecommendation(UtilizationEfficiencyRow? util, decimal monthlyCost)
     {
-        if (util == null || !util.HasCpuSample || util.P95CpuPct >= 30 || util.CpuCount <= 4
-            || util.ProvisioningStatus == ProvisioningVerdict.NotApplicable)
-            return null;
-
-        var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
-        var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
-        var cpuNoun = ServerHardwareScope.CpuCoreNoun(util.EngineEdition);
-        return new RecommendationRow
-        {
-            Category = "Compute",
-            Severity = util.P95CpuPct < 15 ? "High" : "Medium",
-            Confidence = "Medium",
-            Finding = $"CPU over-provisioned ({util.CpuCount} {cpuNoun}, P95 = {util.P95CpuPct:N1}%)",
-            Detail = $"P95 CPU utilization is {util.P95CpuPct:N1}% (avg {util.AvgCpuPct:N1}%, max {util.MaxCpuPct}%) across {util.CpuCount} {cpuNoun}. " +
-                     $"Consider reducing to ~{targetCores} {cpuNoun}.",
-            EstMonthlySavings = monthlyCost > 0 ? monthlyCost * savingsPct * 0.60m : null
-        };
+        var recommendation = FinOpsRecommendationFigures.CpuRightSizing(util?.ToDto(), monthlyCost);
+        return recommendation == null ? null : RecommendationRow.From(recommendation);
     }
 
     /// <summary>
@@ -871,14 +633,7 @@ LIMIT 1";
     }
 
     /// <summary>Human-readable duration formatting for the maintenance-window finding (Lite's FinOps FormatDuration, verbatim).</summary>
-    private static string FormatDuration(long seconds)
-    {
-        if (seconds >= 3600)
-            return $"{seconds / 3600}h {(seconds % 3600) / 60}m {seconds % 60}s";
-        if (seconds >= 60)
-            return $"{seconds / 60}m {seconds % 60}s";
-        return $"{seconds}s";
-    }
+    private static string FormatDuration(long seconds) => FinOpsRecommendationFigures.FormatDuration(seconds);
 }
 
 /// <summary>
@@ -896,11 +651,16 @@ public sealed class RecommendationRow
     public string Detail { get; set; } = "";
     public decimal? EstMonthlySavings { get; set; }
     public string EstMonthlySavingsDisplay => EstMonthlySavings.HasValue ? $"${EstMonthlySavings.Value:N0}" : "";
-    public int SeveritySort => Severity switch
+    public int SeveritySort => FinOpsRecommendationFigures.SeveritySort(Severity);
+
+    /// <summary>The viewer row for a Storage recommendation.</summary>
+    public static RecommendationRow From(FinOpsRecommendation r) => new()
     {
-        "High" => 1,
-        "Medium" => 2,
-        "Low" => 3,
-        _ => 4
+        Category = r.Category,
+        Severity = r.Severity,
+        Confidence = r.Confidence,
+        Finding = r.Finding,
+        Detail = r.Detail,
+        EstMonthlySavings = r.EstMonthlySavings
     };
 }

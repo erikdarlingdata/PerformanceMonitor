@@ -36,7 +36,7 @@ public sealed class NoServiceObjectiveToResizeTests
     public void RecommendationRules_StandDownOnTheSharedPredicate()
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(
-            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs"));
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs"));
         Assert.Contains("ProvisioningVerdict.NotApplicable", source, StringComparison.Ordinal);
     }
 
