@@ -54,7 +54,7 @@ const RECOMMENDATION_COLUMNS = [
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
   { key: "index_name", label: "Index" },
-  { key: "index_size_gb_text", label: "Size GB", align: "right" },
+  { key: "index_size_gb_text", label: "Size GB", align: "right", sortValue: (r) => r.index_size_gb },
   { key: "index_rows", label: "Rows", format: "int" },
   { key: "index_reads", label: "Reads", format: "int" },
   { key: "index_writes", label: "Writes", format: "int" },
