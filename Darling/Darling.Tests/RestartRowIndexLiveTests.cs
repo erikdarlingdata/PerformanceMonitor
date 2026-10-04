@@ -77,9 +77,9 @@ public sealed class RestartRowIndexLiveTests
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         await Exec(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
 
-        /* A fixed anchor, 23:50 UTC on a fixed past day, not the wall clock. The seed reaches back 7,000 seconds
+        /* A fixed anchor, 23:50 UTC on a fixed past day, not the wall clock. The seed reaches back 5,000 seconds
            from this instant, and chunks are one day aligned to UTC midnight, so a seed ending at the real "now"
-           straddles two daily chunks between 00:00 and about 02:00 UTC. On either chunk a Seq Scan can then
+           straddles two daily chunks between 00:00 and about 01:23 UTC. On either chunk a Seq Scan can then
            cost less than the partial index, and the no-heap-scan assertion fails. Ending at 23:50 keeps the
            whole seed inside one day. */
         var utcNow = new DateTime(2026, 1, 15, 23, 50, 0, DateTimeKind.Unspecified);
