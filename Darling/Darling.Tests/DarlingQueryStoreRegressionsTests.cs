@@ -479,6 +479,44 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
     }
 
     /// <summary>
+    /// #4966: a failed data-start probe costs the notice, never the answer. The regression rows come back with the three keys
+    /// absent, and an empty answer carries no hints.
+    /// </summary>
+    [Fact]
+    public async Task AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), 90, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 200, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
+
+            DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
+            try
+            {
+                var hit = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
+
+                Assert.False(hit.TryGetProperty("status", out _));
+                Assert.False(hit.TryGetProperty("error", out _));
+                Assert.Equal(1, hit.GetProperty("regression_count").GetInt32());
+                Assert.False(hit.TryGetProperty("effective_start", out _));
+                Assert.False(hit.TryGetProperty("window_truncated", out _));
+                Assert.False(hit.TryGetProperty("truncation_note", out _));
+
+                /* Take the recent row away: the recent side is missing, so the answer is empty. */
+                await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_store_stats WHERE server_id = $1 AND collection_time > $2", ServerId, DarlingMcpTestData.Naive(baseNow.AddHours(-2)));
+
+                var empty = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 2));
+                Assert.Equal("empty", empty.GetProperty("status").GetString());
+                Assert.False(empty.TryGetProperty("hints", out _));
+            }
+            finally
+            {
+                DarlingMcpWindowNotice.TestOnlyProbe = null;
+            }
+        });
+    }
+
+    /// <summary>
     /// #4966: every <c>empty</c> answer carries the three keys under <c>hints</c>, the all-clear included (a clean comparison
     /// over a baseline the store only partly holds is not a true negative), and every <c>unavailable</c> answer carries none.
     /// </summary>

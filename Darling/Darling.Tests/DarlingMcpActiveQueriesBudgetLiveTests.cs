@@ -119,7 +119,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
 
     /// <summary>
     /// #4966: the same 50 heavy rows, read over a window the store does NOT cover (24 hours back, 49 minutes held), so the three
-    /// window-floor keys and the ~190-character note ride on the payload. The covered case sits 45 bytes under the budget; this
+    /// window-floor keys and the 177-character note ride on the payload. The covered case is 30,223 bytes; this
     /// one pins that the cut window's extra keys do not push the default call over it.
     /// </summary>
     [Fact]

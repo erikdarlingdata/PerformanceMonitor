@@ -695,6 +695,41 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     }
 
     /// <summary>
+    /// #4966: a failed data-start probe costs the notice, never the answer. The grid comes back with the three keys absent,
+    /// and an empty answer carries no hints.
+    /// </summary>
+    [Fact]
+    public async Task AFailedProbe_CostsTheNotice_NeverTheGrid_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            var t1 = FloorToHour(baseNow.AddHours(-3));
+            await SeedAsync(connection, ct, t1, "0xHOT", deltaExec: 5, deltaElapsed: 250_000);
+
+            DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
+            try
+            {
+                var grid = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24));
+
+                Assert.False(grid.TryGetProperty("status", out _));
+                Assert.False(grid.TryGetProperty("error", out _));
+                Assert.True(grid.TryGetProperty("window_start", out _));
+                Assert.False(grid.TryGetProperty("effective_start", out _));
+                Assert.False(grid.TryGetProperty("window_truncated", out _));
+                Assert.False(grid.TryGetProperty("truncation_note", out _));
+
+                var empty = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 1));
+                Assert.Equal("empty", empty.GetProperty("status").GetString());
+                Assert.False(empty.TryGetProperty("hints", out _));
+            }
+            finally
+            {
+                DarlingMcpWindowNotice.TestOnlyProbe = null;
+            }
+        });
+    }
+
+    /// <summary>
     /// #4966: every <c>empty</c> answer carries the three keys under <c>hints</c>, and <c>unavailable</c> carries none.
     /// Rows only outside the window: the store holds no collection of the window, so the hints say NOT covered with no start
     /// to name. Then a zero-execution capture inside it: the store did look, so covered, at the window's start.
