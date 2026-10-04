@@ -231,7 +231,7 @@ public sealed class FinOpsTabIndexAnalysisPageTests
     {
         var tab = Tab();
         Assert.Matches(@"addEventListener\(""focus"", \(\) => \{\s*choice\.focused = true;", tab);
-        Assert.Matches(@"addEventListener\(""blur"", \(\) => \{\s*if \(dbInput\.isConnected\) choice\.focused = false;", tab);
+        Assert.Matches(@"addEventListener\(""blur"", \(\) => \{\s*setTimeout\(\(\) => \{\s*if \(dbInput\.isConnected\) choice\.focused = false;\s*\}, 0\);", tab);
         Assert.Matches(@"if \(choice\.focused\) \{\s*setTimeout\(\(\) => \{\s*if \(dbInput\.isConnected\) \{\s*dbInput\.focus\(\);\s*if \(choice\.caret\) dbInput\.setSelectionRange\(choice\.caret\[0\], choice\.caret\[1\]\);", tab);
         Assert.DoesNotContain("requestAnimationFrame", tab);
     }

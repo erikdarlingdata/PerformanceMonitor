@@ -165,6 +165,7 @@ export const tab = {
 
     // The panel is rebuilt on every poll. Keep the uncommitted text, the caret and the focus on the per-server
     // choice so the new box can take them back. A blur caused by the old panel leaving the page must not clear focus.
+    // Chrome fires that blur DURING the removal, while the box is still connected, so the check waits a turn.
     dbInput.addEventListener("input", () => {
       choice.draft = dbInput.value;
       choice.caret = [dbInput.selectionStart, dbInput.selectionEnd];
@@ -173,7 +174,9 @@ export const tab = {
       choice.focused = true;
     });
     dbInput.addEventListener("blur", () => {
-      if (dbInput.isConnected) choice.focused = false;
+      setTimeout(() => {
+        if (dbInput.isConnected) choice.focused = false;
+      }, 0);
     });
     dbInput.addEventListener("change", () => {
       choice.db = dbInput.value.trim();
