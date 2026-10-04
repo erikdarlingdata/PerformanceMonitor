@@ -48,7 +48,7 @@ internal static class DarlingAlertReader
     public sealed record AlertHistoryReadRow(
         DateTime AlertTime, int ServerId, string ServerName, string MetricName,
         double CurrentValue, double ThresholdValue, bool AlertSent, string NotificationType,
-        string? SendError, bool Muted, string? DetailText, bool Dismissed, string? ContextJson = null);
+        string? SendError, bool Muted, string? DetailText, bool Dismissed, string? ContextJson = null, string? StoredServerName = null);
 
     private const string AlertHistorySelectColumns = @"
     a.alert_time,
@@ -63,6 +63,7 @@ internal static class DarlingAlertReader
     a.muted,
     a.detail_text,
     a.context_json,
+    a.server_name AS stored_server_name,
     a.dismissed";
 
     /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 window
@@ -182,10 +183,12 @@ AND   dismissed = TRUE";
             reader.IsDBNull(8) ? null : reader.GetString(8),
             !reader.IsDBNull(9) && reader.GetBoolean(9),
             reader.IsDBNull(10) ? null : reader.GetString(10),
-            /* context_json sits at ordinal 11 and dismissed stays the LAST column at 12 — the viewer's
-               own column order, and the "dismissed is selected" pin anchors on it closing the list. */
-            !reader.IsDBNull(12) && reader.GetBoolean(12),
-            reader.IsDBNull(11) ? null : reader.GetString(11));
+            /* context_json sits at ordinal 11, the stored server_name (the spelling the producer's mute context
+               carries, as opposed to the display name at ordinal 2) at 12, and dismissed stays the LAST column
+               at 13 — the "dismissed is selected" pin anchors on it closing the list. */
+            !reader.IsDBNull(13) && reader.GetBoolean(13),
+            reader.IsDBNull(11) ? null : reader.GetString(11),
+            reader.IsDBNull(12) ? null : reader.GetString(12));
 
     /* ─────────── the first row after an alert (#4755) ─────────── */
 

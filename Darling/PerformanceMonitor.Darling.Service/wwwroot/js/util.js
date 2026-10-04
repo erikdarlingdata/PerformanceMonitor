@@ -591,7 +591,7 @@ export function onSessionExpired(fn) {
   sessionExpiredListeners.push(fn);
 }
 
-function reportSessionExpired(message, login) {
+export function reportSessionExpired(message, login) {
   if (sessionExpired) return;
   sessionExpired = true;
   for (const fn of sessionExpiredListeners) fn(message, login);
