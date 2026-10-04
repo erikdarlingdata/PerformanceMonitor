@@ -997,7 +997,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static void MapServerTags(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
     {
-        var store = new ServerTagStore(postgres, McpCommandDeadlines.ReadSeconds);
+        var store = new ServerTagStore(postgres, DarlingMcpServerTagTools.WriteCommandSeconds);
 
         app.MapPost("/api/server-tags", async (HttpContext context) =>
         {

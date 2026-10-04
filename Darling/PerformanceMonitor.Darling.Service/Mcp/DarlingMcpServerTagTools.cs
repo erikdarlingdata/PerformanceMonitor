@@ -55,7 +55,7 @@ public sealed class DarlingMcpServerTagTools
     private const string RulesAffectedCode = "rules_affected";
 
     /// <summary>The per-command deadline the write tools use, the same as the mute-rule store's.</summary>
-    private const int WriteCommandSeconds = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
+    internal const int WriteCommandSeconds = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
 
     [McpServerTool(Name = "create_server_tag"), Description(
         "Creates a fleet server tag, at the root or under parent_id. Tags organize the server list and scope custom alert rules: a rule scoped to a tag covers every server under its whole subtree. Names are trimmed, 1-100 characters, unique among siblings ignoring case; tags nest at most four levels. colour is #RRGGBB; omit it for the palette colour the Viewer assigns. Returns the stored tag, or invalid/conflict/not_found with nothing written. Find tag ids and server ids in get_fleet_overview.")]

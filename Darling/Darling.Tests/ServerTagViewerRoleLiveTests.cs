@@ -83,7 +83,7 @@ public sealed class ServerTagViewerRoleLiveTests
                 await store.UpdateAsync(tagId, new ServerTagEdit(true, "Production", false, null, false, null), ct));
             Assert.Equal("Production", updated.Tag!.Name);
             Assert.Equal(new[] { 4 }, await store.UnassignAsync(tagId, new[] { 4 }, ct));
-            var deleted = Assert.IsType<ServerTagWriteResult.Ok>(await store.DeleteAsync(tagId, ct));
+            var deleted = Assert.IsType<ServerTagWriteResult.Ok>(await store.DeleteAsync(tagId, true, ct));
             Assert.Equal(1, deleted.RemovedAssignments);
             Assert.Empty(await store.ReadTagsAsync(ct));
         }

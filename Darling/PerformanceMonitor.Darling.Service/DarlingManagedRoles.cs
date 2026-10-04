@@ -35,7 +35,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// dashboard's write surfaces run as this role, so it holds INSERT/UPDATE/DELETE on
 /// <c>config.custom_views</c> (#1563, the user-authored view definitions), <c>config.custom_alert_rules</c>
 /// (#3285, the user-authored alert rules), <c>config.database_state_expected</c> (#1986, the Viewer's
-/// per-database override editor) and <c>config.config_mute_rules</c> (#3450, the dedicated mute-rule
+/// per-database override editor), <c>config.server_tags</c> and <c>config.server_tag_map</c> (#5085, the
+/// server-tag endpoints) and <c>config.config_mute_rules</c> (#3450, the dedicated mute-rule
 /// endpoints — plus the two <c>config_service</c> beacon columns its bump trigger writes as the caller).
 /// All non-secret tables; over the web, editing is gated server-side by the host's auth + the seat model
 /// (an OIDC viewer seat is refused every write) — these grants are only the floor beneath that gate. A
