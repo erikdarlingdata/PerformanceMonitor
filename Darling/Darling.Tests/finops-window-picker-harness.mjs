@@ -73,13 +73,15 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "finops-window-"));
 try {
   fs.mkdirSync(path.join(scratch, "pages", "finops"), { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "panels.js", "grid-tools.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
+  for (const f of ["util.js", "panels.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
   for (const f of ["optimization.js", "high-impact.js", "index-analysis.js"]) {
     fs.copyFileSync(path.join(jsDir, "pages", "finops", f), path.join(scratch, "pages", "finops", f));
   }
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
-    'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return {}; }\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n'
+    'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n' +
+      /* panels.js imports these since the line-chart zoom (#5092). */
+      'export function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return ""; }\n'
   );
   const out = {};
   for (const name of ["optimization", "high-impact"]) {
