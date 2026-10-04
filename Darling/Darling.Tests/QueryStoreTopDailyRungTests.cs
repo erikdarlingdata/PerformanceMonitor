@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// writer uses them yet. Every fact finds the rung by NAME, so a renumber is one edit to the registration, the constant
 /// and the viewer's <c>return</c>. The live facts run when <c>DARLING_TEST_PG</c> is set, each on its own scratch store.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class QueryStoreTopDailyRungTests
 {
     public const string RungName = "query-store-top-daily";
@@ -295,8 +296,19 @@ public sealed class QueryStoreTopDailyRungTests
             /* Plain relations (relkind 'r'), not hypertables, in the collect schema. */
             Assert.Equal(2L, await ScalarAsync(connection,
                 "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'collect' AND c.relname IN ('query_store_top_daily', 'query_store_top_daily_built') AND c.relkind = 'r'", ct));
-            Assert.True(await ScalarAsync(connection,
-                "SELECT NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') OR NOT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name IN ('query_store_top_daily', 'query_store_top_daily_built'))", ct) is true);
+            /* Plain-ness is asked of the catalog only when the store has no timescaledb: the hypertables view does not exist
+               there, and a relation in an OR still fails the parse. With the extension, neither table may be a hypertable. */
+            var hasTimescale = await ScalarAsync(connection, "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')", ct) is true;
+            if (hasTimescale)
+            {
+                Assert.True(await ScalarAsync(connection,
+                    "SELECT NOT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name IN ('query_store_top_daily', 'query_store_top_daily_built'))", ct) is true);
+            }
+            else
+            {
+                Assert.True(await ScalarAsync(connection,
+                    "SELECT NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhparent IN ('collect.query_store_top_daily'::regclass, 'collect.query_store_top_daily_built'::regclass) OR i.inhrelid IN ('collect.query_store_top_daily'::regclass, 'collect.query_store_top_daily_built'::regclass))", ct) is true);
+            }
 
             /* The unique index exists, is unique, and is NULLS NOT DISTINCT on the key. */
             var indexDef = (string?)await ScalarAsync(connection,
