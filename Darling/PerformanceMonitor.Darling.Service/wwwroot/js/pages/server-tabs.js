@@ -3015,19 +3015,32 @@ const AUTO_TUNING_COLUMNS = [
   { key: "as_of", label: "As of", format: "time" },
 ];
 
+/* The Active Queries grid, in the desktop viewer's column order and wording (Collected and Query Text lead, the anchor rule; the desktop's plan column is not here). */
 const ACTIVE_COLUMNS = [
-  { key: "collection_time", label: "Time", format: "time" },
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
+  { key: "collection_time", label: "Collected", format: "time" },
+  { key: "query_text", label: "Query Text", render: (r) => codeDisclosure(r.query_text) },
   { key: "session_id", label: "SPID", format: "int" },
   { key: "database_name", label: "Database" },
-  { key: "status", label: "Status" },
-  { key: "cpu_time_ms", label: "CPU", format: "ms" },
-  { key: "elapsed_time_formatted", label: "Elapsed" },
-  { key: "wait_type", label: "Wait" },
-  { key: "blocking_session_id", label: "Blocked by", format: "int" },
-  { key: "dop", label: "DOP", format: "int" },
-  { key: "program_name", label: "Application" },
   { key: "login_name", label: "Login" },
+  { key: "host_name", label: "Host" },
+  { key: "program_name", label: "Program" },
+  { key: "status", label: "Status" },
+  { key: "elapsed_time_formatted", label: "Elapsed" },
+  { key: "cpu_time_ms", label: "CPU (ms)", format: "int" },
+  { key: "logical_reads", label: "Logical Reads", format: "int" },
+  { key: "reads", label: "Reads", format: "int" },
+  { key: "writes", label: "Writes", format: "int" },
+  { key: "wait_type", label: "Wait Type" },
+  { key: "wait_time_ms", label: "Wait (ms)", format: "int" },
+  { key: "wait_resource", label: "Wait Resource" },
+  { key: "blocking_session_id", label: "Blocking", format: "int" },
+  { key: "dop", label: "DOP", format: "int" },
+  { key: "parallel_worker_count", label: "Workers", format: "int" },
+  { key: "granted_query_memory_gb", label: "Memory (GB)", format: "num2" },
+  { key: "transaction_isolation_level", label: "Isolation" },
+  { key: "open_transaction_count", label: "Open Tran", format: "int" },
+  { key: "percent_complete", label: "% Done", format: "num1" },
+  { key: "query_hash", label: "Query Hash" },
 ];
 
 const BLOCKING_COLUMNS = [
