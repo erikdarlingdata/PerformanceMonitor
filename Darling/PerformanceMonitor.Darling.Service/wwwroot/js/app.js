@@ -41,6 +41,7 @@ import { navigateServer } from "./panels.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
 import { renderSweeps } from "./pages/sweeps.js";
+import { renderAdmin } from "./pages/admin.js";
 import { renderServer } from "./pages/server.js";
 import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
@@ -88,6 +89,8 @@ function currentRoute() {
     return { name: "alertEditor", id: "new", template: decodeURIComponent(h.slice("#/alert-rule/new/".length)) };
   }
   if (h.startsWith("#/alert-rule/")) return { name: "alertEditor", id: decodeURIComponent(h.slice("#/alert-rule/".length)) };
+  /* #/admin and #/admin/{tab}: the read-only Admin page; an unknown tab falls back inside the page. */
+  if (h === "#/admin" || h.startsWith("#/admin/")) return { name: "admin", tab: safeDecode(h.slice("#/admin".length).replace(/^\//, "")) };
   /* #/views (list) is checked before the #/view/ forms; and the /edit form is tested before the bare /view/. */
   if (h === "#/views" || h === "#/views/") return { name: "views" };
   if (h === "#/view/new") return { name: "editor", id: "new" };
@@ -172,6 +175,7 @@ function route(opts) {
   else if (r.name === "alerts") renderAlerts(main);
   else if (r.name === "alertRules") renderAlertRuleList(main);
   else if (r.name === "alertEditor") renderAlertEditor(main, r.id, r.template);
+  else if (r.name === "admin") renderAdmin(main, r.tab);
   else if (r.name === "triage") renderTriage(main, r.query);
   else if (r.name === "views") renderViewList(main);
   else if (r.name === "view") renderView(main, r.id);
