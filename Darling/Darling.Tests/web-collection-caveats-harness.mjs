@@ -73,9 +73,14 @@ try {
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   for (const f of ["util.js", "panels.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
   fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
+  /* Modules that other open PRs add to what server-tabs.js and panels.js import: copied when present, so this harness
+     keeps working whichever lands first. */
+  for (const f of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js")]) {
+    if (fs.existsSync(path.join(jsDir, f))) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
+  }
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
-    'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\n' +
+    'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport const CATEGORICAL_COLORS = [];\nexport function normalizeColor(c) { return c; }\n' +
       'export function renderLineChart() { return el("div", {}); }\nexport function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return ""; }\n'
   );
   const tabs = await import(pathToFileURL(path.join(scratch, "pages", "server-tabs.js")).href);
