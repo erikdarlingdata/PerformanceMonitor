@@ -81,7 +81,7 @@ public sealed class McpPlanCorrectionTools
             var requestedStart = windowEnd.AddHours(-hours_back);
             var notice = await McpQueryTools.WindowNoticeAsync(
                 () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.PlanCorrection, resolved.ServerId, requestedStart, windowEnd),
-                requestedStart, windowEnd, "plan_correction", emptyAnswer: rows.Count == 0);
+                requestedStart, windowEnd, "plan_correction", emptyAnswer: false, listOnly: rows.Count == 0);
 
             var recommendations = page.Select(r => new
             {

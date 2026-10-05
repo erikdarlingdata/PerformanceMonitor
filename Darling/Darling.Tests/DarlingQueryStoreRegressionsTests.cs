@@ -752,7 +752,9 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
         Assert.True(answer.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
         Assert.StartsWith("No query on ", message, StringComparison.Ordinal);
         Assert.Contains("more than 25% worse than its baseline", message, StringComparison.Ordinal);
-        Assert.EndsWith(". " + McpHelpers.CutWindowClaim(answer.GetProperty("hints").GetProperty("effective_start").GetString()), message, StringComparison.Ordinal);
+        /* Every fixture here has a baseline that starts 40 hours back, so the notice names a start: the CutWindowNothingMessage variant. */
+        Assert.NotEqual(System.Text.Json.JsonValueKind.Null, answer.GetProperty("hints").GetProperty("effective_start").ValueKind);
+        Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
         Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
     }
 

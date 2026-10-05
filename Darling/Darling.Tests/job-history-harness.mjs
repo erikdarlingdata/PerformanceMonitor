@@ -1,6 +1,6 @@
 /* Runs the shipped Job History page (wwwroot/js/pages/job-history.js) against a recording fetch and a node-tree DOM, and
    prints as one line of JSON what it asked for and drew: the first build, a status pick, a typed job name, a rebuild
-   (the 60 s poll), a one-server pick, and the two notices.
+   (the 60 s poll), a one-server pick, the two notices, and the Agent line (stopped, running, unknown, a roll-up).
        node job-history-harness.mjs <path to wwwroot/js> */
 import fs from "node:fs";
 import os from "node:os";
@@ -117,8 +117,14 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "job-history-"));
 try {
   fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "panels.js", "grid-tools.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  fs.copyFileSync(path.join(jsDir, "pages", "job-history.js"), path.join(scratch, "pages", "job-history.js"));
+  /* Copy every module under js/ and js/pages/ rather than a hand-kept list: a new page module that server-tabs.js
+     imports (another PR's pages/*.js) then needs no edit here. Only imported files load, so the rest are inert;
+     charts.js is replaced by the stub below. */
+  for (const dir of ["", "pages"]) {
+    for (const f of fs.readdirSync(path.join(jsDir, dir))) {
+      if (f.endsWith(".js")) fs.copyFileSync(path.join(jsDir, dir, f), path.join(scratch, dir, f));
+    }
+  }
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n' +
@@ -233,6 +239,31 @@ try {
   renderJobHistory(quiet);
   await settle();
   out.quiet = { noticeCount: all(quiet, "div").filter((d) => d.className === "strip notice").length };
+
+  // The Agent line: a one-server answer's flat fields, the fleet's agents list, and an empty answer's hints.
+  const agentLine = async (body) => {
+    historyBody = JSON.stringify(body);
+    const root = new FakeNode("div");
+    root.isRoot = true;
+    renderJobHistory(root);
+    await settle();
+    const line = all(root, "div").find((d) => String(d.className || "").startsWith("agent-line "));
+    return line ? { text: line.textContent, cls: line.className } : null;
+  };
+  out.agent = {
+    stopped: await agentLine({ ...run, server: "srv-a", agent_running: false, agent_status_desc: "Stopped" }),
+    running: await agentLine({ ...run, server: "srv-a", agent_running: true, agent_status_desc: "Running" }),
+    unknown: await agentLine({ ...run, server: "srv-a", agent_running: null, agent_status_desc: "unknown (no recent status)" }),
+    rollup: await agentLine({ ...run, agents_total: 4, agents_running: 2, agents_not_running: [{ server: "srv-b", agent_running: false }, { server: "srv-d", agent_running: null }] }),
+    allRunning: await agentLine({ ...run, agents_total: 2, agents_running: 2, agents_not_running: [] }),
+    emptyStopped: await agentLine({ status: "empty", message: "No job runs matched in the requested time range.", hints: { effective_start: "2026-03-01T08:00:00Z", window_truncated: false, server: "srv-a", agent_running: false } }),
+    emptyFleet: await agentLine({ status: "empty", message: "No job runs matched in the requested time range.", hints: { agents_total: 3, agents_running: 2, agents_not_running: [{ server: "srv-a", agent_running: false }] } }),
+    noService: await agentLine({ ...run, server: "srv-x", agent_running: null, agent_status_desc: "no SQL Agent service found" }),
+    rollupNoService: await agentLine({ ...run, agents_total: 2, agents_running: 1, agents_not_running: [{ server: "srv-x", agent_running: null, agent_status_desc: "no SQL Agent service found" }] }),
+    rollupMixed: await agentLine({ ...run, agents_total: 3, agents_running: 1, agents_not_running: [{ server: "srv-b", agent_running: false, agent_status_desc: "Stopped" }, { server: "srv-x", agent_running: null, agent_status_desc: "no SQL Agent service found" }] }),
+    emptyNoService: await agentLine({ status: "empty", message: "No job runs matched in the requested time range.", hints: { effective_start: "2026-03-01T08:00:00Z", window_truncated: false, server: "srv-x", agent_running: null, agent_status_desc: "no SQL Agent service found" } }),
+    absent: await agentLine(run),
+  };
 
   out.columns = JOB_HISTORY_COLUMNS.map((c) => c.label);
   console.log(JSON.stringify(out));

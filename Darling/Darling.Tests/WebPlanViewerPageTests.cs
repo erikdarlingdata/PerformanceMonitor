@@ -27,10 +27,9 @@ public sealed class WebPlanViewerPageTests
     public void TheViewer_ReadsGetPlanXml_WithItsRequiredAndOptionalParams()
     {
         var viewer = Js("pages", "plan-viewer.js");
-        Assert.Contains("const PLAN_READ = \"get_plan_xml\"", viewer, StringComparison.Ordinal);
-        Assert.Contains("readTool(PLAN_READ, params)", viewer, StringComparison.Ordinal);
-        Assert.Contains("{ server, query_hash: hash }", viewer, StringComparison.Ordinal);
-        Assert.Contains("params.database_name = database", viewer, StringComparison.Ordinal);
+        Assert.Contains("read: \"get_plan_xml\"", viewer, StringComparison.Ordinal);
+        Assert.Contains("readTool(spec.read, { server, ...spec.params(source) })", viewer, StringComparison.Ordinal);
+        Assert.Contains("params: (s) => ({ query_hash: s.query_hash, database_name: s.database_name || null })", viewer, StringComparison.Ordinal);
 
         Assert.True(DarlingWebEndpoints.CatalogDescriptors.TryGetValue("get_plan_xml", out var d), "get_plan_xml is not on the read surface");
         var names = d!.Params.Select(p => p.Name).ToHashSet(StringComparer.Ordinal);
@@ -39,6 +38,79 @@ public sealed class WebPlanViewerPageTests
         Assert.Contains("database_name", names);
         Assert.True(d.Params.Single(p => p.Name == "query_hash").Required);
         Assert.False(d.Params.Single(p => p.Name == "database_name").Required);
+    }
+
+    /// <summary>Each plan source kind (#5228) reads a tool that is on the web read surface, and sends every parameter
+    /// that tool requires. The kinds and their params are parsed from the shipped SOURCES map.</summary>
+    [Theory]
+    [InlineData("query_hash", "get_plan_xml", new[] { "query_hash" })]
+    [InlineData("active_snapshot", "get_active_query_plan_xml", new[] { "collection_time", "session_id" })]
+    [InlineData("query_store", "get_query_store_plan_xml", new[] { "database_name", "query_id" })]
+    [InlineData("procedure", "get_procedure_plan_xml", new[] { "sql_handle" })]
+    public void EachPlanSourceKind_ReadsACatalogTool_AndSendsItsRequiredParams(string kind, string tool, string[] required)
+    {
+        var viewer = Js("pages", "plan-viewer.js");
+        var start = viewer.IndexOf("  " + kind + ": {", StringComparison.Ordinal);
+        Assert.True(start >= 0, kind + " is not in SOURCES");
+        var end = viewer.IndexOf("\n  },", start, StringComparison.Ordinal);
+        var block = viewer.Substring(start, end - start);
+        Assert.Contains("read: \"" + tool + "\"", block, StringComparison.Ordinal);
+
+        Assert.True(DarlingWebEndpoints.CatalogDescriptors.TryGetValue(tool, out var d), tool + " is not on the read surface");
+        var catalogRequired = d!.Params.Where(p => p.Required).Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+        Assert.Equal(required.OrderBy(n => n, StringComparer.Ordinal).ToArray(), catalogRequired);
+
+        var paramsStart = block.IndexOf("params:", StringComparison.Ordinal);
+        var paramsBlock = block.Substring(paramsStart, block.IndexOf("key:", paramsStart, StringComparison.Ordinal) - paramsStart);
+        foreach (var name in d.Params.Select(p => p.Name).Where(n => n != "server"))
+        {
+            if (kind == "active_snapshot" && name == "live") Assert.Contains("live:", paramsBlock, StringComparison.Ordinal);
+            else if (d.Params.Single(p => p.Name == name).Required) Assert.Contains(name, paramsBlock, StringComparison.Ordinal);
+        }
+
+        Assert.False(d.Params.Any(p => p.Name is "hours" or "as_of"), tool + " is a point read: it takes no window");
+    }
+
+    [Fact]
+    public void TheTimestamp_GoesToTheRead_AsTheRowHoldsIt_NeverThroughADate()
+    {
+        var viewer = Js("pages", "plan-viewer.js");
+        Assert.DoesNotContain("new Date", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain("Date.parse", viewer, StringComparison.Ordinal);
+        Assert.Contains("collection_time: s.collection_time,", viewer, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("ACTIVE_COLUMNS", "[...ACTIVE_COLUMNS, ...activePlanColumns(server)]")]
+    [InlineData("QUERY_STORE_COLUMNS", "[...QUERY_STORE_COLUMNS, queryStorePlanColumn(server)]")]
+    [InlineData("TOP_PROC_COLUMNS", "[...TOP_PROC_COLUMNS, procedurePlanColumn(server)]")]
+    public void TheThreeRowGrids_AddTheirPlanColumns_WhereTheyAreBuilt(string list, string composed)
+    {
+        var tabs = Js("pages", "server-tabs.js");
+        Assert.Contains(composed, tabs, StringComparison.Ordinal);
+        // The bare list is no longer handed to a grid; the composed form is, as many times as the list had call sites.
+        var bareCalls = tabs.Split("        " + list + ",\n").Length - 1;
+        Assert.Equal(0, bareCalls);
+    }
+
+    [Fact]
+    public void TheServerTabsImport_NamesTheThreeFactories()
+    {
+        var tabs = Js("pages", "server-tabs.js");
+        var line = tabs.Split('\n').Single(l => l.EndsWith("from \"./plan-viewer.js\";", StringComparison.Ordinal));
+        foreach (var name in new[] { "activePlanColumns", "planColumn", "procedurePlanColumn", "queryStorePlanColumn" })
+            Assert.Contains(name, line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheFactories_KeyEachColumnUniquely_OnTheFieldThatIsPresentWhenAButtonShows()
+    {
+        var viewer = Js("pages", "plan-viewer.js");
+        Assert.Contains("key: \"has_query_plan\"", viewer, StringComparison.Ordinal);
+        Assert.Contains("key: \"has_live_query_plan\"", viewer, StringComparison.Ordinal);
+        Assert.Contains("key: \"sql_handle\"", viewer, StringComparison.Ordinal);
+        // The original stored-plan column keeps query_hash; no new column reuses it.
+        Assert.Equal(1, viewer.Split("key: \"query_hash\",\n    label: \"Plan\"").Length - 1);
     }
 
     [Fact]
