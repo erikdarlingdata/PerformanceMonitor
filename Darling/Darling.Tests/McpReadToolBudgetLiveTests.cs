@@ -83,7 +83,7 @@ public sealed class McpReadToolBudgetLiveTests
     {
         "add_servers", "create_custom_alert_rule", "create_custom_view", "create_mute_rule",
         "delete_custom_alert_rule", "delete_custom_view", "delete_mute_rule", "delete_notification_route",
-        "mute_analysis_finding", "remove_server", "set_mute_rule_enabled", "set_notification_route_enabled",
+        "edit_server", "mute_analysis_finding", "remove_server", "set_mute_rule_enabled", "set_notification_route_enabled",
         "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule",
         "create_server_tag", "update_server_tag", "delete_server_tag", "assign_server_tag", "unassign_server_tag",
     };

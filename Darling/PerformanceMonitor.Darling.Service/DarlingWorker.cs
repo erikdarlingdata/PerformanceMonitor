@@ -6082,7 +6082,7 @@ LIMIT 1";
                 state.NextDue.Clear();
                 /* #3653 A5 (the adjacency #3540 A4 named and left): a same-id reconnect is a new epoch. The
                    fields ServerDefinitionEquals compares are the ones that decide WHICH instance the
-                   connection reaches (host, database, auth, intent, subnet failover) or WHAT it collects
+                   connection reaches (host, port, engine, database, auth, intent, subnet failover) or WHAT it collects
                    (excluded databases) — so a change here means the counters the next pass reads may be a
                    different instance's while the server_id, and every baseline cached under it, stays the
                    same. Left cached, the first pass after the reconnect would store one interval of
@@ -6281,7 +6281,7 @@ LIMIT 1";
 
     /// <summary>
     /// Whether two server definitions are identical for the collection loop — the connection-relevant fields
-    /// plus the collection-affecting excluded databases. A difference triggers a reconnect on reconcile so the
+    /// (host, port, engine, database, auth, credentials, intent) plus the collection-affecting excluded databases. A difference triggers a reconnect on reconcile so the
     /// new definition takes effect. <c>MonthlyCostUsd</c> is deliberately NOT compared: it does not affect
     /// collection at all, and the reload's <see cref="DarlingObservability.SyncServerEnabledStatesAsync"/>
     /// mirrors a cost change straight onto <c>collect.servers</c> (which the FinOps display reads) with no
@@ -6300,6 +6300,8 @@ LIMIT 1";
         && a.TrustServerCertificate == b.TrustServerCertificate
         && a.ReadOnlyIntent == b.ReadOnlyIntent
         && a.MultiSubnetFailover == b.MultiSubnetFailover
+        && a.Port == b.Port
+        && a.TargetEngine == b.TargetEngine
         && a.ExcludedDatabases.SequenceEqual(b.ExcludedDatabases, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
