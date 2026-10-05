@@ -688,6 +688,8 @@ function vizLine(data, desc) {
        whole-number formatter as the same label several times over ("1 1 1 0 0 0" on a blocking-events axis). */
     integerTicks: desc.format === "int",
     unit: desc.unit ?? null,
+    title: desc.title || null,
+    source: desc.read || desc.path ? { read: desc.read || desc.path, params: desc.params || null } : null,
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
   }, zoomId, chartZoomScope(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours));
