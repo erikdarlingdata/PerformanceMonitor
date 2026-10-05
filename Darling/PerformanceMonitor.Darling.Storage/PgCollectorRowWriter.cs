@@ -66,6 +66,66 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
     public void BeginPayload() => _payloadIndex = 0;
 
     /// <summary>
+    /// The payload position whose integer value this writer tallies, or -1 when it tallies none (#4605). The hour
+    /// ledger needs, per batch, how many rows were written with a <c>sample_interval_seconds</c> other than 0, and the
+    /// writer is the one place that sees the value the COPY really sends into that column: counting here is counting
+    /// the write itself, not re-deriving the interval from the row, and the position comes from the same
+    /// <c>PayloadColumns</c> list the COPY's column list does (<see cref="QueryStatsHourLedgerWriter.IntervalPayloadIndex"/>),
+    /// so the two cannot disagree.
+    /// </summary>
+    private int _countedPayloadIndex = -1;
+
+    private long _countedNonZero;
+
+    private long _countedWrites;
+
+    /// <summary>
+    /// Starts tallying the integer values written at payload position <paramref name="payloadIndex"/>, from zero (#4605).
+    /// The host calls it once per COPY attempt, before the first row, on the attempt's own writer: a writer is built per
+    /// attempt, so a re-attempt starts from zero by construction and a failed attempt's tally cannot reach the next one.
+    /// </summary>
+    public void CountNonZeroAt(int payloadIndex)
+    {
+        if (payloadIndex < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(payloadIndex), payloadIndex, "A payload position is zero or more.");
+        }
+
+        _countedPayloadIndex = payloadIndex;
+        _countedNonZero = 0;
+        _countedWrites = 0;
+    }
+
+    /// <summary>
+    /// How many values written at the watched position were not 0 (#4605). A NULL counts: it is the rollup's own
+    /// <c>sample_interval_seconds IS DISTINCT FROM 0</c> population, which includes rows from before the column existed.
+    /// </summary>
+    public long NonZeroCounted => _countedNonZero;
+
+    /// <summary>
+    /// How many times the watched position was written as an integer (#4605). The host compares it with the rows it wrote:
+    /// a row that wrote the position through any other overload would be missing from <see cref="NonZeroCounted"/>, and an
+    /// undercounted ledger is the one error this tally must not make silently.
+    /// </summary>
+    public long CountedWrites => _countedWrites;
+
+    private void Observe(int index, int? value)
+    {
+        if (index != _countedPayloadIndex)
+        {
+            return;
+        }
+
+        _countedWrites++;
+
+        /* Lifted comparison: a NULL is not 0, so it is counted, as the rollup counts it. */
+        if (value != 0)
+        {
+            _countedNonZero++;
+        }
+    }
+
+    /// <summary>
     /// Closes one row's payload run and asserts the positional contract the whole binary COPY rests
     /// on: the definition must have written exactly one value per declared payload column. A drift
     /// here silently shifts every later column by one — and with a diversion plan active it would
@@ -266,14 +326,14 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
 
     public ICollectorRowWriter Value(int value)
     {
-        NextPayloadIndex();
+        Observe(NextPayloadIndex(), value);
         Target.Write(value, NpgsqlDbType.Integer);
         return this;
     }
 
     public ICollectorRowWriter Value(int? value)
     {
-        NextPayloadIndex();
+        Observe(NextPayloadIndex(), value);
         if (value is null) { Target.WriteNull(); } else { Target.Write(value.Value, NpgsqlDbType.Integer); }
         return this;
     }
