@@ -6300,6 +6300,8 @@ LIMIT 1";
         && a.TrustServerCertificate == b.TrustServerCertificate
         && a.ReadOnlyIntent == b.ReadOnlyIntent
         && a.MultiSubnetFailover == b.MultiSubnetFailover
+        && a.Port == b.Port
+        && a.TargetEngine == b.TargetEngine
         && a.ExcludedDatabases.SequenceEqual(b.ExcludedDatabases, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>

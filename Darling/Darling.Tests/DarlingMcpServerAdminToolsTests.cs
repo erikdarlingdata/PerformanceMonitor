@@ -52,6 +52,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     private static readonly string[] ExpectedToolSurface =
     {
         "add_servers",
+        "edit_server",
         "remove_server",
     };
 
@@ -61,7 +62,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_IsExactlyTheTwoServerAdminTools()
+    public void ToolSurface_IsExactlyTheThreeServerAdminTools()
     {
         var toolMethods = ToolMethods();
         var names = toolMethods
@@ -112,16 +113,17 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     }
 
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForBothTools()
+    public void AdvertisedSchema_IsGeminiClean_ForEveryTool()
     {
         var tools = BuildToolSchemas();
-        Assert.Equal(2, tools.Count);
+        Assert.Equal(3, tools.Count);
         var violations = tools.Values.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
     }
 
     [Theory]
     [InlineData("add_servers", "servers_json")]
+    [InlineData("edit_server", "server_name,changes_json")]
     [InlineData("remove_server", "server_name")]
     public void AdvertisedSchema_RequiredParams_MatchTheContract(string toolName, string expectedCsv)
     {

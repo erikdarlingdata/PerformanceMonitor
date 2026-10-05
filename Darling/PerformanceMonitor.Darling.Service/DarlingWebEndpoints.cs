@@ -130,6 +130,7 @@ public static class DarlingWebEndpoints
         "delete_mute_rule",
         "set_mute_rule_enabled",
         "add_servers",
+        "edit_server",
         "remove_server",
         "create_custom_alert_rule",
         "get_custom_alert_rule",

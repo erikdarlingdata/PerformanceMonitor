@@ -151,7 +151,7 @@ public sealed class DarlingWebEndpointsTests
             {
                 "add_servers", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
                 "analyze_server", "assign_server_tag", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "create_server_tag", "delete_custom_alert_rule",
-                "delete_custom_view", "delete_mute_rule", "delete_notification_route", "delete_server_tag", "describe_custom_view_catalog", "get_custom_alert_rule", "get_custom_view", "get_tool_guide",
+                "delete_custom_view", "delete_mute_rule", "delete_notification_route", "delete_server_tag", "describe_custom_view_catalog", "edit_server", "get_custom_alert_rule", "get_custom_view", "get_tool_guide",
                 "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "mute_analysis_finding", "remove_server", "run_custom_view_panel",
                 "set_mute_rule_enabled", "set_notification_route_enabled", "test_custom_alert_rule", "unassign_server_tag", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "update_server_tag", "validate_custom_alert_rule", "validate_custom_view",
             },
