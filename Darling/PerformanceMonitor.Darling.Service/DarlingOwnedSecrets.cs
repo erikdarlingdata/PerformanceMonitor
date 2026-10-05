@@ -532,11 +532,16 @@ internal static class FileIdentity
         return new FileId(dev, BitConverter.ToUInt64(buffer, 8));
     }
 
+    /* CA2101 wants CharSet.Unicode on a P/Invoke that takes a string, but libc's stat takes a UTF-8 path:
+       CharSet.Unicode would marshal UTF-16 and the call would fail on every non-ASCII path. LPUTF8Str is the
+       correct marshaling here, so the rule is suppressed for these two declarations only. */
+#pragma warning disable CA2101 // libc takes UTF-8; LPUTF8Str is correct and CharSet.Unicode would be wrong
     [DllImport("libc", EntryPoint = "stat", SetLastError = true)]
     private static extern int Stat([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] buffer);
 
     [DllImport("libc", EntryPoint = "stat$INODE64", SetLastError = true)]
     private static extern int StatMacIntel([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] buffer);
+#pragma warning restore CA2101
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(
