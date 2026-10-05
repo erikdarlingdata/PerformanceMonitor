@@ -116,6 +116,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)";
                 CollectionIdGenerator.Next(), t, ServerId, ServerName, 72, "Db", "SELECT 1", "running", 0,
                 null, 100L, 200L, 0, null, null, null);
 
+            /* #5228: session 71 carries an estimated plan only; 72 carries none. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "UPDATE query_snapshots SET query_plan = $1 WHERE server_id = $2 AND session_id = 71", "<ShowPlanXML />", ServerId);
+
             var json = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, 1, limit: 10)).RootElement;
             var rows = json.GetProperty("queries").EnumerateArray().ToDictionary(r => r.GetProperty("session_id").GetInt32());
 
@@ -133,6 +137,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)";
             Assert.Equal("PAGE: 5:1:12345", rows[71].GetProperty("wait_resource").GetString());
             Assert.Equal(37.5, rows[71].GetProperty("percent_complete").GetDouble());
             Assert.Equal("0x1A2B3C4D5E6F7080", rows[71].GetProperty("query_hash").GetString());
+            /* The plan flags are written only when true: a row with a plan has the key, a row without has neither. */
+            Assert.True(rows[71].GetProperty("has_query_plan").GetBoolean());
+            Assert.False(rows[71].TryGetProperty("has_live_query_plan", out _));
+            Assert.False(rows[72].TryGetProperty("has_query_plan", out _));
+            Assert.False(rows[72].TryGetProperty("has_live_query_plan", out _));
+            Assert.Equal(0, rows[72].GetProperty("request_id").GetInt32());
             Assert.Equal(JsonValueKind.Null, rows[72].GetProperty("wait_resource").ValueKind);
             Assert.Equal(JsonValueKind.Null, rows[72].GetProperty("percent_complete").ValueKind);
             Assert.Equal(JsonValueKind.Null, rows[72].GetProperty("query_hash").ValueKind);

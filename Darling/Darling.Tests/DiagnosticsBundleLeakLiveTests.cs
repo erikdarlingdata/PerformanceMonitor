@@ -49,12 +49,13 @@ public sealed class DiagnosticsBundleLeakLiveTests
     private const string TcpHostName = "qxtcphost-alpha.qxzone.test";
     private const string StoreLogSecretHost = "qxlogged-12";
     private const string RemovedServer = "qxgone-21";
+    private const string GatedPgServer = "qxgated-pg9";
 
     /// <summary>Everything that must not appear, including the pieces a splitter produces.</summary>
     internal static readonly string[] Forbidden =
     {
         ServerOne, "zeta-07.example.test", "QXINST", ServerTwo, "203.0.113.40", DisplayTwo, "Epsilon", DbOne, DbTwo, Login, Password, Domain,
-        "zeta-07x", RemovedServer, StoreLogSecretHost, "QXCORP", "svc_zeta", StoreRole, TcpServer, TcpHostName, "qxtcphost", "qxzone",
+        "zeta-07x", RemovedServer, StoreLogSecretHost, "QXCORP", "svc_zeta", StoreRole, TcpServer, TcpHostName, "qxtcphost", "qxzone", GatedPgServer,
     };
 
     /// <summary>
@@ -107,6 +108,16 @@ public sealed class DiagnosticsBundleLeakLiveTests
         /* A server removed from the registry keeps its rows in the collected-data tables, and the service log still names it. */
         await ExecAsync(c, "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) VALUES (704, $1, $1, FALSE, 15, $2, $2) ON CONFLICT (server_id) DO NOTHING",
             RemovedServer, now);
+        /* #5249: a registered PostgreSQL server whose engine kind gates collectors. get_collection_health lists each gated
+           collector as a not_collected row whose message starts with the server name, and the bundle reads that tool's uncut
+           output, so the alias pass must reach the message. */
+        await ExecAsync(c, "INSERT INTO config_monitored_servers (server_id, name, host, database, username, is_enabled) VALUES (705, $1, $2, $3, $4, TRUE) ON CONFLICT (server_id) DO NOTHING",
+            GatedPgServer, "qxgated-pg9.example.test", DbTwo, Login);
+        await ExecAsync(c, "INSERT INTO servers (server_id, server_name, display_name, is_enabled, engine_kind, postgres_major_version, created_date, modified_date) VALUES (705, $1, $1, TRUE, 'postgres', 15, $2, $2) ON CONFLICT (server_id) DO NOTHING",
+            GatedPgServer, now);
+        /* The tool answers "unavailable" for a server with no log rows, so the gated rows need one run beside them. */
+        await ExecAsync(c, "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) VALUES ($1, 705, $2, 'pg_database_stats', $3, 100, 'SUCCESS', 10)",
+            CollectionIdGenerator.Next(), GatedPgServer, now.AddMinutes(-5));
         await ExecAsync(c, $"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{StoreRole}') THEN CREATE ROLE {StoreRole} NOLOGIN; END IF; END $$");
         await ExecAsync(c, @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected)
 VALUES ($1, 701, $2, 'file_io_stats', $3, 3000, 'ERROR', $4, 0)",
@@ -163,6 +174,7 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
             {
                 new { name = ServerOne, host = HostOne, database = DbOne, username = Login },
                 new { name = ServerTwo, host = HostTwo, database = DbTwo, username = Login },
+                new { name = GatedPgServer, host = "qxgated-pg9.example.test", database = DbTwo, username = Login },
                 new { name = TcpServer, host = "tcp:" + TcpHostName + ",1433", database = DbTwo, username = Login },
             },
         }));
@@ -324,6 +336,14 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
 
             Assert.NotEmpty(sections["collection"]!["slowest_runs"]!["runs"]!.AsArray());
             Assert.NotEmpty(sections["collection"]!["health_by_server"]!.AsArray());
+
+            /* #5249: the gated PostgreSQL server's not-collected rows are in the bundle, and the leak scan above already
+               proved its name appears nowhere, so the alias pass reached each row's message. */
+            var gatedRows = sections["collection"]!["health_by_server"]!.AsArray()
+                .SelectMany(e => e!["health"]?["collectors"]?.AsArray().OfType<JsonObject>() ?? Enumerable.Empty<JsonObject>())
+                .Where(r => r["status"]?.GetValue<string>() == "not_collected").ToList();
+            Assert.NotEmpty(gatedRows);
+            Assert.All(gatedRows, r => Assert.StartsWith("server-", r["message"]!.GetValue<string>(), StringComparison.Ordinal));
             Assert.NotEmpty(sections["store_log"]!["retained_events"]!.AsArray());
             Assert.NotEmpty(sections["stall_probes"]!["probes"]!.AsArray());
             Assert.NotEmpty(sections["slow_reads"]!["reads"]!.AsArray());

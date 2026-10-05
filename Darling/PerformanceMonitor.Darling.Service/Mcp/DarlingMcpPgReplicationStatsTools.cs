@@ -79,11 +79,15 @@ public sealed class DarlingMcpPgReplicationStatsTools
                     postgres, "get_pg_replication_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
                 return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                         "empty",
-                        $"No replica was connected to {resolved.ServerName} in the last {hours_back} "
-                        + "hour(s). On a server with no replicas that is the expected answer. If a "
-                        + "replica is SUPPOSED to be attached, check get_pg_replication_slots — a slot "
-                        + "that persists with nothing connected to it retains WAL indefinitely, which is "
-                        + "the case worth acting on.",
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                            factual: $"No replica was connected to {resolved.ServerName} in the last {hours_back} "
+                                + "hour(s)",
+                            coveredClaim: ". On a server with no replicas that is the expected answer.",
+                            tail: " If a "
+                                + "replica is SUPPOSED to be attached, check get_pg_replication_slots — a slot "
+                                + "that persists with nothing connected to it retains WAL indefinitely, which is "
+                                + "the case worth acting on."),
                         emptyNotice.AsHints()), emptyNotice);
             }
 

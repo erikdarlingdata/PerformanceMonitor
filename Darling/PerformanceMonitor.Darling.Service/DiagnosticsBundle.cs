@@ -75,7 +75,7 @@ internal static class DiagnosticsBundle
     internal static readonly string[] ConfigShapeProjected =
     {
         "DarlingConfig.Postgres", "DarlingConfig.Servers", "DarlingConfig.Analyzer", "DarlingConfig.CapturePlans",
-        "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.QueryStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
+        "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
         "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "WebConfig.Enabled", "WebConfig.Network",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
@@ -157,6 +157,9 @@ internal static class DiagnosticsBundle
             ["analyzer_present"] = config.Analyzer is not null,
             ["capture_plans"] = config.CapturePlans,
             ["query_stats_deferred_plan_fetch"] = config.QueryStatsDeferredPlanFetch,
+            // The PARSED mode word, never the raw text (free config text); an unknown value runs as off, so it reports off.
+            ["procedure_stats_deferred_plan_fetch"] = ProcedureStatsPlanFetchModes.TryParse(config.ProcedureStatsDeferredPlanFetch, out var psMode)
+                ? psMode.ToString().ToLowerInvariant() : "off",
             ["alert_delivery_override_modes"] = modes,
         };
     }

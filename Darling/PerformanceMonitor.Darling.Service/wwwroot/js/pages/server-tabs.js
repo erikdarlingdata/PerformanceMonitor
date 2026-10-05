@@ -48,7 +48,7 @@ import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell } from "./deadlock-graph.js";
-import { planColumn } from "./plan-viewer.js";
+import { activePlanColumns, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -216,7 +216,9 @@ function fanout(read, params, specs) {
            all pages of a population - the aggregate one beside a capped row list is exactly the pairing
            where only one of them needs saying so. */
         const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
-        const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours) });
+        /* A fanout line chart names its chart-menu "at This Time" item with spec.atTimeItem, as line() does with
+           opts.atTimeItem; Active Queries when it names none. */
+        const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
 
         mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
@@ -356,6 +358,7 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
     seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
     ...failures,
     zoomableLineChart({
+      atTime: { server },
       points: mergeSeriesRows(drawn, "time", metric),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
@@ -512,6 +515,7 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
     seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
     ...failures,
     zoomableLineChart({
+      atTime: { server },
       points: mergeSeriesRows(drawn, "time", "v"),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
@@ -665,6 +669,7 @@ async function drawQueryTrend(slot, server, ctx, query) {
     keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
     zoomableLineChart({
+      atTime: { server },
       points: trend.data.trend || [],
       xKey: "collection_time",
       series: [
@@ -732,7 +737,7 @@ export function fileIoPanel(server, ctx) {
        narrowed read spans the hours it answered for. */
     const draw = (title, data, id, empty) =>
       data.series.length
-        ? [el("h4", { text: title }), zoomableLineChart({ points: data.points, xKey: "time", series: data.series, formatValue: (v) => Math.round(v) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours) }, id, chartZoomScope(ctx.hours))]
+        ? [el("h4", { text: title }), zoomableLineChart({ atTime: { server }, points: data.points, xKey: "time", series: data.series, formatValue: (v) => Math.round(v) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours) }, id, chartZoomScope(ctx.hours))]
         : [el("h4", { text: title }), emptyStrip(empty)];
     mount(body, [
       keptWindowStrip(res),
@@ -929,6 +934,10 @@ function line(title, read, params, rowsKey, xKey, series, opts = {}) {
     unit: opts.unit,
     emptyText: opts.emptyText,
     span: opts.span ?? 1,
+    /* The chart menu's "at This Time" item opens the SQL Server Queries or Blocking tab, so a panel on a registry
+       without them (the one PostgreSQL line) passes atTime: false. A chart offers the one item that matches it, as the
+       desktop does: atTimeItem is "blocking" or "deadlocks" on those charts, and Active Queries otherwise. */
+    atTime: opts.atTime === false || !params || !params.server ? null : { server: params.server, item: opts.atTimeItem || "queries" },
   });
 }
 
@@ -964,11 +973,13 @@ export const SERVER_TABS = [
       line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
         format: "int",
+        atTimeItem: "blocking",
         emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
         format: "int",
+        atTimeItem: "deadlocks",
         emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       fileIoPanel(server, ctx),
@@ -1060,7 +1071,7 @@ export const SERVER_TABS = [
         "get_top_procedures_by_cpu",
         { server, hours: ctx.hours, top: 20, detail: "full" },
         "procedures",
-        TOP_PROC_COLUMNS,
+        [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
         ctx.label,
         "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
         2,
@@ -1176,11 +1187,13 @@ export const SERVER_TABS = [
       line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
         format: "int",
+        atTimeItem: "blocking",
         emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
         format: "int",
+        atTimeItem: "deadlocks",
         emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       table(
@@ -1241,6 +1254,7 @@ export const SERVER_TABS = [
          this chart drew as one jagged line. get_wait_trend can chart one LCK type; this is the whole family. */
       line("Lock Waits", "get_lock_wait_trend", { server, hours: ctx.hours }, "trend", "collection_time", LOCK_WAIT_SERIES, {
         subtitle: ctx.label,
+        atTimeItem: "blocking",
         emptyText:
           "No lock waits in this window. If wait stats have never been collected for this server the read " +
           "says so explicitly rather than reporting an absence of lock contention.",
@@ -1252,6 +1266,7 @@ export const SERVER_TABS = [
           title: "Blocking Severity",
           subtitle: ctx.label,
           viz: "line",
+          atTimeItem: "blocking",
           rowsKey: "blocking_duration",
           xKey: "time",
           series: BLOCKING_SEVERITY_SERIES,
@@ -1263,6 +1278,7 @@ export const SERVER_TABS = [
           title: "Deadlock Severity",
           subtitle: ctx.label,
           viz: "line",
+          atTimeItem: "deadlocks",
           rowsKey: "deadlock_severity",
           xKey: "time",
           series: DEADLOCK_SEVERITY_SERIES,
@@ -1370,7 +1386,7 @@ export const SERVER_TABS = [
         "get_active_queries",
         { server, hours: ctx.hours, limit: 50 },
         "queries",
-        ACTIVE_COLUMNS,
+        [...ACTIVE_COLUMNS, ...activePlanColumns(server)],
         ctx.label,
         "No active-query snapshots in this window."
       ),
@@ -1443,7 +1459,7 @@ export const SERVER_TABS = [
         "get_top_procedures_by_cpu",
         { server, hours: ctx.hours, top: 20, detail: "full" },
         "procedures",
-        TOP_PROC_COLUMNS,
+        [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
         ctx.label,
         "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
         2,
@@ -1456,7 +1472,7 @@ export const SERVER_TABS = [
         "get_query_store_top",
         { server, hours: ctx.hours, top: 20 },
         "queries",
-        QUERY_STORE_COLUMNS,
+        [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server)],
         ctx.label,
         "No Query Store rows in this window.",
         2,
@@ -1959,6 +1975,7 @@ export const POSTGRES_TABS = [
           format: "pct",
           unit: "%",
           emptyText: "No CPU samples in this window. This is an Amazon Aurora feature — on a stock PostgreSQL target this panel is permanently empty.",
+          atTime: false,
         }
       ),
       momentStat(
@@ -3155,7 +3172,7 @@ const QUERY_TREND_COLUMNS = [
   { key: "query_plan_hash", label: "Plan Hash", mono: true },
 ];
 
-/* The desktop Top Procedures grid's columns in its order (its Query Plan download column is the separate plan work).
+/* The desktop Top Procedures grid's columns in its order (its Query Plan column is procedurePlanColumn, added where the grid is built).
    The ungrouped columns are the core set and always show; the rest follow the toggles in TOP_PROC_GROUPS, all off at
    first. Last Execution and Cached Time arrive as UTC instants (the read converts them from the monitored server's
    clock) and print in the browser's local time. The hourly tier carries none of the grouped fields, nor Type, the
@@ -3382,7 +3399,7 @@ const AUTO_TUNING_COLUMNS = [
   { key: "as_of", label: "As of", format: "time" },
 ];
 
-/* The Active Queries grid, in the desktop viewer's column order and wording (Collected and Query Text lead, the anchor rule; the desktop's plan column is not here). */
+/* The Active Queries grid, in the desktop viewer's column order and wording (Collected and Query Text lead, the anchor rule; the plan buttons are added where the grid is built: activePlanColumns). */
 const ACTIVE_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
   { key: "query_text", label: "Query Text", render: (r) => codeDisclosure(r.query_text) },
@@ -3737,6 +3754,7 @@ export function serverTrendPanel(server, ctx, kind) {
       keptWindowStrip(res),
       notes.length ? noticeStrip(notes.join(" ")) : null,
       zoomableLineChart({
+        atTime: { server },
         points,
         xKey: "time",
         series: spec.series.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
@@ -3840,6 +3858,7 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
     notes.length ? noticeStrip(notes.join(" ")) : null,
     missingStrip(trend.data),
     zoomableLineChart({
+      atTime: { server },
       points: mergeSeriesRows(drawn, "time", "memory_mb"),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
@@ -3961,6 +3980,7 @@ export async function drawNamedTrends(slot, server, ctx, kind, checked) {
     notes.length ? noticeStrip(notes.join(" ")) : null,
     missingStrip(trend.data),
     zoomableLineChart({
+      atTime: { server },
       points: mergeSeriesRows(drawn, "time", kind === "latch" ? "wait_time_ms_per_second" : "collisions_per_second"),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
@@ -4003,6 +4023,7 @@ export function sessionStatsTrendPanel(server, ctx) {
       keptWindowStrip(res),
       notes.length ? noticeStrip(notes.join(" ")) : null,
       zoomableLineChart({
+        atTime: { server },
         points,
         xKey: "time",
         series: SESSION_TREND_SERIES.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
@@ -4048,6 +4069,7 @@ export function memoryPressurePanels(server, ctx) {
           "Samples where an indicator reads 2 or more, counted per hour as stacked bars; an hour with none draws no bar. " + PRESSURE_COVERAGE_CAVEAT
         ),
         zoomableLineChart({
+          atTime: { server },
           points,
           xKey: "time",
           series: lines,
@@ -4587,6 +4609,11 @@ const COLLECTOR_COLUMNS = [
      showed the floor, but no column showed the sentence behind it, so a regressed row read WARNING with
      every other cell blank. Composed server-side from the shared formatter, like the two columns above. */
   { key: "regression_finding", label: "Regression", wrap: true },
+  /* #5249: a PostgreSQL collector this server's engine does not collect (a collector this engine kind can never run: an Aurora-only reader on stock PostgreSQL, the sampler on Aurora) has no log row,
+     so the server lists it with status not_collected and the sentence saying why. The status paints with the
+     neutral Unknown band, not an error one: a gate is not a fault. Left out unless a row has a message, so a
+     server with no such collector (and every SQL Server tab) shows no column of dashes. */
+  { key: "message", label: "Why not collected", wrap: true, hideWhenEmpty: true },
 ];
 
 const HEAVIEST_COLUMNS = [
