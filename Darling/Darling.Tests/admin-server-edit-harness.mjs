@@ -398,6 +398,155 @@ try {
     };
   };
 
+  /* A click that reaches the node's handlers although the node is disabled, as a stale or synthetic event would (a real browser
+     sends none to a disabled button): the proof that a guard in the code holds behind the disabled state. */
+  const forceClick = async (node) => {
+    for (const fn of node.listeners.click || []) await fn({ type: "click", target: node, currentTarget: node, preventDefault() {}, stopPropagation() {} });
+    await settle();
+  };
+  /* Every piece of text the page drew, in document order (a node's own text, so a cell is one piece and a heading another). */
+  const textsUnder = (root) => all(root, (n) => n._text !== "").map((n) => n._text);
+  const SECRET = "SECRET-PW";
+  /* How many nodes under the page hold the typed secret in a value, an attribute or their text (an ancestor of one counts too). */
+  const secretNodes = () => all(main, (n) => n.value === SECRET || n.textContent.includes(SECRET) || Object.values(n.attrs).some((v) => String(v).includes(SECRET))).length;
+  const patches = () => requests.filter((r) => r.method === "PATCH").map((r) => ({ url: r.url, body: r.body, contentType: r.contentType }));
+  /* The Servers tab as a user sees it now, safe to take when its boxes are gone (another tab is on screen): the open form's
+     banner and status line, whether Save and Cancel and each Edit button are disabled, the notice, and what was asked of the service. */
+  const view = () => {
+    const form = openForm();
+    const strip = (key) => {
+      const b = form ? byAttr(form, "data-box", key)[0] : null;
+      return b ? b.children.map((c) => ({ text: text(c), cls: c.className, role: c.attrs.role || null })) : [];
+    };
+    const one = (label) => (form ? buttons(form, label)[0] : null);
+    return {
+      forms: byAttr(main, "data-edit-form").length,
+      formBoxChildren: box("form") ? box("form").children.length : null,
+      banner: strip("banner"),
+      status: strip("status"),
+      saveDisabled: one("Save") ? one("Save").disabled : null,
+      cancelDisabled: one("Cancel") ? one("Cancel").disabled : null,
+      editDisabled: buttons(main, "Edit").map((b) => b.disabled),
+      notice: box("notice") ? strips("notice") : [],
+      patches: patches(),
+      listReads: listGets(),
+      byIdGets: byIdGets(),
+      rows: tableRows(),
+    };
+  };
+  /* The service's answer to a good save, as the route sends it. */
+  const updated = (name, over = {}) => ({
+    status: 200,
+    body: { status: "updated", display_name: name, server: name.toLowerCase(), note: "Takes effect at the next collection cycle.", tested: false, ...over },
+  });
+  const renamed = (id, name) => {
+    state.servers = state.servers.map((s) => (s.server_id === id ? { ...s, display_name: name, server_name: name.toLowerCase() } : s));
+  };
+  /* One edit on an open form: text into a box, a checkbox ticked or cleared, or a choice made in a list. */
+  const edit = async (key, value) => {
+    const node = field(key);
+    if (typeof value === "boolean") {
+      node.checked = value;
+      await fire(node, "change");
+    } else if (node.tag === "select") {
+      node.value = value;
+      await fire(node, "change");
+    } else await typeInto(node, value);
+  };
+  /* Save, with the PATCH held back at the service until the snapshot of "during" was taken; resolves to that snapshot. */
+  const gatedSave = async () => {
+    let release;
+    state.gate = new Promise((r) => { release = r; });
+    const click = clickText(main, "Save");
+    await settle();
+    const during = view();
+    release();
+    await click;
+    await settle(30);
+    state.gate = null;
+    return during;
+  };
+  /* The save cases: which server's form, what the user changes, and what the service answers. `answer(body, n)` is called for the
+     n-th PATCH (1 first) with the body it was sent; it may also change what the list read answers next. `typed` types SECRET into
+     the password box; `down` makes the transport fail; `again` presses Save a second time after the first answer. */
+  const SAVES = {
+    nochange: { id: 1, edits: {}, answer: () => updated("Alpha") },
+    connfail: { id: 3, edits: { host: "charlie-two" }, typed: true, answer: () => ({ status: 200, body: { status: "connection_failed", message: "Could not connect to charlie-two: login failed for user 'sa'." } }) },
+    forbidden: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 403, body: { error: "This account has read-only access." } }) },
+    gone: {
+      id: 1, edits: { display_name: "Alpha Two" },
+      answer: () => {
+        state.servers = state.servers.filter((s) => s.server_id !== 1);
+        return { status: 404, body: { status: "not_found", message: "This server's definition no longer exists (removed since it was looked up); nothing was changed." } };
+      },
+    },
+    updated: { id: 1, edits: { display_name: "Alpha Prime" }, answer: () => { renamed(1, "Alpha Prime"); return updated("Alpha Prime"); } },
+    tested: { id: 3, edits: { host: "charlie-two" }, typed: true, answer: () => { renamed(3, "Charlie"); return updated("Charlie", { tested: true }); } },
+    unchanged: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 200, body: { status: "unchanged" } }) },
+    invalid: { id: 3, edits: { host: "charlie two" }, typed: true, answer: () => ({ status: 400, body: { error: "The host 'charlie two' is not valid: SECRET-PW is not allowed here." } }) },
+    clientcheck: { id: 3, edits: { host: "charlie-two", monthly_cost_usd: "abc" }, typed: true, answer: () => updated("Charlie") },
+    nopassword: { id: 3, edits: { host: "charlie-two" }, answer: () => updated("Charlie") },
+    limited: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 429, body: { error: "Another server change is in progress. Try again in a moment." } }) },
+    broken: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 500, body: { error: "admin server edit failed (InvalidOperationException)" } }) },
+    timedout: {
+      id: 1, edits: { host: "alpha-two" }, again: true,
+      answer: (body, n) => (n === 1
+        ? { status: 503, body: { error: "The edit did not finish in time. It may still complete; reload to see." } }
+        : updated("Alpha")),
+    },
+    network: { id: 1, edits: { display_name: "Alpha Two" }, down: true, answer: () => updated("Alpha Two") },
+    expired: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 200, raw: "<html><body>Sign in</body></html>" }) },
+    collides: { id: 3, edits: { host: "alpha" }, typed: true, answer: () => ({ status: 409, body: { status: "collides", message: "Another server already uses the address alpha." } }) },
+    conflict: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 409, body: { status: "conflict", message: "changed", current: { ...reads.alpha, display_name: "Alpha Elsewhere" } } }) },
+    // The status line: which edits make the service test the connection (any connection change, any auth, or a password).
+    probeWindowsHost: { id: 1, edits: { host: "alpha-two" }, answer: () => updated("Alpha") },
+    probeWindowsTrust: { id: 1, edits: { trust_server_certificate: true }, answer: () => updated("Alpha") },
+    probeWindowsEncrypt: { id: 1, edits: { encrypt_mode: "Strict" }, answer: () => updated("Alpha") },
+    probeName: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => updated("Alpha Two") },
+    probeCost: { id: 1, edits: { monthly_cost_usd: "250" }, answer: () => updated("Alpha") },
+    probeRotate: { id: 3, edits: {}, typed: true, answer: () => updated("Charlie") },
+    probeSqlHost: { id: 3, edits: { host: "charlie-two" }, typed: true, answer: () => updated("Charlie") },
+    probePostgresPort: { id: 2, edits: { port: "5434" }, typed: true, answer: () => updated("Bravo") },
+  };
+  /* The three tabs' payloads (the old vm harness's, kept as they were): each carries credential-shaped fields no cell may show. */
+  const TAB_PAYLOADS = {
+    servers: {
+      server_count: 2,
+      servers: [
+        { server_name: "alpha", display_name: "Alpha", engine: "sqlserver", version: "SQL Server 2022", freshness: "Online", status: "Enabled", auth: "Windows",
+          monthly_cost: "$1,234", monthly_cost_usd: 1234, added: "2025-12-31T00:00:00.0000000", read_only: false, last_collected: "2026-01-01T00:00:00Z", password: "SECRET-PW" },
+        { server_name: "bravo", display_name: "Bravo", engine: "postgres", version: "PostgreSQL 18", freshness: "AwaitingFirstCollection", status: "Disabled", auth: "SQL Server",
+          monthly_cost: null, monthly_cost_usd: 0, added: "2026-01-02T00:00:00.0000000", read_only: false, last_collected: null },
+      ],
+    },
+    routes: {
+      routes: [{
+        route_id: 7, metric_match: "Blocking Detected", match_kind: "exact_metric", family: "performance", configured_channels: ["slack", "pagerduty"],
+        smtp_recipients: ["ops@example.test"], enabled: true, modified_at_utc: "2026-01-01T00:00:00Z", webhook_url: "https://hooks.example.test/SECRET-HOOK",
+        password: "SECRET-PW", routing_key: "SECRET-KEY", slack_url: "https://hooks.example.test/SECRET-SLACKURL", pagerduty_routing_key: "SECRET-PDKEY",
+        slack_webhook_url: "https://hooks.example.test/SECRET-SLACK",
+      }],
+    },
+    settings: {
+      alerts_enabled: true, cooldown_minutes: 15,
+      cpu: { enabled: true, threshold_percent: 90, webhook_url: "SECRET-HOOK", slack_url: "SECRET-SLACKURL", pagerduty_routing_key: "SECRET-PDKEY", connection_string: "SECRET-CS", auth_token: "SECRET-AUTH", future_knob: "UNLISTED-VALUE" },
+      long_running_query: { enabled: true, threshold_minutes: 30, max_results: 10, exclude_backups: true, excluded_logins: ["svc"] },
+      health_bands: { deadlock_warn_per_hour: 1, deadlock_critical_per_hour: 5 }, excluded_databases: ["master"],
+      analysis: { enabled: true, interval_minutes: 60, smtp_password: "SECRET-PW" }, fleet_sweep: { enabled: true, interval_minutes: 60 },
+      smtp_password: "SECRET-PW",
+    },
+  };
+  const TAB_READS = { routes: "/api/read/get_notification_routes", settings: "/api/read/get_alert_settings" };
+  /* A read-only seat whose tab reads answer those payloads (the Servers list through the list read, the others through the tools' route). */
+  const serveTab = () => {
+    state.canEdit = false;
+    state.servers = TAB_PAYLOADS.servers.servers;
+    state.responder = (method, url) => {
+      const name = Object.keys(TAB_READS).find((k) => TAB_READS[k] === url);
+      return name ? { status: 200, body: TAB_PAYLOADS[name] } : { status: 404, body: { error: "no such read " + url } };
+    };
+  };
+
   const scenarios = {
     /* T1: what a seat sees by what its session probe said: "readonly", "probefailed" (an HTTP error), "probedropped" (a transport
        failure) or "editor". The list carries a row without a server_id, which never gets an Edit button. */
@@ -589,6 +738,168 @@ try {
       await clickEdit(1);
       const select = field("encrypt_mode");
       return { value: select.value, options: all(select, (n) => n.tag === "option").map((o) => o.attrs.value) };
+    },
+    /* Save, one case of SAVES at a time (T5, T7, T8's PATCH 404, T11, the answer table, and the status line of review finding 5).
+       The PATCH is held at the service while "during" is taken, then released. `pw` is the password box typed into, read after
+       the answer; `expired` is what the shell was told when the session was gone. */
+    save: async (kind) => {
+      const c = SAVES[kind];
+      if (!c) throw new Error("unknown save case " + kind);
+      seed();
+      const expired = [];
+      util.onSessionExpired((message, login) => expired.push({ message, login }));
+      await mountPage("servers");
+      await clickEdit(c.id);
+      const pw = field("password");
+      for (const [key, value] of Object.entries(c.edits)) await edit(key, value);
+      if (c.typed) await typeInto(pw, SECRET);
+      const typed = pw.value;
+      let n = 0;
+      state.responder = (method, url, sent) => c.answer(sent, ++n);
+      if (c.down) state.networkDown = true;
+      const during = await gatedSave();
+      const after = view();
+      const result = { typed, during, after };
+      if (c.again) {
+        await clickText(main, "Save");
+        await settle(30);
+        result.second = view();
+      }
+      result.pw = { value: pw.value, connected: pw.isConnected };
+      result.secretNodes = secretNodes();
+      result.expired = expired;
+      return result;
+    },
+    /* T9 and review finding 4: a save held at the service, and what the page lets happen meanwhile. "double": a second click on the
+       disabled Save and a click forced past it send no second PATCH; "429": the same, and the service then answers 429. "edit": Edit on
+       another row (clicked, and forced past the disabled state) opens nothing; after the answer the notice shows the outcome and the
+       next row's form saves. "tab" and "hash": the form is discarded mid-save (the Routes tab; another page) and the late answer
+       still sets the notice, which shows when the Servers tab is back, and the list is read again. */
+    midsave: async (how) => {
+      seed();
+      await mountPage("servers");
+      await clickEdit(1);
+      await edit("display_name", "Alpha Two");
+      state.responder = (method) => {
+        if (method !== "PATCH") return { status: 200, body: TAB_PAYLOADS.routes };
+        if (how === "429") return { status: 429, body: { error: "Another server change is in progress. Try again in a moment." } };
+        renamed(1, "Alpha Two");
+        return updated("Alpha Two");
+      };
+      let release;
+      state.gate = new Promise((r) => { release = r; });
+      const first = clickText(main, "Save");
+      await settle();
+      const during = view();
+      if (how === "double" || how === "429") {
+        await clickText(main, "Save");
+        await forceClick(buttons(openForm(), "Save")[0]);
+      }
+      if (how === "edit") {
+        await clickEdit(2);
+        await forceClick(byAttr(main, "data-server-id", 2).find((b) => b.tag === "button"));
+      }
+      if (how === "tab") await mountPage("routes");
+      if (how === "hash") await leaveHash("#/fleet");
+      const mid = view();
+      release();
+      await first;
+      await settle(30);
+      state.gate = null;
+      const result = { during, mid, late: view() };
+      if (how === "tab") {
+        await mountPage("servers");
+        result.back = view();
+      }
+      if (how === "edit") {
+        await clickEdit(3);
+        await edit("display_name", "Charlie Two");
+        state.responder = () => updated("Charlie Two");
+        await clickText(main, "Save");
+        await settle(30);
+        result.next = view();
+      }
+      if (how === "429") {
+        await settle(30);
+        result.settled = view();
+      }
+      return result;
+    },
+    /* The hashchange discard (D6): a password typed into Charlie's form and a changed host, then the hash moves to `hash`. The page
+       is painted twice first, so the listener count shows it is registered once. `kept` is whether the same form is still open. */
+    hash: async (h) => {
+      seed();
+      await mountPage("servers");
+      await clickEdit(3);
+      const form = openForm();
+      const pw = field("password");
+      await typeInto(pw, SECRET);
+      await typeInto(field("host"), "charlie-two");
+      await mountPage("servers");
+      const listeners = (windowHandlers.hashchange || []).length;
+      await leaveHash(h);
+      return {
+        listeners,
+        kept: openForm() === form && form.isConnected,
+        host: field("host") ? field("host").value : null,
+        value: pw.value,
+        connected: pw.isConnected,
+        forms: byAttr(main, "data-edit-form").length,
+        formBoxChildren: box("form").children.length,
+        secretNodes: secretNodes(),
+      };
+    },
+    /* A by-id read still in flight when the hash leaves the Servers tab: the form it would have filled never opens. */
+    hashOpen: async (h) => {
+      seed();
+      await mountPage("servers");
+      let release;
+      state.byIdGate = new Promise((r) => { release = r; });
+      const click = clickEdit(1);
+      await settle();
+      await leaveHash(h);
+      release();
+      await click;
+      await settle();
+      return { forms: byAttr(main, "data-edit-form").length, formBoxChildren: box("form").children.length };
+    },
+    /* The ported tests of the old vm harness: one tab drawn through the real modules, a read-only seat, every piece of text it drew. */
+    tab: async (name) => {
+      serveTab();
+      await mountPage(name);
+      const table = byTag(main, "table")[0];
+      const trs = table ? table.children[1].children : [];
+      return {
+        texts: textsUnder(main),
+        reads: requests.filter((r) => r.url !== "/api/session").map((r) => r.method + " " + r.url),
+        rowClasses: trs.map((tr) => tr.className),
+        cells: trs.map((tr) => tr.children.map(text)),
+        addedFormatted: util.localTime("2026-01-02T00:00:00.0000000"),
+        utcOffsetMinutes: new Date(2026, 0, 1).getTimezoneOffset(),
+      };
+    },
+    /* The 60 s poll: the tab on screen is rendered again and the page is looked at BEFORE the read lands. */
+    repaint: async (name) => {
+      serveTab();
+      await mountPage(name);
+      const before = main.children[2];
+      const row = name === "servers" ? "Alpha" : "cpu.threshold_percent";
+      let release;
+      if (name === "servers") state.listGate = new Promise((r) => { release = r; });
+      else state.gate = new Promise((r) => { release = r; });
+      page.renderAdmin(main, name);
+      await settle();
+      const during = textsUnder(main.children[2]);
+      const result = {
+        sameBody: main.children[2] === before,
+        loadingShown: during.some((t) => t.startsWith("Loading")),
+        rowsKept: during.length > 1,
+        rowShown: during.includes(row),
+      };
+      release();
+      await settle(30);
+      result.rowAfter = textsUnder(main).includes(row);
+      return result;
     },
     /* The frame's proof: a read-only seat sees the Servers tab drawn by the real grid. */
     frame: async () => {
