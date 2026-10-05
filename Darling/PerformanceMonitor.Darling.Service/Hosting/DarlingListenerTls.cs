@@ -9,6 +9,7 @@
 using System;
 using System.Globalization;
 using System.Net;
+using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.Extensions.Logging;
@@ -321,11 +322,12 @@ internal static class DarlingListenerTls
     }
 
     /// <summary>
-    /// The shared body of the one <c>UseHttps</c> call each host keeps: the leaf, and the intermediates that must
-    /// travel with it. Kestrel presents ONLY what it is handed, so an intermediate left out here is an
-    /// incomplete chain and a failed handshake on every client that has not independently cached it, and MCP
-    /// clients are mostly Node and Python SDKs, which never fetch a missing intermediate. Measured against a real
-    /// leaf-plus-intermediate PEM before the web host wired it: the server sent one certificate (#2562, #5288).
+    /// The shared body of the one <c>UseHttps</c> call each host keeps: the leaf, the intermediates that must
+    /// travel with it, and the protocol floor (TLS 1.2 or 1.3, nothing older). Kestrel presents ONLY what it is
+    /// handed, so an intermediate left out here is an incomplete chain and a failed handshake on every client that
+    /// has not independently cached it, and MCP clients are mostly Node and Python SDKs, which never fetch a
+    /// missing intermediate. Measured against a real leaf-plus-intermediate PEM before the web host wired it: the
+    /// server sent one certificate (#2562, #5288).
     ///
     /// <para>A host keeps exactly ONE <c>UseHttps</c> call, on its network listener, and the loopback listeners
     /// stay plain HTTP. This body is shared; the call is not, because a second call is how a loopback listener
@@ -338,6 +340,12 @@ internal static class DarlingListenerTls
         ArgumentNullException.ThrowIfNull(https);
 
         https.ServerCertificate = certificate.Leaf;
+
+        /* The floor is stated, not inherited: both listeners negotiate TLS 1.2 or 1.3 and nothing older. Left at
+           its default the protocol set belongs to the operating system, and that default differs by Windows
+           version, so one release would accept a version another refuses (#5288). */
+        https.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
+
         if (certificate.Chain is { Count: > 0 })
         {
             https.ServerCertificateChain = certificate.Chain;
