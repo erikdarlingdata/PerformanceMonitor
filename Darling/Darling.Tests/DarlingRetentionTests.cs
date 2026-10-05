@@ -118,6 +118,49 @@ public sealed class DarlingRetentionTests
             DarlingRetention.TimeSlicedDeleteSql("config_alert_log", "alert_time"));
     }
 
+    /// <summary>
+    /// #4605: the hour ledger is pruned at the horizon of the SUCCESSOR HOURLY ROLLUP the count guard compares it with,
+    /// derived from <see cref="TimescaleSupport.HourlyRetentionSpan"/>, never raw's four days and never a copied number.
+    /// A ledger pruned at raw's horizon would lack the hours the rollup still holds, and the guard would fail every window
+    /// past four days. The prune is one unsliced DELETE, so it dispatches single-shot. RED on the revision before the
+    /// prune existed (no <c>PruneSql</c> and no call), and on a call wired to raw's span.
+    /// </summary>
+    [Fact]
+    public void HourLedgerPrune_UsesTheSuccessorHourlyRollupsHorizon_NotRaws_AndDispatchesSingleShot()
+    {
+        /* The horizon the prune uses IS the successor hourly's own retention policy: if that policy moves to another
+           tier, this fails and the ledger's horizon is revisited with it. */
+        var policy = TimescaleSupport.RetentionPolicies.Single(p => p.Relation == TimescaleSupport.QueryStatsIntervalHourlyView);
+        Assert.Equal(TimescaleSupport.HourlyRetentionInterval, policy.DropAfter);
+        Assert.Equal(TimeSpan.FromDays(90), TimescaleSupport.HourlyRetentionSpan);
+        Assert.True(TimescaleSupport.HourlyRetentionSpan > TimescaleSupport.RawRetentionSpan,
+            "the rollup outlives raw, which is why the ledger cannot be pruned at raw's horizon");
+
+        Assert.Equal(
+            "DELETE FROM collect.query_stats_hour_ledger\r\nWHERE bucket < date_trunc('hour', $1::timestamp);".Replace("\r\n", "\n", StringComparison.Ordinal),
+            QueryStatsHourLedger.PruneSql.Trim().Replace("\r\n", "\n", StringComparison.Ordinal));
+
+        var source = ReadRetentionSource().Replace("\r\n", "\n", StringComparison.Ordinal);
+        var start = source.IndexOf("var hourLedgerDeleted = await PurgeOneAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the hour ledger's prune call moved or went missing (#4605)");
+        var end = source.IndexOf("pacer: walPacer);", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the hour ledger's prune call is malformed (#4605)");
+        var call = source[start..end];
+
+        Assert.Contains("QueryStatsHourLedger.LedgerTable", call, StringComparison.Ordinal);
+        Assert.Contains("QueryStatsHourLedger.PruneSql", call, StringComparison.Ordinal);
+        Assert.Contains("utcNow - TimescaleSupport.HourlyRetentionSpan", call, StringComparison.Ordinal);
+        Assert.Contains("batchSize: SingleShotStatement", call, StringComparison.Ordinal);
+        Assert.DoesNotContain("RawRetention", call, StringComparison.Ordinal);
+        Assert.DoesNotContain("retentionDays", call, StringComparison.Ordinal);
+
+        /* Outside every timescaleAvailable branch: the ledger is a plain table and a plain-PostgreSQL store needs it
+           bounded too. The statement sits at the sweep's top nesting, after the per-collector loop. */
+        Assert.True(
+            start > source.IndexOf("foreach (var definition in CollectorCatalog.All)", StringComparison.Ordinal),
+            "the ledger prune belongs to the sibling steps after the per-collector loop");
+    }
+
     [Fact]
     public void CommandHistoryRetention_IsTheBaseWindow_AndPurgesOnlyTerminalRows()
     {
@@ -683,6 +726,24 @@ public sealed class DarlingRetentionTests
                 await insert.ExecuteNonQueryAsync(ct);
             }
 
+            /* #4605: collect.query_stats_hour_ledger is pruned at the SUCCESSOR HOURLY ROLLUP's horizon (90 days,
+               TimescaleSupport.HourlyRetentionSpan), not raw's four days and not a collector's 30. The ages
+               DISCRIMINATE that: a 100-day bucket is past it and goes, an 80-day bucket SURVIVES although it is past
+               raw's horizon and past the 30-day base and 60-day log horizons (so this fails if the prune is wired
+               to raw's or a collector's retention), and a bucket from the last hour survives. Whole hours, as the
+               writer's date_trunc leaves them. */
+            foreach (var ageDays in new[] { 100.0, 80.0, 1.0 / 24 })
+            {
+                using var insert = new NpgsqlCommand(
+                    "INSERT INTO collect.query_stats_hour_ledger (server_id, server_name, bucket, n)"
+                    + " VALUES ($1, $2, date_trunc('hour', $3::timestamp), $4)", connection);
+                insert.Parameters.AddWithValue(TestServerId);
+                insert.Parameters.AddWithValue("retention-e2e");
+                insert.Parameters.AddWithValue(utcNow.AddDays(-ageDays));
+                insert.Parameters.AddWithValue(7L);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
             /* At least our three expired rows go (40-day wait_stats, 70-day collection_log, 100-day
                config_alert_log); a shared dev store may shed more. The extension-free DELETE path on purpose
                (timescaleAvailable: false) — it must keep working even on a store whose tables ARE hypertables,
@@ -763,6 +824,30 @@ public sealed class DarlingRetentionTests
                     $"the surviving journal row should be the 100-day one, got {survivor:O}; {purgeLog.Joined}");
                 Assert.False(await reader.ReadAsync(ct),
                     $"the 400-day plan_force_actions row survived past the 365-day horizon; {purgeLog.Joined}");
+            }
+
+            /* #4605: the ledger's survivors are exactly the 80-day and the last-hour bucket. The 100-day one is
+               past the successor hourly rollup's 90-day horizon and goes; the 80-day one is inside it, so it
+               staying proves the horizon is the rollup's and not raw's (4 days) or a collector's (30). */
+            using (var read = new NpgsqlCommand(
+                "SELECT bucket, n FROM collect.query_stats_hour_ledger WHERE server_id = $1 ORDER BY bucket", connection))
+            {
+                read.Parameters.AddWithValue(TestServerId);
+                using var reader = await read.ExecuteReaderAsync(ct);
+
+                var survivors = new List<(DateTime Bucket, long N)>();
+                while (await reader.ReadAsync(ct))
+                {
+                    survivors.Add((reader.GetDateTime(0), reader.GetInt64(1)));
+                }
+
+                Assert.True(survivors.Count == 2,
+                    $"expected the 80-day and the last-hour ledger bucket to survive, got {survivors.Count} bucket(s) ({string.Join(", ", survivors.Select(s => $"{s.Bucket:O}"))}); {purgeLog.Joined}");
+                Assert.True(survivors[0].Bucket < utcNow.AddDays(-79) && survivors[0].Bucket > utcNow.AddDays(-81),
+                    $"the older surviving ledger bucket should be the 80-day one, got {survivors[0].Bucket:O}; {purgeLog.Joined}");
+                Assert.True(survivors[1].Bucket > utcNow.AddDays(-1),
+                    $"the newer surviving ledger bucket should be the last-hour one, got {survivors[1].Bucket:O}; {purgeLog.Joined}");
+                Assert.All(survivors, s => Assert.Equal(7L, s.N));
             }
 
             /* The purge writes ONE auditable run-record under the fleet sentinel server_id — SUCCESS here
@@ -933,6 +1018,7 @@ WHERE hypertable_name = 'wait_stats'
             $"DELETE FROM config_alert_log WHERE server_id = {TestServerId}; " +
             $"DELETE FROM config.config_command WHERE target_server_id = {TestServerId}; " +
             $"DELETE FROM collect.plan_force_actions WHERE server_id = {TestServerId}; " +
+            $"DELETE FROM collect.query_stats_hour_ledger WHERE server_id = {TestServerId}; " +
             $"DELETE FROM collection_log WHERE server_id = {DarlingObservability.FleetServerId} AND collector_name = 'data_retention';",
             connection);
         await cleanup.ExecuteNonQueryAsync(ct);
