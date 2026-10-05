@@ -164,6 +164,8 @@ a:hover { text-decoration: underline; }
 .page-head h2 { margin: 0; font-size: 1.35rem; }
 .page-head .meta { color: var(--muted); font-size: 0.82rem; }
 .page-head .spacer { flex: 1; }
+.agent-line { margin: 0 0 0.6rem; font-size: 0.9rem; color: var(--muted); }
+.agent-line.agent-stopped { color: var(--err); font-weight: 600; }
 
 .refresh-note { color: var(--muted); font-size: 0.75rem; }
 

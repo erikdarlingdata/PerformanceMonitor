@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -119,6 +120,83 @@ internal static class DarlingJobReader
             reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
             !reader.IsDBNull(9) && reader.GetBoolean(9),
             reader.IsDBNull(10) ? null : reader.GetDecimal(10));
+
+    /// <summary>
+    /// The newest <c>agent_status</c> row of every enabled server that has one, or of the one server asked for ($1;
+    /// NULL for every server). A per-server <c>LATERAL</c> reads one row off the (server_id, collection_time) index, so
+    /// the cost is one index probe per server rather than a walk of the table's retained history. A server with no row
+    /// (a PostgreSQL target, or an Agent collector that has not run) is simply absent. <c>next_scheduled_run</c> is the
+    /// server's own wall clock; <see cref="ReadLatestAgentStatesAsync"/> converts it to UTC.
+    /// </summary>
+    public const string LatestAgentStatusSql = """
+        SELECT
+            s.server_id,
+            COALESCE(s.display_name, s.server_name),
+            a.agent_running,
+            a.agent_status_desc,
+            a.next_scheduled_run,
+            a.collection_time
+        FROM servers AS s
+        CROSS JOIN LATERAL
+        (
+            SELECT x.agent_running, x.agent_status_desc, x.next_scheduled_run, x.collection_time
+            FROM agent_status AS x
+            WHERE x.server_id = s.server_id
+            ORDER BY x.collection_time DESC
+            LIMIT 1
+        ) AS a
+        WHERE s.is_enabled
+        AND   ($1::int IS NULL OR s.server_id = $1)
+        ORDER BY COALESCE(s.display_name, s.server_name), s.server_id
+        """;
+
+    /// <summary>The description served for an Agent whose newest snapshot is older than the staleness window.</summary>
+    public const string AgentUnknownDescription = "unknown (no recent status)";
+
+    /// <summary>One server's SQL Agent state as <c>get_job_history</c> reports it. <paramref name="AgentRunning"/> is null
+    /// when the state is not known: no recent snapshot, or a snapshot that did not say.</summary>
+    public sealed record AgentState(
+        string Server, bool? AgentRunning, string? AgentStatusDesc, DateTime? NextRunUtc, DateTime CapturedAtUtc);
+
+    /// <summary>
+    /// Turns a stored snapshot into the state served. A snapshot is judged only while it is fresh, by the same window and
+    /// the same comparison the "Agent Not Running" self-alert uses (<see cref="DarlingSelfAlertEvaluator.StaleWindow"/>):
+    /// an older one says nothing about the Agent now, so it reads as unknown with no next run, never as the last value seen.
+    /// </summary>
+    internal static AgentState ResolveAgentState(
+        string server, bool? running, string? statusDesc, DateTime? nextRunUtc, DateTime capturedAtUtc, DateTime nowUtc)
+    {
+        var fresh = nowUtc - capturedAtUtc < DarlingSelfAlertEvaluator.StaleWindow;
+        return fresh
+            ? new AgentState(server, running, statusDesc, nextRunUtc, capturedAtUtc)
+            : new AgentState(server, null, AgentUnknownDescription, null, capturedAtUtc);
+    }
+
+    /// <summary>The latest Agent state of one server (<paramref name="serverId"/>) or of every enabled server that has a
+    /// snapshot, ordered by name. <paramref name="nowUtc"/> is the instant the snapshots are judged against.</summary>
+    public static async Task<List<AgentState>> ReadLatestAgentStatesAsync(
+        NpgsqlDataSource postgres, int? serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        var clocks = await DarlingServerClocksReader.GetAsync(postgres, serverId, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        var states = new List<AgentState>();
+        await using var command = postgres.CreateCommand(LatestAgentStatusSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = (object?)serverId ?? DBNull.Value });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var id = reader.GetInt32(0);
+            states.Add(ResolveAgentState(
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetBoolean(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : DarlingServerClocksReader.ClockFor(clocks, id).ToUtc(reader.GetDateTime(4)),
+                DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc),
+                nowUtc));
+        }
+
+        return states;
+    }
 
     /// <summary>Lite/Dashboard's job-duration display formatting (Xs / Xm Ys / Xh Ym).</summary>
     public static string FormatDuration(long seconds)
