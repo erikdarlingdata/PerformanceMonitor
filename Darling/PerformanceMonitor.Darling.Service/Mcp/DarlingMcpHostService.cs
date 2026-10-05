@@ -323,16 +323,18 @@ public sealed class DarlingMcpHostService : BackgroundService
         {
             var networkMode = bind.Mode == McpBindMode.NetworkAndLoopback;
 
-            /* In network mode ResolveMcpBind has already validated the listen IP, the allowFrom CIDR, AND their
-               address-family agreement, so these two parses cannot throw; only resolving the token can still
-               fail (a corrupt DPAPI blob), which fail-closes to loopback-only rather than exposing tokenless. */
+            /* In network mode ResolveMcpBind has already validated the listen IP, the allowFrom CIDR list (#5288),
+               AND every entry's address-family agreement with the listen, so these two parses cannot throw; only
+               resolving the token can still fail (a corrupt DPAPI blob), which fail-closes to loopback-only
+               rather than exposing tokenless. The list type's default admits nobody, so the value the loopback
+               mode never reads fails closed too. */
             IPAddress? networkListenIp = null;
-            IPNetwork allowedCidr = default;
+            CidrAllowList allowedCidr = default;
             string bearerToken = "";
             if (networkMode)
             {
                 networkListenIp = IPAddress.Parse(config.Mcp.Network!.Listen!.Trim());
-                allowedCidr = IPNetwork.Parse(config.Mcp.Network.AllowFrom!.Trim());
+                allowedCidr = CidrAllowList.Parse(config.Mcp.Network.AllowFrom!);
 
                 try
                 {
@@ -1096,7 +1098,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         WebApplication app,
         bool networkMode,
         IPAddress? networkListenIp,
-        IPNetwork allowedCidr,
+        CidrAllowList allowedCidr,
         string bearerToken)
     {
         /* #2479 item 5: every gate below used to refuse silently, so "is my token wrong or my CIDR
@@ -1244,7 +1246,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         /// <summary>Exposed + managed but no bearer token — fail-closed to loopback (LogCritical).</summary>
         TokenMissing,
 
-        /// <summary>Exposed + managed + token but allowFrom is missing/not a valid CIDR or its family does not match the listen — fail-closed to loopback (LogCritical).</summary>
+        /// <summary>Exposed + managed + token but allowFrom is missing, is not a valid CIDR list (one CIDR, or CIDRs separated by commas, #5288), or an entry's family does not match the listen — fail-closed to loopback (LogCritical).</summary>
         AllowFromInvalid,
     }
 
@@ -1290,9 +1292,9 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// PURE in-app CIDR check (D3-c, Round-4 #2): is <paramref name="remoteIp"/> allowed? Loopback
     /// (<c>127.0.0.0/8</c> or <c>::1</c>, incl. an IPv4-mapped-IPv6 form) is ALWAYS allowed — it is not in
     /// <paramref name="allowedCidr"/>, so otherwise the loopback bind's local clients would get 403. Everything
-    /// else must fall inside the CIDR. A null remote (unverifiable origin) fails closed.
+    /// else must fall inside ANY entry of the CIDR list (#5288). A null remote (unverifiable origin) fails closed.
     /// </summary>
-    internal static bool IsRemoteAddressAllowed(IPAddress? remoteIp, IPNetwork allowedCidr)
+    internal static bool IsRemoteAddressAllowed(IPAddress? remoteIp, CidrAllowList allowedCidr)
         => DarlingHostBinding.IsRemoteAddressAllowed(remoteIp, allowedCidr);
 
     /// <summary>
@@ -1408,9 +1410,11 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             case McpBindReason.AllowFromInvalid:
                 _logger.Log(level.Value,
-                    "MCP network exposure requested but mcp.network.allowFrom '{AllowFrom}' is not a valid CIDR or its " +
-                    "address family does not match mcp.network.listen — refusing to expose; binding loopback-only. " +
-                    "Use e.g. 192.168.1.0/24 (host bits zeroed, same family as listen).",
+                    "MCP network exposure requested but mcp.network.allowFrom '{AllowFrom}' is not a valid CIDR list or an " +
+                    "entry's address family does not match mcp.network.listen — refusing to expose; binding loopback-only. " +
+                    "Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas or as a JSON array " +
+                    "(e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address) and of the same " +
+                    "family as listen (a :: listen takes IPv6 entries only). Host bits are masked (192.168.1.5/24 means 192.168.1.0/24).",
                     mcp.Network?.AllowFrom);
                 break;
 

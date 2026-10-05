@@ -395,16 +395,18 @@ public sealed class DarlingWebHostService : BackgroundService
         {
             var networkMode = bind.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
 
-            /* In network mode ResolveBind has already validated the listen IP, the allowFrom CIDR, AND their
-               address-family agreement, so these two parses cannot throw; only resolving the token can still
-               fail (a corrupt DPAPI blob), which fail-closes to loopback-only rather than exposing tokenless. */
+            /* In network mode ResolveBind has already validated the listen IP, the allowFrom CIDR list (#5288),
+               AND every entry's address-family agreement with the listen, so these two parses cannot throw; only
+               resolving the token can still fail (a corrupt DPAPI blob), which fail-closes to loopback-only
+               rather than exposing tokenless. The list type's default admits nobody, so the value the loopback
+               mode never reads fails closed too. */
             IPAddress? networkListenIp = null;
-            IPNetwork allowedCidr = default;
+            CidrAllowList allowedCidr = default;
             string accessToken = "";
             if (networkMode)
             {
                 networkListenIp = IPAddress.Parse(network!.Listen!.Trim());
-                allowedCidr = IPNetwork.Parse(network.AllowFrom!.Trim());
+                allowedCidr = CidrAllowList.Parse(network.AllowFrom!);
 
                 try
                 {
@@ -918,7 +920,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// cookie passes, a valid <c>?token=</c> is exchanged for one
     /// (<see cref="WebAuthAction.SetCookieAndRedirect"/>), and anything else gets the login form.</para>
     /// </summary>
-    internal static WebAuthAction DecideWebAuth(IPAddress? remoteIp, IPNetwork allowedCidr, bool hasValidCookie, bool hasValidToken)
+    internal static WebAuthAction DecideWebAuth(IPAddress? remoteIp, CidrAllowList allowedCidr, bool hasValidCookie, bool hasValidToken)
     {
         /* Loopback determination lives in DarlingWebEndpoints.IsLoopbackRemote so every caller unwraps
            IPv4-mapped-IPv6 (::ffff:127.0.0.1) identically. Loopback is exempt from the CIDR test ONLY — it
@@ -1017,7 +1019,7 @@ public sealed class DarlingWebHostService : BackgroundService
         NpgsqlDataSource postgres,
         bool networkMode,
         IPAddress? networkListenIp,
-        IPNetwork allowedCidr,
+        CidrAllowList allowedCidr,
         string accessToken,
         DarlingWebOidcClient? oidcClient,
         string? publicBaseUrlHost = null,
@@ -1362,7 +1364,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// original matrix decides exactly as before.
     /// </summary>
     internal static WebRequestAction DecideWebRequest(
-        IPAddress? remoteIp, IPNetwork allowedCidr, bool isAuthFlowRoute, bool hasValidCookie, bool hasValidToken)
+        IPAddress? remoteIp, CidrAllowList allowedCidr, bool isAuthFlowRoute, bool hasValidCookie, bool hasValidToken)
     {
         var isLoopback = DarlingWebEndpoints.IsLoopbackRemote(remoteIp);
         if (!isLoopback && !DarlingHostBinding.IsRemoteAddressAllowed(remoteIp, allowedCidr))
@@ -2034,9 +2036,11 @@ document.getElementById('return').value = location.pathname + location.search + 
 
             case DarlingHostBinding.BindReason.AllowFromInvalid:
                 _logger.Log(level.Value,
-                    "Web dashboard network exposure requested but web.network.allowFrom '{AllowFrom}' is not a valid CIDR or its " +
-                    "address family does not match web.network.listen — refusing to expose; binding loopback-only. " +
-                    "Use e.g. 192.168.1.0/24 (host bits zeroed, same family as listen).",
+                    "Web dashboard network exposure requested but web.network.allowFrom '{AllowFrom}' is not a valid CIDR list or an " +
+                    "entry's address family does not match web.network.listen — refusing to expose; binding loopback-only. " +
+                    "Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas or as a JSON array " +
+                    "(e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address) and of the same " +
+                    "family as listen (a :: listen takes IPv6 entries only). Host bits are masked (192.168.1.5/24 means 192.168.1.0/24).",
                     web.Network?.AllowFrom);
                 break;
 
