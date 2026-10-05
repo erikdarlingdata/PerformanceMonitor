@@ -379,8 +379,15 @@ function gridTools(desc, cols, tbody) {
 
 /* Column filters (#4843). Every column that has text to match carries a small header button (`filter: false` on a
    column or the descriptor opts out; a `copy: false` control column has none) that opens a text box above the
-   table. The match is a case-insensitive substring of the cell's rendered text, so it matches what the user sees,
-   a list-valued cell included; several filters combine with AND. A row that fails is display:none and is recorded
+   table. Typing alone is a case-insensitive substring match of the cell's rendered text, so it matches what the
+   user sees, a list-valued cell included. A small "Match" list beside the box offers the desktop's other operators
+   for the column's kind (the kind the sort decides, sortKindOf): a number column adds Equals, Not equals, >, >=, <
+   and <=, which compare the SAME raw value the sort orders by (sortKeyOf over columnValue), never the formatted text,
+   so "> 900" does not match "1,000" the way a string comparison would; a text column adds Equals, Not equals, Starts
+   with and Ends with (a comma separates alternatives); a time column offers only the two empty tests. Is empty and Is
+   not empty work on every column: a cell is empty when its raw value is null, undefined, "", blank, NaN or an empty
+   list (a column drawn by display() or render() with no value of its own is empty when it shows nothing or the
+   dash); 0 and false are values, and a literal "-" is a value. Several filters combine with AND. A row that fails is display:none and is recorded
    in `filteredOut`, which Copy all and Export CSV read so they carry exactly the shown rows (all columns, hidden
    and grouped-away ones too, in the current sort order). A strip under the header lists each active filter with a
    button to clear it, a Clear all button and "Showing N of M rows". The filter texts and which box is open live at
@@ -391,6 +398,70 @@ const gridFilterOpen = new Map(); // table key -> column id of the open box
 const gridFilterTyping = new Set(); // table keys whose box had the focus when the page was last drawn
 const filteredOut = new WeakSet();
 const tbodyFilter = new WeakMap();
+
+const FILTER_OP_LABELS = {
+  contains: "Contains",
+  equals: "Equals",
+  notEquals: "Not equals",
+  gt: ">",
+  gte: ">=",
+  lt: "<",
+  lte: "<=",
+  startsWith: "Starts with",
+  endsWith: "Ends with",
+  isEmpty: "Is empty",
+  isNotEmpty: "Is not empty",
+};
+const FILTER_OPS_BY_KIND = {
+  number: ["contains", "equals", "notEquals", "gt", "gte", "lt", "lte", "isEmpty", "isNotEmpty"],
+  time: ["contains", "isEmpty", "isNotEmpty"],
+  text: ["contains", "equals", "notEquals", "startsWith", "endsWith", "isEmpty", "isNotEmpty"],
+};
+const filterNeedsNoText = (op) => op === "isEmpty" || op === "isNotEmpty";
+
+/* A typed number: thousands separators, a percent sign, a dollar sign and spaces are dropped, as the desktop does. */
+function parseFilterNumber(t) {
+  const clean = String(t ?? "").trim().replace(/[,%$\s]/g, "");
+  if (clean === "") return null;
+  const n = Number(clean);
+  return Number.isNaN(n) ? null : n;
+}
+
+function filterCellEmpty(c, raw, text) {
+  const rawEmpty = isEmptyValue(raw) || (typeof raw === "string" && raw.trim() === "") || (Array.isArray(raw) && raw.length === 0);
+  if (!rawEmpty) return false;
+  if (typeof c.display !== "function" && typeof c.render !== "function") return true;
+  const t = text.trim();
+  return t === "" || t === "\u2014";
+}
+
+/* Whether one cell passes one filter. `kind` is the column's sort kind, `text` the rendered cell text, `raw` the
+   value the sort reads. A numeric operator needs a number on both sides; otherwise the row does not match. */
+function filterPasses(op, kind, term, c, raw, text) {
+  if (op === "isEmpty") return filterCellEmpty(c, raw, text);
+  if (op === "isNotEmpty") return !filterCellEmpty(c, raw, text);
+  const lower = text.toLowerCase();
+  const t = String(term).trim().toLowerCase();
+  if (op === "contains") return lower.includes(t);
+  if (kind === "number" && op !== "startsWith" && op !== "endsWith") {
+    const want = parseFilterNumber(term);
+    const have = sortKeyOf("number", raw);
+    if (want !== null && have !== null) {
+      return op === "equals" ? have === want : op === "notEquals" ? have !== want : op === "gt" ? have > want : op === "gte" ? have >= want : op === "lt" ? have < want : have <= want;
+    }
+    /* Not both numbers: Equals and Not equals fall back to the text, as the desktop does; an ordering has no answer. */
+    if (op === "equals") return lower === t;
+    if (op === "notEquals") return lower !== t;
+    return false;
+  }
+  const terms = t.split(",").map((x) => x.trim()).filter(Boolean);
+  if (!terms.length) return true;
+  if (op === "equals") return terms.some((x) => lower === x);
+  if (op === "notEquals") return terms.every((x) => lower !== x);
+  if (op === "startsWith") return terms.some((x) => lower.startsWith(x));
+  if (op === "endsWith") return terms.some((x) => lower.endsWith(x));
+  return true;
+}
 
 function gridFilter(desc, cols, head, tbody) {
   const key = gridSortKey(desc, cols);
@@ -404,18 +475,35 @@ function gridFilter(desc, cols, head, tbody) {
   bar.appendChild(chips);
   const btns = new Map();
   const needle = (t) => String(t ?? "").trim().toLowerCase();
+  /* A filter is { op, text }; the value-less operators are active with no text. */
+  const isOn = (f) => !!f && (filterNeedsNoText(f.op) || !!needle(f.text));
+  /* The sort kind of column i over the rows now in the body: number, time or text. */
+  const kindOf = (i) =>
+    sortKindOf(
+      cols[i],
+      Array.from(tbody.children, (tr) => (trRow.has(tr) ? columnValue(trRow.get(tr), cols[i]) : undefined))
+    );
+  /* The operator in force: a stored one the column's kind does not offer (the rows changed under it) falls back to Contains. */
+  const opFor = (f, kind) => (f && FILTER_OPS_BY_KIND[kind].includes(f.op) ? f.op : "contains");
 
   function applyRows() {
     const tests = [];
     cols.forEach((c, i) => {
-      const t = needle(active().get(colId(c)));
-      if (t) tests.push([i, t]);
+      const f = active().get(colId(c));
+      if (isOn(f)) {
+        const kind = kindOf(i);
+        tests.push([i, opFor(f, kind), kind, f.text ?? ""]);
+      }
     });
     let shown = 0;
     let total = 0;
     for (const tr of tbody.children) {
       total++;
-      const out = tests.some(([i, t]) => !(tr.children[i] && tr.children[i].textContent.toLowerCase().includes(t)));
+      const out = tests.some(([i, op, kind, term]) => {
+        const td = tr.children[i];
+        if (!td) return true;
+        return !filterPasses(op, kind, term, cols[i], trRow.has(tr) ? columnValue(trRow.get(tr), cols[i]) : undefined, td.textContent);
+      });
       if (out) filteredOut.add(tr);
       else {
         filteredOut.delete(tr);
@@ -426,9 +514,9 @@ function gridFilter(desc, cols, head, tbody) {
     return { shown, total, tests: tests.length };
   }
 
-  function setText(c, text) {
+  function setFilter(c, op, text) {
     const next = new Map(active());
-    if (needle(text)) next.set(colId(c), text);
+    if (isOn({ op, text })) next.set(colId(c), { op, text });
     else next.delete(colId(c));
     if (next.size) gridFilters.set(key, next);
     else gridFilters.delete(key);
@@ -440,15 +528,17 @@ function gridFilter(desc, cols, head, tbody) {
     if (r.tests) {
       for (const i of idx) {
         const c = cols[i];
-        const t = active().get(colId(c));
-        if (!needle(t)) continue;
+        const f = active().get(colId(c));
+        if (!isOn(f)) continue;
+        const op = opFor(f, kindOf(i));
+        const chipText = op === "contains" ? String(f.text).trim() : FILTER_OP_LABELS[op] + (filterNeedsNoText(op) ? "" : " " + String(f.text).trim());
         const x = el("button", { type: "button", class: "grid-filter-x", text: "×", title: "Clear the filter on " + c.label, "aria-label": "Clear the filter on " + c.label });
         x.addEventListener("click", () => {
-          setText(c, "");
+          setFilter(c, "contains", "");
           renderPop();
           renderChips();
         });
-        chips.appendChild(el("span", { class: "grid-filter-chip" }, [el("span", { text: c.label + ": " + String(t).trim() }), x]));
+        chips.appendChild(el("span", { class: "grid-filter-chip" }, [el("span", { text: c.label + ": " + chipText }), x]));
       }
       const all = el("button", { type: "button", class: "btn grid-filter-clear-all", text: "Clear all filters" });
       all.addEventListener("click", () => {
@@ -460,7 +550,7 @@ function gridFilter(desc, cols, head, tbody) {
       chips.appendChild(el("span", { class: "grid-filter-count", role: "status", "aria-live": "polite", text: "Showing " + r.shown + " of " + r.total + " rows" }));
     }
     for (const [i, b] of btns) {
-      const on = !!needle(active().get(colId(cols[i])));
+      const on = isOn(active().get(colId(cols[i])));
       b.className = "col-filter-btn" + (on ? " on" : "");
       b.setAttribute("aria-pressed", on ? "true" : "false");
     }
@@ -488,12 +578,28 @@ function gridFilter(desc, cols, head, tbody) {
     }
     const c = cols[i];
     const input = el("input", { type: "text", class: "grid-filter-input", "aria-label": "Filter " + c.label, placeholder: "contains…" });
-    input.value = active().get(colId(c)) ?? "";
+    const stored = active().get(colId(c));
+    const kind = kindOf(i);
+    const ops = FILTER_OPS_BY_KIND[kind];
+    let op = opFor(stored, kind);
+    input.value = stored ? stored.text ?? "" : "";
+    const opSel = el("select", { class: "grid-filter-op", "aria-label": "Match " + c.label }, ops.map((o) => el("option", { value: o, text: FILTER_OP_LABELS[o] })));
+    opSel.value = op;
+    const syncInput = () => {
+      if (input.style) input.style.display = filterNeedsNoText(op) ? "none" : "";
+    };
+    syncInput();
     const clear = el("button", { type: "button", class: "btn grid-filter-clear", text: "Clear" });
     const done = el("button", { type: "button", class: "btn grid-filter-close", text: "Close" });
-    const panel = el("div", { class: "grid-filter-pop", role: "dialog", "aria-label": "Filter " + c.label }, [el("span", { class: "grid-filter-label", text: c.label }), input, clear, done]);
+    const panel = el("div", { class: "grid-filter-pop", role: "dialog", "aria-label": "Filter " + c.label }, [el("span", { class: "grid-filter-label", text: c.label }), ops.length > 1 ? opSel : null, input, clear, done].filter(Boolean));
     input.addEventListener("input", () => {
-      setText(c, input.value);
+      setFilter(c, op, input.value);
+      renderChips();
+    });
+    opSel.addEventListener("change", () => {
+      op = opSel.value;
+      setFilter(c, op, input.value);
+      syncInput();
       renderChips();
     });
     input.addEventListener("focus", () => gridFilterTyping.add(key));
@@ -504,7 +610,7 @@ function gridFilter(desc, cols, head, tbody) {
       }
     });
     clear.addEventListener("click", () => {
-      setText(c, "");
+      setFilter(c, op, "");
       input.value = "";
       renderChips();
       if (typeof input.focus === "function") input.focus();
@@ -607,6 +713,11 @@ function sortKindOf(c, values) {
   return present.length && present.every((v) => typeof v === "number") ? "number" : "text";
 }
 
+/* The raw value a column holds for a row: what the sort orders by and what the numeric filters compare. */
+function columnValue(row, c) {
+  return typeof c.sortValue === "function" ? c.sortValue(row) : getPath(row, c.key);
+}
+
 function sortKeyOf(kind, v) {
   if (isEmptyValue(v)) return null;
   if (kind === "time") {
@@ -649,9 +760,7 @@ function makeGridSort(desc, cols, rows) {
   let tbody = null;
   let moved = false;
 
-  function valueOf(row, c) {
-    return typeof c.sortValue === "function" ? c.sortValue(row) : getPath(row, c.key);
-  }
+  const valueOf = columnValue;
 
   function indicate() {
     const st = gridSortState.get(stateKey);
