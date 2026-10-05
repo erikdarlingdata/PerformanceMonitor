@@ -11,7 +11,7 @@ param get_active_queries.server_name 28
 tool get_session_stats 391
 param get_session_stats.server_name 28
 
-tool get_waiting_tasks 751
+tool get_waiting_tasks 364
 param get_waiting_tasks.as_of 167
 param get_waiting_tasks.hours_back 28
 param get_waiting_tasks.limit 141

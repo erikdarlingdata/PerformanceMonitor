@@ -254,11 +254,42 @@ internal static class WebDataStartNote
     };
 
     /// <summary>
+    /// The three window-floor keys a listed read's tool writes itself at the top level of a data answer (#4966).
+    /// </summary>
+    private static readonly string[] ToolWindowFloorKeys = ["effective_start", "window_truncated", "truncation_note"];
+
+    /// <summary>
+    /// Removes the tool's own window-floor keys from a data answer (an <c>empty</c> status keeps its copy under
+    /// <c>hints</c>, which the page does not read). The guard below then sees the payload as it was before the tool
+    /// wrote them, so a tool's <c>window_truncated: false</c> can neither hide the web's capped note nor stand in for it.
+    /// </summary>
+    private static void StripToolWindowFloor(JsonObject? payload)
+    {
+        if (payload is null)
+        {
+            return;
+        }
+
+        foreach (var key in ToolWindowFloorKeys)
+        {
+            payload.Remove(key);
+        }
+    }
+
+    /// <summary>
     /// <paramref name="result"/> with the notice fields added when <paramref name="tool"/> is a listed grid read whose
     /// window starts before its table's coverage, or is a newest-first list (<see cref="NewestFirstCappedReads"/>) that
     /// hit its row cap; otherwise <paramref name="result"/> itself, untouched.
     /// <paramref name="hoursBack"/> is the window the page asked for (null or below 1: none was asked), and
     /// <paramref name="asOf"/> the request's window anchor.
+    /// <para>A listed read's tool may write the same three keys itself (#4966: <c>effective_start</c>,
+    /// <c>window_truncated</c>, <c>truncation_note</c>, the MCP dialect, in UTC). The page draws its own note from the
+    /// fields this method adds, in the browser's zone, so the tool's three are removed first and the note is decided as
+    /// it was before the tool wrote them: the page gets the same answer, capped or coverage. When a note is added, the
+    /// payload that carries it is the stripped one, so the tool's three keys are gone from it. When no note is added
+    /// (every early return: covered, a short window, a failed probe, a capped page that reaches the start), the string
+    /// goes back as the tool wrote it, and still holds the tool's keys. That is harmless today: the tool and this method run
+    /// the same probe over the same window, so their verdicts agree.</para>
     /// </summary>
     internal static async Task<string> AddAsync(
         NpgsqlDataSource postgres, string tool, string? server, int? hoursBack, string? asOf, string result,
@@ -282,6 +313,9 @@ internal static class WebDataStartNote
         {
             return result;
         }
+
+        /* Strips the parsed copy only: the early returns below send `result` itself, keys and all. */
+        StripToolWindowFloor(payload);
 
         /* Rows, or the answer that says the read looked and found nothing (#4966, NothingFoundStatusByRead): an empty span
            over a short history reads as "nothing happened" when it is only short, so that answer gets the note too. The
