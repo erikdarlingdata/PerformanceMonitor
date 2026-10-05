@@ -63,6 +63,28 @@ internal static class ProcedureStatsPlanFetchModes
 
         return false;
     }
+
+    /// <summary>
+    /// The mode a run was stamped with, read back from its <see cref="CollectorContext"/>. The stamp is the single
+    /// resolution of the knob and the capture setting for the run; the reader close and the reuse pass read it here
+    /// instead of asking again, because the store reloads the capture setting live between the stamp and the apply.
+    /// <list type="bullet">
+    /// <item>On: the main query left the plan out (<c>DeferPlanXmlFetch</c>), or it carries identity columns with no
+    /// plan capture at all (a gated cycle).</item>
+    /// <item>Shadow: identity columns beside an inline plan.</item>
+    /// </list>
+    /// </summary>
+    public static ProcedureStatsPlanFetchMode OfRun(CollectorContext context)
+    {
+        if (context.DeferPlanXmlFetch || (context.PlanIdentityColumns && !context.CapturePlanXml))
+        {
+            return ProcedureStatsPlanFetchMode.On;
+        }
+
+        return context.PlanIdentityColumns && context.CapturePlanXml
+            ? ProcedureStatsPlanFetchMode.Shadow
+            : ProcedureStatsPlanFetchMode.Off;
+    }
 }
 
 /// <summary>

@@ -395,6 +395,12 @@ public sealed class DarlingCollectorRunner
     /// <summary>How long a plan identity may go unseen before the host forgets it (#5158).</summary>
     internal static readonly TimeSpan QueryStatsPlanCacheMaxAge = TimeSpan.FromHours(1);
 
+    /// <summary>
+    /// How long a procedure_stats module-plan identity may go unseen before the host forgets it (#5158). The same
+    /// value as <see cref="QueryStatsPlanCacheMaxAge"/>, named for the collector that uses it so the two can move apart.
+    /// </summary>
+    internal static readonly TimeSpan ProcedureStatsPlanCacheMaxAge = QueryStatsPlanCacheMaxAge;
+
     /* #5158: procedure_stats' knob (darling.json "procedureStatsDeferredPlanFetch": off | shadow | on), read through a
        provider like its siblings. Null provider = off, the shipped default. */
     private readonly Func<string?> _procedureStatsDeferredPlanFetch;
@@ -708,11 +714,38 @@ public sealed class DarlingCollectorRunner
     /// second query, so it keeps the inline capture.
     /// </summary>
     internal bool ShouldDeferPlanFetchFor(string collectorName, bool capturePlanXml, CollectorTargetInfo target) =>
+        ShouldDeferPlanFetchFor(collectorName, capturePlanXml, target, ProcedureStatsPlanFetchModeFor(collectorName, target));
+
+    /// <summary>
+    /// The same decision with procedure_stats' mode already resolved, so one run reads the knob and the capture setting
+    /// once (see <see cref="StampPlanFetchFlags"/>).
+    /// </summary>
+    internal bool ShouldDeferPlanFetchFor(
+        string collectorName, bool capturePlanXml, CollectorTargetInfo target, ProcedureStatsPlanFetchMode procedureStatsMode) =>
         capturePlanXml
         && ((string.Equals(collectorName, QueryStatsCollector.Instance.Name, StringComparison.Ordinal)
                 && !target.IsAzureSqlDb
                 && _queryStatsDeferredPlanFetch())
-            || ProcedureStatsPlanFetchModeFor(collectorName, target) == ProcedureStatsPlanFetchMode.On);
+            || procedureStatsMode == ProcedureStatsPlanFetchMode.On);
+
+    /// <summary>
+    /// #5158: the two context flags that describe a run's plan fetch, resolved from ONE read of the knob and of the
+    /// capture setting. The store reloads the capture setting live, so deciding the stamp, the reader close and the apply
+    /// branch from separate reads could disagree inside one run (shadow rows carrying inline plans, then an on-mode fetch
+    /// run on them over an open reader). Everything after the stamp reads the mode back from the context with
+    /// <see cref="ProcedureStatsPlanFetchModes.OfRun"/>.
+    /// </summary>
+    internal (bool DeferPlanXmlFetch, bool PlanIdentityColumns) StampPlanFetchFlags(
+        string collectorName, bool capturePlanXml, CollectorTargetInfo target)
+    {
+        var mode = ProcedureStatsPlanFetchModeFor(collectorName, target);
+        return (
+            ShouldDeferPlanFetchFor(collectorName, capturePlanXml, target, mode),
+            /* Shadow adds the identity columns after the inline plan on a capture cycle; on sends them every cycle, a
+               gated one included, where they stand alone. */
+            mode == ProcedureStatsPlanFetchMode.On
+                || (mode == ProcedureStatsPlanFetchMode.Shadow && capturePlanXml));
+    }
 
     /// <summary>
     /// #5158: the procedure_stats plan fetch mode for this run. Off for every other collector, while the host captures
@@ -2237,6 +2270,7 @@ public sealed class DarlingCollectorRunner
         }
 
         var capturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId);
+        var planFetchFlags = StampPlanFetchFlags(definition.Name, capturePlanXml, server.Target);
         var context = new CollectorContext
         {
             ServerId = server.ServerId,
@@ -2266,12 +2300,10 @@ public sealed class DarlingCollectorRunner
             CapturePlanXml = capturePlanXml,
             /* #5158: query_stats' main query leaves the plan out and the plan fetch below renders only the plans this
                host has not committed. */
-            DeferPlanXmlFetch = ShouldDeferPlanFetchFor(definition.Name, capturePlanXml, server.Target),
-            /* #5158: procedure_stats' identity columns, so the host can recognize a module plan: shadow adds them after the
-               inline plan on a capture cycle; on sends them every cycle, a gated one included, where they stand alone. */
-            PlanIdentityColumns = ProcedureStatsPlanFetchModeFor(definition.Name, server.Target) is { } planFetchMode
-                && (planFetchMode == ProcedureStatsPlanFetchMode.On
-                    || (planFetchMode == ProcedureStatsPlanFetchMode.Shadow && capturePlanXml)),
+            DeferPlanXmlFetch = planFetchFlags.DeferPlanXmlFetch,
+            /* #5158: procedure_stats' identity columns, so the host can recognize a module plan. Both flags come from one
+               resolution of the mode (StampPlanFetchFlags); the reader close and the reuse pass read it back from here. */
+            PlanIdentityColumns = planFetchFlags.PlanIdentityColumns,
             /* #4735 item 1: 0 on the first attempt; RunWithSplitCharacterRetryAsync raises it after a 22021. */
             PgLogReadShiftBytes = pgLogReadShiftBytes,
             /* #2150: ON. query_sql_text is no longer carried on every runtime-stats row — it is fetched once
@@ -3626,13 +3658,15 @@ public sealed class DarlingCollectorRunner
                     }
                     else if (context.PlanIdentityColumns && (object)rows is List<ProcedureStatsCollector.Row> identityRows)
                     {
-                        if (ProcedureStatsPlanFetchModeFor(definition.Name, server.Target) == ProcedureStatsPlanFetchMode.On)
+                        /* The run's mode, read back from the stamp: the knob and the capture setting are not asked again. */
+                        var procedureStatsMode = ProcedureStatsPlanFetchModes.OfRun(context);
+                        if (procedureStatsMode == ProcedureStatsPlanFetchMode.On)
                         {
                             await reader.CloseAsync();
                         }
 
                         pendingProcedureKeys = await ApplyProcedureStatsPlanReuseAsync(
-                            targetProvider, targetConnection, server, context, identityRows, itemToken);
+                            targetProvider, targetConnection, server, context, identityRows, procedureStatsMode, itemToken);
                     }
                 }
                 catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(itemBudget, cancellationToken))
@@ -3720,6 +3754,14 @@ public sealed class DarlingCollectorRunner
                         }
                     }
 
+                    /* Two runs of one server's procedure_stats never overlap, so no other run can overwrite a pending entry
+                       between this run's add and this confirm (ConfirmPending trusts the entry it finds under the key):
+                       - a non-daily run is awaited inside the server's sweep body, under the per-server CollectionGate
+                         (DarlingWorker.cs:12146), and a snapshot_now takes the same gate (DarlingWorker.cs:12430);
+                       - the sweep launches one body per server at a time (DarlingWorker.cs:3358);
+                       - a run an override makes daily goes through the per-(server, collector) DetachedCollectorGate
+                         (DarlingWorker.cs:13799), and the at-connect and snapshot runs take its slot first
+                         (TryTakeInlineDailySlot, DarlingWorker.cs:5639). */
                     if (pendingProcedureKeys is not null
                         && _procedureStatsPlanCaches.TryGetValue(server.ServerId, out var procedurePlanCache))
                     {
@@ -7190,19 +7232,21 @@ RETURNING s.state_key";
     /// <c>deferred_miss</c> in on. A failed second query ships the rows it covered without plans, caches nothing, and does
     /// not fail the run. Returns the keys to confirm after the batch commits, or discard.</para>
     /// </summary>
-    private async Task<List<ProcedureStatsPlanKey>> ApplyProcedureStatsPlanReuseAsync(
+    internal async Task<List<ProcedureStatsPlanKey>> ApplyProcedureStatsPlanReuseAsync(
         ITargetProvider provider,
         DbConnection targetConnection,
         ServerRuntime server,
         CollectorContext context,
         List<ProcedureStatsCollector.Row> rows,
+        ProcedureStatsPlanFetchMode mode,
         CancellationToken cancellationToken)
     {
         var cache = _procedureStatsPlanCaches.GetOrAdd(server.ServerId, static _ => new PlanDigestCache<ProcedureStatsPlanKey>());
         var now = DateTime.UtcNow;
-        cache.Prune(now - QueryStatsPlanCacheMaxAge);
+        cache.Prune(now - ProcedureStatsPlanCacheMaxAge);
 
-        var shadow = ProcedureStatsPlanFetchModeFor(ProcedureStatsCollector.Instance.Name, server.Target) == ProcedureStatsPlanFetchMode.Shadow;
+        /* The mode the run was STAMPED with, passed in; never re-resolved from the live knob or capture setting. */
+        var shadow = mode == ProcedureStatsPlanFetchMode.Shadow;
         var captureOrdinal = context.CapturePlanXml
             ? _procedureStatsCaptureOrdinals.AddOrUpdate(server.ServerId, 1L, static (_, previous) => previous + 1)
             : _procedureStatsCaptureOrdinals.GetOrAdd(server.ServerId, 0L);

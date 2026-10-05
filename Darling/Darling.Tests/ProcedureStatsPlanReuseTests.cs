@@ -232,6 +232,145 @@ public sealed class ProcedureStatsPlanReuseTests
         Assert.Equal(expected, runner.ShouldDeferPlanFetchFor("procedure_stats", capture, new CollectorTargetInfo()));
     }
 
+    // ---- one mode per run ----------------------------------------------------------------------
+
+    /// <summary>
+    /// A runner whose knob and capture setting can be flipped after the run has been stamped, as the store's live reload
+    /// of the capture setting can do between the stamp and the apply.
+    /// </summary>
+    private sealed class FlippableRunner
+    {
+        public string? Knob { get; set; }
+        public bool CapturePlans { get; set; } = true;
+        public DarlingCollectorRunner Runner { get; }
+        public CapturingTestLogger Log { get; } = new();
+
+        public FlippableRunner(string? knob)
+        {
+            Knob = knob;
+            Runner = new DarlingCollectorRunner(
+                NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Password=x;Database=x"), new CollectorDeltaCalculator(), Log,
+                capturePlans: () => CapturePlans, procedureStatsDeferredPlanFetch: () => Knob);
+        }
+    }
+
+    private static ServerRuntime ServerFor() => new()
+    {
+        Config = new MonitoredServer { Name = "mode-test", Host = "mode-test" },
+        ConnectionString = "Server=mode-test;Initial Catalog=master",
+        Target = new CollectorTargetInfo(),
+        StorageName = "mode-test",
+        ServerId = 42,
+    };
+
+    private static CollectorContext StampedContext(DarlingCollectorRunner runner, bool capture)
+    {
+        var flags = runner.StampPlanFetchFlags("procedure_stats", capture, new CollectorTargetInfo());
+        return new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "mode-test",
+            CollectionTime = s_now,
+            Deltas = new NoDeltas(),
+            Target = new CollectorTargetInfo(),
+            CapturePlanXml = capture,
+            DeferPlanXmlFetch = flags.DeferPlanXmlFetch,
+            PlanIdentityColumns = flags.PlanIdentityColumns,
+        };
+    }
+
+    private static bool Emitted(CollectorContext context, string label) => context.Measurements.Any(m => m.Label == label);
+
+    [Theory]
+    [InlineData("off", true, ProcedureStatsPlanFetchMode.Off)]
+    [InlineData("shadow", true, ProcedureStatsPlanFetchMode.Shadow)]
+    [InlineData("shadow", false, ProcedureStatsPlanFetchMode.Off)]  /* a gated shadow cycle is the off query */
+    [InlineData("on", true, ProcedureStatsPlanFetchMode.On)]
+    [InlineData("on", false, ProcedureStatsPlanFetchMode.On)]       /* a gated on cycle still sends identity columns */
+    public void TheStampedContext_NamesTheModeTheRunWasStampedWith(string knob, bool capture, ProcedureStatsPlanFetchMode expected)
+    {
+        var flipper = new FlippableRunner(knob);
+        var context = StampedContext(flipper.Runner, capture);
+
+        Assert.Equal(expected, ProcedureStatsPlanFetchModes.OfRun(context));
+
+        /* Reading it back never asks the knob or the capture setting again. */
+        flipper.Knob = knob == "on" ? "off" : "on";
+        flipper.CapturePlans = false;
+        Assert.Equal(expected, ProcedureStatsPlanFetchModes.OfRun(context));
+    }
+
+    [Fact]
+    public async Task TheApply_FollowsTheStampedShadowMode_WhateverTheKnobAndCaptureSettingBecomeAfterward()
+    {
+        var flipper = new FlippableRunner("shadow");
+        var context = StampedContext(flipper.Runner, capture: true);
+        Assert.True(context.PlanIdentityColumns);
+        Assert.False(context.DeferPlanXmlFetch);
+
+        /* The store reloads the capture setting between the stamp and the apply, and the knob provider could answer
+           differently on a second read. Neither may change what this run does with rows that already carry plans. */
+        flipper.Knob = "on";
+        flipper.CapturePlans = false;
+
+        var rows = new List<ProcedureStatsCollector.Row> { RowFor(1, "<plan one/>"), RowFor(2, "<plan two/>") };
+        var before = rows.ToList();
+
+        var pending = await flipper.Runner.ApplyProcedureStatsPlanReuseAsync(
+            null!, null!, ServerFor(), context, rows, ProcedureStatsPlanFetchModes.OfRun(context), CancellationToken.None);
+
+        Assert.Equal(before, rows);                                    /* shadow writes nothing different */
+        Assert.True(Emitted(context, "deferred_would_hit"));            /* and counts as shadow */
+        Assert.False(Emitted(context, "deferred_hit"));
+        Assert.Equal(2, pending.Count);
+        Assert.Equal(0, flipper.Log.CountAtLevel(LogLevel.Warning));    /* no fetch was attempted on a reader still open */
+    }
+
+    [Fact]
+    public async Task TheApply_FollowsTheStampedOnMode_WhateverTheKnobBecomesAfterward()
+    {
+        var flipper = new FlippableRunner("on");
+        var context = StampedContext(flipper.Runner, capture: false);   /* a gated cycle: nothing renders, so no second query is needed */
+        Assert.True(context.PlanIdentityColumns);
+
+        flipper.Knob = "shadow";
+        flipper.CapturePlans = true;
+
+        var rows = new List<ProcedureStatsCollector.Row> { RowFor(1), RowFor(2) };
+
+        await flipper.Runner.ApplyProcedureStatsPlanReuseAsync(
+            null!, null!, ServerFor(), context, rows, ProcedureStatsPlanFetchModes.OfRun(context), CancellationToken.None);
+
+        Assert.True(Emitted(context, "deferred_hit"));
+        Assert.False(Emitted(context, "deferred_would_hit"));
+        Assert.Equal(2, context.Measurements.First(m => m.Label == "deferred_miss").Value);
+        Assert.All(rows, row => Assert.Null(row.QueryPlanXml));
+    }
+
+    [Fact]
+    public void TheStampSeam_CountsTheFetchTimeBesideTheRenderedPlans()
+    {
+        var context = StampedContext(new FlippableRunner("on").Runner, capture: true);
+
+        DarlingCollectorRunner.StampPlanFetch(context, 3, 1200, 17);
+
+        Assert.Equal(3, context.Measurements.First(m => m.Label == "plans_rendered").Value);
+        Assert.Equal(1200, context.Measurements.First(m => m.Label == "plans_rendered_bytes").Value);
+        Assert.Equal(17, context.Measurements.First(m => m.Label == "plan_fetch_ms").Value);
+    }
+
+    [Fact]
+    public void TheProcedureStatsCacheAge_IsItsOwnConstant_WithTheSameValueAsTheQueryStatsOne()
+    {
+        Assert.Equal(DarlingCollectorRunner.QueryStatsPlanCacheMaxAge, DarlingCollectorRunner.ProcedureStatsPlanCacheMaxAge);
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs")
+            .ReplaceLineEndings("\n");
+        var apply = source[source.IndexOf("internal async Task<List<ProcedureStatsPlanKey>> ApplyProcedureStatsPlanReuseAsync", StringComparison.Ordinal)..];
+        apply = apply[..apply.IndexOf("return outcome.Pending;", StringComparison.Ordinal)];
+        Assert.Contains("ProcedureStatsPlanCacheMaxAge", apply, StringComparison.Ordinal);
+        Assert.DoesNotContain("QueryStatsPlanCacheMaxAge", apply, StringComparison.Ordinal);
+    }
+
     // ---- shadow --------------------------------------------------------------------------------
 
     [Fact]
