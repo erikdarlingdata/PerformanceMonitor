@@ -43,6 +43,7 @@ import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStr
 import { renderPanel, setPanelSignal, getPanelSignal, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
+import { pgPlanColumn } from "./pg-plan-viewer.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { downloadText } from "../grid-tools.js";
@@ -2148,13 +2149,14 @@ export const POSTGRES_TABS = [
       /* Directly under the query shapes, joined on queryid: a plan only means something beside the
          statement it belongs to. The plan JSON is REDACTED at collection - query text dropped, literals
          replaced - so nothing customer-specific reaches this grid, and the empty text names the usual
-         cause rather than implying the server is quiet. */
+         cause rather than implying the server is quiet. The Plan cell shows the row's own redacted JSON;
+         no second read. */
       table(
         "Captured Plans",
         "get_pg_plans",
         { server, hours: ctx.hours, limit: 10 },
         "plans",
-        PG_PLAN_COLUMNS,
+        [...PG_PLAN_COLUMNS, pgPlanColumn(server)],
         ctx.label + ", grouped by plan shape - plans are redacted at collection",
         "No captured plans. Usually auto_explain is not loaded, or the monitoring login cannot read the server log; on Aurora and RDS there is no log file to read at all."
       ),
