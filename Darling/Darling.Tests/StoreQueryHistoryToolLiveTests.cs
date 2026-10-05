@@ -61,18 +61,13 @@ public sealed class StoreQueryHistoryToolLiveTests
 
     private const string None = "false, false, false";
 
-    private static async Task Finish(ScratchPostgres scratch, NpgsqlDataSource source, bool ok)
-    {
-        await source.DisposeAsync();
-        await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
-        await scratch.DisposeAsync();
-    }
-
     [Fact]
     public async Task TheSeries_IsOldestFirst_WithTheFlags_AndAMeanOfDeltaTotalOverDeltaCalls()
     {
         var ct = TestContext.Current.CancellationToken;
         var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
         var ok = false;
         try
         {
@@ -96,11 +91,11 @@ public sealed class StoreQueryHistoryToolLiveTests
             Assert.True(series[0].GetProperty("first_seen").GetBoolean());
             Assert.True(series[1].GetProperty("reset_in_interval").GetBoolean());
             Assert.False(series[2].GetProperty("entry_restarted").GetBoolean());
+            ok = true;
         }
         finally
         {
-            ok = true;
-            await Finish(scratch, source, ok);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
         }
     }
 
@@ -109,6 +104,9 @@ public sealed class StoreQueryHistoryToolLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
         try
         {
             await Capture(source, 2.5, "ok", ct);
@@ -137,10 +135,11 @@ public sealed class StoreQueryHistoryToolLiveTests
             Assert.Equal(20L, one.GetProperty("calls").GetInt64());
             Assert.Equal(1d, one.GetProperty("mean_ms").GetDouble());
             Assert.Equal(2, one.GetProperty("hours_present").GetInt32());
+            ok = true;
         }
         finally
         {
-            await Finish(scratch, source, true);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
         }
     }
 
@@ -149,16 +148,20 @@ public sealed class StoreQueryHistoryToolLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         var (scratch, source) = await StartAsync(ct, migrate: false);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
         try
         {
             var json = await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, cancellationToken: ct);
 
             Assert.StartsWith("{\"status\":\"precondition\"", json, StringComparison.Ordinal);
             Assert.DoesNotContain("effective_start", json, StringComparison.Ordinal);
+            ok = true;
         }
         finally
         {
-            await Finish(scratch, source, true);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
         }
     }
 
@@ -167,16 +170,20 @@ public sealed class StoreQueryHistoryToolLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
         try
         {
             var json = await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, cancellationToken: ct);
 
             Assert.StartsWith("{\"status\":\"precondition\"", json, StringComparison.Ordinal);
             Assert.DoesNotContain("window_truncated", json, StringComparison.Ordinal);
+            ok = true;
         }
         finally
         {
-            await Finish(scratch, source, true);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
         }
     }
 
@@ -185,6 +192,9 @@ public sealed class StoreQueryHistoryToolLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
         try
         {
             await Capture(source, 3.5, "ok", ct, dealloc: 2);
@@ -199,10 +209,11 @@ public sealed class StoreQueryHistoryToolLiveTests
             Assert.Equal(1L, captures.GetProperty("rebaselined").GetInt64());
             Assert.Equal(5L, captures.GetProperty("dealloc_delta_total").GetInt64());
             Assert.Equal(1L, captures.GetProperty("capped_hours").GetInt64());
+            ok = true;
         }
         finally
         {
-            await Finish(scratch, source, true);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
         }
     }
 
@@ -211,6 +222,9 @@ public sealed class StoreQueryHistoryToolLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
         try
         {
             await Capture(source, 5.5, "rebaselined", ct, seen: 0, kept: 0);
@@ -229,10 +243,11 @@ public sealed class StoreQueryHistoryToolLiveTests
             var names = root.EnumerateObject().Select(p => p.Name).ToArray();
             Assert.Equal("hours_back", names[1]);
             Assert.Equal(new[] { "effective_start", "window_truncated", "truncation_note" }, names.Skip(2).Take(3).ToArray());
+            ok = true;
         }
         finally
         {
-            await Finish(scratch, source, true);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
         }
     }
 
@@ -241,6 +256,9 @@ public sealed class StoreQueryHistoryToolLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
         try
         {
             await Capture(source, 100, "ok", ct);
@@ -251,10 +269,11 @@ public sealed class StoreQueryHistoryToolLiveTests
 
             Assert.False(root.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+            ok = true;
         }
         finally
         {
-            await Finish(scratch, source, true);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
         }
     }
 
@@ -263,6 +282,9 @@ public sealed class StoreQueryHistoryToolLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
         try
         {
             await Capture(source, 100, "ok", ct);
@@ -272,11 +294,12 @@ public sealed class StoreQueryHistoryToolLiveTests
             Assert.Equal("empty", root.GetProperty("status").GetString());
             var hints = root.GetProperty("hints");
             Assert.False(hints.GetProperty("window_truncated").GetBoolean());
-            Assert.True(hints.TryGetProperty("effective_start", out _));
+            Assert.Contains(hints.EnumerateObject(), p => p.Name == "effective_start");
+            ok = true;
         }
         finally
         {
-            await Finish(scratch, source, true);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
         }
     }
 
@@ -285,31 +308,29 @@ public sealed class StoreQueryHistoryToolLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
         try
         {
             await Capture(source, 1.5, "ok", ct);
             await Row(source, 1.5, 7, 1, 1, None, ct);
 
             DarlingMcpStoreQueryHistoryTools.TestOnlyFailEarliestRead = true;
-            string json;
-            try
-            {
-                json = await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, cancellationToken: ct);
-            }
-            finally
-            {
-                DarlingMcpStoreQueryHistoryTools.TestOnlyFailEarliestRead = false;
-            }
+            /* The switch is per async flow, so it dies with this test; it is cleared right after the call all the same. */
+            var json = await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, cancellationToken: ct);
+            DarlingMcpStoreQueryHistoryTools.TestOnlyFailEarliestRead = false;
 
             var root = JsonDocument.Parse(json).RootElement;
             Assert.Equal("ranked", root.GetProperty("mode").GetString());
-            Assert.False(root.TryGetProperty("effective_start", out _));
-            Assert.False(root.TryGetProperty("window_truncated", out _));
+            Assert.DoesNotContain(root.EnumerateObject(), p => p.Name == "effective_start");
+            Assert.DoesNotContain(root.EnumerateObject(), p => p.Name == "window_truncated");
             Assert.Single(root.GetProperty("statements").EnumerateArray());
+            ok = true;
         }
         finally
         {
-            await Finish(scratch, source, true);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
         }
     }
 }
