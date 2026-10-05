@@ -114,6 +114,7 @@ public sealed partial class DarlingMcpFinOpsTools
             executions = r.Executions,
             query_preview = r.QueryPreview,
             has_plan = r.QueryPlanXml != null,
+            query_hash = r.QueryHash,
             est_cost_usd = OptimizationCostShare(r.TotalCpuMs, total, monthly, hoursBack),
         }).ToList();
     }

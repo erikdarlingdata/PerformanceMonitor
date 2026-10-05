@@ -35,7 +35,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Which reads.</b> Only a grid over one collector table whose rows are stamped with the collection time, the
 /// change histories over the config snapshot tables they diff, the memory grant and plan correction reads over their snapshot
 /// tables, or the collection log: <see cref="TableByRead"/>. The memory grant reads answer a window aggregate and the newest
-/// snapshot in one payload; the note is about the aggregate, and the page opts the newest-snapshot panels out. A chart whose time axis spans the asked range already shows the empty span, a read of
+/// snapshot in one payload; the note is about the aggregate, and the page opts the newest-snapshot panels out. The PostgreSQL
+/// window aggregates (top queries, blocking, database stats, session states, I/O and replication stats) and the trend grids
+/// (database, query duration, wait and I/O trends) read one raw relation over the window, and Captured Plans reads the plan
+/// capture table by capture time. Every panel of their fanouts shows the window's own figures, so none opts out, and a stat
+/// tile draws the note beside its grid. A chart whose time axis spans the asked range already shows the empty span, a read of
 /// the newest snapshot has no window to cut, and an event surface (blocked process reports, deadlocks, system health
 /// events, the default trace) filters on the event's own time, which can reach before the first collection, so a
 /// coverage start could name a time later than the history it shows. Those are not in this list.</para>
@@ -62,7 +66,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// cut) and the read did not hit a row cap that cuts by time (or hit it, and its oldest row is at or before the
 /// window's start), nothing in scope holds a row or logged a run in it, the
 /// answer is an envelope other than the read's own "looked and found nothing" word (<see cref="NothingFoundStatusByRead"/>:
-/// <c>empty</c>, or <c>no_changes</c> for the PostgreSQL changes, which are probed like rows; unavailable (the memory grant reads' no-snapshot word), not_collected and
+/// <c>empty</c>, <c>no_changes</c> for the PostgreSQL changes, <c>no_blocking_sampled</c> for blocking and <c>no_io_activity</c> for the I/O summary, which are probed like rows; unavailable (the memory grant reads' no-snapshot word and top queries' no-statistics word), not_collected, not_sampled (blocking's "the collector never ran"), precondition (Captured Plans' "capture is not configured") and
 /// invalid are not) or an error rather than rows, the read cannot be resolved, the
 /// window is no longer than the 90-minute slack (a window that short can never be cut by the store's coverage, so the
 /// probe is not asked), or the probe fails. A failed probe costs the grid its notice, never its rows.</para>
@@ -105,6 +109,26 @@ internal static class WebDataStartNote
         ["get_memory_grants"] = "memory_grant_stats",
         ["get_resource_semaphore"] = "memory_grant_stats",
         ["get_plan_corrections"] = "plan_correction",
+
+        /* The PostgreSQL window aggregates (#4966): each answers totals or per-key aggregates over the whole window from the one
+           raw relation named, so a short history reads as a quiet one. Every panel of their fanouts shows the window's own
+           figures (the stat tiles are window totals), so none opts out of the note. The row caps keep rows by rank, which hides
+           no time range: the coverage rule applies. */
+        ["get_pg_top_queries"] = "pg_statement_stats",
+        ["get_pg_blocking"] = "pg_blocking_edges",
+        ["get_pg_database_stats"] = "pg_database_stats",
+        ["get_pg_session_states"] = "pg_session_states",
+        ["get_pg_io_stats"] = "pg_io_stats",
+        ["get_pg_replication_stats"] = "pg_replication_stats",
+
+        /* The PostgreSQL trend grids and Captured Plans (#4966). The trend reads difference the same raw relations over [start, end]
+           (no rollup, no second tier), and the page draws each as a grid of points. Captured Plans windows on the capture's
+           collection_time and groups by plan shape under a cap ranked by total duration. */
+        ["get_pg_database_trend"] = "pg_database_stats",
+        ["get_pg_query_duration_trend"] = "pg_statement_stats",
+        ["get_pg_wait_trend"] = "pg_wait_sampling",
+        ["get_pg_io_trend"] = "pg_io_stats",
+        ["get_pg_plans"] = "pg_plan_capture",
     };
 
     /// <summary>
@@ -113,6 +137,43 @@ internal static class WebDataStartNote
     /// it with <see cref="DataWindowFloor.Source.ForCollectionLog"/>: its edge is the log's own fixed horizon.
     /// </summary>
     internal const string CollectionLogTable = "collection_log";
+
+    /// <summary>
+    /// The listed reads whose rows are SPARSE, probed on their collector's own logged runs instead of on the table (#4966). A
+    /// blocking chain, a long transaction behind a pinned horizon and a connected replica each store a row only while it exists,
+    /// so the table's oldest row says when the first one happened, not when collection began: on a server collected for a month
+    /// whose first chain came yesterday it would name yesterday and call a covered week partial. The collector's runs are logged
+    /// whether or not they stored a row, which is what the Captures tile beside the grid counts. Each name is a collector
+    /// <see cref="DataWindowFloor.Source.ForCollectorRuns"/> accepts (it throws on any other, and a test holds each). The read
+    /// stays in <see cref="TableByRead"/> too, for the table its tool reads; this map is consulted first.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> CollectorRunsByRead = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["get_pg_blocking"] = "pg_blocking",
+        ["get_pg_session_states"] = "pg_session_states",
+        ["get_pg_replication_stats"] = "pg_replication_stats",
+    };
+
+    /// <summary>
+    /// The probe source for a listed read: its collector's runs when <see cref="CollectorRunsByRead"/> names one, else the source
+    /// of the table <see cref="TableByRead"/> gives it. False for a read in neither, or a table the probe cannot read by index.
+    /// </summary>
+    internal static bool TryGetReadSource(string read, out DataWindowFloor.Source source)
+    {
+        if (CollectorRunsByRead.TryGetValue(read, out var collector))
+        {
+            source = DataWindowFloor.Source.ForCollectorRuns(collector);
+            return true;
+        }
+
+        if (TableByRead.TryGetValue(read, out var table))
+        {
+            return TryGetSource(table, out source);
+        }
+
+        source = null!;
+        return false;
+    }
 
     /// <summary>
     /// The probe source for a table <see cref="TableByRead"/> names: the collection log's own source for
@@ -136,7 +197,12 @@ internal static class WebDataStartNote
     /// names its page <c>config_changes</c>, and the page reads an answer as an envelope only when it carries a
     /// <c>message</c> too.
     /// </summary>
-    private static readonly HashSet<string> RowStatuses = new(StringComparer.Ordinal) { "config_changes" };
+    private static readonly HashSet<string> RowStatuses = new(StringComparer.Ordinal)
+    {
+        "config_changes",
+        "blocking_sampled", "cycles_only", "database_activity", "session_states", "io_activity",
+        "database_trend", "query_duration_trend", "wait_trend", "io_trend",
+    };
 
     /// <summary>
     /// The one <c>status</c> word each listed read answers with when it LOOKED and found nothing in the window (#4966): the
@@ -149,8 +215,15 @@ internal static class WebDataStartNote
     /// <c>no_changes</c>), as do waiting tasks, plan corrections, wait sampling, kernel stats, lock stats and predicate stats: each ran its
     /// query and found no rows in the window. The collection log's <c>empty</c> covers a quiet window and a filter that matched
     /// nothing, and the coverage fact holds for both; its <c>unavailable</c> (never collected) stays as it is. Latch stats,
-    /// spinlock stats, wait stats and PostgreSQL wait events are left out: their no-rows answer is <c>unavailable</c>. A test
+    /// spinlock stats, wait stats, PostgreSQL wait events and PostgreSQL top queries are left out: their no-rows answer is <c>unavailable</c>. A test
     /// reads each tool's source and holds both halves.</para>
+    ///
+    /// <para>The PostgreSQL window reads (#4966): database stats, session states, replication stats, the four trends and Captured Plans
+    /// answer <c>empty</c>; a server with no row and no logged run in the window gets no note, whatever the word. (For the database
+    /// and wait trends <c>empty</c>, and for the I/O summary <c>no_io_activity</c>, a history too short to difference may also
+    /// answer it; the coverage fact holds for that case too.) Blocking answers <c>no_blocking_sampled</c> (captures exist and none held
+    /// a chain) and the I/O summary <c>no_io_activity</c>. Never admitted: <c>not_sampled</c> (blocking found no capture at all),
+    /// <c>precondition</c> (Captured Plans, capture is not configured) and <c>unavailable</c>.</para>
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, string> NothingFoundStatusByRead = new Dictionary<string, string>(StringComparer.Ordinal)
     {
@@ -165,6 +238,21 @@ internal static class WebDataStartNote
         ["get_pg_server_config_changes"] = "no_changes",
         ["get_collection_log"] = "empty",
         ["get_plan_corrections"] = "empty",
+
+        /* The PostgreSQL window reads (#4966). Blocking and the I/O summary name their own nothing-found word; the rest say empty.
+           Top queries has none: its empty answer is unavailable (no extension or no snapshot), which says nothing was captured.
+           Not admitted anywhere: unavailable, not_collected, not_sampled (blocking's "the collector never ran") and precondition
+           (Captured Plans' "capture is not configured"). */
+        ["get_pg_blocking"] = "no_blocking_sampled",
+        ["get_pg_database_stats"] = "empty",
+        ["get_pg_session_states"] = "empty",
+        ["get_pg_io_stats"] = "no_io_activity",
+        ["get_pg_replication_stats"] = "empty",
+        ["get_pg_database_trend"] = "empty",
+        ["get_pg_query_duration_trend"] = "empty",
+        ["get_pg_wait_trend"] = "empty",
+        ["get_pg_io_trend"] = "empty",
+        ["get_pg_plans"] = "empty",
     };
 
     /// <summary>
@@ -205,21 +293,51 @@ internal static class WebDataStartNote
     };
 
     /// <summary>
+    /// The three window-floor keys a listed read's tool writes itself at the top level of a data answer (#4966).
+    /// </summary>
+    private static readonly string[] ToolWindowFloorKeys = ["effective_start", "window_truncated", "truncation_note"];
+
+    /// <summary>
+    /// Removes the tool's own window-floor keys from a data answer (an <c>empty</c> status keeps its copy under
+    /// <c>hints</c>, which the page does not read). The guard below then sees the payload as it was before the tool
+    /// wrote them, so a tool's <c>window_truncated: false</c> can neither hide the web's capped note nor stand in for it.
+    /// </summary>
+    private static void StripToolWindowFloor(JsonObject? payload)
+    {
+        if (payload is null)
+        {
+            return;
+        }
+
+        foreach (var key in ToolWindowFloorKeys)
+        {
+            payload.Remove(key);
+        }
+    }
+
+    /// <summary>
     /// <paramref name="result"/> with the notice fields added when <paramref name="tool"/> is a listed grid read whose
     /// window starts before its table's coverage, or is a newest-first list (<see cref="NewestFirstCappedReads"/>) that
     /// hit its row cap; otherwise <paramref name="result"/> itself, untouched.
     /// <paramref name="hoursBack"/> is the window the page asked for (null or below 1: none was asked), and
     /// <paramref name="asOf"/> the request's window anchor.
+    /// <para>A listed read's tool may write the same three keys itself (#4966: <c>effective_start</c>,
+    /// <c>window_truncated</c>, <c>truncation_note</c>, the MCP dialect, in UTC). The page draws its own note from the
+    /// fields this method adds, in the browser's zone, so the tool's three are removed first and the note is decided as
+    /// it was before the tool wrote them: the page gets the same answer, capped or coverage. When a note is added, the
+    /// payload that carries it is the stripped one, so the tool's three keys are gone from it. When no note is added
+    /// (every early return: covered, a short window, a failed probe, a capped page that reaches the start), the string
+    /// goes back as the tool wrote it, and still holds the tool's keys. That is harmless today: the tool and this method run
+    /// the same probe over the same window, so their verdicts agree.</para>
     /// </summary>
     internal static async Task<string> AddAsync(
         NpgsqlDataSource postgres, string tool, string? server, int? hoursBack, string? asOf, string result,
         ILogger? logger, CancellationToken cancellationToken)
     {
-        if (!TableByRead.TryGetValue(tool, out var table)
-            || string.IsNullOrWhiteSpace(server)
+        if (string.IsNullOrWhiteSpace(server)
             || hoursBack is not int hours
             || hours < 1
-            || !TryGetSource(table, out var source))
+            || !TryGetReadSource(tool, out var source))
         {
             return result;
         }
@@ -233,6 +351,9 @@ internal static class WebDataStartNote
         {
             return result;
         }
+
+        /* Strips the parsed copy only: the early returns below send `result` itself, keys and all. */
+        StripToolWindowFloor(payload);
 
         /* Rows, or the answer that says the read looked and found nothing (#4966, NothingFoundStatusByRead): an empty span
            over a short history reads as "nothing happened" when it is only short, so that answer gets the note too. The

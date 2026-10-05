@@ -118,7 +118,7 @@ public sealed class McpToolsListBudgetTests
        41,669 bytes (measured, every field on every collector) to 20,707 bytes, under the shared 32 KB budget. */
 
     /* #4198 (lane TH): +193 bytes for get_active_queries' new full_query_text opt-in parameter and its
-       limit description's #4198 note (query_text, the wide field, is now a 500-char preview by default;
+       limit description's #4198 note (query_text, the wide field, is now a 500-char (now 400) preview by default;
        limit is 25, down from 50); the preview note itself moved after <<GUIDE>> to stay under the head's
        own 620-char target, so the served head is unchanged at 616. */
     /* #4198 (lane W2): -6 bytes for renaming get_active_queries' full_query_text opt-in to full_text — the
@@ -211,7 +211,8 @@ public sealed class McpToolsListBudgetTests
     // The fleet server-tag write tools (#5085, five tools: create, update, delete, assign and unassign) add 4,174 bytes on their own base: 179,402 -> 183,576.
     // #5085 (server-tag tools, merge): re-measured after merging origin/dev (dev now includes #5095); combined total 184,872 bytes, 170 tools
     // get_server_trend (#5117), get_finops view database_sizes (#5121) and get_deadlock_detail processes (deadlock rows) re-measured together on dev 0032cfa6d: 184,872 -> 186,010.
-    private const int TotalCeilingBytes = 186_010;
+    // get_server_trend gains latch, spinlock, session_stats and collector_duration (#4843): 186,010 -> 186,158.
+    private const int TotalCeilingBytes = 186_158;
 
 
 

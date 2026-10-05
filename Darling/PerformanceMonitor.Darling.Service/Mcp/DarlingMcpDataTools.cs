@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -565,7 +566,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note), and parallel_only/min_dop/group_by=host_object keep the read on raw. Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row — use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note), and parallel_only/min_dop/group_by=host_object keep the read on raw. Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row — use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. detail='full' adds the desktop grid's remaining columns (last_execution_time, creation_time, physical-read, row, grant, spill and thread min/max, total_clr_ms, plan_generation_num, worker_time_per_second), non-null only, raw tier only. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -576,10 +577,17 @@ public sealed class DarlingMcpDataTools
         [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0,
         [Description("Grouping. 'query_hash' (default): one row per (database, query_hash, host_object). 'host_object': rolls a proc's statements into ONE row. See the tool's reading guide.")] string group_by = "query_hash",
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("'summary' (default) or 'full': full adds the remaining desktop columns (grants, threads, extremes, times), omitting nulls.")] string detail = "summary",
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
+
+        var full = string.Equals(detail, "full", StringComparison.OrdinalIgnoreCase);
+        if (!full && !string.Equals(detail, "summary", StringComparison.OrdinalIgnoreCase))
+        {
+            return McpHelpers.Refusal("detail", $"detail must be 'summary' or 'full' (got '{detail}').");
+        }
 
         /* #2235: an unrecognised value must not silently fall back to the default grouping — a caller who
            asked for a rollup and got a per-hash ranking would read it as "this proc is not hot", which is
@@ -648,6 +656,16 @@ public sealed class DarlingMcpDataTools
                     + " " + HourlyWindowEdges.Note(requestedStart, floor, now, routed.HourlyCeiling);
             }
 
+            /* detail='full' on the hourly tier: the rollup carries none of the detail columns, so the call is
+               answered without them. Said here, since a missing field alone reads as "the store has no value". */
+            if (full && hourly)
+            {
+                precisionNote += (precisionNote is null ? "" : " ")
+                    + "detail=full was asked, but the hourly rollup does not carry the detail fields (last_execution_time, creation_time, "
+                    + "physical-read/row/grant/spill/thread min and max, total_clr_ms, plan_generation_num, worker_time_per_second); they are not in these rows. "
+                    + "A window the raw tier still holds returns them.";
+            }
+
             /* A forced-raw read (parallel_only / min_dop / group_by=host_object) over a window raw no longer
                holds read nothing: the floor is null, and "the whole window" would be a claim about a table that
                was empty. The rollup that does hold the window cannot apply those refinements. */
@@ -709,7 +727,7 @@ public sealed class DarlingMcpDataTools
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
                 properties?.EngineEdition, properties?.CpuCount ?? 0, properties?.VcoreCount);
 
-            var result = rows.Select(r => new
+            var result = rows.Select(r => (object)WithDetail(new
             {
                 database_name = r.DatabaseName,
                 query_hash = r.QueryHash,
@@ -760,7 +778,7 @@ public sealed class DarlingMcpDataTools
                 rollup_note = r.DistinctQueryHashes > 1
                     ? $"rolled up {r.DistinctQueryHashes} query_hash values belonging to {r.HostObjectName} — dynamic SQL with per-value literals fragments one statement across hashes, so none of these would rank individually; query_hash and query_text are one representative fragment"
                     : null
-            });
+            }, r.Detail, full));
 
             return JsonSerializer.Serialize(new
             {
@@ -804,6 +822,54 @@ public sealed class DarlingMcpDataTools
         {
             return McpHelpers.FormatError("get_top_queries_by_cpu", ex);
         }
+    }
+
+    /// <summary>The row, plus (detail='full', raw tier) the desktop grid's remaining columns. A field the store
+    /// has no value for is left out, not written as null, so a full row stays as small as its data. The two
+    /// timestamps are naive UTC, converted from the monitored server's clock at the read.</summary>
+    private static JsonObject WithDetail(object row, DarlingDataReader.TopQueryDetail? d, bool full)
+    {
+        var node = JsonSerializer.SerializeToNode(row, McpHelpers.JsonOptions)!.AsObject();
+        if (!full || d is null)
+        {
+            return node;
+        }
+
+        void Put(string name, JsonNode? value)
+        {
+            if (value is not null)
+            {
+                node[name] = value;
+            }
+        }
+
+        var times = new
+        {
+            last_execution_time = d.LastExecutionTime?.ToString("o"),
+            creation_time = d.CreationTime?.ToString("o"),
+        };
+        Put("last_execution_time", times.last_execution_time);
+        Put("creation_time", times.creation_time);
+        Put("min_physical_reads", d.MinPhysicalReads);
+        Put("max_physical_reads", d.MaxPhysicalReads);
+        Put("min_rows", d.MinRows);
+        Put("max_rows", d.MaxRows);
+        Put("min_grant_kb", d.MinGrantKb);
+        Put("max_grant_kb", d.MaxGrantKb);
+        Put("min_used_grant_kb", d.MinUsedGrantKb);
+        Put("max_used_grant_kb", d.MaxUsedGrantKb);
+        Put("min_ideal_grant_kb", d.MinIdealGrantKb);
+        Put("max_ideal_grant_kb", d.MaxIdealGrantKb);
+        Put("min_spills", d.MinSpills);
+        Put("max_spills", d.MaxSpills);
+        Put("min_reserved_threads", d.MinReservedThreads);
+        Put("max_reserved_threads", d.MaxReservedThreads);
+        Put("min_used_threads", d.MinUsedThreads);
+        Put("max_used_threads", d.MaxUsedThreads);
+        Put("total_clr_ms", d.TotalClrTimeUs / 1000.0);
+        Put("plan_generation_num", d.PlanGenerationNum);
+        Put("worker_time_per_second", d.WorkerTimePerSecond);
+        return node;
     }
 
     [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note). Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
@@ -976,7 +1042,7 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     private const int QueryTextPreviewLength = 400;
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Long windows may read whole days from a daily summary; approximate: true says so. approximation_note says what the summary can miss; summary_days names the days it covered. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
     public static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -989,6 +1055,13 @@ public sealed class DarlingMcpDataTools
         [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         CancellationToken cancellationToken = default) =>
         GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength, cancellationToken);
+
+    /// <summary>The sentence beside <c>approximate: true</c> on get_query_store_top (#5094): whole days of the window came from the
+    /// daily summary, which is built after each day ends.</summary>
+    internal const string QueryStoreApproximationNote =
+        "Whole days in this window came from a daily summary built after each day ends. A row changed after its day was "
+        + "summarized is missed, or for about a day can be counted twice, and rows from a server whose clock runs more than an hour "
+        + "ahead are left out, so treat totals and the ranking as close, not exact.";
 
     /// <summary>
     /// get_query_store_top under an explicit <paramref name="previewLength"/> (#4198): the MCP tool passes
@@ -1062,15 +1135,27 @@ public sealed class DarlingMcpDataTools
                 if ((execution_type != null || module_name != null)
                     && (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, 1, database_name, cancellationToken)).Count > 0)
                     return module_name is null
-                        ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name)
+                        /* #5094: whole days from the daily summary make a zero here "close, not exact" (a late write the
+                           summary missed), so the empty answer carries the same flag as a populated one. */
+                        ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name,
+                            read.DailyDaysUsed > 0 ? new { approximate = true, approximation_note = QueryStoreApproximationNote } : null)
                         /* The module miss hands back the window it read: "did not run" is a claim about that window,
                            and the raw tier may not reach the whole of the one asked for. */
-                        : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, new
-                        {
-                            effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
-                            effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
-                            window_truncated = truncated
-                        });
+                        : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, read.DailyDaysUsed > 0
+                            ? new
+                            {
+                                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
+                                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                                window_truncated = truncated,
+                                approximate = true,
+                                approximation_note = QueryStoreApproximationNote
+                            }
+                            : (object)new
+                            {
+                                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
+                                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                                window_truncated = truncated
+                            });
 
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it has to, because the
@@ -1091,6 +1176,7 @@ public sealed class DarlingMcpDataTools
                         "queries did not run.");
             }
 
+            var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
@@ -1134,6 +1220,17 @@ public sealed class DarlingMcpDataTools
                    WriteDisclosure); the census fails a bare `truncated` beside `effective_hours_back`. The note
                    beside it keeps its name: it is the prose for THIS flag, and `*_note` is the house idiom. */
                 window_truncated = truncated,
+                /* #5094: the daily summary answered whole days of this window, so the totals and the ranking are close,
+                   not exact. Always present, so a caller reads the flag rather than inferring it from a missing key. */
+                approximate = approximate,
+                approximation_note = approximate ? QueryStoreApproximationNote : null,
+                summary_days = approximate
+                    ? new
+                    {
+                        from = read.DailySpan!.Value.Start.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                        to_exclusive = read.DailySpan!.Value.EndExclusive.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                    }
+                    : null,
                 truncation_note = !truncated
                     ? null
                     : tablePlan is null

@@ -64,7 +64,7 @@ public sealed class MuteRulesPageTests
     {
         var alerts = Wwwroot("js", "pages", "alerts.js");
         Assert.Contains("canMute = !!(await getSession()).can_edit;", alerts);
-        Assert.Contains("return canMute ? ALERT_COLUMNS.concat([MUTE_COLUMN]) : ALERT_COLUMNS;", alerts);
+        Assert.Contains("return canMute ? [SELECT_COLUMN].concat(ALERT_COLUMNS, [MUTE_COLUMN]) : ALERT_COLUMNS;", alerts);
         Assert.Contains("link(\"Mute this alert\", mutePrefillParams(a))", alerts);
         Assert.DoesNotContain("server_name: a.server_name", alerts);
         Assert.Contains("stored_server_name = r.StoredServerName", File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs")));

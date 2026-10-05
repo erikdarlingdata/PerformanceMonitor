@@ -128,6 +128,18 @@ public sealed class ServerPageTabsTests
     /// the one thing here that is impossible to verify by eye.</para>
     /// </summary>
     [Fact]
+    public void TheQueryStoreTopGrid_DrawsTheApproximationNote_AsAFurtherNote()
+    {
+        var js = ServerTabsJs;
+        var at = js.IndexOf("\"get_query_store_top\",", StringComparison.Ordinal);
+        Assert.True(at >= 0);
+        var end = js.IndexOf("\n      ),", at, StringComparison.Ordinal);
+        var call = js[at..end];
+        Assert.Contains("\"truncation_note\",", call, StringComparison.Ordinal);
+        Assert.Contains("[\"approximation_note\"]", call, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void EveryReadTheServerPageNames_ExistsInTheDispatch()
     {
         var dispatch = DarlingWebEndpoints.BuildReadDispatch().Keys.ToHashSet(StringComparer.Ordinal);
@@ -922,11 +934,11 @@ public sealed class ServerPageTabsTests
         /* The WHOLE signature, so emptyText is asserted to be a declared parameter rather than something
            read off an options object. #3278 appended `noteKey = null` - an opt-in server-supplied caveat,
            unrelated to this guard - and #4925 appended `moreNoteKeys = null` after it (further caveat fields
-           rendered the same way). The literal is spelled out here rather than truncated at emptyText
+           rendered the same way), and #4843 appended `columnGroups = null` (the opt-in column groups of a wide grid). The literal is spelled out here rather than truncated at emptyText
            because a prefix match would stop noticing a parameter inserted BEFORE it. */
         Assert.Contains(
             "function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, "
-            + "noteKey = null, moreNoteKeys = null)",
+            + "noteKey = null, moreNoteKeys = null, columnGroups = null)",
             js,
             StringComparison.Ordinal);
         Assert.Contains(

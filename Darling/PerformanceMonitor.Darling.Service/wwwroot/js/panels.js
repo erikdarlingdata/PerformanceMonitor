@@ -181,7 +181,7 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
 
    Column-header sort (#4843). A header click cycles ascending -> descending -> the server's own order, with a ▲/▼
    indicator and aria-sort; Enter and Space on the focused header do the same. The comparison reads the RAW row value
@@ -216,16 +216,65 @@ function vizTable(data, desc) {
   );
   if (grid) grid.syncHeads();
 
-  const wrap = el("div", { class: "table-wrap" }, [el("table", { class: "data" }, [el("thead", {}, [head]), tbody])]);
-  if (desc.tools === false) return wrap;
-  return el("div", { class: "grid-box" }, [gridTools(desc, cols, tbody), wrap]);
+  const filterBar = desc.filter === false ? null : gridFilter(desc, cols, head, tbody);
+  const table = el("table", { class: "data" }, [el("thead", {}, [head]), tbody]);
+  const wrap = el("div", { class: "table-wrap" }, filterBar ? [filterBar, table] : [table]);
+  const picker = columnPicker(desc, cols, head, tbody);
+  if (desc.tools === false) return picker ? el("div", { class: "grid-box" }, [picker, wrap]) : wrap;
+  return el("div", { class: "grid-box" }, picker ? [picker, gridTools(desc, cols, tbody), wrap] : [gridTools(desc, cols, tbody), wrap]);
+}
+
+/* Column groups (#4843). A descriptor with `groups: ["Memory detail", ...]` and `defaultGroups: [...]` marks wide
+   grids: a column carrying `group: "<name>"` is drawn only while its group is on, and a column with no group (or a
+   group the list does not name) is always shown. A "Columns:" strip above the table carries one toggle per group.
+   Every column is still built, and a hidden one is only display:none, so the sort, Copy and CSV indexes stay
+   aligned and Copy / CSV carry ALL columns, the way the desktop grid's export iterates every column whether or not
+   it is shown. A column the user sorted by stays the sort key after its group is hidden. The toggles live at module
+   scope under the table's key (route + identity + columns), so the 60 s repaint keeps them and another server's
+   grid starts from the defaults. Returns null for a descriptor without groups. */
+function columnPicker(desc, cols, head, tbody) {
+  const groups = Array.isArray(desc.groups) ? desc.groups.filter((g) => cols.some((c) => c.group === g)) : [];
+  if (!groups.length) return null;
+  const key = gridSortKey(desc, cols);
+  const on = () => gridGroupsOn.get(key) || new Set(Array.isArray(desc.defaultGroups) ? desc.defaultGroups : []);
+  const shown = (c) => !c.group || !groups.includes(c.group) || on().has(c.group);
+  const show = (node, yes) => {
+    if (node && node.style) node.style.display = yes ? "" : "none";
+  };
+  const buttons = new Map();
+  const apply = () => {
+    const rowsAll = [head, ...tbody.children];
+    cols.forEach((c, i) => {
+      const yes = shown(c);
+      for (const tr of rowsAll) show(tr.children[i], yes);
+    });
+    for (const [g, b] of buttons) {
+      const live = on().has(g);
+      b.setAttribute("aria-pressed", live ? "true" : "false");
+      b.className = "btn col-toggle" + (live ? " on" : "");
+    }
+  };
+  const toggles = groups.map((g) => {
+    const b = el("button", { type: "button", class: "btn col-toggle", text: g, title: "Show or hide the " + g + " columns" });
+    b.addEventListener("click", () => {
+      const next = new Set(on());
+      if (next.has(g)) next.delete(g);
+      else next.add(g);
+      gridGroupsOn.set(key, next);
+      apply();
+    });
+    buttons.set(g, b);
+    return b;
+  });
+  apply();
+  return el("div", { class: "col-picker" }, [el("span", { class: "col-picker-label", text: "Columns:" }), ...toggles]);
 }
 
 /* Copy and CSV for one table (#4843). Both read the tbody as it stands, so they follow the active sort and any
    in-place reconcile. Copy puts what the user sees on the clipboard: the cells' text, tab-separated, with a header
    row on Copy All. The CSV carries RAW values (the stored ISO instant, the unformatted number) under the column
    labels, quoted per RFC 4180 and with a leading ' on a text cell a spreadsheet would run as a formula. A column
-   whose values are arrays or objects has no one-cell form, so the CSV leaves it out, and so does `csv: false` on a column (a link-only cell); a column's `copyValue(row)` supplies the full text for Copy and the CSV when its cell shows a summary (Copy keeps it: it copies the
+   whose values are arrays or objects has no one-cell form, so the CSV leaves it out, and so does `csv: false` on a column (a link-only cell), and `copy: false` leaves a column out of Copy row and Copy all; a column's `copyValue(row)` supplies the full text for Copy and the CSV when its cell shows a summary (Copy keeps it: it copies the
    cell's text). A custom-render column over a key the rows do not carry has no raw value, so its CSV cell is the
    text it shows. Set `tools: false` on the descriptor to draw a table without the strip. */
 function gridTools(desc, cols, tbody) {
@@ -234,7 +283,9 @@ function gridTools(desc, cols, tbody) {
   const say = (m) => {
     status.textContent = m;
   };
-  const trs = () => [...tbody.children];
+  const allTrs = () => [...tbody.children];
+  /* Copy all and the CSV carry the rows the column filters leave showing, in the order shown. */
+  const trs = () => allTrs().filter((tr) => !filteredOut.has(tr));
   /* The text a cell copies: the column's copyValue(row) when it has one (a custom-render cell whose visible text is a
      summary), else the text shown. */
   const textOf = (tr, i) => {
@@ -243,13 +294,17 @@ function gridTools(desc, cols, tbody) {
     return c && typeof c.copyValue === "function" && row ? String(c.copyValue(row) ?? "") : tr.children[i].textContent;
   };
   const textRows = (list) => list.map((tr) => [...tr.children].map((_, i) => textOf(tr, i)));
+  /* Copy row and Copy table leave out a `copy: false` column (a control column such as a checkbox); the picked-cell
+     signature and Copy cell still see every column. */
+  const copyIdx = (n) => Array.from({ length: n }, (_, i) => i).filter((i) => !(cols[i] && cols[i].copy === false));
+  const copyRows = (list) => textRows(list).map((r) => copyIdx(r.length).map((i) => r[i]));
   /* The picked cell is remembered as the row's text plus the column, at module scope under the table's key, so the
      60 s repaint (a new tbody, new cells) and an in-place reconcile both resolve it against what is on screen now;
      a row that is gone resolves to nothing. */
   const rowSig = (tr) => textRows([tr])[0].join("\u0001");
   const pickedCell = () => {
     const pick = gridPicked.get(key);
-    const tr = pick ? trs().find((t) => rowSig(t) === pick.sig) : null;
+    const tr = pick ? allTrs().find((t) => rowSig(t) === pick.sig) : null;
     return tr && tr.children[pick.col] ? { tr, td: tr.children[pick.col], col: pick.col } : null;
   };
   const initial = pickedCell();
@@ -275,9 +330,9 @@ function gridTools(desc, cols, tbody) {
   const copyRow = () => {
     const p = pickedCell();
     if (!p) return say("Click a cell first, then choose Copy row.");
-    return finish(toTsv(textRows([p.tr])), "the row");
+    return finish(toTsv(copyRows([p.tr])), "the row");
   };
-  const copyAll = () => finish(toTsv([cols.map((c) => c.label), ...textRows(trs())]), "the table");
+  const copyAll = () => finish(toTsv([cols.filter((c) => c.copy !== false).map((c) => c.label), ...copyRows(trs())]), "the table");
   const exportCsv = () => {
     const list = trs();
     const objs = list.map((tr) => trRow.get(tr));
@@ -309,6 +364,190 @@ function gridTools(desc, cols, tbody) {
   ]);
 }
 
+/* Column filters (#4843). Every column that has text to match carries a small header button (`filter: false` on a
+   column or the descriptor opts out; a `copy: false` control column has none) that opens a text box above the
+   table. The match is a case-insensitive substring of the cell's rendered text, so it matches what the user sees,
+   a list-valued cell included; several filters combine with AND. A row that fails is display:none and is recorded
+   in `filteredOut`, which Copy all and Export CSV read so they carry exactly the shown rows (all columns, hidden
+   and grouped-away ones too, in the current sort order). A strip under the header lists each active filter with a
+   button to clear it, a Clear all button and "Showing N of M rows". The filter texts and which box is open live at
+   module scope under gridSortKey(), so the 60 s repaint keeps them and another server's grid starts unfiltered.
+   Escape closes the box and returns focus to its header button; focus leaving the box closes it. */
+const gridFilters = new Map(); // table key -> Map(column id -> text); bounded by routes x tables x columns the session filters
+const gridFilterOpen = new Map(); // table key -> column id of the open box
+const gridFilterTyping = new Set(); // table keys whose box had the focus when the page was last drawn
+const filteredOut = new WeakSet();
+const tbodyFilter = new WeakMap();
+
+function gridFilter(desc, cols, head, tbody) {
+  const key = gridSortKey(desc, cols);
+  const idx = cols.map((_, i) => i).filter((i) => cols[i].filter !== false && cols[i].copy !== false);
+  if (!idx.length) return null;
+  const active = () => gridFilters.get(key) || new Map();
+  const bar = el("div", { class: "grid-filter-bar", role: "group", "aria-label": "Column filters" });
+  const popHolder = el("div", { class: "grid-filter-holder" });
+  const chips = el("div", { class: "grid-filter-chips" });
+  bar.appendChild(popHolder);
+  bar.appendChild(chips);
+  const btns = new Map();
+  const needle = (t) => String(t ?? "").trim().toLowerCase();
+
+  function applyRows() {
+    const tests = [];
+    cols.forEach((c, i) => {
+      const t = needle(active().get(colId(c)));
+      if (t) tests.push([i, t]);
+    });
+    let shown = 0;
+    let total = 0;
+    for (const tr of tbody.children) {
+      total++;
+      const out = tests.some(([i, t]) => !(tr.children[i] && tr.children[i].textContent.toLowerCase().includes(t)));
+      if (out) filteredOut.add(tr);
+      else {
+        filteredOut.delete(tr);
+        shown++;
+      }
+      if (tr.style) tr.style.display = out ? "none" : "";
+    }
+    return { shown, total, tests: tests.length };
+  }
+
+  function setText(c, text) {
+    const next = new Map(active());
+    if (needle(text)) next.set(colId(c), text);
+    else next.delete(colId(c));
+    if (next.size) gridFilters.set(key, next);
+    else gridFilters.delete(key);
+  }
+
+  function renderChips() {
+    const r = applyRows();
+    chips.textContent = "";
+    if (r.tests) {
+      for (const i of idx) {
+        const c = cols[i];
+        const t = active().get(colId(c));
+        if (!needle(t)) continue;
+        const x = el("button", { type: "button", class: "grid-filter-x", text: "×", title: "Clear the filter on " + c.label, "aria-label": "Clear the filter on " + c.label });
+        x.addEventListener("click", () => {
+          setText(c, "");
+          renderPop();
+          renderChips();
+        });
+        chips.appendChild(el("span", { class: "grid-filter-chip" }, [el("span", { text: c.label + ": " + String(t).trim() }), x]));
+      }
+      const all = el("button", { type: "button", class: "btn grid-filter-clear-all", text: "Clear all filters" });
+      all.addEventListener("click", () => {
+        gridFilters.delete(key);
+        renderPop();
+        renderChips();
+      });
+      chips.appendChild(all);
+      chips.appendChild(el("span", { class: "grid-filter-count", role: "status", "aria-live": "polite", text: "Showing " + r.shown + " of " + r.total + " rows" }));
+    }
+    for (const [i, b] of btns) {
+      const on = !!needle(active().get(colId(cols[i])));
+      b.className = "col-filter-btn" + (on ? " on" : "");
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    if (bar.style) bar.style.display = r.tests || gridFilterOpen.has(key) ? "" : "none";
+  }
+
+  function close(refocus) {
+    const open = gridFilterOpen.get(key);
+    gridFilterOpen.delete(key);
+    gridFilterTyping.delete(key);
+    renderPop();
+    renderChips();
+    const i = cols.findIndex((c) => colId(c) === open);
+    const b = btns.get(i);
+    if (refocus && b && typeof b.focus === "function") b.focus();
+  }
+
+  function renderPop() {
+    popHolder.textContent = "";
+    const open = gridFilterOpen.get(key);
+    const i = open == null ? -1 : cols.findIndex((c) => colId(c) === open);
+    if (i < 0 || !btns.has(i)) {
+      gridFilterOpen.delete(key);
+      return null;
+    }
+    const c = cols[i];
+    const input = el("input", { type: "text", class: "grid-filter-input", "aria-label": "Filter " + c.label, placeholder: "contains…" });
+    input.value = active().get(colId(c)) ?? "";
+    const clear = el("button", { type: "button", class: "btn grid-filter-clear", text: "Clear" });
+    const done = el("button", { type: "button", class: "btn grid-filter-close", text: "Close" });
+    const panel = el("div", { class: "grid-filter-pop", role: "dialog", "aria-label": "Filter " + c.label }, [el("span", { class: "grid-filter-label", text: c.label }), input, clear, done]);
+    input.addEventListener("input", () => {
+      setText(c, input.value);
+      renderChips();
+    });
+    input.addEventListener("focus", () => gridFilterTyping.add(key));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        close(true);
+      }
+    });
+    clear.addEventListener("click", () => {
+      setText(c, "");
+      input.value = "";
+      renderChips();
+      if (typeof input.focus === "function") input.focus();
+    });
+    done.addEventListener("click", () => close(true));
+    panel.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close(true);
+      }
+    });
+    panel.addEventListener("focusout", (e) => {
+      const to = e && e.relatedTarget;
+      if (to && (to === btns.get(i) || (typeof panel.contains === "function" && panel.contains(to)))) return;
+      setTimeout(() => {
+        if (panel.isConnected === false || gridFilterOpen.get(key) !== colId(c)) return;
+        const at = typeof document !== "undefined" ? document.activeElement : null;
+        if (at && typeof panel.contains === "function" && panel.contains(at)) return;
+        gridFilterTyping.delete(key);
+        close(false);
+      }, 0);
+    });
+    popHolder.appendChild(panel);
+    return input;
+  }
+
+  for (const i of idx) {
+    const c = cols[i];
+    const b = el("button", { type: "button", class: "col-filter-btn", title: "Filter " + c.label, "aria-label": "Filter " + c.label, "aria-pressed": "false" });
+    /* The header's own click and key handlers sort; this button must not reach them. */
+    b.addEventListener("click", (e) => {
+      if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+      if (gridFilterOpen.get(key) === colId(c)) return close(true);
+      gridFilterOpen.set(key, colId(c));
+      const input = renderPop();
+      renderChips();
+      if (input && typeof input.focus === "function") input.focus();
+    });
+    b.addEventListener("keydown", (e) => {
+      if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+    });
+    btns.set(i, b);
+    if (head.children[i]) head.children[i].appendChild(b);
+  }
+  const input = renderPop();
+  renderChips();
+  tbodyFilter.set(tbody, { reapply: renderChips });
+  /* The page was redrawn while the box had the focus: give it back once the new box is in the document. */
+  if (input && gridFilterTyping.has(key)) {
+    setTimeout(() => {
+      if (input.isConnected !== false && typeof input.focus === "function") input.focus();
+    }, 0);
+  }
+  return bar;
+}
+
 /* An unsortable header cell. The sortable one is built by makeGridSort().headerCell; both are the place a later
    header affordance (a filter, a menu) attaches. */
 function headerCell(c) {
@@ -325,6 +564,8 @@ const trRow = new WeakMap();
 const tbodyGrid = new WeakMap();
 /* The cell each grid's Copy cell / Copy row act on (see gridTools), keyed like the sort state. */
 const gridPicked = new Map(); // one entry per table the session clicks in; bounded by routes x tables
+/* The column groups switched on for each grid (see columnPicker), keyed like the sort state; absent means defaultGroups. */
+const gridGroupsOn = new Map(); // one entry per grouped table the session toggles; bounded by routes x tables
 
 /* The table identity: `desc.sortId`, else `desc.id`, else `desc.title`, else `desc.rowsKey`. Panels built by
    renderPanel carry a title; the FinOps tabs call VIZ.table with a rowsKey, and two grids of one tab can share one,
@@ -490,6 +731,8 @@ export function gridRowOf(tr) {
 export function reapplyGridSort(tbody) {
   const g = tbody && tbodyGrid.get(tbody);
   if (g) g.reapply();
+  const f = tbody && tbodyFilter.get(tbody);
+  if (f) f.reapply();
 }
 
 /* A table column may depend on the rows: `hideWhenEmpty: true` drops it when no row has a value at its key (null,
@@ -635,6 +878,8 @@ function vizLine(data, desc) {
        whole-number formatter as the same label several times over ("1 1 1 0 0 0" on a blocking-events axis). */
     integerTicks: desc.format === "int",
     unit: desc.unit ?? null,
+    title: desc.title || null,
+    source: desc.read || desc.path ? { read: desc.read || desc.path, params: desc.params || null } : null,
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
   }, zoomId, chartZoomScope(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours));

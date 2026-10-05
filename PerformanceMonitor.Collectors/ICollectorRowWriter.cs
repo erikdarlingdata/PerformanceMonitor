@@ -37,10 +37,11 @@ public interface ICollectorRowWriter
     ICollectorRowWriter NullValue();
 
     /// <summary>
-    /// Writes a payload column that may already be held by the store under a content digest. A host whose
-    /// store keeps payloads by digest can write <paramref name="knownDigest"/> alone when
-    /// <paramref name="content"/> is null; every other host writes the content, which is this default.
-    /// Exactly one payload column is consumed either way.
+    /// Writes a payload column that may already be in the store under a known digest (#5158). A writer that
+    /// can store a digest without the content overrides this; the default ignores the digest and writes the
+    /// content, so a host that does not (Lite) behaves exactly as it did with <see cref="Value(string?)"/>.
     /// </summary>
+    /// <param name="content">The payload text, or null when the row carries none.</param>
+    /// <param name="knownDigest">The digest the store already holds for this content, or null.</param>
     ICollectorRowWriter PayloadOrDigest(string? content, string? knownDigest) => Value(content);
 }

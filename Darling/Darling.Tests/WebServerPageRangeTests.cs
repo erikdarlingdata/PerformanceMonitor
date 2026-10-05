@@ -181,7 +181,7 @@ public sealed class WebServerPageRangeTests
         var reads = Strings(r.GetProperty("found"), "reads");
         Assert.Equal(JsonValueKind.Null, r.GetProperty("found").GetProperty("err").ValueKind);
         Assert.Contains("/api/read/get_cpu_utilization?server=SRV1&hours=4&as_of=2026-01-02T10%3A30%3A00.000Z", reads);
-        Assert.Contains("/api/read/get_top_queries_by_cpu?server=SRV1&hours=4&top=20&as_of=2026-01-02T10%3A30%3A00.000Z", reads);
+        Assert.Contains("/api/read/get_top_queries_by_cpu?server=SRV1&hours=4&top=20&detail=full&as_of=2026-01-02T10%3A30%3A00.000Z", reads);
         Assert.Contains("/api/read/get_cpu_scheduler_pressure?server=SRV1", reads);
         Assert.Empty(Strings(r, "errors"));
     }
