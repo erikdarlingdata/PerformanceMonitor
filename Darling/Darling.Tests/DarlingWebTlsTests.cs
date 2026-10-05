@@ -430,6 +430,241 @@ public sealed class DarlingWebTlsTests
         Assert.False(usedPlaintext);
     }
 
+    /* ---- The section parameter (#5288): one resolver, two listeners ----
+       MCP gets its own tls block of the same type, so every message must name the block the operator actually has
+       to edit. The tests above call these members with no section and pin the web texts; their passing UNCHANGED
+       is the proof the default stayed byte-identical, and the exact-text test below nails whole strings because
+       those substring pins would survive a reworded sentence. */
+
+    /* One block per refusal Describe can give; s_webInvalidTexts holds each one's whole web text, in the same order. */
+    private static readonly WebTlsConfig[] s_invalidBlocks =
+    [
+        new WebTlsConfig { PfxPath = "/certs/a.pfx", CertPath = "/certs/a.crt", KeyPath = "/certs/a.key" },
+        new WebTlsConfig { CertPath = "/certs/a.crt" },
+        new WebTlsConfig { KeyPath = "/certs/a.key" },
+        new WebTlsConfig { PfxPassword = "hunter2" },
+    ];
+
+    private static readonly string[] s_webInvalidTexts =
+    [
+        "web.network.tls names BOTH a PKCS#12 bundle (pfxPath) and a PEM pair (certPath/keyPath) — set one form or the other, never both, so the certificate actually served is the one you meant.",
+        "web.network.tls sets certPath with no keyPath — a PEM certificate cannot serve TLS without its private key.",
+        "web.network.tls sets keyPath with no certPath — name the PEM certificate that key belongs to.",
+        "web.network.tls sets a PKCS#12 password but no pfxPath — there is no bundle for it to open.",
+    ];
+
+    private const string WebStrayPasswordWarning =
+        "web.network.tls sets a PKCS#12 password alongside a PEM pair — the PEM pair is being served and the password is ignored. Remove it, or finish setting pfxPath if the bundle was the one you meant.";
+
+    private static string ForMcp(string webText)
+        => webText.Replace("web.network.tls", "mcp.network.tls", StringComparison.Ordinal);
+
+    [Fact]
+    public void Describe_WebSection_RendersTodaysExactTexts()
+    {
+        /* Whole strings, copied from the code as it stood before the section was threaded through. The default
+           section and an explicit "web" must both render them. */
+        for (var i = 0; i < s_invalidBlocks.Length; i++)
+        {
+            Assert.Equal(s_webInvalidTexts[i], DarlingWebTls.Describe(s_invalidBlocks[i]).Problem);
+            Assert.Equal(s_webInvalidTexts[i], DarlingWebTls.Describe(s_invalidBlocks[i], "web").Problem);
+        }
+
+        var stray = new WebTlsConfig { CertPath = "/certs/a.crt", KeyPath = "/certs/a.key", PfxPassword = "left-over" };
+        Assert.Equal(WebStrayPasswordWarning, DarlingWebTls.Describe(stray).Warning);
+        Assert.Equal(WebStrayPasswordWarning, DarlingWebTls.Describe(stray, "web").Warning);
+    }
+
+    [Fact]
+    public void Describe_McpSection_NamesMcpSetting()
+    {
+        for (var i = 0; i < s_invalidBlocks.Length; i++)
+        {
+            var plan = DarlingWebTls.Describe(s_invalidBlocks[i], "mcp");
+
+            /* The decision is the web's decision and only the NAME differs: same refusal, same words. */
+            Assert.Equal(DarlingWebTls.TlsShape.Invalid, plan.Shape);
+            Assert.DoesNotContain("web.network.tls", plan.Problem, StringComparison.Ordinal);
+            Assert.Equal(ForMcp(s_webInvalidTexts[i]), plan.Problem);
+        }
+
+        var stray = new WebTlsConfig { CertPath = "/certs/a.crt", KeyPath = "/certs/a.key", PfxPassword = "left-over" };
+        var warned = DarlingWebTls.Describe(stray, "mcp");
+        Assert.Equal(DarlingWebTls.TlsShape.Pem, warned.Shape);
+        Assert.Null(warned.Problem);
+        Assert.Equal(ForMcp(WebStrayPasswordWarning), warned.Warning);
+
+        /* Absent and usable blocks decide identically under either section: the section is a label, not an input. */
+        foreach (var block in new WebTlsConfig?[]
+        {
+            null,
+            new WebTlsConfig(),
+            new WebTlsConfig { PfxPath = "/certs/a.pfx" },
+            new WebTlsConfig { CertPath = "/certs/a.crt", KeyPath = "/certs/a.key" },
+        })
+        {
+            Assert.Equal(DarlingWebTls.Describe(block), DarlingWebTls.Describe(block, "mcp"));
+        }
+    }
+
+    [Fact]
+    public void Load_McpSection_NamesMcpSetting()
+    {
+        using var temp = new TempDir();
+        using var generated = SelfSigned();
+
+        var absent = Path.Combine(temp.Path, "absent.pem");
+        var pfx = Path.Combine(temp.Path, "mcp.pfx");
+        File.WriteAllBytes(pfx, generated.Export(X509ContentType.Pkcs12, "hunter2"));
+        var keyless = Path.Combine(temp.Path, "public-only.pfx");
+        File.WriteAllBytes(keyless, new X509Certificate2Collection(
+            X509CertificateLoader.LoadCertificate(generated.Export(X509ContentType.Cert))).Export(X509ContentType.Pkcs12)!);
+        var junk = Path.Combine(temp.Path, "junk.pem");
+        File.WriteAllText(junk, "this is not a PEM file");
+        var realCert = Path.Combine(temp.Path, "mcp.crt");
+        File.WriteAllText(realCert, generated.ExportCertificatePem());
+        const string unsetVariable = "DARLING_TEST_5288_MCP_TLS_UNSET_PFX_PASSWORD";
+
+        /* Every message Load can give that a test can reach, rendered under both sections: the web text is pinned
+           whole, and the MCP text must be that text with only the setting name changed. */
+        AssertLoadFailure(
+            new WebTlsConfig { PfxPath = absent },
+            $"web.network.tls.pfxPath '{absent}' does not exist or is not readable");
+        AssertLoadFailure(
+            new WebTlsConfig { CertPath = absent, KeyPath = absent },
+            $"web.network.tls.certPath '{absent}' does not exist or is not readable");
+        AssertLoadFailure(
+            new WebTlsConfig { CertPath = realCert, KeyPath = absent },
+            $"web.network.tls.keyPath '{absent}' does not exist or is not readable");
+        AssertLoadFailure(
+            new WebTlsConfig { PfxPath = pfx, PfxPassword = "env:" + unsetVariable },
+            "web.network.tls: the PKCS#12 password could not be resolved (web.network.tls.pfxPassword: "
+            + $"environment variable '{unsetVariable}' is not set (or empty or blank) — the referenced secret cannot resolve.)");
+        AssertLoadFailure(
+            new WebTlsConfig { PfxPath = keyless },
+            $"web.network.tls.pfxPath '{keyless}' contains no certificate with a private key — a TLS server "
+            + "certificate must carry its key (export the bundle with the key included).");
+        AssertLoadFailure(
+            new WebTlsConfig { PfxPath = pfx, PfxPassword = "wrong" },
+            webPrefix: $"web.network.tls.pfxPath '{pfx}' could not be loaded (",
+            webSuffix: ") — check the password slot too: Windows reports a wrong PKCS#12 password as unreadable data "
+                + "rather than as a bad password.");
+        AssertLoadFailure(
+            new WebTlsConfig { CertPath = junk, KeyPath = junk },
+            webPrefix: $"web.network.tls: the PEM pair '{junk}' / '{junk}' could not be loaded (",
+            webSuffix: ")");
+
+        /* A shape Describe never returns for a loadable block: the guard names the section too. */
+        var wrongShape = Assert.Throws<InvalidOperationException>(
+            () => DarlingWebTls.Load(new WebTlsConfig(), DarlingWebTls.TlsShape.NotConfigured, "mcp"));
+        Assert.Equal("mcp.network.tls cannot be loaded in shape NotConfigured — Describe() must be consulted first.", wrongShape.Message);
+        var wrongShapeWeb = Assert.Throws<InvalidOperationException>(
+            () => DarlingWebTls.Load(new WebTlsConfig(), DarlingWebTls.TlsShape.NotConfigured));
+        Assert.Equal("web.network.tls cannot be loaded in shape NotConfigured — Describe() must be consulted first.", wrongShapeWeb.Message);
+
+        /* The section never changes what loads: a usable bundle loads the same under "mcp". */
+        var good = new WebTlsConfig { PfxPath = pfx, PfxPassword = "hunter2" };
+        using var loaded = DarlingWebTls.Load(good, DarlingWebTls.Describe(good, "mcp").Shape, "mcp");
+        Assert.True(loaded.Leaf.HasPrivateKey);
+        Assert.Equal(generated.Thumbprint, loaded.Leaf.Thumbprint);
+    }
+
+    [Fact]
+    public void ResolvePfxPassword_McpSection_NamesMcpSetting()
+    {
+        const string unsetVariable = "DARLING_TEST_5288_MCP_TLS_UNSET_PFX_PASSWORD";
+        var unresolvable = new WebTlsConfig { PfxPassword = "env:" + unsetVariable };
+
+        var mcp = Assert.Throws<InvalidOperationException>(() => unresolvable.ResolvePfxPassword(out _, "mcp"));
+        Assert.StartsWith("mcp.network.tls.pfxPassword: ", mcp.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("web.network.tls", mcp.Message, StringComparison.Ordinal);
+
+        /* No section = the web, exactly as before. */
+        var web = Assert.Throws<InvalidOperationException>(() => unresolvable.ResolvePfxPassword(out _));
+        Assert.StartsWith("web.network.tls.pfxPassword: ", web.Message, StringComparison.Ordinal);
+        Assert.Equal(ForMcp(web.Message), mcp.Message);
+
+        /* A resolvable slot is untouched by the section: same value, same plaintext flag. */
+        var literal = new WebTlsConfig { PfxPassword = "hunter2" };
+        Assert.Equal("hunter2", literal.ResolvePfxPassword(out var usedPlaintext, "mcp"));
+        Assert.True(usedPlaintext);
+
+        /* The DPAPI slot is reachable off Windows only through the platform guard, whose text names the slot. */
+        if (!OperatingSystem.IsWindows())
+        {
+            var encrypted = new WebTlsConfig { EncryptedPfxPassword = "AQAAAsomeblob" };
+            var mcpEx = Assert.Throws<PlatformNotSupportedException>(() => encrypted.ResolvePfxPassword(out _, "mcp"));
+            Assert.StartsWith("mcp.network.tls.encryptedPfxPassword requires Windows (DPAPI);", mcpEx.Message, StringComparison.Ordinal);
+            var webEx = Assert.Throws<PlatformNotSupportedException>(() => encrypted.ResolvePfxPassword(out _));
+            Assert.StartsWith("web.network.tls.encryptedPfxPassword requires Windows (DPAPI);", webEx.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingWebTls.cs")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs")]
+    public void NoMessage_SpellsTheWebSectionOutright(string relative)
+    {
+        /* A string literal that spells "web.network.tls" would name the WRONG block for MCP, and the one message
+           no behavioral test can reach ("the PEM pair loaded but could not be prepared for the TLS listener") is
+           exactly where that would hide. Comments may name the setting; code builds it from the section. */
+        var offenders = new System.Text.StringBuilder();
+        var lines = ReadSource(relative).Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i].Trim();
+            if (line.StartsWith("//", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var at = line.IndexOf("web.network.tls", StringComparison.Ordinal);
+            if (at > 0 && line.LastIndexOf('"', at) >= 0)
+            {
+                offenders.AppendLine($"{relative}:{i + 1}: {line}");
+            }
+        }
+
+        Assert.True(
+            offenders.Length == 0,
+            "A string literal spells the web section outright; build it as $\"{section}.network.tls...\" instead:"
+            + Environment.NewLine + offenders);
+    }
+
+    private static string LoadMessage(WebTlsConfig config, string section)
+        => Assert.Throws<InvalidOperationException>(
+            () => DarlingWebTls.Load(config, DarlingWebTls.Describe(config, section).Shape, section)).Message;
+
+    /// <summary>Whole-text form: the web message equals <paramref name="webExpected"/>, the default section agrees
+    /// with it, and the MCP message is that text with only the setting name changed.</summary>
+    private static void AssertLoadFailure(WebTlsConfig config, string webExpected)
+    {
+        var web = LoadMessage(config, "web");
+        Assert.Equal(webExpected, web);
+
+        var byDefault = Assert.Throws<InvalidOperationException>(
+            () => DarlingWebTls.Load(config, DarlingWebTls.Describe(config).Shape)).Message;
+        Assert.Equal(web, byDefault);
+
+        var mcp = LoadMessage(config, "mcp");
+        Assert.DoesNotContain("web.network.tls", mcp, StringComparison.Ordinal);
+        Assert.Equal(ForMcp(webExpected), mcp);
+    }
+
+    /// <summary>Prefix-and-suffix form, for a message that embeds the platform's own text between the two.</summary>
+    private static void AssertLoadFailure(WebTlsConfig config, string webPrefix, string webSuffix)
+    {
+        var web = LoadMessage(config, "web");
+        Assert.StartsWith(webPrefix, web, StringComparison.Ordinal);
+        Assert.EndsWith(webSuffix, web, StringComparison.Ordinal);
+
+        var mcp = LoadMessage(config, "mcp");
+        Assert.DoesNotContain("web.network.tls", mcp, StringComparison.Ordinal);
+        Assert.StartsWith(ForMcp(webPrefix), mcp, StringComparison.Ordinal);
+        Assert.EndsWith(webSuffix, mcp, StringComparison.Ordinal);
+        Assert.Equal(ForMcp(web), mcp);
+    }
+
     /* ---- IsConfigured: a tls-only block still counts as a configured network block ---- */
 
     [Fact]

@@ -1189,9 +1189,10 @@ public sealed class McpConfig
     /// <summary>
     /// Opt-in network exposure for the MCP server (darling-network-endpoints). Omit for the secure
     /// default = loopback-only, tokenless HTTP (today's behavior). Managed-mode only; ignored in BYO
-    /// with a caller warning. Any missing precondition (token / valid allowFrom / managed) keeps MCP
-    /// loopback-only + LogCritical — enforced in the MCP host, NEVER in the all-fatal
-    /// <see cref="DarlingConfig.Validate"/> (D-validate). See <see cref="McpNetworkConfig"/>.
+    /// with a caller warning. Any missing precondition (token / valid allowFrom / managed, and a usable
+    /// certificate when <c>tls</c> is set, #5288) keeps MCP loopback-only + LogCritical — enforced in the MCP
+    /// host, NEVER in the all-fatal <see cref="DarlingConfig.Validate"/> (D-validate). See
+    /// <see cref="McpNetworkConfig"/>.
     /// </summary>
     [JsonPropertyName("network")]
     public McpNetworkConfig? Network { get; set; }
@@ -1257,8 +1258,13 @@ public sealed class PostgresNetworkConfig
 /// with a non-loopback <see cref="Listen"/> AND managed mode AND a token AND a valid
 /// <see cref="AllowFrom"/>, the MCP host binds the network interface behind a required bearer token +
 /// an in-app CIDR check (D3); any missing precondition keeps MCP loopback-only + LogCritical
-/// (fail-closed, enforced in the MCP host). No TLS on MCP (a self-signed cert breaks real clients; the
-/// named MITM control is a TLS reverse proxy in front of the endpoint).
+/// (fail-closed, enforced in the MCP host).
+///
+/// <para><b>TLS is opt-in via <see cref="Tls"/> (#5288).</b> Without it the network listener is plain HTTP, and
+/// the bearer token and every tool result cross the segment in the clear — the MCP host warns about exactly
+/// that at every exposed start, and a TLS-terminating reverse proxy in front of the port is the other way to
+/// close the gap. <see cref="HostName"/> names the one DNS name clients reach the endpoint by. Both are
+/// file-only and restart-only, like the rest of this block, and both are null by default.</para>
 /// </summary>
 public sealed class McpNetworkConfig
 {
@@ -1301,6 +1307,33 @@ public sealed class McpNetworkConfig
     public string? Token { get; set; }
 
     /// <summary>
+    /// Opt-in TLS for the MCP network listener (#5288). Omit for plain HTTP, which is the zero-config default and
+    /// the right answer on loopback; supply a certificate before exposing MCP on a segment where the bearer
+    /// token and the tool results crossing in the clear matter. The SAME type as <c>web.network.tls</c>
+    /// (<see cref="WebTlsConfig"/>), but its OWN block with its own fail-closed decision: no shared block and no
+    /// precedence rule between the two listeners. To serve one certificate on both, point both blocks at the
+    /// same files. A bad, expired or not-yet-valid certificate keeps MCP loopback-only with a Critical line,
+    /// never plain HTTP on the LAN. File-only and restart-only: a renewed certificate file is served after a
+    /// service restart.
+    /// </summary>
+    [JsonPropertyName("tls")]
+    public WebTlsConfig? Tls { get; set; }
+
+    /// <summary>
+    /// The ONE DNS name clients reach the MCP endpoint by (#5288), e.g. <c>mcp.corp.example</c>: a bare name with
+    /// no scheme, port, path, wildcard or IP address (see <see cref="NormalizeHostName"/> for the exact rules).
+    /// The Host-header guard admits that one exact name, compared ignoring case, in BOTH bind modes, beside the
+    /// names it always admits; it never admits a name the operator did not write here. With <see cref="Tls"/>
+    /// set it is also the name the certificate should carry as a dNSName SAN, and the host warns (never refuses)
+    /// when it does not. A value that is set but is not a bare DNS name is ignored with one Warning at start.
+    /// Unlike <c>web.publicBaseUrl</c> this is a bare host rather than a URL, because MCP has no link builder: a
+    /// scheme, port and path would be unused fields that could disagree with the listener. File-only and
+    /// restart-only.
+    /// </summary>
+    [JsonPropertyName("hostName")]
+    public string? HostName { get; set; }
+
+    /// <summary>
     /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
     /// NOT the same as "exposed".
     /// </summary>
@@ -1309,7 +1342,53 @@ public sealed class McpNetworkConfig
         !string.IsNullOrWhiteSpace(Listen)
         || !string.IsNullOrWhiteSpace(AllowFrom)
         || !string.IsNullOrWhiteSpace(EncryptedToken)
-        || !string.IsNullOrWhiteSpace(Token);
+        || !string.IsNullOrWhiteSpace(Token)
+        || !string.IsNullOrWhiteSpace(HostName)
+        || (Tls?.IsConfigured ?? false);
+
+    /// <summary>
+    /// The bare DNS name a raw <see cref="HostName"/> stands for, or null when there is none to use (#5288). PURE:
+    /// no DNS lookup, no config, no logger. The rules, in this order:
+    ///
+    /// <list type="number">
+    /// <item>A null, empty or blank value is "not set": null.</item>
+    /// <item>Surrounding whitespace is trimmed.</item>
+    /// <item>ONE trailing dot is stripped (<c>mcp.corp.example.</c> is the same name written fully qualified).
+    /// A name that still ends in a dot after that (<c>host..</c>) is refused: an empty label is a typo, not a
+    /// name.</item>
+    /// <item>Only a DNS name survives: <c>Uri.CheckHostName</c> must say <c>Dns</c>. An IP address (the guard
+    /// admits the listen IP by itself), a port (<c>host:5152</c>), a scheme or path (<c>https://host/</c>), a
+    /// wildcard (<c>*.corp.example</c>) and anything with whitespace inside are refused: null.</item>
+    /// </list>
+    ///
+    /// <para>Case is kept as written, because the Host-header guard compares ignoring case. A caller tells "not
+    /// set" from "set but refused" by testing <see cref="HostName"/> for blank first: a refused value is ignored
+    /// with one Warning at start, never an error, and never a reason to degrade a listener.</para>
+    /// </summary>
+    /// <param name="value">The raw <see cref="HostName"/>.</param>
+    /// <returns>The trimmed name without its trailing dot, or null when unset or refused.</returns>
+    public static string? NormalizeHostName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var name = value.Trim();
+        if (name.EndsWith('.'))
+        {
+            name = name[..^1];
+        }
+
+        /* "host.." had two dots: stripping one leaves an empty label that CheckHostName may let through, and no
+           client sends it as a Host. A bare "." strips to nothing. Both are refused. */
+        if (name.Length == 0 || name.EndsWith('.'))
+        {
+            return null;
+        }
+
+        return Uri.CheckHostName(name) == UriHostNameType.Dns ? name : null;
+    }
 
     /// <summary>
     /// The bearer token, preferring <see cref="EncryptedToken"/> (DPAPI-decrypted; Windows-only) over
@@ -1400,9 +1479,8 @@ public sealed class WebConfig
 ///
 /// <para><b>TLS is opt-in via <see cref="Tls"/> (#2562).</b> Without it the network listener is plain HTTP and
 /// the token and session cookie cross the segment in the clear — the web host warns about exactly that at
-/// every exposed start. MCP still has no TLS of its own on the older rationale that a self-signed certificate
-/// breaks real MCP clients; that argument is about MCP clients rather than about the wire, and it does not
-/// carry to a surface whose only client is a browser.</para>
+/// every exposed start. The MCP endpoint has its own <c>mcp.network.tls</c> block of the same type (#5288);
+/// the two listeners never share a block.</para>
 /// </summary>
 public sealed class WebNetworkConfig
 {
@@ -1634,11 +1712,14 @@ public sealed class WebOidcConfig
 }
 
 /// <summary>
-/// Opt-in TLS for the web dashboard's network listener (#2562). Omit the whole <c>tls</c> object for plain
-/// HTTP — the zero-config default, and the correct one for a loopback-only dashboard, which has nothing to
-/// encrypt. Supply a certificate to close the gap the exposure block otherwise leaves open: the access token
-/// and the HMAC session cookie it is exchanged for both cross the segment in the clear over HTTP, and the
-/// in-app CIDR check bounds who can ROUTE to the port, never what an on-path attacker can read off the wire.
+/// Opt-in TLS for a network listener (#2562, #5288). This one type backs BOTH <c>web.network.tls</c> (the web
+/// dashboard) and <c>mcp.network.tls</c> (the MCP endpoint): two separate blocks, each its own fail-closed
+/// decision, with no shared block and no precedence rule. To serve one certificate on both, point both blocks at
+/// the same files. Omit the whole <c>tls</c> object for plain HTTP — the zero-config default, and the correct
+/// one for a loopback-only listener, which has nothing to encrypt. Supply a certificate to close the gap the
+/// exposure block otherwise leaves open: the access token (and, on the web, the HMAC session cookie it is
+/// exchanged for; on MCP, every tool result) crosses the segment in the clear over HTTP, and the in-app CIDR
+/// check bounds who can ROUTE to the port, never what an on-path attacker can read off the wire.
 ///
 /// <para><b>Two forms, exactly one at a time.</b> A PKCS#12 bundle (<see cref="PfxPath"/>, with the password
 /// in whichever of the three slots suits the platform) or a PEM pair (<see cref="CertPath"/> +
@@ -1651,7 +1732,7 @@ public sealed class WebOidcConfig
 /// replaces. An internal CA is the normal answer on the LAN this feature is for.</para>
 ///
 /// <para><b>Fail-closed, like every other exposure precondition.</b> A missing, unreadable, mismatched or
-/// EXPIRED certificate keeps the dashboard loopback-only and logs Critical. It never falls back to serving
+/// EXPIRED certificate keeps the listener loopback-only and logs Critical. It never falls back to serving
 /// the LAN over HTTP: an operator who configured TLS and silently got cleartext would be in precisely the
 /// state this block exists to prevent.</para>
 /// </summary>
@@ -1710,7 +1791,11 @@ public sealed class WebTlsConfig
     /// over <see cref="PfxPassword"/> — the same shape as <see cref="WebNetworkConfig.ResolveToken"/>.
     /// Returns null when neither is set, which is correct for a bundle with no password rather than an error.
     /// </summary>
-    public string? ResolvePfxPassword(out bool usedPlaintext)
+    /// <param name="usedPlaintext">True when the plaintext <see cref="PfxPassword"/> literal was used (an
+    /// <c>env:</c>/<c>file:</c> reference is not plaintext), so the caller can warn.</param>
+    /// <param name="section">Which listener's block this is, <c>"web"</c> (the default) or <c>"mcp"</c>; it only
+    /// names the setting in the messages (<c>{section}.network.tls.pfxPassword</c>).</param>
+    public string? ResolvePfxPassword(out bool usedPlaintext, string section = "web")
     {
         usedPlaintext = false;
 
@@ -1722,7 +1807,7 @@ public sealed class WebTlsConfig
             if (!OperatingSystem.IsWindows())
             {
                 throw new PlatformNotSupportedException(
-                    "web.network.tls.encryptedPfxPassword requires Windows (DPAPI); use \"pfxPassword\" with a "
+                    $"{section}.network.tls.encryptedPfxPassword requires Windows (DPAPI); use \"pfxPassword\" with a "
                     + "file:/env: reference on other platforms.");
             }
 
@@ -1733,7 +1818,7 @@ public sealed class WebTlsConfig
         {
             /* An env:/file: reference (#1804) is not plaintext-in-config — no warning for it. */
             usedPlaintext = !DarlingSecretSource.IsReference(PfxPassword);
-            return DarlingSecretSource.Resolve(PfxPassword, "web.network.tls.pfxPassword");
+            return DarlingSecretSource.Resolve(PfxPassword, $"{section}.network.tls.pfxPassword");
         }
 
         return null;

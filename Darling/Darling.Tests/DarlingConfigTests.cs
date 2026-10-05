@@ -341,7 +341,9 @@ public sealed class DarlingConfigTests
     /// #5288, "no new setting = unchanged", the allowFrom half: a darling.json that spells allowFrom as ONE plain
     /// string, exactly as every existing config does, loads that string untouched on both listeners (the
     /// converter reshapes an ARRAY only), parses to the one-entry list <c>IPNetwork</c> gave, and resolves the
-    /// same bind. The tls and hostName halves are added by the lanes that introduce those two settings.
+    /// same bind. The tls and hostName halves (#5288): neither key is in the file, so both read null, the MCP
+    /// listener's TLS shape is "not configured" (plain HTTP, as today), and the host-name normalizer has nothing
+    /// to say about an absent name.
     /// </summary>
     [Fact]
     public void NoNewSettings_McpTlsAndHostNameNull_AllowFromStringAsToday()
@@ -367,6 +369,137 @@ public sealed class DarlingConfigTests
         var webBind = PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService.ResolveWebBind(config.Web, managed: true, inContainer: false);
         Assert.Equal(PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.BindMode.NetworkAndLoopback, webBind.Mode);
         Assert.Equal(PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.BindReason.NetworkExposed, webBind.Reason);
+
+        /* The tls and hostName halves (#5288). */
+        Assert.Null(config.Mcp.Network.Tls);
+        Assert.Null(config.Mcp.Network.HostName);
+        Assert.Null(config.Web.Network.Tls);
+        Assert.Null(McpNetworkConfig.NormalizeHostName(config.Mcp.Network.HostName));
+        Assert.Equal(
+            PerformanceMonitor.Darling.Service.Hosting.DarlingWebTls.TlsShape.NotConfigured,
+            PerformanceMonitor.Darling.Service.Hosting.DarlingWebTls.Describe(config.Mcp.Network.Tls, "mcp").Shape);
+        Assert.True(config.Mcp.Network.IsConfigured);
+    }
+
+    [Fact]
+    public void Network_ParsesMcpTlsAndHostName()
+    {
+        /* #5288: the two keys bind by the names the README and the sample document, and the tls block is the same
+           type the web uses, so its slots resolve the same way and Describe reads it under the MCP section. */
+        var config = DarlingConfig.Parse(@"{
+            ""postgres"": { ""managed"": true },
+            ""mcp"": {
+                ""enabled"": true,
+                ""network"": {
+                    ""listen"": ""192.168.1.205"", ""allowFrom"": ""192.168.1.0/24"", ""token"": ""dev-token"",
+                    ""hostName"": ""mcp.corp.example"",
+                    ""tls"": { ""certPath"": ""/certs/mcp.crt"", ""keyPath"": ""/certs/mcp.key"" }
+                }
+            },
+            ""servers"": [ { ""host"": ""SQL2022"" } ]
+        }");
+
+        var network = config.Mcp.Network!;
+        Assert.Equal("mcp.corp.example", network.HostName);
+        Assert.Equal("mcp.corp.example", McpNetworkConfig.NormalizeHostName(network.HostName));
+        Assert.NotNull(network.Tls);
+        Assert.Equal("/certs/mcp.crt", network.Tls!.CertPath);
+        Assert.Equal("/certs/mcp.key", network.Tls.KeyPath);
+        Assert.Equal(
+            PerformanceMonitor.Darling.Service.Hosting.DarlingWebTls.TlsShape.Pem,
+            PerformanceMonitor.Darling.Service.Hosting.DarlingWebTls.Describe(network.Tls, "mcp").Shape);
+        Assert.True(network.IsConfigured);
+    }
+
+    [Fact]
+    public void McpNetworkConfig_IsConfigured_SeesTlsAndHostName_IgnoresBlankOnes()
+    {
+        /* IsConfigured drives the BYO "network.* is ignored" notice, so a block carrying only a certificate or only
+           a host name must trip it, and a block of blank values must not: the two rules WebNetworkConfig has. */
+        Assert.False(new McpNetworkConfig().IsConfigured);
+        Assert.False(new McpNetworkConfig { Tls = new WebTlsConfig(), HostName = "   " }.IsConfigured);
+        Assert.True(new McpNetworkConfig { Tls = new WebTlsConfig { PfxPath = "/certs/mcp.pfx" } }.IsConfigured);
+        Assert.True(new McpNetworkConfig { HostName = "mcp.corp.example" }.IsConfigured);
+    }
+
+    [Theory]
+    [InlineData("mcp.corp.example", "mcp.corp.example")]
+    [InlineData("mcp-01.corp.example", "mcp-01.corp.example")]
+    [InlineData("localhost", "localhost")]
+    [InlineData("darling", "darling")]
+    public void NormalizeHostName_AcceptsABareDnsName(string raw, string expected)
+        /* One label is a DNS name too: a LAN box is routinely reached by its short name. */
+        => Assert.Equal(expected, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("  mcp.corp.example  ", "mcp.corp.example")]
+    [InlineData("\tmcp.corp.example\r\n", "mcp.corp.example")]
+    [InlineData("mcp.corp.example.", "mcp.corp.example")]
+    [InlineData("  mcp.corp.example. ", "mcp.corp.example")]
+    public void NormalizeHostName_TrimsWhitespace_AndStripsOneTrailingDot(string raw, string expected)
+        => Assert.Equal(expected, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("MCP.Corp.Example")]
+    [InlineData("Darling-Box")]
+    public void NormalizeHostName_KeepsCaseAsWritten(string raw)
+        /* The Host-header guard compares ignoring case, so folding here would only change what the log shows. */
+        => Assert.Equal(raw, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\t\r\n")]
+    public void NormalizeHostName_BlankIsNotSet_NullWithNothingToWarnAbout(string? raw)
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("10.1.2.3")]
+    [InlineData("192.168.1.205")]
+    [InlineData("::1")]
+    [InlineData("[::1]")]
+    [InlineData("fe80::1")]
+    public void NormalizeHostName_RefusesAnIpAddress(string raw)
+        /* The guard already admits the listen IP by itself, and a name that is really an address would be a second,
+           unwritten way in. */
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("mcp.corp.example:5152")]
+    [InlineData("https://mcp.corp.example")]
+    [InlineData("http://mcp.corp.example:5152/")]
+    [InlineData("mcp.corp.example/mcp")]
+    [InlineData("user@mcp.corp.example")]
+    [InlineData("*.corp.example")]
+    [InlineData("*")]
+    [InlineData("mcp corp.example")]
+    public void NormalizeHostName_RefusesAPortASchemeAPathAWildcardOrWhitespaceInside(string raw)
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("mcp.corp.example..")]
+    [InlineData(".")]
+    [InlineData("..")]
+    [InlineData(".mcp.corp.example")]
+    [InlineData("mcp..corp.example")]
+    public void NormalizeHostName_RefusesEmptyLabels_AndMoreThanOneTrailingDot(string raw)
+        /* One trailing dot is a fully qualified name; two is a typo, and a result still ending in a dot would
+           never match what a client sends as its Host. */
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Fact]
+    public void NormalizeHostName_ASetButRefusedValue_IsDistinguishableFromNotSet()
+    {
+        /* The host logs ONE Warning for a value that is set but refused (and ignores it), and nothing for an unset
+           one. The distinction is "HostName not blank" together with a null result, so both halves must hold. */
+        var refused = new McpNetworkConfig { HostName = "https://mcp.corp.example" };
+        Assert.False(string.IsNullOrWhiteSpace(refused.HostName));
+        Assert.Null(McpNetworkConfig.NormalizeHostName(refused.HostName));
+
+        var unset = new McpNetworkConfig { HostName = "  " };
+        Assert.True(string.IsNullOrWhiteSpace(unset.HostName));
+        Assert.Null(McpNetworkConfig.NormalizeHostName(unset.HostName));
     }
 
     [Fact]
