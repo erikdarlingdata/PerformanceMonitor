@@ -1081,10 +1081,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 running = addServers(body);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex)
             {
                 /* addServers threw before returning a task: nothing is running, so free the slot here. Only the
-                   exception TYPE is logged: its message could quote a value the request carried. */
+                   exception TYPE is logged: its message could quote a value the request carried. EVERY synchronous
+                   throw is caught, cancellation included: the slot is no longer released in a finally, so a type
+                   that escaped this catch would hold it for the life of the process and answer 429 forever. */
                 addInFlight.Release();
                 return ServerErrorResult(
                     $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
