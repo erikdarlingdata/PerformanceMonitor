@@ -24,6 +24,20 @@ namespace PerformanceMonitorLite.Mcp;
 /// never been read answers <c>unavailable</c>, never <c>empty</c>. Before this, eight of the nine answered a
 /// dead session with the same word a healthy quiet hour earns. Darling's twin does the same.
 /// </para>
+///
+/// <para>
+/// #4966: each data answer also says where the data starts (<c>effective_start</c>, <c>window_truncated</c>,
+/// <c>truncation_note</c>, right after <c>hours_back</c>), and each <c>empty</c> answer carries the same three keys
+/// under <c>hints</c>. The probe is the shared coverage floor (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>)
+/// over <c>v_system_health_events</c>: the earlier of the first stored event and the collector's first logged run
+/// inside the window, both read on <c>event_time</c>, the column the nine reads window on. It counts events of
+/// every type, because one collector stores them all, so it describes where the session's capture starts and not
+/// where one category's first hit sits. The event-time form (<see cref="McpQueryTools.EventWindowNoticeAsync"/>) is
+/// not used: a first run of this collector stores events from up to
+/// <see cref="PerformanceMonitor.Collectors.CollectorContext.EventFallbackWindow"/> before itself, but the probe
+/// already reads <c>event_time</c>, so it names such an event itself and no row a page shows can be older than its floor.
+/// <c>not_collected</c> and <c>unavailable</c> answers keep their shape and carry no keys.
+/// </para>
 /// </summary>
 [McpServerToolType]
 public sealed class McpHealthParserTools
@@ -35,6 +49,23 @@ public sealed class McpHealthParserTools
     /// answer "supported" and silently restore the old wrong message.
     /// </summary>
     private const string SystemHealthCollectorName = "system_health_events";
+
+    /// <summary>The table the window notice names: the one every read below is served from.</summary>
+    private const string SystemHealthTable = "system_health_events";
+
+    /// <summary>
+    /// #4966: the window notice of one of the nine reads. The window is the one the read took (<paramref name="windowEnd"/>
+    /// minus <paramref name="hoursBack"/>, which is what <c>GetTimeRange</c> gives for an <c>as_of</c> anchor). A data
+    /// answer over a window of 90 minutes or less starts no probe; an empty one always does.
+    /// </summary>
+    private static Task<McpQueryTools.McpWindowNotice> WindowNoticeAsync(
+        LocalDataService dataService, int serverId, int hoursBack, DateTime windowEnd, bool emptyAnswer = false)
+    {
+        var requestedStart = windowEnd.AddHours(-hoursBack);
+        return McpQueryTools.WindowNoticeAsync(
+            () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.SystemHealthEvents, serverId, requestedStart, windowEnd),
+            requestedStart, windowEnd, SystemHealthTable, emptyAnswer: emptyAnswer);
+    }
 
     [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health health indicators (the sp_server_diagnostics component results) over an event_time window ending at as_of, newest first. Ungated: every parsed event is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets parsed system_health extended event data: overall health indicators (spinlock backoffs, sick spinlocks, latch warnings, dump requests, non-yielding tasks, SQL vs system CPU, bad pages) captured by sp_server_diagnostics. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSystemHealth(
@@ -59,10 +90,17 @@ public sealed class McpHealthParserTools
                 return await EmptyAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
                     "none carried a SYSTEM component result with a timestamp (the other four sp_server_diagnostics components feed the sibling reads)", capturedInWindow: null, lastCapturedAt);
 
+            var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's system_health data starts for the window, always present (false and null
+                   when the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 total_entries = rows.Count,
@@ -114,10 +152,17 @@ public sealed class McpHealthParserTools
                 return await EmptyAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, SystemHealthParser.ErrorReportedEvent,
                     $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)", capturedInWindow: null, lastCapturedAt);
 
+            var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's system_health data starts for the window, always present (false and null
+                   when the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 error_count = rows.Count,
@@ -160,10 +205,17 @@ public sealed class McpHealthParserTools
                 return await EmptyAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
                     "none was an IO_SUBSYSTEM component result in the WARNING state", capturedInWindow: null, lastCapturedAt);
 
+            var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's system_health data starts for the window, always present (false and null
+                   when the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 issue_count = rows.Count,
@@ -206,10 +258,17 @@ public sealed class McpHealthParserTools
                 return await EmptyAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, SystemHealthParser.SchedulerMonitorEvent,
                     "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", capturedInWindow: null, lastCapturedAt);
 
+            var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's system_health data starts for the window, always present (false and null
+                   when the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 issue_count = rows.Count,
@@ -252,10 +311,17 @@ public sealed class McpHealthParserTools
                 return await EmptyAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
                     "none was a RESOURCE component result carrying a low-memory (RESOURCE_MEMPHYSICAL_LOW) notification", capturedInWindow: null, lastCapturedAt);
 
+            var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's system_health data starts for the window, always present (false and null
+                   when the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 event_count = rows.Count,
@@ -323,10 +389,17 @@ public sealed class McpHealthParserTools
                 return await EmptyAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
                     $"none was a QUERY_PROCESSING component result in the WARNING state with at least {SystemHealthSignificance.CpuTaskMinPendingTasks} pending tasks", capturedInWindow: null, lastCapturedAt);
 
+            var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's system_health data starts for the window, always present (false and null
+                   when the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 event_count = rows.Count,
@@ -373,10 +446,17 @@ public sealed class McpHealthParserTools
                 return await EmptyAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, SystemHealthParser.MemoryBrokerEvent,
                     "none carried a low-memory notification (broker adjustments that are not a shrink under pressure are routine)", capturedInWindow: null, lastCapturedAt);
 
+            var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's system_health data starts for the window, always present (false and null
+                   when the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 event_count = rows.Count,
@@ -425,10 +505,17 @@ public sealed class McpHealthParserTools
                 return await EmptyAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, SystemHealthParser.MemoryNodeOomEvent,
                     "none shredded to a memory-node OOM record (this category is ungated, so a captured OOM event that parsed would be here)", capturedInWindow: null, lastCapturedAt);
 
+            var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's system_health data starts for the window, always present (false and null
+                   when the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 event_count = rows.Count,
@@ -506,10 +593,17 @@ public sealed class McpHealthParserTools
                     capturedInWindow: captured, lastCapturedAt);
             }
 
+            var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's system_health data starts for the window, always present (false and null
+                   when the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 wait_count = rows.Count,
@@ -555,6 +649,10 @@ public sealed class McpHealthParserTools
     /// Database has no session to start), and its text stays exactly right for every engine that does
     /// collect this.</para>
     ///
+    /// <para>#4966: the three <c>empty</c> rungs also carry the window-floor keys under <c>hints</c> (an empty answer over
+    /// a window the store does not reach back to is not a true negative); the <c>unavailable</c> and <c>not_collected</c>
+    /// rung stays bare.</para>
+    ///
     /// <para>Every rung carries the same two witness keys the data envelope carries
     /// (<c>source_observed</c>, <c>last_captured_at</c>) plus the rung's own evidence, at the top level
     /// beside <c>status</c> — the trend family's precedent (#3541 A2): a caller reads the witness without
@@ -575,7 +673,8 @@ public sealed class McpHealthParserTools
             return WitnessStatus(
                 "empty",
                 $"{captured} {eventType} event(s) were captured for {serverName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}. Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
-                sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured);
+                sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured,
+                hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
         }
 
         if (lastOfType is DateTime seen)
@@ -583,7 +682,8 @@ public sealed class McpHealthParserTools
             return WitnessStatus(
                 "empty",
                 $"No {eventType} events were captured for {serverName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)}), so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
-                sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0);
+                sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
+                hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
         }
 
         if (lastCapturedAt is DateTime alive)
@@ -591,7 +691,8 @@ public sealed class McpHealthParserTools
             return WitnessStatus(
                 "empty",
                 $"No {eventType} events have been captured for {serverName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
-                sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0);
+                sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0,
+                hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
         }
 
         return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, SystemHealthCollectorName)
@@ -605,19 +706,26 @@ public sealed class McpHealthParserTools
     /// <see cref="McpHelpers.Status"/> with the source witness beside <c>status</c> and <c>message</c>: the
     /// same <c>source_observed</c> / <c>last_captured_at</c> pair the data envelope carries, plus what this
     /// rung measured (<c>last_captured_of_type_at</c>, <c>events_in_window</c>). Top-level rather than under
-    /// <c>hints</c> so the keys sit in one place whichever branch answered.
+    /// <c>hints</c> so the keys sit in one place whichever branch answered. The one thing under <c>hints</c> is the #4966
+    /// window-floor trio, which an <c>empty</c> rung passes in and the <c>unavailable</c> rung leaves out.
     /// </summary>
     private static string WitnessStatus(
-        string status, string message, bool sourceObserved, DateTime? lastCapturedAt, DateTime? lastCapturedOfTypeAt, int eventsInWindow)
-        => JsonSerializer.Serialize(new
+        string status, string message, bool sourceObserved, DateTime? lastCapturedAt, DateTime? lastCapturedOfTypeAt, int eventsInWindow,
+        object? hints = null)
+    {
+        /* The serializer writes a null member, so hints is added only when there is one: the unavailable rung keeps its shape. */
+        var answer = new Dictionary<string, object?>
         {
-            status,
-            message,
-            source_observed = sourceObserved,
-            last_captured_at = Stamp(lastCapturedAt),
-            last_captured_of_type_at = Stamp(lastCapturedOfTypeAt),
-            events_in_window = eventsInWindow,
-        }, McpHelpers.JsonOptions);
+            ["status"] = status,
+            ["message"] = message,
+            ["source_observed"] = sourceObserved,
+            ["last_captured_at"] = Stamp(lastCapturedAt),
+            ["last_captured_of_type_at"] = Stamp(lastCapturedOfTypeAt),
+            ["events_in_window"] = eventsInWindow,
+        };
+        if (hints is not null) answer["hints"] = hints;
+        return JsonSerializer.Serialize(answer, McpHelpers.JsonOptions);
+    }
 
     /// <summary>The store's naive-UTC stamp in the same ISO shape the rows' <c>event_time</c> uses; null stays null.</summary>
     private static string? Stamp(DateTime? stamp) => stamp?.ToString("o");
