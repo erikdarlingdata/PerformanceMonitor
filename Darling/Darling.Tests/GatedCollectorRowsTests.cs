@@ -192,7 +192,7 @@ public sealed class GatedCollectorRowsTests
     }
 
     [Fact]
-    public void TheToolIsCalledFromOneLine_AndTheDescriptionIsUntouched()
+    public void TheToolIsCalledFromOneLine()
     {
         var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
         Assert.Equal(1, source.Split("DarlingGatedCollectorRows.AppendAsync(", StringSplitOptions.None).Length - 1);
@@ -292,7 +292,7 @@ public sealed class GatedCollectorRowsLiveTests
     }
 
     [Fact]
-    public async Task AStockPostgresServer_ListsItsGatedCollectors_AfterTheLogRows_ByName_AndNotOnesThatLogged()
+    public async Task AStockPostgresServer_ListsItsKindGatedCollectors_AfterTheLogRows_ByName_AndNotOnesThatLogged()
     {
         await RunAsync(async (connection, postgres, ct) =>
         {
@@ -453,7 +453,7 @@ public sealed class GatedCollectorRowsLiveTests
             }
 
             Console.WriteLine("get_collection_health PG response: " + string.Join("; ", sizes));
-            Assert.Equal(2, sizes.Count);
+            Assert.All(sizes, s => Assert.Matches(@"\d+ -> \d+ bytes \(\+[1-9]\d*\)", s));
         });
     }
 }

@@ -21,8 +21,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para><b>Why they need a source other than the log.</b> Health rows come from <c>collection_log</c>, and a
 /// collector that the dispatch gate never sends at a server writes no log row at all. On a PostgreSQL server
-/// several collectors are in that state (the wait-statistics reader on stock PostgreSQL, the sampler on
-/// Aurora), so the Collectors panel simply lacked them, and an operator could not tell a collector that
+/// several collectors are in that state because this engine KIND can never run them (the wait-statistics
+/// reader on stock PostgreSQL, the sampler on Aurora). Gates that depend on the server's major version or on
+/// recovery state are not listed: the kind gate is the only one asked here. The Collectors panel simply lacked
+/// these, and an operator could not tell a collector that
 /// failed to run from one that cannot run on this engine. The catalog and
 /// <see cref="CollectorEngineCapability"/> already know which is which; this lists them.</para>
 ///
