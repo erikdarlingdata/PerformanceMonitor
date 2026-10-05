@@ -2856,6 +2856,11 @@ public class CrossAppGuardCiGateTests
         var job = JobBlock(yaml, "lite-tests");
         Assert.Contains("      contents: read\n", job, StringComparison.Ordinal);
         Assert.Contains("      actions: read\n", job, StringComparison.Ordinal);
+        /* The packer's own self-test (totality, input-order determinism, the hash fallback) is the only executable
+           proof of "the same plan on every shard"; these pins are text, so without a workflow step that runs it a
+           later edit to the packer could keep every pin green and ship. Shard 0 alone runs it. */
+        Assert.Contains("run: python .github/scripts/lite-shard-pack.py --self-test", job, StringComparison.Ordinal);
+        Assert.Contains("\n        if: matrix.shard == 0\n", StepBlock(job, "Shard packer self-test"), StringComparison.Ordinal);
         var run = StepBlock(job, "Run Lite tests (shard)");
         Assert.Contains("LITE_TIMING_RUN: ${{ needs.gate.outputs.lite_timing_run }}", run, StringComparison.Ordinal);
         Assert.Contains("LITE_TIMING_ARTIFACTS: ${{ needs.gate.outputs.lite_timing_artifacts }}", run, StringComparison.Ordinal);
