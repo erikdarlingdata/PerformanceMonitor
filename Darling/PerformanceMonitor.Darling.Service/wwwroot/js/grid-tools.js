@@ -71,9 +71,9 @@ export async function copyText(text) {
 
 const REVOKE_AFTER_MS = 10000;
 
-/** Hands CSV text to the browser as a file download (UTF-8 with a byte-order mark so a spreadsheet reads unicode). */
-export function downloadCsv(fileName, csv) {
-  const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
+/** Hands text to the browser as a file download under the given MIME type. */
+export function downloadText(fileName, parts, type) {
+  const blob = new Blob(parts, { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -84,4 +84,9 @@ export function downloadCsv(fileName, csv) {
   document.body.removeChild(a);
   /* Some browsers cancel the download if the URL is revoked before it has started. */
   setTimeout(() => URL.revokeObjectURL(url), REVOKE_AFTER_MS);
+}
+
+/** Hands CSV text to the browser as a file download (UTF-8 with a byte-order mark so a spreadsheet reads unicode). */
+export function downloadCsv(fileName, csv) {
+  downloadText(fileName, ["\uFEFF", csv], "text/csv;charset=utf-8");
 }
