@@ -1269,18 +1269,31 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         return ServerTagEnvelopeStatus(result);
     }
 
-    /// <summary>The edit answer with every occurrence of the submitted secret removed, in its raw and its JSON-escaped
-    /// spelling. The core's answers carry none today; this is the backstop, over the whole text.</summary>
+    /// <summary>The edit answer with every occurrence of the submitted secret removed from its one free-text field,
+    /// <c>message</c> (the only field a driver's text can reach: connection_failed, collides). Structured fields
+    /// (engine, username, host, server, modified_at, numbers, keys) are never rewritten, so a short or common secret
+    /// cannot corrupt them. An answer that does not parse is replaced by a fixed body, never passed through.</summary>
     internal static string RedactEditAnswer(string answer, IReadOnlyList<string> secrets)
     {
-        foreach (var secret in secrets)
+        if (secrets.Count == 0)
         {
-            answer = answer.Replace(secret, RedactedSecret, StringComparison.Ordinal);
-            var escaped = JsonSerializer.Serialize(secret);
-            answer = answer.Replace(escaped[1..^1], RedactedSecret, StringComparison.Ordinal);
+            return answer;
         }
 
-        return answer;
+        try
+        {
+            if (JsonNode.Parse(answer) is not JsonObject envelope)
+            {
+                return RedactSecrets(answer, secrets);
+            }
+
+            RedactField(envelope, "message", secrets);
+            return envelope.ToJsonString();
+        }
+        catch (JsonException)
+        {
+            return "{\"status\":\"error\",\"message\":\"The answer could not be read.\"}";
+        }
     }
 
     /// <summary>One Information line per saved edit: who, the server id and the field NAMES. Never a value, never the

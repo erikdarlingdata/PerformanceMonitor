@@ -331,14 +331,84 @@ public sealed class ServerEditRouteTests
     }
 
     [Fact]
-    public void RedactEditAnswer_RemovesTheSecretInItsRawAndJsonEscapedSpelling()
+    public void RedactEditAnswer_RemovesTheSecretInItsRawAndJsonEscapedSpelling_FromTheMessage()
     {
         const string secret = "p\"w\\d";
-        var answer = "{\"message\":\"bad " + System.Text.Json.JsonSerializer.Serialize(secret)[1..^1] + " and " + secret + "\"}";
+        /* Serialized the way the core writes it: on the wire the secret's quote and backslash are escaped. */
+        var answer = new JsonObject { ["status"] = "connection_failed", ["message"] = "bad " + secret + " and again " + secret }.ToJsonString();
+        Assert.Contains("p\\\"w\\\\d", answer, StringComparison.Ordinal);
+
         var redacted = DarlingWebEndpoints.RedactEditAnswer(answer, new[] { secret });
         Assert.DoesNotContain(secret, redacted, StringComparison.Ordinal);
         Assert.DoesNotContain("p\\\"w\\\\d", redacted, StringComparison.Ordinal);
+        var envelope = JsonNode.Parse(redacted)!.AsObject();
+        Assert.Equal("bad [redacted] and again [redacted]", envelope["message"]!.GetValue<string>());
+        Assert.Equal("connection_failed", envelope["status"]!.GetValue<string>());
         Assert.Equal(answer, DarlingWebEndpoints.RedactEditAnswer(answer, Array.Empty<string>()));
+    }
+
+    /// <summary>The whole-text replace this pins against turned a secret that spelled a key, a number or an engine word
+    /// into a hole in the answer's structure, so a committed edit read as a failure and its audit line was dropped.</summary>
+    [Theory]
+    [InlineData("41")]
+    [InlineData("true")]
+    [InlineData("false")]
+    [InlineData("postgres")]
+    [InlineData("status")]
+    [InlineData("updated")]
+    [InlineData("sql01")]
+    [InlineData("current")]
+    public void RedactEditAnswer_NeverRewritesAStructuredField_WhateverTheSecretSpells(string secret)
+    {
+        var stored = "{\"status\":\"conflict\",\"message\":\"The server changed since it was read.\",\"current\":{\"engine\":\"postgres\","
+            + "\"username\":\"postgres\",\"host\":\"sql01\",\"display_name\":\"Orders\",\"server_id\":41,\"trust_server_certificate\":true,\"read_only_intent\":false}}";
+        foreach (var answer in new[] { UpdatedAnswer, stored })
+        {
+            var redacted = DarlingWebEndpoints.RedactEditAnswer(answer, new[] { secret });
+            Assert.True(
+                JsonNode.DeepEquals(JsonNode.Parse(answer), JsonNode.Parse(redacted)),
+                $"a secret spelled \"{secret}\" rewrote a structured field: {redacted}");
+        }
+    }
+
+    [Fact]
+    public void RedactEditAnswer_ReplacesAnAnswerThatDoesNotParse_WithAFixedBody_AndRedactsAnythingThatIsNotAnObject()
+    {
+        var broken = DarlingWebEndpoints.RedactEditAnswer("{\"status\":\"updated\" " + FakeSecret + " ", new[] { FakeSecret });
+        Assert.DoesNotContain(FakeSecret, broken, StringComparison.Ordinal);
+        Assert.Equal("error", JsonNode.Parse(broken)!["status"]!.GetValue<string>());
+
+        Assert.Equal("[\"x [redacted] y\"]", DarlingWebEndpoints.RedactEditAnswer("[\"x " + FakeSecret + " y\"]", new[] { FakeSecret }));
+    }
+
+    [Theory]
+    [InlineData("41")]
+    [InlineData("true")]
+    [InlineData("updated")]
+    [InlineData("sql01")]
+    public async Task ASecretThatSpellsAStructuredValue_LeavesACommittedEditsAnswerIntact_AndItsAuditLineWritten(string secret)
+    {
+        await using var rig = await StartAsync();
+        var (status, body) = await PatchAsync(rig, Changes("\"display_name\":\"Orders\",\"password\":\"" + secret + "\""));
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse(UpdatedAnswer), JsonNode.Parse(body)), $"the answer was rewritten: {body}");
+        Assert.Equal(41, JsonNode.Parse(body)!["server_id"]!.GetValue<int>());
+        var line = Assert.Single(rig.Log.Lines, l => l.StartsWith("Information: Server edited by", StringComparison.Ordinal));
+        Assert.Contains("Server edited by alice: id 41, fields display_name,monthly_cost_usd", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AConflict_ForAPostgresTargetWhoseSecretIsTheEngineWord_StillCarriesTheStoredValues()
+    {
+        var conflict = "{\"status\":\"conflict\",\"message\":\"The server changed since it was read.\",\"current\":{\"engine\":\"postgres\","
+            + "\"username\":\"postgres\",\"host\":\"db01\",\"display_name\":\"postgres\",\"modified_at\":\"" + Token + "\"}}";
+        await using var rig = await StartAsync(edit: (_, _) => Task.FromResult(conflict));
+        var (status, body) = await PatchAsync(rig, Changes("\"host\":\"db02\",\"password\":\"postgres\""));
+        Assert.Equal(HttpStatusCode.Conflict, status);
+        var current = JsonNode.Parse(body)!["current"]!.AsObject();
+        Assert.Equal("postgres", current["engine"]!.GetValue<string>());
+        Assert.Equal("postgres", current["username"]!.GetValue<string>());
+        Assert.Equal("db01", current["host"]!.GetValue<string>());
     }
 
     [Fact]
