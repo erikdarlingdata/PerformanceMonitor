@@ -161,8 +161,8 @@ public sealed class DarlingMcpBlockingTools
                        ride on it under hints. The page is fed by two collectors, so the probe is both (the earlier of the two). */
                     ?? McpHelpers.Status("empty", "No blocking events found in the specified time range.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
-                            () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources(xeReportsOnPage: false), resolved.ServerName, windowStart, now, cancellationToken),
-                            null, windowStart, now, BlockingPageTables(xeReportsOnPage: false), emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
+                            () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, windowStart, now, cancellationToken),
+                            null, windowStart, now, BlockingPageTables, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
 
             var scanTruncated = filtering && rows.Count > DarlingBlockingReader.FingerprintScanCeiling;
             if (scanTruncated) rows = rows.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();
@@ -186,6 +186,7 @@ public sealed class DarlingMcpBlockingTools
             {
                 var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
                 var kept = rows.Where((_, i) => keys[i] == wanted || legacyKeys?[i] == wanted).ToList();
+                /* A dedup_key miss stays bare: Lite's tools have no dedup_key, so there is no twin answer to match, and the miss is about one named incident, not about where the store's data starts. */
                 if (kept.Count == 0)
                     return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
                         "blocking events", dedup_key!, resolved.FingerprintName, examined)
@@ -202,13 +203,11 @@ public sealed class DarlingMcpBlockingTools
             var page = rows.Take(limit).ToList();
 
             /* #4966: where the store's data starts for the window. An event list, so the floor is the earlier of the coverage probe and
-               the oldest event the page shows (a first run of a collector can store events from before itself). The probe is the
-               source the page's rows came from: when the page holds XE reports it is the XE collector's alone (the DMV snapshots'
-               longer history is not what those rows are), otherwise the earlier of the two collectors, as the viewer's grid does. */
-            var xeReportsOnPage = page.Any(r => r.Source == BlockedProcessAlertRow.XeReportSource);
+               the oldest event the page shows (a first run of a collector can store events from before itself). The
+               page is fed by two collectors (XE reports and DMV snapshots), so the probe is both and the earlier wins, as the viewer's grid does. */
             var notice = await DarlingMcpWindowNotice.ReadEventAsync(
-                () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources(xeReportsOnPage), resolved.ServerName, windowStart, now, cancellationToken),
-                page.Min(r => r.EventTime), windowStart, now, BlockingPageTables(xeReportsOnPage), logger: logger, cancellationToken: cancellationToken);
+                () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, windowStart, now, cancellationToken),
+                page.Min(r => r.EventTime), windowStart, now, BlockingPageTables, logger: logger, cancellationToken: cancellationToken);
 
             /* #4198: filtering (a dedup_key) already narrowed the page to one named incident, so that call
                is exempt from the preview cut — see SqlTextPreviewLength's doc comment. */
@@ -310,20 +309,16 @@ public sealed class DarlingMcpBlockingTools
 
     /// <summary>
     /// The collector tables get_blocking's page is fed by (#4966): the XE blocked process reports and the always-on DMV blocking
-    /// snapshots that stand in for them. When the page holds XE reports the probe is the XE table alone, because those rows come from
-    /// that collector and the DMV collector's longer history says nothing about where they start; otherwise (an empty answer, or a
-    /// page of DMV rows only) it is both, and <see cref="DataWindowFloor.GetAsync"/> answers the earlier of the two. Both are table
-    /// sources, not <c>ForCollectorRuns</c>: the rows were read from these tables, so the purge edge that bounds them is the
-    /// tables' (30 days), where the run log's is 60 and would claim coverage of days the rows no longer exist for.
+    /// snapshots that stand in for them. The probe is always both, and <see cref="DataWindowFloor.GetAsync"/> answers the earlier of
+    /// the two, as the viewer does: the page merges the two populations, so a page of XE rows can still have dropped older DMV rows to
+    /// <c>limit</c>. Both are table sources, not <c>ForCollectorRuns</c>: the rows were read from these tables, so the purge edge that
+    /// bounds them is the tables' (30 days), where the run log's is 60 and would claim coverage of days the rows no longer exist for.
     /// </summary>
-    private static DataWindowFloor.Source[] BlockingPageSources(bool xeReportsOnPage) =>
-        xeReportsOnPage
-            ? [DataWindowFloor.Source.ForCollectorTable("blocked_process_reports")]
-            : [DataWindowFloor.Source.ForCollectorTable("blocked_process_reports"), DataWindowFloor.Source.ForCollectorTable("dmv_blocking_snapshots")];
+    private static readonly DataWindowFloor.Source[] BlockingPageSources =
+        [DataWindowFloor.Source.ForCollectorTable("blocked_process_reports"), DataWindowFloor.Source.ForCollectorTable("dmv_blocking_snapshots")];
 
-    /// <summary>The table name(s) <see cref="BlockingPageSources"/> probes, as the truncation note names them.</summary>
-    private static string BlockingPageTables(bool xeReportsOnPage) =>
-        xeReportsOnPage ? "blocked_process_reports" : "blocked_process_reports and dmv_blocking_snapshots";
+    /// <summary>The table names <see cref="BlockingPageSources"/> probes, as the truncation note names them.</summary>
+    private const string BlockingPageTables = "blocked_process_reports and dmv_blocking_snapshots";
 
     /// <summary>
     /// The sentence appended to a no-match answer when the fingerprint scan hit
@@ -397,6 +392,7 @@ public sealed class DarlingMcpBlockingTools
             {
                 var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
                 var kept = rows.Where((_, i) => keys[i] == wanted || legacyKeys?[i] == wanted).ToList();
+                /* A dedup_key miss stays bare: Lite's tools have no dedup_key, so there is no twin answer to match, and the miss is about one named incident, not about where the store's data starts. */
                 if (kept.Count == 0)
                     return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
                         "deadlocks", dedup_key!, resolved.FingerprintName, examined)
@@ -538,6 +534,7 @@ public sealed class DarlingMcpBlockingTools
             {
                 var wanted = DarlingIncidentFingerprint.NormalizeKey(dedup_key);
                 var kept = candidates.Where((_, i) => keys[i] == wanted || legacyKeys?[i] == wanted).ToList();
+                /* A dedup_key miss stays bare: Lite's tools have no dedup_key, so there is no twin answer to match, and the miss is about one named incident, not about where the store's data starts. */
                 if (kept.Count == 0)
                     return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
                         "deadlocks with a graph", dedup_key!, resolved.FingerprintName, examined)

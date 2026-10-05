@@ -579,7 +579,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
 
     private static readonly EventTool[] EventTools =
     [
-        new("get_blocking", "blocked_process_reports", "blocked_process_reports", "events"),
+        new("get_blocking", "blocked_process_reports", "blocked_process_reports and dmv_blocking_snapshots", "events"),
         new("get_blocking_dmv", "dmv_blocking_snapshots", "blocked_process_reports and dmv_blocking_snapshots", "events"),
         new("get_deadlocks", "deadlocks", "deadlocks", "deadlocks"),
         new("get_deadlock_detail", "deadlocks", "deadlocks", "deadlocks"),
@@ -612,7 +612,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
 
     /// <summary>A server registered at <paramref name="created"/> with three events an hour apart from <paramref name="firstEvent"/> (none when null).</summary>
     private static async Task SeedEventServerAsync(
-        NpgsqlConnection connection, EventTool tool, string name, DateTime created, DateTime? firstEvent, System.Threading.CancellationToken ct)
+        NpgsqlConnection connection, EventTool tool, string name, DateTime created, DateTime? firstEvent, System.Threading.CancellationToken ct,
+        DateTime? collectedAt = null)
     {
         var serverId = ServerIdHelper.GetDeterministicHashCode(name);
         await DeleteEventServerAsync(connection, name, ct);
@@ -623,31 +624,32 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         for (var i = 0; i < 3; i++)
         {
             var at = DarlingMcpTestData.Naive(first.AddHours(i));
+            var collected = collectedAt is DateTime c ? DarlingMcpTestData.Naive(c) : at;
             switch (tool.Table)
             {
                 case "blocked_process_reports":
                     await DarlingMcpTestData.ExecAsync(connection, ct,
                         @"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid, wait_time_ms, lock_mode, blocked_sql_text, blocking_sql_text, blocked_process_report_xml, contentious_object)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
-                        CollectionIdGenerator.Next(), at, serverId, name, at, Db, 55 + i, 60, 8000L, "X", "SELECT 1", "UPDATE Posts SET Score = Score + 1", "<blocked-process-report><blocked-process><process spid=\"55\"/></blocked-process></blocked-process-report>", "dbo.Posts");
+                        CollectionIdGenerator.Next(), collected, serverId, name, at, Db, 55 + i, 60, 8000L, "X", "SELECT 1", "UPDATE Posts SET Score = Score + 1", "<blocked-process-report><blocked-process><process spid=\"55\"/></blocked-process></blocked-process-report>", "dbo.Posts");
                     break;
                 case "dmv_blocking_snapshots":
                     await DarlingMcpTestData.ExecAsync(connection, ct,
                         @"INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, monitor_loop, event_time, database_name, blocked_spid, blocking_spid, wait_time_ms, lock_mode, blocking_status, contentious_object, blocked_sql_text, blocking_sql_text)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
-                        CollectionIdGenerator.Next(), at, serverId, name, -1, at, Db, 70 + i, 80, 3000L, "S", "suspended", "dbo.Users", "SELECT 2", "WAITFOR DELAY '00:01'");
+                        CollectionIdGenerator.Next(), collected, serverId, name, -1, at, Db, 70 + i, 80, 3000L, "S", "suspended", "dbo.Users", "SELECT 2", "WAITFOR DELAY '00:01'");
                     break;
                 case "deadlocks":
                     await DarlingMcpTestData.ExecAsync(connection, ct,
                         @"INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-                        CollectionIdGenerator.Next(), at, serverId, name, at, "process123", "DELETE FROM Posts", "<deadlock><victim-list><victimProcess id=\"process123\"/></victim-list><process-list><process id=\"process123\"><inputbuf>DELETE FROM Posts</inputbuf></process></process-list></deadlock>");
+                        CollectionIdGenerator.Next(), collected, serverId, name, at, "process123", "DELETE FROM Posts", "<deadlock><victim-list><victimProcess id=\"process123\"/></victim-list><process-list><process id=\"process123\"><inputbuf>DELETE FROM Posts</inputbuf></process></process-list></deadlock>");
                     break;
                 default:
                     await DarlingMcpTestData.ExecAsync(connection, ct,
                         @"INSERT INTO long_query_completions (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, duration_microseconds, statement_text)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-                        CollectionIdGenerator.Next(), at, serverId, name, at, "rpc_completed", Db, (long)(i + 1) * 1_000_000, "EXEC p" + i);
+                        CollectionIdGenerator.Next(), collected, serverId, name, at, "rpc_completed", Db, (long)(i + 1) * 1_000_000, "EXEC p" + i);
                     break;
             }
         }
@@ -749,8 +751,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
         var ct = TestContext.Current.CancellationToken;
         await ForEachEventToolAsync("backfill", async (connection, postgres, tool, name, end) =>
         {
-            /* Registered an hour ago; the oldest event is 30 minutes into a 24-hour window, 23 hours before the registration. */
-            await SeedEventServerAsync(connection, tool, name, end.AddHours(-1), end.AddHours(-23.5), ct);
+            /* Registered an hour ago and collected 30 minutes ago, but the events are stamped 23.5 hours back. The probe reads collection_time, so only
+               the oldest event time on the page puts the notice's start before the registration: it stays quiet only if that time is folded in. */
+            await SeedEventServerAsync(connection, tool, name, end.AddHours(-1), end.AddHours(-23.5), ct, collectedAt: end.AddMinutes(-30));
 
             var root = ParseEvent(await CallEventAsync(postgres, tool, name, 24, end));
 
