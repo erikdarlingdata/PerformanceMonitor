@@ -474,6 +474,8 @@ table.data th {
 table.data tbody tr:nth-child(even) { background: var(--row-alt); }
 table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.data td.wrap { white-space: normal; max-width: 620px; }
+.plan-panel pre.plan-json { max-height: 28rem; overflow: auto; white-space: pre; overflow-wrap: normal; padding: 6px; border: 1px solid var(--border); }
+.plan-summary { display: flex; flex-wrap: wrap; gap: 0 1rem; margin: 4px 0; }
 table.data td.pre { white-space: pre-wrap; }
 table.data td.mono { font-family: var(--mono); font-size: 0.78rem; }
 table.data td.sev-Warning { color: var(--warn); }
