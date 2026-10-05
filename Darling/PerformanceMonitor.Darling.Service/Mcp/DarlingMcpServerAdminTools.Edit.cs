@@ -197,6 +197,35 @@ public sealed partial class DarlingMcpServerAdminTools
 
     /* ─────────────────────────────── the core ─────────────────────────────── */
 
+    /// <summary>
+    /// The web edit route's entry (#5240): the core over a store and the real probe, for a row already resolved to
+    /// <paramref name="serverId"/>. Pass <c>null</c> for <paramref name="logger"/> when the caller writes its own audit
+    /// line (the web route does, with the signed-in principal). A fault that escapes the core becomes the error
+    /// envelope with the submitted secret redacted, because a driver's message can quote it.
+    /// </summary>
+    internal static async Task<string> EditServerByIdAsync(
+        NpgsqlDataSource postgres, int serverId, string changesJson, ILogger? logger, CancellationToken cancellationToken)
+    {
+        string? submittedSecret = null;
+        try
+        {
+            var (changes, parseError) = ParseEditChanges(changesJson);
+            if (parseError != null)
+            {
+                return Outcome(EditStatus.Invalid, parseError);
+            }
+
+            submittedSecret = changes!.Password;
+            return await EditServerCoreAsync(
+                new PostgresServerEditStore(postgres), serverId, changes, DefaultProbeAsync, OperatingSystem.IsWindows(), logger, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ex = new InvalidOperationException(RedactEditSecret(ex.Message, submittedSecret));
+            return McpHelpers.FormatError("edit_server", ex);
+        }
+    }
+
     /// <summary>The core over a changes string: parses it, then runs <see cref="EditServerCoreAsync(IServerEditStore, int, ServerEditChanges, ServerProbe, bool, ILogger?, CancellationToken)"/>.
     /// An unparseable body is <c>invalid</c> without a store read.</summary>
     internal static async Task<string> EditServerCoreAsync(
@@ -326,25 +355,31 @@ public sealed partial class DarlingMcpServerAdminTools
         {
             status = EditStatus.Conflict,
             message = "This server was changed since you read it; nothing was saved. The current values are in current.",
-            current = new
-            {
-                server_id = row.ServerId,
-                display_name = row.Name,
-                host = row.Host,
-                port = row.Port,
-                database = row.Database,
-                read_only_intent = row.ReadOnlyIntent,
-                auth = AuthWord(row.Auth),
-                username = row.Username,
-                encrypt_mode = row.EncryptMode,
-                trust_server_certificate = row.TrustServerCertificate,
-                multi_subnet_failover = row.MultiSubnetFailover,
-                monthly_cost_usd = row.MonthlyCostUsd,
-                modified_at = ModifiedAtToken(row.ModifiedAt),
-            },
+            current = CurrentValuesOf(row),
         }, McpHelpers.JsonOptions);
 
-    private static string AuthWord(string storeAuth) => storeAuth.ToLowerInvariant() switch
+    /// <summary>The non-secret values of a row, as the conflict answer's <c>current</c> and the web edit form's read
+    /// return them. No password and no <c>encrypted_password</c>: this surface cannot read either. <c>modified_at</c> is
+    /// the opaque token (<see cref="ModifiedAtToken"/>).</summary>
+    internal static object CurrentValuesOf(ServerEditRow row) => new
+    {
+        server_id = row.ServerId,
+        display_name = row.Name,
+        engine = row.Engine,
+        host = row.Host,
+        port = row.Port,
+        database = row.Database,
+        read_only_intent = row.ReadOnlyIntent,
+        auth = AuthWord(row.Auth),
+        username = row.Username,
+        encrypt_mode = row.EncryptMode,
+        trust_server_certificate = row.TrustServerCertificate,
+        multi_subnet_failover = row.MultiSubnetFailover,
+        monthly_cost_usd = row.MonthlyCostUsd,
+        modified_at = ModifiedAtToken(row.ModifiedAt),
+    };
+
+    internal static string AuthWord(string storeAuth) => storeAuth.ToLowerInvariant() switch
     {
         ServerStoreAuth.Sql => "SQL",
         ServerStoreAuth.ServicePrincipal => "ServicePrincipal",
@@ -858,7 +893,7 @@ FROM config_monitored_servers WHERE server_id = $1";
                " WHERE server_id = $1 AND modified_at = $2 RETURNING modified_at";
     }
 
-    private sealed class PostgresServerEditStore : IServerEditStore
+    internal sealed class PostgresServerEditStore : IServerEditStore
     {
         private readonly NpgsqlDataSource _postgres;
 

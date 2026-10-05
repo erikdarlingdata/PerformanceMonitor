@@ -1031,15 +1031,25 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static void MapServers(
         WebApplication app, NpgsqlDataSource postgres, ILogger logger,
         Func<string, Task<string>>? addServers = null,
-        TimeSpan? addTimeout = null)
+        TimeSpan? addTimeout = null,
+        Func<int, string, Task<string>>? editServer = null,
+        TimeSpan? editTimeout = null,
+        Func<int, Task<DarlingMcpServerAdminTools.ServerEditRow?>>? readServer = null)
     {
         var slotTimeout = addTimeout ?? ServerAddSlotTimeout;
+        var editSlotTimeout = editTimeout ?? ServerEditSlotTimeout;
 
-        /* One gate per host: MapAll runs once per process. */
-        var addInFlight = new SemaphoreSlim(1, 1);
+        /* One gate per host: MapAll runs once per process. ADD and EDIT share it (#5240): both probe over the network
+           and both read-then-write the same identity set, so one server write runs at a time per host process. */
+        var serverWriteInFlight = new SemaphoreSlim(1, 1);
 
         /* The seam a test stands a stub probe or a held add in through; production runs the core itself. */
         addServers ??= body => DarlingMcpServerAdminTools.AddServers(postgres, body);
+
+        /* The edit core and the by-id read, with the same seam. The edit core gets NO logger: the route writes the one
+           audit line itself, with the signed-in principal. */
+        editServer ??= (id, body) => DarlingMcpServerAdminTools.EditServerByIdAsync(postgres, id, body, null, CancellationToken.None);
+        readServer ??= id => new DarlingMcpServerAdminTools.PostgresServerEditStore(postgres).ReadRowAsync(id, CancellationToken.None);
 
         app.MapPost("/api/servers", async (HttpContext context) =>
         {
@@ -1068,68 +1078,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(refusal!, StatusCodes.Status400BadRequest);
             }
 
-            if (!addInFlight.Wait(0))
+            var ran = await RunInServerWriteSlotAsync(serverWriteInFlight, () => addServers(body), slotTimeout, AddSlotLabels, logger);
+            if (ran.Early is not null)
             {
-                return ErrorResult("A server add is already running. Wait for it to finish, then try again.", StatusCodes.Status429TooManyRequests);
+                return ran.Early;
             }
 
-            var stopwatch = Stopwatch.StartNew();
-
-            /* Two exits can free the slot: this handler, when the add finished inside the wait, and the
-               add's own continuation, when it outlives the wait. They run on different threads and either
-               may be first, so both go through one object that frees the slot at most once. */
-            var slot = new SingleReleaseSlot(addInFlight);
-
-            /* The core takes no request token, like the tool: a client that disconnects mid-batch must not
-               leave the entries after it unattempted while the ones before it are already saved and unaudited. */
-            Task<string> running;
-            try
-            {
-                running = addServers(body);
-            }
-            catch (Exception ex)
-            {
-                /* addServers threw before returning a task: nothing is running, so free the slot here. Only the
-                   exception TYPE is logged: its message could quote a value the request carried. EVERY synchronous
-                   throw is caught, cancellation included: the slot is no longer released in a finally, so a type
-                   that escaped this catch would hold it for the life of the process and answer 429 forever. */
-                slot.Release();
-                return ServerErrorResult(
-                    $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
-            }
-
-            /* The slot is freed by the add itself, once, when it finishes (completed or faulted) - never by
-               the wait's timeout, so an add that outlives the timeout still holds the slot. */
-            _ = running.ContinueWith(_ => slot.Release(), TaskScheduler.Default);
-
-            string result;
-            try
-            {
-                result = await running.WaitAsync(slotTimeout);
-            }
-            catch (TimeoutException)
-            {
-                _ = running.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
-                logger.LogWarning("POST /api/servers: the add did not finish within {Seconds} s; the slot stays held until it does", (int)slotTimeout.TotalSeconds);
-                return ErrorResult(ServerAddTimedOutText, StatusCodes.Status503ServiceUnavailable);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                /* The core catches its own faults, so this is a backstop; only the TYPE is logged. */
-                return ServerErrorResult(
-                    $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
-            }
-            finally
-            {
-                /* An add that finished inside the wait frees the slot here, before any response is produced,
-                   so a client that posts again the moment it reads this answer finds the slot free rather than
-                   racing the continuation above. An add still running (the timeout path) keeps it: only its
-                   own continuation frees it. */
-                if (running.IsCompleted)
-                {
-                    slot.Release();
-                }
-            }
+            var result = ran.Answer!;
+            var stopwatch = ran.Stopwatch!;
 
             var secrets = SubmittedSecrets(entries);
 
@@ -1143,6 +1099,294 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             LogServerAdds(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, entries, answer);
             return Results.Text(answer, "application/json", statusCode: MuteRuleEnvelopeStatus(answer));
         });
+
+        /* #5240: edit one server in place. Gates in add's order: the seat (403), JSON content type (415), a bounded
+           body (400), a JSON object without duplicate keys (400), the token (400), then the shared slot (429) and the
+           core with a timeout (503). The host's group-level method gate has already refused a read-only sign-in
+           every unsafe method. */
+        app.MapPatch("/api/servers/{id:int}", async (HttpContext context, int id) =>
+        {
+            if (!DarlingWebSeat.FromContext(context).CanEdit)
+            {
+                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+            }
+
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            string body;
+            try
+            {
+                body = await ReadBoundedBodyAsync(context, MaxServerEditBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
+            if (!TryReadServerEditBody(body, out var changes, out var refusal))
+            {
+                return ErrorResult(refusal!, StatusCodes.Status400BadRequest);
+            }
+
+            var ran = await RunInServerWriteSlotAsync(serverWriteInFlight, () => editServer(id, body), editSlotTimeout, EditSlotLabels, logger);
+            if (ran.Early is not null)
+            {
+                return ran.Early;
+            }
+
+            var secrets = new List<string>();
+            if (TryGetString(changes, "password") is { Length: > 0 } secret)
+            {
+                secrets.Add(secret);
+            }
+
+            var result = ran.Answer!;
+            if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
+            {
+                return ServerErrorResult(RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets), "/api/servers/{id}", logger, ran.Stopwatch!.ElapsedMilliseconds);
+            }
+
+            var answer = RedactEditAnswer(result, secrets);
+            LogServerEdit(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, id, answer);
+            return Results.Text(answer, "application/json", statusCode: ServerEditEnvelopeStatus(answer));
+        });
+
+        /* The edit form's read (#5240): the editable NON-secret values plus modified_at, an opaque string. Web-only
+           (no MCP tool), behind the same gates as every GET route. It cannot say whether a secret is stored: the
+           viewer role cannot even evaluate encrypted_password. */
+        app.MapGet("/api/admin/servers/{id:int}", async (HttpContext context, int id) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            DarlingMcpServerAdminTools.ServerEditRow? row;
+            try
+            {
+                row = await readServer(id);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ServerErrorResult($"admin server read failed ({ex.GetType().Name})", "/api/admin/servers/{id}", logger, stopwatch.ElapsedMilliseconds);
+            }
+
+            if (row is null)
+            {
+                return ErrorResult("This server's definition no longer exists.", StatusCodes.Status404NotFound);
+            }
+
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.Text(JsonSerializer.Serialize(DarlingMcpServerAdminTools.CurrentValuesOf(row), McpHelpers.JsonOptions), "application/json");
+        });
+    }
+
+    /// <summary>The most request-body bytes the edit route reads (a partial change of a dozen scalar fields).</summary>
+    internal const int MaxServerEditBodyBytes = 8 * 1024;
+
+    /// <summary>
+    /// PURE: parses the edit body, or names why it is not acceptable with a fixed sentence that quotes no part of the
+    /// body. It must be a JSON object with no duplicate key, and the web route ALWAYS requires
+    /// <c>expected_modified_at</c> (a non-empty string): a form that did not read the row first cannot edit it.
+    /// </summary>
+    internal static bool TryReadServerEditBody(string body, out JsonObject changes, out string? refusal)
+    {
+        changes = new JsonObject();
+        refusal = null;
+        try
+        {
+            if (JsonNode.Parse(body) is not JsonObject parsed)
+            {
+                refusal = "Request body must be a JSON object.";
+                return false;
+            }
+
+            /* A duplicate property name throws ArgumentException on the first enumeration; force it here. */
+            _ = parsed.Count;
+            if (TryGetString(parsed, "expected_modified_at") is not { Length: > 0 })
+            {
+                refusal = "expected_modified_at is required: send the modified_at the edit form read.";
+                return false;
+            }
+
+            changes = parsed;
+            return true;
+        }
+        catch (JsonException)
+        {
+            refusal = "Request body is not valid JSON.";
+            return false;
+        }
+        catch (ArgumentException)
+        {
+            refusal = "Request body has a duplicate field.";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The HTTP status an edit answer maps to: <see cref="ServerTagEnvelopeStatus"/> plus <c>collides</c> as 409, and
+    /// <c>connection_failed</c> as 200 with the status in the body (add answers a failed probe the same way), so the
+    /// page branches on <c>status</c> and no new convention is invented. Pure.
+    /// </summary>
+    internal static int ServerEditEnvelopeStatus(string result)
+    {
+        if (ClassifyToolResponse(result) is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal)
+        {
+            try
+            {
+                switch (JsonNode.Parse(result) is JsonObject envelope ? TryGetString(envelope, "status") : null)
+                {
+                    case "collides":
+                        return StatusCodes.Status409Conflict;
+                    case "connection_failed":
+                        return StatusCodes.Status200OK;
+                }
+            }
+            catch (JsonException)
+            {
+                /* Not a shape the core produces; the tag mapping below answers it. */
+            }
+        }
+
+        return ServerTagEnvelopeStatus(result);
+    }
+
+    /// <summary>The edit answer with every occurrence of the submitted secret removed, in its raw and its JSON-escaped
+    /// spelling. The core's answers carry none today; this is the backstop, over the whole text.</summary>
+    internal static string RedactEditAnswer(string answer, IReadOnlyList<string> secrets)
+    {
+        foreach (var secret in secrets)
+        {
+            answer = answer.Replace(secret, RedactedSecret, StringComparison.Ordinal);
+            var escaped = JsonSerializer.Serialize(secret);
+            answer = answer.Replace(escaped[1..^1], RedactedSecret, StringComparison.Ordinal);
+        }
+
+        return answer;
+    }
+
+    /// <summary>One Information line per saved edit: who, the server id and the field NAMES. Never a value, never the
+    /// secret. A refused probe gets a line with the core's sanitized detail (redacted already).</summary>
+    private static void LogServerEdit(ILogger logger, string principal, int id, string answer)
+    {
+        try
+        {
+            if (JsonNode.Parse(answer) is not JsonObject envelope)
+            {
+                return;
+            }
+
+            switch (TryGetString(envelope, "status"))
+            {
+                case "updated":
+                    var fields = envelope["changed"] is JsonArray changed
+                        ? string.Join(",", changed.Select(n => n is JsonValue v && v.TryGetValue<string>(out var f) ? f : "?"))
+                        : "";
+                    logger.LogInformation(
+                        "Server edited by {Principal}: id {ServerId}, fields {Fields}",
+                        DarlingHttpRefusalLog.Sanitize(principal, 256), id, DarlingHttpRefusalLog.Sanitize(fields, 256));
+                    break;
+                case "connection_failed":
+                    logger.LogInformation(
+                        "Server edit failed for {Principal}: id {ServerId}, connection_failed: {Detail}",
+                        DarlingHttpRefusalLog.Sanitize(principal, 256), id, DarlingHttpRefusalLog.Sanitize(TryGetString(envelope, "message") ?? "", 1024));
+                    break;
+            }
+        }
+        catch (JsonException)
+        {
+            /* An unreadable answer has nothing to log. */
+        }
+    }
+
+    /// <summary>What <see cref="RunInServerWriteSlotAsync"/> says for one server-write route.</summary>
+    internal sealed record ServerWriteSlotLabels(string BusyText, string TimedOutText, string ToolName, string Route, string LogVerb);
+
+    internal static readonly ServerWriteSlotLabels AddSlotLabels = new(
+        "A server add or edit is already running. Wait for it to finish, then try again.",
+        ServerAddTimedOutText, "add_servers", "/api/servers", "POST /api/servers: the add");
+
+    internal static readonly ServerWriteSlotLabels EditSlotLabels = new(
+        "A server add or edit is already running. Wait for it to finish, then try again.",
+        ServerEditTimedOutText, "edit_server", "/api/servers/{id}", "PATCH /api/servers/{id}: the edit");
+
+    /// <summary>How long one <c>PATCH /api/servers/{id}</c> request may hold the slot (one probe, not twenty).</summary>
+    internal static readonly TimeSpan ServerEditSlotTimeout = TimeSpan.FromSeconds(60);
+
+    internal const string ServerEditTimedOutText = "Editing the server took too long; check the server's settings before retrying. If every later add or edit is refused as busy, restart the service.";
+
+    /// <summary>The outcome of <see cref="RunInServerWriteSlotAsync"/>: either an <see cref="Early"/> answer (busy,
+    /// timed out, or faulted) or the core's <see cref="Answer"/> and how long it ran.</summary>
+    internal sealed record ServerWriteRun(IResult? Early, string? Answer, Stopwatch? Stopwatch);
+
+    /// <summary>
+    /// The ONE place the server-write slot is taken, held and freed (#5268's fix, shared by add and edit so the next
+    /// server-write route cannot reintroduce the race). <c>Wait(0)</c> or 429; the core starts; two exits can free the
+    /// slot, the handler when the core finished inside the wait and the core's own continuation when it outlives the
+    /// wait, and both go through one <see cref="SingleReleaseSlot"/> so it is freed at most once; the handler frees it
+    /// in <c>finally</c> BEFORE the caller writes any answer, so a client that sends again the moment it reads the
+    /// answer finds the slot free. A core that outlives <paramref name="timeout"/> answers 503 and keeps the slot
+    /// until it finishes. Only the exception TYPE is ever logged or answered: its message could quote a value the
+    /// request carried.
+    /// </summary>
+    private static async Task<ServerWriteRun> RunInServerWriteSlotAsync(
+        SemaphoreSlim gate, Func<Task<string>> start, TimeSpan timeout, ServerWriteSlotLabels labels, ILogger logger)
+    {
+        if (!gate.Wait(0))
+        {
+            return new ServerWriteRun(ErrorResult(labels.BusyText, StatusCodes.Status429TooManyRequests), null, null);
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        var slot = new SingleReleaseSlot(gate);
+
+        /* The core takes no request token, like the tool: a client that disconnects mid-write must not leave it
+           half-attempted and unaudited. */
+        Task<string> running;
+        try
+        {
+            running = start();
+        }
+        catch (Exception ex)
+        {
+            /* start threw before returning a task: nothing is running, so free the slot here. EVERY synchronous throw
+               is caught, cancellation included: the slot is not released in a finally, so a type that escaped this
+               catch would hold it for the life of the process and answer 429 forever. */
+            slot.Release();
+            return new ServerWriteRun(
+                ServerErrorResult($"{labels.ToolName} failed ({ex.GetType().Name})", labels.Route, logger, stopwatch.ElapsedMilliseconds), null, null);
+        }
+
+        /* The slot is freed by the core itself, once, when it finishes (completed or faulted) - never by the wait's
+           timeout, so a core that outlives the timeout still holds the slot. */
+        _ = running.ContinueWith(_ => slot.Release(), TaskScheduler.Default);
+
+        try
+        {
+            var answer = await running.WaitAsync(timeout);
+            return new ServerWriteRun(null, answer, stopwatch);
+        }
+        catch (TimeoutException)
+        {
+            _ = running.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            logger.LogWarning("{Verb} did not finish within {Seconds} s; the slot stays held until it does", labels.LogVerb, (int)timeout.TotalSeconds);
+            return new ServerWriteRun(ErrorResult(labels.TimedOutText, StatusCodes.Status503ServiceUnavailable), null, null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The cores catch their own faults, so this is a backstop; only the TYPE is logged. */
+            return new ServerWriteRun(
+                ServerErrorResult($"{labels.ToolName} failed ({ex.GetType().Name})", labels.Route, logger, stopwatch.ElapsedMilliseconds), null, null);
+        }
+        finally
+        {
+            /* A core that finished inside the wait frees the slot here, before any response is produced. One still
+               running (the timeout path) keeps it: only its own continuation frees it. */
+            if (running.IsCompleted)
+            {
+                slot.Release();
+            }
+        }
     }
 
     /// <summary>

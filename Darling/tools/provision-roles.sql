@@ -20,7 +20,8 @@
 --              config.config_mute_rules (the web dashboard's dedicated mute-rule endpoints, #3450 -- plus the
 --              two config_service beacon columns their bump trigger writes as the caller), and the single
 --              dismissed column of config.config_alert_log (the web Alert History dismiss, #4843), and INSERT
---              on config.config_monitored_servers (the web add-server route, #4843; its credential column
+--              on config.config_monitored_servers plus a column-level UPDATE on the columns the web edit route
+--              may set (the web add-server and edit-server routes, #4843 / #5240; its credential column
 --              stays SELECT-carved). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
 --              grants are only the floor beneath that gate. All other write actions degrade gracefully. The
 --              web dashboard's identity, and a locked-down Viewer's (postgres.connectAs = "viewer").
@@ -324,10 +325,19 @@ GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;
 
 -- #4843: the web dashboard's add-server route runs the add_servers core as viewer, so viewer gets INSERT on
---     config_monitored_servers (never UPDATE or DELETE: the core never updates a row and no web route removes one). The
+--     config_monitored_servers (never DELETE: no web route removes a server). The
 --     credential column stays SELECT-carved from viewer, so it can write a password blob and never read one back;
 --     the write's bump trigger is served by the two config_service beacon columns granted above.
 GRANT INSERT ON config.config_monitored_servers TO viewer;
+
+-- #5240: the web dashboard's edit route (PATCH /api/servers/{id}) runs the edit_server core as viewer, which UPDATEs
+--     one row. Column-level on exactly the columns that core may SET, plus modified_at (the optimistic token).
+--     is_enabled, excluded_databases, engine, server_id, capture_plans, alert_delivery_mode_override,
+--     plan_force_bot_enabled and the remediation_* columns stay unwritable by viewer. encrypted_password is writable
+--     and stays SELECT-carved, so viewer can replace a password blob and never read one back. SELECT ... FOR UPDATE
+--     needs UPDATE on one column, which this supplies. RE-RUN THIS SCRIPT AFTER UPGRADING to the release that adds
+--     the edit route (the precedent is the V117 note above): without it every web edit answers a 500 (42501).
+GRANT UPDATE (name, host, port, database, read_only_intent, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at) ON config.config_monitored_servers TO viewer;
 
 -- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as viewer) and the MCP rule
 --     tools (as mcp) create, edit and delete config.custom_alert_rules -- non-secret rule JSON, the same

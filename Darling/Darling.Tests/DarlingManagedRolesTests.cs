@@ -137,16 +137,35 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;", sql, StringComparison.Ordinal);
 
-        /* #4843: the web add-server route runs the add_servers core as viewer: INSERT on config_monitored_servers and
-           no UPDATE (the core never updates a row) and no DELETE (no web route removes a server yet), one explicit
-           statement naming viewer alone. The credential column stays SELECT-carved (asserted with the carve below). */
+        /* #4843: the web add-server route runs the add_servers core as viewer: INSERT on config_monitored_servers. #5240: the
+           web edit route runs the edit_server core as viewer: a COLUMN-level UPDATE on exactly the columns that core may
+           SET, plus modified_at (the optimistic token). No DELETE (no web route removes a server), no table-level UPDATE.
+           The census is the whole set of viewer grants on the table, so a widened or extra grant fails here. The credential
+           column stays SELECT-carved (asserted with the carve below; the column SELECT grant is not a write, so the census skips it). */
+        const string EditGrant =
+            "GRANT UPDATE (name, host, port, database, read_only_intent, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at) ON config.config_monitored_servers TO viewer;";
         Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains(EditGrant, sql, StringComparison.Ordinal);
         Assert.Equal(
-            new[] { "GRANT INSERT ON config.config_monitored_servers TO viewer;" },
+            new[] { "GRANT INSERT ON config.config_monitored_servers TO viewer;", EditGrant },
             System.Text.RegularExpressions.Regex.Matches(
                     System.Text.RegularExpressions.Regex.Replace(sql, @"(?m)^\s*--.*$", ""),
-                    @"GRANT [^;(]*? ON config\.config_monitored_servers TO [^;]*viewer[^;]*;")
+                    @"GRANT (?!SELECT )[^;]*? ON config\.config_monitored_servers TO [^;]*viewer[^;]*;")
                 .Select(m => m.Value).ToArray());
+
+        /* The columns the edit grant must NOT name: a server's enabled state, engine, identity and remediation credentials. */
+        var editColumns = EditGrant[(EditGrant.IndexOf('(', StringComparison.Ordinal) + 1)..EditGrant.IndexOf(')', StringComparison.Ordinal)]
+            .Split(',').Select(c => c.Trim()).ToArray();
+        foreach (var forbidden in new[]
+                 {
+                     "is_enabled", "excluded_databases", "engine", "server_id", "capture_plans", "alert_delivery_mode_override",
+                     "plan_force_bot_enabled", "remediation_encrypted_password",
+                 })
+        {
+            Assert.DoesNotContain(forbidden, editColumns);
+        }
+
+        Assert.DoesNotContain("remediation", EditGrant, StringComparison.Ordinal);
 
         /* It must NOT widen the schema-wide config write to viewer (that grant stays admin-only, pinned here). */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", sql, StringComparison.Ordinal);
