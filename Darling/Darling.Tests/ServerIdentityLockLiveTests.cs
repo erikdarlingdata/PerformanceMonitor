@@ -41,11 +41,13 @@ namespace Darling.Tests;
 ///
 /// <para><b>The desktop viewer's writes (#5240, PR 2).</b> The viewer's add (<c>AddMonitoredServerAsync</c>) and edit
 /// (<c>UpsertMonitoredServerAsync</c>) take the same lock and re-read the addresses under it. The viewer has no probe
-/// to park in, so its facts make the race the other way round: the lock is taken from a second connection FIRST, both
-/// callers are started, and the test waits until both are queued on it before releasing it. A viewer write that took no
-/// lock would not queue (the wait ends early and the queue assertion fails) and would write over the other caller (the
-/// table assertions fail). The startup seed's INSERT loop takes the lock too, and skips an address that was claimed
-/// while it waited.</para>
+/// to park in, so its facts make the race the other way round: the lock is taken from a second connection FIRST, the
+/// two callers are started one at a time (each waits until the one before it is queued, so the lock is granted in call
+/// order), and the lock is released once both are queued. The caller that queued first wins; the second's re-check
+/// runs against the first's committed write and must refuse. Each viewer fact runs in both orders, so the viewer's
+/// re-check is what refuses in one of them. A viewer write that took no lock would not queue (the queue assertion
+/// fails); one that did not re-check would write over the other caller (the answers and the table assertions fail).
+/// The startup seed's INSERT loop takes the lock too, and skips an address that was claimed while it waited.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class ServerIdentityLockLiveTests
@@ -384,8 +386,9 @@ public sealed class ServerIdentityLockLiveTests
 
     /// <summary>
     /// The race the viewer's writes are held to: takes the SERVICE's identity lock (<see cref="Edit.IdentityLockSql"/>)
-    /// from a second connection first, starts both callers, waits until both are queued on it (or one is already done,
-    /// which is what a write path without the lock looks like), then releases it and returns both answers.
+    /// from a second connection first, starts the callers one at a time, waits until both are queued on it (or one is
+    /// already done, which is what a write path without the lock looks like), then releases it and returns both answers
+    /// in call order. The first caller wins the lock.
     /// </summary>
     private static async Task<Race> QueuedRaceAsync(Rig rig, Func<Task<string>> first, Func<Task<string>> second, CancellationToken ct)
     {
@@ -401,7 +404,13 @@ public sealed class ServerIdentityLockLiveTests
                 await take.ExecuteNonQueryAsync(ct);
             }
 
+            /* One at a time: the lock is granted to its waiters in the order they queued, so the caller started first
+               wins it and the second one's re-check is what runs against the first one's committed write. Starting both
+               at once would leave the winner to the scheduler, and a viewer write whose re-check was gone could pass by
+               luck whenever it happened to queue first. */
             var firstCall = Task.Run(first, ct);
+            await WaitUntilAsync(
+                async () => await AdvisoryLocksAsync(rig.Owner, false, ct) >= 1 || firstCall.IsCompleted, TimeSpan.FromSeconds(30), ct);
             var secondCall = Task.Run(second, ct);
             var bothQueued = false;
             await WaitUntilAsync(async () =>
@@ -436,60 +445,86 @@ public sealed class ServerIdentityLockLiveTests
         }
     }
 
-    [Fact]
-    public async Task AViewerAddAndAnMcpEditThatClaimOneAddress_QueueOnTheLock_AndExactlyOneRowEndsWithIt()
+    /// <param name="viewerFirst">Whose write queues on the lock first, and so wins it: the viewer's add (the MCP edit's
+    /// re-check then refuses), or the MCP edit (the VIEWER's re-check then refuses the add).</param>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AViewerAddAndAnMcpEditThatClaimOneAddress_QueueOnTheLock_AndTheSecondToQueueIsRefused(bool viewerFirst)
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await OpenAsync(ct);
         await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
         await SeedServerAsync(rig.Owner, 7341, "race-x", "race-x.example.test", ct);
 
-        var race = await QueuedRaceAsync(rig,
-            async () => (await viewer.AddMonitoredServerAsync(
-                ViewerRow(ViewerDataService.ComputeServerId(AddressK, null, false), "viewer-added", AddressK), ct)).Outcome.ToString(),
-            async () => Parse(await Edit.EditServerByNameAsync(
-                rig.Owner, "race-x", "{\"host\":\"" + AddressK + "\"}", ReachedAtOnce, true, null, ct))["status"]!.GetValue<string>(),
-            ct);
+        Func<Task<string>> viewerAdd = async () => (await viewer.AddMonitoredServerAsync(
+            ViewerRow(ViewerDataService.ComputeServerId(AddressK, null, false), "viewer-added", AddressK), ct)).Outcome.ToString();
+        Func<Task<string>> mcpEdit = async () => Parse(await Edit.EditServerByNameAsync(
+            rig.Owner, "race-x", "{\"host\":\"" + AddressK + "\"}", ReachedAtOnce, true, null, ct))["status"]!.GetValue<string>();
 
-        var viewerWon = race.FirstAnswer == nameof(MonitoredServerAddOutcome.Added) && race.SecondAnswer == "collides";
-        var mcpWon = race.FirstAnswer == nameof(MonitoredServerAddOutcome.Duplicate) && race.SecondAnswer == "updated";
-        Assert.True(viewerWon ^ mcpWon, $"Exactly one caller should win. viewer add: {race.FirstAnswer}, MCP edit: {race.SecondAnswer}.");
+        var race = viewerFirst
+            ? await QueuedRaceAsync(rig, viewerAdd, mcpEdit, ct)
+            : await QueuedRaceAsync(rig, mcpEdit, viewerAdd, ct);
+
+        if (viewerFirst)
+        {
+            Assert.Equal(nameof(MonitoredServerAddOutcome.Added), race.FirstAnswer);
+            Assert.Equal("collides", race.SecondAnswer);
+        }
+        else
+        {
+            Assert.Equal("updated", race.FirstAnswer);
+            Assert.Equal(nameof(MonitoredServerAddOutcome.Duplicate), race.SecondAnswer);
+        }
 
         var keys = await StorageKeysAsync(rig.Owner, ct);
         Assert.Equal(keys.Count, keys.Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Assert.Single(keys, key => key.Contains(AddressK, StringComparison.OrdinalIgnoreCase));
-        Assert.Equal(viewerWon ? 2 : 1, keys.Count);
+        Assert.Equal(viewerFirst ? 2 : 1, keys.Count);
         Assert.Equal(0, race.LocksLeftAfterwards);
         Assert.True(race.BothQueuedOnTheLock, "Both the viewer's add and the MCP edit should have queued behind the held identity lock.");
     }
 
-    [Fact]
-    public async Task AViewerEditAndAnMcpAddThatClaimOneAddress_QueueOnTheLock_AndExactlyOneRowEndsWithIt()
+    /// <param name="viewerFirst">Whose write queues on the lock first, and so wins it: the viewer's edit (the MCP add's
+    /// re-check then answers duplicate), or the MCP add (the VIEWER's re-check then refuses the edit).</param>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AViewerEditAndAnMcpAddThatClaimOneAddress_QueueOnTheLock_AndTheSecondToQueueIsRefused(bool viewerFirst)
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await OpenAsync(ct);
         await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
         await SeedServerAsync(rig.Owner, 7351, "race-x", "race-x.example.test", ct);
 
-        var race = await QueuedRaceAsync(rig,
-            () => ViewerEditAsync(viewer, ViewerRow(7351, "race-x", AddressK), ct),
-            async () => AddStatusOf(await Edit.AddServersAsync(rig.Owner, AddJson(AddressK), ReachedAtOnce, ct)),
-            ct);
+        Func<Task<string>> viewerEdit = () => ViewerEditAsync(viewer, ViewerRow(7351, "race-x", AddressK), ct);
+        Func<Task<string>> mcpAdd = async () => AddStatusOf(await Edit.AddServersAsync(rig.Owner, AddJson(AddressK), ReachedAtOnce, ct));
 
-        var viewerWon = race.FirstAnswer == "Updated" && race.SecondAnswer == "duplicate";
-        var mcpWon = race.FirstAnswer == "Claimed" && race.SecondAnswer == "added";
-        Assert.True(viewerWon ^ mcpWon, $"Exactly one caller should win. viewer edit: {race.FirstAnswer}, MCP add: {race.SecondAnswer}.");
+        var race = viewerFirst
+            ? await QueuedRaceAsync(rig, viewerEdit, mcpAdd, ct)
+            : await QueuedRaceAsync(rig, mcpAdd, viewerEdit, ct);
+
+        if (viewerFirst)
+        {
+            Assert.Equal("Updated", race.FirstAnswer);
+            Assert.Equal("duplicate", race.SecondAnswer);
+        }
+        else
+        {
+            Assert.Equal("added", race.FirstAnswer);
+            Assert.Equal("Claimed", race.SecondAnswer);
+        }
 
         var keys = await StorageKeysAsync(rig.Owner, ct);
         Assert.Equal(keys.Count, keys.Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Assert.Single(keys, key => key.Contains(AddressK, StringComparison.OrdinalIgnoreCase));
-        Assert.Equal(mcpWon ? 2 : 1, keys.Count);
+        Assert.Equal(viewerFirst ? 1 : 2, keys.Count);
         Assert.Equal(0, race.LocksLeftAfterwards);
         Assert.True(race.BothQueuedOnTheLock, "Both the viewer's edit and the MCP add should have queued behind the held identity lock.");
     }
 
     [Fact]
-    public async Task TwoViewerEditsThatMoveTwoServersOntoOneAddress_QueueOnTheLock_AndExactlyOneRowEndsWithIt()
+    public async Task TwoViewerEditsThatMoveTwoServersOntoOneAddress_QueueOnTheLock_AndTheSecondToQueueIsRefused()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await OpenAsync(ct);
@@ -502,7 +537,8 @@ public sealed class ServerIdentityLockLiveTests
             () => ViewerEditAsync(viewer, ViewerRow(7362, "race-y", AddressK), ct),
             ct);
 
-        Assert.Equal(new[] { "Claimed", "Updated" }, new[] { race.FirstAnswer, race.SecondAnswer }.Order().ToArray());
+        Assert.Equal("Updated", race.FirstAnswer);
+        Assert.Equal("Claimed", race.SecondAnswer);
 
         var keys = await StorageKeysAsync(rig.Owner, ct);
         Assert.Equal(2, keys.Count);
