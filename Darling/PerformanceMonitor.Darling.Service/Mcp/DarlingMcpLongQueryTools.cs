@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -37,6 +38,7 @@ public sealed class DarlingMcpLongQueryTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -50,6 +52,7 @@ public sealed class DarlingMcpLongQueryTools
         try
         {
             var now = windowEnd;
+            var windowStart = now.AddHours(-hours_back);
 
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation signal.
                The reader's own LIMIT 200 was invisible to the caller, and `total_completions` published it as
@@ -63,10 +66,22 @@ public sealed class DarlingMcpLongQueryTools
                        is missing. The precondition answer names that state instead of quietly blaming a knob
                        that is already switched on. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range. The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.");
+                    /* #4966: the window keys ride on an empty answer under hints; not_collected and the precondition stay bare. */
+                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range. The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
+                        (await DarlingMcpWindowNotice.ReadEventAsync(
+                            () => DarlingMcpWindowNotice.Probe(postgres, "long_query_completions", resolved.ServerName, windowStart, now, cancellationToken),
+                            null, windowStart, now, "long_query_completions", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
 
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
+
+            /* #4966: an event list, so the floor is the earlier of the coverage probe and the oldest event the page shows. The probe
+               reads the table on collection_time while the page is ranked by duration, so a first run's backfilled event can be older
+               than the probe's floor. The page is the slowest N, so its oldest event depends on limit; that cannot make a false
+               notice, as the floor only moves earlier, and a first run reads back 10 minutes, well inside the 90-minute slack. */
+            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "long_query_completions", resolved.ServerName, windowStart, now, cancellationToken),
+                page.Min(r => r.EventTime), windowStart, now, "long_query_completions", logger: logger, cancellationToken: cancellationToken);
 
             var result = page.Select(r => new
             {
@@ -90,10 +105,16 @@ public sealed class DarlingMcpLongQueryTools
                 query_hash = r.QueryHash
             });
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
+                   window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
+                   for the window floor. A failed coverage probe leaves the three off (see the return below). */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 /* #3541 A3: the page described as a page. Under a duration RANKING the two stamps bound the
                    slowest runs, not the reach — the description says so, and QueryStoreTopWindowTests states
                    the general trap for cost-ranked pages. */
@@ -104,6 +125,9 @@ public sealed class DarlingMcpLongQueryTools
                 order = "duration_ms_desc",
                 completions = result
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
