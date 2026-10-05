@@ -237,7 +237,7 @@ function sweepDocument(d) {
     nodes.push(el("h4", { class: "sweep-section", text: "Would have paged (master switch off)" }));
     nodes.push(whp.length
       ? sweepGrid("would-have-paged", [
-          { key: "server", label: "Server", display: (w) => w.server || "server " + w.server_id },
+          { key: "server", label: "Server", display: serverText, sortValue: serverText, copyValue: serverText },
           { key: "family", label: "Family" },
           evidenceColumn(),
         ], whp)
@@ -376,10 +376,10 @@ async function renderWatchItems(box) {
         /* The display name the feed joins from the retained verdict history (#3482); the bare id is
            the degrade for a name the store no longer holds, and the fleet-scope sentinel renders as
            the fleet — it has no server name, and "server 0" would be a fabrication. */
-        { key: "server", label: "Server", display: (w) => (w.fleet_scope ? "Fleet" : (w.server || "server " + w.server_id)) },
+        { key: "server", label: "Server", display: watchServerText, sortValue: watchServerText, copyValue: watchServerText },
         { key: "item", label: "Item", mono: true },
         { key: "state", label: "State", display: (w) => SWEEP_WATCH_STATE_LABELS[w.state] || w.state, cellClass: (w) => watchStateSev(w.state) },
-        { key: "position", label: "Position", display: (w) => watchPosition(w, d), sortValue: (w) => watchPosition(w, d) },
+        { key: "position", label: "Position", display: (w) => watchPosition(w, d), copyValue: (w) => watchPosition(w, d), sortValue: (w) => watchPositionRank(w) },
         { key: "first_seen_at", label: "First seen", format: "reltime" },
         { key: "last_seen_at", label: "Last seen", format: "reltime" },
         {
@@ -408,6 +408,25 @@ function watchPosition(w, d) {
   if (w.state === "closed") return "closed";
   if (w.consecutive_misses > 0) return w.consecutive_misses + " of " + d.exit_bar_sweeps + " quiet to close";
   return w.consecutive_hits + " consecutive hit" + (w.consecutive_hits === 1 ? "" : "s");
+}
+
+/* The server cell's text, also what the column sorts, filters and exports: the fallback label is not in the raw
+   `server` field, so the raw value would sort as null and export blank. */
+function serverText(w) {
+  return w.server || "server " + w.server_id;
+}
+
+function watchServerText(w) {
+  return w.fleet_scope ? "Fleet" : serverText(w);
+}
+
+/* A number to order the Position column by: the count the sentence is built on (hits, quiet sweeps) after the
+   state's own group, so pending < running hits < closing < closed. */
+function watchPositionRank(w) {
+  if (w.state === "pending") return 1000 + (Number(w.consecutive_hits) || 0);
+  if (w.state === "closed") return 4000;
+  if (w.consecutive_misses > 0) return 3000 + (Number(w.consecutive_misses) || 0);
+  return 2000 + (Number(w.consecutive_hits) || 0);
 }
 
 function watchStateSev(state) {
@@ -521,7 +540,7 @@ function verdictSev(v) {
    readout, not rows to sort or export. */
 function sweepGrid(id, columns, rows) {
   return gridTable(rows, {
-    id: "sweeps|" + id,
+    id: "sweeps|" + (selectedSweepId ?? "latest") + "|" + id,
     title: id,
     columns: columns.map((c) => (c.display || c.render || c.format ? c : { ...c, display: (r) => (r[c.key] == null || r[c.key] === "" ? "—" : String(r[c.key])) })),
   });

@@ -776,7 +776,7 @@ function cell(row, c) {
     if (c.wrap) rcls.push("wrap");
     if (c.mono) rcls.push("mono");
     if (c.pre) rcls.push("pre");
-    if (typeof c.cellClass === "function") rcls.push(c.cellClass(row));
+    if (typeof c.cellClass === "function") { const k = c.cellClass(row); if (k) rcls.push(k); }
     return el("td", { class: rcls.join(" ") || null }, [c.render(row)]);
   }
   const raw = getPath(row, c.key);
@@ -787,7 +787,7 @@ function cell(row, c) {
   if (c.pre) cls.push("pre");
   if (c.sevKey) cls.push(sevClass(getPath(row, c.sevKey)));
   if (c.statusSev) cls.push(sevClass(statusToSev(raw)));
-  if (typeof c.cellClass === "function") cls.push(c.cellClass(row));
+  if (typeof c.cellClass === "function") { const k = c.cellClass(row); if (k) cls.push(k); }
   /* nullKey names another field of the SAME row that says why this one is empty (get_file_io_stats' size_note:
      "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
      shows it in place of the bare em dash. */

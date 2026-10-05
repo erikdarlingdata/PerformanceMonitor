@@ -92,6 +92,9 @@ public sealed class GridAdoptionBehaviourTests
         Assert.Equal(new[] { "srv-a", "srv-d" }, Arr(r, "rebuilt"));
         Assert.Equal("descending", Str(r, "rebuiltSort"));
         Assert.Equal(4, Arr(r, "otherRule").Length);
+        Assert.Equal("none", Str(r, "otherRuleSort"));
+        Assert.Equal("ascending", Str(r, "draftSort"));
+        Assert.Equal("none", Str(r, "nextDraftSort"));
     }
 
     [Fact]
@@ -105,7 +108,14 @@ public sealed class GridAdoptionBehaviourTests
         Assert.Equal("Server\tFrom\tTo\tReason\napi-one\tHealthy\tWarning\tcpu\nweb-two\tWarning\tHealthy\trecovered", Str(r, "copy"));
         Assert.Equal(new[] { "api-one", "web-two" }, Arr(r, "rebuilt"));
         Assert.Equal("ascending", Str(r, "rebuiltSort"));
-        Assert.Equal(2, Arr(r, "watchRows").Length);
+        Assert.Equal(4, Arr(r, "watchRows").Length);
+        // The position column orders by its count, not its sentence ("12 consecutive hits" sorts after "3 ...").
+        Assert.Equal(new[] { "fleet", "disk", "orphan", "cpu" }, Arr(r, "posAsc"));
+        Assert.Equal(new[] { "cpu", "orphan", "disk", "fleet" }, Arr(r, "posDesc"));
+        // The fallback labels the page shows are what the column sorts on and the CSV carries.
+        Assert.Equal(new[] { "api-one", "Fleet", "server 9", "web-one" }, Arr(r, "serverAsc"));
+        Assert.Contains("\r\nFleet,fleet,", Str(r, "serverCsv"));
+        Assert.Contains("\r\nserver 9,orphan,", Str(r, "serverCsv"));
         Assert.StartsWith("Server,Item,State,Position,First seen,Last seen,Condition / evidence\r\nweb-one,disk,open,3 consecutive hits,2026-01-02T08:00:00", Str(r, "watchCsv"));
     }
 
@@ -124,5 +134,45 @@ public sealed class GridAdoptionBehaviourTests
         Assert.True(Bool(r, "sameRows"));
         Assert.Equal("No rows in this window.", Str(r, "emptyViz"));
         Assert.StartsWith("No fields configured", Str(r, "noFields"));
+    }
+
+    [Fact]
+    public void TwoUntitledComposedTablePanels_OnOneView_DoNotShareSortOrFilters()
+    {
+        var r = Run("twoPanels");
+        Assert.Equal("descending", Str(r, "aSort"));
+        Assert.Equal(new[] { "alpha", "Alpha two" }, Arr(r, "aRows"));
+        Assert.Equal("none", Str(r, "bSort"));
+        Assert.Equal(3, Arr(r, "bRows").Length);
+        Assert.Equal("descending", Str(r, "a2Sort"));
+        Assert.Equal(2, Arr(r, "a2Rows").Length);
+    }
+
+    [Fact]
+    public void RenderComposedInto_ThreadsThePanelSlotToTheTable_AgainstTheRealGrid()
+    {
+        var r = Run("composedInto");
+        Assert.True(Bool(r, "found"));
+        Assert.Equal(3, Arr(r, "rows").Length);
+        Assert.Equal("ascending", Str(r, "sameSlotSort"));
+        Assert.Equal("none", Str(r, "otherSlotSort"));
+    }
+
+    [Fact]
+    public void VizTable_EdgeShapes_SingleColumn_AllHidden_DotRowsKey_ToolsAndFilterOff_EmptyCellClass()
+    {
+        var r = Run("vizEdges");
+        Assert.Equal(new[] { "Name" }, Arr(r, "oneHeads"));
+        Assert.Equal(new[] { "Alpha", "beta" }, Arr(r, "oneSorted"));
+        Assert.Equal(new[] { "none", "none" }, Arr(r, "hiddenShown"));
+        Assert.Equal("Name\tN\nAlpha\t3\nbeta\t1", Str(r, "hiddenCopy"));
+        Assert.Equal(new[] { "solo" }, Arr(r, "dotRows"));
+        Assert.Equal(new[] { "7" }, Arr(r, "dotN"));
+        Assert.False(Bool(r, "noToolsCopy"));
+        Assert.True(Bool(r, "noToolsFilter"));
+        Assert.True(Bool(r, "noFilterTools"));
+        Assert.False(Bool(r, "noFilterBtn"));
+        Assert.True(Bool(r, "noFilterSort"));
+        Assert.DoesNotContain("undefined", Str(r, "cls"));
     }
 }

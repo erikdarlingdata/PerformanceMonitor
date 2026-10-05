@@ -71,7 +71,7 @@ const alertRes = { kind: "data", data: { results: [
   { server: "srv-c", no_data: true },
   { server: "srv-d", current_value: 40, breaching: true },
 ] } };
-const alertTable = () => wrapOf(renderTestResult(alertRes, "percent"));
+const alertTable = (key) => wrapOf(renderTestResult(alertRes, "percent", key));
 
 const sweepDoc = {
   swept_at: "2026-01-02T10:00:00", span_start: "2026-01-02T09:00:00", span_end: "2026-01-02T10:00:00", alerts_enabled: true, instruments_alive: true,
@@ -86,6 +86,8 @@ const sweepDoc = {
 const watch = { entry_bar_sweeps: 2, exit_bar_sweeps: 2, items: [
   { server: "web-one", item: "disk", state: "open", consecutive_hits: 3, consecutive_misses: 0, first_seen_at: "2026-01-02T08:00:00", last_seen_at: "2026-01-02T10:00:00", condition: "disk low", evidence: { free: 1 } },
   { server: "api-one", item: "cpu", state: "carried", consecutive_hits: 1, consecutive_misses: 1, first_seen_at: "2026-01-02T09:00:00", last_seen_at: "2026-01-02T10:00:00", condition: "cpu high" },
+  { server: null, server_id: 0, fleet_scope: true, item: "fleet", state: "pending", consecutive_hits: 1, consecutive_misses: 0, first_seen_at: "2026-01-02T09:30:00", last_seen_at: "2026-01-02T10:00:00", condition: "fleet wide" },
+  { server: null, server_id: 9, item: "orphan", state: "open", consecutive_hits: 12, consecutive_misses: 0, first_seen_at: "2026-01-02T09:30:00", last_seen_at: "2026-01-02T10:00:00", condition: "no name" },
 ] };
 globalThis.fetch = async (url) => {
   const u = String(url);
@@ -154,8 +156,8 @@ const scenarios = {
     out.otherSort = ths(other)[2].getAttribute("aria-sort");
   },
   async alert() {
-    globalThis.location = { hash: "#/alert-rules/edit/7" };
-    const w = alertTable();
+    globalThis.location = { hash: "#/alert-rule/7" };
+    const w = alertTable("rule-7");
     out.heads = ths(w).map((h) => h.textContent.replace(/[▲▼ ▾]/g, ""));
     out.before = cellsOf(w, 0);
     ths(w)[1].fire("click"); ths(w)[1].fire("click");
@@ -166,11 +168,19 @@ const scenarios = {
     out.copy = clip[clip.length - 1];
     tool(w, "Export CSV").click();
     out.csv = await csvText();
-    const again = alertTable();
+    const again = alertTable("rule-7");
     out.rebuilt = cellsOf(again, 0);
     out.rebuiltSort = ths(again)[1].getAttribute("aria-sort");
-    globalThis.location = { hash: "#/alert-rules/edit/8" };
-    out.otherRule = cellsOf(alertTable(), 0);
+    globalThis.location = { hash: "#/alert-rule/8" };
+    const other = alertTable("rule-8");
+    out.otherRule = cellsOf(other, 0);
+    out.otherRuleSort = ths(other)[1].getAttribute("aria-sort");
+    out.otherRuleFiltered = cellsOf(other, 0).length;
+    globalThis.location = { hash: "#/alert-rule/new" };
+    const d1 = alertTable("draft-1");
+    ths(d1)[1].fire("click");
+    out.draftSort = ths(d1)[1].getAttribute("aria-sort");
+    out.nextDraftSort = ths(alertTable("draft-2"))[1].getAttribute("aria-sort") || "";
   },
   async sweeps() {
     globalThis.location = { hash: "#/sweeps" };
@@ -194,6 +204,76 @@ const scenarios = {
     out.watchHeads = ths(watchT).map((h) => h.textContent.replace(/[▲▼ ▾]/g, ""));
     tool(watchT, "Export CSV").click();
     out.watchCsv = await csvText();
+    ths(watchT)[3].fire("click");
+    out.posAsc = cellsOf(watchT, 1);
+    ths(watchT)[3].fire("click");
+    out.posDesc = cellsOf(watchT, 1);
+    ths(watchT)[0].fire("click");
+    out.serverAsc = cellsOf(watchT, 0);
+    out.serverCsv = (() => { tool(watchT, "Export CSV").click(); return csvText(); })();
+    out.serverCsv = await out.serverCsv;
+  },
+  async twoPanels() {
+    globalThis.location = { hash: "#/view/dash" };
+    const spec = { viz: "table", title: "", measure: "m", unit: "count" };
+    const mk = (slot) => wrapOf(renderComposedResult({ rows: composedRows }, spec, { scope: { server: "srv-a" }, panelSlot: slot }));
+    const a = mk(0);
+    ths(a)[2].fire("click"); ths(a)[2].fire("click");
+    filterBy(a, 1, "alpha");
+    out.aSort = ths(a)[2].getAttribute("aria-sort");
+    out.aRows = cellsOf(a, 1);
+    const b = mk(1);
+    out.bSort = ths(b)[2].getAttribute("aria-sort") || "";
+    out.bRows = cellsOf(b, 1);
+    const a2 = mk(0);
+    out.a2Sort = ths(a2)[2].getAttribute("aria-sort");
+    out.a2Rows = cellsOf(a2, 1);
+  },
+  async composedInto() {
+    globalThis.location = { hash: "#/view/dash" };
+    globalThis.fetch = async () => {
+      const b = { sql: "select 1", rows: composedRows };
+      const raw = JSON.stringify(b);
+      return { ok: true, status: 200, text: async () => raw, json: async () => b };
+    };
+    const { renderComposedInto } = await imp("compose.js");
+    const body = new FakeNode("div");
+    await renderComposedInto(body, { viz: "table", title: "", measure: "m", unit: "count" }, { server: "srv-a" }, { panelSlot: 3 });
+    const t = wrapOf(body.children);
+    out.found = !!t;
+    out.rows = t ? cellsOf(t, 1) : [];
+    if (t) { ths(t)[2].fire("click"); out.sorted = cellsOf(t, 1); }
+    const body2 = new FakeNode("div");
+    await renderComposedInto(body2, { viz: "table", title: "", measure: "m", unit: "count" }, { server: "srv-a" }, { panelSlot: 3 });
+    out.sameSlotSort = ths(wrapOf(body2.children))[2].getAttribute("aria-sort");
+    const body3 = new FakeNode("div");
+    await renderComposedInto(body3, { viz: "table", title: "", measure: "m", unit: "count" }, { server: "srv-a" }, { panelSlot: 4 });
+    out.otherSlotSort = ths(wrapOf(body3.children))[2].getAttribute("aria-sort") || "";
+  },
+  async vizEdges() {
+    globalThis.location = { hash: "#/server/a/viz-edges" };
+    const rows = [{ name: "Alpha", n: 3 }, { name: "beta", n: 1 }];
+    const one = VIZ.table({ rows }, { rowsKey: "rows", columns: [{ key: "name", label: "Name" }], title: "One" });
+    out.oneHeads = ths(one).map((h) => h.textContent.replace(/[▲▼ ▾]/g, ""));
+    ths(one)[0].fire("click");
+    out.oneSorted = cellsOf(one, 0);
+    const hidden = VIZ.table({ rows }, { rowsKey: "rows", title: "Hidden", columns: [{ key: "name", label: "Name", group: "G" }, { key: "n", label: "N", group: "G" }], groups: ["G"], defaultGroups: [] });
+    out.hiddenShown = tbodyOf(hidden).children[0].children.map((c) => c.style.display);
+    out.hiddenCopy = (() => { tool(hidden, "Copy all").click(); return flush(); })();
+    await out.hiddenCopy;
+    out.hiddenCopy = clip[clip.length - 1];
+    const dot = VIZ.table({ name: "solo", n: 7 }, { rowsKey: ".", columns: [{ key: "name", label: "Name" }, { key: "n", label: "N", format: "int" }], title: "Dot" });
+    out.dotRows = cellsOf(dot, 0);
+    out.dotN = cellsOf(dot, 1);
+    const noTools = VIZ.table({ rows }, { rowsKey: "rows", columns: [{ key: "name", label: "Name" }], title: "NoTools", tools: false });
+    out.noToolsCopy = !!tool(noTools, "Copy all");
+    out.noToolsFilter = !!filterBtn(noTools, 0);
+    const noFilter = VIZ.table({ rows }, { rowsKey: "rows", columns: [{ key: "name", label: "Name" }], title: "NoFilter", filter: false });
+    out.noFilterBtn = !!filterBtn(noFilter, 0);
+    out.noFilterTools = !!tool(noFilter, "Copy all");
+    out.noFilterSort = (ths(noFilter)[0].className || "").includes("sortable");
+    const emptyCls = VIZ.table({ rows }, { rowsKey: "rows", columns: [{ key: "name", label: "Name", cellClass: () => undefined }], title: "Cls" });
+    out.cls = tbodyOf(emptyCls).children[0].children[0].className;
   },
 };
 await scenarios[process.argv[3]]();

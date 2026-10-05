@@ -109,6 +109,9 @@ export async function renderAlertEditor(main, id, templateKey) {
 
   let model;
   let editingId = null;
+  /* The record this editor is on, so the test table's sort and filters do not follow you to another rule. Every
+     new draft shares #/alert-rule/new, so each opening of it counts as its own. */
+  const draftNo = ++alertDraftSeq;
   let loadedVersion = null;
 
   if (id != null && id !== "new") {
@@ -137,7 +140,7 @@ export async function renderAlertEditor(main, id, templateKey) {
     model = seed ? seededModel(seed) : blankModel();
   }
 
-  buildAlertEditor(main, { model, editingId, loadedVersion, catalog, fleet, tags });
+  buildAlertEditor(main, { model, editingId, loadedVersion, catalog, fleet, tags, recordKey: editingId != null ? "rule-" + editingId : "draft-" + draftNo });
 }
 
 /* ─────────────────────────── model <-> definition ─────────────────────────── */
@@ -446,7 +449,7 @@ function buildAlertEditor(main, ctx) {
     }
 
     const tres = await api.testAlertRule({ definition: def });
-    mount(previewBox, renderTestResult(tres, model.metric.unit));
+    mount(previewBox, renderTestResult(tres, model.metric.unit, ctx.recordKey));
   }
 
   const deleteBtn = ctx.editingId != null ? buildDeleteButton(ctx.editingId, saveStatus) : null;
@@ -765,12 +768,14 @@ function advancedSection(model, onChange) {
   ]);
 }
 
+let alertDraftSeq = 0;
+
 /* ─────────────────────────── test result (current value / would-fire) ─────────────────────────── */
 
 /* The POST /api/alerts/test result: per-server CURRENT value + whether it would breach right now, in a table, with
    the hysteresis caveat above it. This is the instantaneous predicate only — the running evaluator also gates on
    hysteresis + per-server streak, which the note spells out. Every value reaches the DOM as text (R4). */
-export function renderTestResult(res, unit) {
+export function renderTestResult(res, unit, recordKey = "") {
   if (res.kind === "empty") {
     /* An invalid/not-found draft comes back as {status, message}; surface the message (validate already ran, so
        this is the belt-and-suspenders path). */
@@ -818,7 +823,7 @@ export function renderTestResult(res, unit) {
       },
     },
   ];
-  nodes.push(gridTable(results, { id: "alert-test", title: "Alert rule test result", columns }));
+  nodes.push(gridTable(results, { id: "alert-test|" + recordKey, title: "Alert rule test result", columns }));
   return el("div", {}, nodes);
 }
 
