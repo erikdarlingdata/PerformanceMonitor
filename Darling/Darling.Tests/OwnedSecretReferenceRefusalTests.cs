@@ -29,6 +29,8 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     private readonly string _root = Path.Combine(Path.GetTempPath(), "darling-ref-" + Guid.NewGuid().ToString("N"));
     private readonly DarlingOwnedSet _before = DarlingOwnedSecrets.Current;
     private readonly string _owned;
+    private readonly List<string> _links = new();
+    private readonly List<string> _lockedDirectories = new();
 
     public OwnedSecretReferenceRefusalTests()
     {
@@ -42,14 +44,50 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     public void Dispose()
     {
         DarlingOwnedSecrets.Set(_before);
+
+        /* A directory a test made unreadable must be readable again before it can be deleted. */
+        foreach (var dir in _lockedDirectories)
+        {
+            try
+            {
+                File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                /* best effort; the recursive delete below reports nothing either */
+            }
+        }
+
+        /* Remove each link a test created, itself and not what it points at, BEFORE the recursive delete: a recursive
+           delete that walks a junction into the owned directory is refused with UnauthorizedAccessException on Windows.
+           Directory.Delete(link, recursive: false) removes the reparse point and leaves its target alone. */
+        foreach (var link in _links)
+        {
+            try
+            {
+                Directory.Delete(link, recursive: false);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* best effort: the link may never have been created */
+            }
+        }
+
         try
         {
             Directory.Delete(_root, true);
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            /* best effort */
+            /* best effort. UnauthorizedAccessException derives from SystemException, not IOException, so it has to be named. */
         }
+    }
+
+    /// <summary>Registers a link BEFORE it is created so that Dispose removes it even if creation half-succeeds.</summary>
+    private string TrackLink(string link)
+    {
+        _links.Add(link);
+        return link;
     }
 
     private static string? Check(string? password) => DarlingOwnedSecrets.ReferenceRefusal(password);
@@ -150,7 +188,7 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     [Fact]
     public void ASymlinkIntoTheOwnedDirectory_IsRefused()
     {
-        var link = Path.Combine(_root, "other", "alias");
+        var link = TrackLink(Path.Combine(_root, "other", "alias"));
         CreateLinkOrSkip(link, _owned);
         AssertResolvesTo(link, _owned);
 
@@ -161,7 +199,7 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     public void AJunctionIntoTheOwnedDirectory_IsRefused()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "directory junctions exist only on Windows; they need no privilege, so this case cannot skip there.");
-        var link = Path.Combine(_root, "other", "junction");
+        var link = TrackLink(Path.Combine(_root, "other", "junction"));
         var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe")
         {
             UseShellExecute = false,
@@ -187,11 +225,100 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
         Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + Path.Combine(link, "secret.txt")));
     }
 
+    /* Identity cannot be determined for two different reasons, and they must not be treated alike. The identity source
+       reports absence by returning null and every other failure by throwing. */
+    private Func<string, FileId?> IdentityThatFailsAt(string failingPath, Exception failure) => p =>
+        string.Equals(Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar), Path.GetFullPath(failingPath).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)
+            ? throw failure
+            : FileIdentity.Of(p);
+
+    private string? CheckWith(string path, Func<string, FileId?> identityOf) =>
+        DarlingOwnedSecrets.ReferenceRefusal("file:" + path, DarlingOwnedSecrets.Current, identityOf);
+
+    [Fact]
+    public void APathThatDoesNotExist_IsAccepted_BecauseAbsenceIsNotADenial()
+    {
+        var absent = Path.Combine(_root, "other", "not-there-yet", "pw");
+
+        Assert.Null(FileIdentity.Of(absent));
+        Assert.Null(CheckWith(absent, FileIdentity.Of));
+        Assert.Null(CheckWith(absent, _ => null));
+    }
+
+    [Fact]
+    public void APathUnderAFileThatIsNotADirectory_IsAbsence_AndIsAccepted()
+    {
+        var file = Path.Combine(_root, "other", "plain.txt");
+        File.WriteAllText(file, "x");
+        var beneath = Path.Combine(file, "pw");
+
+        Assert.Null(FileIdentity.Of(beneath));
+        Assert.Null(CheckWith(beneath, FileIdentity.Of));
+    }
+
+    [Fact]
+    public void APathWhoseIdentityIsDenied_IsRefused_WithTheSameSentence()
+    {
+        var target = Path.Combine(_root, "other", "denied.txt");
+        File.WriteAllText(target, "x");
+
+        var refusal = CheckWith(target, IdentityThatFailsAt(target, new UnauthorizedAccessException()));
+
+        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, refusal);
+    }
+
+    [Fact]
+    public void AnAncestorWhoseIdentityIsDenied_RefusesAPathThatDoesNotExist()
+    {
+        /* Nothing says the missing file is not reachable through the directory we were not allowed to look at. */
+        var ancestor = Path.Combine(_root, "other");
+        var absent = Path.Combine(ancestor, "missing", "pw");
+
+        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, CheckWith(absent, IdentityThatFailsAt(ancestor, new UnauthorizedAccessException())));
+        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, CheckWith(absent, IdentityThatFailsAt(ancestor, new IOException("sharing violation"))));
+    }
+
+    [Fact]
+    public void AnUnreadableOwnedPath_DoesNotRefuseAnUnrelatedReference()
+    {
+        /* The failure that matters is on the REFERENCED path. An owned path we cannot read adds no identity; the text
+           comparison still covers it, and an unrelated reference stays acceptable. */
+        var unrelated = Path.Combine(_root, "other", "pw");
+
+        Assert.Null(CheckWith(unrelated, IdentityThatFailsAt(_owned, new UnauthorizedAccessException())));
+    }
+
+    [Fact]
+    public void ARealDeniedDirectory_RefusesAReferenceBeneathIt()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "a mode-000 directory is a Unix construct; the Windows denial path is pinned through the identity seam above.");
+        var locked = Path.Combine(_root, "other", "locked");
+        Directory.CreateDirectory(locked);
+        File.WriteAllText(Path.Combine(locked, "pw"), "x");
+        _lockedDirectories.Add(locked);
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+        Assert.SkipWhen(CanStatInside(locked), "this process can search a mode-000 directory (running as root), so no denial can be produced.");
+
+        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + Path.Combine(locked, "pw")));
+    }
+
+    private static bool CanStatInside(string directory)
+    {
+        try
+        {
+            return File.Exists(Path.Combine(directory, "pw"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     [Fact]
     public void ASymlinkCycle_IsRefused()
     {
-        var a = Path.Combine(_root, "other", "a");
-        var b = Path.Combine(_root, "other", "b");
+        var a = TrackLink(Path.Combine(_root, "other", "a"));
+        var b = TrackLink(Path.Combine(_root, "other", "b"));
         CreateLinkOrSkip(a, b);
         CreateLinkOrSkip(b, a);
         Assert.NotNull(new DirectoryInfo(a).LinkTarget);
@@ -405,7 +532,7 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
             {
                 Directory.Delete(dir, true);
             }
-            catch (IOException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 /* best effort; Dispose removes the root */
             }

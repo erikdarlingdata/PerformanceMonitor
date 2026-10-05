@@ -75,7 +75,15 @@ public static class DarlingOwnedSecrets
     /// Identity comparison (volume + file ID of each owned path, a small known set) catches a symlink, a case variant and a
     /// Windows short name. A hard link placed outside every owned directory is out of scope: making one needs local read
     /// access to the target, which already defeats this control, and finding one would mean statting every file under the
-    /// owned directories (thousands, in the database data directory) on an interactive path.</summary>
+    /// owned directories (thousands, in the database data directory) on an interactive path.
+    /// When the identity of the referenced path, or of a directory above it, cannot be determined, the answer depends on
+    /// WHY. A path that does not exist (no file, no directory) has no identity and is accepted: the reference may name a
+    /// file that is not there yet, and the connection attempt reports the real failure. A path that exists but cannot be
+    /// examined (access denied, or any other failure that is not absence) is REFUSED, because nothing proves it is not one
+    /// of Darling's own files; the refusal text is the same sentence. The identity source reports absence by returning
+    /// null and every other failure by throwing.
+    /// An owned path whose own identity cannot be read contributes no identity to the comparison; the text comparison
+    /// still covers it.</summary>
     internal static string? ReferenceRefusal(string? password) => ReferenceRefusal(password, s_current);
 
     internal static string? ReferenceRefusal(string? password, DarlingOwnedSet owned)
@@ -160,7 +168,9 @@ public static class DarlingOwnedSecrets
 
     /// <summary>True when the file, or any directory above it, IS an owned file or directory — by volume and file ID,
     /// so a hard link, a bind mount, a Windows 8.3 short name and a case variant all arrive at the same identity. A file
-    /// that does not exist has no identity of its own; its nearest existing ancestor still does.</summary>
+    /// that does not exist has no identity of its own; its nearest existing ancestor still does. Also true when the
+    /// identity of the file or of an ancestor exists but cannot be read (see <see cref="Safe"/>): with no way to prove the
+    /// path is not owned, it is treated as owned. Absence is not that case and does not refuse.</summary>
     private static bool ReachesOwned(string path, string real, HashSet<FileId> ownedIds, Func<string, FileId?> identityOf)
     {
         foreach (var start in new[] { path, real })
@@ -177,7 +187,8 @@ public static class DarlingOwnedSecrets
 
             for (var i = 0; i < 256 && current is not null; i++)
             {
-                if (Safe(identityOf, current) is { } id && ownedIds.Contains(id))
+                var lookup = Lookup(identityOf, current);
+                if (lookup.Undeterminable || (lookup.Id is { } id && ownedIds.Contains(id)))
                 {
                     return true;
                 }
@@ -189,18 +200,27 @@ public static class DarlingOwnedSecrets
         return false;
     }
 
-    private static FileId? Safe(Func<string, FileId?> identityOf, string path)
+    /// <summary>The result of one identity lookup. <see cref="Id"/> null with <see cref="Undeterminable"/> false means the
+    /// path does not exist; <see cref="Undeterminable"/> true means it could not be examined, for a reason other than absence.</summary>
+    private readonly record struct IdentityLookup(FileId? Id, bool Undeterminable);
+
+    /// <summary>Identity of a path, keeping the reason a lookup produced nothing. The seam contract: null is absence;
+    /// an exception is a failure to examine something that may exist.</summary>
+    private static IdentityLookup Lookup(Func<string, FileId?> identityOf, string path)
     {
         try
         {
-            return identityOf(path);
+            return new IdentityLookup(identityOf(path), false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException
                                        or DllNotFoundException or EntryPointNotFoundException or MarshalDirectiveException)
         {
-            return null;
+            return new IdentityLookup(null, true);
         }
     }
+
+    /// <summary>For the owned side only: an owned path with no readable identity simply adds none to the set.</summary>
+    private static FileId? Safe(Func<string, FileId?> identityOf, string path) => Lookup(identityOf, path).Id;
 
     /// <summary>Forms no real secret path needs, refused before any comparison.</summary>
     private static bool IsRefusedForm(string path)
@@ -485,7 +505,9 @@ public static class DarlingOwnedSecrets
 internal readonly record struct FileId(ulong Volume, ulong Index);
 
 /// <summary>Reads <see cref="FileId"/> from the operating system: volume serial plus file index on Windows,
-/// <c>st_dev</c>/<c>st_ino</c> on Unix. Null for a file that does not exist, and where the platform call is unavailable.</summary>
+/// <c>st_dev</c>/<c>st_ino</c> on Unix. Null ONLY for a path that does not exist. Every other failure throws
+/// (<see cref="UnauthorizedAccessException"/> for a denial, <see cref="IOException"/> otherwise, and the platform
+/// exceptions when the native call is unavailable), so a caller can tell "nothing there" from "could not look".</summary>
 internal static class FileIdentity
 {
     public static FileId? Of(string path) =>
@@ -494,13 +516,31 @@ internal static class FileIdentity
     private const uint FileFlagBackupSemantics = 0x02000000;
     private const uint FileShareAll = 7;
     private const uint OpenExisting = 3;
+    private const int ErrorFileNotFound = 2;
+    private const int ErrorPathNotFound = 3;
+    private const int ErrorAccessDenied = 5;
+    private const int ErrorInvalidName = 123; /* a name that cannot exist: absence, not a failure to look */
+    private const int Enoent = 2;
+    private const int Eacces = 13;
+    private const int Enotdir = 20; /* a path component is a file, so nothing can be under it: absence */
 
     private static FileId? OfWindows(string path)
     {
         using var handle = CreateFileW(path, 0, FileShareAll, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics, IntPtr.Zero);
-        if (handle.IsInvalid || !GetFileInformationByHandle(handle, out var info))
+        if (handle.IsInvalid)
         {
-            return null;
+            var error = Marshal.GetLastPInvokeError();
+            return error switch
+            {
+                ErrorFileNotFound or ErrorPathNotFound or ErrorInvalidName => null,
+                ErrorAccessDenied => throw new UnauthorizedAccessException("Access to the path was denied (Win32 error 5)."),
+                _ => throw new IOException("The path could not be examined (Win32 error " + error + ")."),
+            };
+        }
+
+        if (!GetFileInformationByHandle(handle, out var info))
+        {
+            throw new IOException("The path could not be examined (Win32 error " + Marshal.GetLastPInvokeError() + ").");
         }
 
         return new FileId(info.VolumeSerialNumber, ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow);
@@ -511,21 +551,25 @@ internal static class FileIdentity
     private static FileId? OfUnix(string path)
     {
         var buffer = new byte[512];
-        int result;
-        try
+        if (IntPtr.Size != 8)
         {
-            result = OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.X64
-                ? StatMacIntel(path, buffer)
-                : Stat(path, buffer);
-        }
-        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
-        {
-            return null;
+            throw new PlatformNotSupportedException("The stat layout is only known for 64-bit processes.");
         }
 
-        if (result != 0 || IntPtr.Size != 8)
+        /* DllNotFoundException / EntryPointNotFoundException propagate: the native call being unavailable is a failure
+           to look, not absence. */
+        var result = OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.X64
+            ? StatMacIntel(path, buffer)
+            : Stat(path, buffer);
+        if (result != 0)
         {
-            return null;
+            var errno = Marshal.GetLastPInvokeError();
+            return errno switch
+            {
+                Enoent or Enotdir => null,
+                Eacces => throw new UnauthorizedAccessException("Access to the path was denied (errno 13)."),
+                _ => throw new IOException("The path could not be examined (errno " + errno + ")."),
+            };
         }
 
         var dev = OperatingSystem.IsMacOS() ? (ulong)BitConverter.ToUInt32(buffer, 0) : BitConverter.ToUInt64(buffer, 0);
