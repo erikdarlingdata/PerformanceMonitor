@@ -132,6 +132,11 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("GRANT UPDATE ON config.config_service TO viewer", sql, StringComparison.Ordinal);
 
+        /* #5085: the web server-tag endpoints run as viewer: the same two single-table writes mcp holds, and no
+           default-privileges shortcut. */
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;", sql, StringComparison.Ordinal);
+
         /* It must NOT widen the schema-wide config write to viewer (that grant stays admin-only, pinned here). */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin, viewer", sql, StringComparison.Ordinal);
@@ -348,6 +353,9 @@ public sealed class DarlingManagedRolesTests
            alert-settings row (never INSERT/DELETE — the row is a fixed singleton the service seeds). */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO mcp;", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT UPDATE ON config.config_alert_settings TO mcp;", sql, StringComparison.Ordinal);
+        /* The fleet server-tag write tools (#5085): the admin gate is exactly these two single-table grants. */
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSERT, UPDATE, DELETE ON config.config_alert_settings", sql, StringComparison.Ordinal);
 
         /* The beacon caveat: a config_alert_settings write fires the SECURITY INVOKER bump trigger, which UPDATEs
@@ -541,8 +549,13 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("INSERT INTO config_alert_log", sql, StringComparison.Ordinal);
         Assert.Contains("false, 'none', NULL, false,", sql, StringComparison.Ordinal);
 
-        /* NOT the rejected blanket grant: viewer/mcp never get a direct write on the history table. */
-        Assert.DoesNotContain("ON config.config_alert_log TO viewer", sql, StringComparison.Ordinal);
+        /* NOT the rejected blanket grant: viewer/mcp never get a table-level write on the history table. The one
+           privilege on it that viewer holds is the single-column dismiss grant (#4843), so every statement naming
+           the table TO viewer must be exactly that one. */
+        Assert.Equal(
+            new[] { "GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;" },
+            System.Text.RegularExpressions.Regex.Matches(sql, @"GRANT [^;]*? ON config\.config_alert_log TO [^;]*viewer[^;]*;")
+                .Select(m => m.Value).ToArray());
         Assert.DoesNotContain("ON config.config_alert_log TO mcp", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON config_alert_log TO viewer", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON config_alert_log TO mcp", sql, StringComparison.Ordinal);

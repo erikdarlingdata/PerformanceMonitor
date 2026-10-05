@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>Which side of the process answered a read (#4442 scope 2). <c>Web</c> is the <c>/api/read/*</c>
 /// dispatch loop, <c>Compose</c> is the one runner behind both the web composer and the MCP custom-view tool
 /// (recorded ONCE there, so an MCP custom-view call is not double-counted as both <c>Compose</c> and
-/// <c>Mcp</c>), and <c>Mcp</c> is reserved for the later per-tool wrapper — nothing records it yet.</summary>
+/// <c>Mcp</c>), and <c>Mcp</c> is every MCP tool call, recorded by <see cref="Mcp.McpToolLatencyFilter"/>.</summary>
 public enum ReadSurface
 {
     Web,
@@ -31,7 +31,10 @@ public enum ReadSurface
 /// <summary>How a read finished (#4442 scope 2), read by <see cref="ReadOutcomeClassifier"/>. <c>Ok</c> is
 /// success; <c>Timeout</c> is a caught 57014 whose message names the store's own statement_timeout;
 /// <c>Cancelled</c> is the caller's own token going away, or a 57014 this process cannot attribute to the
-/// store's timeout (a user cancel); <c>Limit</c> (#4605) is a caught 53400 <c>configuration_limit_exceeded</c>
+/// store's timeout (a user cancel); <c>FallbackRaw</c> (#5097) is a read whose interval-table path was chosen
+/// and then faulted, so it was answered from raw; <c>GateFailed</c> (#5097) is a read whose source decision
+/// (or the connection and transaction it needs) faulted, so it read raw without a decision — both are noted by
+/// the reader through <see cref="ReadScope"/> and only replace an otherwise-<c>Ok</c> outcome; <c>Limit</c> (#4605) is a caught 53400 <c>configuration_limit_exceeded</c>
 /// — the viewer/mcp role's <c>temp_file_limit</c> refusing a read's on-disk spill, a distinct "the store
 /// refused this on purpose" outcome from a wall-clock <c>Timeout</c>; <c>Error</c> is everything else.</summary>
 public enum ReadOutcome
@@ -41,6 +44,8 @@ public enum ReadOutcome
     Cancelled,
     Error,
     Limit,
+    FallbackRaw,
+    GateFailed,
 }
 
 /// <summary>
@@ -68,6 +73,21 @@ public enum ReadOutcome
 /// </summary>
 public sealed class ReadLatencyAccumulator
 {
+    /// <summary>The stored <c>outcome</c> text for a <see cref="ReadOutcome"/>: an explicit closed set, so
+    /// the two-word members spell <c>fallback_raw</c> / <c>gate_failed</c> and a member added without a
+    /// label throws instead of writing a guess.</summary>
+    internal static string OutcomeLabel(ReadOutcome outcome) => outcome switch
+    {
+        ReadOutcome.Ok => "ok",
+        ReadOutcome.Timeout => "timeout",
+        ReadOutcome.Cancelled => "cancelled",
+        ReadOutcome.Error => "error",
+        ReadOutcome.Limit => "limit",
+        ReadOutcome.FallbackRaw => "fallback_raw",
+        ReadOutcome.GateFailed => "gate_failed",
+        _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, "No stored label for this read outcome."),
+    };
+
     /// <summary>Log-scale bucket upper bounds in milliseconds, 10 ms to 120 s, plus an implicit final overflow
     /// bucket (anything above the last bound). ~24 finite bounds: fine enough near the floor (where "fast" and
     /// "fast enough" are a meaningful distinction) and coarse enough near the ceiling (where the only question
@@ -213,7 +233,7 @@ WHERE metric_time < $1";
             insert.Parameters.AddWithValue(metricTimeUtc);
             insert.Parameters.AddWithValue(row.Surface.ToString().ToLowerInvariant());
             insert.Parameters.AddWithValue(row.Route);
-            insert.Parameters.AddWithValue(row.Outcome.ToString().ToLowerInvariant());
+            insert.Parameters.AddWithValue(OutcomeLabel(row.Outcome));
             insert.Parameters.AddWithValue((int)Math.Min(row.Count, int.MaxValue));
             insert.Parameters.AddWithValue(row.TotalMs);
             insert.Parameters.AddWithValue(row.MaxMs);

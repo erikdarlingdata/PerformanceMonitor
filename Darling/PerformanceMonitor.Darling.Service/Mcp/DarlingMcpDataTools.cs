@@ -1602,7 +1602,8 @@ public sealed class DarlingMcpDataTools
                WRITES nulls, so a property would ship analysis_caveats: null on every clean answer — and it reads
                the process-wide ledger because the scheduled sweep builds a fresh analysis service per pass.
                A different layer from the collector rows above: 43 healthy collectors above a family the pass timed out reading. */
-            return JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
+            var collectionCaveats = await DarlingCollectionCaveatReader.ReadAsync(postgres, resolved.ServerId, logger, cancellationToken);
+            var healthJson = JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
             {
                 server = resolved.ServerName,
                 /* #3453: the build-attribution read. Nothing else on the MCP surface says WHAT build is
@@ -1771,6 +1772,7 @@ public sealed class DarlingMcpDataTools
                    column of the statement behind it follows. */
                 collection_health_age_seconds = collectionHealthAgeSeconds
             }, resolved.ServerId, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
+            return DarlingCollectionCaveatReader.AttachToJson(healthJson, collectionCaveats);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

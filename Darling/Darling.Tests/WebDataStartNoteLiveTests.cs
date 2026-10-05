@@ -177,6 +177,36 @@ public sealed class WebDataStartNoteLiveTests
         Assert.StartsWith("partial window: this panel's data starts at", answer["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
     }
 
+    /// <summary>The Memory Grant Pressure read over its own snapshot table (#4966): a server added two days ago whose
+    /// snapshots start a day back is asked for 7 days, through the real tool, so the note is added to rows the tool
+    /// returned. The data starts between the server's first collection and its first snapshot, as for the other
+    /// snapshot tables; the same server asked for a window its snapshots cover (rows from eight days back) gets none.</summary>
+    [Fact]
+    public async Task TheMemoryGrantsRead_WhoseSnapshotsStartInsideTheRange_GetsANoteNamingWhereItsDataStarts_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+        var firstRow = store.End.AddDays(-1);
+        await store.SeedTableAsync("memory_grant_stats", -496630, "web-data-start-memory-grants", added, firstRow, ct);
+
+        var payload = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants", 168, null, ct);
+        var answered = await WebDataStartNote.AddAsync(store.DataSource, "get_memory_grants", "web-data-start-memory-grants", 168, null, payload, null, ct);
+
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        Assert.NotNull(answer["window"]);
+        Assert.True(answer["window_truncated"]?.GetValue<bool>(), "the tool returned rows and the read gets its note");
+        var start = ParseUtc(answer["effective_start"]);
+        Assert.True(start >= added.AddSeconds(-1) && start <= firstRow.AddSeconds(1), "the data starts between the first collection and the first snapshot, got " + start.ToString("o", CultureInfo.InvariantCulture));
+        Assert.StartsWith("partial window: this panel's data starts at", answer["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Equal(start.Ticks, ParseUtc(answer["data_start_utc"]).Ticks);
+        Assert.Equal(TimeSpan.FromHours(168), ParseUtc(answer["window_end_utc"]) - ParseUtc(answer["window_start_utc"]));
+
+        await store.SeedTableAsync("memory_grant_stats", -496631, "web-data-start-memory-grants-covered", store.End.AddDays(-30), firstRow: store.End.AddDays(-8), ct);
+        var covered = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants-covered", 168, null, ct);
+        Assert.Same(covered, await WebDataStartNote.AddAsync(store.DataSource, "get_memory_grants", "web-data-start-memory-grants-covered", 168, null, covered, null, ct));
+    }
+
     /// <summary>What a PostgreSQL grid's answer looks like to the note: rows, with no status, error or floor of its
     /// own. The note reads the store, not the rows, so a stand-in keeps these two tests on the table each read lists.</summary>
     private const string StandInRows = "{\"server\":\"pg01\",\"rows\":[{\"n\":1}]}";

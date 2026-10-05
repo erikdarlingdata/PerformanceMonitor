@@ -102,6 +102,10 @@ const sandbox = {
   isBackedOff: policy.isBackedOff,
   defaultRefreshChoice: policy.defaultRefreshChoice,
   refreshLabel: policy.refreshLabel,
+  PAGE_REFRESH_CHOICES: policy.PAGE_REFRESH_CHOICES,
+  loadPageRefreshChoice: policy.loadPageRefreshChoice,
+  savePageRefreshChoice: policy.savePageRefreshChoice,
+  buildPageRefreshControl: () => ({ root: {}, select: {} }),
   getSession: async () => null,
   listViews: async () => [],
 };

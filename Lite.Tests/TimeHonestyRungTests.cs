@@ -46,6 +46,7 @@ namespace PerformanceMonitorLite.Tests;
 /// ring-buffer dedup compares in the watermark's frame and the autumn fall-back hour lands
 /// (<see cref="WatermarkFrameReadTests"/>; the dedup itself is pinned in <c>CpuUtilizationCollectorDefinitionTests</c>).</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class TimeHonestyRungTests
 {
     /// <summary>The v63 block: both ALTERs, the log line, and the argument in the words the next reader will
@@ -252,6 +253,7 @@ public sealed class TimeHonestyRungTests
 /// stamp exceeds every post-rung row's local stamp, so the plain read's answer and the pair read's answer are
 /// different rows in different frames. Scoped per server, because the flag flips per server.
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class WatermarkFrameReadTests : IClassFixture<SharedDuckDbFixture>
 {
     private const string Table = "cpu_utilization_stats";
@@ -358,6 +360,7 @@ public sealed class WatermarkFrameReadTests : IClassFixture<SharedDuckDbFixture>
 /// properties read carrying the clock pair, NULL zone included, into <c>get_server_properties</c>.
 /// </summary>
 [Collection("server-time-helper")]
+[Trait("Reads", "Darling")]
 public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     /* The server sits in America/New_York. The snapshot the store holds was collected under EDT (UTC-4); the

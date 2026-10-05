@@ -57,6 +57,7 @@ namespace Lite.Tests;
 /// those exact corpus lines as negative controls and the shipped forms as positive ones, so a pattern
 /// that has quietly stopped matching fails instead of reporting a clean bill of health.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class ParameterSensitivityFiringSignatureParityTests
 {
     /// <summary>

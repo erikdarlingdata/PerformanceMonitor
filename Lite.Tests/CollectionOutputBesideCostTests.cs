@@ -31,6 +31,7 @@ namespace Lite.Tests;
 /// reference one SQL const directly and read the other's source: <c>Lite.Tests</c> has no reference to any
 /// Darling project. What lives here is Lite's own behaviour and Lite's own wiring.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class CollectionOutputBesideCostTests
 {
     /* Named to mirror the Darling twin, which these fixtures are meant to match line-for-line. */

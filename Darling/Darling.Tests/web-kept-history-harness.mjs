@@ -87,6 +87,8 @@ let offered = null;
 let beyond = null;
 let observed = null;
 let notes = null;
+/* The custom-range scenarios' findings, whatever shape the scenario wants to report. */
+let found = null;
 
 /* The modules, unchanged, with charts.js replaced by a stand-in that records the window each chart was given. An
    editor scenario also loads the view editor (editor.js) and the modules it imports, with compose.js (the composed
@@ -98,7 +100,7 @@ const editorScenario = scenario.startsWith("editor");
    keeps its Range presets, and the widest of them that it hands tabNote, in module-private constants, so the scratch
    copy appends one line exporting RANGE_OPTIONS and WIDEST_RANGE_HOURS, the same way the editor copy exports
    ensureFieldConfigs. */
-const serverPageScenario = scenario === "offeredRanges";
+const serverPageScenario = scenario === "offeredRanges" || scenario.startsWith("custom");
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "kept-history-"));
 let modules;
 try {
@@ -106,16 +108,27 @@ try {
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
   fs.copyFileSync(path.join(jsDir, "panels.js"), path.join(scratch, "panels.js"));
+  fs.copyFileSync(path.join(jsDir, "grid-tools.js"), path.join(scratch, "grid-tools.js"));
   fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
+  /* Copied when present, so this harness keeps working in a tree where server-tabs.js does not import it. */
+  const findings = path.join("pages", "analysis-findings.js");
+  if (fs.existsSync(path.join(jsDir, findings))) fs.copyFileSync(path.join(jsDir, findings), path.join(scratch, findings));
   fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
+  for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js")]) {
+    const from = path.join(jsDir, rel);
+    if (!fs.existsSync(from)) continue;
+    fs.mkdirSync(path.dirname(path.join(scratch, rel)), { recursive: true });
+    fs.copyFileSync(from, path.join(scratch, rel));
+  }
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { el } from "./util.js";\n' +
       "export const SERIES_COLORS = ['#111', '#222', '#333', '#444', '#555', '#666'];\n" +
+      "export const CATEGORICAL_COLORS = SERIES_COLORS;\n" +
       "export const chartCalls = [];\n" +
       "export function normalizeColor(color) { return color; }\n" +
       "export function renderLineChart(opts) {\n" +
-      "  chartCalls.push({ windowStart: opts.windowStart, windowEnd: opts.windowEnd });\n" +
+      "  chartCalls.push({ windowStart: opts.windowStart, windowEnd: opts.windowEnd, points: (opts.points || []).length });\n" +
       "  return el('div', { class: 'chart-stub' });\n" +
       "}\n" +
       "export function zoomableLineChart(opts) { return renderLineChart(opts); }\n" +
@@ -223,6 +236,16 @@ const settleFast = async () => {
   for (let i = 0; i < 200; i++) await new Promise((r) => setImmediate(r));
 };
 
+/* One server tab built at RANGE with one read answering `body` and every other read answering nothing. Each panel the
+   tab drew is marked with its heading (the `where` the strips report), so a notice comes back naming its panel. */
+const tabFloor = (tabId, read, body) => {
+  answer = (url) => data(tool(url) === read ? body : {});
+  const tab = modules.tabs.SERVER_TABS.find((t) => t.id === tabId);
+  const panels = [].concat(tab.build("SRV1", RANGE));
+  for (const panel of panels) panel.where = panel.children[0] ? panel.children[0].textContent : "";
+  return panels;
+};
+
 const scenarios = {
   // The page asks for 30 days; the read keeps 7 and says so; the retry at 168 hours answers.
   loaderRefused: () => {
@@ -297,6 +320,54 @@ const scenarios = {
         : data({ trend: [{ time: "2026-01-01T00:00:00", wait_time_ms_per_second: 1 }] });
     return [modules.tabs.waitsPanel("SRV1", RANGE)];
   },
+  // #4966: a stat tile over a windowed read draws the note too (a stat is not a chart: its figures are the window's).
+  floorStatDraws: () => {
+    answer = () => data({ total: 5, window_truncated: true, truncation_note: FLOOR_NOTE });
+    return [modules.panels.renderPanel({ title: "Totals", read: "get_x", params: { server: "SRV1", hours: 168 }, viz: "stat", stats: [{ key: "total", label: "Total" }] })];
+  },
+  // A descriptor that opts out of the note draws none, over the same truncated answer.
+  floorOptOut: () => {
+    answer = () => data(WAITING_TASKS_FLOOR);
+    return [modules.panels.renderPanel({ ...waitingTasksPanel, windowNote: false })];
+  },
+  // A descriptor with a floorKey reads the nested fields, and a top-level pair beside them is not what it draws.
+  floorNested: () => {
+    answer = () =>
+      data({
+        tasks: WAITING_TASKS_FLOOR.tasks,
+        window: { window_truncated: true, truncation_note: "nested: the raw tier starts later" },
+        window_truncated: true,
+        truncation_note: "top level: not this one",
+      });
+    return [modules.panels.renderPanel({ ...waitingTasksPanel, floorKey: "window" })];
+  },
+  // The server tabs' own specs. Each scenario answers one read with the fields a truncated window carries and marks
+  // every panel the tab drew with its heading, so the test can say which panels drew the note.
+  floorMemoryGrants: () => tabFloor("memory", "get_memory_grants", {
+    window_truncated: true, truncation_note: FLOOR_NOTE,
+    window: [{ pool_id: 1, snapshots_in_window: 3 }], grants: [{ pool_id: 1, waiter_count: 0 }],
+  }),
+  floorResourceSemaphore: () => tabFloor("memory", "get_resource_semaphore", {
+    window_truncated: true, truncation_note: FLOOR_NOTE,
+    window: [{ pool_id: 1, resource_semaphore_id: 0, snapshots_in_window: 3 }], grants: [{ pool_id: 1, resource_semaphore_id: 0 }],
+  }),
+  floorPlanCorrections: () => tabFloor("queries", "get_plan_corrections", {
+    window_truncated: true, truncation_note: FLOOR_NOTE,
+    recommendations: [{ database_name: "db1", query_id: 1 }], automatic_tuning: [{ database_name: "db1" }],
+  }),
+  // An empty Plan Corrections answer: the note rides on the envelope. With the flag set it draws; without it, none.
+  floorPlanCorrectionsEmpty: () => tabFloor("queries", "get_plan_corrections", {
+    status: "empty", message: "No plan corrections in this window.", window_truncated: true, truncation_note: FLOOR_NOTE,
+  }),
+  floorPlanCorrectionsEmptyUntruncated: () => tabFloor("queries", "get_plan_corrections", {
+    status: "empty", message: "No plan corrections in this window.",
+  }),
+
+  floorClutter: () => tabFloor("queries", "get_query_store_clutter", {
+    databases: [{ database_name: "db1" }],
+    qs_overhead: { wait_stats: { included: [{ wait_type: "QDS_X" }] }, memory_clerk: { latest_memory_mb: 1 } },
+    window: { window_truncated: true, truncation_note: "nested: the raw tier starts later" },
+  }),
   // A hand-built composite over one read (File I/O).
   fileIoRefused: () => {
     answer = (url) => (asked(url) === "720" ? refusal(720, 168, 7) : data({ trend: [{ time: "2026-01-01T00:00:00", database_name: "db1", file_type: "ROWS", avg_read_latency_ms: 4 }] }));
@@ -383,6 +454,108 @@ const scenarios = {
   },
 };
 
+/* ── custom range (server page) ── */
+const T0 = "2026-01-02T07:15:00.000Z";
+const T1 = "2026-01-02T10:30:00.000Z";
+const NOW = Date.parse("2026-06-01T00:00:00.000Z");
+const customServerPage = async (server, opts) => {
+  const holder = new FakeNode("div");
+  modules.server.renderServer(holder, server, "cpu", opts);
+  await settleFast();
+  return holder;
+};
+const cpuRows = ["2026-01-02T06:00:00", "2026-01-02T07:30:00", "2026-01-02T09:00:00", "2026-01-02T10:00:00", "2026-01-02T11:00:00"].map((t) => ({ sample_time: t, cpu: 5 }));
+Object.assign(scenarios, {
+  // The mapping from a picked pair to as_of + whole hours, and every refusal.
+  customMapping: () => {
+    const r = (a, b) => modules.server.resolveCustomRange(Date.parse(a), Date.parse(b), NOW);
+    found = {
+      rounded: r(T0, T1),
+      exact: r("2026-01-02T06:30:00.000Z", T1),
+      subHour: r("2026-01-02T10:00:00.000Z", T1),
+      reversed: r(T1, T0),
+      future: r("2026-05-31T00:00:00.000Z", "2026-06-02T00:00:00.000Z"),
+      tooWide: r("2025-12-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z"),
+      live: modules.server.resolveCustomRange(NOW - 5 * 3600000, NOW - 1000, NOW),
+    };
+    return [];
+  },
+  // A past-end custom range through the page: its reads carry as_of=end and the rounded hours.
+  customPageReads: async () => {
+    answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
+    const holder = await customServerPage("SRV1");
+    const before = fetches.length;
+    const err = modules.server.applyCustomRange("SRV1", Date.parse(T0), Date.parse(T1), NOW);
+    await settleFast();
+    found = { err, reads: fetches.slice(before) };
+    return [holder];
+  },
+  // A rebuild (the poll) of a past-end range reads nothing; a live range and a preset read again; another server resets.
+  customPoll: async () => {
+    answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
+    await customServerPage("SRV1");
+    modules.server.applyCustomRange("SRV1", Date.parse(T0), Date.parse(T1), NOW);
+    await settleFast();
+    const reads = (from) => fetches.slice(from).filter((f) => f.startsWith("/api/read/"));
+    let mark = fetches.length;
+    await customServerPage("SRV1", { poll: true });
+    const pastPoll = reads(mark);
+    mark = fetches.length;
+    await customServerPage("SRV1");
+    const tabClick = reads(mark);
+    mark = fetches.length;
+    await customServerPage("SRV2", { poll: true });
+    const other = reads(mark);
+    modules.server.applyCustomRange("SRV3", Date.now() - 6 * 3600000, Date.now(), Date.now());
+    await settleFast();
+    mark = fetches.length;
+    await customServerPage("SRV3", { poll: true });
+    const livePoll = reads(mark);
+    found = { pastPoll, tabClick, other, livePoll };
+    return [];
+  },
+  // The custom range trims a chart's rows to the exact pair, and a read with no as_of keeps the preset and says so.
+  customTrimAndNotice: async () => {
+    answer = (url) => data(tool(url) === "get_cpu_utilization" ? { samples: cpuRows } : { rows: [] });
+    modules.util.setActiveRange({ server: "SRV1", hours: 4, startMs: Date.parse(T0), endMs: Date.parse(T1), asOf: T1 });
+    const chart = modules.panels.renderPanel({ ...cpuPanel, params: { server: "SRV1", hours: 4 } });
+    const latency = modules.panels.renderPanel({
+      title: "Read latency", read: "get_read_latency", params: { server: "SRV1", hours: 4 }, viz: "table", rowsKey: "rows",
+      columns: [{ key: "route", label: "Route" }], emptyText: "none",
+    });
+    const other = modules.panels.renderPanel({ ...cpuPanel, params: { server: "SRV2", hours: 4 } });
+    return [chart, latency, other];
+  },
+  // A read wider than the store keeps is asked again for the hours it keeps: the retry keeps the range's end, draws only
+  // the part of the range the store holds, and the notice says so.
+  customKeptHistory: async () => {
+    answer = (url) => (Number(asked(url)) > 4 ? refusal(asked(url), 4, 0) : data({ samples: cpuRows }));
+    modules.util.setActiveRange({ server: "SRV1", hours: 24, startMs: Date.parse("2026-01-01T11:15:00.000Z"), endMs: Date.parse(T1), asOf: T1 });
+    return [modules.panels.renderPanel({ ...cpuPanel, params: { server: "SRV1", hours: 24 } })];
+  },
+  // Aggregate rows stamped with their last sample survive the trim; per-point series rows do not.
+  customAggregateRows: async () => {
+    const latch = [{ latch_class: "A", captured_at: "2026-01-02T06:45:00" }, { latch_class: "B", captured_at: "2026-01-02T09:00:00" }];
+    answer = (url) => data(tool(url) === "get_latch_stats" ? { latches: latch } : { samples: cpuRows });
+    modules.util.setActiveRange({ server: "SRV1", hours: 4, startMs: Date.parse(T0), endMs: Date.parse(T1), asOf: T1 });
+    const lat = await modules.util.readTool("get_latch_stats", { server: "SRV1", hours: 4 });
+    const cpu = await modules.util.readTool("get_cpu_utilization", { server: "SRV1", hours: 4 });
+    found = { latchRows: lat.data.latches.length, seriesRows: cpu.data.samples.length };
+    return [];
+  },
+  // The label says where totals begin when the span is not whole hours.
+  customRoundedLabel: async () => {
+    answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
+    await customServerPage("SRV1");
+    const ctx = (a, b) => {
+      modules.server.applyCustomRange("SRV1", Date.parse(a), Date.parse(b), NOW);
+      return modules.server.rangeContext(NOW).label;
+    };
+    found = { rounded: ctx(T0, T1), whole: ctx("2026-01-02T06:30:00.000Z", T1) };
+    return [];
+  },
+});
+
 const chosen = scenarios[scenario];
 if (!chosen) throw new Error("unknown scenario " + scenario);
 
@@ -432,5 +605,7 @@ console.log(JSON.stringify({
   beyond,
   observed,
   notes,
+  found,
+  chartPoints: modules.charts.chartCalls.map((c) => c.points),
   rejections,
 }));

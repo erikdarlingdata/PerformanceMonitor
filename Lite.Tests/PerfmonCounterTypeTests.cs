@@ -35,6 +35,7 @@ namespace PerformanceMonitorLite.Tests;
 /// <c>PerformanceMonitor.Collectors</c> is kept free of both), so the gauge set is spelled twice and
 /// <see cref="TheCollectorsGaugeSet_IsTheVocabularysGaugeSet"/> is what holds the two spellings equal.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class PerfmonCounterTypeTests
 {
     /* ---- the vocabulary ------------------------------------------------------------------------------ */
@@ -208,6 +209,7 @@ public sealed class PerfmonCounterTypeTests
 /// the rung (NULL type), and a counter whose instances disagree on type — each read back with the type the
 /// chart classifies by, the delta as null where none was stored, and the kind word the MCP publishes.
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class PerfmonCounterTypeReadTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private readonly DuckDbInitializer _duckDb;

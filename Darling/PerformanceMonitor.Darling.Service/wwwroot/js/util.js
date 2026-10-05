@@ -187,7 +187,9 @@ export async function readWithinKeptHistory(fetchWith, params) {
   const kept = keptHoursOf(res.message);
   const asked = Number(params && params.hours);
   if (kept == null || !(kept >= 1 && asked > kept)) return res;
-  const retry = await fetchWith({ ...params, hours: kept });
+  /* The narrowed ask remembers the hours it replaces (NARROWED_FROM, a symbol, so it never reaches the query string):
+     a custom range on the server page carries through the retry instead of the read falling back to "ending now". */
+  const retry = await fetchWith({ ...params, hours: kept, [NARROWED_FROM]: asked });
   return retry.kind === "data" || retry.kind === "empty" ? { ...retry, keptHours: kept } : retry;
 }
 
@@ -198,7 +200,13 @@ export function readToolWithinKeptHistory(tool, params, signal) {
 
 /** The notice for a read readWithinKeptHistory narrowed to the widest window it takes, or null for any other result. */
 export function keptWindowStrip(res) {
+  if (res && !res.keptHours && res.presetHours) {
+    return noticeStrip("This panel shows the last " + res.presetHours + " hours, not the custom range: its read takes no end time.");
+  }
   if (!res || !res.keptHours) return null;
+  if (res.keptCustom) {
+    return noticeStrip(readLimitText(res.keptHours) + ", so it shows the part of the custom range the store still holds.");
+  }
   return noticeStrip(readLimitText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
 }
 
@@ -206,16 +214,20 @@ export function keptWindowStrip(res) {
  * The notice for a grid whose table starts covering the server after the window does (#4966): the response says so with
  * `window_truncated: true` and a `truncation_note` naming where the data starts (in the browser's zone by the time a
  * read reaches here: readTool composes it with windowNoteText). Null for any other response,
- * which is every window the table covered, a quiet start included. `desc` is the panel's descriptor: a grid draws the
- * note, a chart does not (its time axis already spans the asked range and shows the empty span), and a grid that names
- * `truncation_note` as its own note (the Queries tab's grids, #4231) draws it there, not twice. The note is text,
- * never markup (R4).
+ * which is every window the table covered, a quiet start included. `desc` is the panel's descriptor: a grid or a stat
+ * tile draws the note, a chart does not (its time axis already spans the asked range and shows the empty span), and a grid that names
+ * `truncation_note` as its own note (the Queries tab's grids, #4231) draws it there, not twice. A stat is safe to draw: a tile over a
+ * snapshot read that takes no `hours` never gets the fields from the server. A panel over the NEWEST snapshot of a read that also
+ * serves a window (the `grants` half of the memory reads, Automatic Tuning) sets `windowNote: false`, because its rows are a moment,
+ * not the window. A read that measures its own floor in a nested block (the Query Store clutter read's `window`) names it in
+ * `floorKey`, and the fields are read from there instead of from the top level. The note is text, never markup (R4).
  */
 export function windowFloorStrip(data, desc) {
-  if (!desc || desc.viz !== "table") return null;
+  if (!desc || desc.windowNote === false || (desc.viz !== "table" && desc.viz !== "stat")) return null;
   if (desc.noteKey === "truncation_note" || (desc.moreNoteKeys || []).includes("truncation_note")) return null;
-  if (!data || data.window_truncated !== true) return null;
-  const note = data.truncation_note;
+  const source = desc.floorKey ? getPath(data, desc.floorKey) : data;
+  if (!source || source.window_truncated !== true) return null;
+  const note = source.truncation_note;
   return typeof note === "string" && note.trim() ? noticeStrip(note) : null;
 }
 
@@ -340,6 +352,12 @@ export function axisTime(date, withDate) {
 export function windowFromHours(hours) {
   const h = Number(hours);
   if (!isFinite(h) || h < 1) return null;
+  /* A custom range's own reads span the exact pair the reader picked, not the whole hours they were fetched over. */
+  if (liveRange() && h === activeRange.hours) return { windowStart: activeRange.startMs, windowEnd: activeRange.endMs };
+  /* A read narrowed to the kept history draws the part of the custom range that history holds. */
+  if (liveRange() && h === activeRange.narrowedTo) {
+    return { windowStart: Math.max(activeRange.startMs, activeRange.endMs - h * 3600000), windowEnd: activeRange.endMs };
+  }
   const windowEnd = Date.now();
   return { windowStart: windowEnd - h * 3600000, windowEnd };
 }
@@ -464,8 +482,9 @@ export function buildQuery(params) {
    the poll loop (app.js refresh()) can tell whether the page it is about to re-render has already settled
    before firing a whole new set of the same reads on top of it. apiSendRead (a read that must travel as a POST,
    the composed-panel run) IS counted, so a slow panel holds the poll off and the refresh back-off measures it.
-   apiGetFleet and apiSend are deliberately NOT counted here — the fleet read is the one request every caller
-   already shares regardless of render (#3895), and a mutation is not a "page read" a poll tick should wait out. */
+   apiGetFleet IS counted too (each caller counts its own wait on the shared request), so a render whose reads are
+   fleet reads is timed for as long as it ran. apiSend is deliberately NOT counted: a mutation is not a "page read"
+   a poll tick should wait out. */
 let inFlightReads = 0;
 
 /** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
@@ -515,15 +534,20 @@ let fleetRequest = null;
  * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
  */
 export async function apiGetFleet() {
-  if (!fleetRequest) {
-    fleetRequest = fetchBody("/api/fleet").finally(() => {
-      fleetRequest = null;
-    });
-  }
+  inFlightReads++;
+  try {
+    if (!fleetRequest) {
+      fleetRequest = fetchBody("/api/fleet").finally(() => {
+        fleetRequest = null;
+      });
+    }
 
-  const shared = await fleetRequest;
-  if (shared.transportError) return { kind: "error", message: shared.transportError };
-  return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    const shared = await fleetRequest;
+    if (shared.transportError) return { kind: "error", message: shared.transportError };
+    return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+  } finally {
+    inFlightReads--;
+  }
 }
 
 /** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a
@@ -707,5 +731,93 @@ export function alertDeliveryState(a) {
 
 /** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). */
 export function readTool(tool, params, signal) {
-  return apiGet("/api/read/" + tool + buildQuery(params), signal).then(localizeWindowNote);
+  const plan = planCustomRange(tool, params);
+  return apiGet("/api/read/" + tool + buildQuery(plan.params), signal)
+    .then(localizeWindowNote)
+    .then((res) => finishCustomRange(res, plan));
+}
+
+/* ─────────────────────────── custom range (server page) ─────────────────────────── */
+
+/* The server page's custom start/end, or null for a preset. The page sets it before it builds a tab and clears it for
+   a preset and when the reader leaves the server page. It is applied here, to every read, so the ~100 `hours: ctx.hours`
+   call sites on the server tabs need no change: a read of the active server whose `hours` is the range's own whole-hour
+   count and that names no `as_of` is anchored at the range's end (`as_of`), and its rows are trimmed to the exact pair
+   afterwards. The window the read covers is then [end - hours, end], which starts at or before the picked start. */
+let activeRange = null;
+
+/** `{ server, hours, startMs, endMs, asOf }` for the page's custom range, or null to go back to the presets. `asOf` is
+ *  null for a range that ends now: its reads then name no `as_of` and the server anchors them at its own clock, and only
+ *  the start of the trim applies. */
+export function setActiveRange(range) {
+  activeRange = range || null;
+}
+
+/* The windowed reads that take no `as_of` (the catalog's `hours` without an `as_of`): they keep answering "the last N
+   hours ending now", and say so. Every other windowed read takes `as_of`. WebServerPageRangeTests pins this list
+   against the read catalog. */
+const READS_WITHOUT_AS_OF = new Set(["get_fleet_overview", "get_read_latency", "get_finops"]);
+
+/* The row fields that stamp one sample, event or run at an instant. A list under a read's answer whose rows carry one of
+   these is cut to the exact range. Fields that say when something last happened (last_execution_time and its kin, and
+   the captured_at / measured_at that some aggregate reads stamp with their LAST sample) are left alone: those rows are
+   totals over the window, not points in it. */
+const INSTANT_FIELDS = ["sample_time", "time", "collection_time", "event_time", "occurred_at", "deadlock_time", "change_time", "time_bucket"];
+
+/* The range belongs to the server page: a read from any other page is never anchored by it. */
+function liveRange() {
+  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  return activeRange && (hash === "" || hash.startsWith("#/server/")) ? activeRange : null;
+}
+
+/* Marks the retry readWithinKeptHistory sends for fewer hours, with the hours the read first asked for. */
+const NARROWED_FROM = Symbol("narrowedFrom");
+
+function planCustomRange(tool, params) {
+  const range = liveRange();
+  const narrowedFrom = params ? params[NARROWED_FROM] : undefined;
+  const asked = narrowedFrom != null ? Number(narrowedFrom) : Number(params && params.hours);
+  if (!range || !params || params.server !== range.server || asked !== range.hours || params.as_of != null) {
+    return { params, range: null, ignored: false };
+  }
+  if (READS_WITHOUT_AS_OF.has(tool)) return { params, range: null, ignored: true };
+  const withEnd = range.asOf ? { ...params, as_of: range.asOf } : params;
+  if (narrowedFrom == null) return { params: withEnd, range, ignored: false };
+  /* The kept-history retry: the same end, the hours the store keeps, and only the part of the range those hours reach. */
+  const kept = Number(params.hours);
+  range.narrowedTo = kept;
+  return { params: withEnd, range: { ...range, startMs: Math.max(range.startMs, range.endMs - kept * 3600000) }, ignored: false, narrowed: true };
+}
+
+function finishCustomRange(res, plan) {
+  if (plan.ignored) return res && (res.kind === "data" || res.kind === "empty") ? { ...res, presetHours: Number(plan.params.hours) } : res;
+  if (plan.narrowed && res && (res.kind === "data" || res.kind === "empty")) res = { ...res, keptCustom: true };
+  if (!plan.range || !res || res.kind !== "data") return res;
+  return { ...res, data: trimToRange(res.data, plan.range.startMs, plan.range.asOf ? plan.range.endMs : Infinity, 0) };
+}
+
+function trimToRange(node, startMs, endMs, depth) {
+  if (!node || typeof node !== "object" || Array.isArray(node) || depth > 2) return node;
+  let out = node;
+  for (const [key, value] of Object.entries(node)) {
+    let next = value;
+    if (Array.isArray(value)) {
+      const first = value.find((r) => r && typeof r === "object");
+      const field = first ? INSTANT_FIELDS.find((f) => f in first) : null;
+      if (field) {
+        next = value.filter((r) => {
+          const at = r && parseUtc(r[field]);
+          return !at || (at.getTime() >= startMs && at.getTime() <= endMs);
+        });
+        if (next.length === value.length) next = value;
+      }
+    } else {
+      next = trimToRange(value, startMs, endMs, depth + 1);
+    }
+    if (next !== value) {
+      if (out === node) out = { ...node };
+      out[key] = next;
+    }
+  }
+  return out;
 }
