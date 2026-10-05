@@ -114,6 +114,7 @@ try {
   const findings = path.join("pages", "analysis-findings.js");
   if (fs.existsSync(path.join(jsDir, findings))) fs.copyFileSync(path.join(jsDir, findings), path.join(scratch, findings));
   fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
+  for (const file of ["viewer-local.js", "viewer-local-ui.js"]) fs.copyFileSync(path.join(jsDir, file), path.join(scratch, file));
   for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js")]) {
     const from = path.join(jsDir, rel);
     if (!fs.existsSync(from)) continue;

@@ -21,6 +21,7 @@
           <div class="sub">SQL Server fleet monitor</div>
           <!-- Shell-level master pause (#4222d, #4666): one button that stops every page's auto-refresh.
                js/app.js sets the label/aria-label/title and the pressed state; see initAutoRefreshToggle(). -->
+          <button id="sidebar-collapse" class="sidebar-collapse" type="button" aria-expanded="true" title="Hide the sidebar"></button>
           <button id="auto-refresh-toggle" class="auto-refresh-toggle" type="button" aria-pressed="false"></button>
         </div>
         <nav class="nav">
@@ -42,6 +43,7 @@
         <div id="server-list"></div>
         <div class="server-list-header">Views</div>
         <div id="view-list"></div>
+        <div id="viewer-settings"></div>
       </aside>
       <main id="main"></main>
     </div>

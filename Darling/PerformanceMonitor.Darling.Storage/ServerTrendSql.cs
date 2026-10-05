@@ -340,6 +340,167 @@ public static class ServerTrendSql
             """;
     }
 
+    /// <summary>
+    /// The tempdb allocated-size trend (the tempdb tab's size chart): reserved plus unallocated MB, each averaged per
+    /// bucket (gauges), as one series. A bucket with no reading for a part counts that part as 0, as the chart does.
+    /// </summary>
+    public const string TempDbSize = $"""
+        SELECT
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            COALESCE(CAST(AVG(total_reserved_mb) AS double precision), 0) + COALESCE(CAST(AVG(unallocated_mb) AS double precision), 0) AS allocated_mb,
+            MIN(collection_time) AS first_collection_time,
+            COUNT(*) AS collection_count
+        FROM v_tempdb_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        GROUP BY 1
+        ORDER BY 1
+        """;
+
+    /// <summary>
+    /// The tempdb per-file I/O latency trend for <paramref name="nameCount"/> tempdb files in one query, grouped by
+    /// file and bucket: average read and write latency (summed stall ms over summed operations). The
+    /// <c>file_name IN (...)</c> list takes $4 onward and the bucket width the parameter after it. A row whose interval
+    /// is 0 (no delta knowable) or whose operation or stall delta is NULL is left out of the sums; a bucket with no
+    /// usable read row is dropped, and a bucket with usable rows but no reads (or writes) reads 0 ms for that side, as the chart does.
+    /// </summary>
+    public static string TempDbFileIo(int nameCount)
+    {
+        var nameParams = string.Join(", ", Enumerable.Range(0, nameCount).Select(i => "$" + (i + 4)));
+        var widthParam = "$" + (nameCount + 4);
+        return $$"""
+            WITH rated AS
+            (
+                SELECT
+                    file_name,
+                    collection_time,
+                    CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 AND delta_reads IS NOT NULL AND delta_stall_read_ms IS NOT NULL THEN delta_reads END AS rated_reads,
+                    CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 AND delta_reads IS NOT NULL AND delta_stall_read_ms IS NOT NULL THEN CAST(delta_stall_read_ms AS double precision) END AS rated_stall_read_ms,
+                    CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 AND delta_writes IS NOT NULL AND delta_stall_write_ms IS NOT NULL THEN delta_writes END AS rated_writes,
+                    CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 AND delta_writes IS NOT NULL AND delta_stall_write_ms IS NOT NULL THEN CAST(delta_stall_write_ms AS double precision) END AS rated_stall_write_ms
+                FROM v_file_io_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   database_name = 'tempdb'
+                AND   file_name IN ({{nameParams}})
+            )
+            SELECT
+                file_name,
+                GREATEST(date_bin(CAST({{widthParam}} AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                CASE WHEN SUM(rated_reads) > 0 THEN SUM(rated_stall_read_ms) / SUM(rated_reads) ELSE 0 END AS avg_read_latency_ms,
+                CASE WHEN SUM(rated_writes) > 0 THEN SUM(rated_stall_write_ms) / SUM(rated_writes) ELSE 0 END AS avg_write_latency_ms,
+                MIN(collection_time) AS first_collection_time,
+                COUNT(*) AS collection_count
+            FROM rated
+            GROUP BY file_name, 2
+            HAVING COUNT(rated_reads) > 0
+            ORDER BY file_name, 2
+            """;
+    }
+
+    /// <summary>
+    /// The file I/O throughput trend (MB/s) for <paramref name="nameCount"/> files in one query, grouped by file label
+    /// (<c>database.file</c>) and bucket. The label <c>IN (...)</c> list takes $4 onward and the bucket width the
+    /// parameter after it. Each side's rate is the summed delta bytes over the summed stored interval of the rows that
+    /// had that delta (the stored interval, or for rows that never stored one the gap since the file's previous
+    /// collection; an interval of 0 is dropped), divided by 1 MiB, so a row with a NULL delta adds no seconds.
+    /// </summary>
+    public static string FileIoThroughput(int nameCount)
+    {
+        var nameParams = string.Join(", ", Enumerable.Range(0, nameCount).Select(i => "$" + (i + 4)));
+        var widthParam = "$" + (nameCount + 4);
+        return $$"""
+            WITH with_interval AS
+            (
+                SELECT
+                    database_name || '.' || file_name AS file_label,
+                    collection_time,
+                    /* A counter reset on an old row (no stored interval) gives a negative delta; it is not a rate, so it counts as no delta. */
+                    CASE WHEN delta_read_bytes >= 0 THEN delta_read_bytes END AS delta_read_bytes,
+                    CASE WHEN delta_write_bytes >= 0 THEN delta_write_bytes END AS delta_write_bytes,
+                    /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+                       and the row is dropped. NULL (a pre-V127 row) falls back to the gap since the file's previous collection. */
+                    CASE WHEN sample_interval_seconds IS NULL
+                         THEN EXTRACT(EPOCH FROM (collection_time - LAG(collection_time) OVER (PARTITION BY server_id, database_name, file_name ORDER BY collection_time)))
+                         ELSE NULLIF(sample_interval_seconds, 0)
+                    END AS interval_seconds
+                FROM v_file_io_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   database_name || '.' || file_name IN ({{nameParams}})
+            )
+            SELECT
+                file_label,
+                GREATEST(date_bin(CAST({{widthParam}} AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                CAST(SUM(CASE WHEN interval_seconds > 0 AND delta_read_bytes IS NOT NULL THEN delta_read_bytes END) AS double precision)
+                    / SUM(CASE WHEN interval_seconds > 0 AND delta_read_bytes IS NOT NULL THEN interval_seconds END) / 1048576.0 AS read_mb_per_sec,
+                CAST(SUM(CASE WHEN interval_seconds > 0 AND delta_write_bytes IS NOT NULL THEN delta_write_bytes END) AS double precision)
+                    / SUM(CASE WHEN interval_seconds > 0 AND delta_write_bytes IS NOT NULL THEN interval_seconds END) / 1048576.0 AS write_mb_per_sec,
+                MIN(collection_time) AS first_collection_time,
+                COUNT(*) AS collection_count
+            FROM with_interval
+            GROUP BY file_label, 2
+            HAVING COUNT(CASE WHEN interval_seconds > 0 AND (delta_read_bytes IS NOT NULL OR delta_write_bytes IS NOT NULL) THEN 1 END) > 0
+            ORDER BY file_label, 2
+            """;
+    }
+
+    /// <summary>The tempdb files with the most I/O operations in the window, for the default selection. $1 server_id, $2/$3 window (naive UTC), $4 how many to return.</summary>
+    public const string TopTempDbFiles = """
+        SELECT
+            file_name
+        FROM v_file_io_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   database_name = 'tempdb'
+        GROUP BY file_name
+        ORDER BY SUM(COALESCE(delta_reads, 0) + COALESCE(delta_writes, 0)) DESC, file_name
+        LIMIT CAST($4 AS integer)
+        """;
+
+    /// <summary>The files (<c>database.file</c>) with the most bytes moved in the window, for the default selection. $1 server_id, $2/$3 window (naive UTC), $4 how many to return.</summary>
+    public const string TopIoFiles = """
+        SELECT
+            database_name || '.' || file_name AS file_label
+        FROM v_file_io_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   (delta_read_bytes > 0 OR delta_write_bytes > 0)
+        GROUP BY database_name, file_name
+        ORDER BY SUM(COALESCE(delta_read_bytes, 0) + COALESCE(delta_write_bytes, 0)) DESC, database_name || '.' || file_name
+        LIMIT CAST($4 AS integer)
+        """;
+
+    /// <summary>Whether the server has EVER recorded a tempdb space sample. $1 server_id.</summary>
+    public const string HasAnyTempDb = """
+        SELECT 1
+        FROM v_tempdb_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Whether the server has EVER recorded tempdb file I/O. $1 server_id.</summary>
+    public const string HasAnyTempDbFileIo = """
+        SELECT 1
+        FROM v_file_io_stats
+        WHERE server_id = $1
+        AND   database_name = 'tempdb'
+        LIMIT 1
+        """;
+
+    /// <summary>Whether the server has EVER recorded file I/O. $1 server_id.</summary>
+    public const string HasAnyFileIo = """
+        SELECT 1
+        FROM v_file_io_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
     /// <summary>The latch classes with the most wait time in the window, for the default selection. $1 server_id, $2/$3 window (naive UTC), $4 how many to return.</summary>
     public const string TopLatchClasses = """
         SELECT

@@ -709,7 +709,7 @@ function pickerControl(label, options, onPick) {
  * #3897 the read projected only the database, and nine tempdb files wrote over each other in this pivot.
  */
 export function fileIoPanel(server, ctx) {
-  const { panel, body } = panelShell("File I/O Latency", "avg read latency per database and file type, " + ctx.label);
+  const { panel, body } = panelShell("File I/O Latency", "avg read and write latency per database and file type, " + ctx.label);
   (async () => {
     const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -719,20 +719,24 @@ export function fileIoPanel(server, ctx) {
       ...r,
       line: r.database_name === r.file_type ? r.database_name : r.database_name + " " + r.file_type + (r.file_name ? " " + r.file_name : ""),
     }));
-    const { points, series } = pivot(rows, {
-      xKey: "time",
-      seriesKey: "line",
-      valueKey: "avg_read_latency_ms",
-    });
-    if (!series.length) return mount(body, [keptWindowStrip(res), emptyStrip("No file I/O samples in this window.")]);
+    /* The desktop draws read and write latency as two stacked charts over the same lines; so does this panel, one read
+       feeding both. Each chart keeps its own top series by its own peak; a bucket with no reads (or no writes) has a null figure and is left out of that chart rather than drawn as 0. */
+    const read = pivot(rows.filter((r) => r.avg_read_latency_ms != null), { xKey: "time", seriesKey: "line", valueKey: "avg_read_latency_ms" });
+    const write = pivot(rows.filter((r) => r.avg_write_latency_ms != null), { xKey: "time", seriesKey: "line", valueKey: "avg_write_latency_ms" });
+    if (!read.series.length && !write.series.length) return mount(body, [keptWindowStrip(res), emptyStrip("No file I/O samples in this window.")]);
     /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
     const notes = discontinuityNotes(res.data);
     /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. A
        narrowed read spans the hours it answered for. */
+    const draw = (title, data, id, empty) =>
+      data.series.length
+        ? [el("h4", { text: title }), zoomableLineChart({ points: data.points, xKey: "time", series: data.series, formatValue: (v) => Math.round(v) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours) }, id, chartZoomScope(ctx.hours))]
+        : [el("h4", { text: title }), emptyStrip(empty)];
     mount(body, [
       keptWindowStrip(res),
       notes.length ? noticeStrip(notes.join(" ")) : null,
-      zoomableLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(res.keptHours || ctx.hours) }, "file-io-latency", chartZoomScope(ctx.hours)),
+      ...draw("Read latency (ms)", read, "file-io-latency", "No reads in this window."),
+      ...draw("Write latency (ms)", write, "file-io-write-latency", "No writes in this window."),
     ]);
   })();
   return panel;
@@ -996,6 +1000,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No latch classes accumulated waits in this window."
       ),
+      namedTrendPanel(server, ctx, "latch"),
       table(
         "Spinlock Stats",
         "get_spinlock_stats",
@@ -1005,6 +1010,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No spinlocks recorded collisions in this window."
       ),
+      namedTrendPanel(server, ctx, "spinlock"),
     ],
   },
 
@@ -1459,7 +1465,11 @@ export const SERVER_TABS = [
         QUERY_STORE_REGRESSION_COLUMNS,
         ctx.label,
         "No query regressed against its baseline in this window. If this server has no history OLDER than " +
-          "the window there is nothing to compare against, and the read says so rather than calling it clear."
+          "the window there is nothing to compare against, and the read says so rather than calling it clear.",
+        2,
+        null,
+        null,
+        QUERY_STORE_REGRESSION_GROUPS
       ),
       /* #3797: the clutter view. ONE fetch, three panels — the per-database rows, the per-server QDS wait
          block and the per-server memory clerk — because the read composes four arms over two raw hypertables
@@ -1536,7 +1546,11 @@ export const SERVER_TABS = [
         "completions",
         LONG_QUERY_COLUMNS,
         ctx.label,
-        "No long-running completions in this window. This collector is opt-in and off by default."
+        "No long-running completions in this window. This collector is opt-in and off by default.",
+        2,
+        null,
+        null,
+        LONG_QUERY_GROUPS
       ),
       /* One read, two panels. get_plan_corrections returns both arrays, and automatic_tuning comes from an
          unconditional latest-snapshot query that ignores hours/limit entirely — so the second fetch was paying
@@ -1548,6 +1562,8 @@ export const SERVER_TABS = [
           viz: "table",
           rowsKey: "recommendations",
           columns: PLAN_CORRECTION_COLUMNS,
+          groups: PLAN_CORRECTION_GROUPS.groups,
+          defaultGroups: PLAN_CORRECTION_GROUPS.defaultGroups,
           emptyText: "No tuning recommendations in this window.",
         },
         {
@@ -1658,6 +1674,7 @@ export const SERVER_TABS = [
     label: "Activity",
     build: (server, ctx) => [
       perfmonPanel(server, ctx),
+      sessionStatsTrendPanel(server, ctx),
       ...fanout("get_session_stats", { server }, [
         { title: "Sessions", subtitle: SNAPSHOT, viz: "stat", stats: SESSION_STATS },
         {
@@ -3166,6 +3183,8 @@ const TOP_PROC_GROUPS = {
    same finding as one that went from 1 s to 4 s, and the percent alone cannot tell them apart. Extra
    duration is the ranking key and the column that says whether the regression matters at all. */
 /* Stays local: this page's column set differs from the catalog entry's. */
+const QUERY_STORE_REGRESSION_GROUPS = { groups: ["CPU and reads", "Executions and plans"], defaultGroups: [] };
+
 const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "severity", label: "Severity" },
   { key: "database_name", label: "Database" },
@@ -3176,17 +3195,17 @@ const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "baseline_duration_ms", label: "Baseline Duration", format: "ms" },
   { key: "recent_duration_ms", label: "Recent Duration", format: "ms" },
   { key: "cpu_regression_percent", label: "CPU +%", format: "num1" },
-  { key: "baseline_cpu_ms", label: "Baseline CPU", format: "ms" },
-  { key: "recent_cpu_ms", label: "Recent CPU", format: "ms" },
+  { key: "baseline_cpu_ms", label: "Baseline CPU", group: "CPU and reads", format: "ms" },
+  { key: "recent_cpu_ms", label: "Recent CPU", group: "CPU and reads", format: "ms" },
   { key: "io_regression_percent", label: "Reads +%", format: "num1" },
-  { key: "baseline_reads", label: "Base Reads (pages)", format: "int" },
-  { key: "recent_reads", label: "Recent Reads (pages)", format: "int" },
-  { key: "baseline_exec_count", label: "Base Execs", format: "int" },
-  { key: "recent_exec_count", label: "Recent Execs", format: "int" },
+  { key: "baseline_reads", label: "Base Reads (pages)", group: "CPU and reads", format: "int" },
+  { key: "recent_reads", label: "Recent Reads (pages)", group: "CPU and reads", format: "int" },
+  { key: "baseline_exec_count", label: "Base Execs", group: "Executions and plans", format: "int" },
+  { key: "recent_exec_count", label: "Recent Execs", group: "Executions and plans", format: "int" },
   /* A plan count that moved between the two sides is the first thing to check: a query that regressed
      while gaining a plan is usually a plan-choice problem, not a data one. */
-  { key: "baseline_plan_count", label: "Baseline Plans", format: "int" },
-  { key: "recent_plan_count", label: "Recent Plans", format: "int" },
+  { key: "baseline_plan_count", label: "Baseline Plans", group: "Executions and plans", format: "int" },
+  { key: "recent_plan_count", label: "Recent Plans", group: "Executions and plans", format: "int" },
   { key: "last_execution_time", label: "Last Exec", format: "time" },
 ];
 
@@ -3284,27 +3303,31 @@ const QS_CLERK_STATS = [
   { key: "qs_overhead.memory_clerk.latest_clerk_captured_at", label: "Clerk Last Seen", format: "time" },
 ];
 
+const LONG_QUERY_GROUPS = { groups: ["I/O and rows", "Session"], defaultGroups: [] };
+
 const LONG_QUERY_COLUMNS = [
   { key: "event_time", label: "Time", format: "time" },
   { key: "statement", label: "Statement", render: (r) => codeDisclosure(r.statement) },
   { key: "event_type", label: "Event Type" },
   { key: "duration_ms", label: "Duration", format: "ms" },
   { key: "cpu_ms", label: "CPU", format: "ms" },
-  { key: "logical_reads", label: "Logical Reads", format: "int" },
-  { key: "physical_reads", label: "Physical Reads", format: "int" },
-  { key: "writes", label: "Writes", format: "int" },
-  { key: "row_count", label: "Rows", format: "int" },
+  { key: "logical_reads", label: "Logical Reads", group: "I/O and rows", format: "int" },
+  { key: "physical_reads", label: "Physical Reads", group: "I/O and rows", format: "int" },
+  { key: "writes", label: "Writes", group: "I/O and rows", format: "int" },
+  { key: "row_count", label: "Rows", group: "I/O and rows", format: "int" },
   { key: "result", label: "Result" },
   { key: "database_name", label: "Database" },
   { key: "object_name", label: "Object" },
-  { key: "session_id", label: "SPID", format: "int" },
-  { key: "client_app_name", label: "App" },
-  { key: "server_principal_name", label: "Login" },
+  { key: "session_id", label: "SPID", group: "Session", format: "int" },
+  { key: "client_app_name", label: "App", group: "Session" },
+  { key: "server_principal_name", label: "Login", group: "Session" },
   { key: "query_hash", label: "Query Hash" },
 ];
 
 /* The Script, Executable and Revertable columns the desktop grid adds are not here: get_plan_corrections
    returns no implementation script or action flags, and the page does not rebuild them. */
+const PLAN_CORRECTION_GROUPS = { groups: ["Plans", "Plan metrics", "Lifecycle"], defaultGroups: [] };
+
 const PLAN_CORRECTION_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
@@ -3315,21 +3338,21 @@ const PLAN_CORRECTION_COLUMNS = [
   { key: "score", label: "Score", format: "int" },
   { key: "estimated_gain_seconds", label: "Est. gain (s)", format: "num1" },
   { key: "query_id", label: "Query ID", format: "int" },
-  { key: "regressed_plan_id", label: "Regressed Plan", format: "int" },
-  { key: "last_good_plan_id", label: "Last Good Plan", format: "int" },
-  { key: "last_good_plan_forcing_type", label: "Forcing Type" },
-  { key: "last_good_plan_is_forced", label: "Forced", format: "bool" },
-  { key: "last_good_plan_force_failure_reason", label: "Force Failure", wrap: true },
-  { key: "regressed_plan_execution_count", label: "Regressed Execs", format: "int" },
-  { key: "regressed_plan_cpu_time_average_ms", label: "Regressed CPU (ms)", format: "num2" },
-  { key: "last_good_plan_execution_count", label: "Last Good Execs", format: "int" },
-  { key: "last_good_plan_cpu_time_average_ms", label: "Last Good CPU (ms)", format: "num2" },
-  { key: "valid_since", label: "Valid Since", format: "time" },
-  { key: "last_refresh", label: "Last Refresh", format: "time" },
-  { key: "execute_action_initiated_by", label: "Executed By" },
-  { key: "execute_action_initiated_time", label: "Executed At", format: "time" },
-  { key: "revert_action_initiated_by", label: "Reverted By" },
-  { key: "revert_action_initiated_time", label: "Reverted At", format: "time" },
+  { key: "regressed_plan_id", label: "Regressed Plan", group: "Plans", format: "int" },
+  { key: "last_good_plan_id", label: "Last Good Plan", group: "Plans", format: "int" },
+  { key: "last_good_plan_forcing_type", label: "Forcing Type", group: "Plans" },
+  { key: "last_good_plan_is_forced", label: "Forced", group: "Plans", format: "bool" },
+  { key: "last_good_plan_force_failure_reason", label: "Force Failure", group: "Plans", wrap: true },
+  { key: "regressed_plan_execution_count", label: "Regressed Execs", group: "Plan metrics", format: "int" },
+  { key: "regressed_plan_cpu_time_average_ms", label: "Regressed CPU (ms)", group: "Plan metrics", format: "num2" },
+  { key: "last_good_plan_execution_count", label: "Last Good Execs", group: "Plan metrics", format: "int" },
+  { key: "last_good_plan_cpu_time_average_ms", label: "Last Good CPU (ms)", group: "Plan metrics", format: "num2" },
+  { key: "valid_since", label: "Valid Since", group: "Lifecycle", format: "time" },
+  { key: "last_refresh", label: "Last Refresh", group: "Lifecycle", format: "time" },
+  { key: "execute_action_initiated_by", label: "Executed By", group: "Lifecycle" },
+  { key: "execute_action_initiated_time", label: "Executed At", group: "Lifecycle", format: "time" },
+  { key: "revert_action_initiated_by", label: "Reverted By", group: "Lifecycle" },
+  { key: "revert_action_initiated_time", label: "Reverted At", group: "Lifecycle", format: "time" },
 ];
 
 const AUTO_TUNING_COLUMNS = [
@@ -3806,6 +3829,172 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
     }, "clerk-trend|" + server, chartZoomScope(ctx.hours)),
     typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? el("div", { class: "mp-metric-note", text: trend.data.aggregate_note }) : null,
   ]);
+}
+
+/**
+ * The latch and spinlock trends get_server_trend serves as one line per name (#5170). The options are the classes of the
+ * table above (heaviest first, read with the same window); the heaviest five are checked the first time, as the read's
+ * own default does. The checked set and search text live in multi-picker.js's module state keyed by kind and server, so
+ * the 60 s rebuild keeps them.
+ */
+const NAMED_TRENDS = {
+  latch: {
+    title: "Latch Trend",
+    optionsTool: "get_latch_stats",
+    rowsKey: "latches",
+    nameKey: "latch_class",
+    seriesKey: "latch_class",
+    unit: "ms/s",
+    noun: "latch class",
+    label: "Latch classes",
+    note: "Wait ms/s, one line per checked latch class.",
+    noOptions: "No latch classes accumulated waits in this window.",
+  },
+  spinlock: {
+    title: "Spinlock Trend",
+    optionsTool: "get_spinlock_stats",
+    rowsKey: "spinlocks",
+    nameKey: "spinlock_name",
+    seriesKey: "spinlock_name",
+    unit: "collisions/s",
+    noun: "spinlock",
+    label: "Spinlocks",
+    note: "Collisions/s, one line per checked spinlock.",
+    noOptions: "No spinlocks recorded collisions in this window.",
+  },
+};
+const MAX_NAMES_CHARTED = 10;
+const DEFAULT_NAMES_CHECKED = 5;
+
+export function namedTrendPanel(server, ctx, kind) {
+  const spec = NAMED_TRENDS[kind];
+  const { panel, body } = panelShell(spec.title, ctx.label + ", with a trend for the " + spec.noun + "s you check");
+  (async () => {
+    const res = await readToolWithinKeptHistory(spec.optionsTool, { server, hours: ctx.hours, top: MAX_NAMES_CHARTED }, ctx && ctx.signal);
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message || spec.noOptions)]);
+    const options = (res.data[spec.rowsKey] || []).map((r) => r[spec.nameKey]).filter(Boolean);
+    if (!options.length) return mount(body, emptyStrip(spec.noOptions));
+
+    const chartSlot = el("div", {}, [loadingStrip()]);
+    const picker = multiPicker({
+      key: kind + "|" + server,
+      label: spec.label,
+      options,
+      max: MAX_NAMES_CHARTED,
+      noun: spec.noun,
+      defaultsLabel: "Top " + spec.noun + "s",
+      defaults: (o) => o.slice(0, DEFAULT_NAMES_CHECKED),
+      onChange: (checked) => drawNamedTrends(chartSlot, server, ctx, kind, checked),
+    });
+    mount(body, [picker.node, chartSlot]);
+    drawNamedTrends(chartSlot, server, ctx, kind, picker.checked());
+    picker.restoreFocus();
+  })();
+  return panel;
+}
+
+/* The newest named-trend draw's AbortController per kind and server: a new draw aborts the previous one's read. */
+const namedDraws = new Map();
+
+export async function drawNamedTrends(slot, server, ctx, kind, checked) {
+  const spec = NAMED_TRENDS[kind];
+  const names = checked.slice(0, MAX_NAMES_CHARTED);
+  const drawKey = kind + "|" + server;
+  const previous = namedDraws.get(drawKey);
+  if (previous) previous.abort();
+  const mine = new AbortController();
+  namedDraws.set(drawKey, mine);
+  if (!names.length) {
+    mount(slot, emptyStrip("Check at least one " + spec.noun + " to chart its trend."));
+    return;
+  }
+  mount(slot, loadingStrip());
+  const signal = ctx && ctx.signal && typeof AbortSignal !== "undefined" && AbortSignal.any ? AbortSignal.any([mine.signal, ctx.signal]) : mine.signal;
+  const trend = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours, names: names.join(",") }, signal);
+  if (namedDraws.get(drawKey) !== mine || mine.signal.aborted) return;
+
+  if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
+  /* The read names the series it found no samples for under missing_names at the top level on a partial match and
+     under hints on an empty answer. */
+  const missingOf = (data) => {
+    const top = data && Array.isArray(data.missing_names) ? data.missing_names : [];
+    const hinted = data && data.hints && Array.isArray(data.hints.missing_names) ? data.hints.missing_names : [];
+    return [...new Set([...top, ...hinted])];
+  };
+  const missingStrip = (data) => (missingOf(data).length ? noticeStrip("No samples in this window for: " + missingOf(data).join(", ") + ".") : null);
+  if (trend.kind === "empty") {
+    return mount(slot, [keptWindowStrip(trend), missingStrip(trend.hints || {}), emptyStrip(trend.message || "No " + spec.noun + " samples in this window.")]);
+  }
+
+  const drawn = (trend.data.series || []).map((s, i) => ({
+    key: "n" + i,
+    label: s[spec.seriesKey],
+    rows: s.trend || [],
+    color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length],
+  }));
+  if (!drawn.length) return mount(slot, [keptWindowStrip(trend), missingStrip(trend.data), emptyStrip("No " + spec.noun + " samples in this window.")]);
+  /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+  const notes = discontinuityNotes(trend.data);
+  mount(slot, [
+    keptWindowStrip(trend),
+    notes.length ? noticeStrip(notes.join(" ")) : null,
+    missingStrip(trend.data),
+    zoomableLineChart({
+      points: mergeSeriesRows(drawn, "time", kind === "latch" ? "wait_time_ms_per_second" : "collisions_per_second"),
+      xKey: "time",
+      series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
+      formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+      unit: spec.unit,
+      ...windowFromHours(trend.keptHours || ctx.hours),
+    }, kind + "-trend|" + server, chartZoomScope(ctx.hours)),
+    el("div", { class: "mp-metric-note", text: spec.note }),
+    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? el("div", { class: "mp-metric-note", text: trend.data.aggregate_note }) : null,
+  ]);
+}
+
+/** The session counts the Activity tab charts; the read also carries databases_with_connections and the top application and host. */
+const SESSION_TREND_SERIES = [
+  { key: "total_sessions", label: "Total" },
+  { key: "running_sessions", label: "Running" },
+  { key: "sleeping_sessions", label: "Sleeping" },
+  { key: "background_sessions", label: "Background" },
+  { key: "dormant_sessions", label: "Dormant" },
+  { key: "idle_sessions_over_30min", label: "Idle over 30 min" },
+  { key: "sessions_waiting_for_memory", label: "Waiting for memory" },
+];
+
+/** Session Stats trend: the server-wide session counts per bucket, with the newest bucket's top application and host as text. */
+export function sessionStatsTrendPanel(server, ctx) {
+  const { panel, body } = panelShell("Session Stats Trend", ctx.label);
+  (async () => {
+    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: "session_stats", hours: ctx.hours }, ctx && ctx.signal);
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message || "No session samples in this window.")]);
+    const points = res.data.trend || [];
+    if (!points.length) return mount(body, [keptWindowStrip(res), emptyStrip("No session samples in this window.")]);
+    /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+    const notes = discontinuityNotes(res.data);
+    const newest = points[points.length - 1];
+    const top = [];
+    if (newest.top_application_name) top.push("application " + newest.top_application_name + " (" + newest.top_application_connections + ")");
+    if (newest.top_host_name) top.push("host " + newest.top_host_name + " (" + newest.top_host_connections + ")");
+    mount(body, [
+      keptWindowStrip(res),
+      notes.length ? noticeStrip(notes.join(" ")) : null,
+      zoomableLineChart({
+        points,
+        xKey: "time",
+        series: SESSION_TREND_SERIES.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
+        formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+        unit: "sessions",
+        ...windowFromHours(res.keptHours || ctx.hours),
+      }, "server-trend|" + server + "|session_stats", chartZoomScope(ctx.hours)),
+      top.length ? el("div", { class: "mp-metric-note", text: "Top in the newest bucket: " + top.join("; ") + "." }) : null,
+      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? el("div", { class: "mp-metric-note", text: res.data.aggregate_note }) : null,
+    ]);
+  })();
+  return panel;
 }
 
 /**
