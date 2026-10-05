@@ -118,7 +118,7 @@ public sealed class McpToolsListBudgetTests
        41,669 bytes (measured, every field on every collector) to 20,707 bytes, under the shared 32 KB budget. */
 
     /* #4198 (lane TH): +193 bytes for get_active_queries' new full_query_text opt-in parameter and its
-       limit description's #4198 note (query_text, the wide field, is now a 500-char preview by default;
+       limit description's #4198 note (query_text, the wide field, is now a 500-char (now 400) preview by default;
        limit is 25, down from 50); the preview note itself moved after <<GUIDE>> to stay under the head's
        own 620-char target, so the served head is unchanged at 616. */
     /* #4198 (lane W2): -6 bytes for renaming get_active_queries' full_query_text opt-in to full_text — the

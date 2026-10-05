@@ -117,6 +117,81 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         }
     }
 
+    /// <summary>
+    /// #4966: the same 50 heavy rows, read over a window the store does NOT cover (24 hours back, 49 minutes held), so the three
+    /// window-floor keys and the 177-character note ride on the payload. The covered case is 30,223 bytes; this
+    /// one pins that the cut window's extra keys do not push the default call over it.
+    /// </summary>
+    [Fact]
+    public async Task GetActiveQueries_Default_WithACutWindow_StaysUnderResponseBudget_WithFiftyRealisticRows()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live active-queries budget test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const string cutServerName = "darling-mcp-active-queries-budget-cut-e2e";
+        var cutServerId = ServerIdHelper.GetDeterministicHashCode(cutServerName);
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, cutServerId, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, cutServerId, cutServerName, ct);
+            var baseTime = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-49);
+            var wideText = BuildQueryText(seed: 999, approxLength: 2_800);
+            await SeedFiftyHeavyRowsAsync(connection, cutServerId, cutServerName, wideText, baseTime, ct);
+
+            var cutJson = await DarlingMcpSessionTools.GetActiveQueries(postgres, cutServerName, hours_back: 24);
+            using var cutParsed = JsonDocument.Parse(cutJson);
+            Assert.True(cutParsed.RootElement.GetProperty("window_truncated").GetBoolean(), "the 24-hour window must read as cut.");
+            Assert.False(string.IsNullOrEmpty(cutParsed.RootElement.GetProperty("effective_start").GetString()));
+            var note = cutParsed.RootElement.GetProperty("truncation_note").GetString()!;
+            Assert.InRange(note.Length, 150, 250);
+            Assert.Equal(25, cutParsed.RootElement.GetProperty("snapshots_returned").GetInt32());
+
+            var cutBytes = Encoding.UTF8.GetByteCount(cutJson);
+            _output.WriteLine($"get_active_queries default call, cut window: {cutBytes:N0} bytes (budget {McpResponseBudget.DefaultBytes:N0}), note {note.Length} characters.");
+            Assert.True(cutBytes < McpResponseBudget.DefaultBytes,
+                $"get_active_queries' default call over a cut window is {cutBytes:N0} bytes, at or over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cutServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>The same 50 heavy rows the covered case plants (ten near 2,800 characters, the rest near 700), for the cut-window case below.</summary>
+    private static async Task SeedFiftyHeavyRowsAsync(NpgsqlConnection connection, int serverId, string serverName, string wideText, DateTime baseTime, System.Threading.CancellationToken ct)
+    {
+        for (var i = 0; i < 50; i++)
+        {
+            var t = DarlingMcpTestData.Naive(baseTime.AddMinutes(i));
+            var db = i % 3 == 0 ? "StackOverflow" : i % 3 == 1 ? "AdventureWorks" : "ReportingDW";
+            var isWide = i >= 40;
+            var text = isWide ? wideText : BuildQueryText(seed: i, approxLength: 700);
+            var hasWait = i % 4 == 0;
+
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, elapsed_time_formatted, query_text, status, blocking_session_id, wait_type, wait_time_ms, cpu_time_ms, total_elapsed_time_ms, reads, writes, logical_reads, granted_query_memory_gb, transaction_isolation_level, dop, parallel_worker_count, login_name, host_name, program_name, open_transaction_count, request_id, wait_resource, percent_complete, query_hash)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)",
+                CollectionIdGenerator.Next(), t, serverId, serverName, 100 + i, db,
+                "00 00:00:05.125", text, i % 5 == 0 ? "suspended" : "running", 0,
+                hasWait ? "PAGEIOLATCH_SH" : null, hasWait ? 250L + i : 0L, 1000L + (i * 37), 1500L + (i * 37),
+                10_000L + (i * 123), 50L + i, i % 7, i % 6 == 0 ? 0.75m : 0m,
+                i % 2 == 0 ? "Read Committed" : "Repeatable Read", i % 6 == 0 ? 8 : 1, i % 6 == 0 ? 4 : 0,
+                i % 2 == 0 ? "app_svc_prod" : @"CONTOSO\svc_reporting", $"APPSRV{i % 5:D2}",
+                i % 2 == 0 ? ".Net SqlClient Data Provider" : "MyOrderService.Worker", i % 3 == 0 ? 1 : 0, 0,
+                "KEY: 5:72057594043432960 (a1b2c3d4e5f6)", 12.5m + i, "0x" + (0x1A2B3C4D5E6F7080L + i).ToString("X16"));
+        }
+    }
+
     /// <summary>Builds ASCII SQL text (a big literal IN-list, a realistic cause of an outsized capture) near
     /// <paramref name="approxLength"/> characters, so its length in .NET UTF-16 chars and its size in UTF-8
     /// bytes stay close.</summary>
@@ -136,10 +211,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         return sb.ToString();
     }
 
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    private static Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct) => DeleteRowsAsync(connection, ServerId, ct);
+
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM query_snapshots WHERE server_id = {ServerId}; DELETE FROM servers WHERE server_id = {ServerId};",
+            $"DELETE FROM query_snapshots WHERE server_id = {serverId}; DELETE FROM servers WHERE server_id = {serverId};",
             connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
