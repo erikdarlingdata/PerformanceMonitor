@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
@@ -18,11 +19,12 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// A right-click on a server-tab line chart also offers Show Active Queries / Blocking / Deadlocks at This Time (the
-/// desktop's chart drill-downs). Each item sets the server's custom range to the time of the drawn point nearest the
-/// click +- 30 minutes (the smallest range the picker allows) and moves the hash to that tab. These run the shipped
-/// <c>charts.js</c> under Node (<c>web-chart-at-time-harness.mjs</c>), and read <c>server-tabs.js</c> for the charts that
-/// must hand the server over.
+/// A right-click on a server-tab line chart also offers the one item that matches the chart: Show Blocking at This Time
+/// on the blocking charts, Show Deadlocks at This Time on the deadlock charts, Show Active Queries at This Time on the
+/// rest (the desktop's chart drill-downs). Each item sets the server's custom range to the time of the drawn point
+/// nearest the click +- 30 minutes (the smallest range the picker allows) and moves the hash to that tab. These run the
+/// shipped <c>charts.js</c> under Node (<c>web-chart-at-time-harness.mjs</c>), and read <c>server-tabs.js</c> for the
+/// charts that must hand the server over and name their item.
 /// </summary>
 public sealed class WebChartAtTimeBehaviourTests
 {
@@ -71,12 +73,17 @@ public sealed class WebChartAtTimeBehaviourTests
         return calls[0];
     }
 
-    [Fact]
-    public void ARightClickOnAServerChart_OffersTheThreeItemsAfterTheUsualOnes()
+    private static readonly string[] UsualItems = { "Copy Image", "Save Image As...", "Export Data to CSV..." };
+
+    [Theory]
+    [InlineData("rightClickItems", "Show Active Queries at This Time")]  // a chart that names no item: the default
+    [InlineData("unknownItemItems", "Show Active Queries at This Time")] // an item the page does not know: the default
+    [InlineData("blockingItems", "Show Blocking at This Time")]
+    [InlineData("deadlockItems", "Show Deadlocks at This Time")]
+    public void ARightClickOnAServerChart_OffersOnlyTheOneItemThatMatchesIt_AfterTheUsualOnes(string chart, string item)
     {
-        Assert.Equal(
-            new[] { "Copy Image", "Save Image As...", "Export Data to CSV...", "Show Active Queries at This Time", "Show Blocking at This Time", "Show Deadlocks at This Time" },
-            Strings(Run().GetProperty("rightClickItems")));
+        // The desktop's chart drill-downs give each chart the one item that matches what it plots, not all three on every chart.
+        Assert.Equal(UsualItems.Append(item).ToArray(), Strings(Run().GetProperty(chart)));
     }
 
     [Theory]
@@ -163,9 +170,8 @@ public sealed class WebChartAtTimeBehaviourTests
     public void AChartWithoutAtTime_AndAMenuOpenedFromTheButton_ShowNoneOfTheItems()
     {
         var r = Run();
-        var usual = new[] { "Copy Image", "Save Image As...", "Export Data to CSV..." };
-        Assert.Equal(usual, Strings(r.GetProperty("noAtTimeItems")));
-        Assert.Equal(usual, Strings(r.GetProperty("buttonItems")));
+        Assert.Equal(UsualItems, Strings(r.GetProperty("noAtTimeItems")));
+        Assert.Equal(UsualItems, Strings(r.GetProperty("buttonItems")));
     }
 
     [Fact]
@@ -175,20 +181,19 @@ public sealed class WebChartAtTimeBehaviourTests
         // menu and the button (Shift+F10 on it raises a contextmenu with the button as the target) would map their x through
         // the plot and open an hour the user never pointed at.
         var r = Run();
-        var usual = new[] { "Copy Image", "Save Image As...", "Export Data to CSV..." };
-        Assert.Equal(usual, Strings(r.GetProperty("offPlotLegendItems")));
-        Assert.Equal(usual, Strings(r.GetProperty("offPlotStatusItems")));
-        Assert.Equal(usual, Strings(r.GetProperty("offPlotButtonItems")));
-        // The menu from a click on the plot held the six items before it was right-clicked itself.
-        Assert.Equal(6, r.GetProperty("offPlotMenuBefore").GetInt32());
-        Assert.Equal(usual, Strings(r.GetProperty("offPlotMenuItems")));
+        Assert.Equal(UsualItems, Strings(r.GetProperty("offPlotLegendItems")));
+        Assert.Equal(UsualItems, Strings(r.GetProperty("offPlotStatusItems")));
+        Assert.Equal(UsualItems, Strings(r.GetProperty("offPlotButtonItems")));
+        // The menu from a click on the plot held the usual three and its one at-this-time item before it was right-clicked itself.
+        Assert.Equal(UsualItems.Length + 1, r.GetProperty("offPlotMenuBefore").GetInt32());
+        Assert.Equal(UsualItems, Strings(r.GetProperty("offPlotMenuItems")));
     }
 
     [Fact]
     public void AMenuHeldOpenAcrossTheMinutePollRebuild_KeepsItsClickedTime()
     {
         var r = Run();
-        Assert.Equal(6, r.GetProperty("rebuiltItems").GetArrayLength());
+        Assert.Equal(UsualItems.Length + 1, r.GetProperty("rebuiltItems").GetArrayLength());
         Assert.Equal(ClickedMs, r.GetProperty("rebuiltMiddle").GetInt64());
     }
 
@@ -209,5 +214,65 @@ public sealed class WebChartAtTimeBehaviourTests
             var text = File.ReadAllText(PathTo(new[] { "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js" }.Concat(other).ToArray()));
             Assert.DoesNotContain("atTime", text);
         }
+    }
+
+    /// <summary>
+    /// The bracketed span that opens at <paramref name="open"/> ("(" or "{"), through its matching close. A bracket inside a
+    /// "double-quoted" string (an empty-state sentence) does not count.
+    /// </summary>
+    private static string Balanced(string text, int open)
+    {
+        var depth = 0;
+        for (var i = open; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c == '"')
+            {
+                for (i++; text[i] != '"'; i++)
+                {
+                    if (text[i] == '\\') i++;
+                }
+            }
+            else if (c is '(' or '{')
+            {
+                depth++;
+            }
+            else if (c is ')' or '}')
+            {
+                depth--;
+                if (depth == 0) return text[open..(i + 1)];
+            }
+        }
+
+        throw new InvalidOperationException("no closing bracket after index " + open);
+    }
+
+    [Fact]
+    public void TheBlockingAndDeadlockCharts_NameTheirOwnItem_AndNoOtherChartDoes()
+    {
+        // The desktop gives Blocking Events, Lock Waits and the blocking severity chart "Show Blocking at This Time", and the
+        // deadlock charts "Show Deadlocks at This Time". Every other server-tab line chart keeps the Active Queries default.
+        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+
+        // line() panels: Blocking Events and Deadlocks sit on both the Overview tab and the Blocking tab.
+        foreach (var (title, item, count) in new[] { ("Blocking Events", "blocking", 2), ("Deadlocks", "deadlocks", 2), ("Lock Waits", "blocking", 1) })
+        {
+            var calls = Regex.Matches(tabs, @"line\(""" + title + @""",");
+            Assert.Equal(count, calls.Count);
+            foreach (Match call in calls)
+                Assert.Contains($"atTimeItem: \"{item}\",", Balanced(tabs, call.Index + "line".Length));
+        }
+
+        // fanout() line specs: one read draws two charts, so each spec names its own item.
+        foreach (var (title, item) in new[] { ("Blocking Severity", "blocking"), ("Deadlock Severity", "deadlocks") })
+        {
+            var at = tabs.IndexOf($"title: \"{title}\",", StringComparison.Ordinal);
+            Assert.True(at > 0, title);
+            Assert.Contains($"atTimeItem: \"{item}\",", Balanced(tabs, tabs.LastIndexOf('{', at)));
+        }
+
+        // No other chart names one: 4 blocking charts and 3 deadlock charts, all counted above.
+        Assert.Equal(4, Regex.Matches(tabs, @"atTimeItem: ""blocking""").Count);
+        Assert.Equal(3, Regex.Matches(tabs, @"atTimeItem: ""deadlocks""").Count);
     }
 }

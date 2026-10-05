@@ -1,7 +1,8 @@
 /* Runs the web viewer's shipped charts.js against a stand-in DOM and checks the chart menu's "at This Time" items: a
-   right-click on a server-tab chart (spec.atTime = { server }) offers Show Active Queries / Blocking / Deadlocks at
-   This Time, and each item sets the server's custom range to the time of the drawn point nearest the click +- 30 minutes
-   and moves the hash to that tab. Prints the findings as one line of JSON.
+   right-click on a server-tab chart (spec.atTime = { server, item }) offers the ONE item that matches the chart (Show
+   Blocking, Show Deadlocks, or Show Active Queries by default) at This Time, and the item sets the server's custom range
+   to the time of the drawn point nearest the click +- 30 minutes and moves the hash to that tab. Prints the findings as
+   one line of JSON.
    WebChartAtTimeBehaviourTests starts it as
        node web-chart-at-time-harness.mjs <path to wwwroot/js>
    Every .js under js/ and js/pages/ is copied into the scratch directory (a hand-kept list breaks whenever a page
@@ -139,6 +140,17 @@ const scope = charts.chartZoomScope(4);
 const a = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server: "A" } }), "t1", scope);
 rightClick(a, 521);
 out.rightClickItems = labels(a);
+/* A chart offers only the item that matches it, as the desktop does: atTime.item names it, and Active Queries is the
+   default, for a chart that names none (a above) and for a name the page does not know. */
+const blk = charts.zoomableLineChart(spec({ title: "Blocking Events", atTime: { server: "A", item: "blocking" } }), "t10", scope);
+rightClick(blk, 521);
+out.blockingItems = labels(blk);
+const dl = charts.zoomableLineChart(spec({ title: "Deadlocks", atTime: { server: "A", item: "deadlocks" } }), "t11", scope);
+rightClick(dl, 521);
+out.deadlockItems = labels(dl);
+const unk = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server: "A", item: "nonsense" } }), "t12", scope);
+rightClick(unk, 521);
+out.unknownItemItems = labels(unk);
 const click = async (host, label) => {
   const item = items(host).find((n) => n.textContent === label);
   if (item) item.listeners.click[0]();
@@ -148,13 +160,13 @@ const take = () => stub.calls.splice(0, stub.calls.length);
 
 await click(a, "Show Active Queries at This Time");
 out.queries = take();
-rightClick(a, 521);
-await click(a, "Show Blocking at This Time");
+rightClick(blk, 521);
+await click(blk, "Show Blocking at This Time");
 out.blocking = take();
 /* The hash moved to another tab, so the router's own hashchange rebuilds the page: no event is raised for it. */
 out.dispatchedOnTabChange = out.dispatched || 0;
-rightClick(a, 521);
-await click(a, "Show Deadlocks at This Time");
+rightClick(dl, 521);
+await click(dl, "Show Deadlocks at This Time");
 out.deadlocks = take();
 /* The hash was already #/server/A/blocking: setting it again fires nothing, so the event is raised once. */
 out.dispatchedOnSameTab = out.dispatched || 0;
@@ -164,10 +176,10 @@ out.t0Plus5 = T0 + 5 * MIN;
 /* A range the page refuses is reported on the chart and the hash stays put. */
 globalThis.__rangeError = "The end cannot be in the future.";
 globalThis.location.hash = "#/server/A/cpu";
-rightClick(a, 521);
-await click(a, "Show Blocking at This Time");
+rightClick(blk, 521);
+await click(blk, "Show Blocking at This Time");
 out.refusedHash = globalThis.location.hash;
-out.refusedStatus = find(a, (n) => String(n.className) === "chart-menu-status")[0].textContent;
+out.refusedStatus = find(blk, (n) => String(n.className) === "chart-menu-status")[0].textContent;
 take();
 globalThis.__rangeError = null;
 
@@ -195,7 +207,7 @@ const realNow = Date.now;
 Date.now = () => T0 + 7 * MIN;
 const recent = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server: "A" } }), "t7", scope);
 rightClick(recent, 521);
-await click(recent, "Show Blocking at This Time");
+await click(recent, "Show Active Queries at This Time");
 Date.now = realNow;
 out.nearNow = take()[0] || null;
 
@@ -242,7 +254,7 @@ const k1 = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server: "A" }
 rightClick(k1, 521);
 const k2 = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server: "A" } }), "t6", scope);
 out.rebuiltItems = labels(k2);
-await click(k2, "Show Blocking at This Time");
+await click(k2, "Show Active Queries at This Time");
 const kc = take()[0];
 out.rebuiltMiddle = kc ? (kc.startMs + kc.endMs) / 2 : null;
 

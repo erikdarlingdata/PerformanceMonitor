@@ -66,10 +66,13 @@ function svg(tag, attrs) {
  *   source     — optional { read, params }: the read name and parameters behind the chart. The chart menu's
  *                Show Data Source item appears only when this is given.
  *   zoomed / onResetZoom — optional: when zoomed is true and onResetZoom is a function, the chart menu offers Reset zoom.
- *   atTime     — optional { server }: a server-tab chart. A right-click on the plot then also offers Show Active Queries /
- *                Blocking / Deadlocks at This Time, which set the server's custom range to the time of the drawn point
- *                nearest the click ±30 minutes and open that tab. A menu opened without a click on the plot (the ⋯ button,
- *                Shift+F10, a right-click on the legend, the status line or the open menu) has no time and offers none.
+ *   atTime     — optional { server, item }: a server-tab chart. A right-click on the plot then also offers the ONE "at This
+ *                Time" item that matches what the chart plots, as the desktop's chart drill-downs do: item "blocking" gives
+ *                Show Blocking at This Time, "deadlocks" gives Show Deadlocks at This Time, and "queries" (the default,
+ *                also for any other value) gives Show Active Queries at This Time. The item sets the server's custom range
+ *                to the time of the drawn point nearest the click ±30 minutes and opens that tab. A menu opened without a
+ *                click on the plot (the ⋯ button, Shift+F10, a right-click on the legend, the status line or the open
+ *                menu) has no time and offers none.
  *   windowStart— optional x-axis DOMAIN start, windowEnd its end, both UTC-epoch ms (#2802). When both are given
  *   windowEnd    and windowEnd > windowStart, the axis spans [windowStart, windowEnd] — the REQUESTED time window
  *                — instead of the data's own first/last-point extent, so a sparse discrete-event series (blocking,
@@ -1038,12 +1041,14 @@ export const CHART_MENU_LABELS = {
 /** Half of the range an "at this time" item opens: the smallest custom range the picker allows is one hour. */
 export const AT_TIME_HALF_WINDOW_MS = 30 * 60000;
 
-/** The "at this time" items: label, and the server sub-tab the item opens (Deadlocks is a panel of the Blocking tab). */
-const AT_TIME_TARGETS = [
-  { label: CHART_MENU_LABELS.atQueries, tab: "queries" },
-  { label: CHART_MENU_LABELS.atBlocking, tab: "blocking" },
-  { label: CHART_MENU_LABELS.atDeadlocks, tab: "blocking" },
-];
+/* The "at this time" items: label, and the server sub-tab the item opens (Deadlocks is a panel of the Blocking tab).
+   Like the desktop (ServerTab.xaml.cs AddChartDrillDownMenuItem), a chart offers the ONE item that matches what it
+   plots. atTime.item names it; Active Queries is the default. */
+const AT_TIME_TARGETS = {
+  queries: { label: CHART_MENU_LABELS.atQueries, tab: "queries" },
+  blocking: { label: CHART_MENU_LABELS.atBlocking, tab: "blocking" },
+  deadlocks: { label: CHART_MENU_LABELS.atDeadlocks, tab: "blocking" },
+};
 
 const SVG_STYLE_PROPS = ["fill", "stroke", "stroke-width", "stroke-dasharray", "stroke-linecap", "stroke-linejoin", "opacity", "fill-opacity", "stroke-opacity", "font-family", "font-size", "font-weight", "font-variant-numeric", "text-anchor", "display"];
 const IMAGE_SCALE = 2;
@@ -1261,7 +1266,8 @@ function attachChartMenu(chart, root, opts, rows) {
   const open = (x, y, t) => {
     if (popup) close();
     const hasTime = !!atTime && Number.isFinite(t);
-    const timed = hasTime ? AT_TIME_TARGETS.map((g) => ({ label: g.label, run: () => goToTime(t, g.tab) })) : [];
+    const g = hasTime ? AT_TIME_TARGETS[atTime.item] || AT_TIME_TARGETS.queries : null;
+    const timed = g ? [{ label: g.label, run: () => goToTime(t, g.tab) }] : [];
     const items = actions.concat(timed).map((a) => {
       const b = el("button", { class: "chart-menu-item", type: "button", role: "menuitem", text: a.label });
       b.addEventListener("click", () => {
