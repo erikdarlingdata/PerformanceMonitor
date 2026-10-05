@@ -199,17 +199,25 @@ internal sealed class PendingSeedSession : IDisposable
 
     public PendingSeedSession(DuckDbInitializer duckDb) => _duckDb = duckDb;
 
-    public async Task ExecuteAsync(string sql, params object?[] values)
+    /// <summary>The session's one open connection, inside its open transaction. Callers must not dispose it.</summary>
+    public async Task<DuckDB.NET.Data.DuckDBConnection> ConnectionAsync()
     {
         if (_connection == null)
         {
-            _connection = _duckDb.CreateConnection();
-            await _connection.OpenAsync();
-            _batch = new SeedBatch(_duckDb, _connection);
+            var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync();
+            _connection = connection;
+            _batch = new SeedBatch(_duckDb, connection);
         }
 
+        return _connection;
+    }
+
+    public async Task ExecuteAsync(string sql, params object?[] values)
+    {
+        var connection = await ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
-        using var cmd = _connection.CreateCommand();
+        using var cmd = connection.CreateCommand();
         cmd.CommandText = sql;
         foreach (var value in values)
         {
