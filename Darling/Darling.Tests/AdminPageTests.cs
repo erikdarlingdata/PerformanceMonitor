@@ -26,7 +26,6 @@ public sealed class AdminPageTests
         ReadRepoFile(new[] { "Darling", "PerformanceMonitor.Darling.Service", "wwwroot" }.Concat(rest).ToArray()).ReplaceLineEndings("\n");
 
     [Theory]
-    [InlineData("list_servers")]
     [InlineData("get_notification_routes")]
     [InlineData("get_alert_settings")]
     public void ThePage_ReadsEachToolWithNoParams(string tool)
@@ -34,8 +33,18 @@ public sealed class AdminPageTests
         Assert.Contains("readTool(\"" + tool + "\", {})", Page());
     }
 
+    [Fact]
+    public void TheServersTab_ReadsTheAdminRoute_NotListServers_AndDrawsDisabledRowsGrey()
+    {
+        var page = Page();
+        Assert.Contains("apiGet(\"/api/admin/servers\")", page);
+        Assert.DoesNotContain("list_servers", page.Replace("GET /api/admin/servers (every configured server, enabled or not)", ""));
+        Assert.Contains("rowClass: serverRowClass", page);
+        Assert.Contains("row.status === \"Disabled\"", page);
+    }
+
     [Theory]
-    [InlineData("SERVER_COLUMNS", new[] { "display_name", "server_name", "engine_kind", "engine_version", "status", "read_only", "last_collection" })]
+    [InlineData("SERVER_COLUMNS", new[] { "display_name", "server_name", "auth", "engine", "version", "status", "freshness", "monthly_cost", "read_only", "added", "last_collected" })]
     [InlineData("ROUTE_COLUMNS", new[] { "route_id", "enabled", "metric_match", "match_kind", "family", "channels", "smtp_recipients", "modified_at_utc" })]
     [InlineData("SETTING_COLUMNS", new[] { "setting", "value" })]
     public void EachTab_DeclaresItsColumnKeys(string name, string[] keys)
@@ -49,12 +58,15 @@ public sealed class AdminPageTests
     }
 
     [Fact]
-    public void TheServersTab_CallsItsStatusColumnFreshness_BecauseTheDesktopStatusIsEnabledOrDisabled()
+    public void TheServersTab_CallsItsStatusColumnStatus_AndItsCollectionAgeFreshness_AsTheDesktopDoes()
     {
         var page = Page();
-        Assert.Contains("{ key: \"status\", label: \"Freshness\"", page);
-        Assert.DoesNotContain("label: \"Status\"", page);
-        Assert.Contains("whether collection is enabled or disabled", page);
+        Assert.Contains("{ key: \"status\", label: \"Status\" }", page);
+        Assert.Contains("{ key: \"freshness\", label: \"Freshness\"", page);
+        Assert.Contains("{ key: \"auth\", label: \"Auth\" }", page);
+        Assert.Contains("label: \"Monthly Cost ($)\"", page);
+        Assert.Contains("{ key: \"added\", label: \"Added\", format: \"time\" }", page);
+        Assert.DoesNotContain("Not shown here", page);
         Assert.Contains("label: \"Email to\"", page);
         Assert.DoesNotContain("Email recipients", page);
     }
@@ -168,7 +180,7 @@ public sealed class AdminPageBehaviourTests
     }
 
     [Theory]
-    [InlineData("servers", "Alpha", "list_servers")]
+    [InlineData("servers", "Alpha", "/api/admin/servers")]
     [InlineData("routes", "Blocking Detected", "get_notification_routes")]
     [InlineData("settings", "cpu.threshold_percent", "get_alert_settings")]
     public void EachTab_ReadsItsTool_AndDrawsTheRow(string tab, string expectedText, string tool)
@@ -176,6 +188,23 @@ public sealed class AdminPageBehaviourTests
         var texts = Texts(tab, out var root);
         Assert.Contains(texts, t => t == expectedText);
         Assert.Equal(tool, Assert.Single(root.GetProperty("reads").EnumerateArray()).GetProperty("tool").GetString());
+    }
+
+    [Fact]
+    public void TheServersTab_DrawsTheDisabledServer_WithItsAuthCostAndAddedTime_AndGreysOnlyTheDisabledRow()
+    {
+        var texts = Texts("servers", out var root);
+        Assert.Contains("Enabled", texts);
+        Assert.Contains("Disabled", texts);
+        Assert.Contains("Windows", texts);
+        Assert.Contains("SQL Server", texts);
+        Assert.Contains("$1,234", texts);
+        Assert.Contains("2026-01-02T00:00:00.0000000", texts);
+        Assert.Contains("rowclass:band-Offline", texts);
+        Assert.Contains("rowclass:", texts);
+        Assert.Equal(1, texts.Count(t => t == "rowclass:band-Offline"));
+        Assert.Contains("2 servers.", string.Join(" ", texts));
+        Assert.Equal("/api/admin/servers", Assert.Single(root.GetProperty("reads").EnumerateArray()).GetProperty("tool").GetString());
     }
 
     [Theory]
