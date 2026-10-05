@@ -331,11 +331,32 @@ export function openStoredPlan(server, queryHash, database) {
   return openPlanSource(server, { kind: "query_hash", query_hash: queryHash, database_name: database || null });
 }
 
+function reproButton(key, server, source) {
+  const reproOpen = openRepros.has(key);
+  const repro = el("button", {
+    type: "button",
+    class: "grid-tool",
+    text: reproOpen ? "Hide repro" : "Repro script",
+    "aria-expanded": reproOpen ? "true" : "false",
+    title: "Build a T-SQL repro script from the stored query text and plan",
+  });
+  repro.addEventListener("click", () => toggleRepro(server, source));
+  return repro;
+}
+
 function panelFor(key, stem, server, source) {
   const state = openPlans.get(key);
   const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
   if (state.phase === "loading") return el("div", { class: "plan-panel" }, [el("div", { class: "strip loading", text: "Loading the stored plan..." })]);
   const r = state.result;
+  if (r.kind === "none" && SOURCES[source.kind].repro) {
+    /* No stored plan, but the repro is still built from the stored query text (plan-less), as the Viewer does. */
+    return el("div", { class: "plan-panel" }, [
+      el("div", { class: "grid-tools" }, [reproButton(key, server, source), status]),
+      openRepros.has(key) ? reproPanel(key, stem) : null,
+      el("div", { class: "strip empty", text: r.message }),
+    ]);
+  }
   if (r.kind !== "plan") {
     return el("div", { class: "plan-panel" }, [el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
   }
@@ -360,18 +381,7 @@ function panelFor(key, stem, server, source) {
     });
   }
   const tools = [copy, download];
-  if (SOURCES[source.kind].repro) {
-    const reproOpen = openRepros.has(key);
-    const repro = el("button", {
-      type: "button",
-      class: "grid-tool",
-      text: reproOpen ? "Hide repro" : "Repro script",
-      "aria-expanded": reproOpen ? "true" : "false",
-      title: "Build a T-SQL repro script from the stored query text and plan",
-    });
-    repro.addEventListener("click", () => toggleRepro(server, source));
-    tools.push(repro);
-  }
+  if (SOURCES[source.kind].repro) tools.push(reproButton(key, server, source));
   tools.push(status);
   return el("div", { class: "plan-panel" }, [
     el("div", { class: "grid-tools" }, tools),

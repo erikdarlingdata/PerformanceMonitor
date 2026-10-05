@@ -425,12 +425,13 @@ public sealed class DarlingMcpPlanTools
             return JsonSerializer.Serialize(new
             {
                 kind,
-                query_hash,
-                database_name,
-                query_id,
-                plan_id,
-                collection_time,
-                session_id,
+                /* Only the kind's own key fields are echoed, never stray caller params. */
+                query_hash = kind == DarlingReproScript.KindQueryHash ? query_hash : null,
+                database_name = kind != DarlingReproScript.KindActiveSnapshot ? database_name : null,
+                query_id = kind == DarlingReproScript.KindQueryStore ? query_id : null,
+                plan_id = kind == DarlingReproScript.KindQueryStore ? plan_id : null,
+                collection_time = kind == DarlingReproScript.KindActiveSnapshot ? collection_time : null,
+                session_id = kind == DarlingReproScript.KindActiveSnapshot ? session_id : null,
                 request_id = kind == DarlingReproScript.KindActiveSnapshot ? (int?)request_id : null,
                 plan_found = !string.IsNullOrEmpty(planXml),
                 script,

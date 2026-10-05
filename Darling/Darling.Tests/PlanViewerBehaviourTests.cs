@@ -299,6 +299,18 @@ public sealed class PlanViewerBehaviourTests
     }
 
     [Fact]
+    public void WithNoStoredPlan_TheReproIsStillOffered_AndShowsTheScriptWithTheNoPlanNotice()
+    {
+        var r = Run("reproWithNoStoredPlan");
+        Assert.False(r.GetProperty("hasPre").GetBoolean());
+        Assert.True(r.GetProperty("hasReproButton").GetBoolean());
+        Assert.True(r.GetProperty("noPlanStrip").GetBoolean());
+        Assert.True(r.GetProperty("hasScript").GetBoolean());
+        Assert.Contains("No stored plan was found", Str(r, "notice"));
+        Assert.Equal("0xAB", r.GetProperty("query").GetProperty("query_hash").GetString());
+    }
+
+    [Fact]
     public void AReproWithNoStoredText_ShowsTheEnvelope_NotAScript()
     {
         var r = Run("reproUnavailable");

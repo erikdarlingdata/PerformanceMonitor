@@ -343,6 +343,21 @@ const scenarios = {
     out.notice = cell.all((n) => n.className.includes("notice")).map((n) => n.textContent).join("|");
     out.hasScript = cell.all((n) => n.className.includes("repro-sql")).length === 1;
   },
+  async reproWithNoStoredPlan() {
+    const cell = viewer.planSourceCell("srv-a", { kind: "query_hash", query_hash: "0xAB", database_name: null });
+    reply = { status: 200, body: JSON.stringify({ status: "unavailable", message: "No stored plan found for this query_hash key." }) };
+    cell.byText("Plan").click();
+    await flush();
+    out.hasPre = pre(cell) !== null;
+    out.hasReproButton = cell.byText("Repro script") !== null;
+    reply = { status: 200, body: JSON.stringify({ kind: "query_hash", query_hash: "0xAB", plan_found: false, script: "select 1;" }) };
+    cell.byText("Repro script").click();
+    await flush();
+    out.query = Object.fromEntries(params().searchParams);
+    out.notice = cell.all((n) => n.className.includes("notice")).map((n) => n.textContent).join("|");
+    out.hasScript = cell.all((n) => n.className.includes("repro-sql")).length === 1;
+    out.noPlanStrip = cell.textContent.includes("No stored plan found");
+  },
   async reproUnavailable() {
     const cell = viewer.planSourceCell("srv-a", { kind: "query_hash", query_hash: "0xAB", database_name: null });
     planReply(XML);

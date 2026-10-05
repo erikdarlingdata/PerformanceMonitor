@@ -28,6 +28,10 @@ public sealed class DarlingReproScriptParityTests
         "<ColumnReference Column=\"@CustomerId\" ParameterDataType=\"int\" ParameterCompiledValue=\"(42)\" />" +
         "</ParameterList></QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>";
 
+    /// <summary>The builder stamps "Generated: {DateTime.Now}" in the header; drop that line so a second tick between two builds cannot fail a byte comparison.</summary>
+    private static string? NoClock(string? s) =>
+        s is null ? null : System.Text.RegularExpressions.Regex.Replace(s, @"^.*Generated:.*$", "", System.Text.RegularExpressions.RegexOptions.Multiline);
+
     [Theory]
     [InlineData(Plan)]
     [InlineData(null)]
@@ -42,7 +46,7 @@ public sealed class DarlingReproScriptParityTests
         var viewer = ViewerServerTab.BuildReproScriptForRow(
             new ViewerQueryStatsRow { QueryText = Text, DatabaseName = "Orders", QueryHash = "0xAB" }, plan, DarlingReproScript.ProductName);
         Assert.NotNull(viewer);
-        Assert.Equal(viewer, DarlingReproScript.Build("query_hash", Text, "Orders", plan, "READ COMMITTED"));
+        Assert.Equal(NoClock(viewer), NoClock(DarlingReproScript.Build("query_hash", Text, "Orders", plan, "READ COMMITTED")));
     }
 
     [Theory]
@@ -59,7 +63,7 @@ public sealed class DarlingReproScriptParityTests
         var viewer = ViewerServerTab.BuildReproScriptForRow(
             new ViewerQueryStoreRow { QueryText = Text, DatabaseName = "Orders", QueryId = 42, PlanId = 7 }, plan, DarlingReproScript.ProductName);
         Assert.NotNull(viewer);
-        Assert.Equal(viewer, DarlingReproScript.Build("query_store", Text, "Orders", plan, "READ COMMITTED"));
+        Assert.Equal(NoClock(viewer), NoClock(DarlingReproScript.Build("query_store", Text, "Orders", plan, "READ COMMITTED")));
     }
 
     [Theory]
@@ -77,7 +81,7 @@ public sealed class DarlingReproScriptParityTests
             new ViewerQuerySnapshotRow { QueryText = Text, DatabaseName = "Orders", TransactionIsolationLevel = isolation }, plan, DarlingReproScript.ProductName);
         Assert.NotNull(viewer);
         var web = DarlingReproScript.Build("active_snapshot", Text, "Orders", plan, isolation);
-        Assert.Equal(viewer, web);
+        Assert.Equal(NoClock(viewer), NoClock(web));
         Assert.Contains("SET TRANSACTION ISOLATION LEVEL", web, StringComparison.Ordinal);
     }
 
@@ -91,7 +95,7 @@ public sealed class DarlingReproScriptParityTests
     {
         var expected = ReproScriptBuilder.BuildReproScript(
             Text, "Orders", Plan, carriesIsolation ? "SERIALIZABLE" : null, source, productName: DarlingReproScript.ProductName);
-        Assert.Equal(expected, DarlingReproScript.Build(kind, Text, "Orders", Plan, "SERIALIZABLE"));
+        Assert.Equal(NoClock(expected), NoClock(DarlingReproScript.Build(kind, Text, "Orders", Plan, "SERIALIZABLE")));
         Assert.Contains(source, expected, StringComparison.Ordinal);
         Assert.Equal(carriesIsolation, expected.Contains("SET TRANSACTION ISOLATION LEVEL", StringComparison.Ordinal));
     }
