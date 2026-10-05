@@ -11,6 +11,7 @@
    returns as text, and a sample of its statement. */
 
 import { VIZ } from "../../panels.js";
+import { planColumn } from "../plan-viewer.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 
 // The default window.
@@ -88,7 +89,7 @@ export const tab = {
         const data = res.data || {};
         mount(body, [
           noticeStrip(noticeText(data)),
-          VIZ.table(data, { rowsKey: "rows", columns: COLUMNS, emptyText: "No queries were ranked for this server." }),
+          VIZ.table(data, { rowsKey: "rows", columns: [...COLUMNS, planColumn(server)], emptyText: "No queries were ranked for this server." }),
         ]);
       } catch (e) {
         if (mine === seq && e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
