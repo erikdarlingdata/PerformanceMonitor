@@ -199,6 +199,8 @@ public sealed class GatedCollectorRowsTests
     }
 }
 
+/* #1776 own-store: each fact mints its own scratch database through ScratchPostgres and never touches the shared store. */
+
 /// <summary>The same facts through the real tool against a store.</summary>
 public sealed class GatedCollectorRowsLiveTests
 {
