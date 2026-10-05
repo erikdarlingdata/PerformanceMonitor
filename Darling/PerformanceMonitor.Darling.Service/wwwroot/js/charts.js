@@ -66,6 +66,13 @@ function svg(tag, attrs) {
  *   source     — optional { read, params }: the read name and parameters behind the chart. The chart menu's
  *                Show Data Source item appears only when this is given.
  *   zoomed / onResetZoom — optional: when zoomed is true and onResetZoom is a function, the chart menu offers Reset zoom.
+ *   atTime     — optional { server, item }: a server-tab chart. A right-click on the plot then also offers the ONE "at This
+ *                Time" item that matches what the chart plots, as the desktop's chart drill-downs do: item "blocking" gives
+ *                Show Blocking at This Time, "deadlocks" gives Show Deadlocks at This Time, and "queries" (the default,
+ *                also for any other value) gives Show Active Queries at This Time. The item sets the server's custom range
+ *                to the time of the drawn point nearest the click ±30 minutes and opens that tab, scrolled to the item's own
+ *                grid (Active Queries, Blocking or Deadlocks). A menu opened without a click on the plot (the ⋯ button,
+ *                Shift+F10, a right-click on the legend, the status line or the open menu) has no time and offers none.
  *   windowStart— optional x-axis DOMAIN start, windowEnd its end, both UTC-epoch ms (#2802). When both are given
  *   windowEnd    and windowEnd > windowStart, the axis spans [windowStart, windowEnd] — the REQUESTED time window
  *                — instead of the data's own first/last-point extent, so a sparse discrete-event series (blocking,
@@ -78,7 +85,7 @@ function svg(tag, attrs) {
 export function renderLineChart(spec) {
   const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
   const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
-  const { hiddenKeys = null, onLegend = null } = spec;
+  const { hiddenKeys = null, onLegend = null, atTime = null } = spec;
   /* Legend hide/isolate: a hidden series is dropped from everything below (the y-domain, the stack, the drawn
      marks, the hover tooltip and the CSV) so the axis rescales to what is visible. The legend still lists it,
      marked off, so it can be brought back. Hiding every series is never honoured: the chart keeps all of them. */
@@ -488,10 +495,9 @@ export function renderLineChart(spec) {
     });
   }
 
-  overlay.addEventListener("mousemove", (ev) => {
-    if (dragFromX != null) return; /* brushing — the band owns the pointer */
-    const rect = root.getBoundingClientRect();
-    const vbX = ((ev.clientX - rect.left) / rect.width) * W;
+  /* The index of the drawn point nearest a viewBox x, or -1 when no point sits on the plot. The hover tooltip names this
+     point, and so does the chart menu's right-click time (#5230), so the two always agree. */
+  const nearestPointIdx = (vbX) => {
     let idx = -1;
     let best = Infinity;
     for (let i = 0; i < xs.length; i++) {
@@ -503,6 +509,14 @@ export function renderLineChart(spec) {
         idx = i;
       }
     }
+    return idx;
+  };
+
+  overlay.addEventListener("mousemove", (ev) => {
+    if (dragFromX != null) return; /* brushing — the band owns the pointer */
+    const rect = root.getBoundingClientRect();
+    const vbX = ((ev.clientX - rect.left) / rect.width) * W;
+    const idx = nearestPointIdx(vbX);
     if (idx < 0) return;
     const { t, r } = rows[idx];
     const px = xs[idx];
@@ -569,7 +583,17 @@ export function renderLineChart(spec) {
   const exportRows = exportPoints
     ? exportPoints.map((r) => ({ t: parseUtc(r[xKey]), r })).filter((p) => p.t).sort((a, b) => a.t - b.t)
     : rows;
-  attachChartMenu(chart, root, { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey }, exportRows);
+  /* The right-click time: the time of the drawn point nearest the pointer, the one the hover tooltip names. The desktop's
+     AddChartDrillDownMenuItem (ServerTab.DrillDown.cs) takes the nearest point's time the same way, so a click a pixel or
+     two beside a one-bucket spike on a 7-day chart still opens the hour that holds it. A click past either edge snaps to
+     the first or last point; no point on the plot gives undefined, so no items. */
+  const timeAt = atTime
+    ? (clientX) => {
+        const idx = nearestPointIdx(toVbX(clientX));
+        return idx < 0 ? undefined : rows[idx].t.getTime();
+      }
+    : null;
+  attachChartMenu(chart, root, { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, timeAt }, exportRows);
   return chart;
 }
 
@@ -1009,6 +1033,22 @@ export const CHART_MENU_LABELS = {
   reset: "Reset zoom",
   csv: "Export Data to CSV...",
   source: "Show Data Source",
+  atQueries: "Show Active Queries at This Time",
+  atBlocking: "Show Blocking at This Time",
+  atDeadlocks: "Show Deadlocks at This Time",
+};
+
+/** Half of the range an "at this time" item opens: the smallest custom range the picker allows is one hour. */
+export const AT_TIME_HALF_WINDOW_MS = 30 * 60000;
+
+/* The "at this time" items: label, the server sub-tab the item opens (Deadlocks is a panel of the Blocking tab), and the
+   title of the panel it brings into view there (the desktop's Deadlocks item opens its Deadlocks sub-tab, where the web
+   has a grid further down the Blocking tab). Like the desktop (ServerTab.xaml.cs AddChartDrillDownMenuItem), a chart
+   offers the ONE item that matches what it plots. atTime.item names it; Active Queries is the default. */
+const AT_TIME_TARGETS = {
+  queries: { label: CHART_MENU_LABELS.atQueries, tab: "queries", panel: "Active Queries" },
+  blocking: { label: CHART_MENU_LABELS.atBlocking, tab: "blocking", panel: "Blocking" },
+  deadlocks: { label: CHART_MENU_LABELS.atDeadlocks, tab: "blocking", panel: "Deadlocks" },
 };
 
 const SVG_STYLE_PROPS = ["fill", "stroke", "stroke-width", "stroke-dasharray", "stroke-linecap", "stroke-linejoin", "opacity", "fill-opacity", "stroke-opacity", "font-family", "font-size", "font-weight", "font-variant-numeric", "text-anchor", "display"];
@@ -1089,7 +1129,7 @@ const chartMenuStates = new Map();
 const MENU_STATE_TTL_MS = 90000;
 
 function attachChartMenu(chart, root, opts, rows) {
-  const { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey } = opts;
+  const { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, timeAt } = opts;
   const owner = {};
   const held = menuKey ? chartMenuStates.get(menuKey) : null;
   const restore = held && Date.now() - held.at < MENU_STATE_TTL_MS ? held : null;
@@ -1197,9 +1237,54 @@ function attachChartMenu(chart, root, opts, rows) {
     sourceBox.style.display = "";
   };
 
-  const open = (x, y) => {
+  /* The custom range an at-this-time item applies: t ± 30 minutes. A range may not end in the future, so near "now"
+     the hour is shifted back to end at the current time (it still holds t). */
+  const goToTime = async (t, tab, panel) => {
+    try {
+      const mod = await import("./pages/server.js");
+      let start = t - AT_TIME_HALF_WINDOW_MS;
+      let end = t + AT_TIME_HALF_WINDOW_MS;
+      const now = Date.now();
+      if (end > now) {
+        end = now;
+        start = now - 2 * AT_TIME_HALF_WINDOW_MS;
+      }
+      const err = mod.applyCustomRange(atTime.server, start, end, now, { redraw: false });
+      if (err) {
+        say(err);
+        return;
+      }
+      /* Bring the item's own grid into view once the router has built the tab. The router's hashchange listener was
+         added first (app.js), and for a server already on screen renderServer paints the tab synchronously, so the new
+         panels are in place when this one runs. A chart and a grid share the title "Deadlocks"; the grid is the later one.
+         The listener is once-only, and added after the range is taken, so a refused range leaves none behind. */
+      if (typeof window.addEventListener === "function") {
+        window.addEventListener(
+          "hashchange",
+          () => {
+            const heads = [...document.querySelectorAll(".panel > h3")].filter((h) => h.firstChild && h.firstChild.textContent === panel);
+            const last = heads[heads.length - 1];
+            if (last && last.parentNode.scrollIntoView) last.parentNode.scrollIntoView({ block: "start" });
+          },
+          { once: true }
+        );
+      }
+      /* A full render, not a panel redraw, so the range picker in the page head shows the new range too (#5230). Setting
+         the hash to the tab already open fires no hashchange, so then the event is raised here. */
+      const target = "#/server/" + encodeURIComponent(atTime.server) + "/" + tab;
+      if (location.hash === target) window.dispatchEvent(new Event("hashchange"));
+      else location.hash = target;
+    } catch (e) {
+      say("Could not open that time: " + (e && e.message ? e.message : "the page refused."));
+    }
+  };
+
+  const open = (x, y, t) => {
     if (popup) close();
-    const items = actions.map((a) => {
+    const hasTime = !!atTime && Number.isFinite(t);
+    const g = hasTime ? AT_TIME_TARGETS[atTime.item] || AT_TIME_TARGETS.queries : null;
+    const timed = g ? [{ label: g.label, run: () => goToTime(t, g.tab, g.panel) }] : [];
+    const items = actions.concat(timed).map((a) => {
       const b = el("button", { class: "chart-menu-item", type: "button", role: "menuitem", text: a.label });
       b.addEventListener("click", () => {
         close();
@@ -1209,7 +1294,7 @@ function attachChartMenu(chart, root, opts, rows) {
       return b;
     });
     popup = el("div", { class: "chart-menu", role: "menu" }, items);
-    const at0 = typeof x === "number" && typeof y === "number" ? { x, y } : null;
+    const at0 = typeof x === "number" && typeof y === "number" ? (hasTime ? { x, y, t } : { x, y }) : null;
     if (at0) {
       /* The stylesheet pins the menu to the right edge; a click position needs left/top alone. */
       popup.style.right = "auto";
@@ -1259,7 +1344,10 @@ function attachChartMenu(chart, root, opts, rows) {
   chart.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     const box = chart.getBoundingClientRect();
-    open(Math.max(0, e.clientX - box.left), Math.max(0, e.clientY - box.top));
+    /* Only a click on the drawing itself names a time: the legend, the status line, the ⋯ button and the open menu do not,
+       and Shift+F10 on the button lands here with the button as the target (#5230). `root` is the plot's SVG. */
+    const onPlot = !!timeAt && !!e.target && root.contains(e.target);
+    open(Math.max(0, e.clientX - box.left), Math.max(0, e.clientY - box.top), onPlot ? timeAt(e.clientX) : undefined);
   });
   chart.appendChild(button);
   chart.appendChild(status);
@@ -1271,7 +1359,7 @@ function attachChartMenu(chart, root, opts, rows) {
     }
     if (restore.menu) {
       const m = restore.menu;
-      open(typeof m.x === "number" ? m.x : undefined, typeof m.y === "number" ? m.y : undefined);
+      open(typeof m.x === "number" ? m.x : undefined, typeof m.y === "number" ? m.y : undefined, typeof m.t === "number" ? m.t : undefined);
     }
   }
 }
