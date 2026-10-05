@@ -128,12 +128,15 @@ export function resolveCustomRange(startMs, endMs, nowMs) {
   return { hours: Math.ceil(span / HOUR_MS), asOf: live ? null : new Date(endMs).toISOString(), live, startMs, endMs };
 }
 
-/** Apply a custom range to a server and redraw. Returns the error text, or null when the range was taken. */
-export function applyCustomRange(server, startMs, endMs, nowMs = Date.now()) {
+/** Apply a custom range to a server and redraw. Returns the error text, or null when the range was taken. `redraw: false`
+ *  is for a caller that rebuilds the page itself (the chart menu's "at This Time" items route to a tab, #5230): a panel
+ *  redraw would leave the range picker in the page head on the old preset, and from another tab it would start a batch
+ *  of reads that the route change then aborts. */
+export function applyCustomRange(server, startMs, endMs, nowMs = Date.now(), { redraw = true } = {}) {
   const r = resolveCustomRange(startMs, endMs, nowMs);
   if (r.error) return r.error;
   customRanges.set(server, { startMs, endMs, live: r.live, spanMs: endMs - startMs });
-  redrawPanels();
+  if (redraw) redrawPanels();
   return null;
 }
 

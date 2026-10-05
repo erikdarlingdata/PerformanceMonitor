@@ -634,6 +634,27 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     CONSTRAINT pk_store_statement_baseline PRIMARY KEY (role_name, queryid)
 );";
 
+    /// <summary>
+    /// V164 (#4605) — the hourly row-count ledger of <c>collect.query_stats</c> and its one-row state table. The
+    /// count guard of the hourly-edges read compared raw row counts with the rollup's per (server, hour), a scan of
+    /// millions of rows that outran the panel deadline. The ledger is that count kept at write time, so the guard
+    /// reads a few thousand rows. The text, the counted population and the reasoning are on
+    /// <see cref="QueryStatsHourLedger"/>, which the rung embeds.
+    ///
+    /// <para><b>Both tables are empty when created</b> (the data-moving census therefore has nothing to declare), and
+    /// the rung inserts only the state row: <c>counted_since</c>, the next whole hour, below which every window is
+    /// uncounted and a reader stays on raw. The tables are plain and not collectors, like V111's and V162's.</para>
+    ///
+    /// <para><b>No GRANT and no provisioning change.</b> The <c>collect</c> schema carries blanket SELECT for
+    /// admin/viewer/mcp plus the owner-scoped <c>ALTER DEFAULT PRIVILEGES</c>, both re-asserted every managed start
+    /// (<c>DarlingManagedRoles</c>) and re-run in BYO mode by <c>tools/provision-roles.sql</c>, so the compose roles that
+    /// read these tables need no new statement, and the collector writes as the service owner.</para>
+    ///
+    /// <para><b>No Lite twin.</b> Lite's store is DuckDB, which has no continuous aggregates, so no rollup exists there
+    /// for a count guard to check.</para>
+    /// </summary>
+    private const string V164Sql = QueryStatsHourLedger.CreateSql;
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -835,6 +856,7 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
         new Migration(161, "query-store-top-daily", V161Sql),
         new Migration(162, "slow-reads", V162Sql),
         new Migration(163, "store-statement-history", V163Sql),
+        new Migration(164, "query-stats-hour-ledger", V164Sql),
     };
 
     /// <summary>
