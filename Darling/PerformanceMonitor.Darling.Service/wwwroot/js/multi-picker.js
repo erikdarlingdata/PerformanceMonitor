@@ -81,13 +81,15 @@ export function mergeSeriesRows(series, xKey, valueKey) {
 
 /**
  * Build the picker. `opts`: key (state key), label, options (string values, heaviest first), max (cap on checked),
- * metrics (optional [{ value, label }]), onChange(checkedValuesInOptionOrder, metricValue).
+ * metrics (optional [{ value, label }]), onChange(checkedValuesInOptionOrder, metricValue). Optional wording and default
+ * set for pickers that are not about waits: noun (default "wait"), defaultsLabel (default "Top waits") and
+ * defaults(options, max) (default topWaitDefaults).
  * Returns { node, checked(), metric(), restoreFocus() }: call restoreFocus() once node is in the page.
  */
 export function multiPicker(opts) {
-  const { key, label, options, max, metrics = null, onChange } = opts;
+  const { key, label, options, max, metrics = null, onChange, noun = "wait", defaultsLabel = "Top waits", defaults: defaultSet = topWaitDefaults } = opts;
   const state = pickerState(key);
-  const defaults = () => topWaitDefaults(options, max);
+  const defaults = () => defaultSet(options, max);
   state.checked = state.checked ? new Set(state.checked) : new Set(defaults());
   const known = new Set(options);
   /* The listed values: the caller's options, then any checked value they no longer hold. */
@@ -111,7 +113,7 @@ export function multiPicker(opts) {
   const render = () => {
     const full = state.checked.size >= max;
     count.textContent = state.checked.size + " / " + max + " selected";
-    hint.textContent = full ? "Limit reached: uncheck a wait to pick another." : "";
+    hint.textContent = full ? "Limit reached: uncheck a " + noun + " to pick another." : "";
     const rows = visible().map((o) => {
       const on = state.checked.has(o);
       const box = el("input", { type: "checkbox", "aria-label": o });
@@ -131,7 +133,7 @@ export function multiPicker(opts) {
       });
       return el("label", { class: "mp-item" }, [box, el("span", { text: o })]);
     });
-    mount(list, rows.length ? rows : el("div", { class: "mp-none", text: "No wait matches the search." }));
+    mount(list, rows.length ? rows : el("div", { class: "mp-none", text: "No " + noun + " matches the search." }));
   };
 
   search.addEventListener("input", () => {
@@ -158,7 +160,7 @@ export function multiPicker(opts) {
     for (const o of visible()) state.checked.delete(o);
     changed();
   });
-  const top = button("Top waits", () => {
+  const top = button(defaultsLabel, () => {
     state.checked = new Set(defaults());
     changed();
   });
