@@ -62,8 +62,9 @@ public sealed class ProcedureStatsPlanFetchTests
     [InlineData(true)]
     public void MainQuery_Deferred_IsTheNoPlanForm_PlusOnlyTheIdentityFragments(bool azure)
     {
-        var deferred = Build(MakeContext(capture: true, defer: true, azure: azure));
-        var captureOff = Build(MakeContext(capture: false, azure: azure));
+        /* The checkout's line endings are CRLF on every OS (.gitattributes), so compare as LF. */
+        var deferred = Build(MakeContext(capture: true, defer: true, azure: azure)).ReplaceLineEndings("\n");
+        var captureOff = Build(MakeContext(capture: false, azure: azure)).ReplaceLineEndings("\n");
 
         Assert.Contains("plan_statement_count", deferred, StringComparison.Ordinal);
         Assert.Contains("plan_last_statement_compile", deferred, StringComparison.Ordinal);
@@ -74,19 +75,9 @@ public sealed class ProcedureStatsPlanFetchTests
         /* Cut the select fragment (from its leading comma through its last column) and the apply fragment
            (from its newline through the alias) and what remains is the capture-off text. */
         var selectStart = deferred.IndexOf(",\n    plan_statement_count", StringComparison.Ordinal);
-        if (selectStart < 0)
-        {
-            selectStart = deferred.IndexOf(",\r\n    plan_statement_count", StringComparison.Ordinal);
-        }
-
         Assert.True(selectStart >= 0);
         var stripped = Strip(deferred, selectStart, "plan_generation_sum = pfp.plan_generation_sum");
         var applyStart = stripped.IndexOf("OUTER APPLY\n(", StringComparison.Ordinal);
-        if (applyStart < 0)
-        {
-            applyStart = stripped.IndexOf("OUTER APPLY\r\n(", StringComparison.Ordinal);
-        }
-
         Assert.True(applyStart > 0);
         /* The apply fragment starts with a newline that follows `) AS ranked`; remove that newline too. */
         applyStart = stripped.LastIndexOf('\n', applyStart - 1) is var nl && nl >= 0 && stripped[nl..applyStart].Trim().Length == 0
@@ -94,7 +85,33 @@ public sealed class ProcedureStatsPlanFetchTests
             : applyStart;
         stripped = Strip(stripped, applyStart, ") AS pfp");
 
-        Assert.Equal(captureOff.ReplaceLineEndings("\n"), stripped.ReplaceLineEndings("\n"));
+        Assert.Equal(captureOff, stripped);
+    }
+
+    /// <summary>
+    /// The standard query nests the identity fragments inside N'...' dynamic SQL, so a single quote in either
+    /// one would end the literal early. What the deferred text adds over capture-off carries none.
+    /// </summary>
+    [Fact]
+    public void IdentityFragments_CarryNoSingleQuote_ForTheStandardNestedVariant()
+    {
+        var deferred = Build(MakeContext(capture: true, defer: true)).ReplaceLineEndings("\n");
+        var captureOff = Build(MakeContext(capture: false)).ReplaceLineEndings("\n");
+
+        var selectStart = deferred.IndexOf(",\n    plan_statement_count", StringComparison.Ordinal);
+        Assert.True(selectStart >= 0);
+        var selectEnd = deferred.IndexOf("plan_generation_sum = pfp.plan_generation_sum", selectStart, StringComparison.Ordinal);
+        Assert.True(selectEnd >= 0);
+        var applyStart = deferred.IndexOf("OUTER APPLY\n(", StringComparison.Ordinal);
+        Assert.True(applyStart >= 0);
+        var applyEnd = deferred.IndexOf(") AS pfp", applyStart, StringComparison.Ordinal);
+        Assert.True(applyEnd >= 0);
+
+        var added = deferred[selectStart..selectEnd] + deferred[applyStart..applyEnd];
+        Assert.Contains("plan_statement_count", added, StringComparison.Ordinal);
+        Assert.Contains("COUNT_BIG", added, StringComparison.Ordinal);
+        Assert.DoesNotContain("'", added, StringComparison.Ordinal);
+        Assert.Equal(captureOff.Split('\'').Length, deferred.Split('\'').Length);
     }
 
     private static string Strip(string text, int start, string endMarker)
@@ -298,33 +315,30 @@ public sealed class ProcedureStatsPlanFetchTests
     }
 
     /// <summary>
-    /// A known over-cap identity has no digest to stand in for its content but keeps its size. A row carrying
-    /// a known digest and a known byte count writes the digest through PayloadOrDigest and still writes the
-    /// bytes column (the oversized backlog needs the size), with no measured size from this run.
+    /// A deferred-fetch host sets QueryPlanXmlBytes from its cache for a known identity. A row with a known
+    /// digest, no content and an over-cap size writes the digest through PayloadOrDigest, writes the bytes
+    /// column, and still yields an oversized-plan observation, so the backlog's last_seen keeps refreshing.
     /// </summary>
     [Fact]
-    public void WritePayload_KnownDigestAndKnownBytes_WriteTheDigest_AndKeepTheBytesColumn()
+    public void KnownDigestWithOverCapBytes_WritesDigestAndBytes_AndYieldsAnOversizedObservation()
     {
         var writer = new RecordingWriter();
-        var row = SampleRow() with { QueryPlanXml = null, KnownPlanDigest = "ABCDEF", KnownPlanBytes = 900_000L };
+        var overCap = QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + 1L;
+        var row = SampleRow() with
+        {
+            QueryPlanXml = null,
+            SqlHandle = "0x0300",
+            KnownPlanDigest = "ABCDEF",
+            QueryPlanXmlBytes = overCap,
+        };
 
         ProcedureStatsCollector.Instance.WritePayload(row, writer, MakeContext(capture: true));
+        var observation = ProcedureStatsCollector.Instance.DescribeOversizedPlan(row);
 
         Assert.Equal(((string?)null, "ABCDEF"), Assert.Single(writer.PayloadOrDigestCalls));
-        Assert.Contains(900_000L, writer.NullableLongs);
-    }
-
-    /// <summary>A measured size from this run wins over a remembered one.</summary>
-    [Fact]
-    public void WritePayload_AMeasuredSize_WinsOverTheKnownSize()
-    {
-        var writer = new RecordingWriter();
-        var row = SampleRow() with { QueryPlanXmlBytes = 14L, KnownPlanBytes = 900_000L };
-
-        ProcedureStatsCollector.Instance.WritePayload(row, writer, MakeContext(capture: true));
-
-        Assert.Contains(14L, writer.NullableLongs);
-        Assert.DoesNotContain(900_000L, writer.NullableLongs);
+        Assert.Contains(overCap, writer.NullableLongs);
+        Assert.NotNull(observation);
+        Assert.Equal(overCap, observation!.Value.ObservedBytes);
     }
 
     private sealed class NoDeltas : ICollectorDeltaCalculator

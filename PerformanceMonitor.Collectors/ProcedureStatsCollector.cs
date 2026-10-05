@@ -73,19 +73,17 @@ public sealed class ProcedureStatsCollector : CollectorDefinitionBase<ProcedureS
         /// the plan fetch and recognizes the plan from an earlier commit. When set, the writer stores the
         /// digest instead of the content (<see cref="ICollectorRowWriter.PayloadOrDigest"/>). Null by
         /// default, so a row writes its <see cref="QueryPlanXml"/> as it always has. Init-only rather than
-        /// positional so existing <c>new Row(...)</c> call sites are untouched.
+        /// positional so existing <c>new Row(...)</c> call sites are untouched. A known identity whose plan is
+        /// over the capture cap has no digest; the host sets <see cref="QueryPlanXmlBytes"/> from its cache for
+        /// it, as <c>query_stats</c> does, so the size column and the oversized backlog both see it. The host
+        /// must clear this digest when it measures a new size for the row.
         /// </summary>
         public string? KnownPlanDigest { get; init; }
 
-        /// <summary>
-        /// #5158: the measured plan size the host remembers for a known identity. A plan over the capture cap
-        /// has no digest, so the host carries its byte count instead and copies it into
-        /// <see cref="QueryPlanXmlBytes"/> without rendering the plan again. Null by default.
-        /// </summary>
-        public long? KnownPlanBytes { get; init; }
-
         /// <summary>#5158 identity fingerprint, read only when the plan fetch is deferred: how many statements
-        /// <c>sys.dm_exec_query_stats</c> holds for this module's plan handle.</summary>
+        /// <c>sys.dm_exec_query_stats</c> holds for this module's plan handle. Zero (with a null max and sum)
+        /// means no statements are visible for the handle: it aged out or none has run. The wiring must not
+        /// cache an identity keyed on a count of zero.</summary>
         public long? PlanStatementCount { get; init; }
 
         /// <summary>#5158 identity fingerprint: the latest statement <c>creation_time</c> for the plan handle.</summary>
@@ -673,7 +671,7 @@ OUTER APPLY
             .Value(deltaPhysReads)
             .Value(deltaSpills)
             .PayloadOrDigest(row.QueryPlanXml, row.KnownPlanDigest) /* null unless CapturePlanXml captured it (Darling); #5158: or the digest of a plan the store holds */
-            .Value(row.QueryPlanXmlBytes ?? row.KnownPlanBytes) /* #3392: measured size, never gated by the cap; #5158: or the size remembered for a known identity */
+            .Value(row.QueryPlanXmlBytes) /* #3392: measured size, never gated by the cap; a host that defers the fetch sets it from its cache for a known identity */
             .Value(sampleIntervalSeconds);     /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
     }
 
