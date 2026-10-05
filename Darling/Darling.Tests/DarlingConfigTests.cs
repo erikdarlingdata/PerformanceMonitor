@@ -488,6 +488,63 @@ public sealed class DarlingConfigTests
            never match what a client sends as its Host. */
         => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
 
+    [Theory]
+    [InlineData("b\u00FCcher.example", "xn--bcher-kva.example")]
+    [InlineData("mcp.b\u00FCcher.example", "mcp.xn--bcher-kva.example")]
+    [InlineData("\u043F\u0440\u0438\u043C\u0435\u0440.example", "xn--e1afmkfd.example")]
+    [InlineData("\u65E5\u672C\u8A9E.example", "xn--wgv71a119e.example")]
+    [InlineData("  b\u00FCcher.example. ", "xn--bcher-kva.example")]
+    [InlineData("b\u00FCcher\u3002example", "xn--bcher-kva.example")]
+    [InlineData("B\u00DCCHER.Example", "xn--bcher-kva.example")]
+    public void NormalizeHostName_MapsAUnicodeNameToItsPunycodeForm(string raw, string expected)
+        /* #5288: a client sends the ASCII (xn--) form in its Host header, so that is the form the guard has to hold.
+           The trim and the one trailing dot still come first; an ideographic full stop between labels is a dot; and
+           IDNA folds case, which changes nothing the guard (it compares ignoring case) can see. */
+        => Assert.Equal(expected, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("xn--bcher-kva.example")]
+    [InlineData("XN--BCHER-KVA.Example")]
+    [InlineData("MCP.Corp.Example")]
+    public void NormalizeHostName_AnAsciiName_IsNeverMapped_SoItKeepsItsCaseAndSpelling(string raw)
+        /* The mapping runs only for a name with a non-ASCII character. An ASCII name that is already punycode must
+           not be decoded and encoded again, and an upper-case one must not be folded: the rows above that keep the
+           case as written (NormalizeHostName_KeepsCaseAsWritten) stay true for every ASCII name. */
+        => Assert.Equal(raw, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("b\u00FCcher..example")]       // an empty label
+    [InlineData("b\u00FCcher.example..")]      // two trailing dots, the same typo as in an ASCII name
+    [InlineData("b\u00FCcher.example\u3002")]  // a trailing ideographic full stop maps to a trailing dot
+    [InlineData("b\u200D\u00FCcher.example")]  // a zero-width joiner the IDN rules do not allow there
+    public void NormalizeHostName_RefusesAnInvalidInternationalizedName(string raw)
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Fact]
+    public void NormalizeHostName_RefusesALoneSurrogate_AndALabelTooLongOnceEncoded()
+    {
+        /* Built at run time: a lone surrogate in an [InlineData] literal is not safe to serialize into a test id. */
+        Assert.Null(McpNetworkConfig.NormalizeHostName("mcp" + (char)0xD800 + ".example"));
+
+        /* The 63-character label limit applies to the ENCODED form: 30 u-umlauts encode to a valid label, 60 do not. */
+        Assert.NotNull(McpNetworkConfig.NormalizeHostName(new string('\u00FC', 30) + ".example"));
+        Assert.Null(McpNetworkConfig.NormalizeHostName(new string('\u00FC', 60) + ".example"));
+    }
+
+    [Theory]
+    [InlineData("https://b\u00FCcher.example")]    // a scheme
+    [InlineData("b\u00FCcher.example:5152")]       // a port
+    [InlineData("b\u00FCcher.example/mcp")]        // a path
+    [InlineData("*.b\u00FCcher.example")]          // a wildcard
+    [InlineData("b\u00FCcher corp.example")]       // whitespace inside
+    [InlineData("\uFF11\uFF10.1.2.3")]             // a fullwidth "10": the whole name MAPS to an IPv4 address
+    [InlineData("\uFF3B\uFF1A\uFF1A\uFF11\uFF3D")] // a fullwidth "[::1]": it maps to an IPv6 address
+    public void NormalizeHostName_RunsTheDnsTestOnTheAsciiForm_SoAMappedNonNameIsStillRefused(string raw)
+        /* The mapping lets these through (it only rewrites the Unicode); what refuses them is the same
+           Uri.CheckHostName test an ASCII name gets, now run on the mapped form. Without that second look a fullwidth
+           IP address would become an ASCII one and be admitted as a name. */
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
     [Fact]
     public void NormalizeHostName_ASetButRefusedValue_IsDistinguishableFromNotSet()
     {

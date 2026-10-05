@@ -56,7 +56,7 @@ public sealed class DarlingMcpHostGateLiveTests
     /// the singletons the tool classes require (a data source the gates never open, since none of them touch
     /// Postgres — a request is refused or reaches tools/list before any tool body runs).
     /// </summary>
-    private static async Task<TestServer> BuildServer(bool networkMode)
+    private static async Task<TestServer> BuildServer(bool networkMode, string? hostName = null, ILogger? logger = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -84,7 +84,12 @@ public sealed class DarlingMcpHostGateLiveTests
             networkMode: networkMode,
             networkListenIp: networkMode ? IPAddress.Parse(ListenIp) : null,
             allowedCidr: IPNetwork.Parse(AllowedCidr),
-            bearerToken: Token);
+            bearerToken: Token,
+            // #5288: the configured name is decided exactly as TryStartServerAsync decides it, through
+            // ResolveAllowedHostName from the FINAL mode, so loopback mode never admits it. Passing the name here
+            // unconditionally would hide the very rule that HostName_AdmittedInNetworkMode_RefusedInLoopbackMode_OtherNamesStill400 pins.
+            allowedHostName: DarlingMcpHostService.ResolveAllowedHostName(
+                hostName, networkMode, logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance));
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -181,6 +186,119 @@ public sealed class DarlingMcpHostGateLiveTests
         var ctx = await SendRaw(server, path, "evil.com", networkMode ? InCidrRemote : IPAddress.Loopback, bearer: networkMode ? Token : null);
 
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288, review F2: <c>mcp.network.hostName</c> is admitted by the Host guard in NETWORK mode only. With the
+    /// name configured, network mode admits it (as written, or in any case) on both paths and still demands the
+    /// token, loopback mode given the SAME configured name refuses it 400 while its loopback names keep working,
+    /// and every OTHER name is still refused 400 in both. The name reaches the pipeline through
+    /// <see cref="DarlingMcpHostService.ResolveAllowedHostName"/>, the method production calls with the final
+    /// mode, so this fails the moment the name is passed in loopback mode too.
+    /// </summary>
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/core")]
+    public async Task HostName_AdmittedInNetworkMode_RefusedInLoopbackMode_OtherNamesStill400(string path)
+    {
+        const string hostName = "mcp.corp.example";
+
+        using var network = await BuildServer(networkMode: true, hostName);
+
+        // Admitted, as written and in any case: with the token the request gets past every gate to a handler.
+        foreach (var host in new[] { hostName, "MCP.Corp.Example" })
+        {
+            var (status, _) = await ToolsListAsync(network, path, host, InCidrRemote, bearer: Token);
+            Assert.True(status == StatusCodes.Status200OK, $"network mode, Host '{host}' on {path}: expected 200, got {status}");
+        }
+
+        // A Host is not a credential: the guard admits the name, and the token gate still runs after it.
+        var (noToken, _) = await ToolsListAsync(network, path, hostName, InCidrRemote);
+        Assert.Equal(StatusCodes.Status401Unauthorized, noToken);
+
+        // The names the guard always admitted are untouched by the extra one.
+        foreach (var host in new[] { ListenIp, "localhost" })
+        {
+            var (status, _) = await ToolsListAsync(network, path, host, InCidrRemote, bearer: Token);
+            Assert.True(status == StatusCodes.Status200OK, $"network mode, Host '{host}' on {path}: expected 200, got {status}");
+        }
+
+        // Every other name is still 400, token and all: another site, a longer name that only ENDS with it, a
+        // longer one that only STARTS with it, its parent domain, a child of it, and an IP that is not the listen IP.
+        foreach (var other in new[] { "evil.com", "evil-mcp.corp.example", "mcp.corp.example.evil.com", "corp.example", "sub.mcp.corp.example", "10.9.9.9" })
+        {
+            var ctx = await SendRaw(network, path, other, InCidrRemote, bearer: Token);
+            Assert.True(
+                ctx.Response.StatusCode == StatusCodes.Status400BadRequest,
+                $"network mode, Host '{other}' on {path}: expected 400, got {ctx.Response.StatusCode}");
+        }
+
+        // Loopback mode with the SAME name configured: refused, because that surface is tokenless and a name the
+        // operator wrote for the network listener's clients buys nothing there.
+        using var loopback = await BuildServer(networkMode: false, hostName);
+
+        foreach (var host in new[] { hostName, "MCP.Corp.Example" })
+        {
+            var ctx = await SendRaw(loopback, path, host, IPAddress.Loopback);
+            Assert.True(
+                ctx.Response.StatusCode == StatusCodes.Status400BadRequest,
+                $"loopback mode, Host '{host}' on {path}: expected 400, got {ctx.Response.StatusCode}");
+        }
+
+        // ...while the loopback names keep working, and a foreign name is still refused.
+        var (loopbackStatus, _) = await ToolsListAsync(loopback, path, "localhost", IPAddress.Loopback);
+        Assert.Equal(StatusCodes.Status200OK, loopbackStatus);
+
+        var foreign = await SendRaw(loopback, path, "evil.com", IPAddress.Loopback);
+        Assert.Equal(StatusCodes.Status400BadRequest, foreign.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288 item 3: a host name written in Unicode is admitted as the ASCII (punycode) name a client sends in its
+    /// Host header. ASP.NET Core decodes that header to Unicode before the guard sees it, so the pipeline compares
+    /// the configured name in the same decoded form; a different internationalized name is still refused.
+    /// </summary>
+    [Fact]
+    public async Task HostName_WrittenInUnicode_IsAdmittedAsItsPunycodeHost()
+    {
+        using var server = await BuildServer(networkMode: true, hostName: "b\u00FCcher.example");
+
+        var (punycode, body) = await ToolsListAsync(server, "/", "xn--bcher-kva.example", InCidrRemote, bearer: Token);
+        Assert.True(punycode == StatusCodes.Status200OK, $"expected 200, got {punycode}: {body}");
+
+        var other = await SendRaw(server, "/", "xn--e1afmkfd.example", InCidrRemote, bearer: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, other.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288 item 2: a host name that is SET but is not a bare DNS name admits NOTHING, not even the part a lenient
+    /// parser would keep (the host before a port, a name a wildcard would match), and logs exactly one Warning at
+    /// start that names the key and the value as written. The listener is otherwise unaffected: the listen IP and
+    /// the token still work, because a typo in an optional name must not take MCP down.
+    /// </summary>
+    [Theory]
+    [InlineData("mcp.corp.example:5152", "mcp.corp.example")]
+    [InlineData("https://mcp.corp.example/", "mcp.corp.example")]
+    [InlineData("mcp.corp.example/mcp", "mcp.corp.example")]
+    [InlineData("*.corp.example", "mcp.corp.example")]
+    [InlineData("10.9.9.9", "10.9.9.9")]
+    [InlineData("mcp.corp.example..", "mcp.corp.example")]
+    [InlineData("b\u00FCcher..example", "xn--bcher-kva.example")]
+    public async Task HostName_SetButRefused_IsNotAdmitted_AndLogsOneWarning(string refusedValue, string hostAClientWouldSend)
+    {
+        var logger = new CapturingTestLogger();
+        using var server = await BuildServer(networkMode: true, refusedValue, logger);
+
+        var line = Assert.Single(logger.Lines);
+        Assert.StartsWith("Warning: ", line);
+        Assert.Contains("mcp.network.hostName", line);
+        Assert.Contains(refusedValue, line);
+
+        var refused = await SendRaw(server, "/", hostAClientWouldSend, InCidrRemote, bearer: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, refused.Response.StatusCode);
+
+        var (listenIp, _) = await ToolsListAsync(server, "/", ListenIp, InCidrRemote, bearer: Token);
+        Assert.Equal(StatusCodes.Status200OK, listenIp);
     }
 
     /// <summary>Network mode, the right token, an in-CIDR remote: a tools/list on <c>/</c> succeeds — proof

@@ -314,4 +314,46 @@ public sealed class HostHeaderGuardTests
             "options.Stateless = true must be set in the same WithHttpTransport block as ConfigureSessionOptions");
         Assert.False(source.Contains("Stateless = false", StringComparison.Ordinal), "the MCP transport must stay stateless while /core is mapped");
     }
+
+    /// <summary>
+    /// #5288, review F2: the MCP host's extra Host name (<c>mcp.network.hostName</c>) is admitted in NETWORK mode
+    /// only. The rule lives in <c>ResolveAllowedHostName</c>, so the wiring this pins is that
+    /// <c>TryStartServerAsync</c> hands <c>ConfigurePipeline</c> exactly that method's answer, decided from
+    /// <c>networkMode</c> after the last place it can change (nothing assigns it afterwards), and that the raw
+    /// config value is normalized nowhere else in the host. A call site that passed the config value straight
+    /// through would admit the name on the tokenless loopback surface while every behavioral test of the helper
+    /// stayed green, because the live gate test builds its own pipeline through the helper and cannot see this.
+    /// </summary>
+    [Fact]
+    public void McpHost_HostNameReachesThePipeline_OnlyThroughTheNetworkModeGate()
+    {
+        var source = ReadHostSource("DarlingMcpHostService.cs");
+
+        var build = source.IndexOf("_app = builder.Build();", StringComparison.Ordinal);
+        var callStart = source.IndexOf("ConfigurePipeline(_app,", StringComparison.Ordinal);
+        Assert.True(build >= 0 && callStart > build, "ConfigurePipeline is no longer called after Build() - this test needs rewriting");
+
+        var call = source[callStart..source.IndexOf(';', callStart)];
+        Assert.EndsWith(", allowedHostName)", call, StringComparison.Ordinal);
+
+        var decision = System.Text.RegularExpressions.Regex.Match(
+            source[build..callStart],
+            @"var allowedHostName = ResolveAllowedHostName\(\s*config\.Mcp\.Network\?\.HostName\s*,\s*networkMode\s*,");
+        Assert.True(
+            decision.Success,
+            "the name must be decided by ResolveAllowedHostName(config.Mcp.Network?.HostName, networkMode, ...) between Build() and the ConfigurePipeline call");
+
+        // networkMode is final by the decision: no assignment to it follows.
+        Assert.DoesNotMatch(@"\bnetworkMode\s*=[^=]", source[(build + decision.Index)..]);
+
+        // The raw value is normalized in one place, the helper.
+        var normalizeCalls = System.Text.RegularExpressions.Regex.Matches(source, @"McpNetworkConfig\.NormalizeHostName\(").Count;
+        Assert.Equal(1, normalizeCalls);
+
+        // And the guard admits exactly what the pipeline was handed.
+        Assert.Contains(
+            "DarlingHostBinding.IsAllowedHost(context.Request.Host.Host, networkListenIp, admittedHostName)",
+            source,
+            StringComparison.Ordinal);
+    }
 }

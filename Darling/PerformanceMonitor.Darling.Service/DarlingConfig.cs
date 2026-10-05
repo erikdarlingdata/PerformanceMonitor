@@ -1322,13 +1322,16 @@ public sealed class McpNetworkConfig
     /// <summary>
     /// The ONE DNS name clients reach the MCP endpoint by (#5288), e.g. <c>mcp.corp.example</c>: a bare name with
     /// no scheme, port, path, wildcard or IP address (see <see cref="NormalizeHostName"/> for the exact rules).
-    /// The Host-header guard admits that one exact name, compared ignoring case, in BOTH bind modes, beside the
-    /// names it always admits; it never admits a name the operator did not write here. With <see cref="Tls"/>
-    /// set it is also the name the certificate should carry as a dNSName SAN, and the host warns (never refuses)
-    /// when it does not. A value that is set but is not a bare DNS name is ignored with one Warning at start.
-    /// Unlike <c>web.publicBaseUrl</c> this is a bare host rather than a URL, because MCP has no link builder: a
-    /// scheme, port and path would be unused fields that could disagree with the listener. File-only and
-    /// restart-only.
+    /// In NETWORK mode the Host-header guard admits that one exact name, compared ignoring case, beside the
+    /// names it always admits; it never admits a name the operator did not write here. In loopback-only mode,
+    /// and in every mode that degrades to it (an unreadable token, a refused certificate), the guard does NOT
+    /// admit it: that surface is tokenless, and the name exists for the network listener's clients. With
+    /// <see cref="Tls"/> set it is also the name the certificate should carry as a dNSName SAN, and the host
+    /// warns (never refuses) when it does not. A value that is set but is not a bare DNS name is ignored with one
+    /// Warning at start. A name written in Unicode is admitted as the ASCII (punycode) name a client sends in
+    /// its Host header. Unlike <c>web.publicBaseUrl</c> (admitted in both modes) this is a bare host rather than
+    /// a URL, because MCP has no link builder: a scheme, port and path would be unused fields that could
+    /// disagree with the listener. File-only and restart-only.
     /// </summary>
     [JsonPropertyName("hostName")]
     public string? HostName { get; set; }
@@ -1356,17 +1359,26 @@ public sealed class McpNetworkConfig
     /// <item>ONE trailing dot is stripped (<c>mcp.corp.example.</c> is the same name written fully qualified).
     /// A name that still ends in a dot after that (<c>host..</c>) is refused: an empty label is a typo, not a
     /// name.</item>
-    /// <item>Only a DNS name survives: <c>Uri.CheckHostName</c> must say <c>Dns</c>. An IP address (the guard
-    /// admits the listen IP by itself), a port (<c>host:5152</c>), a scheme or path (<c>https://host/</c>), a
-    /// wildcard (<c>*.corp.example</c>) and anything with whitespace inside are refused: null.</item>
+    /// <item>A name with any non-ASCII character is an internationalized name. A client sends its ASCII
+    /// (punycode) form in the Host header, never the Unicode form, so a Unicode name could never match: it is
+    /// mapped with <c>IdnMapping.GetAscii</c> (<c>b&#252;cher.example</c> becomes <c>xn--bcher-kva.example</c>,
+    /// folded to lower case as IDNA does), and every rule below runs on that ASCII form. A name the mapping
+    /// refuses (an empty label, a label over 63 characters once encoded, a lone surrogate) is refused: null. So
+    /// is a mapped name that ends in a dot, which the mapping can produce from an ideographic full stop. An
+    /// all-ASCII name is never mapped, so it keeps its case and its spelling.</item>
+    /// <item>Only a DNS name survives: <c>Uri.CheckHostName</c> must say <c>Dns</c>, on the ASCII form. An IP
+    /// address (the guard admits the listen IP by itself, and a fullwidth <c>10.1.2.3</c> maps to one), a port
+    /// (<c>host:5152</c>), a scheme or path (<c>https://host/</c>), a wildcard (<c>*.corp.example</c>) and
+    /// anything with whitespace inside are refused: null.</item>
     /// </list>
     ///
-    /// <para>Case is kept as written, because the Host-header guard compares ignoring case. A caller tells "not
-    /// set" from "set but refused" by testing <see cref="HostName"/> for blank first: a refused value is ignored
-    /// with one Warning at start, never an error, and never a reason to degrade a listener.</para>
+    /// <para>An ASCII name keeps its case as written, because the Host-header guard compares ignoring case. A
+    /// caller tells "not set" from "set but refused" by testing <see cref="HostName"/> for blank first: a refused
+    /// value is ignored with one Warning at start, never an error, and never a reason to degrade a listener.</para>
     /// </summary>
     /// <param name="value">The raw <see cref="HostName"/>.</param>
-    /// <returns>The trimmed name without its trailing dot, or null when unset or refused.</returns>
+    /// <returns>The trimmed name without its trailing dot (its ASCII form when it was written in Unicode), or
+    /// null when unset or refused.</returns>
     public static string? NormalizeHostName(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -1385,6 +1397,32 @@ public sealed class McpNetworkConfig
         if (name.Length == 0 || name.EndsWith('.'))
         {
             return null;
+        }
+
+        /* A client sends the punycode (xn--) form of an internationalized name in its Host header, so a Unicode
+           value could never match what the guard compares it with. Map it to that form first; the DNS test below
+           then runs on the ASCII form, which is also what refuses a fullwidth "10.1.2.3" (it maps to an IPv4
+           address) or a "host:5152" the mapping let through. Only a name with a non-ASCII character is mapped:
+           an ASCII name is left exactly as written, case included. The mapping throws ArgumentException for a
+           name that is not a valid IDN (an empty label, a label too long once encoded, a lone surrogate): refused,
+           never an exception out of a start-up config read. */
+        if (!System.Text.Ascii.IsValid(name))
+        {
+            try
+            {
+                name = new System.Globalization.IdnMapping().GetAscii(name);
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+
+            /* The mapping folds the ideographic full stops (U+3002, U+FF0E, U+FF61) into dots, so a name can end in
+               a dot only now: refused, as the same typo written with an ASCII dot is above. */
+            if (name.Length == 0 || name.EndsWith('.'))
+            {
+                return null;
+            }
         }
 
         return Uri.CheckHostName(name) == UriHostNameType.Dns ? name : null;

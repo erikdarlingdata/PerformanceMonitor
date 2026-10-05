@@ -273,4 +273,83 @@ public sealed class DarlingMcpHostTests
         Assert.Null(Host.MapBindReasonSeverity(Host.McpBindReason.NetworkExposed));     // announced at start with the real bind
         Assert.Null(Host.MapBindReasonSeverity(Host.McpBindReason.LoopbackByDefault));  // the silent, byte-for-byte-today path
     }
+
+    /* ---- ResolveAllowedHostName (#5288, review F2): the one extra Host name, admitted in NETWORK mode only ---- */
+
+    [Theory]
+    [InlineData("mcp.corp.example", "mcp.corp.example")]
+    [InlineData("  MCP.Corp.Example. ", "MCP.Corp.Example")]        // trimmed, one trailing dot stripped, case kept
+    [InlineData("b\u00FCcher.example", "xn--bcher-kva.example")]    // a Unicode name is admitted as the punycode a client sends
+    public void ResolveAllowedHostName_NetworkMode_IsTheNormalizedName_AndSilent(string configured, string expected)
+    {
+        var logger = new CapturingTestLogger();
+
+        Assert.Equal(expected, Host.ResolveAllowedHostName(configured, networkMode: true, logger));
+        Assert.Empty(logger.Lines);
+    }
+
+    [Theory]
+    [InlineData("mcp.corp.example")]
+    [InlineData("b\u00FCcher.example")]
+    public void ResolveAllowedHostName_LoopbackOrDegradedMode_IsNull_EvenForAValidName(string configured)
+    {
+        /* networkMode is false in loopback-only mode AND after every degrade (an unreadable token, a refused
+           certificate), so one answer covers all of them: that surface is tokenless, and the name exists for the
+           network listener's clients. A valid name that is simply not used here is not worth a log line. */
+        var logger = new CapturingTestLogger();
+
+        Assert.Null(Host.ResolveAllowedHostName(configured, networkMode: false, logger));
+        Assert.Empty(logger.Lines);
+    }
+
+    [Theory]
+    [InlineData(true, null)]
+    [InlineData(true, "")]
+    [InlineData(true, "   ")]
+    [InlineData(false, null)]
+    [InlineData(false, "\t\r\n")]
+    public void ResolveAllowedHostName_NotSet_IsNullAndSilent_InEveryMode(bool networkMode, string? configured)
+    {
+        var logger = new CapturingTestLogger();
+
+        Assert.Null(Host.ResolveAllowedHostName(configured, networkMode, logger));
+        Assert.Empty(logger.Lines);
+    }
+
+    [Theory]
+    [InlineData(true, "https://mcp.corp.example")]
+    [InlineData(false, "https://mcp.corp.example")]
+    [InlineData(true, "mcp.corp.example:5152")]
+    [InlineData(true, "*.corp.example")]
+    [InlineData(true, "10.1.2.3")]
+    [InlineData(false, "10.1.2.3")]
+    [InlineData(true, "mcp.corp.example..")]
+    [InlineData(true, "b\u00FCcher..example")]                      // an invalid internationalized name
+    public void ResolveAllowedHostName_SetButRefused_LogsOneWarning_AdmitsNothing_InEveryMode(bool networkMode, string configured)
+    {
+        /* The warning is about the CONFIG VALUE, so it is written in loopback mode too: the operator who typed a URL
+           where a name goes finds out at the first start, not only once the network listener is working. */
+        var logger = new CapturingTestLogger();
+
+        Assert.Null(Host.ResolveAllowedHostName(configured, networkMode, logger));
+
+        var line = Assert.Single(logger.Lines);
+        Assert.StartsWith("Warning: ", line);
+        Assert.Contains("mcp.network.hostName", line);
+        Assert.Contains($"'{configured}'", line);
+    }
+
+    [Fact]
+    public void ResolveAllowedHostName_SetButRefused_EchoesNoLineBreak()
+    {
+        /* The value comes from darling.json, but a log file is split on newlines: a value carrying one must not be
+           able to forge a second entry. */
+        var logger = new CapturingTestLogger();
+
+        Assert.Null(Host.ResolveAllowedHostName("evil\r\nCritical: forged", networkMode: true, logger));
+
+        var line = Assert.Single(logger.Lines);
+        Assert.DoesNotContain("\r", line);
+        Assert.DoesNotContain("\n", line);
+    }
 }

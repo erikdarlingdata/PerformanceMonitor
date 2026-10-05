@@ -593,7 +593,16 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             _app = builder.Build();
 
-            ConfigurePipeline(_app, networkMode, networkListenIp, allowedCidr, bearerToken);
+            /* The Host guard also admits mcp.network.hostName (#5288), in NETWORK mode only (review F2). networkMode
+               is final by here (an unreadable token above has already made it loopback-only), and a loopback-only
+               server admits no extra name. This deliberately differs from the web host (#4220), which admits
+               web.publicBaseUrl's host in both modes: MCP has no link builder that needs the name, and its
+               loopback surface is tokenless, so one more admitted name there would widen the very surface the
+               guard exists to protect and buy nothing. A name that is set but refused logs one Warning inside
+               ResolveAllowedHostName and is not admitted (fail closed). */
+            var allowedHostName = ResolveAllowedHostName(config.Mcp.Network?.HostName, networkMode, _logger);
+
+            ConfigurePipeline(_app, networkMode, networkListenIp, allowedCidr, bearerToken, allowedHostName);
 
             /* #2389: name the authority for each half of what is being started. enabled/port come from
                whichever plane the supervisor resolved; listen/allowFrom/token are always darling.json. */
@@ -1086,6 +1095,41 @@ public sealed class DarlingMcpHostService : BackgroundService
     }
 
     /// <summary>
+    /// The ONE extra Host the guard admits beside the names it always admits (#5288): the normalized
+    /// <c>mcp.network.hostName</c>, or null for none. NETWORK mode only (review F2): in loopback-only mode, and in
+    /// every mode that degraded to it (an unreadable token, a refused certificate), it returns null even for a
+    /// valid name, because that surface is tokenless and the name exists for the network listener's clients. This
+    /// deliberately differs from the web host (#4220), which admits <c>web.publicBaseUrl</c>'s host in both
+    /// modes: MCP has no link builder, and its loopback surface is tokenless.
+    ///
+    /// <para>A value that is SET but is not a bare DNS name (<see cref="McpNetworkConfig.NormalizeHostName"/>
+    /// returns null for it while the raw value is not blank) logs ONE Warning and admits nothing: fail closed,
+    /// never an error and never a reason to degrade the listener. The warning is about the config value, so it is
+    /// written in every mode. An unset (blank) value is silent. PURE but for that one log line; it takes the
+    /// logger so a test can read the line, and <paramref name="networkMode"/> must be the FINAL mode, after every
+    /// degrade, because that is the whole rule.</para>
+    /// </summary>
+    internal static string? ResolveAllowedHostName(string? configuredHostName, bool networkMode, ILogger logger)
+    {
+        var hostName = McpNetworkConfig.NormalizeHostName(configuredHostName);
+        if (hostName is null)
+        {
+            if (!string.IsNullOrWhiteSpace(configuredHostName))
+            {
+                logger.LogWarning(
+                    "mcp.network.hostName '{HostName}' is not a bare DNS name (no scheme, port, path, wildcard or IP address; "
+                    + "a non-ASCII name must be a valid internationalized domain name). Ignoring it: the Host-header guard "
+                    + "admits no name beyond the ones it always admits. Write the name alone, e.g. mcp.corp.example.",
+                    DarlingHttpRefusalLog.Sanitize(configuredHostName));
+            }
+
+            return null;
+        }
+
+        return networkMode ? hostName : null;
+    }
+
+    /// <summary>
     /// Everything AFTER <c>builder.Build()</c>: the Host-allowlist/DNS-rebinding guard (both modes), the
     /// network-mode bearer-token + CIDR middleware, then <c>MapMcp()</c> and <c>MapMcp("/core")</c>.
     /// Extracted (#4128) so a live-HTTP test can build the SAME pipeline against a <c>TestServer</c> instead
@@ -1093,13 +1137,20 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// passes exactly these values, in exactly this order — see <c>TryStartServerAsync</c>. Instance method,
     /// not static: the gates read <c>_logger</c>, exactly as before the extraction — only the receiver
     /// (this vs. a test-constructed instance) changes.
+    ///
+    /// <para><paramref name="allowedHostName"/> (#5288) is the ONE extra Host the guard admits beside the names it
+    /// always admits: the already-normalized <c>mcp.network.hostName</c>, or null for none. The pipeline admits
+    /// whatever it is given, so the caller owns the rule: <see cref="ResolveAllowedHostName"/> returns null in
+    /// loopback-only and degraded modes (review F2), and a test builds this pipeline through it for the same
+    /// reason it builds it through this method. Optional, so a caller with no name is unchanged.</para>
     /// </summary>
     internal void ConfigurePipeline(
         WebApplication app,
         bool networkMode,
         IPAddress? networkListenIp,
         CidrAllowList allowedCidr,
-        string bearerToken)
+        string bearerToken,
+        string? allowedHostName = null)
     {
         /* #2479 item 5: every gate below used to refuse silently, so "is my token wrong or my CIDR
            wrong" was answerable only from the client, which sees one opaque status code. One log per
@@ -1108,6 +1159,12 @@ public sealed class DarlingMcpHostService : BackgroundService
            what it deliberately never writes. Created here, per started server, so a rebind starts
            with a clean budget rather than inheriting the previous listener's scan. */
         var refusals = new DarlingHttpRefusalLog();
+
+        /* #5288: HttpRequest.Host hands the guard the DECODED form of a Host header (HostString.FromUriComponent
+           turns a punycode xn-- name into Unicode), so a client that sends xn--bcher-kva.example is seen as the
+           Unicode name. The configured name goes through the same conversion before the guard compares it, so
+           both sides are in the form the framework gives the middleware; an ASCII name comes out unchanged. */
+        var admittedHostName = allowedHostName is null ? null : HostString.FromUriComponent(allowedHostName).Host;
 
         /* DNS-rebinding guard (#1648) — the FIRST middleware, in BOTH modes, mirroring the web host's
            #1576 fix. The loopback bind is tokenless by design (the network gates below install only in
@@ -1118,10 +1175,16 @@ public sealed class DarlingMcpHostService : BackgroundService
            preflight applies. Require the Host header to name an address we actually bind — a loopback
            name/IP or, in network mode, the configured listen IP. networkListenIp is null in loopback mode,
            so ONLY loopback Hosts pass there; a rebound foreign hostname is rejected 400 before the bearer
-           check, the CIDR check, MapMcp, or any tool handler. */
+           check, the CIDR check, MapMcp, or any tool handler.
+
+           #5288: allowedHostName admits ONE more exact name (mcp.network.hostName, case-insensitive, no port),
+           the standard AllowedHosts pattern: a rebind needs a hostname the ATTACKER chooses, and this admits
+           only the one the OPERATOR wrote. The host passes it in network mode only, where the bearer token
+           still gates every request, so the name adds no credential-free way in; in loopback mode it is null
+           and only loopback names pass, exactly as before. */
         app.Use(async (context, next) =>
         {
-            if (!DarlingHostBinding.IsAllowedHost(context.Request.Host.Host, networkListenIp))
+            if (!DarlingHostBinding.IsAllowedHost(context.Request.Host.Host, networkListenIp, admittedHostName))
             {
                 refusals.Report(
                     _logger, "MCP", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
