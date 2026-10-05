@@ -44,7 +44,13 @@ LANGUAGE sql AS $$ SELECT f.role_name, f.queryid, f.calls, f.total_exec_ms, f.to
                    FROM public.fake_stats f $$;
 CREATE FUNCTION config.store_statement_stats_info()
 RETURNS TABLE (stats_reset timestamptz, dealloc bigint)
-LANGUAGE sql AS $$ SELECT i.stats_reset, i.dealloc FROM public.fake_info i $$;";
+LANGUAGE sql AS $$ SELECT i.stats_reset, i.dealloc FROM public.fake_info i $$;
+-- The rig may not preload the extension, and the ready check asks pg_settings (unqualified on purpose, so this
+-- stand-in, first on the path, answers for it).
+CREATE SCHEMA fakeset;
+CREATE TABLE fakeset.pg_settings (name text, setting text);
+INSERT INTO fakeset.pg_settings VALUES ('pg_stat_statements.max', '5000');
+SET search_path = fakeset, pg_catalog, public;";
 
     private static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection)> StartAsync(CancellationToken ct, bool withFakes = true)
     {
@@ -114,6 +120,7 @@ LANGUAGE sql AS $$ SELECT i.stats_reset, i.dealloc FROM public.fake_info i $$;";
             /* A new connection stands in for a restarted service: nothing but the store is carried over. */
             await using var second = new NpgsqlConnection(scratch.ConnectionString);
             await second.OpenAsync(ct);
+            await ExecAsync(second, "SET search_path = fakeset, pg_catalog, public", ct);
             var result = await StoreStatementHistory.SnapshotAsync(second, T0.AddHours(1), null, ct);
 
             Assert.Equal(StoreStatementHistory.OutcomeOk, result.Outcome);
@@ -270,6 +277,90 @@ LANGUAGE sql AS $$ SELECT i.stats_reset, i.dealloc FROM public.fake_info i $$;";
             Assert.Equal(1L, await ScalarAsync(c, "SELECT count(*) FROM collect.store_statement_captures WHERE outcome = 'precondition'", ct));
             Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) FROM collect.store_statement_history", ct));
             Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) FROM config.store_statement_baseline", ct));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>The planted pg_settings has no pg_stat_statements.max row.</summary>
+    [Fact]
+    public async Task AnInstalledButUnloadedExtension_WritesAPreconditionCapture_AndNoHistory()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = c;
+        var ok = false;
+        try
+        {
+            await ExecAsync(c, "DELETE FROM fakeset.pg_settings", ct);
+            await SetStats(c, "('owner', 1, 100, 1000, 20, 10, 5, 1, 0)", ct);
+            var result = await StoreStatementHistory.SnapshotAsync(c, T0, null, ct);
+
+            Assert.Equal(StoreStatementHistory.OutcomePrecondition, result.Outcome);
+            Assert.Equal(1L, await ScalarAsync(c, "SELECT count(*) FROM collect.store_statement_captures WHERE outcome = 'precondition'", ct));
+            Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) FROM config.store_statement_baseline", ct));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AReaderThatRaises_RollsTheWholePassBack_AndLeavesTheBaselineAlone()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = c;
+        var ok = false;
+        try
+        {
+            await SetStats(c, "('owner', 1, 100, 1000, 20, 10, 5, 1, 0)", ct);
+            await StoreStatementHistory.SnapshotAsync(c, T0, null, ct);
+            await SetStats(c, "('owner', 1, 130, 1300, 20, 10, 5, 1, 0)", ct);
+            await ExecAsync(c, "DROP FUNCTION config.store_statement_stats(); CREATE FUNCTION config.store_statement_stats() RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, mean_exec_ms double precision, max_exec_ms double precision, total_plan_ms double precision, rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint, query text) LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'planted' USING ERRCODE = '55000'; END $$", ct);
+
+            var ex = await Assert.ThrowsAsync<PostgresException>(() => StoreStatementHistory.SnapshotAsync(c, T0.AddHours(1), null, ct));
+            Assert.Equal("55000", ex.SqlState);
+            Assert.Equal(0L, await ScalarAsync(c, "SELECT count(*) FROM collect.store_statement_history", ct));
+            Assert.Equal(1L, await ScalarAsync(c, "SELECT count(*) FROM collect.store_statement_captures", ct));
+            Assert.Equal(100L, await ScalarAsync(c, "SELECT calls FROM config.store_statement_baseline WHERE queryid = 1", ct));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task TheSameEpoch_WithStampsOnBothSides_SubtractsTheBaseline_AndTheIntervalAgreesOnBothRows()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = c;
+        var ok = false;
+        try
+        {
+            await ExecAsync(c, "UPDATE public.fake_info SET stats_reset = TIMESTAMPTZ '2026-02-20 00:00:00+00'", ct);
+            await SetStats(c, "('owner', 1, 100, 1000, 20, 10, 5, 1, 0)", ct);
+            await StoreStatementHistory.SnapshotAsync(c, T0, null, ct);
+            await SetStats(c, "('owner', 1, 130, 1300, 25, 12, 6, 1, 0)", ct);
+            var second = await StoreStatementHistory.SnapshotAsync(c, T0.AddSeconds(3599.6), null, ct);
+
+            Assert.Equal(StoreStatementHistory.OutcomeOk, second.Outcome);
+            Assert.Equal(30L, await ScalarAsync(c, "SELECT delta_calls FROM collect.store_statement_history", ct));
+            Assert.Equal(false, await ScalarAsync(c, "SELECT reset_in_interval FROM collect.store_statement_history", ct));
+            Assert.Equal(
+                await ScalarAsync(c, "SELECT interval_seconds FROM collect.store_statement_history", ct),
+                await ScalarAsync(c, "SELECT interval_seconds FROM collect.store_statement_captures WHERE outcome = 'ok'", ct));
             ok = true;
         }
         finally

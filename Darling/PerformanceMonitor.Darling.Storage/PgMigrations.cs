@@ -569,6 +569,13 @@ CREATE INDEX IF NOT EXISTS idx_slow_reads_time
     /// at read time, so a stored row can never hold a statement the reader function would withhold. There are no WAL or
     /// temp-file columns beyond temp blocks written: the store's own statements do not move them.</para>
     ///
+    /// <para><b>Reading the columns.</b> <c>max_exec_ms</c> is the longest single execution since the entry started
+    /// in the extension, not within the interval: it is cumulative and cannot be differenced. <c>first_seen</c> can be
+    /// an upper bound (an entry already there but missing from the baseline, such as a query id that became visible
+    /// after a grant or a renamed role, is credited its whole lifetime as one interval). An entry that was evicted and
+    /// re-added, and has already passed its old baseline, undercounts with no flag; <c>dealloc_delta</c> on the capture
+    /// is the hint. <c>statements_seen</c> is 0 on a <c>rebaselined</c> capture.</para>
+    ///
     /// <para><b>No Lite twin.</b> Lite's store is DuckDB, which has no <c>pg_stat_statements</c>; the same structural
     /// reason as V111.</para>
     /// </summary>

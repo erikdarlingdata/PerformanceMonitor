@@ -10110,21 +10110,29 @@ AND   j.hypertable_name = '{relation}'", connection))
                 await connection.OpenAsync(budget.Token);
             }
 
+            /* Its own slice of the budget, like the re-mask above: seven commands at 60 s each could otherwise use the
+               whole sweep budget and a cancellation here would skip the flushes below. A slice that expired while the
+               budget did not is a failed pass like any other; only the budget itself ends the sweep. */
+            using var historyBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+            historyBudget.CancelAfter(StoreStatementHistory.SliceBudget);
             try
             {
-                await StoreStatementHistory.SnapshotAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+                await StoreStatementHistory.SnapshotAsync(connection, DateTime.UtcNow, _logger, historyBudget.Token);
+                _storeStatementHistoryWarned = false;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException
+                || (historyBudget.IsCancellationRequested && !budget.IsCancellationRequested))
             {
+                var sqlState = (ex as PostgresException)?.SqlState ?? "n/a";
                 if (_storeStatementHistoryWarned)
                 {
-                    _logger.LogDebug("Store statement history is still failing: {Message}", ex.Message);
+                    _logger.LogDebug("Store statement history is still failing (SqlState {SqlState}): {Message}", sqlState, ex.Message);
                 }
                 else
                 {
                     _logger.LogWarning(
-                        "Store statement history failed, so this hour's per-statement deltas are missing: {Message}",
-                        ex.Message);
+                        "Store statement history failed (SqlState {SqlState}), so this hour's per-statement deltas are missing: {Message}",
+                        sqlState, ex.Message);
                     _storeStatementHistoryWarned = true;
                 }
             }

@@ -81,9 +81,36 @@ public sealed class StoreStatementHistoryTests
         Assert.True(call > 0 && call < flush, "the snapshot sits before the collector-cost flush");
 
         var tail = worker[call..flush];
-        Assert.Contains("catch (Exception ex) when (ex is not OperationCanceledException)", tail, StringComparison.Ordinal);
+        Assert.Contains("catch (Exception ex) when (ex is not OperationCanceledException", tail, StringComparison.Ordinal);
+        Assert.Contains("historyBudget.IsCancellationRequested && !budget.IsCancellationRequested", tail, StringComparison.Ordinal);
+        Assert.Contains("_storeStatementHistoryWarned = false;", tail, StringComparison.Ordinal);
+        Assert.Contains("SqlState", tail, StringComparison.Ordinal);
         Assert.Contains("_storeStatementHistoryWarned", tail, StringComparison.Ordinal);
         Assert.Contains("LogWarning", tail, StringComparison.Ordinal);
         Assert.Contains("LogDebug", tail, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The snapshot runs under its own linked slice of the tick's budget, like the re-mask, and a slice that expired
+    /// while the budget did not is caught, so the flushes after it still run.
+    /// </summary>
+    [Fact]
+    public void TheWorkerGivesTheSnapshotItsOwnSlice_SoAnExpiredSliceDoesNotSkipTheFlushes()
+    {
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        Assert.Contains("using var historyBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);", worker, StringComparison.Ordinal);
+        Assert.Contains("historyBudget.CancelAfter(StoreStatementHistory.SliceBudget);", worker, StringComparison.Ordinal);
+        Assert.Contains("await StoreStatementHistory.SnapshotAsync(connection, DateTime.UtcNow, _logger, historyBudget.Token);", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("SnapshotAsync(connection, DateTime.UtcNow, _logger, budget.Token)", worker, StringComparison.Ordinal);
+        Assert.True(StoreStatementHistory.SliceBudget < TimeSpan.FromSeconds(300));
+    }
+
+    [Fact]
+    public void TheReadyCheck_AlsoRequiresTheExtensionLoadedAndTheTempPrivilege()
+    {
+        Assert.Contains("name = 'pg_stat_statements.max'", StoreStatementHistory.ReaderReadySql, StringComparison.Ordinal);
+        Assert.Contains("has_database_privilege(current_database(), 'TEMP')", StoreStatementHistory.ReaderReadySql, StringComparison.Ordinal);
+        Assert.Contains("a.queryid, a.role_name", StoreStatementHistory.SnapshotSql, StringComparison.Ordinal);
+        Assert.Contains("$6::integer", StoreStatementHistory.SnapshotSql, StringComparison.Ordinal);
     }
 }

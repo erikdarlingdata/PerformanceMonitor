@@ -43,10 +43,21 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>Reads through the reader function.</b> The snapshot calls the SECURITY DEFINER
 /// <c>config.store_statement_stats()</c> and its info companion, which already restrict the rows to this database and
 /// map users to role names, and never touches <c>pg_stat_statements</c> directly. If the functions are missing or the
-/// caller may not execute them, the pass writes one capture with outcome <c>precondition</c> and no history.</para>
+/// caller may not execute them, the extension is not loaded, or the role may not create temporary tables, the pass
+/// writes one capture with outcome <c>precondition</c> and no history.</para>
+///
+/// <para><b>Limits a reader should know.</b> An entry that was evicted and came back after the previous capture, and
+/// has already passed its old baseline, shows <c>current - baseline</c>: a plausible undercount with no flag (only the
+/// capture's <c>dealloc_delta</c> hints at eviction). <c>first_seen</c> can be an upper bound: an entry that was already
+/// there but missing from the baseline (a query id that became visible after a <c>pg_read_all_stats</c> grant, or a
+/// role that was renamed) is credited its whole lifetime counters as one interval. <c>statements_seen</c> is 0 on a
+/// rebaseline, which reads no deltas.</para>
 /// </summary>
 public static class StoreStatementHistory
 {
+    /// <summary>The snapshot's own slice of the hourly tick's budget, so a slow pass cannot cost the flushes after it.</summary>
+    public static readonly TimeSpan SliceBudget = TimeSpan.FromSeconds(120);
+
     /// <summary>Per-command timeout, in seconds. The pass shares the hourly tick's budget with other self-telemetry.</summary>
     public const int SnapshotTimeoutSeconds = 60;
 
@@ -71,13 +82,19 @@ public static class StoreStatementHistory
 
     private const string InfoFunction = Config + "." + StoreStatementStats.InfoFunctionName;
 
-    /// <summary>Whether both reader functions exist and the calling role may run them.</summary>
+    /// <summary>
+    /// Whether the snapshot can run: both reader functions exist, the calling role may run them, the extension is
+    /// loaded (<c>pg_stat_statements.max</c> is a setting only when it is in <c>shared_preload_libraries</c>; an installed
+    /// but unloaded extension makes the reader raise 55000), and the role may create the transaction-local table.
+    /// </summary>
     public const string ReaderReadySql = @"
 SELECT CASE
            WHEN to_regprocedure('" + Function + @"()') IS NULL
              OR to_regprocedure('" + InfoFunction + @"()') IS NULL THEN false
            ELSE has_function_privilege('" + Function + @"()', 'EXECUTE')
             AND has_function_privilege('" + InfoFunction + @"()', 'EXECUTE')
+            AND EXISTS (SELECT 1 FROM pg_settings WHERE name = 'pg_stat_statements.max')
+            AND has_database_privilege(current_database(), 'TEMP')
        END";
 
     /// <summary>The epoch and the eviction counter. Nulls on extension 1.8, which has no info view.</summary>
@@ -123,8 +140,8 @@ FROM store_statement_cur";
     /// <summary>
     /// Writes the interval's deltas and answers (statements active, statements kept). $1 capture time, $2 top,
     /// $3 previous capture time, $4 whether the baseline is valid (same epoch), $5 whether a reset happened inside
-    /// the interval. With $4 false every row is credited whole. A counter below its baseline means the entry was
-    /// evicted and re-entered, so it is credited whole too and flagged. Ranked by time spent, then query id.
+    /// the interval, $6 the interval in seconds (computed once in C#, so the capture row agrees). With $4 false every row is credited whole. A counter below its baseline means the entry was
+    /// evicted and re-entered, so it is credited whole too and flagged. Ranked by time spent, then query id, then role name, so a tie cuts the same way every time.
     /// </summary>
     public const string SnapshotSql = @"
 WITH joined AS
@@ -186,7 +203,7 @@ kept AS
          delta_shared_blks_hit, delta_shared_blks_read, delta_temp_blks_written, max_exec_ms,
          first_seen, entry_restarted, reset_in_interval)
     SELECT $1::timestamp,
-           GREATEST(1, COALESCE(EXTRACT(EPOCH FROM ($1::timestamp - $3::timestamp))::integer, 1)),
+           $6::integer,
            a.role_name,
            a.queryid,
            a.delta_calls,
@@ -200,7 +217,7 @@ kept AS
            a.entry_restarted,
            $5::boolean
     FROM active AS a
-    ORDER BY a.delta_total_exec_ms DESC, a.queryid
+    ORDER BY a.delta_total_exec_ms DESC, a.queryid, a.role_name
     LIMIT $2::integer
     RETURNING 1
 )
@@ -336,6 +353,7 @@ WHERE capture_time < $1";
             }
 
             var epoch = DecideEpoch(previousTime, previousReset, currentReset);
+            int? interval = previousTime is { } t ? Math.Max(1, (int)(captureTime - t).TotalSeconds) : null;
 
             await using (var current = Command(connection, transaction, CaptureCurrentSql))
             {
@@ -343,14 +361,12 @@ WHERE capture_time < $1";
             }
 
             var hidden = 0;
-            var keyed = 0;
             await using (var count = Command(connection, transaction, HiddenCountSql))
             await using (var reader = await count.ExecuteReaderAsync(cancellationToken))
             {
                 if (await reader.ReadAsync(cancellationToken))
                 {
                     hidden = reader.GetInt32(0);
-                    keyed = reader.GetInt32(1);
                 }
             }
 
@@ -364,6 +380,7 @@ WHERE capture_time < $1";
                 snapshot.Parameters.Add(new NpgsqlParameter { Value = (object?)previousTime ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
                 snapshot.Parameters.Add(new NpgsqlParameter { Value = epoch == Epoch.SameEpoch, NpgsqlDbType = NpgsqlDbType.Boolean });
                 snapshot.Parameters.Add(new NpgsqlParameter { Value = epoch == Epoch.ResetInsideInterval, NpgsqlDbType = NpgsqlDbType.Boolean });
+                snapshot.Parameters.Add(new NpgsqlParameter { Value = interval ?? 1, NpgsqlDbType = NpgsqlDbType.Integer });
                 await using var reader = await snapshot.ExecuteReaderAsync(cancellationToken);
                 if (await reader.ReadAsync(cancellationToken))
                 {
@@ -371,10 +388,9 @@ WHERE capture_time < $1";
                     kept = reader.GetInt32(1);
                 }
             }
-            else
-            {
-                seen = keyed;
-            }
+
+            /* A rebaseline reads no deltas, so it reports 0 active statements (not every keyed entry): the column
+               always means "statements with calls in the interval". */
 
             await using (var delete = Command(connection, transaction, BaselineDeleteSql))
             {
@@ -388,7 +404,6 @@ WHERE capture_time < $1";
             }
 
             long? dealloc = epoch == Epoch.SameEpoch && currentDealloc is { } d && previousDealloc is { } p && d >= p ? d - p : null;
-            int? interval = previousTime is { } t ? Math.Max(1, (int)(captureTime - t).TotalSeconds) : null;
             var outcome = epoch == Epoch.Rebaseline ? OutcomeRebaselined : OutcomeOk;
             await InsertCaptureAsync(connection, transaction, captureTime, interval, currentReset, currentDealloc, dealloc, seen, kept, hidden, outcome, cancellationToken);
             result = new SnapshotResult(outcome, seen, kept, hidden);
