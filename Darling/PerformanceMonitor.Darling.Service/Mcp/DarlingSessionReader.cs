@@ -69,6 +69,17 @@ internal static class DarlingSessionReader
 
         /// <summary>The request's query hash as captured; null when absent.</summary>
         public string? QueryHash { get; init; }
+
+        /// <summary>The request id as captured (#5228); null when the snapshot stored none. The plan read keys
+        /// on it, a NULL matching <c>request_id = 0</c>, so a caller omitting it still finds the row.</summary>
+        public int? RequestId { get; init; }
+
+        /// <summary>The snapshot carries an estimated plan (#5228) — a presence flag, never the XML, which
+        /// <c>get_active_query_plan_xml</c> reads on demand.</summary>
+        public bool HasQueryPlan { get; init; }
+
+        /// <summary>The snapshot carries a live/actual plan (#5228); see <see cref="HasQueryPlan"/>.</summary>
+        public bool HasLiveQueryPlan { get; init; }
     }
 
     /// <summary>One waiting-task snapshot row.</summary>
@@ -187,7 +198,10 @@ internal static class DarlingSessionReader
                 query_text,
                 wait_resource,
                 CAST(percent_complete AS double precision) AS percent_complete,
-                query_hash
+                query_hash,
+                request_id,
+                (query_plan IS NOT NULL) AS has_query_plan,
+                (live_query_plan IS NOT NULL) AS has_live_query_plan
             FROM query_snapshots
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -251,7 +265,10 @@ internal static class DarlingSessionReader
             COUNT(*) OVER () AS population_count,
             p.wait_resource,
             p.percent_complete,
-            p.query_hash
+            p.query_hash,
+            p.request_id,
+            p.has_query_plan,
+            p.has_live_query_plan
         FROM population AS p
         ORDER BY p.collection_time DESC, p.cpu_time_ms DESC
         LIMIT $4
@@ -311,6 +328,9 @@ internal static class DarlingSessionReader
                 WaitResource = reader.IsDBNull(26) ? null : reader.GetString(26),
                 PercentComplete = reader.IsDBNull(27) ? null : reader.GetDouble(27),
                 QueryHash = reader.IsDBNull(28) ? null : reader.GetString(28),
+                RequestId = reader.IsDBNull(29) ? null : reader.GetInt32(29),
+                HasQueryPlan = !reader.IsDBNull(30) && reader.GetBoolean(30),
+                HasLiveQueryPlan = !reader.IsDBNull(31) && reader.GetBoolean(31),
             });
             populationCount = reader.GetInt64(25);
         }
