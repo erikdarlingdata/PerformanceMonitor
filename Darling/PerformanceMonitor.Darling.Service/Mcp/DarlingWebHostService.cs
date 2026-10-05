@@ -1022,7 +1022,8 @@ public sealed class DarlingWebHostService : BackgroundService
         DarlingWebOidcClient? oidcClient,
         string? publicBaseUrlHost = null,
         PostgresConfig? postgresConfig = null,
-        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null,
+        byte[]? sessionSigningKeyForTests = null)
     {
         /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
            because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
@@ -1077,7 +1078,9 @@ public sealed class DarlingWebHostService : BackgroundService
                cookie (acceptable — the operator re-presents the token once). The OIDC transaction key is
                DERIVED from it rather than shared — see DeriveTransactionKey for why sharing the raw key
                across the two cookie shapes would let a pre-auth transaction cookie impersonate a session. */
-            var signingKey = RandomNumberGenerator.GetBytes(SigningKeyBytes);
+            /* sessionSigningKeyForTests (#5240): a live-pipeline test mints a signed viewer or admin cookie with a key it
+               chose; production never passes one, so the key stays a per-process random value. */
+            var signingKey = sessionSigningKeyForTests ?? RandomNumberGenerator.GetBytes(SigningKeyBytes);
             var transactionKey = DarlingWebOidc.DeriveTransactionKey(signingKey);
 
             app.Use(async (context, next) =>
