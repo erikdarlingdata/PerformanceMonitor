@@ -17,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -69,6 +70,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, most samples first. Default 20. This is what bounds the page - read truncated to know whether the window held more; the shares stay of the whole window whatever this is set to.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -99,21 +101,40 @@ public sealed class DarlingMcpPgWaitSamplingTools
                    extension that is not installed — which is the LIKELY one here, because
                    pg_wait_sampling needs shared_preload_libraries and a server restart, so an operator
                    who has not done that gets told what to do rather than shown a blank. */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                var bare = await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling", cancellationToken)
-                    ?? McpHelpers.Status(
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling", cancellationToken);
+                if (bare is not null)
+                {
+                    return bare;
+                }
+
+            /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+               Rows are windowed on collection_time over [start, now], the probe's column. A data answer over 90 minutes or less starts
+               no probe; a failed probe costs the notice, never the rows. */
+            var emptyStart = windowEnd.AddHours(-hours_back);
+            var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_wait_sampling", "pg_wait_sampling", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+
+                return McpHelpers.Status(
                         "empty",
                         $"No sampled waits for {resolved.ServerName} in the last {hours_back} hour(s). The "
                         + "figures here are per-interval deltas, so a single collection has nothing to "
                         + "difference against and the window fills on the second one. On a genuinely idle "
                         + "server this is the healthy state: the profiler samples backends, and an idle "
                         + "server has none to sample."
-                        + DescribeInstrumentForEmpty(instrument));
+                        + DescribeInstrumentForEmpty(instrument),
+                        emptyNotice.AsHints());
             }
 
-            return BuildWaitSamplingJson(resolved.ServerName, hours_back, page, limit, instrument);
+            /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+               Rows are windowed on collection_time over [start, now], the probe's column. A data answer over 90 minutes or less starts
+               no probe; a failed probe costs the notice, never the rows. */
+            var windowStart = windowEnd.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_wait_sampling", "pg_wait_sampling", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
+            return BuildWaitSamplingJson(resolved.ServerName, hours_back, page, limit, instrument, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -160,7 +181,8 @@ public sealed class DarlingMcpPgWaitSamplingTools
         int hoursBack,
         DarlingPgWaitSamplingReader.PgWaitSamplingPage page,
         int limit,
-        DarlingPgWaitSamplingReader.WaitInstrumentState? instrument = null)
+        DarlingPgWaitSamplingReader.WaitInstrumentState? instrument = null,
+        McpWindowNotice? notice = null)
     {
         /* #3604: an unrecognised token is not echoed as an instrument - a future arm this build does not know
            reads as unknown, which is the honest word, rather than as a grain the caller might act on. */
@@ -196,10 +218,13 @@ public sealed class DarlingMcpPgWaitSamplingTools
         })
         .ToList();
 
-        return JsonSerializer.Serialize(new
+        var json = JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,
+            effective_start = notice?.EffectiveStart,
+            window_truncated = notice?.WindowTruncated,
+            truncation_note = notice?.TruncationNote,
             /* #3541 A3 dialect: the page described as a page. No time bounds — each row is one series
                differenced across the whole window, so there is no page reach to report, only a cap. */
             waits_returned = waits.Count,
@@ -249,5 +274,6 @@ public sealed class DarlingMcpPgWaitSamplingTools
                      : string.Empty),
             waits,
         }, McpHelpers.JsonOptions);
+        return notice is null || notice.Value.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
     }
 }

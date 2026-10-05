@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -48,6 +49,7 @@ public sealed class DarlingMcpPgPredicateTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -65,17 +67,37 @@ public sealed class DarlingMcpPgPredicateTools
 
             if (rows.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                var bare = await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.ServerName, "pg_predicate_stats", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_predicate_stats", cancellationToken)
-                    ?? McpHelpers.Status(
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_predicate_stats", cancellationToken);
+                if (bare is not null)
+                {
+                    return bare;
+                }
+
+            /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+               Rows are windowed on collection_time over [start, now], the probe's column. A data answer over 90 minutes or less starts
+               no probe; a failed probe costs the notice, never the rows. */
+            var emptyStart = windowEnd.AddHours(-hours_back);
+            var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_predicate_stats", "pg_predicate_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+
+                return McpHelpers.Status(
                         "empty",
                         $"No predicate statistics for {resolved.ServerName} in the last {hours_back} "
                         + "hour(s). pg_qualstats SAMPLES executions — at the default 1% rate a low-traffic "
                         + "database can genuinely record nothing — and it needs shared_preload_libraries "
-                        + "plus a restart to be active at all.");
+                        + "plus a restart to be active at all.",
+                        emptyNotice.AsHints());
             }
+
+            /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+               Rows are windowed on collection_time over [start, now], the probe's column. A data answer over 90 minutes or less starts
+               no probe; a failed probe costs the notice, never the rows. */
+            var windowStart = windowEnd.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_predicate_stats", "pg_predicate_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
 
             /* One rate for the server in the ordinary case; distinct() rather than First() because a rate
                changed mid-window would otherwise be reported as whichever row sorted first. */
@@ -100,10 +122,13 @@ public sealed class DarlingMcpPgPredicateTools
                 sample_rate = r.SampleRate,
             });
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 predicate_count = rows.Count,
                 sample_rates = rates,
                 note = "Counts are SAMPLED and are not scaled up here: multiply by 1/sample_rate to "
@@ -116,6 +141,7 @@ public sealed class DarlingMcpPgPredicateTools
                          : string.Empty),
                 predicates,
             }, McpHelpers.JsonOptions);
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

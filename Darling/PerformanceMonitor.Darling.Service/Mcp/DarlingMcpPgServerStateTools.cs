@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -395,6 +396,7 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -415,15 +417,35 @@ public sealed class DarlingMcpPgServerStateTools
 
             if (fetched.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_lock_stats", cancellationToken)
-                    ?? McpHelpers.Status(
+                var bare = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_lock_stats", cancellationToken);
+                if (bare is not null)
+                {
+                    return bare;
+                }
+
+            /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+               Rows are windowed on the probe's time column over [start, now]. A data answer over 90 minutes or less starts no probe;
+               a failed probe costs the notice, never the rows. */
+            var emptyStart = windowEnd.AddHours(-hours_back);
+            var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_lock_stats", "pg_lock_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+
+                return McpHelpers.Status(
                         "empty",
                         $"No lock activity sampled on {resolved.ServerName} in the last {hours_back} "
                         + "hour(s). This is a SAMPLE of pg_locks rather than an event log, so this is the "
                         + "healthy state on a server without sustained contention — and it is not proof "
-                        + "that nothing was ever locked.");
+                        + "that nothing was ever locked.",
+                        emptyNotice.AsHints());
             }
+
+            /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+               Rows are windowed on the probe's time column over [start, now]. A data answer over 90 minutes or less starts no probe;
+               a failed probe costs the notice, never the rows. */
+            var windowStart = windowEnd.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_lock_stats", "pg_lock_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
 
             var truncated = fetched.Count > limit;
             var rows = truncated ? fetched.Take(limit).ToList() : fetched;
@@ -445,10 +467,13 @@ public sealed class DarlingMcpPgServerStateTools
                 last_seen = r.LastSeen,
             });
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 lock_count = rows.Count,
                 truncated,
                 /* Counted over the returned rows, and reported only when they are all of them. */
@@ -463,6 +488,7 @@ public sealed class DarlingMcpPgServerStateTools
                      + "ones; for who is blocking whom, use get_pg_blocking.",
                 locks,
             }, McpHelpers.JsonOptions);
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -804,6 +830,7 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("Hours of history to analyze. Default 168 (one week).")] int hours_back = 168,
         [Description("Maximum changes to return. Default 100.")] int limit = 100,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -824,17 +851,47 @@ public sealed class DarlingMcpPgServerStateTools
 
             if (fetched.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config", cancellationToken)
-                    ?? McpHelpers.Status(
+                var bare = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config", cancellationToken);
+                if (bare is not null)
+                {
+                    return bare;
+                }
+
+            /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+               Rows are windowed on the probe's time column over [start, now]. A data answer over 90 minutes or less starts no probe;
+               a failed probe costs the notice, never the rows. */
+            var emptyStart = windowEnd.AddHours(-hours_back);
+            var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_server_config_changes", "pg_server_config", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+
+                return McpHelpers.Status(
                         "no_changes",
                         $"No configuration parameter changed value on {resolved.ServerName} in the last "
                         + $"{hours_back} hour(s). That is a real finding rather than missing data - this "
-                        + "read compares consecutive snapshots, so an unchanged server produces no rows.");
+                        + "read compares consecutive snapshots, so an unchanged server produces no rows.",
+                        emptyNotice.AsHints());
             }
 
             var truncated = fetched.Count > limit;
             var rows = truncated ? fetched.Take(limit).ToList() : fetched;
+
+            /* #4966: the window floor. Coverage is the web's source for this read (WebDataStartNote): a snapshot in the window proves the
+               store held the server from that snapshot on, and one before the window is not counted. The list is newest first under a row
+               cap, so a capped page ends at its oldest change and the store's coverage cannot move that: the capped-list rule names the
+               oldest change shown (the web's rule, WebDataStartNote.NewestFirstCappedReads) and starts no probe. A page the cap did not
+               cut, or one that reaches the window's start, takes the coverage rule or none. */
+            var windowStart = windowEnd.AddHours(-hours_back);
+            var oldestShown = rows.Min(r => r.ChangedAtUtc);
+            var notice = truncated
+                ? (oldestShown > windowStart
+                    ? new McpWindowNotice(
+                        McpHelpers.FormatEffectiveStart(oldestShown),
+                        true,
+                        ComposeStoreAvailability.BuildCappedListNotice(oldestShown, windowStart, windowEnd))
+                    : new McpWindowNotice(McpHelpers.FormatEffectiveStart(windowStart), false, null))
+                : await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_server_config_changes", "pg_server_config", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
 
             /* #3937: the rows are typed `object` so one list can carry two shapes. A server-wide row is the SAME
                anonymous shape it always was, and System.Text.Json serializes an object-typed element by its
@@ -850,6 +907,9 @@ public sealed class DarlingMcpPgServerStateTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 status = "config_changes",
                 change_count = rows.Count,
                 truncated,
@@ -876,7 +936,8 @@ public sealed class DarlingMcpPgServerStateTools
                to what this tool returned before #3937. */
             if (rows.All(r => r.DatabaseName is null && r.RoleName is null))
             {
-                return JsonSerializer.Serialize(page, McpHelpers.JsonOptions);
+                var plain = JsonSerializer.Serialize(page, McpHelpers.JsonOptions);
+                return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(plain) : plain;
             }
 
             var node = JsonSerializer.SerializeToNode(page, McpHelpers.JsonOptions)?.AsObject()
@@ -889,7 +950,8 @@ public sealed class DarlingMcpPgServerStateTools
                 + "began reading overrides is not reported as set: nobody set it then, the collector started "
                 + "seeing it. An override row has no unit, context or description; read those off the "
                 + "server-wide setting of the same name.";
-            return node.ToJsonString(McpHelpers.JsonOptions);
+            var scoped = node.ToJsonString(McpHelpers.JsonOptions);
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(scoped) : scoped;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -137,6 +137,24 @@ internal static class DarlingMcpWindowNotice
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
+    /// <summary>
+    /// <see cref="ReadAsync"/> over the probe source the WEB uses for the same read (<see cref="WebDataStartNote.TryGetReadSource"/>),
+    /// so a tool and the page it shares a read with never disagree about where the store's coverage starts (#4966).
+    /// </summary>
+    internal static Task<McpWindowNotice> ReadForToolAsync(
+        NpgsqlDataSource postgres, string tool, string table, string serverName, DateTime requestedStart, DateTime windowEnd,
+        bool emptyAnswer, ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (!WebDataStartNote.TryGetReadSource(tool, out var source))
+        {
+            throw new InvalidOperationException($"'{tool}' has no data-start probe source in WebDataStartNote.");
+        }
+
+        return ReadAsync(
+            () => Probe(postgres, source, serverName, requestedStart, windowEnd, cancellationToken),
+            requestedStart, windowEnd, table, emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
+    }
+
     /// <summary>A test's stand-in for the coverage probe, per async flow (null: the store is asked).</summary>
     private static readonly AsyncLocal<Func<Task<DateTime?>>?> s_testOnlyProbe = new();
 
