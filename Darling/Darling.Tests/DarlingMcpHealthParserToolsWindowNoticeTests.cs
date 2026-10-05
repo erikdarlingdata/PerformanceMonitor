@@ -29,7 +29,8 @@ namespace Darling.Tests;
 /// can be older than the coverage: the notice names the earlier of the two. <c>unavailable</c> answers stay bare. Every window is
 /// anchored by <c>as_of</c>.
 /// </summary>
-public sealed partial class DarlingMcpHealthParserToolsLivePostgresTests
+[Collection("live-postgres")]
+public sealed class DarlingMcpHealthParserToolsWindowNoticeLiveTests
 {
     private const string Collector = "system_health_events";
     private static readonly string[] HealthTables = ["system_health_events"];
