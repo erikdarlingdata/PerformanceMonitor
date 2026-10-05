@@ -444,6 +444,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCustomAlerts(app, postgres, logger);
         MapMuteRules(app, postgres, logger);
         MapServerTags(app, postgres, logger);
+        MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
@@ -982,6 +983,362 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var result = await Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore(store, id);
             return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
+    }
+
+    /// <summary>How long one <c>POST /api/servers</c> request may hold the one-at-a-time slot.</summary>
+    internal static readonly TimeSpan ServerAddSlotTimeout = TimeSpan.FromSeconds(120);
+
+    internal const string ServerAddTimedOutText = "Adding servers took too long; check the server list before retrying. If every later add is refused as busy, restart the service.";
+
+    /// <summary>The most servers one <c>POST /api/servers</c> request may carry.</summary>
+    internal const int MaxServersPerAddRequest = 20;
+
+    /// <summary>The most request-body bytes the add route reads before it answers 400 (twenty entries are a few KB).</summary>
+    internal const int MaxServerAddBodyBytes = 64 * 1024;
+
+    /// <summary>What a redacted secret is replaced with in any text the add route puts on the wire or in a log.</summary>
+    private const string RedactedSecret = "[redacted]";
+
+    /// <summary>
+    /// <c>POST /api/servers</c>: adds monitored servers (the web twin of the MCP <c>add_servers</c> tool). The body
+    /// is the same JSON ARRAY of server objects the tool takes, and the route hands it to the SAME core
+    /// (<see cref="DarlingMcpServerAdminTools.AddServersAsync(NpgsqlDataSource, string, DarlingMcpServerAdminTools.ServerProbe, CancellationToken)"/>),
+    /// so the web surface accepts exactly what the tool accepts, probes the server from the service before saving,
+    /// and answers with the core's own <c>{requested, added, skipped, collided, failed, results}</c> envelope. The
+    /// core's whole-request refusal (<c>{"status":"invalid"}</c>) is a 400; every other envelope is a 200, with
+    /// each entry's outcome in <c>results</c>.
+    ///
+    /// <para><b>Gates.</b> A read-only seat is refused by the host's group-level write gate
+    /// (<see cref="DarlingWebSeat.IsRequestAllowed"/>) and again here, because this is the one route that carries a
+    /// credential. <c>application/json</c> is required (415 otherwise, the CSRF defense the mute routes use). At most
+    /// <see cref="MaxServersPerAddRequest"/> servers per request (400 above that). One add runs at a time per host
+    /// process: a second request that arrives while one is running answers 429, because each entry is probed over
+    /// the network and a caller must not be able to queue unbounded probes from the service. The write runs on the
+    /// host's <c>viewer</c> pool, whose <c>INSERT</c> on <c>config_monitored_servers</c> is the floor beneath the
+    /// seat gate; <c>encrypted_password</c> stays SELECT-carved from it.</para>
+    ///
+    /// <para><b>Credentials.</b> A password or client secret travels only in the request body. The route never echoes
+    /// the body, never logs it, and every 400 it composes is a fixed sentence (a parse failure names no part of the
+    /// body, because a JSON parser's message can quote the character it stopped at). Any submitted secret that
+    /// appears in the core's answer is replaced with <see cref="RedactedSecret"/> before it is written, as a
+    /// backstop: the core's answers carry none today. The core's caught-exception envelope never reaches the wire
+    /// either: it answers through <see cref="ServerErrorResult"/>'s fixed body, like every other write route.</para>
+    ///
+    /// <para><b>Audit.</b> Who added a server is not stored on the row, so one Information line per added server is
+    /// the record: the editor principal, the server name and the auth mode, never the secret.</para>
+    /// </summary>
+    internal static void MapServers(
+        WebApplication app, NpgsqlDataSource postgres, ILogger logger,
+        Func<string, Task<string>>? addServers = null,
+        TimeSpan? addTimeout = null)
+    {
+        var slotTimeout = addTimeout ?? ServerAddSlotTimeout;
+
+        /* One gate per host: MapAll runs once per process. */
+        var addInFlight = new SemaphoreSlim(1, 1);
+
+        /* The seam a test stands a stub probe or a held add in through; production runs the core itself. */
+        addServers ??= body => DarlingMcpServerAdminTools.AddServers(postgres, body);
+
+        app.MapPost("/api/servers", async (HttpContext context) =>
+        {
+            if (!DarlingWebSeat.FromContext(context).CanEdit)
+            {
+                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+            }
+
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            string body;
+            try
+            {
+                body = await ReadBoundedBodyAsync(context, MaxServerAddBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
+            if (!TryReadServerAddBody(body, out var entries, out var refusal))
+            {
+                return ErrorResult(refusal!, StatusCodes.Status400BadRequest);
+            }
+
+            if (!addInFlight.Wait(0))
+            {
+                return ErrorResult("A server add is already running. Wait for it to finish, then try again.", StatusCodes.Status429TooManyRequests);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            /* The core takes no request token, like the tool: a client that disconnects mid-batch must not
+               leave the entries after it unattempted while the ones before it are already saved and unaudited. */
+            Task<string> running;
+            try
+            {
+                running = addServers(body);
+            }
+            catch (Exception ex)
+            {
+                /* addServers threw before returning a task: nothing is running, so free the slot here. Only the
+                   exception TYPE is logged: its message could quote a value the request carried. EVERY synchronous
+                   throw is caught, cancellation included: the slot is no longer released in a finally, so a type
+                   that escaped this catch would hold it for the life of the process and answer 429 forever. */
+                addInFlight.Release();
+                return ServerErrorResult(
+                    $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
+            }
+
+            /* The slot is freed by the add itself, once, when it finishes (completed or faulted) - never by
+               the wait, so an add that outlives the timeout still holds the slot. */
+            _ = running.ContinueWith(_ => addInFlight.Release(), TaskScheduler.Default);
+
+            string result;
+            try
+            {
+                result = await running.WaitAsync(slotTimeout);
+            }
+            catch (TimeoutException)
+            {
+                _ = running.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                logger.LogWarning("POST /api/servers: the add did not finish within {Seconds} s; the slot stays held until it does", (int)slotTimeout.TotalSeconds);
+                return ErrorResult(ServerAddTimedOutText, StatusCodes.Status503ServiceUnavailable);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* The core catches its own faults, so this is a backstop; only the TYPE is logged. */
+                return ServerErrorResult(
+                    $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
+            }
+
+            var secrets = SubmittedSecrets(entries);
+
+            if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
+            {
+                return ServerErrorResult(RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets), "/api/servers", logger, stopwatch.ElapsedMilliseconds);
+            }
+
+            var answer = RedactAddAnswer(result, secrets);
+            LogServerAddFailures(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, answer);
+            LogServerAdds(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, entries, answer);
+            return Results.Text(answer, "application/json", statusCode: MuteRuleEnvelopeStatus(answer));
+        });
+    }
+
+    /// <summary>
+    /// PURE: parses the add body into its entries. False with a fixed, caller-facing <paramref name="refusal"/>
+    /// when the body is not a JSON array of 1 to <see cref="MaxServersPerAddRequest"/> objects. The refusal names
+    /// no part of the body.
+    /// </summary>
+    internal static bool TryReadServerAddBody(string body, out List<JsonObject> entries, out string? refusal)
+    {
+        entries = new List<JsonObject>();
+        refusal = null;
+
+        JsonNode? root;
+        try
+        {
+            root = JsonNode.Parse(body);
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException)
+        {
+            refusal = "Request body is not valid JSON.";
+            return false;
+        }
+
+        if (root is not JsonArray array)
+        {
+            refusal = "Request body must be a JSON array of server objects.";
+            return false;
+        }
+
+        if (array.Count == 0)
+        {
+            refusal = "Request body must hold at least one server object.";
+            return false;
+        }
+
+        if (array.Count > MaxServersPerAddRequest)
+        {
+            refusal = $"A request may add at most {MaxServersPerAddRequest} servers; send the rest in another request.";
+            return false;
+        }
+
+        foreach (var element in array)
+        {
+            if (element is not JsonObject entry)
+            {
+                refusal = "Every entry must be a JSON object.";
+                return false;
+            }
+
+            try
+            {
+                /* A duplicate property name throws ArgumentException on the first enumeration; force it here so it
+                   answers 400, like the dismiss route. */
+                _ = entry.Count;
+            }
+            catch (ArgumentException)
+            {
+                refusal = "An entry has a duplicate field.";
+                return false;
+            }
+
+            entries.Add(entry);
+        }
+
+        return true;
+    }
+
+    /// <summary>The non-empty <c>password</c> values the request carried (a SQL password or a service-principal client secret).</summary>
+    private static List<string> SubmittedSecrets(List<JsonObject> entries)
+    {
+        var secrets = new List<string>();
+        foreach (var entry in entries)
+        {
+            if (TryGetString(entry, "password") is { Length: > 0 } secret)
+            {
+                secrets.Add(secret);
+            }
+        }
+
+        return secrets;
+    }
+
+    /// <summary>PURE: <paramref name="text"/> with every occurrence of every secret replaced.</summary>
+    internal static string RedactSecrets(string text, IReadOnlyList<string> secrets)
+    {
+        foreach (var secret in secrets)
+        {
+            text = text.Replace(secret, RedactedSecret, StringComparison.Ordinal);
+        }
+
+        return text;
+    }
+
+    /// <summary>The core's envelope with any submitted secret removed from its free-text fields (<c>detail</c>,
+    /// <c>message</c>, <c>server</c>). The envelope keeps its shape; an envelope that does not parse is replaced
+    /// by a fixed refusal rather than passed through unredacted.</summary>
+    internal static string RedactAddAnswer(string answer, IReadOnlyList<string> secrets)
+    {
+        if (secrets.Count == 0)
+        {
+            return answer;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(answer) is not JsonObject envelope)
+            {
+                return RedactSecrets(answer, secrets);
+            }
+
+            RedactField(envelope, "message", secrets);
+            if (envelope["results"] is JsonArray results)
+            {
+                foreach (var row in results.OfType<JsonObject>())
+                {
+                    RedactField(row, "detail", secrets);
+                    RedactField(row, "server", secrets);
+                }
+            }
+
+            return envelope.ToJsonString();
+        }
+        catch (JsonException)
+        {
+            return "{\"status\":\"error\",\"message\":\"The answer could not be read.\"}";
+        }
+    }
+
+    private static void RedactField(JsonObject node, string key, IReadOnlyList<string> secrets)
+    {
+        if (node[key] is JsonValue value && value.TryGetValue<string>(out var text))
+        {
+            node[key] = RedactSecrets(text, secrets);
+        }
+    }
+
+    /// <summary>The auth mode an add entry names, in the words the tool documents; absent means Windows.</summary>
+    private static string AuthModeOf(JsonObject entry) => TryGetString(entry, "auth")?.Trim().ToLowerInvariant() switch
+    {
+        null or "" or "windows" => "Windows",
+        "sql" => "SQL",
+        "serviceprincipal" => "ServicePrincipal",
+        "managedidentity" => "ManagedIdentity",
+        _ => "other",
+    };
+
+    /// <summary>One Information line per failed row with the core's full detail (secrets already redacted), so the
+    /// operator keeps what the web answer no longer shows.</summary>
+    private static void LogServerAddFailures(ILogger logger, string principal, string answer)
+    {
+        try
+        {
+            if (JsonNode.Parse(answer) is JsonObject envelope && envelope["results"] is JsonArray results)
+            {
+                foreach (var row in results.OfType<JsonObject>())
+                {
+                    var status = TryGetString(row, "status");
+                    if (status != DarlingMcpServerAdminTools.AddStatus.ConnectionFailed && status != DarlingMcpServerAdminTools.AddStatus.NotSaved)
+                    {
+                        continue;
+                    }
+
+                    logger.LogInformation(
+                        "Server add failed for {Principal}: {Server}, {Status}: {Detail}",
+                        DarlingHttpRefusalLog.Sanitize(principal, 256),
+                        DarlingHttpRefusalLog.Sanitize(TryGetString(row, "server") ?? "", 256),
+                        status,
+                        DarlingHttpRefusalLog.Sanitize(TryGetString(row, "detail") ?? "", 1024));
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            /* An unreadable answer has no rows to log. */
+        }
+    }
+
+    /// <summary>One Information line per server this request ADDED: who, which server and its auth mode. Request
+    /// text is sanitized before it reaches the log; the secret is never read here.</summary>
+    private static void LogServerAdds(ILogger logger, string principal, List<JsonObject> entries, string answer)
+    {
+        var authByName = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var entry in entries)
+        {
+            var host = TryGetString(entry, "host")?.Trim();
+            var name = TryGetString(entry, "display_name") is { Length: > 0 } displayName ? displayName.Trim() : host;
+            if (!string.IsNullOrEmpty(name))
+            {
+                authByName.TryAdd(name, AuthModeOf(entry));
+            }
+        }
+
+        try
+        {
+            if (JsonNode.Parse(answer) is JsonObject { } envelope && envelope["results"] is JsonArray results)
+            {
+                foreach (var row in results.OfType<JsonObject>())
+                {
+                    if (TryGetString(row, "status") != DarlingMcpServerAdminTools.AddStatus.Added)
+                    {
+                        continue;
+                    }
+
+                    var server = TryGetString(row, "server") ?? "";
+                    logger.LogInformation(
+                        "Server added by {Principal}: {Server}, auth {AuthMode}",
+                        DarlingHttpRefusalLog.Sanitize(principal, 256), DarlingHttpRefusalLog.Sanitize(server, 256), authByName.GetValueOrDefault(server, "other"));
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            /* The answer was written by the core; an unreadable one has no added rows to audit. */
+        }
     }
 
     /// <summary>The most alert keys one dismiss request may carry.</summary>
