@@ -214,12 +214,15 @@ public sealed class McpToolsListBudgetTests
     // get_server_trend gains latch, spinlock, session_stats and collector_duration (#4843): 186,010 -> 186,158.
     // get_slow_reads (#5097, the slow-read record's read tool) adds one tool, re-measured on the tree merged with dev 85a522f0b: 186,158 -> 186,917, 171 -> 172 tools (unchanged by dev's later commits).
     // get_store_query_history (#5097, the store statement history read) adds one tool, measured on this tree: 187,122 -> 188,119, 172 -> 173 tools.
+    // edit_server (#5240) adds one tool, measured on this tree: 188,119 -> 189,171, 173 -> 174 tools (+1,052 bytes).
     /* #5228: the three raw-plan reads behind the web grids' plan buttons (get_query_store_plan_xml, get_procedure_plan_xml,
        get_active_query_plan_xml), measured on the tree merged with dev 94aa5e755: 188,119 -> 190,004 (+1,885), 173 -> 176 tools. Each head
        is under 160 characters. */
+    // Both additions above together (edit_server #5240 plus the three raw-plan reads #5228), as McpToolsListBudgetTests measured the tree
+    // merged with dev c1679bcdd: 188,119 -> 191,056 (= 188,119 + 1,052 + 1,885), 173 -> 177 tools. The ceiling now covers all 177 served tools.
     /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History button,
        measured on this tree: 190,004 -> 190,772 (+768), 176 -> 177 tools. Its head is under 160 characters. */
-    private const int TotalCeilingBytes = 190_772;
+    private const int TotalCeilingBytes = 191_824;
 
 
 

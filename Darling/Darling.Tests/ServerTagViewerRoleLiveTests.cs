@@ -118,35 +118,7 @@ public sealed class ServerTagViewerRoleLiveTests
             await PgMigrations.MigrateAsync(connection, null, ct);
         }
 
-        var provisioning = DarlingManagedRoles.BuildProvisioningSql(
-            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
-        var viewerStatements = new System.Collections.Generic.List<string>();
-        /* Drop the comment lines BEFORE splitting: the provisioning prose contains semicolons. */
-        var uncommented = string.Join('\n', provisioning.Split('\n').Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal)));
-        foreach (var raw in uncommented.Split(';'))
-        {
-            var statement = raw.Trim();
-            var isGrant = statement.StartsWith("GRANT ", StringComparison.Ordinal);
-            if (!isGrant && !statement.StartsWith("REVOKE ", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var marker = isGrant ? " TO " : " FROM ";
-            var at = statement.LastIndexOf(marker, StringComparison.Ordinal);
-            if (at < 0 || statement.Contains("EXECUTE ON FUNCTION", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var targets = statement[(at + marker.Length)..].Split(',').Select(t => t.Trim()).ToList();
-            if (!targets.Contains("viewer", StringComparer.Ordinal))
-            {
-                continue;
-            }
-
-            viewerStatements.Add(statement[..at] + marker + roleName);
-        }
+        var viewerStatements = ViewerGrantReplay.StatementsFor(roleName);
 
         /* The viewer's table-wide config SELECT and its column carve must both be in what we replay. */
         Assert.Contains(viewerStatements, x => x.Contains("SELECT ON ALL TABLES IN SCHEMA config", StringComparison.Ordinal));

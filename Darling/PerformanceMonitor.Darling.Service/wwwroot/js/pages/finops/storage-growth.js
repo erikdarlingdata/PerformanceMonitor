@@ -7,7 +7,7 @@
  */
 
 /* FinOps "Storage Growth" tab, from get_finops (view storage_growth). Three levels held as state in the tab: databases
-   (the default), objects (a click on a database: its fastest-growing tables with a 30-day size heatmap) and indexes (a
+   (the default), objects (a click on a database: its fastest-growing tables with a size heatmap over the 7, 30 or 90 day window) and indexes (a
    click on a table: its indexes and their usage). Back returns one level; the breadcrumb names the path. Nothing goes
    in the URL. The heatmap is a matrix table; each cell's shade class comes from the service's band and the browser
    computes nothing. */
@@ -18,14 +18,22 @@ import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, error
 const HOURS = 24;
 const OBJECT_LIMIT = 20;
 
-// The drill per server: { level, database, object }. It lives at module scope because the page's 60 s poll calls build()
+// The objects window, in days: the desktop's 7 / 30 / 90 picker. The service reads it as hours_back (days * 24); 30 days is its default.
+const WINDOWS = [
+  { value: 7, label: "Last 7 days" },
+  { value: 30, label: "Last 30 days" },
+  { value: 90, label: "Last 90 days" },
+];
+const DEFAULT_DAYS = 30;
+
+// The drill per server: { level, database, object, days }. It lives at module scope because the page's 60 s poll calls build()
 // again and a build-local state would drop the reader back to Databases mid-drill.
 const drills = new Map();
 
 function drillFor(server) {
   let d = drills.get(server);
   if (!d) {
-    d = { level: "databases", database: null, object: null };
+    d = { level: "databases", database: null, object: null, days: DEFAULT_DAYS };
     drills.set(server, d);
   }
   return d;
@@ -178,12 +186,28 @@ export const tab = {
       load();
     }
 
+    // The window picker (objects level only); the choice is kept in the drill, so the 60 s rebuild does not put it back to 30 days.
+    function windowPicker() {
+      const sel = el(
+        "select",
+        { class: "range-select-inline", "aria-label": "Window" },
+        WINDOWS.map((w) => el("option", { value: w.value, text: w.label }))
+      );
+      sel.value = String(state.days);
+      sel.addEventListener("change", () => {
+        state.days = Number(sel.value);
+        load();
+      });
+      return el("label", { class: "range-control" }, [el("span", { text: "Window" }), sel]);
+    }
+
     function chrome(content) {
       const items = [];
       if (state.level !== "databases") {
         items.push(el("button", { type: "button", class: "btn", text: "Back", onClick: back }));
         items.push(crumb());
       }
+      if (state.level === "objects") items.push(windowPicker());
       mount(body, [...items, ...content]);
     }
 
@@ -204,8 +228,9 @@ export const tab = {
       const mine = ++seq;
       mount(body, [loadingStrip()]);
       const params = { server, view: "storage_growth", hours: HOURS };
-      if (state.level === "objects") Object.assign(params, { database_name: state.database, limit: OBJECT_LIMIT });
-      if (state.level === "indexes") Object.assign(params, { database_name: state.database, object_name: state.object });
+      if (state.level === "objects") Object.assign(params, { database_name: state.database, limit: OBJECT_LIMIT, hours: state.days * 24 });
+      // The same window at the indexes level, so the table is looked up among the same fastest growers the reader just saw.
+      if (state.level === "indexes") Object.assign(params, { database_name: state.database, object_name: state.object, hours: state.days * 24 });
       try {
         const res = await readTool("get_finops", params, ctx && ctx.signal);
         if (mine !== seq) return;

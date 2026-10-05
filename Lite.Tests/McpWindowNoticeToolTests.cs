@@ -12,6 +12,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -344,6 +345,58 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     }
 
     /* ───────────────────────── get_query_heatmap (query_stats) ───────────────────────── */
+
+    /// <summary>#4966: an idle grid over a cut window carries the shared cut sentence, not the "idle" reading.</summary>
+    [Fact]
+    public async Task GetQueryHeatmap_AnIdleGrid_OverACutWindow_CarriesTheCutSentence()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedIdleQueryStatsAsync(now.AddDays(-2), "0xI1");
+        await SeedIdleQueryStatsAsync(now.AddDays(-1), "0xI2");
+
+        var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 168));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.True(EmptyHints(root).GetProperty("window_truncated").GetBoolean());
+        Assert.NotEqual(JsonValueKind.Null, EmptyHints(root).GetProperty("effective_start").ValueKind);
+        var message = root.GetProperty("message").GetString()!;
+        Assert.StartsWith("Query stats WERE collected for ", message, StringComparison.Ordinal);
+        Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage + " Delta-based collection also needs a SECOND cycle before the first non-zero row exists.", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("up and idle", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4966: a database_name filter is exempt: over the same cut window its empty grid keeps the sentence that names the filter as a cause.</summary>
+    [Fact]
+    public async Task GetQueryHeatmap_AFilteredIdleGrid_OverACutWindow_KeepsItsOwnSentence()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedIdleQueryStatsAsync(now.AddDays(-2), "0xI1");
+        await SeedIdleQueryStatsAsync(now.AddDays(-1), "0xI2");
+
+        var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 168, database_name: "Db"));
+
+        Assert.True(EmptyHints(root).GetProperty("window_truncated").GetBoolean());
+        Assert.Contains("a database_name filter matching nothing collected", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("Nothing in the part of the window", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>#4966: the same idle grid over a covered window keeps its "idle" sentence.</summary>
+    [Fact]
+    public async Task GetQueryHeatmap_AnIdleGrid_OverACoveredWindow_KeepsTheIdleSentence()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedIdleQueryStatsAsync(now.AddHours(-167.9), "0xI1");
+        await SeedIdleQueryStatsAsync(now.AddDays(-1), "0xI2");
+
+        var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 168));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.False(EmptyHints(root).GetProperty("window_truncated").GetBoolean());
+        Assert.Contains("WERE collected", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
 
     [Fact]
     public async Task GetQueryHeatmap_RowsStartInsideTheWindow_ReportTheFloor()
@@ -680,9 +733,29 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24));
 
-        Assert.Contains("this IS the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        /* #4966: the window is cut, so the all-clear claim gives way to the shared cut sentence; the 25% threshold stays. */
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("more than 25% worse than its baseline", message, StringComparison.Ordinal);
+        Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
         AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
         Assert.Contains("baseline_start", EmptyHints(root).GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>#4966: the same all-clear over a baseline the store fully covers keeps its text, with no cut in the hints.</summary>
+    [Fact]
+    public async Task GetQueryStoreRegressions_AnAllClear_OverACoveredBaseline_KeepsTheAllClearSentence()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedRegressionAsync(now.AddDays(-9), queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddDays(-3), queryId: 1, avgUs: 1000, intervalId: 3);
+        await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 1000, intervalId: 2);
+
+        var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24));
+
+        Assert.Contains("this IS the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.False(EmptyHints(root).GetProperty("window_truncated").GetBoolean());
     }
 
     [Fact]
@@ -710,7 +783,8 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     {
         await _duckDb.InitializeAsync();
         var now = DateTime.UtcNow;
-        await SeedRegressionAsync(now.AddDays(-3), queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddDays(-9), queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddDays(-3), queryId: 1, avgUs: 1000, intervalId: 3);
         await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 1000, intervalId: 2);
 
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, database_name: "Db"));
@@ -954,6 +1028,13 @@ VALUES ($1, $2, $3, $4, 55, 'LCK_M_X', 3000, 60, 'Db')",
         _nextId++, Naive(at), _serverId, ServerName);
 
     /// <summary>One capture of <paramref name="queryHash"/>, with executions, so the heatmap has a cell for it.</summary>
+    private Task SeedIdleQueryStatsAsync(DateTime at, string queryHash) => ExecuteAsync(@"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     last_execution_time, delta_execution_count, delta_worker_time, delta_elapsed_time, query_text)
+VALUES ($1, $2, $3, $4, 'Db', $5, $6, $2, 0, 0, 0, $7)",
+        _nextId++, Naive(at), _serverId, ServerName, queryHash, "0xS" + queryHash, "SELECT " + queryHash);
+
     private Task SeedQueryStatsAsync(DateTime at, string queryHash) => ExecuteAsync(@"
 INSERT INTO query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,

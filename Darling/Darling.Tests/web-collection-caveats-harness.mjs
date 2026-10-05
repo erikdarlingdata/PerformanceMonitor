@@ -75,9 +75,12 @@ try {
   fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
   /* Modules that other open PRs add to what server-tabs.js and panels.js import: copied when present, so this harness
      keeps working whichever lands first. */
-  for (const f of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js"), path.join("pages", "query-store-history.js")]) {
+  for (const f of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js"), path.join("pages", "pg-plan-viewer.js"), path.join("pages", "query-store-history.js")]) {
     if (fs.existsSync(path.join(jsDir, f))) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
   }
+  /* #5246: the Graph cell of the Deadlock Graphs grid. */
+  fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
+  fs.copyFileSync(path.join(jsDir, "pages", "deadlock-graph.js"), path.join(scratch, "pages", "deadlock-graph.js"));
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport const CATEGORICAL_COLORS = [];\nexport function normalizeColor(c) { return c; }\n' +

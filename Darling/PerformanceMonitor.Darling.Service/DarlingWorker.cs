@@ -6082,7 +6082,7 @@ LIMIT 1";
                 state.NextDue.Clear();
                 /* #3653 A5 (the adjacency #3540 A4 named and left): a same-id reconnect is a new epoch. The
                    fields ServerDefinitionEquals compares are the ones that decide WHICH instance the
-                   connection reaches (host, database, auth, intent, subnet failover) or WHAT it collects
+                   connection reaches (host, port, engine, database, auth, intent, subnet failover) or WHAT it collects
                    (excluded databases) — so a change here means the counters the next pass reads may be a
                    different instance's while the server_id, and every baseline cached under it, stays the
                    same. Left cached, the first pass after the reconnect would store one interval of
@@ -6281,7 +6281,7 @@ LIMIT 1";
 
     /// <summary>
     /// Whether two server definitions are identical for the collection loop — the connection-relevant fields
-    /// plus the collection-affecting excluded databases. A difference triggers a reconnect on reconcile so the
+    /// (host, port, engine, database, auth, credentials, intent) plus the collection-affecting excluded databases. A difference triggers a reconnect on reconcile so the
     /// new definition takes effect. <c>MonthlyCostUsd</c> is deliberately NOT compared: it does not affect
     /// collection at all, and the reload's <see cref="DarlingObservability.SyncServerEnabledStatesAsync"/>
     /// mirrors a cost change straight onto <c>collect.servers</c> (which the FinOps display reads) with no
@@ -6300,6 +6300,8 @@ LIMIT 1";
         && a.TrustServerCertificate == b.TrustServerCertificate
         && a.ReadOnlyIntent == b.ReadOnlyIntent
         && a.MultiSubnetFailover == b.MultiSubnetFailover
+        && a.Port == b.Port
+        && a.TargetEngine == b.TargetEngine
         && a.ExcludedDatabases.SequenceEqual(b.ExcludedDatabases, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -12846,9 +12848,9 @@ LIMIT 1";
        is the trap — it would exclude every post-cutover row, the whole set this change exists to serve. */
     public const string ResolveStoredQueryStoreForActualPlanSql = @"
 SELECT r.query_text,
-       r.query_plan_text,
+       CASE WHEN m.plan_id IS NULL THEN r.query_plan_text ELSE d.query_plan_xml END AS query_plan_text,
        NULL::text AS transaction_isolation_level,
-       NULL::bytea AS query_plan_gz
+       d.query_plan_gz
 FROM
 (
     SELECT
@@ -12864,14 +12866,27 @@ FROM
             s.query_text
         ) AS query_text,
         s.query_plan_text,
+        s.plan_id,
         s.collection_time
     FROM query_store_stats AS s
     WHERE s.server_id = $1
     AND   s.database_name = $2
     AND   s.query_id = $3
 ) AS r
+/* #5257: since #2210 the plan lives once in query_plan_dim, reached through collect.query_store_plan_map on
+   its primary key (server_id, database_name, plan_id) — the fact row's own column is a NULL placeholder. The
+   inline column answers ONLY for a plan_id the map has no row for (a pre-cutover plan): a map row with no
+   content behind it (a NULL-digest marker, or a digest whose dimension row is gone) is an absent plan, and
+   the inline column is not asked for it. */
+LEFT JOIN collect.query_store_plan_map AS m
+  ON  m.server_id = $1
+  AND m.database_name = $2
+  AND m.plan_id = r.plan_id
+LEFT JOIN query_plan_dim AS d
+  ON  d.digest = m.digest
+  AND (d.query_plan_xml IS NOT NULL OR d.query_plan_gz IS NOT NULL)
 WHERE r.query_text IS NOT NULL
-ORDER BY (r.query_plan_text IS NOT NULL) DESC, r.collection_time DESC
+ORDER BY ((m.plan_id IS NULL AND r.query_plan_text IS NOT NULL) OR d.digest IS NOT NULL) DESC, r.collection_time DESC
 LIMIT 1";
 
     /// <summary>The <c>query_snapshots</c> resolver — the Wait drill-down surface's identifier (server_id +
