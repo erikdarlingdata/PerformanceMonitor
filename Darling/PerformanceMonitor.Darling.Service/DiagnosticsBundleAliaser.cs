@@ -268,10 +268,85 @@ internal sealed class BundleAliaser
         return stripped;
     }
 
-    /* A quoted WORD\word is a Windows account (domain and login): 'CORP\svc_darling' in a SQL Server 18456 message. */
+    /* A quoted WORD\word is a Windows account (domain and login): 'CORP\svc_darling' in a SQL Server 18456 message.
+       The domain half is NetBIOS-shaped (a letter first, at most 15 characters, no dot), so a quoted relative path
+       ('..\logs') or a dotted file name is not an account. */
     private static readonly Regex s_quotedAccount = new(
-        @"(?<q>['""])(?<d>[A-Za-z0-9_.\-]{2,64})\\(?<l>[A-Za-z0-9_.$\-]{2,64})\k<q>",
+        @"(?<q>['""])(?<d>[A-Za-z][A-Za-z0-9_\-]{1,14})\\(?<l>[A-Za-z0-9_.$\-]{2,64})\k<q>",
         RegexOptions.CultureInvariant, TimeSpan.FromSeconds(2));
+
+    /// <summary>Words that read as product or path vocabulary, not as a domain or login: a quoted <c>'server\instance'</c> is help text.</summary>
+    private static readonly HashSet<string> s_vocabulary = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "server", "host", "db", "domain", "login", "role", "ip", "tag", "instance", "database", "pg", "log", "logs",
+        "data", "store", "service", "user", "path", "bin", "etc", "var", "tmp", "opt", "usr", "lib",
+    };
+
+    private static readonly Regex s_fileExtension = new(
+        @"\.(?:log|json|txt|conf|cfg|ini|xml|exe|dll|md|csv|sql|tmp)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    private readonly HashSet<string> _bundleKeys = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Records every JSON key of <paramref name="node"/>. A quoted half that is a kept word, or that has the shape of a
+    /// product key (lowercase letters, digits and underscores) and IS one of these keys, is vocabulary and not an account.
+    /// </summary>
+    internal void NoteKeys(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var (key, value) in obj)
+                {
+                    _bundleKeys.Add(key);
+
+                    /* A status is a fixed word of the product (ok, not_present, store_unreachable), never data. */
+                    if (key == "status" && value is JsonValue statusValue && statusValue.TryGetValue<string>(out var status))
+                    {
+                        NoteProductValues(new[] { status });
+                    }
+
+                    NoteKeys(value);
+                }
+
+                break;
+            case JsonArray array:
+                foreach (var item in array)
+                {
+                    NoteKeys(item);
+                }
+
+                break;
+        }
+    }
+
+    private readonly HashSet<string> _productValues = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Registers text the product itself writes as a value (the section names in the manifest listing). A value that is
+    /// exactly one of these is the product's vocabulary, so a real name that is a substring of it (a database called
+    /// <c>Store</c> against <c>store_log</c>) is not a leak there.
+    /// </summary>
+    internal void NoteProductValues(IEnumerable<string> values)
+    {
+        foreach (var value in values)
+        {
+            if (s_productKeyShape.IsMatch(value))
+            {
+                _productValues.Add(value);
+            }
+        }
+    }
+
+    private bool IsAccountHalf(string half, bool isLogin)
+    {
+        if (IsKept(half) || s_vocabulary.Contains(half) || (s_productKeyShape.IsMatch(half) && _bundleKeys.Contains(half)))
+        {
+            return false;
+        }
+
+        return !(isLogin && s_fileExtension.IsMatch(half));
+    }
 
     /// <summary>Adds both halves of every quoted <c>WORD\word</c> in <paramref name="text"/>: the domain, and the login.</summary>
     private void RegisterQuotedAccounts(string text)
@@ -285,8 +360,12 @@ internal sealed class BundleAliaser
         {
             foreach (Match m in s_quotedAccount.Matches(text))
             {
-                AddName(AliasKind.Domain, m.Groups["d"].Value);
-                AddName(AliasKind.Login, m.Groups["l"].Value);
+                /* The pair is an account only when both halves can be one; a path or help text registers nothing. */
+                if (IsAccountHalf(m.Groups["d"].Value, isLogin: false) && IsAccountHalf(m.Groups["l"].Value, isLogin: true))
+                {
+                    AddName(AliasKind.Domain, m.Groups["d"].Value);
+                    AddName(AliasKind.Login, m.Groups["l"].Value);
+                }
             }
         }
         catch (RegexMatchTimeoutException)
@@ -697,7 +776,7 @@ internal sealed class BundleAliaser
         var values = new List<(string Path, string Text)>();
         var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         Collect(root, string.Empty, values, keys);
-        var unescaped = string.Join('\n', values.Select(v => v.Text));
+        var unescaped = string.Join('\n', values.Where(v => !_productValues.Contains(v.Text)).Select(v => v.Text));
         var leaks = new List<BundleLeak>();
 
         foreach (var secret in _secrets.Where(Verifiable))
@@ -709,6 +788,11 @@ internal sealed class BundleAliaser
         }
 
         var minted = new HashSet<string>(_aliasByToken.Values, StringComparer.OrdinalIgnoreCase);
+
+        /* Alias text the generator minted (domain-1, host-3) is output, not information, so a real name such as "main"
+           or "host" must not match inside it. The product's own keys are masked the same way (see MaskProductKeys). */
+        var maskedValues = MaskAliasText(unescaped, minted);
+        var maskedBytes = MaskAliasText(MaskProductKeys(serialized), minted);
         foreach (var token in _aliasByToken.Keys)
         {
             if (!Verifiable(token) || TokenIsAliasText(token, minted))
@@ -716,9 +800,7 @@ internal sealed class BundleAliaser
                 continue;
             }
 
-            /* A token that occurs ONLY as a JSON key (exactly "token" followed by a colon, in every occurrence) is the
-               product's own vocabulary: keys are never rewritten. Any other occurrence in the bytes is a leak. */
-            if (unescaped.Contains(token, StringComparison.OrdinalIgnoreCase) || OccursOutsideKeys(serialized, token))
+            if (maskedValues.Contains(token, StringComparison.OrdinalIgnoreCase) || maskedBytes.Contains(token, StringComparison.OrdinalIgnoreCase))
             {
                 leaks.Add(Locate(values, token, "name"));
             }
@@ -727,30 +809,30 @@ internal sealed class BundleAliaser
         return leaks;
     }
 
-    /// <summary>True when <paramref name="token"/> occurs in <paramref name="serialized"/> anywhere other than as a whole JSON key.</summary>
-    private static bool OccursOutsideKeys(string serialized, string token)
-    {
-        var at = 0;
-        while ((at = serialized.IndexOf(token, at, StringComparison.OrdinalIgnoreCase)) >= 0)
+    private static readonly Regex s_productKeyShape = new("^[a-z0-9_]+$", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    /* A product-shaped string that is a key (a colon follows it) or a registered product value. */
+    private static readonly Regex s_serializedProductKey = new(@"""[a-z0-9_]+""", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
+
+    private static readonly Regex s_aliasShape = new(
+        @"(?<![A-Za-z0-9_])(?:server|host|db|domain|login|role|ip|tag)-\d+(?![A-Za-z0-9_])",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
+
+    /// <summary>
+    /// Blanks every JSON key whose WHOLE text has the product's key shape (<c>^[a-z0-9_]+$</c>): keys are never rewritten,
+    /// so a name that is a substring of <c>store_log</c> is the product's own vocabulary. A key with mixed case, a dot, a
+    /// space or a hyphen is data-shaped and stays in the text, so a name inside it is still a leak.
+    /// </summary>
+    private string MaskProductKeys(string serialized) =>
+        s_serializedProductKey.Replace(serialized, m =>
         {
-            var end = at + token.Length;
-            var quoted = at > 0 && serialized[at - 1] == '"' && end < serialized.Length && serialized[end] == '"';
-            var next = end + 1;
-            while (quoted && next < serialized.Length && char.IsWhiteSpace(serialized[next]))
-            {
-                next++;
-            }
+            var isKey = serialized.AsSpan(m.Index + m.Length).TrimStart().StartsWith(":", StringComparison.Ordinal);
+            return isKey || _productValues.Contains(m.Value[1..^1]) ? new string('\u0001', m.Length) : m.Value;
+        });
 
-            if (!(quoted && next < serialized.Length && serialized[next] == ':'))
-            {
-                return true;
-            }
-
-            at = end;
-        }
-
-        return false;
-    }
+    /// <summary>Blanks the alias text the generator minted, so a real name cannot match inside it.</summary>
+    private static string MaskAliasText(string text, HashSet<string> minted) =>
+        s_aliasShape.Replace(text, m => minted.Contains(m.Value) ? new string('\u0001', m.Length) : m.Value);
 
     /// <summary>
     /// True for text the alias generator itself mints (<c>server-3</c>, <c>ip-1</c>): a token that is exactly one of the
@@ -792,12 +874,13 @@ internal sealed class BundleAliaser
         var values = new List<(string Path, string Text)>();
         var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         Collect(root, string.Empty, values, keys);
-        var unescaped = string.Join('\n', values.Select(v => v.Text));
+        var unescaped = string.Join('\n', values.Where(v => !_productValues.Contains(v.Text)).Select(v => v.Text));
         var hits = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var minted = new HashSet<string>(_aliasByToken.Values, StringComparer.OrdinalIgnoreCase);
+        var masked = MaskAliasText(unescaped, minted);
         foreach (var token in _aliasByToken.Keys)
         {
-            if (Verifiable(token) && !TokenIsAliasText(token, minted) && unescaped.Contains(token, StringComparison.OrdinalIgnoreCase))
+            if (Verifiable(token) && !TokenIsAliasText(token, minted) && masked.Contains(token, StringComparison.OrdinalIgnoreCase))
             {
                 hits.Add(token);
             }
@@ -815,7 +898,7 @@ internal sealed class BundleAliaser
                 {
                     if (obj[key] is JsonValue v && v.TryGetValue<string>(out var text))
                     {
-                        obj[key] = ReplaceNoBoundary(text, tokens);
+                        obj[key] = _productValues.Contains(text) ? text : ReplaceNoBoundary(text, tokens);
                     }
                     else
                     {
@@ -829,7 +912,7 @@ internal sealed class BundleAliaser
                 {
                     if (array[i] is JsonValue v && v.TryGetValue<string>(out var text))
                     {
-                        array[i] = ReplaceNoBoundary(text, tokens);
+                        array[i] = _productValues.Contains(text) ? text : ReplaceNoBoundary(text, tokens);
                     }
                     else
                     {
@@ -841,7 +924,29 @@ internal sealed class BundleAliaser
         }
     }
 
+    /// <summary>Replaces each token wherever it occurs, except inside alias text the generator minted (which is output, never information).</summary>
     private string ReplaceNoBoundary(string text, HashSet<string> tokens)
+    {
+        var minted = new HashSet<string>(_aliasByToken.Values, StringComparer.OrdinalIgnoreCase);
+        var result = new StringBuilder(text.Length);
+        var last = 0;
+        foreach (Match alias in s_aliasShape.Matches(text))
+        {
+            if (!minted.Contains(alias.Value))
+            {
+                continue;
+            }
+
+            result.Append(ReplaceTokens(text[last..alias.Index], tokens));
+            result.Append(alias.Value);
+            last = alias.Index + alias.Length;
+        }
+
+        result.Append(ReplaceTokens(text[last..], tokens));
+        return result.ToString();
+    }
+
+    private string ReplaceTokens(string text, HashSet<string> tokens)
     {
         var result = text;
         foreach (var token in tokens.OrderByDescending(t => t.Length))
