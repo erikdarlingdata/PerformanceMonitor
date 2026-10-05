@@ -217,7 +217,9 @@ public sealed class McpToolsListBudgetTests
     /* #5228: the three raw-plan reads behind the web grids' plan buttons (get_query_store_plan_xml, get_procedure_plan_xml,
        get_active_query_plan_xml), measured on the tree merged with dev 94aa5e755: 188,119 -> 190,004 (+1,885), 173 -> 176 tools. Each head
        is under 160 characters. */
-    private const int TotalCeilingBytes = 190_004;
+    /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History button,
+       measured on this tree: 190,004 -> 190,772 (+768), 176 -> 177 tools. Its head is under 160 characters. */
+    private const int TotalCeilingBytes = 190_772;
 
 
 
