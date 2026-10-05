@@ -152,10 +152,10 @@ async function send(method, path, body) {
   return result;
 }
 
-const createRule = (body) => send("POST", "/api/mute-rules", body);
+export const createRule = (body) => send("POST", "/api/mute-rules", body);
 const patchRule = (id, body) => send("PATCH", "/api/mute-rules/" + encodeURIComponent(id), body);
 const setEnabled = (id, enabled) => send("PUT", "/api/mute-rules/" + encodeURIComponent(id) + "/enabled", { enabled });
-const deleteRule = (id) => send("DELETE", "/api/mute-rules/" + encodeURIComponent(id));
+export const deleteRule = (id) => send("DELETE", "/api/mute-rules/" + encodeURIComponent(id));
 
 /* ─────────────────────────── page ─────────────────────────── */
 
