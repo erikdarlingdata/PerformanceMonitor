@@ -66,6 +66,42 @@ public sealed class DarlingModuleMapTests
         /* accumulate: upsert, and only ever advance — a stale run can't regress a fresher attribution */
         Assert.Contains("ON CONFLICT (server_name, sql_handle) DO UPDATE SET", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE module_map.last_seen IS NULL OR EXCLUDED.last_seen >= module_map.last_seen", sql, StringComparison.Ordinal);
+        /* the watermark moves in the same statement: forward only, and only when the read found a row */
+        Assert.Contains("INSERT INTO collect.module_map_state", sql, StringComparison.Ordinal);
+        Assert.Contains("refreshed_through = GREATEST(module_map_state.refreshed_through, EXCLUDED.refreshed_through)", sql, StringComparison.Ordinal);
+        Assert.Contains("HAVING max(collection_time) IS NOT NULL", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CreateStateTable_IsASingleRowRuntimeTableOfNaiveTimestamps()
+    {
+        var sql = DarlingModuleMap.CreateStateTableSql;
+
+        Assert.Contains("CREATE TABLE IF NOT EXISTS collect.module_map_state", sql, StringComparison.Ordinal);
+        Assert.Contains("id integer PRIMARY KEY CHECK (id = 1)", sql, StringComparison.Ordinal);
+        Assert.Contains("refreshed_through timestamp,", sql, StringComparison.Ordinal);
+        Assert.Contains("refreshed_at timestamp", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("timestamptz", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RefreshSince_IsTheDailyStatementOverABoundSince_WithTheSameUpsertAndWatermark()
+    {
+        var sql = DarlingModuleMap.RefreshSinceSql;
+
+        Assert.Contains("WHERE collection_time >= $1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("now() -", sql, StringComparison.Ordinal);
+        Assert.Contains("sql_handle IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("DISTINCT ON (server_name, sql_handle)", sql, StringComparison.Ordinal);
+        /* the #1801 lock-order ORDER BY survives */
+        Assert.Contains("ORDER BY server_name, sql_handle, collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE module_map.last_seen IS NULL OR EXCLUDED.last_seen >= module_map.last_seen", sql, StringComparison.Ordinal);
+        Assert.Contains("refreshed_through = GREATEST(module_map_state.refreshed_through, EXCLUDED.refreshed_through)", sql, StringComparison.Ordinal);
+        Assert.Contains("HAVING max(collection_time) IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("(now() AT TIME ZONE 'UTC')::timestamp", sql, StringComparison.Ordinal);
+        /* the daily statement is the same tail over its own head: they share every clause after the source */
+        var tail = sql[sql.IndexOf("up AS (", StringComparison.Ordinal)..];
+        Assert.EndsWith(tail, DarlingModuleMap.RefreshSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -151,7 +187,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", ct,
     {
         using var cmd = new NpgsqlCommand(
             $"DELETE FROM collect.procedure_stats WHERE server_id = {TestServerId}; " +
-            $"DELETE FROM collect.module_map WHERE server_name = '{TestServerName}'", c);
+            $"DELETE FROM collect.module_map WHERE server_name = '{TestServerName}'; " +
+            "DELETE FROM collect.module_map_state", c);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
