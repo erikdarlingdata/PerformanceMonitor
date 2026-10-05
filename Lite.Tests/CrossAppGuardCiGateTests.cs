@@ -2880,6 +2880,13 @@ public class CrossAppGuardCiGateTests
         Assert.DoesNotContain("% 4", run, StringComparison.Ordinal);
         Assert.Contains("($hash[0] % $shards) -eq ${{ matrix.shard }}", run, StringComparison.Ordinal);
 
+        /* ...and job-total is the shard count only while `shard` is the matrix's one axis: a second axis (an OS, say)
+           raises job-total while matrix.shard stays 0-3, so the packer would write buckets no leg reads and those
+           classes would never run, with no leg selecting zero. On a one-axis matrix job-index IS the shard value, so
+           each leg checks that and fails when it is not, before either cut uses $shards. */
+        Assert.Contains("if (${{ strategy.job-index }} -ne ${{ matrix.shard }}) { throw ", run, StringComparison.Ordinal);
+        Assert.Matches(@"\$shards = \$\{\{ strategy\.job-total \}\}\s+(?:#[^\r\n]*\s+)*if \(\$\{\{ strategy\.job-index \}\} -ne \$\{\{ matrix\.shard \}\}\) \{ throw [^\r\n]*\}\s+if \(\$env:LITE_TIMING_RUN -match ", run);
+
         /* The download is tried three times, and every try starts from an EMPTY folder: gh extracts each file
            create-exclusive, so a file a partial try left would make tries 2 and 3 fail too. The native-command
            error preference is off before the first try, so a failed gh call reaches the retry instead of throwing

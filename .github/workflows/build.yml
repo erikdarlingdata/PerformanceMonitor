@@ -1824,7 +1824,9 @@ jobs:
   #     rather than string.GetHashCode(), which is randomized per process ON PURPOSE). It is the
   #     fallback: no timing source, or timings the packer cannot use (missing, corrupt, empty, all
   #     zero, or covering under 80% of this commit's classes), cut this way. The shard count comes
-  #     from the matrix (strategy.job-total), so the cut and the matrix cannot disagree.
+  #     from the matrix (strategy.job-total), so the cut and the matrix cannot disagree: that holds
+  #     while `shard` is the matrix's only axis, and a leg whose job-index is not its shard value
+  #     fails (see the run step).
   # Totality used to hold by arithmetic; the duration cut earns it by proof. The packer's reconcile
   # check fails the leg unless the shard files hold every discovered class exactly once. And a leg
   # whose pinned timings cannot be downloaded, or whose download is not exactly the artifact set the
@@ -2047,6 +2049,9 @@ jobs:
               # fetch FAILS the leg: falling back to the hash here alone, while the other legs cut by
               # duration, would leave the four cuts not partitioning the suite.
               $shards = ${{ strategy.job-total }}
+              # job-total is the shard count only while `shard` is the matrix's one axis. A second axis would cut into
+              # buckets no leg reads; on a one-axis matrix job-index equals the shard value.
+              if (${{ strategy.job-index }} -ne ${{ matrix.shard }}) { throw "the lite-tests matrix is no longer the single shard axis (job-index ${{ strategy.job-index }}, shard ${{ matrix.shard }}), so strategy.job-total is not the shard count" }
               if ($env:LITE_TIMING_RUN -match '^\d+$') {
                   $planDir = Join-Path $env:RUNNER_TEMP 'lite-shard-plan'
                   $timingDir = Join-Path $planDir 'timings'
