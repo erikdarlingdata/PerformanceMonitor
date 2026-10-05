@@ -107,12 +107,61 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// The stored Query Store execution plan for a grid row, or null when no plan text was captured for
-    /// that (database, query_id, plan_id). Query Store already stores plans as ShowPlanXML text.
+    /// The latest captured Query Store plan for a query as it is stored since #2210: the fact rows carry no
+    /// plan text (the collector ships a NULL placeholder), and a plan lives ONCE in <c>query_plan_dim</c>,
+    /// reached through <c>collect.query_store_plan_map</c> on (server_id, database_name, plan_id). The inner
+    /// query picks the plans this query_id ran under, newest first (the fact table's own index on
+    /// server, database, query_id, plan_id answers it); the join then resolves the first one whose
+    /// content exists. A map row with a NULL digest is the content-less marker for a plan the engine could
+    /// not persist, so it joins to nothing and the next-newest plan is tried. The dimension row carries
+    /// text, gzip bytes or (for the oldest rows) text only, so both columns come back and the C# side
+    /// resolves text-else-gz. $1 server_id, $2 database_name, $3 query_id, $4 plan_id (the Viewer always passes one; the MCP reader passes NULL for "any plan").
+    /// </summary>
+    public const string QueryStorePlanViaMapSql = """
+        SELECT d.query_plan_xml, d.query_plan_gz
+        FROM (
+            SELECT plan_id, MAX(collection_time) AS last_collected
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   database_name = $2
+            AND   query_id = $3
+            AND   ($4::bigint IS NULL OR plan_id = $4)
+            GROUP BY plan_id
+        ) AS r
+        JOIN collect.query_store_plan_map AS m
+          ON  m.server_id = $1
+          AND m.database_name = $2
+          AND m.plan_id = r.plan_id
+        JOIN query_plan_dim AS d
+          ON d.digest = m.digest
+        WHERE (d.query_plan_xml IS NOT NULL OR d.query_plan_gz IS NOT NULL)
+        ORDER BY r.last_collected DESC
+        LIMIT 1
+        """;
+
+    /// <summary>
+    /// The stored Query Store execution plan for a grid row, or null when none was captured for that
+    /// (database, query_id, plan_id). Since #2210 the plan lives in <c>query_plan_dim</c> behind
+    /// <c>collect.query_store_plan_map</c> (<see cref="QueryStorePlanViaMapSql"/>), asked first; rows written
+    /// before that carry the text inline (<see cref="QueryStorePlanTextSql"/>), asked second.
     /// </summary>
     public async Task<string?> GetQueryStorePlanTextAsync(
         int serverId, string databaseName, long queryId, long planId, CancellationToken cancellationToken = default)
     {
+        await using (var viaMap = _dataSource.CreateCommand(QueryStorePlanViaMapSql))
+        {
+            viaMap.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            viaMap.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            viaMap.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
+            viaMap.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });
+            viaMap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = planId });
+            var resolved = await ReadPlanTextOrGzipAsync(viaMap, cancellationToken);
+            if (resolved is not null)
+            {
+                return resolved;
+            }
+        }
+
         await using var command = _dataSource.CreateCommand(QueryStorePlanTextSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
