@@ -284,4 +284,88 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
             DarlingOwnedSecrets.ReferenceRefusal("file:/data/PROGRA~3/darling/secret.txt", owned, Identity));
         Assert.Null(DarlingOwnedSecrets.ReferenceRefusal("file:/data/PROGRA~4/other/secret.txt", owned, Identity));
     }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sec, uint disposition, uint flags, IntPtr template);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool SetFileShortNameW(Microsoft.Win32.SafeHandles.SafeFileHandle h, string shortName);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetShortPathNameW(string longPath, System.Text.StringBuilder buf, uint size);
+
+    private static bool TrySetShortNameWithApi(string file, string shortName)
+    {
+        const uint genericRead = 0x80000000, genericWrite = 0x40000000, delete = 0x00010000, shareAll = 7, openExisting = 3, backupSemantics = 0x02000000;
+        using var h = CreateFileW(file, genericRead | genericWrite | delete, shareAll, IntPtr.Zero, openExisting, backupSemantics, IntPtr.Zero);
+        return !h.IsInvalid && SetFileShortNameW(h, shortName);
+    }
+
+    private static bool TrySetShortNameWithFsutil(string file, string shortName)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo("fsutil.exe", $"file setshortname \"{file}\" {shortName}")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            using var p = System.Diagnostics.Process.Start(psi)!;
+            p.StandardOutput.ReadToEnd();
+            p.StandardError.ReadToEnd();
+            p.WaitForExit();
+            return p.ExitCode == 0;
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    [Fact]
+    public void AFileGivenAnExplicit83ShortName_IsRefusedByItsShortPath_AsWellAsItsLongPath()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "8.3 short names exist only on Windows (NTFS); the identity comparison is covered by the stand-in test elsewhere.");
+
+        const string shortName = "LONGFI~9.TXT";
+        var dir = Path.Combine(_root, "shortname");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var longFile = Path.Combine(dir, "a-deliberately-long-secret-name.txt");
+            File.WriteAllText(longFile, "x");
+
+            /* Create the short name ourselves: the volume's auto-generation setting cannot be read without elevation,
+               and a test that relied on it would prove nothing. */
+            var made = TrySetShortNameWithApi(longFile, shortName) || TrySetShortNameWithFsutil(longFile, shortName);
+            Assert.True(made, "could not give the file an 8.3 short name (SetFileShortNameW and fsutil both failed); this test cannot prove anything here");
+
+            var buf = new System.Text.StringBuilder(520);
+            var n = GetShortPathNameW(longFile, buf, (uint)buf.Capacity);
+            Assert.True(n > 0 && n < buf.Capacity, "GetShortPathName failed");
+            Assert.Equal(shortName, Path.GetFileName(buf.ToString()), ignoreCase: true);
+
+            var shortPath = Path.Combine(dir, shortName);
+            Assert.NotEqual(longFile, shortPath);
+            Assert.True(File.Exists(shortPath), "the short path does not reach the file");
+
+            /* The owned entry is the file itself, so only identity (not text or a directory prefix) can catch the alias. */
+            DarlingOwnedSecrets.Set(new DarlingOwnedSet(new[] { longFile }, Array.Empty<string>()));
+
+            Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + longFile));
+            Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + shortPath));
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(dir, true);
+            }
+            catch (IOException)
+            {
+                /* best effort; Dispose removes the root */
+            }
+        }
+    }
 }
