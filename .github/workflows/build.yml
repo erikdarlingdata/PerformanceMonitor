@@ -1761,7 +1761,16 @@ jobs:
         shard: [0, 1, 2, 3]
     # A shard is at most ~27% of a ~9½-minute suite plus ~2½ minutes of setup; 20 minutes is ~4x that,
     # past which something is hung and a shared-pool Windows runner is being held for nothing.
-    timeout-minutes: 20
+    #
+    # Raised from 20 to 30. The suite now runs roughly five times slower on hosted runners than the
+    # ~9.5 minutes above assumed: across five train runs (03:16Z-06:12Z) the four shard durations
+    # summed to about 45 minutes (45.5, 42.0, 45.8, 47.3), with single shards reaching 15.9 and
+    # 16.9 minutes against the 20-minute cap. The sum was flat all night, so this is not growth from
+    # recent merges. A shard that crosses the cap is a RED THAT IS A TIMEOUT, not a test failure,
+    # and is easy to misread as a bug in whatever pull request was in the train. This is a guard
+    # against those spurious timeout reds, NOT a fix: the underlying slowdown is tracked
+    # separately, and this value should come back down when it is fixed.
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
