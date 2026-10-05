@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -216,7 +217,7 @@ public sealed class WebDataStartNoteLiveTests
     private const string StandInRows = "{\"server\":\"pg01\",\"rows\":[{\"n\":1}]}";
 
     private static readonly string[] PostgresReads =
-        [.. WebDataStartNote.TableByRead.Keys.Where(k => k.StartsWith("get_pg_", StringComparison.Ordinal)).OrderBy(k => k, StringComparer.Ordinal)];
+        [.. WebDataStartNote.TableByRead.Keys.Where(k => k.StartsWith("get_pg_", StringComparison.Ordinal) && !WebDataStartNote.EventTimeByRead.ContainsKey(k)).OrderBy(k => k, StringComparer.Ordinal)];
 
     /// <summary>Each of the twenty-three PostgreSQL reads (the configuration changes, the window aggregates, the trend grids, Captured Plans and the vacuum, horizon, slot and write tiles among them, #4966), over its own table, for a server added two days ago whose rows
     /// start a day back: the data starts inside the 7-day range, so the note is there and names a start between the
@@ -336,6 +337,13 @@ public sealed class WebDataStartNoteLiveTests
         ("get_long_query_completions", "long_query_completions", "event_time"),
         ("get_memory_pressure_events", "memory_pressure_events", "sample_time"),
         ("get_default_trace_events", "default_trace_events", "event_time"),
+
+        /* PostgreSQL event logs, Blocking and Deadlocks (#4966). */
+        ("get_pg_deadlocks", "pg_deadlocks", "occurred_at"),
+        ("get_pg_log_events", "pg_log_events", "occurred_at"),
+        ("get_blocking", "blocked_process_reports", "event_time"),
+        ("get_deadlocks", "deadlocks", "deadlock_time"),
+        ("get_deadlock_detail", "deadlocks", "deadlock_time"),
     ];
 
     /// <summary>A server added two days ago whose stored events carry times from before it (a first collection stores the
@@ -388,8 +396,90 @@ public sealed class WebDataStartNoteLiveTests
         }
     }
 
+    /// <summary>Two of the nine system_health reads over one seeded <c>system_health_events</c> table (a server per read, every row the
+    /// read's own event type): history reaching back before coverage names the earliest event; history reaching the window's start
+    /// gives no note.</summary>
+    [Theory]
+    [InlineData(-496730, 2.0, true)]
+    [InlineData(-496740, 5.5, false)]
+    public async Task TheSystemHealthReads_FollowTheEventTimeRule_AgainstDevPostgres(int serverId, double shiftDays, bool expectNote)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+
+        var reads = new[] { ("get_health_parser_severe_errors", SystemHealthParser.ErrorReportedEvent, "error_reported.xml"), ("get_health_parser_system_health", SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_system.xml") };
+        for (var i = 0; i < reads.Length; i++)
+        {
+            var (read, eventType, fixture) = reads[i];
+            var name = "web-data-start-health-" + (expectNote ? "before-" : "reaches-") + i;
+            await store.SeedTableAsync("system_health_events", serverId - 100 * (i + 1), name, added, added, ct, eventColumn: "event_time", eventShift: TimeSpan.FromDays(shiftDays));
+            await store.GiveHealthRowsTheirXmlAsync(serverId - 100 * (i + 1), eventType, fixture, ct);
+
+            var answer = await store.AskHealthReadAsync(read, name, 168, ct);
+            if (!expectNote)
+            {
+                Assert.NotEqual(true, answer["window_truncated"]?.GetValue<bool>());
+                Assert.Null(answer["data_start_utc"]);
+                continue;
+            }
+
+            Assert.True(answer["window_truncated"]?.GetValue<bool>(), read + " gives a note");
+            var earliestEvent = added.AddDays(-2);
+            Assert.True(Math.Abs((ParseUtc(answer["effective_start"]) - earliestEvent).TotalSeconds) < 1, read + " names the earliest event");
+            Assert.StartsWith("partial window:", answer["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The composite probe, proved: the XE table starts late inside the window (the page shows only XE rows), while the DMV
+    /// snapshots reach back from before the window. The earlier start covers the window, so there is NO note; a probe of the XE table
+    /// alone would name the late start and add one.</summary>
+    [Fact]
+    public async Task GetBlocking_WhenTheDmvSnapshotsCoverTheWindowButTheXeRowsStartLate_GivesNoNote_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        const string server = "web-data-start-blocking-composite";
+
+        /* DMV: hourly snapshots from 10 days back to the window end, so they cover the 7-day window from before its start. */
+        await store.SeedTableAsync("dmv_blocking_snapshots", -496732, server, store.End.AddDays(-10), store.End.AddDays(-10), ct);
+        /* XE: starts one day back, late inside the window; these are the rows the page shows. */
+        await store.SeedTableAsync("blocked_process_reports", -496732, server, store.End.AddDays(-1), store.End.AddDays(-1), ct, eventColumn: "event_time", extraSet: ExtraSet("blocked_process_reports"));
+
+        var answer = await store.AskEventReadAsync("get_blocking", server, 168, ct);
+        Assert.True(answer["events_returned"]?.GetValue<int>() > 0, "the page shows the XE rows");
+        Assert.True(answer["window_truncated"] is null, "the DMV snapshots cover the window, so no note: " + answer["truncation_note"]);
+        Assert.Null(answer["truncation_note"]);
+    }
+
+    /// <summary>Each single-table server still gets the note from its own table's start (does not by itself prove the composite).</summary>
+    [Fact]
+    public async Task GetBlocking_OnRowsFromOneTableOnly_NamesThatTablesStart_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+
+        await store.SeedTableAsync("dmv_blocking_snapshots", -496730, "web-data-start-blocking-dmv-only", added, added, ct);
+        var dmv = await store.AskEventReadAsync("get_blocking", "web-data-start-blocking-dmv-only", 168, ct);
+        Assert.True(dmv["window_truncated"]?.GetValue<bool>(), "the DMV-only server gives a note");
+        Assert.True(Math.Abs((ParseUtc(dmv["effective_start"]) - added).TotalSeconds) < 1, "names the DMV table's start");
+
+        await store.SeedTableAsync("blocked_process_reports", -496731, "web-data-start-blocking-xe-only", added, added, ct, extraSet: ExtraSet("blocked_process_reports"));
+        var xe = await store.AskEventReadAsync("get_blocking", "web-data-start-blocking-xe-only", 168, ct);
+        Assert.True(xe["window_truncated"]?.GetValue<bool>(), "the XE-only server gives a note");
+        Assert.True(Math.Abs((ParseUtc(xe["effective_start"]) - added).TotalSeconds) < 1, "names the XE table's start");
+    }
+
     /* The Blocked Process Reports read counts only rows that carry a report; the stand-in seed leaves that column null. */
-    private static string? ExtraSet(string table) => table == "blocked_process_reports" ? "blocked_process_report_xml = '<blocked-process-report/>'" : null;
+    private static string? ExtraSet(string table) => table switch
+    {
+        "blocked_process_reports" => "blocked_process_report_xml = '<blocked-process-report/>'",
+        "deadlocks" => "deadlock_graph_xml = '<deadlock/>'",
+        "pg_deadlocks" => "deadlock_hash = 'x'",
+        "pg_log_events" => "raw_line_hash = 'x', severity = 'ERROR', family = 'error'",
+        _ => null,
+    };
 
     private sealed class Store : IAsyncDisposable
     {
@@ -562,11 +652,46 @@ ORDER BY ordinal_position", connection))
         {
             var payload = read switch
             {
-                "get_blocked_process_xml" => await DarlingMcpBlockingTools.GetBlockedProcessXml(DataSource, server, hours, 100, null, cancellationToken: ct),
-                "get_long_query_completions" => await DarlingMcpLongQueryTools.GetLongQueryCompletions(DataSource, server, hours, 100, null, cancellationToken: ct),
-                "get_memory_pressure_events" => await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(DataSource, server, hours, null, null, cancellationToken: ct),
-                "get_default_trace_events" => await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(DataSource, server, hours, 100, null, cancellationToken: ct),
+                "get_blocked_process_xml" => await DarlingMcpBlockingTools.GetBlockedProcessXml(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_long_query_completions" => await DarlingMcpLongQueryTools.GetLongQueryCompletions(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_memory_pressure_events" => await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(DataSource, server_name: server, hours_back: hours, cancellationToken: ct),
+                "get_default_trace_events" => await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_pg_deadlocks" => await DarlingMcpPgDeadlockTools.GetPgDeadlocks(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_pg_log_events" => await DarlingMcpPgLogEventTools.GetPgLogEvents(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_blocking" => await DarlingMcpBlockingTools.GetBlocking(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_deadlocks" => await DarlingMcpBlockingTools.GetDeadlocks(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_deadlock_detail" => await DarlingMcpBlockingTools.GetDeadlockDetail(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
                 _ => throw new ArgumentOutOfRangeException(nameof(read), read, "not an event read"),
+            };
+            var answered = await WebDataStartNote.AddAsync(DataSource, read, server, hours, null, payload, null, ct);
+            return Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        }
+
+        /// <summary>The stand-in seed leaves each row's event type and XML blank: make every row one event of this type, stamped with
+        /// the row's own event time as a real capture has it.</summary>
+        public async Task GiveHealthRowsTheirXmlAsync(int serverId, string eventType, string fixture, CancellationToken ct)
+        {
+            var xml = await System.IO.File.ReadAllTextAsync(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "SystemHealth", fixture), ct);
+            await using var connection = await DataSource.OpenConnectionAsync(ct);
+            await using var update = new NpgsqlCommand(@"
+UPDATE collect.system_health_events
+SET event_type = $2,
+    event_xml = regexp_replace($3, 'timestamp=""[^""]*""', 'timestamp=""' || to_char(event_time, 'YYYY-MM-DD""T""HH24:MI:SS.MS') || 'Z""')
+WHERE server_id = $1", connection);
+            update.Parameters.AddWithValue(serverId);
+            update.Parameters.AddWithValue(eventType);
+            update.Parameters.AddWithValue(xml);
+            await update.ExecuteNonQueryAsync(ct);
+        }
+
+        /// <summary>The tool's own payload for a system_health read, then the data-start note.</summary>
+        public async Task<JsonObject> AskHealthReadAsync(string read, string server, int hours, CancellationToken ct)
+        {
+            var payload = read switch
+            {
+                "get_health_parser_severe_errors" => await DarlingMcpHealthParserTools.GetSevereErrors(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_health_parser_system_health" => await DarlingMcpHealthParserTools.GetSystemHealth(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                _ => throw new ArgumentOutOfRangeException(nameof(read), read, "not a seeded system_health read"),
             };
             var answered = await WebDataStartNote.AddAsync(DataSource, read, server, hours, null, payload, null, ct);
             return Assert.IsType<JsonObject>(JsonNode.Parse(answered));

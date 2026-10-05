@@ -147,6 +147,7 @@ try {
   }
   if (serverPageScenario) {
     fs.copyFileSync(path.join(jsDir, "pages", "fleet.js"), path.join(scratch, "pages", "fleet.js"));
+    fs.copyFileSync(path.join(jsDir, "fleet-groups.js"), path.join(scratch, "fleet-groups.js"));
     /* The fleet page imports the mute-rules writes and the session read; copied when present, with what they import. */
     for (const rel of ["alerts-api.js", "views-api.js", "derive.js", "alert-seed.js", "refresh-policy.js", "refresh-control.js", path.join("pages", "mute-rules.js")]) {
       const from = path.join(jsDir, rel);

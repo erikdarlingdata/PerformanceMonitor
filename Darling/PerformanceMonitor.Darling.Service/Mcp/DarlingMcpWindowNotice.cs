@@ -65,8 +65,14 @@ internal static class DarlingMcpWindowNotice
     /// <paramref name="tail"/> is one more sentence a truncated note carries.
     /// </summary>
     internal static McpWindowNotice Build(
-        DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false, bool listOnly = false)
+        DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false, bool listOnly = false,
+        bool storeSubject = false)
     {
+        if (storeSubject)
+        {
+            return BuildForStore(floor, requestedStart, table, tail, emptyAnswer);
+        }
+
         if (floor is null && listOnly)
         {
             /* The windowed list is empty but the answer carries other data (a latest-snapshot block), so it is not an empty answer. */
@@ -92,6 +98,31 @@ internal static class DarlingMcpWindowNotice
             truncated,
             truncated
                 ? $"The window reaches further back than this server's raw {table} retains (or this server has been monitored for less time than that), so the older part of it was not read."
+                    + (tail is null ? "" : " " + tail)
+                : null);
+    }
+
+    /// <summary>
+    /// <see cref="Build"/> for a tool whose subject is the STORE's own history (<c>storeSubject</c>), not a monitored server's
+    /// collection: the same three keys, with wording that does not talk about "this server" or point at get_collection_health.
+    /// </summary>
+    private static McpWindowNotice BuildForStore(DateTime? floor, DateTime requestedStart, string table, string? tail, bool emptyAnswer)
+    {
+        if (floor is null && emptyAnswer)
+        {
+            return new McpWindowNotice(
+                null,
+                true,
+                $"The store holds no {table} that read the extension in this window, so nothing was read, and this empty answer is not a report that nothing happened. "
+                    + "The window may reach further back than the history exists, or snapshots may not have been taken yet.");
+        }
+
+        var truncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+        return new McpWindowNotice(
+            McpHelpers.FormatEffectiveStart(RawWindowFloor.EffectiveStart(floor, requestedStart)),
+            truncated,
+            truncated
+                ? $"The window reaches further back than the store's own {table} goes (its first snapshot is later than the start of the window), so the older part of it was not read."
                     + (tail is null ? "" : " " + tail)
                 : null);
     }

@@ -16,6 +16,7 @@
 import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId } from "../util.js";
 import { VIZ, navigateServer } from "../panels.js";
 import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
+import { buildTagGroups, cardMatches } from "../fleet-groups.js";
 import { favoriteStar, alertBadge } from "../viewer-local-ui.js";
 import * as api from "../alerts-api.js";
 import { createRule, deleteRule } from "./mute-rules.js";
@@ -61,61 +62,6 @@ const GROUP_INDENT = 16; // px per tree depth
 function readStored(key) { try { return localStorage.getItem(key); } catch { return null; } }
 function readStoredJson(key, dflt) { try { return JSON.parse(localStorage.getItem(key) || "null") ?? dflt; } catch { return dflt; } }
 function writeStored(key, value) { try { localStorage.setItem(key, value); } catch { /* private mode / disabled — view stays session-only */ } }
-
-/* The web twin of FleetView's projection: the tag forest depth-first (child tags before a tag's own servers),
-   then an Untagged group last. Each entry is one group header with its DIRECTLY-assigned server cards; a server
-   carrying multiple tags appears under each, and an untagged server appears only under Untagged. Cycle- and
-   dangling-parent-safe (an orphaned tag surfaces as a root rather than vanishing). No Favorites group — the web
-   fleet has no per-user favourites. */
-function buildTagGroups(forest, cards, sortFn) {
-  const known = new Set(forest.map((t) => t.id));
-  const byParent = new Map();
-  for (const t of forest) {
-    const p = t.parent_id != null && known.has(t.parent_id) ? t.parent_id : 0; // dangling parent -> root
-    if (!byParent.has(p)) byParent.set(p, []);
-    byParent.get(p).push(t);
-  }
-  for (const list of byParent.values()) list.sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
-
-  const serversByTag = new Map();
-  for (const c of cards) {
-    for (const t of c.tags || []) {
-      if (!serversByTag.has(t.id)) serversByTag.set(t.id, []);
-      serversByTag.get(t.id).push(c);
-    }
-  }
-
-  const groups = [];
-  const visited = new Set();
-  function emit(tag, depth) {
-    if (visited.has(tag.id)) return;
-    visited.add(tag.id);
-    const servers = (serversByTag.get(tag.id) || []).slice().sort(sortFn);
-    const kids = byParent.get(tag.id) || [];
-    groups.push({ key: "tag:" + tag.id, name: tag.name, depth, cards: servers, hasChildren: kids.length > 0 || servers.length > 0 });
-    for (const kid of kids) emit(kid, depth + 1);
-  }
-  for (const root of byParent.get(0) || []) emit(root, 0);
-  for (const t of forest) if (!visited.has(t.id)) emit(t, 0); // cycle / disconnected -> surface as a root
-
-  const untagged = cards.filter((c) => !(c.tags || []).length).slice().sort(sortFn);
-  if (untagged.length) groups.push({ key: "untagged", name: "Untagged", depth: 0, cards: untagged, hasChildren: true });
-
-  return groups;
-}
-
-/* Name/tag filter, matching the desktop apps' ServerOverviewFilter rule: an empty term matches everything,
-   otherwise a case-insensitive substring of the display name, the instance name, or any of the server's tag
-   names (#2020) — so `prod` finds both sql-prod-01 and everything tagged Production, as on the desktop. */
-function cardMatches(c, q) {
-  const needle = (q || "").trim().toLowerCase();
-  if (!needle) return true;
-  return (
-    (c.display_name || "").toLowerCase().includes(needle) ||
-    (c.server_name || "").toLowerCase().includes(needle) ||
-    (c.tags || []).some((t) => (t.name || "").toLowerCase().includes(needle))
-  );
-}
 
 /* The needs-attention predicate (#2437). It reads the card's PRE-BANDED `band` — the same field
    BuildRollup counted `additional_problem_count` from (`cards.Where(c => c.Band != FleetHealthBand.Healthy)`)

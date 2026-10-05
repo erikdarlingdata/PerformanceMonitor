@@ -36,8 +36,7 @@
  * list) still refreshes.
  */
 
-import { el, mount, apiGet, apiGetFleet, readTool, bandClass, localTime, hasInFlightReads, isSessionExpired, onSessionExpired } from "./util.js";
-import { navigateServer } from "./panels.js";
+import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, isSessionExpired, onSessionExpired } from "./util.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
 import { renderSweeps } from "./pages/sweeps.js";
@@ -57,8 +56,9 @@ import { getSession, listViews } from "./views-api.js";
 import { renderMuteRules } from "./pages/mute-rules.js";
 import { renderManageTags } from "./pages/manage-tags.js";
 import { renderJobHistory } from "./pages/job-history.js";
-import { favoritesFirst, refreshAttention, onChange as onLocalChange } from "./viewer-local.js";
-import { favoriteStar, alertBadge, initSidebarCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
+import { refreshAttention, onChange as onLocalChange } from "./viewer-local.js";
+import { initSidebarCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
+import { initSidebarSearch, paintServerList } from "./sidebar.js";
 
 /* The shell (sidebar, view list, AG nav) refreshes every POLL_MS; the page re-renders on its own interval. */
 const POLL_MS = 60000;
@@ -256,29 +256,10 @@ let lastSidebarFleet = null;
 function paintSidebar() {
   const res = lastSidebarFleet;
   if (!res) return;
-  const cards = [...(res.data.cards || [])].sort(favoritesFirst((a, b) => a.display_name.localeCompare(b.display_name)));
   const r = currentRoute();
-  mount(
-    serverList,
-    cards.map((c) => {
-      const target = c.server_name || c.display_name;
-      const active = r.name === "server" && (r.param === c.server_name || r.param === c.display_name);
-      return el(
-        "div",
-        {
-          class: "server-item" + (active ? " active" : ""),
-          dataset: { server: target, display: c.display_name },
-          onActivate: () => navigateServer(target),
-        },
-        [
-          el("span", { class: "dot " + bandClass(c.band) }),
-          el("span", { class: "name", text: c.display_name }),
-          alertBadge(c.server_id),
-          favoriteStar(c.server_id),
-        ]
-      );
-    })
-  );
+  /* The search box, the group-by-tag view and the list rows live in sidebar.js; the term is its module state, so
+     this repaint (the 60 s poll, a favourite, a route change) never resets it. */
+  paintServerList(serverList, res.data, r.name === "server" ? r.param : null);
   updateStatusBar(res.data);
 }
 
@@ -724,6 +705,7 @@ function start() {
   initAutoRefreshToggle();
   initPageRefreshControl();
   initSidebarCollapse(document.getElementById("app"), document.getElementById("sidebar-collapse"));
+  initSidebarSearch(document.getElementById("server-search"), paintSidebar);
   initSeverityColorSettings(document.getElementById("viewer-settings"));
   onLocalChange(paintSidebar);
 
