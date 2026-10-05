@@ -19,7 +19,7 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet } from "../util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiWrite } from "../util.js";
 import { getSession } from "../views-api.js";
 
 export const SERVER_COLUMNS = [
@@ -42,11 +42,13 @@ export function serverRowClass(row) {
 }
 
 /* The Edit button of one row (#5240): a row the list reports without a numeric server_id gets none, because the by-id
-   read and the edit are keyed on it. The label names the server for a screen reader. */
+   read and the edit are keyed on it. The label names the server for a screen reader. A button drawn while a save is in
+   flight (the poll or the re-read repaints the grid) is born disabled, so no other row opens mid-save; `disabled` is set
+   as a property because a `disabled="false"` attribute would still disable it. */
 function editCell(row) {
   if (!row || !Number.isInteger(row.server_id)) return null;
   const name = row.display_name || row.server_name || "server " + row.server_id;
-  return el("button", {
+  const button = el("button", {
     class: "btn",
     type: "button",
     text: "Edit",
@@ -54,6 +56,8 @@ function editCell(row) {
     "data-server-id": String(row.server_id),
     onClick: () => openEdit(row.server_id),
   });
+  button.disabled = busy;
+  return button;
 }
 
 /* The trailing Edit column. Like the Mute column on Alert History it is the web's per-row write affordance: a link-only
@@ -478,12 +482,18 @@ function serversNote(session) {
    or anything that holds it to mount() or clear() (review finding 1; manage-tags.js keeps its form the same way).
    `editForm` is the open edit form, or null. `opening` counts every open and every close, so a by-id read that lands after
    its form was discarded is dropped. `notice` is the page-level sentence, { message, isError } or null: a refused or
-   failed open now, a save's answer later. `summary` is the count-and-note text of the last good list read. */
+   failed open now, a save's answer later. `summary` is the count-and-note text of the last good list read.
+   `busy` is true while a save runs (review finding 4): Save, Cancel and every Edit button are disabled and a second Save does
+   nothing. `held` is a save's answer that landed while the Servers tab was not on screen, shown the next time it is.
+   `hashWatched` is true once the one hashchange listener is registered. */
 let layout = null;
 let editForm = null;
 let opening = 0;
 let notice = null;
 let summary = null;
+let busy = false;
+let held = null;
+let hashWatched = false;
 
 function serverBoxes(body) {
   if (layout && layout.body === body) return layout;
@@ -514,9 +524,28 @@ function setNotice(message, isError) {
   drawNotice();
 }
 
+/** A save's answer as a page sentence. With the Servers tab on screen it is the notice; with it off screen (a tab switch
+    while the save ran) it is held, and the next arrival at the Servers tab shows it, so the outcome is never lost. */
+function showOutcome(message, isError) {
+  if (layout) setNotice(message, isError);
+  else held = { message, isError: isError === true };
+}
+
 /* The Edit buttons now in the grid, for the code that locks them while a request runs. */
 function editButtons() {
   return layout ? layout.tableBox.querySelectorAll("button[data-server-id]") : [];
+}
+
+/* Lock or unlock what a save in flight must not race: Save and Cancel of the open form and every Edit button in the grid
+   (review finding 4). A grid drawn while locked gets its buttons already disabled (editCell), so this reaches only the
+   buttons on screen now. */
+function setBusy(value) {
+  busy = value;
+  if (editForm && editForm.saveButton) {
+    editForm.saveButton.disabled = value;
+    editForm.cancelButton.disabled = value;
+  }
+  for (const button of editButtons()) button.disabled = value;
 }
 
 /* Read the list again under a new render generation (a poll read still in flight is dropped), into the boxes already on
@@ -645,6 +674,7 @@ function formNode(f) {
   f.heading = heading;
   f.passwordInput = secret;
   f.bannerBox = el("div", { "data-box": "banner" });
+  f.statusBox = el("div", { "data-box": "status", role: "status" });
   f.saveButton = el("button", { class: "btn primary", type: "button", text: "Save", "data-action": "save", onClick: () => submitEdit() });
   f.cancelButton = el("button", { class: "btn", type: "button", text: "Cancel", "data-action": "cancel", onClick: () => closeEdit() });
   f.refresh = () => {
@@ -690,6 +720,7 @@ function formNode(f) {
   }
   rows.push(
     textRow(f, "monthly_cost_usd", "Monthly Cost ($):", { inputmode: "decimal" }).row,
+    f.statusBox,
     f.bannerBox,
     el("div", { class: "form-actions" }, [f.saveButton, f.cancelButton]),
   );
@@ -703,6 +734,9 @@ function formNode(f) {
    other answer (403, 500, a network failure, a body that is not a server's settings) shows its sentence and opens no
    form. The password box is created only after a good read. */
 async function openEdit(id) {
+  /* A save is running: the Edit buttons are disabled, and this guard holds for any other caller. It comes before
+     closeEdit() so that nothing discards the form that is saving. */
+  if (busy) return;
   closeEdit();
   const mine = opening;
   setNotice(null);
@@ -738,8 +772,92 @@ function closeEdit() {
   if (layout) mount(layout.formBox, []);
 }
 
-/* Save (the next step builds on this: the checks, the request and the answer table). The form's Save button calls it. */
-async function submitEdit() {}
+const STATUS_TESTING = "Testing the connection, then saving. This can take up to a minute.";
+const STATUS_SAVING = "Saving.";
+
+/* The form's one error sentence, above its buttons (D11), as an alert strip. */
+function showBanner(f, sentence) {
+  mount(f.bannerBox, el("div", { class: "strip error", role: "alert", text: sentence }));
+}
+
+/* The status line while a save runs; "" takes it away. */
+function showStatus(f, sentence) {
+  mount(f.statusBox, sentence ? loadingStrip(sentence) : []);
+}
+
+/* LANE C: D10's 409 panel plugs in here. `out` is interpretEdit's `conflict` answer, { banner, current }; `f` is the
+   open form, kept, with its password already cleared and nothing saved. Until the panel exists a stale edit reads as any
+   other refusal: its sentence in the banner. */
+function showConflict(f, out) {
+  showBanner(f, out.banner);
+}
+
+/* What one answer to the save does (D9, and review finding 4 for an answer that is late). `here` is true while the form that
+   sent the save is still the open one; `password` is what was typed when Save was pressed, kept only in the caller's local
+   variable and used to redact every sentence shown.
+   - An answer that closes the form closes it through closeEdit (the password goes first) and shows its sentence as the
+     notice, an error when the sign-in is read-only.
+   - An answer that keeps the form clears the password and shows its sentence in the banner, or hands a conflict to showConflict.
+   - A late answer (the form was discarded while the save ran: a tab switch, another page, the hash leaving the tab) touches
+     no form. Its page sentence still shows, and a sentence that had only a banner shows as an error notice, so the user
+     learns what the save did. */
+function landEdit(f, out, password) {
+  const here = editForm === f;
+  const say = (sentence) => redactPassword(sentence, password);
+  if (out.close) {
+    if (here) closeEdit();
+    if (out.notice) showOutcome(say(out.notice), out.kind === "readonly");
+    return;
+  }
+  if (!here) {
+    showOutcome(say(out.banner), true);
+    return;
+  }
+  f.passwordInput.value = "";
+  if (out.kind === "conflict") showConflict(f, out);
+  else showBanner(f, say(out.banner));
+}
+
+/* Save (#5240). The form's Save button calls it. The checks that need no request run first, each with the desktop's or the
+   service's own sentence in the banner and the password cleared. A form that differs from what was read in nothing, and
+   has no password to send, closes with "No change." and sends nothing. Otherwise ONE PATCH goes out through apiWrite, the
+   status line says whether the service will test the connection first (probeExpected, whatever the auth: review finding
+   5), and the answer is read by interpretEdit from its status and status word, never from message text.
+   `busy` is set before the request and cleared in a finally, so it clears whatever became of the form meanwhile (review
+   finding 4); the list re-read an answer asks for runs after the lock is released. A late answer, one that arrives after
+   the form was discarded, also re-reads the list when it was an `unchanged` one, so the page shows the state the save left. */
+async function submitEdit() {
+  const f = editForm;
+  if (busy || !f) return;
+  const password = f.passwordInput.value;
+  mount(f.bannerBox, []);
+  const problem = validateEdit(f.original, f.values, password);
+  if (problem) {
+    f.passwordInput.value = "";
+    showBanner(f, redactPassword(problem, password));
+    return;
+  }
+  const body = buildEditBody(f.original, f.values, f.token, password);
+  if (!body) {
+    closeEdit();
+    setNotice("No change.", false);
+    return;
+  }
+  setBusy(true);
+  showStatus(f, probeExpected(f.original, f.values, typeof body.password === "string") ? STATUS_TESTING : STATUS_SAVING);
+  let out = null;
+  let late = false;
+  try {
+    const res = await apiWrite("PATCH", "/api/servers/" + f.id, body);
+    out = interpretEdit(res.status, res.body, res.message);
+    late = editForm !== f;
+    landEdit(f, out, password);
+  } finally {
+    if (editForm === f) showStatus(f, "");
+    setBusy(false);
+  }
+  if (out.reread || (late && out.kind === "unchanged")) await reloadServers();
+}
 
 const ROUTES_NOTE =
   "Read only. Destinations (webhook URLs, keys) are never reported by the service; only the names of the channels a " +
@@ -792,7 +910,25 @@ function startBuilder(tabId, body, generation) {
   });
 }
 
+/* True when `hash` shows the Servers tab: #/admin or #/admin/servers, or a tab name the page does not know while the
+   Servers tab is the one on screen (renderAdmin falls back the same way). */
+function showsServers(hash) {
+  if (hash !== "#/admin" && !hash.startsWith("#/admin/")) return false;
+  return findTab(hash.slice("#/admin".length).replace(/^\//, "")).id === "servers";
+}
+
+/* The one hashchange listener (D6, review finding 6). Another Admin tab is seen by renderAdmin, but leaving the page for
+   another one is seen by nothing else, because no render of this page follows it. A hash that no longer shows the Servers
+   tab discards the open form, password first, and drops a by-id read still in flight. Discarding twice is harmless. */
+function onHashChange() {
+  if (!showsServers(String(window.location.hash || ""))) closeEdit();
+}
+
 export function renderAdmin(main, tabId) {
+  if (!hashWatched) {
+    hashWatched = true;
+    window.addEventListener("hashchange", onHashChange);
+  }
   const tab = findTab(tabId);
   activeTab = tab.id;
   const generation = ++renderGeneration;
@@ -801,11 +937,13 @@ export function renderAdmin(main, tabId) {
   const sameTab = !!shownBody && shownTab === tab.id;
   if (!sameTab) {
     /* Arriving at a tab other than the one on screen discards an open edit form (its password is cleared first) and the
-       Servers tab's page state. */
+       Servers tab's page state. The one thing kept is the answer of a save that landed while the Servers tab was off screen:
+       arriving at that tab shows it, once. */
     closeEdit();
     layout = null;
-    notice = null;
     summary = null;
+    notice = tab.id === "servers" ? held : null;
+    if (tab.id === "servers") held = null;
   }
   const body = sameTab ? shownBody : el("div", { class: "admin-body" }, [loadingStrip("Loading " + tab.label.toLowerCase())]);
   shownBody = body;
