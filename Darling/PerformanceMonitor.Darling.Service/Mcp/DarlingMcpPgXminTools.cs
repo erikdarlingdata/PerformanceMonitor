@@ -122,11 +122,16 @@ public sealed class DarlingMcpPgXminTools
                     status = "no_holder",
                     hints = emptyNotice.AsHints(),
                     captures_in_window = capturesInWindow,
-                    finding = $"Nothing is holding back the xmin horizon in this window: the collector captured "
-                            + $"{capturesInWindow} time(s) and recorded no holder. Vacuum is free to "
+                    finding = McpHelpers.QuietUnlessCut(
+                        emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                        factual: (emptyNotice.WindowTruncated
+                                ? "Nothing is holding back the xmin horizon in the captures the store holds"
+                                : "Nothing is holding back the xmin horizon in this window")
+                            + $": the collector captured {capturesInWindow} time(s) and recorded no holder",
+                        coveredClaim: ". Vacuum is free to "
                             + "reclaim dead rows, so bloat growth has a different cause — look at whether "
                             + "autovacuum is being triggered at all (per-table thresholds and dead-tuple "
-                            + "counts) rather than at whether it is being blocked.",
+                            + "counts) rather than at whether it is being blocked."),
                 }, McpHelpers.JsonOptions), emptyNotice);
             }
 

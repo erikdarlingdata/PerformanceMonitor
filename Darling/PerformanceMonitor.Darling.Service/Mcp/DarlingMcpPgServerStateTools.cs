@@ -436,10 +436,13 @@ public sealed class DarlingMcpPgServerStateTools
 
                 return McpHelpers.Status(
                         "empty",
-                        $"No lock activity sampled on {resolved.ServerName} in the last {hours_back} "
-                        + "hour(s). This is a SAMPLE of pg_locks rather than an event log, so this is the "
-                        + "healthy state on a server without sustained contention — and it is not proof "
-                        + "that nothing was ever locked.",
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                            factual: $"No lock activity sampled on {resolved.ServerName} in the last {hours_back} "
+                                + "hour(s). This is a SAMPLE of pg_locks rather than an event log",
+                            coveredClaim: ", so this is the "
+                                + "healthy state on a server without sustained contention — and it is not proof "
+                                + "that nothing was ever locked."),
                         emptyNotice.AsHints());
             }
 
@@ -886,9 +889,12 @@ public sealed class DarlingMcpPgServerStateTools
 
                 return McpHelpers.Status(
                         "no_changes",
-                        $"No configuration parameter changed value on {resolved.ServerName} in the last "
-                        + $"{hours_back} hour(s). That is a real finding rather than missing data - this "
-                        + "read compares consecutive snapshots, so an unchanged server produces no rows.",
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                            factual: $"No configuration parameter changed value on {resolved.ServerName} in the last "
+                                + $"{hours_back} hour(s)",
+                            coveredClaim: ". That is a real finding rather than missing data - this "
+                                + "read compares consecutive snapshots, so an unchanged server produces no rows."),
                         emptyNotice.AsHints());
             }
 

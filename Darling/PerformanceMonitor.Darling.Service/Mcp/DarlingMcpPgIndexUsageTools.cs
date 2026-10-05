@@ -444,10 +444,13 @@ public sealed class DarlingMcpPgIndexUsageTools
         {
             return McpHelpers.Status(
                 "empty",
-                $"No indexes were recorded for {serverName} in the last {hoursBack} hour(s) even though "
-                + "collection ran - at least two snapshots exist. Every index on every collected database is "
-                + "under the collector's 64 KB size floor, which is the state of a schema whose indexes are "
-                + "all trivially small. That is a genuine all-clear rather than missing data.",
+                McpHelpers.QuietUnlessCut(
+                    notice is { IsUnavailable: false, WindowTruncated: true }, notice.EffectiveStart,
+                    factual: $"No indexes were recorded for {serverName} in the last {hoursBack} hour(s) even though "
+                        + "collection ran - at least two snapshots exist. Every index on every collected database is "
+                        + "under the collector's 64 KB size floor, which is the state of a schema whose indexes are "
+                        + "all trivially small",
+                    coveredClaim: ". That is a genuine all-clear rather than missing data."),
                 hints);
         }
 

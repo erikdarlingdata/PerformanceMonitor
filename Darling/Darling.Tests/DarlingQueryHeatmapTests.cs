@@ -432,6 +432,7 @@ public sealed class DarlingQueryHeatmapLiveTests
             Assert.Equal("empty", idle.GetProperty("status").GetString());
             var idleText = idle.GetProperty("message").GetString()!;
             Assert.Contains("zero execution delta", idleText, StringComparison.Ordinal);
+            Assert.EndsWith(". A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.", idleText, StringComparison.Ordinal);
             Assert.DoesNotContain("Widen hours_back", idleText, StringComparison.Ordinal);
             Assert.DoesNotContain("EVER", idleText, StringComparison.Ordinal);
 
@@ -765,6 +766,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             var idleHints = idle.GetProperty("hints");
             Assert.False(idleHints.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, idleHints.GetProperty("truncation_note").ValueKind);
+            Assert.EndsWith(". A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.", idle.GetProperty("message").GetString()!, StringComparison.Ordinal);
             Assert.EndsWith("Z", idleHints.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
         });
     }
