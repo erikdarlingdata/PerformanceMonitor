@@ -13,9 +13,11 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -71,6 +73,7 @@ public sealed class DarlingMcpHealthParserTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -84,12 +87,20 @@ public sealed class DarlingMcpHealthParserTools
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
                 return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SpServerDiagnosticsEvent,
-                    "none carried a SYSTEM component result with a timestamp (the other four sp_server_diagnostics components feed the sibling reads)", cancellationToken);
+                    "none carried a SYSTEM component result with a timestamp (the other four sp_server_diagnostics components feed the sibling reads)", logger, cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            /* The earliest event is taken from every qualifying row, before the page limit applies: the read has no SQL cap, so the store
+               really reaches that event, and shown / total_entries show the page cap. With a small limit, effective_start can therefore
+               name an event no returned row carries. */
+            var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
+
+            return Finish(notice, JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(c.LastCapturedAt),
                 total_entries = c.Rows.Count,
@@ -113,7 +124,7 @@ public sealed class DarlingMcpHealthParserTools
                     bad_pages_detected = r.BadPagesDetected,
                     bad_pages_fixed = r.BadPagesFixed
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_system_health", ex); }
     }
@@ -125,6 +136,7 @@ public sealed class DarlingMcpHealthParserTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -150,14 +162,20 @@ public sealed class DarlingMcpHealthParserTools
                 .ToList();
             if (rows.Count == 0)
                 return await EmptyAsync(
-                    postgres, new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt),
+                    postgres, new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now),
                     hours_back, SystemHealthParser.ErrorReportedEvent,
-                    $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)", cancellationToken);
+                    $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)", logger, cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            var collected = new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now);
+            var notice = await NoticeAsync(postgres, collected, hours_back, EarliestOf(rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
+
+            return Finish(notice, JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 error_count = rows.Count,
@@ -172,7 +190,7 @@ public sealed class DarlingMcpHealthParserTools
                     database_name = DarlingSystemHealthReader.ResolveDatabaseName(r.DatabaseId, map),
                     message = r.Message
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_severe_errors", ex); }
     }
@@ -184,6 +202,7 @@ public sealed class DarlingMcpHealthParserTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -196,12 +215,17 @@ public sealed class DarlingMcpHealthParserTools
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
                 return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SpServerDiagnosticsEvent,
-                    "none was an IO_SUBSYSTEM component result in the WARNING state", cancellationToken);
+                    "none was an IO_SUBSYSTEM component result in the WARNING state", logger, cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
+
+            return Finish(notice, JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(c.LastCapturedAt),
                 issue_count = c.Rows.Count,
@@ -216,7 +240,7 @@ public sealed class DarlingMcpHealthParserTools
                     longest_pending_requests_duration_ms = r.LongestPendingRequestsDurationMs,
                     longest_pending_requests_file_path = r.LongestPendingRequestsFilePath
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_io_issues", ex); }
     }
@@ -228,6 +252,7 @@ public sealed class DarlingMcpHealthParserTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -239,12 +264,17 @@ public sealed class DarlingMcpHealthParserTools
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
                 return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SchedulerMonitorEvent,
-                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", cancellationToken);
+                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", logger, cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
+
+            return Finish(notice, JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(c.LastCapturedAt),
                 issue_count = c.Rows.Count,
@@ -259,7 +289,7 @@ public sealed class DarlingMcpHealthParserTools
                     page_faults = r.PageFaults,
                     working_set_delta_mb = r.WorkingSetDeltaMb
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_scheduler_issues", ex); }
     }
@@ -271,6 +301,7 @@ public sealed class DarlingMcpHealthParserTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -282,12 +313,17 @@ public sealed class DarlingMcpHealthParserTools
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
                 return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SpServerDiagnosticsEvent,
-                    "none was a RESOURCE component result carrying a low-memory (RESOURCE_MEMPHYSICAL_LOW) notification", cancellationToken);
+                    "none was a RESOURCE component result carrying a low-memory (RESOURCE_MEMPHYSICAL_LOW) notification", logger, cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
+
+            return Finish(notice, JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(c.LastCapturedAt),
                 event_count = c.Rows.Count,
@@ -327,7 +363,7 @@ public sealed class DarlingMcpHealthParserTools
                     last_oom_factor = r.LastOomFactor,
                     last_os_error = r.LastOsError
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_memory_conditions", ex); }
     }
@@ -339,6 +375,7 @@ public sealed class DarlingMcpHealthParserTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -350,12 +387,17 @@ public sealed class DarlingMcpHealthParserTools
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
                 return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SpServerDiagnosticsEvent,
-                    $"none was a QUERY_PROCESSING component result in the WARNING state with at least {SystemHealthSignificance.CpuTaskMinPendingTasks} pending tasks", cancellationToken);
+                    $"none was a QUERY_PROCESSING component result in the WARNING state with at least {SystemHealthSignificance.CpuTaskMinPendingTasks} pending tasks", logger, cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
+
+            return Finish(notice, JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(c.LastCapturedAt),
                 event_count = c.Rows.Count,
@@ -374,7 +416,7 @@ public sealed class DarlingMcpHealthParserTools
                     has_deadlocked_schedulers_occurred = r.HasDeadlockedSchedulersOccurred,
                     did_blocking_occur = r.DidBlockingOccur
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_cpu_tasks", ex); }
     }
@@ -386,6 +428,7 @@ public sealed class DarlingMcpHealthParserTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -397,12 +440,17 @@ public sealed class DarlingMcpHealthParserTools
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
                 return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.MemoryBrokerEvent,
-                    "none carried a low-memory notification (broker adjustments that are not a shrink under pressure are routine)", cancellationToken);
+                    "none carried a low-memory notification (broker adjustments that are not a shrink under pressure are routine)", logger, cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
+
+            return Finish(notice, JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(c.LastCapturedAt),
                 event_count = c.Rows.Count,
@@ -423,7 +471,7 @@ public sealed class DarlingMcpHealthParserTools
                     broker = r.Broker,
                     notification = r.Notification
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_memory_broker", ex); }
     }
@@ -435,6 +483,7 @@ public sealed class DarlingMcpHealthParserTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -448,12 +497,17 @@ public sealed class DarlingMcpHealthParserTools
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
                 return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.MemoryNodeOomEvent,
-                    "none shredded to a memory-node OOM record (this category is ungated, so a captured OOM event that parsed would be here)", cancellationToken);
+                    "none shredded to a memory-node OOM record (this category is ungated, so a captured OOM event that parsed would be here)", logger, cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
+
+            return Finish(notice, JsonSerializer.Serialize(new
             {
                 server = c.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(c.LastCapturedAt),
                 event_count = c.Rows.Count,
@@ -489,7 +543,7 @@ public sealed class DarlingMcpHealthParserTools
                     is_process_physical_memory_low = r.IsProcessPhysicalMemoryLow,
                     is_process_virtual_memory_low = r.IsProcessVirtualMemoryLow
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_memory_node_oom", ex); }
     }
@@ -501,6 +555,7 @@ public sealed class DarlingMcpHealthParserTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -540,15 +595,21 @@ public sealed class DarlingMcpHealthParserTools
                     description (the four conditions) is this tool's to word.
                 */
                 return await EmptyAsync(
-                    postgres, new Collected<SignificantWaitRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt),
+                    postgres, new Collected<SignificantWaitRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now),
                     hours_back, SystemHealthParser.WaitInfoEvent,
-                    $"none was significant (needs a real session, a non-BACKUP statement, at least {SystemHealthSignificance.SignificantWaitMinDurationMs} ms, and a wait type off the idle list)", cancellationToken);
+                    $"none was significant (needs a real session, a non-BACKUP statement, at least {SystemHealthSignificance.SignificantWaitMinDurationMs} ms, and a wait type off the idle list)", logger, cancellationToken);
             }
 
-            return JsonSerializer.Serialize(new
+            var collected = new Collected<SignificantWaitRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now);
+            var notice = await NoticeAsync(postgres, collected, hours_back, EarliestOf(rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
+
+            return Finish(notice, JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 wait_count = rows.Count,
@@ -565,7 +626,7 @@ public sealed class DarlingMcpHealthParserTools
                     session_id = r.SessionId,
                     query_text = r.QueryText
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_significant_waits", ex); }
     }
@@ -578,7 +639,7 @@ public sealed class DarlingMcpHealthParserTools
     /// <see cref="Rows"/>. The id rides along for the #2511 engine-capability probe on the zero-row path —
     /// re-resolving the name there would be a second registry read, which could answer for a different server.</summary>
     private readonly record struct Collected<T>(
-        string? EarlyReturn, int ServerId, string ServerName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt);
+        string? EarlyReturn, int ServerId, string ServerName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt, DateTime WindowEnd);
 
     /// <summary>
     /// Resolves the server, validates hours_back + as_of + limit, reads the raw event_xml for
@@ -598,10 +659,10 @@ public sealed class DarlingMcpHealthParserTools
         Func<string, IEnumerable<T>> shred, Func<T, bool> significant, CancellationToken cancellationToken = default) where T : class
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, cancellationToken);
-        if (error != null) return new Collected<T>(error, 0, "", new List<T>(), 0, null);
+        if (error != null) return new Collected<T>(error, 0, "", new List<T>(), 0, null, default);
 
         var validation = McpHelpers.ValidateWindow(hoursBack, asOf, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
-        if (validation != null) return new Collected<T>(validation, 0, "", new List<T>(), 0, null);
+        if (validation != null) return new Collected<T>(validation, 0, "", new List<T>(), 0, null, default);
 
         var now = windowEnd;
         var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
@@ -618,7 +679,7 @@ public sealed class DarlingMcpHealthParserTools
             }
         }
 
-        return new Collected<T>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt);
+        return new Collected<T>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now);
     }
 
     /* ─────────────────────────── the four nothings (#3541 A12) ─────────────────────────── */
@@ -651,7 +712,7 @@ public sealed class DarlingMcpHealthParserTools
     /// </summary>
     private static async Task<string> EmptyAsync<T>(
         NpgsqlDataSource postgres, Collected<T> c, int hoursBack, string eventType, string noneQualifiedBecause,
-        CancellationToken cancellationToken = default)
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         /* The type-scoped probe runs on every rung: on rung 1 the type exists in the window so the backward
            index walk stops at its first row, and the stamp it returns is THIS type's newest capture rather
@@ -662,7 +723,7 @@ public sealed class DarlingMcpHealthParserTools
             return WitnessStatus(
                 "empty",
                 $"{c.RawEventCount} {eventType} event(s) were captured for {c.ServerName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}. Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
-                sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount);
+                sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount, hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints());
         }
 
         if (lastOfType is DateTime seen)
@@ -670,7 +731,8 @@ public sealed class DarlingMcpHealthParserTools
             return WitnessStatus(
                 "empty",
                 $"No {eventType} events were captured for {c.ServerName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)}), so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
-                sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0);
+                sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
+                hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints());
         }
 
         if (c.LastCapturedAt is DateTime alive)
@@ -678,7 +740,8 @@ public sealed class DarlingMcpHealthParserTools
             return WitnessStatus(
                 "empty",
                 $"No {eventType} events have been captured for {c.ServerName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
-                sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0);
+                sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0,
+                hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints());
         }
 
         return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.ServerName, SystemHealthCollectorName, cancellationToken)
@@ -695,16 +758,57 @@ public sealed class DarlingMcpHealthParserTools
     /// <c>hints</c> so the keys sit in one place whichever branch answered.
     /// </summary>
     private static string WitnessStatus(
-        string status, string message, bool sourceObserved, DateTime? lastCapturedAt, DateTime? lastCapturedOfTypeAt, int eventsInWindow)
-        => JsonSerializer.Serialize(new
+        string status, string message, bool sourceObserved, DateTime? lastCapturedAt, DateTime? lastCapturedOfTypeAt, int eventsInWindow,
+        object? hints = null)
+    {
+        /* The serializer writes a null member, so hints is added only when there is one: the unavailable rung keeps its shape. */
+        var answer = new Dictionary<string, object?>
         {
-            status,
-            message,
-            source_observed = sourceObserved,
-            last_captured_at = Stamp(lastCapturedAt),
-            last_captured_of_type_at = Stamp(lastCapturedOfTypeAt),
-            events_in_window = eventsInWindow,
-        }, McpHelpers.JsonOptions);
+            ["status"] = status,
+            ["message"] = message,
+            ["source_observed"] = sourceObserved,
+            ["last_captured_at"] = Stamp(lastCapturedAt),
+            ["last_captured_of_type_at"] = Stamp(lastCapturedOfTypeAt),
+            ["events_in_window"] = eventsInWindow,
+        };
+        if (hints is not null) answer["hints"] = hints;
+        return JsonSerializer.Serialize(answer, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// #4966: where the store's coverage of this window starts, for the three keys every window-floor tool writes. The nine reads
+    /// window on <c>event_time</c>, while the coverage probe reads <c>collection_time</c> (the collector's own UTC clock) of the one
+    /// table <c>system_health_events</c>, so it counts events of EVERY type and the collector's logged runs: a server with a rare
+    /// event type is covered from when its session was first read, not from this type's first hit. A server's first collection
+    /// stores the ring buffer's history, so an event can be older than the coverage; the notice names the earlier of the coverage
+    /// and the earliest event shown (<paramref name="earliestShown"/>), the rule the viewer's System Events tab follows
+    /// (<c>ViewerEventDataStart.Of</c>). An empty answer shows no event and is always probed; a data answer over a window of 90
+    /// minutes or less starts no probe.
+    /// </summary>
+    private static async Task<McpWindowNotice> NoticeAsync<T>(
+        NpgsqlDataSource postgres, Collected<T> c, int hoursBack, DateTime? earliestShown, bool emptyAnswer,
+        ILogger? logger, CancellationToken cancellationToken)
+    {
+        var windowEnd = c.WindowEnd;
+        var windowStart = windowEnd.AddHours(-hoursBack);
+        var notice = await DarlingMcpWindowNotice.ReadAsync(
+            async () =>
+            {
+                var floor = await DarlingMcpWindowNotice.Probe(postgres, SystemHealthTable, c.ServerName, windowStart, windowEnd, cancellationToken);
+                /* The earlier of the two, and the earliest event alone when the probe found no coverage in the window. */
+                return floor is DateTime covered && earliestShown is DateTime shown && shown < covered ? shown : floor ?? earliestShown;
+            },
+            windowStart, windowEnd, SystemHealthTable, emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
+        return notice;
+    }
+
+    /// <summary>The table every one of the nine reads is served from.</summary>
+    private const string SystemHealthTable = "system_health_events";
+
+    private static DateTime? EarliestOf(IEnumerable<DateTime?> times) => times.Where(t => t.HasValue).Min();
+
+    /// <summary>The payload as serialized, or without the three window-floor keys when the coverage probe failed.</summary>
+    private static string Finish(McpWindowNotice notice, string json) => notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
 
     /// <summary>The store's naive-UTC stamp in the same ISO shape the rows' <c>event_time</c> uses; null stays null.</summary>
     private static string? Stamp(DateTime? stamp) => stamp?.ToString("o");
