@@ -236,37 +236,40 @@ public class CollectionLogDrainForensicsStoreTests
     }
 
     /// <summary>
-    /// The session id is captured AFTER the open round trip, exactly once, and the helper normalizes the
-    /// provider's not-populated 0 to null (#2884).
-    ///
-    /// <para>SqlConnection.ServerProcessId is not reliably populated until the connection has round-tripped
-    /// a command. The original capture sat before ExecuteReaderAsync, so the runs it mattered most for —
-    /// budget-abandoned cycles, where the id is the join key to waiting_tasks and the peer snapshots —
-    /// recorded a literal 0. Ordering is pinned on the source because it IS a source property: the capture
-    /// call must come after the ExecuteReaderAsync await it depends on, and a refactor that hoists it back
-    /// above the open reintroduces #2884 while compiling clean and passing every behavioral test that
-    /// cannot construct a real SqlConnection.</para>
+    /// The session id is resolved right after the target connection opens and BEFORE any reader exists on
+    /// it, through the per-connection cache (#5132). Under MultipleActiveResultSets
+    /// <c>SqlConnection.ServerProcessId</c> is 0 at every point, so the old capture after
+    /// <c>ExecuteReaderAsync</c> recorded nothing; the open-time lookup is the only source. The ordering and
+    /// the single call site are source properties, pinned here.
     /// </summary>
     [Fact]
-    public void TheSessionIdIsCapturedAfterTheOpenRoundTrip()
+    public void TheSessionIdIsResolvedRightAfterTheOpen_BeforeAnyReader()
     {
         var runner = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
 
-        const string openCall = "opened = await command.ExecuteReaderAsync(";
-        const string captureCall = "context.TargetSessionId = TryReadTargetSessionId(";
-
+        const string openCall = "await targetConnection.OpenAsync(cancellationToken);";
+        const string captureCall = "await TargetSessionIdCache.Shared.ResolveAsync(targetConnection";
         var open = runner.IndexOf(openCall, StringComparison.Ordinal);
         var capture = runner.IndexOf(captureCall, StringComparison.Ordinal);
 
         Assert.True(open >= 0, "the server-scoped open call moved; re-anchor this pin");
-        Assert.True(capture >= 0, "the session-id capture is gone entirely");
-        Assert.True(capture > open,
-            "the session id must be captured AFTER ExecuteReaderAsync has round-tripped (#2884) — " +
-            "before it, SqlConnection.ServerProcessId reads 0 on exactly the abandoned cycles it exists to explain");
+        Assert.True(capture > open, "the session-id lookup must follow the open");
+
+        /* BOTH reader call sites on the connection come after the capture: the enumerated path's list
+           reader and the plain path's reader. */
+        foreach (var readerCall in new[] { "ExecuteReaderAsync(cancellationToken)", "opened = await command.ExecuteReaderAsync(itemToken)" })
+        {
+            var reader = runner.IndexOf(readerCall, open, StringComparison.Ordinal);
+            Assert.True(reader > 0, $"the reader call '{readerCall}' moved; re-anchor this pin");
+            Assert.True(capture < reader, $"the session-id lookup must precede '{readerCall}'");
+        }
+
         Assert.Equal(capture, runner.LastIndexOf(captureCall, StringComparison.Ordinal));
 
-        /* The helper's own normalization: 0 is not a session id and must become null at the source. */
-        Assert.Contains("return raw > 0 ? raw : null;", runner, StringComparison.Ordinal);
+        /* The reconnect check sits right after the plain path's first reader, never before it. */
+        var plainReader = runner.IndexOf("opened = await command.ExecuteReaderAsync(itemToken)", StringComparison.Ordinal);
+        var discard = runner.IndexOf("TargetSessionIdCache.Shared.DiscardIfReplaced(", StringComparison.Ordinal);
+        Assert.True(discard > plainReader && plainReader > 0, "the replaced-connection check must follow the first reader's open");
     }
 
     /// <summary>

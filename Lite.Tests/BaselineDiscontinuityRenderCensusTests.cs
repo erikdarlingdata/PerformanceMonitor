@@ -187,9 +187,9 @@ public sealed class BaselineDiscontinuityRenderCensusTests
         Assert.Equal("#E8B21E", PerformanceMonitor.Common.ChartPalette.AccentColor("Discontinuity"));
     }
 
-    /// <summary>The web page: one sentence builder, the shared wording, applied to the four trend panels.</summary>
+    /// <summary>The web page: one sentence builder, the shared wording, applied to the six trend-drawing functions.</summary>
     [Fact]
-    public void TheWebPage_RendersTheSentenceOnItsFourTrendPanels()
+    public void TheWebPage_RendersTheSentenceOnItsSixTrendPanels()
     {
         var js = File.ReadAllText(RepoPath("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
@@ -197,10 +197,10 @@ public sealed class BaselineDiscontinuityRenderCensusTests
         Assert.Contains("\"baseline discontinuity at \" + localTime(d.at) + \" (\" + d.reason + \")\"", js, StringComparison.Ordinal);
         Assert.Contains("Array.isArray(data.discontinuities)", js, StringComparison.Ordinal);
 
-        /* One definition and one use per trend-drawing function: the wait, perfmon, per-query and file-I/O panels. */
+        /* One definition and one use per trend-drawing function: the wait, perfmon, per-query and file-I/O panels, plus the instance-trend and memory-clerk panels. */
         var uses = Regex.Matches(js, @"discontinuityNotes\((trend\.data|res\.data)\)").Count;
-        Assert.Equal(4, uses);
-        foreach (var fn in new[] { "export async function drawWaitTrends(", "async function drawPerfmonTrend(", "async function drawQueryTrend(", "export function fileIoPanel(" })
+        Assert.Equal(6, uses);
+        foreach (var fn in new[] { "export async function drawWaitTrends(", "export async function drawPerfmonTrends(", "async function drawQueryTrend(", "export function fileIoPanel(", "export function serverTrendPanel(", "export async function drawClerkTrends(" })
         {
             var start = js.IndexOf(fn, StringComparison.Ordinal);
             Assert.True(start >= 0, fn);
