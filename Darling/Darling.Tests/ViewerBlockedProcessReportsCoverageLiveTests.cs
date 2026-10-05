@@ -43,6 +43,9 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
     private const int DmvOnlyServerId = -499802;
     private const int DmvOnlyQuietServerId = -499803;
     private const int DmvCappedServerId = -499804;
+    private const int XeMidwayServerId = -499805;
+    private const int ChartsDmvOnlyServerId = -499806;
+    private const int XeWholeWindowServerId = -499807;
     private const string XeCollector = "blocked_process_report";
     private const string DmvCollector = "dmv_blocking_snapshot";
 
@@ -129,6 +132,61 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
         Assert.Equal(oldestReturned, read.CappedSourceStartUtc);
         Assert.True(read.Rows.Min(r => r.EventTime) > oldestReturned.AddMinutes(-1));
         Assert.Equal(Since(oldestReturned), banner);
+    }
+
+    /* The Blocking charts read the XE table when it holds a report in the window. The DMV collector has run for 40 days and the
+       XE collector began 3 days before the range's end: the grid's probe takes the earlier of the two and reads covered, while
+       the charts' probe names the XE start, the first day their data can exist. */
+    [Fact]
+    public async Task TheChartsProbe_NamesTheXeStart_WhereTheGridProbeReadsCoveredByTheDmv_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(XeMidwayServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(XeMidwayServerId, DmvCollector, store.End.AddDays(-40), store.End, ct);
+        await store.LogRunsAsync(XeMidwayServerId, XeCollector, store.End.AddDays(-3), store.End, ct);
+        await store.InsertXeReportsAsync(XeMidwayServerId, store.End.AddDays(-3).AddHours(6), store.End, store.End.AddDays(-3), ct);
+
+        var gridProbe = await store.Viewer.GetBlockedProcessReportsDataStartAsync(XeMidwayServerId, store.Start, store.End, ct);
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(XeMidwayServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.False(RawWindowFloor.IsTruncated(gridProbe, store.Start));
+        Assert.Equal(store.End.AddDays(-3), chartsProbe);
+    }
+
+    /* No XE report in the window: the charts' probe is the two-source probe, as before. */
+    [Fact]
+    public async Task TheChartsProbe_WithNoXeReportInTheWindow_IsTheGridProbe_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(ChartsDmvOnlyServerId, store.End.AddDays(-2), ct);
+        await store.LogRunsAsync(ChartsDmvOnlyServerId, DmvCollector, store.End.AddDays(-2), store.End, ct);
+        await store.InsertDmvSnapshotsAsync(ChartsDmvOnlyServerId, store.End.AddDays(-2).AddHours(3), store.End, TimeSpan.FromHours(6), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ChartsDmvOnlyServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.Equal(store.End.AddDays(-2), chartsProbe);
+        Assert.Equal(await store.Viewer.GetBlockedProcessReportsDataStartAsync(ChartsDmvOnlyServerId, store.Start, store.End, ct), chartsProbe);
+    }
+
+    /* The XE collector covers the whole range: the charts' probe reads covered. */
+    [Fact]
+    public async Task TheChartsProbe_WithXeCoveringTheWholeWindow_ReadsCovered_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(XeWholeWindowServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(XeWholeWindowServerId, XeCollector, store.End.AddDays(-40), store.End, ct);
+        await store.InsertXeReportsAsync(XeWholeWindowServerId, store.Start.AddHours(5), store.End, store.End.AddDays(-40), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(XeWholeWindowServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.NotNull(chartsProbe);
+        Assert.False(RawWindowFloor.IsTruncated(chartsProbe, store.Start));
     }
 
     private static string Since(DateTime utc) =>
