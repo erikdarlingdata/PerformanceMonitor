@@ -194,7 +194,7 @@ public sealed class WebDataStartNoteLiveTests
         var firstRow = store.End.AddDays(-1);
         await store.SeedTableAsync("memory_grant_stats", -496630, "web-data-start-memory-grants", added, firstRow, ct);
 
-        var payload = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants", 168, null, ct);
+        var payload = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants", 168, null, cancellationToken: ct);
         var answered = await WebDataStartNote.AddAsync(store.DataSource, "get_memory_grants", "web-data-start-memory-grants", 168, null, payload, null, ct);
 
         var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
@@ -207,7 +207,7 @@ public sealed class WebDataStartNoteLiveTests
         Assert.Equal(TimeSpan.FromHours(168), ParseUtc(answer["window_end_utc"]) - ParseUtc(answer["window_start_utc"]));
 
         await store.SeedTableAsync("memory_grant_stats", -496631, "web-data-start-memory-grants-covered", store.End.AddDays(-30), firstRow: store.End.AddDays(-8), ct);
-        var covered = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants-covered", 168, null, ct);
+        var covered = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants-covered", 168, null, cancellationToken: ct);
         Assert.Same(covered, await WebDataStartNote.AddAsync(store.DataSource, "get_memory_grants", "web-data-start-memory-grants-covered", 168, null, covered, null, ct));
     }
 
@@ -556,10 +556,10 @@ ORDER BY ordinal_position", connection))
         {
             var payload = read switch
             {
-                "get_blocked_process_xml" => await DarlingMcpBlockingTools.GetBlockedProcessXml(DataSource, server, hours, 100, null, ct),
-                "get_long_query_completions" => await DarlingMcpLongQueryTools.GetLongQueryCompletions(DataSource, server, hours, 100, null, ct),
-                "get_memory_pressure_events" => await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(DataSource, server, hours, null, null, ct),
-                "get_default_trace_events" => await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(DataSource, server, hours, 100, null, ct),
+                "get_blocked_process_xml" => await DarlingMcpBlockingTools.GetBlockedProcessXml(DataSource, server, hours, 100, null, cancellationToken: ct),
+                "get_long_query_completions" => await DarlingMcpLongQueryTools.GetLongQueryCompletions(DataSource, server, hours, 100, null, cancellationToken: ct),
+                "get_memory_pressure_events" => await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(DataSource, server, hours, null, null, cancellationToken: ct),
+                "get_default_trace_events" => await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(DataSource, server, hours, 100, null, cancellationToken: ct),
                 _ => throw new ArgumentOutOfRangeException(nameof(read), read, "not an event read"),
             };
             var answered = await WebDataStartNote.AddAsync(DataSource, read, server, hours, null, payload, null, ct);
