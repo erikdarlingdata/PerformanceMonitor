@@ -12,6 +12,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -29,7 +31,11 @@ public sealed record DarlingOwnedSet(IReadOnlyList<string> Paths, IReadOnlyList<
 /// </summary>
 public static class DarlingOwnedSecrets
 {
-    private static volatile DarlingOwnedSet s_current = DarlingOwnedSet.Empty;
+    /// <summary>The state before any configuration has loaded. Compared by REFERENCE: an <see cref="DarlingOwnedSet.Empty"/>
+    /// set is a populated set that owns nothing, which is not the same thing and is not refused wholesale.</summary>
+    internal static DarlingOwnedSet Unpopulated { get; } = new(Array.Empty<string>(), Array.Empty<string>());
+
+    private static volatile DarlingOwnedSet s_current = Unpopulated;
     private const int MaxDepth = 8;
 
     /// <summary>Environment variables the service itself reads. A census test keeps this complete.</summary>
@@ -43,10 +49,12 @@ public static class DarlingOwnedSecrets
         "USERPROFILE",
     };
 
-    /// <summary>The current owned set (empty until a config has been loaded).</summary>
+    /// <summary>The current owned set. Until a configuration has loaded this is <see cref="Unpopulated"/>, and every
+    /// <c>env:</c>/<c>file:</c> reference is refused: a guard that exists only when the configuration happened to load
+    /// is not a guard.</summary>
     public static DarlingOwnedSet Current => s_current;
 
-    public static void Set(DarlingOwnedSet set) => s_current = set ?? DarlingOwnedSet.Empty;
+    public static void Set(DarlingOwnedSet set) => s_current = set ?? Unpopulated;
 
     /// <summary>One sentence for every refusal; it names no path and no variable.</summary>
     internal const string ReferenceRefusalText =
@@ -57,14 +65,19 @@ public static class DarlingOwnedSecrets
     private static StringComparison EnvComparison =>
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
+    /* Windows and macOS volumes are case-insensitive by default. Identity (below) is the real answer for a file that
+       exists; this is the text fallback for one that does not, so it errs toward refusing on macOS. */
     private static StringComparison PathComparison =>
-        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
     /// <summary>Null when <paramref name="password"/> is not an <c>env:</c>/<c>file:</c> reference or the reference
     /// points at nothing Darling owns; otherwise <see cref="ReferenceRefusalText"/>.</summary>
     internal static string? ReferenceRefusal(string? password) => ReferenceRefusal(password, s_current);
 
     internal static string? ReferenceRefusal(string? password, DarlingOwnedSet owned)
+        => ReferenceRefusal(password, owned, FileIdentity.Of);
+
+    internal static string? ReferenceRefusal(string? password, DarlingOwnedSet owned, Func<string, FileId?> identityOf)
     {
         if (string.IsNullOrWhiteSpace(password))
         {
@@ -72,12 +85,19 @@ public static class DarlingOwnedSecrets
         }
 
         var value = password.Trim();
-        if (value.StartsWith("file:", StringComparison.Ordinal))
+        var isFile = value.StartsWith("file:", StringComparison.Ordinal);
+        var isEnv = value.StartsWith("env:", StringComparison.Ordinal);
+        if ((isFile || isEnv) && ReferenceEquals(owned, Unpopulated))
         {
-            return FileRefused(value["file:".Length..].Trim(), owned) ? ReferenceRefusalText : null;
+            return ReferenceRefusalText; /* No configuration has loaded, so nothing can be said to be safe. */
         }
 
-        if (value.StartsWith("env:", StringComparison.Ordinal))
+        if (isFile)
+        {
+            return FileRefused(value["file:".Length..].Trim(), owned, identityOf) ? ReferenceRefusalText : null;
+        }
+
+        if (isEnv)
         {
             var name = value["env:".Length..].Trim();
             return owned.EnvNames.Any(n => string.Equals(n, name, EnvComparison)) ? ReferenceRefusalText : null;
@@ -86,7 +106,7 @@ public static class DarlingOwnedSecrets
         return null;
     }
 
-    private static bool FileRefused(string path, DarlingOwnedSet owned)
+    internal static bool FileRefused(string path, DarlingOwnedSet owned, Func<string, FileId?> identityOf)
     {
         if (IsRefusedForm(path))
         {
@@ -99,6 +119,7 @@ public static class DarlingOwnedSecrets
             return true;
         }
 
+        var ownedIds = new HashSet<FileId>();
         foreach (var ownedPath in owned.Paths)
         {
             if (string.IsNullOrWhiteSpace(ownedPath) || ownedPath.Contains('\0'))
@@ -106,14 +127,133 @@ public static class DarlingOwnedSecrets
                 continue;
             }
 
+            /* Text first: it covers an owned path that does not exist yet (a log or key the store has not written),
+               where identity has nothing to read. */
             var ownedReal = RealPath(ownedPath);
             if (ownedReal is not null && Covers(ownedReal, real))
+            {
+                return true;
+            }
+
+            if (Safe(identityOf, ownedPath) is { } id)
+            {
+                ownedIds.Add(id);
+            }
+
+            if (ownedReal is not null && Safe(identityOf, ownedReal) is { } realId)
+            {
+                ownedIds.Add(realId);
+            }
+        }
+
+        if (ownedIds.Count > 0 && ReachesOwned(path, real, ownedIds, identityOf))
+        {
+            return true;
+        }
+
+        /* A hard link is a second name for an owned FILE, and an ancestor walk cannot see it: the candidate sits outside
+           every owned directory. So when the candidate exists, look for its identity among the files under each owned
+           directory. Bounded: a store directory can hold many files, and the scan stops at the cap rather than run long. */
+        var candidate = Safe(identityOf, real) ?? Safe(identityOf, path);
+        if (candidate is null)
+        {
+            return false;
+        }
+
+        var budget = MaxFilesScanned;
+        foreach (var ownedPath in owned.Paths)
+        {
+            if (!string.IsNullOrWhiteSpace(ownedPath) && !ownedPath.Contains('\0')
+                && ContainsFileWithIdentity(ownedPath, candidate.Value, identityOf, ref budget))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    private const int MaxFilesScanned = 20000;
+
+    private static bool ContainsFileWithIdentity(string root, FileId wanted, Func<string, FileId?> identityOf, ref int budget)
+    {
+        try
+        {
+            if (!Directory.Exists(root))
+            {
+                return false;
+            }
+
+            var options = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = FileAttributes.ReparsePoint,
+                ReturnSpecialDirectories = false,
+            };
+            foreach (var file in Directory.EnumerateFiles(root, "*", options))
+            {
+                if (--budget < 0)
+                {
+                    return false;
+                }
+
+                if (Safe(identityOf, file) is { } id && id == wanted)
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    /// <summary>True when the file, or any directory above it, IS an owned file or directory — by volume and file ID,
+    /// so a hard link, a bind mount, a Windows 8.3 short name and a case variant all arrive at the same identity. A file
+    /// that does not exist has no identity of its own; its nearest existing ancestor still does.</summary>
+    private static bool ReachesOwned(string path, string real, HashSet<FileId> ownedIds, Func<string, FileId?> identityOf)
+    {
+        foreach (var start in new[] { path, real })
+        {
+            string? current;
+            try
+            {
+                current = Path.GetFullPath(start);
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                return true;
+            }
+
+            for (var i = 0; i < 256 && current is not null; i++)
+            {
+                if (Safe(identityOf, current) is { } id && ownedIds.Contains(id))
+                {
+                    return true;
+                }
+
+                current = Path.GetDirectoryName(current);
+            }
+        }
+
+        return false;
+    }
+
+    private static FileId? Safe(Func<string, FileId?> identityOf, string path)
+    {
+        try
+        {
+            return identityOf(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException
+                                       or DllNotFoundException or EntryPointNotFoundException or MarshalDirectiveException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Forms no real secret path needs, refused before any comparison.</summary>
@@ -342,7 +482,24 @@ public static class DarlingOwnedSecrets
         Walk(config, new List<string>(), new HashSet<object>(ReferenceEqualityComparer.Instance), 0, false, pathValues);
         paths.AddRange(pathValues);
 
-        var data = config.Postgres?.DataDirectory;
+        /* A managed store with no dataDirectory lives at the DEFAULT directory, so resolve it exactly as the store does;
+           reading the setting as written would leave the default install owning none of its own files. */
+        var data = config.Postgres is { Managed: true } managed
+            ? DarlingManagedPostgres.ResolveDataDirectory(managed)
+            : config.Postgres?.DataDirectory;
+
+        /* The compose distribution's credential directory (plaintext role passwords) and the log-hash key's directory
+           for this configuration. Both are directories; everything under them is owned. */
+        paths.Add(DarlingManagedRoles.ComposeStoreCredentialDirectory);
+        try
+        {
+            paths.Add(DarlingLogHashKeyFile.DirectoryFor(config, configPath));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException or InvalidOperationException)
+        {
+            /* An unresolvable key directory owns nothing we can name. */
+        }
+
         if (!string.IsNullOrWhiteSpace(data))
         {
             paths.Add(data);
@@ -375,5 +532,90 @@ public static class DarlingOwnedSecrets
         return new DarlingOwnedSet(
             paths.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.Ordinal).ToList(),
             envNames.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+    }
+}
+
+/// <summary>A file's identity: the volume (or device) and the file's ID on it.</summary>
+internal readonly record struct FileId(ulong Volume, ulong Index);
+
+/// <summary>Reads <see cref="FileId"/> from the operating system: volume serial plus file index on Windows,
+/// <c>st_dev</c>/<c>st_ino</c> on Unix. Null for a file that does not exist, and where the platform call is unavailable.</summary>
+internal static class FileIdentity
+{
+    public static FileId? Of(string path) =>
+        OperatingSystem.IsWindows() ? OfWindows(path) : OfUnix(path);
+
+    private const uint FileFlagBackupSemantics = 0x02000000;
+    private const uint FileShareAll = 7;
+    private const uint OpenExisting = 3;
+
+    private static FileId? OfWindows(string path)
+    {
+        using var handle = CreateFileW(path, 0, FileShareAll, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics, IntPtr.Zero);
+        if (handle.IsInvalid || !GetFileInformationByHandle(handle, out var info))
+        {
+            return null;
+        }
+
+        return new FileId(info.VolumeSerialNumber, ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow);
+    }
+
+    /* st_dev is at offset 0 and st_ino at offset 8 in struct stat on 64-bit Linux (x86-64 and arm64) and on macOS with
+       64-bit inodes; st_dev is 8 bytes on Linux and 4 on macOS. A buffer larger than any of those structs is used. */
+    private static FileId? OfUnix(string path)
+    {
+        var buffer = new byte[512];
+        int result;
+        try
+        {
+            result = OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.X64
+                ? StatMacIntel(path, buffer)
+                : Stat(path, buffer);
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            return null;
+        }
+
+        if (result != 0 || IntPtr.Size != 8)
+        {
+            return null;
+        }
+
+        var dev = OperatingSystem.IsMacOS() ? (ulong)BitConverter.ToUInt32(buffer, 0) : BitConverter.ToUInt64(buffer, 0);
+        return new FileId(dev, BitConverter.ToUInt64(buffer, 8));
+    }
+
+    [DllImport("libc", EntryPoint = "stat", SetLastError = true)]
+    private static extern int Stat([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] buffer);
+
+    [DllImport("libc", EntryPoint = "stat$INODE64", SetLastError = true)]
+    private static extern int StatMacIntel([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] buffer);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(
+        string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes,
+        uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleInfo info);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleInfo
+    {
+        public uint FileAttributes;
+        public uint CreationLow;
+        public uint CreationHigh;
+        public uint AccessLow;
+        public uint AccessHigh;
+        public uint WriteLow;
+        public uint WriteHigh;
+        public uint VolumeSerialNumber;
+        public uint SizeHigh;
+        public uint SizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
     }
 }

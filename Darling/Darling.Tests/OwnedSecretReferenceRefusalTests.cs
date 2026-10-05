@@ -202,4 +202,83 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     }
 
     private static string ThisFile([CallerFilePath] string path = "") => path;
+
+    [Fact]
+    public void AnUnpopulatedSet_RefusesEveryReference_AndLeavesLiteralsAlone()
+    {
+        DarlingOwnedSecrets.Set(null!);
+
+        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + Path.Combine(_root, "other", "pw")));
+        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("env:SOME_OTHER_VAR"));
+        Assert.Null(Check("hunter2"));
+        Assert.Null(Check(null));
+    }
+
+    [Fact]
+    public void ASetThatWasPopulatedAndOwnsNothing_IsNotTheUnpopulatedSet()
+    {
+        DarlingOwnedSecrets.Set(DarlingOwnedSet.Empty);
+
+        Assert.Null(Check("env:SOME_OTHER_VAR"));
+    }
+
+    private static bool TryHardLink(string link, string target)
+    {
+        try
+        {
+            var psi = OperatingSystem.IsWindows()
+                ? new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /H \"{link}\" \"{target}\"")
+                : new System.Diagnostics.ProcessStartInfo("ln", $"\"{target}\" \"{link}\"");
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            using var p = System.Diagnostics.Process.Start(psi)!;
+            p.WaitForExit();
+            return p.ExitCode == 0 && File.Exists(link);
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    [Fact]
+    public void AHardLinkToAnOwnedFile_IsRefused()
+    {
+        var link = Path.Combine(_root, "other", "linked.txt");
+        Assert.True(TryHardLink(link, Path.Combine(_owned, "secret.txt")), "could not create a hard link on this machine");
+
+        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + link));
+    }
+
+    [Fact]
+    public void ACaseVariantOfAnOwnedPath_IsRefused_WhereTheVolumeIgnoresCase()
+    {
+        var owned = Path.Combine(_owned, "secret.txt");
+        var variant = Path.Combine(_root.ToUpperInvariant(), "OWN", "SECRET.TXT");
+        if (!File.Exists(variant))
+        {
+            return; /* a case-sensitive volume: the variant is a different (missing) file */
+        }
+
+        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + variant));
+        Assert.NotNull(owned);
+    }
+
+    [Fact]
+    public void AnAliasWhoseTextDiffersButWhoseIdentityMatches_IsRefused_LikeAWindowsShortName()
+    {
+        /* PROGRA~3 and "Program Files" name the same directory on Windows but share no text; that cannot be created on
+           this machine, so the comparison is exercised with a stand-in identity source. */
+        var owned = new DarlingOwnedSet(new[] { "/data/Program Files/darling" }, Array.Empty<string>());
+        FileId? Identity(string p) => p.Replace('\\', '/').TrimEnd('/') switch
+        {
+            "/data/Program Files/darling" or "/data/PROGRA~3/darling" => new FileId(7, 42),
+            _ => null,
+        };
+
+        Assert.Equal(
+            DarlingOwnedSecrets.ReferenceRefusalText,
+            DarlingOwnedSecrets.ReferenceRefusal("file:/data/PROGRA~3/darling/secret.txt", owned, Identity));
+        Assert.Null(DarlingOwnedSecrets.ReferenceRefusal("file:/data/PROGRA~4/other/secret.txt", owned, Identity));
+    }
 }

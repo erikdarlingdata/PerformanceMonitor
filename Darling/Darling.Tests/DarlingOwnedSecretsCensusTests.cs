@@ -145,6 +145,36 @@ public sealed class DarlingOwnedSecretsCensusTests
     }
 
     [Fact]
+    public void Compute_ADefaultManagedConfiguration_OwnsTheResolvedStoreDirectorysFiles()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "darling-owned-" + Guid.NewGuid().ToString("N"));
+        var config = new DarlingConfig();
+        config.Postgres.Managed = true;
+        config.Postgres.DataDirectory = null;
+        var set = DarlingOwnedSecrets.Compute(config, Path.Combine(root, "darling.json"));
+
+        var resolved = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
+        Assert.Contains(resolved, set.Paths);
+        Assert.Contains(DarlingManagedPostgres.CredentialPathFor(resolved), set.Paths);
+        Assert.Contains(DarlingManagedPostgres.AdminCredentialPathFor(resolved), set.Paths);
+        Assert.Contains(Path.Combine(Path.GetDirectoryName(resolved)!, "server.key"), set.Paths);
+        Assert.Contains(Path.Combine(Path.GetDirectoryName(resolved)!, "pg.log"), set.Paths);
+    }
+
+    [Fact]
+    public void Compute_OwnsTheComposeCredentialDirectory_AndTheLogHashKeyDirectory()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "darling-owned-" + Guid.NewGuid().ToString("N"));
+        var configPath = Path.Combine(root, "darling.json");
+        var config = new DarlingConfig();
+        config.Postgres.Managed = false;
+        var set = DarlingOwnedSecrets.Compute(config, configPath);
+
+        Assert.Contains(DarlingManagedRoles.ComposeStoreCredentialDirectory, set.Paths);
+        Assert.Contains(DarlingLogHashKeyFile.DirectoryFor(config, configPath), set.Paths);
+    }
+
+    [Fact]
     public void Holder_SetThenCurrent()
     {
         var before = DarlingOwnedSecrets.Current;

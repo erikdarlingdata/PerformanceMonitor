@@ -982,7 +982,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>How long one <c>POST /api/servers</c> request may hold the one-at-a-time slot.</summary>
     internal static readonly TimeSpan ServerAddSlotTimeout = TimeSpan.FromSeconds(120);
 
-    internal const string ServerAddTimedOutText = "Adding servers took too long; check the server list before retrying.";
+    internal const string ServerAddTimedOutText = "Adding servers took too long; check the server list before retrying. If every later add is refused as busy, restart the service.";
 
     /// <summary>The most servers one <c>POST /api/servers</c> request may carry.</summary>
     internal const int MaxServersPerAddRequest = 20;
