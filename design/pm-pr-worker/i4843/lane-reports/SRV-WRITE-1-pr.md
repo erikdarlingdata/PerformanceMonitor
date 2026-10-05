@@ -36,7 +36,7 @@ An admin seat (an OIDC admin, the shared-token seat, or loopback-only mode) can 
 **Abuse limits.**
 - At most 20 servers per request (400 above that).
 - 64 KB body cap.
-- One add in flight per process: a second gets 429. The slot is released when the core faults.
+- One add in flight per process: a second gets 429. The slot is released when the core faults. A core call that never finishes holds the slot until the process restarts, so the 503 text says a restart clears it.
 - Duplicate names are the core's typed `duplicate` refusal.
 
 **Audit.** One Information line per added server: `Server added by {principal}: {server}, auth {mode}`. It never contains the secret, and the server text is sanitized before it is logged. Nothing is logged for a refused, duplicate or failed entry.
@@ -74,10 +74,11 @@ An admin seat (an OIDC admin, the shared-token seat, or loopback-only mode) can 
 
 A server's password may be an `env:NAME` or `file:/path` reference, resolved by the host at connect time. References stay allowed with no setting to turn on. One rule, in the shared core (`DarlingMcpServerAdminTools.ParseEntry`, so the MCP `add_servers` tool and the web route both get it): a reference must not point at Darling's own configuration or secret files.
 
-- **Owned set.** `DarlingOwnedSecrets.Current`: the config directory, the store data directory and its parent's credential, key and log files, every `file:`/`env:` reference written in the config (captured before resolution), and the service's own environment names.
+- **Owned set.** `DarlingOwnedSecrets.Current`: the config directory, the store data directory (for a managed store, the directory the store actually uses, so the default install is covered) and its parent's credential, key and log files, the compose credential directory, the log-hash-key directory, every `file:`/`env:` reference written in the config (captured before resolution), and the service's own environment names.
+- **Fails closed.** Until a configuration has loaded, every `env:` and `file:` reference is refused. The `--add-server` command calls `DarlingConfig.Load` before it reaches the core, so it always runs with a populated set.
 - **Same object.** The check reads the password from the entry object `ParseEntry` already holds, so the route and the core cannot read different values.
 - **Refused as a class** (no real secret path needs them): a path that is not rooted; one with a `..` segment; a `\\?\` or `\\.\` prefix; a UNC root; a leading `~`; a second `:` after the drive letter; a root of `/proc` or `/sys`.
-- **Otherwise** the path is resolved through symlinks (capped at 40 hops; a cycle is refused), made absolute, and compared with each resolved owned path. Ordinal, and case-insensitive only on Windows. Env names compare the same way.
+- **Otherwise** the path is resolved through symlinks (capped at 40 hops; a cycle is refused) and compared with each owned path as text (case-insensitive on Windows and macOS). It is then compared by file identity: volume and file ID on Windows, `st_dev`/`st_ino` on Unix. That covers hard links, bind mounts, 8.3 short names and case variants, which share no text with the owned path. A reference to a file that does not exist is checked through its nearest existing parent directory, so a missing file under an owned directory is still refused, and a missing file elsewhere is accepted. A file's identity is also looked up among the files under each owned directory (at most 20,000 files per check). Env names compare ordinally, case-insensitive only on Windows.
 - **One sentence** for every case, naming no path and no variable: "That password reference points at this service's own configuration or secrets."
 - A literal or empty password is untouched, and an unrelated `env:`/`file:` reference is accepted.
 
@@ -87,7 +88,7 @@ The earlier web-only allowlist (`web.serverAddSecretReferences`) and `DarlingWeb
 
 Finished. All four parts of the work are on this branch: the grant and route, the owned set, the core refusal, and the alias-proof comparison. Nothing is pending on the owner.
 
-- **New tests:** `OwnedSecretReferenceRefusalTests` (MCP core refuses owned file and env references; each alias form; symlink and cycle; unrelated references accepted; identical text; literals untouched; env-name census). `DarlingOwnedSecretsCensusTests` shares its collection because both set the static holder.
+- **New tests:** `OwnedSecretReferenceRefusalTests` (MCP core refuses owned file and env references; each alias form; symlink and cycle; unrelated references accepted; identical text; literals untouched; env-name census; an unpopulated set refuses every reference; hard link; case variant; a Windows short-name case as a unit test on the comparison). `DarlingOwnedSecretsCensusTests` also pins that a default managed configuration owns the resolved store directory's files, and that the compose credential and log-hash-key directories are owned. `DarlingOwnedSecretsCensusTests` shares its collection because both set the static holder.
 - **Run on the Mac:** the requested classes plus the whole guard family, 1171 tests: 5 failed, all expected here (four `DarlingConfigTests` SqlClient connection-string cases and `LivePostgresCollectionHygieneTests`, platform assembly loads). The tool-list budget test passes under its 186,010-byte ceiling; no tool text changed.
 - **Not run:** Lite.Tests (none name a changed symbol). Windows-path cases (drive-letter ADS, `\\?\`) run as string forms on the Mac, not against a Windows filesystem; a VM run would confirm them.
 
