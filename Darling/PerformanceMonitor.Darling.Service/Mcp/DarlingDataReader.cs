@@ -1546,10 +1546,10 @@ internal static class DarlingDataReader
     /// </summary>
     public static async Task<List<TopQueryRow>> GetTopQueriesByCpuAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
-        bool rollUpByHostObject = false, int minMaxDop = 0, CancellationToken cancellationToken = default)
+        bool rollUpByHostObject = false, int minMaxDop = 0, TopRanking ranking = TopRanking.Cpu, CancellationToken cancellationToken = default)
     {
         var result = await GetTopQueriesByCpuRoutedAsync(
-            postgres, serverId, startUtc, endUtc, top, databaseName, rollUpByHostObject, minMaxDop, cancellationToken);
+            postgres, serverId, startUtc, endUtc, top, databaseName, rollUpByHostObject, minMaxDop, ranking, cancellationToken);
         return result.Rows;
     }
 
@@ -1573,7 +1573,7 @@ internal static class DarlingDataReader
     /// </summary>
     public static async Task<TopQueriesReadResult> GetTopQueriesByCpuRoutedAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
-        bool rollUpByHostObject = false, int minMaxDop = 0, CancellationToken cancellationToken = default)
+        bool rollUpByHostObject = false, int minMaxDop = 0, TopRanking ranking = TopRanking.Cpu, CancellationToken cancellationToken = default)
     {
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
         var tier = RetentionTierRouter.Resolve(
@@ -1591,11 +1591,20 @@ internal static class DarlingDataReader
             rawForced = true;
         }
 
+        /* #5226: the rollup keeps no per-query logical reads, so ranking by reads is a raw-only ask the way the
+           parallelism filter is — forced to raw, and disclosed by the MCP tool's precision_note. CPU, duration
+           and executions all have a rollup column (worker_time_sum / elapsed_time_sum / execution_count_sum). */
+        if (tier == RetentionTier.Hourly && !TopRankings.HourlyCarries(ranking))
+        {
+            tier = RetentionTier.Raw;
+            rawForced = true;
+        }
+
         Debug.Assert(!(tier == RetentionTier.Hourly && (minMaxDop > 0 || rollUpByHostObject)));
         if (tier == RetentionTier.Hourly)
         {
             var ceiling = HourlyEndCeiling(coverage, TimescaleSupport.QueryStatsHourlyView, startUtc);
-            var (hourlyRows, firstBucket) = await GetTopQueriesByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, ceiling, cancellationToken);
+            var (hourlyRows, firstBucket) = await GetTopQueriesByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, ceiling, ranking, cancellationToken);
             return new TopQueriesReadResult(hourlyRows, RetentionTier.Hourly, HourlyFirstBucket: firstBucket, HourlyCeiling: ceiling);
         }
 
@@ -1604,7 +1613,8 @@ internal static class DarlingDataReader
            UTC per row through the server's clock, as every other server-local column on the MCP surface is. */
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         /* #2235: same parameters, same columns, different GROUP BY — see TopQueriesByHostObjectSql. */
-        await using var command = postgres.CreateCommand(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql);
+        await using var command = postgres.CreateCommand(
+            TopRankings.Apply(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql, ranking, hourly: false));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
@@ -1670,11 +1680,11 @@ internal static class DarlingDataReader
     /// </summary>
     private static async Task<(List<TopQueryRow> Rows, DateTime? FirstBucket)> GetTopQueriesByCpuHourlyAsync(
         NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc,
-        int top, string? databaseName, DateTime? ceiling, CancellationToken cancellationToken)
+        int top, string? databaseName, DateTime? ceiling, TopRanking ranking, CancellationToken cancellationToken)
     {
         var fromClause = coverage.StitchedRelationSql(
             TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var sql = TopQueriesHourlySql
+        var sql = TopRankings.Apply(TopQueriesHourlySql, ranking, hourly: true)
             .Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
             .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(6), StringComparison.Ordinal);
 
@@ -1832,12 +1842,13 @@ internal static class DarlingDataReader
     /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly);
     /// the MCP tool's <c>tier_used</c> comes from here.</summary>
     public sealed record TopProceduresReadResult(
-        List<TopProcedureRow> Rows, RetentionTier Tier, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null);
+        List<TopProcedureRow> Rows, RetentionTier Tier, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null, bool RawForced = false);
 
     public static async Task<List<TopProcedureRow>> GetTopProceduresByCpuAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        TopRanking ranking = TopRanking.Cpu, CancellationToken cancellationToken = default)
     {
-        var result = await GetTopProceduresByCpuRoutedAsync(postgres, serverId, startUtc, endUtc, top, databaseName, cancellationToken);
+        var result = await GetTopProceduresByCpuRoutedAsync(postgres, serverId, startUtc, endUtc, top, databaseName, ranking, cancellationToken);
         return result.Rows;
     }
 
@@ -1847,7 +1858,8 @@ internal static class DarlingDataReader
     /// Daily is clamped to Hourly (#4231).
     /// </summary>
     public static async Task<TopProceduresReadResult> GetTopProceduresByCpuRoutedAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        TopRanking ranking = TopRanking.Cpu, CancellationToken cancellationToken = default)
     {
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
         var tier = RetentionTierRouter.Resolve(
@@ -1858,10 +1870,19 @@ internal static class DarlingDataReader
             tier = RetentionTier.Hourly;
         }
 
+        /* #5226: procedure_stats_hourly keeps no logical reads (same rollup limit as queries), so ranking by reads
+           reads raw, and RawForced says why. */
+        var rawForced = false;
+        if (tier == RetentionTier.Hourly && !TopRankings.HourlyCarries(ranking))
+        {
+            tier = RetentionTier.Raw;
+            rawForced = true;
+        }
+
         if (tier == RetentionTier.Hourly)
         {
             var ceiling = HourlyEndCeiling(coverage, TimescaleSupport.ProcedureStatsHourlyView, startUtc);
-            var (hourlyRows, firstBucket) = await GetTopProceduresByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, ceiling, cancellationToken);
+            var (hourlyRows, firstBucket) = await GetTopProceduresByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, ceiling, ranking, cancellationToken);
             return new TopProceduresReadResult(hourlyRows, RetentionTier.Hourly, firstBucket, ceiling);
         }
 
@@ -1869,7 +1890,7 @@ internal static class DarlingDataReader
         /* The two detail timestamps are stored on the monitored server's own clock; they are converted to naive
            UTC per row through the server's clock, as every other server-local column on the MCP surface is. */
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
-        await using var command = postgres.CreateCommand(TopProceduresSql);
+        await using var command = postgres.CreateCommand(TopRankings.Apply(TopProceduresSql, ranking, hourly: false));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
@@ -1898,7 +1919,7 @@ internal static class DarlingDataReader
                 ReadTopProcedureDetail(reader, 17, clock)));
         }
 
-        return new TopProceduresReadResult(rows, RetentionTier.Raw);
+        return new TopProceduresReadResult(rows, RetentionTier.Raw, RawForced: rawForced);
     }
 
     /// <summary>The detail columns of <see cref="TopProceduresSql"/>, ten consecutive fields from
@@ -1924,11 +1945,11 @@ internal static class DarlingDataReader
     /// </summary>
     private static async Task<(List<TopProcedureRow> Rows, DateTime? FirstBucket)> GetTopProceduresByCpuHourlyAsync(
         NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc,
-        int top, string? databaseName, DateTime? ceiling, CancellationToken cancellationToken)
+        int top, string? databaseName, DateTime? ceiling, TopRanking ranking, CancellationToken cancellationToken)
     {
         var fromClause = coverage.StitchedRelationSql(
             TimescaleSupport.ProcedureStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var sql = TopProceduresHourlySql
+        var sql = TopRankings.Apply(TopProceduresHourlySql, ranking, hourly: true)
             .Replace(TopProceduresHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
             .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(6), StringComparison.Ordinal);
 
