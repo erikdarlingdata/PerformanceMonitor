@@ -692,8 +692,14 @@ public sealed class DarlingWebTlsTests
         var source = ReadSource(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs"));
 
-        Assert.Contains("https.ServerCertificate = listenerCertificate.Value.Leaf;", source, StringComparison.Ordinal);
-        Assert.Contains("https.ServerCertificateChain = listenerCertificate.Value.Chain;", source, StringComparison.Ordinal);
+        /* The HTTPS body moved into the helper both hosts share (#5288 review F5), so the two lines that hand
+           Kestrel the leaf AND the intermediates are pinned where they now live, and the host is pinned to call
+           it with the loaded certificate. */
+        Assert.Contains("DarlingListenerTls.ConfigureHttps(https, listenerCertificate.Value)", source, StringComparison.Ordinal);
+        var shared = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingListenerTls.cs"));
+        Assert.Contains("https.ServerCertificate = certificate.Leaf;", shared, StringComparison.Ordinal);
+        Assert.Contains("https.ServerCertificateChain = certificate.Chain;", shared, StringComparison.Ordinal);
         Assert.Contains("options.Listen(IPAddress.Loopback, effectivePort);", source, StringComparison.Ordinal);
         Assert.Contains("options.Listen(IPAddress.IPv6Loopback, effectivePort);", source, StringComparison.Ordinal);
 
@@ -709,9 +715,11 @@ public sealed class DarlingWebTlsTests
            certificate, the normal thing an internal CA issues, permanently unusable here. Without this check
            the operator learns that from a browser warning instead of from the service log. */
         var source = ReadSource(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs"));
+            "Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingListenerTls.cs"));
 
-        Assert.Contains("DarlingManagedPostgres.CertificateSanCoversIp(certificate, networkListenIp)", source, StringComparison.Ordinal);
+        /* The check moved into the shared start path with the rest of the TLS block (#5288); its subject is
+           unchanged, and the parameter that was the web's networkListenIp is the helper's listenIp. */
+        Assert.Contains("DarlingManagedPostgres.CertificateSanCoversIp(certificate, listenIp)", source, StringComparison.Ordinal);
         Assert.Contains("iPAddress SAN", source, StringComparison.Ordinal);
     }
 
@@ -751,17 +759,35 @@ public sealed class DarlingWebTlsTests
            field, unused, until the next full stop. The invariant the class doc claims is that every bail path
            releases the key, so pin that the catch actually does it. */
         var source = ReadSource(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs"));
+            "Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingListenerTls.cs"));
 
+        /* The block moved into DarlingListenerTls.Resolve (#5288). It owns the certificate it loaded until it
+           returns, so the release is of the LOCAL, not of a host field, in the catch and on the lifetime refusal. */
         var catchAt = source.IndexOf(
-            "\"Web dashboard TLS certificate could not be loaded ({Message})", StringComparison.Ordinal);
+            "\"{Surface} TLS certificate could not be loaded ({Message})", StringComparison.Ordinal);
         Assert.True(catchAt > 0, "the TLS load catch is gone — this pin needs rewriting");
 
         /* The release must come BEFORE the log line in that catch, which is the whole point of the ordering. */
         var window = source[..catchAt];
-        var release = window.LastIndexOf("_serverCertificate?.Dispose();", StringComparison.Ordinal);
-        var adoption = window.LastIndexOf("_serverCertificate = loaded;", StringComparison.Ordinal);
-        Assert.True(release > adoption, "the TLS load catch no longer disposes the already-adopted certificate");
+        var release = window.LastIndexOf("loaded?.Dispose();", StringComparison.Ordinal);
+        var load = window.LastIndexOf("loaded = DarlingWebTls.Load(", StringComparison.Ordinal);
+        Assert.True(release > load, "the TLS load catch no longer disposes the already-loaded certificate");
+
+        var refusalAt = source.IndexOf(
+            "\"{Surface} TLS certificate cannot be used ({Refusal})", StringComparison.Ordinal);
+        Assert.True(refusalAt > 0, "the lifetime refusal is gone — this pin needs rewriting");
+        Assert.True(
+            source[..refusalAt].LastIndexOf("loaded.Value.Dispose();", StringComparison.Ordinal) > load,
+            "the lifetime refusal no longer disposes the certificate it refuses");
+
+        /* And the host adopts what comes back at once, before the first bail path after the TLS call. */
+        var host = ReadSource(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs"));
+        var call = host.IndexOf("DarlingListenerTls.Resolve(", StringComparison.Ordinal);
+        var adopted = host.IndexOf("_serverCertificate = tlsOutcome.Certificate;", StringComparison.Ordinal);
+        var firstBail = host.IndexOf("PortUtilityService.IsTcpPortListeningAsync(", StringComparison.Ordinal);
+        Assert.True(call > 0 && adopted > call && firstBail > adopted, "the host no longer adopts the certificate before its bail paths");
+        Assert.Contains("tlsOutcome.ExposesWithoutItsCertificate", host, StringComparison.Ordinal);
     }
 
     /* ---- helpers ---- */
