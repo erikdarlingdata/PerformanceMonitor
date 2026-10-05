@@ -515,6 +515,91 @@ SELECT 8000000 + g * 12 + c, $2, $3, 'collector_' || c, $1::timestamp + g * INTE
         }
     }
 
+    [Fact]
+    public async Task TheRateRules_SessionNewestCollection_AndCollectorNames_HoldAgainstTheStore()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live server-trend test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            /* Every row sits inside one hour-aligned hour, so a 60-minute bucket holds all of them. */
+            var end = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var hour = new DateTime(end.Year, end.Month, end.Day, end.Hour, 0, 0, DateTimeKind.Utc).AddHours(-1);
+            var asOf = hour.AddHours(1).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+            const string LatchInsert = "INSERT INTO latch_stats (collection_id, collection_time, server_id, server_name, latch_class, waiting_requests_count, wait_time_ms, max_wait_time_ms, delta_waiting_requests_count, delta_wait_time_ms, delta_max_wait_time_ms, sample_interval_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)";
+
+            /* A known interval with a NULL delta is not a rated sample: 6000 ms over its own 60 s is 100 ms/s, not 6000 over 120 s. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, LatchInsert,
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(10)), ServerId, ServerName, "LATCH_NULLDELTA", 1000L, 20000L, 50L, 10L, 6000L, 5L, 60);
+            await DarlingMcpTestData.ExecAsync(connection, ct, LatchInsert,
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(11)), ServerId, ServerName, "LATCH_NULLDELTA", 1000L, 20000L, 50L, 10L, DBNull.Value, 5L, 60);
+
+            /* No stored interval: the gap to the class's previous collection (30 s) is the interval; the first row has no gap and is dropped. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, LatchInsert,
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(20)), ServerId, ServerName, "LATCH_LAG", 1000L, 20000L, 50L, 10L, 9999L, 5L, DBNull.Value);
+            await DarlingMcpTestData.ExecAsync(connection, ct, LatchInsert,
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(20).AddSeconds(30)), ServerId, ServerName, "LATCH_LAG", 1000L, 20000L, 50L, 10L, 3000L, 5L, DBNull.Value);
+
+            /* Two session collections in one bucket: the count averages, the attribution is the newest collection's own. */
+            for (var i = 0; i < 2; i++)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO session_summary_stats (collection_id, collection_time, server_id, server_name, total_sessions, running_sessions, sleeping_sessions, background_sessions, dormant_sessions, idle_sessions_over_30min, sessions_waiting_for_memory, databases_with_connections, top_application_name, top_application_connections, top_host_name, top_host_connections)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(30 + i)), ServerId, ServerName, 100 + 100 * i, 5, 90, 3, 2, 1, 0, 4, i == 0 ? "app-old" : "app-new", 50 + i, i == 0 ? "host-old" : "host-new", 40 + i);
+            }
+
+            foreach (var (collector, ms) in new[] { ("slow_collector", 9000), ("quick_collector", 120) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status) VALUES ($1,$2,$3,$4,$5,$6,'SUCCESS')",
+                    CollectionIdGenerator.Next(), ServerId, ServerName, collector, DarlingMcpTestData.Naive(hour.AddMinutes(40)), ms);
+            }
+
+            var latch = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "latch", ServerName, 3, asOf, bucket_minutes: 60, names: "LATCH_NULLDELTA, LATCH_LAG")).RootElement;
+            foreach (var series in latch.GetProperty("series").EnumerateArray())
+            {
+                var points = series.GetProperty("trend").EnumerateArray().ToArray();
+                Assert.Single(points);
+                Assert.Equal(100.0, points[0].GetProperty("wait_time_ms_per_second").GetDouble(), 2);
+            }
+
+            Assert.Equal(2, latch.GetProperty("series").GetArrayLength());
+
+            var sessions = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "session_stats", ServerName, 3, asOf, bucket_minutes: 60)).RootElement;
+            var point = Assert.Single(sessions.GetProperty("trend").EnumerateArray().ToArray());
+            Assert.Equal(150.0, point.GetProperty("total_sessions").GetDouble(), 2);
+            Assert.Equal("app-new", point.GetProperty("top_application_name").GetString());
+            Assert.Equal("host-new", point.GetProperty("top_host_name").GetString());
+            Assert.Equal(51.0, point.GetProperty("top_application_connections").GetDouble(), 2);
+            Assert.Equal(41.0, point.GetProperty("top_host_connections").GetDouble(), 2);
+
+            var named = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "collector_duration", ServerName, 3, asOf, bucket_minutes: 60, names: "quick_collector, nope_collector")).RootElement;
+            Assert.Equal(["quick_collector"], named.GetProperty("series").EnumerateArray().Select(x => x.GetProperty("collector_name").GetString()).ToArray());
+            Assert.Equal(["nope_collector"], named.GetProperty("missing_names").EnumerateArray().Select(x => x.GetString()).ToArray());
+
+            var none = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "collector_duration", ServerName, 3, asOf, names: "nope_collector")).RootElement;
+            Assert.Equal("empty", none.GetProperty("status").GetString());
+            Assert.Equal(["slow_collector", "quick_collector"], none.GetProperty("hints").GetProperty("top_names").EnumerateArray().Select(x => x.GetString()).ToArray());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         var sql = string.Join(" ", Tables.Select(t => $"DELETE FROM {t} WHERE server_id = {ServerId};")) + $" DELETE FROM servers WHERE server_id = {ServerId};";

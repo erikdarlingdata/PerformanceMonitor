@@ -300,12 +300,12 @@ public static class ServerTrendSql
             SELECT
                 {{nameColumn}},
                 GREATEST(date_bin(CAST({{widthParam}} AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
-                CAST(SUM(CASE WHEN interval_seconds > 0 THEN {{deltaColumn}} END) AS double precision) / SUM(CASE WHEN interval_seconds > 0 THEN interval_seconds END) AS {{rateColumn}},
+                CAST(SUM(CASE WHEN interval_seconds > 0 AND {{deltaColumn}} IS NOT NULL THEN {{deltaColumn}} END) AS double precision) / SUM(CASE WHEN interval_seconds > 0 AND {{deltaColumn}} IS NOT NULL THEN interval_seconds END) AS {{rateColumn}},
                 MIN(collection_time) AS first_collection_time,
                 COUNT(*) AS collection_count
             FROM raw
             GROUP BY {{nameColumn}}, 2
-            HAVING COUNT(CASE WHEN interval_seconds > 0 THEN 1 END) > 0
+            HAVING COUNT(CASE WHEN interval_seconds > 0 AND {{deltaColumn}} IS NOT NULL THEN 1 END) > 0
             ORDER BY {{nameColumn}}, 2
             """;
     }

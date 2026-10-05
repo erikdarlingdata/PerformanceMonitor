@@ -118,7 +118,7 @@ public sealed class DarlingMcpServerTrendTools
             {
                 if (selected.Count == 0)
                 {
-                    selected = await ReadTopNamesAsync(postgres, kind, resolved.ServerId, start, end, cancellationToken);
+                    selected = await ReadTopNamesAsync(postgres, kind, resolved.ServerId, start, end, name, cancellationToken);
                 }
 
                 if (selected.Count == 0)
@@ -272,7 +272,7 @@ public sealed class DarlingMcpServerTrendTools
         NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, SeriesKind kind, List<string> named, DateTime start, DateTime end,
         int hoursBack, string metric, CancellationToken cancellationToken)
     {
-        var heaviest = await ReadTopNamesAsync(postgres, kind, resolved.ServerId, start, end, cancellationToken, metric);
+        var heaviest = await ReadTopNamesAsync(postgres, kind, resolved.ServerId, start, end, metric, cancellationToken);
         if (heaviest.Count == 0)
         {
             return await EmptyAsync(postgres, resolved, metric, hoursBack, cancellationToken);
@@ -334,10 +334,10 @@ public sealed class DarlingMcpServerTrendTools
     }
 
     private static async Task<List<string>> ReadTopNamesAsync(
-        NpgsqlDataSource postgres, SeriesKind kind, int serverId, DateTime start, DateTime end, CancellationToken cancellationToken, string? metric = null)
+        NpgsqlDataSource postgres, SeriesKind kind, int serverId, DateTime start, DateTime end, string metric, CancellationToken cancellationToken)
     {
         var items = new List<string>();
-        var topSql = (metric ?? KindMetric(kind)) switch
+        var topSql = metric switch
         {
             "latch" => ServerTrendSql.TopLatchClasses,
             "spinlock" => ServerTrendSql.TopSpinlocks,
@@ -356,14 +356,6 @@ public sealed class DarlingMcpServerTrendTools
 
         return items;
     }
-
-    private static string KindMetric(SeriesKind kind) => kind.Key switch
-    {
-        "latch_class" => "latch",
-        "spinlock_name" => "spinlock",
-        "collector_name" => "collector_duration",
-        _ => "memory_clerks",
-    };
 
     private static async Task<Dictionary<string, List<Dictionary<string, object?>>>> ReadSeriesAsync(
         NpgsqlDataSource postgres, string metric, SeriesKind kind, int serverId, List<string> selected, DateTime start, DateTime end, int bucketMinutes,
