@@ -15,8 +15,8 @@
    - The summary line comes from this capture's own figures; other captures of the same shape may differ.
    - A Query Identifier inside the JSON is a 64-bit number that JSON.parse rounds in the browser. The grid's string
      queryid is the exact one; the panel says so.
-   - XSS: everything is drawn through el() with text: or string children (textContent). Never innerHTML,
-     insertAdjacentHTML or DOMParser. The plan is untrusted content.
+   - XSS: everything is drawn through el() with text: or string children (textContent). Never any markup
+     sink or parser. The plan is untrusted content.
  */
 
 import { el } from "../util.js";
