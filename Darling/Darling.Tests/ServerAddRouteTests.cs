@@ -407,6 +407,116 @@ public sealed class ServerAddRouteTests
         Assert.Equal(HttpStatusCode.OK, accepted);
     }
 
+    /* ═══════════════════════ slot hand-off ═══════════════════════ */
+
+    /// <summary>Cycles for the hand-off stress pins. The defect is a race between the handler's answer and the
+    /// slot release, so one pass proves little; the fixed code frees the slot before the answer exists, so every
+    /// cycle passes by construction and a regression shows up as a refusal within the loop.</summary>
+    private const int HandOffCycles = 400;
+
+    [Fact]
+    public async Task AnAddThatFinishedInsideTheWait_FreesTheSlotBeforeItsAnswer_SoAnImmediateSecondAddIsNotRefused()
+    {
+        await using var rig = await StartAsync(_ => Task.FromResult(AddedAnswer));
+
+        for (var i = 0; i < HandOffCycles; i++)
+        {
+            var status = (await PostAsync(rig, Entries(1))).Status;
+            Assert.True(status == HttpStatusCode.OK, $"add {i + 1} of {HandOffCycles} answered {(int)status} right after a finished add");
+        }
+    }
+
+    [Fact]
+    public async Task AnAddThatFinishedInsideTheWait_ReleasesTheSlotExactlyOnce_SoALaterHeldAddStillBlocksTheNext()
+    {
+        var calls = 0;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var rig = await StartAsync(_ =>
+        {
+            if (Interlocked.Increment(ref calls) % 2 == 1)
+            {
+                return Task.FromResult(AddedAnswer);
+            }
+
+            entered.TrySetResult();
+            return release.Task.ContinueWith(_ => AddedAnswer, TaskScheduler.Default);
+        });
+
+        for (var i = 0; i < HandOffCycles; i++)
+        {
+            /* A finishes inside the wait: its handler and its own continuation both reach for the release. */
+            Assert.Equal(HttpStatusCode.OK, (await PostAsync(rig, Entries(1))).Status);
+
+            /* B takes the freed slot and holds it. A's continuation may still be in flight; a second release
+               from it would free B's slot while B runs, and C would be let in. */
+            entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var held = PostAsync(rig, Entries(1));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            Assert.Equal(HttpStatusCode.TooManyRequests, (await PostAsync(rig, Entries(1))).Status);
+            Assert.Equal(2 * i + 2, Volatile.Read(ref calls));
+
+            release.SetResult();
+            Assert.Equal(HttpStatusCode.OK, (await held).Status);
+        }
+    }
+
+    [Fact]
+    public async Task AnAddThatOutlivesTheTimeout_KeepsTheSlotForEveryLaterAdd_AndFreesItOnce_WhenItFinishes()
+    {
+        var hang = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var heldEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var heldRelease = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        await using var rig = await StartAsync(_ =>
+        {
+            switch (Interlocked.Increment(ref calls))
+            {
+                case 1:
+                    return hang.Task;
+                case 3:
+                    heldEntered.TrySetResult();
+                    return heldRelease.Task;
+                default:
+                    return Task.FromResult(AddedAnswer);
+            }
+        }, addTimeout: TimeSpan.FromMilliseconds(200));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await PostAsync(rig, Entries(1))).Status);
+
+        /* The handler has answered and gone: the add is still running, so the slot is still held. */
+        for (var i = 0; i < 5; i++)
+        {
+            Assert.Equal(HttpStatusCode.TooManyRequests, (await PostAsync(rig, Entries(1))).Status);
+        }
+
+        Assert.Equal(1, Volatile.Read(ref calls));
+
+        /* The add finishes: the slot is freed, by the add's own continuation. */
+        hang.SetResult(AddedAnswer);
+        var accepted = HttpStatusCode.TooManyRequests;
+        for (var i = 0; i < 100 && accepted == HttpStatusCode.TooManyRequests; i++)
+        {
+            accepted = (await PostAsync(rig, Entries(1))).Status;
+            if (accepted == HttpStatusCode.TooManyRequests)
+            {
+                await Task.Delay(50, TestContext.Current.CancellationToken);
+            }
+        }
+
+        Assert.Equal(HttpStatusCode.OK, accepted);
+
+        /* Freed once: the next add takes the slot and a further one is refused, not let in beside it. */
+        var held = PostAsync(rig, Entries(1));
+        await heldEntered.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await PostAsync(rig, Entries(1))).Status);
+
+        heldRelease.SetResult(AddedAnswer);
+        Assert.Equal(HttpStatusCode.OK, (await held).Status);
+    }
+
     /* ═══════════════════════ principal on one line ═══════════════════════ */
 
     [Fact]
