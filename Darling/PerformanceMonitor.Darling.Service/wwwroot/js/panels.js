@@ -371,9 +371,9 @@ const gridSortState = new Map(); // grows by one entry per table the session sor
 const trRow = new WeakMap();
 const tbodyGrid = new WeakMap();
 /* The cell each grid's Copy cell / Copy row act on (see gridTools), keyed like the sort state. */
-const gridPicked = new Map();
+const gridPicked = new Map(); // one entry per table the session clicks in; bounded by routes x tables
 /* The column groups switched on for each grid (see columnPicker), keyed like the sort state; absent means defaultGroups. */
-const gridGroupsOn = new Map(); // one entry per grouped table the session toggles; bounded by routes x tables // one entry per table the session clicks in; bounded by routes x tables
+const gridGroupsOn = new Map(); // one entry per grouped table the session toggles; bounded by routes x tables
 
 /* The table identity: `desc.sortId`, else `desc.id`, else `desc.title`, else `desc.rowsKey`. Panels built by
    renderPanel carry a title; the FinOps tabs call VIZ.table with a rowsKey, and two grids of one tab can share one,

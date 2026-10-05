@@ -65,6 +65,11 @@ public sealed class ColumnGroupsBehaviourTests
         Assert.False(r.GetProperty("hasPicker").GetBoolean());
         Assert.Equal(new[] { "Name", "A", "B", "C" }, Arr(r, "heads"));
         Assert.Equal("grid-box", Str(r, "top"));
+        Assert.Equal(new[] { "grid-tools", "table-wrap" }, Arr(r, "childClasses"));
+        Assert.Equal(0, r.GetProperty("displayStyled").GetInt32());
+        Assert.Equal("table-wrap", Str(r, "bareClass"));
+        Assert.False(r.GetProperty("bareHasTools").GetBoolean());
+        Assert.Equal(0, r.GetProperty("bareDisplayStyled").GetInt32());
     }
 
     [Fact]
@@ -105,7 +110,7 @@ public sealed class ColumnGroupsBehaviourTests
         Assert.Equal(byB, Arr(r, "hiddenAsc"));
         Assert.Equal(byB, Arr(r, "repaintAsc"));
         Assert.Equal(new[] { "Name", "A" }, Arr(r, "heads"));
-        Assert.Equal(byB, Arr(r, "byA"));
+        Assert.Equal(new[] { "y", "x", "z" }, Arr(r, "byA"));
     }
 
     [Fact]

@@ -43,7 +43,7 @@ const cols = [
 ];
 const rows = [{ name: "x", a: 3, b: 30, c: 1 }, { name: "y", a: 1, b: 10, c: 3 }, { name: "z", a: 2, b: 20, c: 2 }];
 const grouped = { groups: ["G1", "G2"], defaultGroups: ["G1"] };
-const build = (desc = {}) => VIZ.table({ rows }, { rowsKey: "rows", columns: cols, title: "T", ...grouped, ...desc });
+const build = (desc = {}, data = rows) => VIZ.table({ rows: data }, { rowsKey: "rows", columns: cols, title: "T", ...grouped, ...desc });
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
 const picker = (w) => all(w).find((n) => n.className === "col-picker");
 const toggle = (w, label) => picker(w).children.find((c) => c.textContent === label);
@@ -61,6 +61,12 @@ const scenarios = {
     out.hasPicker = !!picker(w);
     out.heads = shownHeads(w);
     out.top = w.className;
+    out.childClasses = w.children.map((c) => c.className);
+    out.displayStyled = all(w).filter((n) => (n.tag === "th" || n.tag === "td") && n.style.display !== undefined).length;
+    const bare = VIZ.table({ rows }, { rowsKey: "rows", columns: cols.map(({ group, ...c }) => c), title: "P", tools: false });
+    out.bareClass = bare.className;
+    out.bareHasTools = all(bare).some((n) => n.className === "grid-tools");
+    out.bareDisplayStyled = all(bare).filter((n) => (n.tag === "th" || n.tag === "td") && n.style.display !== undefined).length;
   },
   defaults() {
     const w = build();
@@ -90,13 +96,15 @@ const scenarios = {
   },
   sortHidden() {
     globalThis.location = { hash: "#/server/s/tab" };
-    const w = build();
+    // A ascending (y, x, z) differs from B ascending (y, z, x), so the final check can tell a sort from no sort.
+    const data = [{ name: "x", a: 2, b: 30, c: 1 }, { name: "y", a: 1, b: 10, c: 3 }, { name: "z", a: 3, b: 20, c: 2 }];
+    const w = build({}, data);
     toggle(w, "G2").click();
     ths(w)[2].fire("click"); // B ascending: 10, 20, 30
     out.asc = col0(w);
     toggle(w, "G2").click(); // B hidden; the order must hold and nothing throws
     out.hiddenAsc = col0(w);
-    const w2 = build(); // the repaint with B hidden re-applies the sort
+    const w2 = build({}, data); // the repaint with B hidden re-applies the sort
     out.repaintAsc = col0(w2);
     out.heads = shownHeads(w2);
     ths(w2)[1].fire("click"); // sort a visible column afterwards

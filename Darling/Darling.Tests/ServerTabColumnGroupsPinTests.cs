@@ -24,9 +24,9 @@ public sealed class ServerTabColumnGroupsPinTests
     private static string Js() => File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
     [Theory]
-    [InlineData("MEMORY_CONDITION_COLUMNS", "MEMORY_CONDITION_GROUPS")]
-    [InlineData("MEMORY_OOM_COLUMNS", "MEMORY_OOM_GROUPS")]
-    public void TheWideGrid_GroupsItsColumns_AndItsGroupListMatches(string columns, string groups)
+    [InlineData("Memory Conditions", "MEMORY_CONDITION_COLUMNS", "MEMORY_CONDITION_GROUPS")]
+    [InlineData("Memory Node OOM", "MEMORY_OOM_COLUMNS", "MEMORY_OOM_GROUPS")]
+    public void TheWideGrid_GroupsItsColumns_AndItsGroupListMatches(string title, string columns, string groups)
     {
         var js = Js();
         var cols = Regex.Match(js, "const " + columns + @" = \[(.*?)\n\];", RegexOptions.Singleline).Groups[1].Value;
@@ -39,6 +39,8 @@ public sealed class ServerTabColumnGroupsPinTests
         Assert.NotEmpty(defaults);
         Assert.All(defaults, d => Assert.Contains(d, listed));
         Assert.Contains("group: ", cols);
-        Assert.Contains(", " + groups, js);
+        // The constant is the last argument of THIS grid's own table() call, next to its own columns constant.
+        var call = Regex.Match(js, "table\\(\\s*\"" + title + "\",(?:(?!\\btable\\().)*?\\b" + columns + @",(?:(?!\btable\().)*?,\s*" + groups + @"\s*\)", RegexOptions.Singleline);
+        Assert.True(call.Success, title + "'s table() call must pass " + groups + " as its last argument.");
     }
 }
