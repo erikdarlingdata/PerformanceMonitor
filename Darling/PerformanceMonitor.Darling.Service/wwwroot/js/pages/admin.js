@@ -19,7 +19,7 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiWrite } from "../util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiWrite, onSessionExpired } from "../util.js";
 import { getSession } from "../views-api.js";
 
 export const SERVER_COLUMNS = [
@@ -420,6 +420,26 @@ export function conflictChanges(original, current, values) {
   return changes;
 }
 
+/** The form's values after "Reapply my changes" on a 409: `current` (the answer's current values, run through
+    editFormValues) with every field the user changed since the form opened laid over it, so the user's own edits
+    survive and every other box shows what the service holds now. A field counts as the user's by the test the body
+    uses (normalized `original` against normalized `values`), so a box only padded with spaces takes the current value,
+    and one that holds text which does not parse (a bad port or cost) keeps it for the next Save to refuse. The username
+    goes with the authentication: when the user chose the authentication, the username box they left with it is theirs
+    too, so another edit's client id never turns up inside a login they picked. */
+export function reapplyValues(original, values, current) {
+  const engine = original && original.engine;
+  const was = normalizeEdit(original, engine);
+  const mine = normalizeEdit(values, engine);
+  const typed = values && typeof values === "object" ? values : {};
+  const merged = { ...current };
+  for (const { key } of EDIT_FIELDS) {
+    if (!sameValue(key, was[key], mine[key])) merged[key] = typed[key];
+  }
+  if (!sameValue("auth", was.auth, mine.auth)) merged.username = typed.username;
+  return merged;
+}
+
 /** `text` with every copy of the typed password replaced by "[redacted]" (plain split and join, no pattern); with no
     password the text is returned as it is. Applied to any service sentence before it is shown. */
 export function redactPassword(text, password) {
@@ -595,6 +615,12 @@ const PASSWORD_LABELS = { SQL: "Password", ServicePrincipal: "Client Secret" };
 const PASSWORD_REQUIRED = "(required for this change)";
 const PASSWORD_KEPT = "(leave blank to keep the stored one)";
 
+/* The username and password boxes hold the SERVER's login, not this site's. autocomplete="new-password" (and "off" for the
+   username) stops a browser filling in the saved sign-in, and these data attributes ask the common password managers (1Password,
+   LastPass, Bitwarden and the ones that read data-form-type) not to fill, save, update or generate anything here. The two boxes
+   carry no name or id and sit in no form element, so a browser has no sign-in form to take them for (#5240). */
+const KEEP_FROM_PASSWORD_MANAGERS = { "data-1p-ignore": "", "data-lpignore": "true", "data-bwignore": "", "data-form-type": "other" };
+
 /* One labelled text box. The label wraps its control, so it names it without an id or a name attribute. */
 function textRow(f, key, label, props) {
   const caption = el("span", { class: "mute-label", text: label });
@@ -666,14 +692,15 @@ function formNode(f) {
   const host = textRow(f, "host", "Server Name / Address");
   const name = textRow(f, "display_name", "Display Name (optional)");
   const port = postgres ? textRow(f, "port", "Port:", { inputmode: "numeric" }) : null;
-  const username = textRow(f, "username", USERNAME_LABELS.SQL);
+  const username = textRow(f, "username", USERNAME_LABELS.SQL, { autocomplete: "off", ...KEEP_FROM_PASSWORD_MANAGERS });
   const managedNote = el("div", { class: "muted", "data-row": "managed-identity-note", text: MANAGED_IDENTITY_NOTE });
-  const secret = el("input", { type: "password", class: "tag-input", "data-field": "password" });
+  const secret = el("input", { type: "password", class: "tag-input", "data-field": "password", autocomplete: "new-password", ...KEEP_FROM_PASSWORD_MANAGERS });
   const secretCaption = el("span", { class: "mute-label", text: PASSWORD_LABELS.SQL });
   const secretRow = el("label", { class: "tag-field", "data-row": "password" }, [secretCaption, secret]);
   f.heading = heading;
   f.passwordInput = secret;
   f.bannerBox = el("div", { "data-box": "banner" });
+  f.conflictBox = el("div", { "data-box": "conflict" });
   f.statusBox = el("div", { "data-box": "status", role: "status" });
   f.saveButton = el("button", { class: "btn primary", type: "button", text: "Save", "data-action": "save", onClick: () => submitEdit() });
   f.cancelButton = el("button", { class: "btn", type: "button", text: "Cancel", "data-action": "cancel", onClick: () => closeEdit() });
@@ -722,6 +749,7 @@ function formNode(f) {
     textRow(f, "monthly_cost_usd", "Monthly Cost ($):", { inputmode: "decimal" }).row,
     f.statusBox,
     f.bannerBox,
+    f.conflictBox,
     el("div", { class: "form-actions" }, [f.saveButton, f.cancelButton]),
   );
   f.refresh();
@@ -753,10 +781,22 @@ async function openEdit(id) {
     return;
   }
   const original = editFormValues(data);
-  const usernames = { SQL: "", ServicePrincipal: "", ManagedIdentity: "" };
-  if (original.auth in usernames) usernames[original.auth] = original.username;
-  const f = { id, original, values: { ...original }, usernames, token: data.modified_at };
+  const f = { id, original, values: { ...original }, usernames: usernamesOf(original), token: data.modified_at };
   editForm = f;
+  showForm(f);
+}
+
+/* The username boxes' contents by mode as a form is first drawn: the username fills the mode it belongs to, the others start
+   blank. */
+function usernamesOf(values) {
+  const usernames = { SQL: "", ServicePrincipal: "", ManagedIdentity: "" };
+  if (values.auth in usernames) usernames[values.auth] = values.username;
+  return usernames;
+}
+
+/* Draw the form of `f` into its box and put the focus on its heading. Mounting INTO formBox is allowed while a form is open;
+   only formBox itself and what holds it are never passed to mount() or clear(). */
+function showForm(f) {
   mount(layout.formBox, formNode(f));
   f.heading.focus();
 }
@@ -772,6 +812,11 @@ function closeEdit() {
   if (layout) mount(layout.formBox, []);
 }
 
+/* A session that expired under ANY read of the page (the poll's list read, another tab's read) makes the shell take the page
+   over, which leaves the open form detached but still held by this module. Closing it here, once, at module load, clears the
+   typed password first, so a secret never outlives the page it was typed on (#5240). The save's own expiry comes here too. */
+onSessionExpired(() => closeEdit());
+
 const STATUS_TESTING = "Testing the connection, then saving. This can take up to a minute.";
 const STATUS_SAVING = "Saving.";
 
@@ -785,11 +830,48 @@ function showStatus(f, sentence) {
   mount(f.statusBox, sentence ? loadingStrip(sentence) : []);
 }
 
-/* LANE C: D10's 409 panel plugs in here. `out` is interpretEdit's `conflict` answer, { banner, current }; `f` is the
-   open form, kept, with its password already cleared and nothing saved. Until the panel exists a stale edit reads as any
-   other refusal: its sentence in the banner. */
-function showConflict(f, out) {
-  showBanner(f, out.banner);
+const CONFLICT_NONE = "None of the fields on this form changed. Another setting, such as the enabled state, changed.";
+const CONFLICT_REAPPLY = "Reapply my changes";
+const CONFLICT_RELOAD = "Reload current values";
+
+/* The 409 panel (D10). `out` is interpretEdit's `conflict` answer, { banner, current }; `f` is the open form, kept, with its
+   password already cleared and nothing saved. Under the banner: what the other edit changed in the fields of this form (and
+   what the user entered for the same field), or the sentence that none of them did, and the two ways forward. Both only
+   refill the form: a stale save is never sent again for the user, so the next Save is the user's own. `say` takes the
+   submit-time password out of any sentence shown. An answer with no usable modified_at has nothing to reapply onto, so it
+   stays the plain banner. */
+function showConflict(f, out, say) {
+  showBanner(f, say(out.banner));
+  const current = out.current;
+  if (typeof current.modified_at !== "string") return;
+  const changes = conflictChanges(f.original, current, f.values);
+  const list = changes.length
+    ? el("ul", { class: "admin-conflict-list", "data-role": "conflict-list", "aria-label": "Changed since you opened this server" },
+      changes.map((c) => el("li", { "data-conflict-field": c.key, text: say(c.text) })))
+    : el("div", { class: "muted", "data-role": "conflict-none", text: CONFLICT_NONE });
+  mount(f.conflictBox, el("div", { class: "admin-conflict" }, [
+    list,
+    el("div", { class: "form-actions" }, [
+      el("button", { class: "btn", type: "button", text: CONFLICT_REAPPLY, "data-action": "reapply", onClick: () => refillEdit(f, current, true) }),
+      el("button", { class: "btn", type: "button", text: CONFLICT_RELOAD, "data-action": "reload", onClick: () => refillEdit(f, current, false) }),
+    ]),
+  ]));
+}
+
+/* Point the open form at what the service holds now (the `current` of a 409): its values become the baseline and its
+   modified_at the token the next Save carries. With `keepMine` the user's own changes are laid over it (reapplyValues);
+   without, the form shows the current values and the user's changes are gone. NOTHING is sent: the form is only drawn again
+   (a fresh password box, nothing typed) and the user presses Save. Does nothing for a form that is no longer the open one,
+   or while a save runs. */
+function refillEdit(f, current, keepMine) {
+  if (editForm !== f || busy) return;
+  const now = editFormValues(current);
+  f.values = keepMine ? reapplyValues(f.original, f.values, now) : { ...now };
+  f.original = now;
+  f.token = current.modified_at;
+  f.usernames = usernamesOf(f.values);
+  f.shownAuth = undefined;
+  showForm(f);
 }
 
 /* What one answer to the save does (D9, and review finding 4 for an answer that is late). `here` is true while the form that
@@ -814,7 +896,7 @@ function landEdit(f, out, password) {
     return;
   }
   f.passwordInput.value = "";
-  if (out.kind === "conflict") showConflict(f, out);
+  if (out.kind === "conflict") showConflict(f, out, say);
   else showBanner(f, say(out.banner));
 }
 
@@ -831,6 +913,7 @@ async function submitEdit() {
   if (busy || !f) return;
   const password = f.passwordInput.value;
   mount(f.bannerBox, []);
+  mount(f.conflictBox, []);
   const problem = validateEdit(f.original, f.values, password);
   if (problem) {
     f.passwordInput.value = "";

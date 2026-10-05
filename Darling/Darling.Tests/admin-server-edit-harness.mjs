@@ -407,11 +407,21 @@ try {
   /* Every piece of text the page drew, in document order (a node's own text, so a cell is one piece and a heading another). */
   const textsUnder = (root) => all(root, (n) => n._text !== "").map((n) => n._text);
   const SECRET = "SECRET-PW";
-  /* How many nodes under the page hold the typed secret in a value, an attribute or their text (an ancestor of one counts too). */
-  const secretNodes = () => all(main, (n) => n.value === SECRET || n.textContent.includes(SECRET) || Object.values(n.attrs).some((v) => String(v).includes(SECRET))).length;
+  /* How many nodes under the page hold `secret` in a value, an attribute or their text (an ancestor of one counts too). */
+  const leaks = (secret) => all(main, (n) => n.value === secret || n.textContent.includes(secret) || Object.values(n.attrs).some((v) => String(v).includes(secret))).length;
+  const secretNodes = () => leaks(SECRET);
   const patches = () => requests.filter((r) => r.method === "PATCH").map((r) => ({ url: r.url, body: r.body, contentType: r.contentType }));
+  /* The 409 panel of an open form: the lines naming what the other edit changed (and the field each is about), the "none of the
+     fields changed" sentence, and the buttons; null while there is no panel. */
+  const conflictPanel = (form) => {
+    const b = form ? byAttr(form, "data-box", "conflict")[0] : null;
+    if (!b || !b.children.length) return null;
+    const none = all(b, (n) => n.attrs["data-role"] === "conflict-none")[0];
+    const items = all(b, (n) => n.tag === "li");
+    return { lines: items.map(text), fields: items.map((n) => n.attrs["data-conflict-field"]), none: none ? text(none) : null, buttons: buttons(b).map(text) };
+  };
   /* The Servers tab as a user sees it now, safe to take when its boxes are gone (another tab is on screen): the open form's
-     banner and status line, whether Save and Cancel and each Edit button are disabled, the notice, and what was asked of the service. */
+     banner, status line and 409 panel, whether Save and Cancel and each Edit button are disabled, the notice, and what was asked of the service. */
   const view = () => {
     const form = openForm();
     const strip = (key) => {
@@ -424,6 +434,7 @@ try {
       formBoxChildren: box("form") ? box("form").children.length : null,
       banner: strip("banner"),
       status: strip("status"),
+      conflict: conflictPanel(form),
       saveDisabled: one("Save") ? one("Save").disabled : null,
       cancelDisabled: one("Cancel") ? one("Cancel").disabled : null,
       editDisabled: buttons(main, "Edit").map((b) => b.disabled),
@@ -453,6 +464,13 @@ try {
       await fire(node, "change");
     } else await typeInto(node, value);
   };
+  /* Choose one of the four authentication radios, as a click does. */
+  const chooseAuth = async (word) => {
+    const radio = byAttr(main, "data-field", "auth").find((r) => r.attrs.value === word);
+    if (!radio) throw new Error("no authentication choice " + word);
+    radio.checked = true;
+    await fire(radio, "change");
+  };
   /* Save, with the PATCH held back at the service until the snapshot of "during" was taken; resolves to that snapshot. */
   const gatedSave = async () => {
     let release;
@@ -466,6 +484,9 @@ try {
     state.gate = null;
     return during;
   };
+  /* The modified_at another edit leaves behind, and the 409 conflict answer that carries the values it left (the by-id read's shape). */
+  const TOKEN2 = "2026-10-05T13:00:00.7654321Z";
+  const conflictAnswer = (current, message = "This server was changed since you read it; nothing was saved.") => ({ status: 409, body: { status: "conflict", message, current } });
   /* The save cases: which server's form, what the user changes, and what the service answers. `answer(body, n)` is called for the
      n-th PATCH (1 first) with the body it was sent; it may also change what the list read answers next. `typed` types SECRET into
      the password box; `down` makes the transport fail; `again` presses Save a second time after the first answer. */
@@ -498,6 +519,10 @@ try {
     expired: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 200, raw: "<html><body>Sign in</body></html>" }) },
     collides: { id: 3, edits: { host: "alpha" }, typed: true, answer: () => ({ status: 409, body: { status: "collides", message: "Another server already uses the address alpha." } }) },
     conflict: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 409, body: { status: "conflict", message: "changed", current: { ...reads.alpha, display_name: "Alpha Elsewhere" } } }) },
+    // The answer is read by its status word, never by its message: a collision whose text talks about a change is no conflict, and a
+    // conflict whose text talks about a collision still carries its panel.
+    collidesTalk: { id: 3, edits: { host: "alpha" }, typed: true, answer: () => ({ status: 409, body: { status: "collides", message: "This server was changed since you opened it: another monitored server already uses the address." } }) },
+    conflictTalk: { id: 3, edits: { host: "alpha" }, typed: true, answer: () => conflictAnswer({ ...reads.charlie, host: "charlie-new", modified_at: TOKEN2 }, "Another server already uses the address alpha.") },
     // The status line: which edits make the service test the connection (any connection change, any auth, or a password).
     probeWindowsHost: { id: 1, edits: { host: "alpha-two" }, answer: () => updated("Alpha") },
     probeWindowsTrust: { id: 1, edits: { trust_server_certificate: true }, answer: () => updated("Alpha") },
@@ -862,6 +887,136 @@ try {
       await click;
       await settle();
       return { forms: byAttr(main, "data-edit-form").length, formBoxChildren: box("form").children.length };
+    },
+    /* T4: a stale edit on Charlie's form. The user changes the host and the display name and types the password; the first save is
+       answered 409 conflict with what another edit left (a new host, its own display name, a database, a newer modified_at), or, for
+       "none", with nothing of this form changed (another setting did). `how` is what the user does next: "reapply" and "reload" press
+       that button; "reloadnone" presses Reload and then Save at once; "again" presses Save without choosing; "none" presses Reapply on
+       the answer with nothing changed. Requests are counted around the press; the next Save is the user's own. */
+    conflict: async (how) => {
+      seed();
+      const none = how === "none";
+      const other = none ? { ...reads.charlie, modified_at: TOKEN2 } : { ...reads.charlie, host: "charlie-new", display_name: "Charlie Elsewhere", database: "Orders", modified_at: TOKEN2 };
+      await mountPage("servers");
+      await clickEdit(3);
+      if (!none) await edit("host", "charlie-two");
+      await edit("display_name", "Charlie Two");
+      const pw = field("password");
+      await typeInto(pw, SECRET);
+      let n = 0;
+      state.responder = () => (++n === 1 || (how === "again" && n === 2) ? conflictAnswer(other) : updated("Charlie Two"));
+      const take = () => ({ view: view(), form: formSnapshot(), requests: requests.length, secretNodes: secretNodes(), otherNodes: leaks("OTHER-PW") });
+      const save = async (name) => {
+        await clickText(main, "Save");
+        await settle(30);
+        result[name] = take();
+      };
+      const result = {};
+      await save("stale");
+      result.stale.pw = { value: pw.value, connected: pw.isConnected };
+      const before = requests.length;
+      if (how === "reapply" || none) await clickText(main, "Reapply my changes");
+      if (how === "reload" || how === "reloadnone") await clickText(main, "Reload current values");
+      result.pressed = { ...take(), sent: requests.length - before, oldPw: { value: pw.value, connected: pw.isConnected } };
+      if (how === "reapply") {
+        await save("refused");
+        await typeInto(field("password"), "OTHER-PW");
+        await save("saved");
+      } else if (how === "reload") {
+        await edit("monthly_cost_usd", "5");
+        await save("saved");
+      } else if (how === "again") {
+        await typeInto(field("password"), "OTHER-PW");
+        await save("saved");
+      } else await save("saved");
+      return result;
+    },
+    /* T6 and the password's whole life: "SECRET-PW" typed into Charlie's form, then it leaves by `path`: "cancel"; "saved" (the service
+       updates it); "badrequest", "echo" (a 400 whose message repeats the password) and "limited" (429); "conflict" (a 409 whose
+       current values carry the password as a display name, so the panel line must show [redacted]); "reapply" and "reload" after
+       a plain 409; "hash" (the window goes to another page); "listexpired" (the next list read answers 401, so the shell takes
+       the page over). The password box typed into is kept, so it is read after it was detached. */
+    secret: async (path) => {
+      seed();
+      await mountPage("servers");
+      await clickEdit(3);
+      const pw = field("password");
+      await typeInto(pw, SECRET);
+      const typed = pw.value;
+      const stale = { ...reads.charlie, host: "charlie-new", modified_at: TOKEN2 };
+      const answers = {
+        saved: () => updated("Charlie"),
+        badrequest: () => ({ status: 400, body: { error: "The host 'charlie two' is not valid." } }),
+        echo: () => ({ status: 400, body: { error: "The host 'charlie two' is not valid: SECRET-PW is not allowed here." } }),
+        limited: () => ({ status: 429, body: { error: "Another server change is in progress. Try again in a moment." } }),
+        conflict: () => conflictAnswer({ ...stale, display_name: SECRET }),
+        reapply: () => conflictAnswer(stale),
+        reload: () => conflictAnswer(stale),
+      };
+      if (path in answers) {
+        await edit("host", "charlie-two");
+        state.responder = answers[path];
+        await clickText(main, "Save");
+        await settle(30);
+        if (path === "reapply") await clickText(main, "Reapply my changes");
+        if (path === "reload") await clickText(main, "Reload current values");
+      } else if (path === "cancel") await clickText(main, "Cancel");
+      else if (path === "hash") await leaveHash("#/fleet");
+      else if (path === "listexpired") {
+        state.listReply = () => ({ status: 401, body: { error: "Session expired" } });
+        page.renderAdmin(main, "servers");
+        await settle(30);
+      } else throw new Error("unknown secret path " + path);
+      const next = field("password");
+      return {
+        typed,
+        value: pw.value,
+        connected: pw.isConnected,
+        nextValue: next ? next.value : null,
+        forms: byAttr(main, "data-edit-form").length,
+        secretNodes: secretNodes(),
+        view: view(),
+      };
+    },
+    /* T2, T3 and T13, the flow halves: one edit driven through the real form for the by-id read given on stdin
+       ({"read": {...}, "edits": {"host": "sql-b"}, "password": "typed"}). The edits are made in the order given, the authentication
+       first (the username box belongs to a mode); the password is typed into its box even when the page hides it. The service answers
+       "updated". Prints the form as it opened, the label of the password row once the edits were made, and the page after Save. */
+    flow: async () => {
+      const request = JSON.parse(await readStdin());
+      const read = request.read;
+      state.servers = [server(read.server_id, read.display_name, { engine: read.engine })];
+      state.byId = { [read.server_id]: read };
+      state.responder = () => updated(read.display_name);
+      await mountPage("servers");
+      await clickEdit(read.server_id);
+      const opened = formSnapshot();
+      const entries = Object.entries(request.edits || {});
+      for (const [key, value] of entries.filter(([k]) => k === "auth")) await chooseAuth(value);
+      for (const [key, value] of entries.filter(([k]) => k !== "auth")) await edit(key, value);
+      if (request.password) await typeInto(field("password"), request.password);
+      const label = rowInfo("password").label;
+      await clickText(main, "Save");
+      await settle(30);
+      return { opened, label, after: view(), patches: patches() };
+    },
+    /* Finding 11: the attributes of the username and password boxes of a SQL Server form and of a PostgreSQL form, and whether either
+       sits inside a form element (or the page has one at all). */
+    inputs: async () => {
+      seed();
+      await mountPage("servers");
+      const out = {};
+      for (const [name, id] of [["sql", 3], ["postgres", 2]]) {
+        await clickEdit(id);
+        const describe = (key) => {
+          const node = field(key);
+          let inForm = false;
+          for (let a = node.parent; a; a = a.parent) if (a.tag === "form") inForm = true;
+          return { type: node.attrs.type, attrs: { ...node.attrs }, inForm };
+        };
+        out[name] = { username: describe("username"), password: describe("password"), formElements: byTag(main, "form").length };
+      }
+      return out;
     },
     /* The ported tests of the old vm harness: one tab drawn through the real modules, a read-only seat, every piece of text it drew. */
     tab: async (name) => {
