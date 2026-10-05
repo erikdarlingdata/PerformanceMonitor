@@ -201,7 +201,7 @@ VALUES ($1,$2,$3,$4,'db1','public','t1','ix_t1',$5, 0,0,0,0, 10485760, 20971520,
     [InlineData("get_pg_column_stats")]
     public void TheNewestPerKeyReads_EmitNoWindowNotice(string tool)
     {
-        var source = RepoFile.ReadRepoFileLf(System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgIndexTools.cs"));
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgIndexTools.cs");
         var at = source.IndexOf("Name = \"" + tool + "\"", StringComparison.Ordinal);
         Assert.True(at > 0, tool + " is not in DarlingMcpPgIndexTools.cs");
         /* The comment that explains the omission sits just above the attribute; the next tool's own comment sits above ITS attribute. */
