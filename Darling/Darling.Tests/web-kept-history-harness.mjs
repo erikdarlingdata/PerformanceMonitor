@@ -147,6 +147,11 @@ try {
   }
   if (serverPageScenario) {
     fs.copyFileSync(path.join(jsDir, "pages", "fleet.js"), path.join(scratch, "pages", "fleet.js"));
+    /* The fleet page imports the mute-rules writes and the session read; copied when present, with what they import. */
+    for (const rel of ["alerts-api.js", "views-api.js", "derive.js", "alert-seed.js", "refresh-policy.js", "refresh-control.js", path.join("pages", "mute-rules.js")]) {
+      const from = path.join(jsDir, rel);
+      if (fs.existsSync(from) && !fs.existsSync(path.join(scratch, rel))) fs.copyFileSync(from, path.join(scratch, rel));
+    }
     fs.writeFileSync(
       path.join(scratch, "pages", "server.js"),
       fs.readFileSync(path.join(jsDir, "pages", "server.js"), "utf8") + "\nexport { RANGE_OPTIONS, WIDEST_RANGE_HOURS };\n"
