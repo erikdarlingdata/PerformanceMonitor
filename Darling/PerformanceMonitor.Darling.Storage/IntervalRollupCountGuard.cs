@@ -25,19 +25,25 @@ namespace PerformanceMonitor.Darling.Storage;
 /// raw. A store before V164 has no ledger table, so the runner reads the store's schema version first and does not run the
 /// guard below <see cref="QueryStatsHourLedger.RungVersion"/>: the read stays on raw with no fault. A ledger table that is missing
 /// on a store at the rung is a fault like any other.</para>
-/// <para><b>Why a pass is exact.</b> The ledger counts the rollup's population: a restart row
+/// <para><b>What a pass proves.</b> The ledger counts the rollup's population: a restart row
 /// (<c>sample_interval_seconds = 0</c>) is in neither, and a row with a NULL interval is in both, because the rollup's
 /// own <c>count(*)</c> sits under <c>WHERE sample_interval_seconds IS DISTINCT FROM 0</c>
 /// (<see cref="TimescaleSupport.CreateQueryStatsIntervalHourlySql"/>). Restart rows need no guard: the route reads them
 /// live from raw (<see cref="IntervalRollupRestartRows"/>). The collector writes the ledger in its COPY's own transaction, so
 /// the guard and the panel read one REPEATABLE READ snapshot in which the ledger, raw and the rollup are all the state
-/// after the same set of commits. Every way the counts can drift then makes them differ, and a difference fails safe: a
-/// rollup that has not refreshed over a late row is below the ledger, a (server, hour) the ledger lacks is above the
-/// rollup (the FULL JOIN keeps a pair that only one side has), and a row-by-row DELETE of raw leaves the ledger above the
-/// rollup once it refreshes. The one unsafe case is a writer of <c>collect.query_stats</c> that the ledger does not
-/// count, and the writer census pin (<c>QueryStatsWriterCensusPins</c>) guards it. An in-place UPDATE of a raw row
-/// changes no count and passes unseen, so the route also relies on the collector's append-only COPY writes and its
-/// whole-row retention; a live pin in the runner change records that dependency (#4605).</para>
+/// after the same set of commits. A drift the ledger saw makes the counts differ, and a difference fails safe: a rollup
+/// that has not refreshed over a counted row is below the ledger, and a (server, hour) the ledger lacks leaves the rollup
+/// above it (the FULL JOIN keeps a pair that only one side has). The unsafe case is a writer of <c>collect.query_stats</c>
+/// that the ledger does not count, whose rows the rollup also lacks (a late row below the watermark, before the next
+/// refresh, is one). The writer census pin (<c>QueryStatsWriterCensusPins</c>) sees this build's code only. It cannot see an
+/// older service that still writes raw rows into a V164 store (a rolling upgrade, or a downgrade): the guard catches those
+/// rows wherever the rollup holds them, and misses them in one known case, an hour the rollup never materialized (a hole)
+/// whose raw rows all came from an older service. That hour has no ledger row and no rollup row, so no pair disagrees, the
+/// guard returns 0, and the route reads nothing for that hour while raw has rows. A row-by-row DELETE of raw shows only after
+/// the rollup refreshes over it, which retention never does inside a window the route takes (its window starts inside raw's
+/// retention). An in-place UPDATE of a raw row changes no count and passes unseen, so the route also relies on the
+/// collector's append-only COPY writes and its whole-row retention; a live pin in the runner change records that dependency
+/// (#4605).</para>
 /// <para>Every instant is bound: <c>$1</c> is the start, inclusive, and <c>$2</c> the end, exclusive, both naive UTC
 /// <c>timestamp</c>; <c>$3</c> is a <c>text[]</c> of server names, or NULL for every server. Both sides filter on
 /// <c>server_name</c> per row. The coverage test compares the store-wide <c>counted_since</c> with <c>$1</c>, so a window that
