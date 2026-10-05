@@ -15,9 +15,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// (<see cref="IntervalRollupCountGuard"/>) proves that by comparing, per (server, hour), the raw row count with the
 /// rollup's <c>sum(sample_count)</c>. Counting raw is a scan of millions of rows and runs past any panel deadline. The
 /// ledger moves that count to write time: the collector adds each batch's count in the same transaction as its COPY,
-/// so under one read snapshot the ledger, raw and the rollup agree, and the guard reads one small row per (server,
-/// hour) instead of every raw row. This class and the V164 rung are the storage half; the writer in the collector's
-/// COPY, the guard's read of the ledger, the census pin on writers and the retention prune are the later lanes of #4605.
+/// so under one read snapshot the ledger counts every row raw holds from this build's writer (the writer census pin checks
+/// this build's code only, and <see cref="IntervalRollupCountGuard"/> names the one case a pass can miss), and the guard's
+/// ledger half reads one small row per (server, hour) instead of every raw row. The guard's rollup half still sums the rollup's rows for the window, so the
+/// guard costs about one pass over those rows and no raw rows; the large-store timing is measured after deployment, by the
+/// acceptance read of #4605. This class and the V164 rung are the storage half; the guard's read of the ledger is
+/// <see cref="IntervalRollupCountGuard"/>, and the writer in the collector's COPY, the census pin on writers and the
+/// retention prune are the other lanes of #4605.
 ///
 /// <para><b>What is counted.</b> Exactly the population the rollup counts: rows whose <c>sample_interval_seconds</c> is
 /// not 0. A restart row (0, a delta that was not knowable) is not counted, and a row with a NULL interval (written
@@ -52,6 +56,14 @@ public static class QueryStatsHourLedger
 
     /// <summary>The one-row state table: <c>counted_since</c> is the first whole hour from which every row is in the ledger.</summary>
     public const string StateTable = "collect.query_stats_hour_ledger_state";
+
+    /// <summary>
+    /// The store schema version of the rung that creates both tables (V164). A store below it has neither table, so a
+    /// reader checks the store's schema version against this before it names them: the hourly-edges runner does, and a
+    /// store below the rung reads raw with no fault to log (#4605). <c>QueryStatsHourLedgerTests</c> pins it to the
+    /// version the rung is registered under.
+    /// </summary>
+    public const int RungVersion = 164;
 
     /// <summary>
     /// Both tables and the state row, as the V164 rung runs them. Idempotent: the tables are guarded and the state row
