@@ -54,7 +54,7 @@ public sealed class DiagnosticsBundleLeakLiveTests
     internal static readonly string[] Forbidden =
     {
         ServerOne, "zeta-07.example.test", "QXINST", ServerTwo, "203.0.113.40", DisplayTwo, "Epsilon", DbOne, DbTwo, Login, Password, Domain,
-        "zeta-07x", RemovedServer, StoreLogSecretHost, "QXCORP", "svc_zeta", StoreRole, TcpServer, TcpHostName, "qxtcphost-alpha", "qxzone",
+        "zeta-07x", RemovedServer, StoreLogSecretHost, "QXCORP", "svc_zeta", StoreRole, TcpServer, TcpHostName, "qxtcphost", "qxzone",
     };
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -113,6 +113,12 @@ VALUES ($1, 701, $2, 'file_io_stats', $3, 3000, 'ERROR', $4, 0)",
         await ExecAsync(c, @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected)
 VALUES ($1, 702, $2, 'wait_stats', $3, 4000, 'ERROR', $4, 0)",
             CollectionIdGenerator.Next(), ServerTwo, now.AddMinutes(-10), $"Login failed for user '{Login}' on {ServerTwo} ({HostTwo}); database {DbTwo} unavailable");
+
+        /* A failed run whose error text is long enough that a registered host starts before character 500 and ends after it:
+           the tool's own cut would leave the front of the host as a prefix no name matches, so the bundle must read the text whole. */
+        await ExecAsync(c, @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected)
+VALUES ($1, 701, $2, 'query_store', $3, 4000, 'ERROR', $4, 0)",
+            CollectionIdGenerator.Next(), ServerOne, now.AddMinutes(-11), new string('x', 488) + " " + TcpHostName + " refused the login");
 
         /* A stall probe whose wait summary names the server's FQDN and a client host. */
         await ExecAsync(c, @"INSERT INTO collect.collector_stall_probes

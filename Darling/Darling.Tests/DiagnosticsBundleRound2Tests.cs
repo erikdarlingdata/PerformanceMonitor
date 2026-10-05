@@ -72,6 +72,44 @@ public sealed class DiagnosticsBundleRound2Tests
         Assert.DoesNotContain("doDB", text, StringComparison.Ordinal);
     }
 
+    /* ── a monitored name used as a whole key is renamed, never exempted ── */
+
+    [Theory]
+    [InlineData("zeta07", true)]
+    [InlineData("sales_db", false)]
+    [InlineData("Store", false)]
+    public void AKeyThatIsItselfAMonitoredName_IsRenamedToItsAlias_AndTheValueAndOrderSurvive(string name, bool isServer)
+    {
+        var aliaser = new BundleAliaser();
+        aliaser.AddName(isServer ? AliasKind.Server : AliasKind.Database, name);
+        var node = new JsonObject { ["status"] = "ok", ["first"] = 1, [name] = new JsonObject { ["x"] = 1 }, ["last"] = 2 };
+        var (text, leaks) = Assemble(aliaser, Section("store_log", node));
+
+        Assert.Equal(0, leaks);
+        Assert.NotNull(text);
+        /* "Store" is also a substring of the product's own store_log, so the key is checked whole. */
+        Assert.DoesNotContain("\"" + name + "\"", text, StringComparison.OrdinalIgnoreCase);
+        var alias = isServer ? "server-1" : "db-1";
+        Assert.Contains("\"" + alias + "\"", text, StringComparison.Ordinal);
+        Assert.True(text.IndexOf("\"first\"", StringComparison.Ordinal) < text.IndexOf("\"" + alias + "\"", StringComparison.Ordinal));
+        Assert.True(text.IndexOf("\"" + alias + "\"", StringComparison.Ordinal) < text.IndexOf("\"last\"", StringComparison.Ordinal));
+        Assert.Contains("\"x\": 1", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AKeyThatIsAProductWord_IsNotRenamed_EvenWhenANameIsASubstringOfIt()
+    {
+        var aliaser = new BundleAliaser();
+        aliaser.AddName(AliasKind.Database, "Store");
+        var node = new JsonObject { ["status"] = "ok", ["store_log"] = 1, ["server_id"] = 7 };
+        var (text, leaks) = Assemble(aliaser, Section("store_log", node));
+
+        Assert.Equal(0, leaks);
+        Assert.NotNull(text);
+        Assert.Contains("\"store_log\": 1", text, StringComparison.Ordinal);
+        Assert.Contains("\"status\": \"ok\"", text, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ADataShapedKeyHoldingAName_StillFailsClosed()
     {

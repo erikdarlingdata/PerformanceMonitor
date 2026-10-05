@@ -476,9 +476,34 @@ internal sealed class BundleAliaser
     }
 
     /// <summary>
+    /// The key a source key is written under. A key whose whole text equals a known name (the same case-insensitive
+    /// lookup the value pass uses) is renamed to that name's alias, so a name used as a key is never left for the verify
+    /// to exempt as product vocabulary. The product's own keys (<c>status</c>, the harvest keys, the section names and
+    /// the statuses) are never names. A second key that lands on an alias already written gets a numbered suffix.
+    /// </summary>
+    private string AliasKey(string key, JsonObject written)
+    {
+        if (!_aliasByToken.TryGetValue(key, out var alias) || s_productKeys.Contains(key) || HarvestKeys.ContainsKey(key) || _productValues.Contains(key))
+        {
+            return key;
+        }
+
+        var renamed = alias;
+        for (var n = 2; written.ContainsKey(renamed); n++)
+        {
+            renamed = alias + "-" + n.ToString(CultureInfo.InvariantCulture);
+        }
+
+        return renamed;
+    }
+
+    private static readonly HashSet<string> s_productKeys = new(StringComparer.Ordinal) { "status", "server_id", "server_alias" };
+
+    /// <summary>
     /// Rewrites a tree: every string value goes through <see cref="Alias"/>; every key naming a secret has its value
     /// replaced by the redaction marker at any depth; a <c>server_id</c> number becomes a <c>server_alias</c> string.
-    /// Keys are never aliased, so the structure survives.
+    /// A key is rewritten only when its WHOLE text is a known name (see <see cref="AliasKey"/>), so the structure
+    /// survives and a monitored name used as a key never reaches the file.
     /// </summary>
     internal JsonNode? AliasTree(JsonNode? node)
     {
@@ -489,8 +514,9 @@ internal sealed class BundleAliaser
             case JsonObject obj:
             {
                 var copy = new JsonObject();
-                foreach (var (key, value) in obj)
+                foreach (var (sourceKey, value) in obj)
                 {
+                    var key = AliasKey(sourceKey, copy);
                     if (value is JsonValue idValue && string.Equals(key, "server_id", StringComparison.OrdinalIgnoreCase)
                         && idValue.TryGetValue<long>(out var id))
                     {
