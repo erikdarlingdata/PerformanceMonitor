@@ -10,7 +10,10 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -180,6 +183,174 @@ public sealed class RawWindowFloorEffectiveStartTests
     [Fact]
     public void NoFloor_ReportsTheRequestedStart() =>
         Assert.Equal(s_start, RawWindowFloor.EffectiveStart(null, s_start));
+
+    private const string NotCoveredHead =
+        "The store holds no collection of query_snapshots for this server in this window, so nothing was read, and this empty answer is not a report that nothing happened. ";
+
+    private const string NotCoveredTail =
+        "The window may reach further back than the store retains, this server may have been monitored for less time than that, or collection may have stopped; get_collection_health shows which.";
+
+    private const string TruncatedSentence =
+        "The window reaches further back than this server's raw query_snapshots retains (or this server has been monitored for less time than that), so the older part of it was not read.";
+
+    private static async Task<(McpWindowNotice Notice, int Probes)> ReadAsync(
+        TimeSpan window, DateTime? floor, bool emptyAnswer, string? tail = null)
+    {
+        var probes = 0;
+        var notice = await DarlingMcpWindowNotice.ReadAsync(
+            () => { probes++; return Task.FromResult(floor); }, s_start, s_start + window, "query_snapshots", tail, emptyAnswer);
+        return (notice, probes);
+    }
+
+    /// <summary>#4966: a probe that throws costs the notice, never the answer: no verdict, no hints, and a Warning.</summary>
+    [Fact]
+    public async Task AProbeThatThrows_AnswersNoNotice_AndLogsAWarning()
+    {
+        var logger = new CapturingLogger();
+        var notice = await DarlingMcpWindowNotice.ReadAsync(
+            () => throw new TimeoutException("deadline"), s_start, s_start + TimeSpan.FromDays(7), "query_snapshots", logger: logger);
+
+        Assert.True(notice.IsUnavailable);
+        Assert.False(notice.WindowTruncated);
+        Assert.Null(notice.EffectiveStart);
+        Assert.Null(notice.AsHints());
+        Assert.Equal([LogLevel.Warning], logger.Levels);
+
+        /* An empty answer fails the same way. */
+        Assert.True((await DarlingMcpWindowNotice.ReadAsync(
+            () => throw new TimeoutException("deadline"), s_start, s_start + TimeSpan.FromHours(1), "query_snapshots", emptyAnswer: true)).IsUnavailable);
+    }
+
+    /// <summary>#4966: only the CALLER's cancellation goes through; the probe's own deadline is a failed probe.</summary>
+    [Fact]
+    public async Task ACancelledCaller_StillCancels_ButAProbeDeadlineDoesNot()
+    {
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingMcpWindowNotice.ReadAsync(
+            () => throw new OperationCanceledException(cts.Token), s_start, s_start + TimeSpan.FromDays(7), "query_snapshots", cancellationToken: cts.Token));
+
+        var notice = await DarlingMcpWindowNotice.ReadAsync(
+            () => throw new OperationCanceledException("the probe's own deadline"), s_start, s_start + TimeSpan.FromDays(7), "query_snapshots",
+            cancellationToken: CancellationToken.None);
+        Assert.True(notice.IsUnavailable);
+    }
+
+    private sealed class CapturingLogger : ILogger
+    {
+        public List<LogLevel> Levels { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Levels.Add(logLevel);
+    }
+
+    /// <summary>#4966: an answer with rows over a window of 90 minutes or less never asks the store, and is covered at the start that was asked for.</summary>
+    [Theory]
+    [InlineData(60)]
+    [InlineData(90)]
+    public async Task ARowsAnswer_OverNinetyMinutesOrLess_MakesNoProbe_AndIsCoveredAtTheAskedStart(int minutes)
+    {
+        var (notice, probes) = await ReadAsync(TimeSpan.FromMinutes(minutes), s_start.AddMinutes(80), emptyAnswer: false);
+
+        Assert.Equal(0, probes);
+        Assert.Equal(McpHelpers.FormatEffectiveStart(s_start), notice.EffectiveStart);
+        Assert.False(notice.WindowTruncated);
+        Assert.Null(notice.TruncationNote);
+    }
+
+    [Fact]
+    public async Task ARowsAnswer_PastNinetyMinutes_IsProbed_AndAFloorWithinTheSlackIsStillCovered()
+    {
+        var (notice, probes) = await ReadAsync(TimeSpan.FromMinutes(91), s_start.AddMinutes(90), emptyAnswer: false);
+
+        Assert.Equal(1, probes);
+        Assert.False(notice.WindowTruncated);
+        Assert.Null(notice.TruncationNote);
+        Assert.Equal(McpHelpers.FormatEffectiveStart(s_start.AddMinutes(90)), notice.EffectiveStart);
+    }
+
+    /// <summary>An empty answer is probed at any length, and a probe that finds nothing says NOT covered, with the sentence Lite says.</summary>
+    [Fact]
+    public async Task AnEmptyAnswer_AtSixtyMinutes_IsProbed_AndANullFloorIsNotCovered()
+    {
+        var (notice, probes) = await ReadAsync(TimeSpan.FromMinutes(60), floor: null, emptyAnswer: true);
+
+        Assert.Equal(1, probes);
+        Assert.Null(notice.EffectiveStart);
+        Assert.True(notice.WindowTruncated);
+        Assert.Equal(NotCoveredHead + NotCoveredTail, notice.TruncationNote);
+    }
+
+    [Fact]
+    public async Task AnEmptyAnswer_WhoseProbeFindsCoverage_IsCoveredAtTheFloor_OrTheStartWhenTheFloorIsEarlier()
+    {
+        var (inside, _) = await ReadAsync(TimeSpan.FromMinutes(60), s_start.AddMinutes(35), emptyAnswer: true);
+        Assert.Equal(McpHelpers.FormatEffectiveStart(s_start.AddMinutes(35)), inside.EffectiveStart);
+        Assert.False(inside.WindowTruncated);
+        Assert.Null(inside.TruncationNote);
+
+        var (before, _) = await ReadAsync(TimeSpan.FromMinutes(60), s_start.AddDays(-3), emptyAnswer: true);
+        Assert.Equal(McpHelpers.FormatEffectiveStart(s_start), before.EffectiveStart);
+        Assert.False(before.WindowTruncated);
+    }
+
+    [Fact]
+    public async Task AFloorPastTheSlack_IsTruncated_NamesTheTable_AndCarriesTheTail()
+    {
+        var floor = s_start.AddDays(2);
+        var (notice, probes) = await ReadAsync(TimeSpan.FromDays(7), floor, emptyAnswer: false, tail: "More.");
+
+        Assert.Equal(1, probes);
+        Assert.True(notice.WindowTruncated);
+        Assert.Equal(McpHelpers.FormatEffectiveStart(floor), notice.EffectiveStart);
+        Assert.EndsWith("Z", notice.EffectiveStart, StringComparison.Ordinal);
+        Assert.Equal(TruncatedSentence + " More.", notice.TruncationNote);
+        Assert.Equal(TruncatedSentence, (await ReadAsync(TimeSpan.FromDays(7), floor, emptyAnswer: false)).Notice.TruncationNote);
+    }
+
+    [Fact]
+    public void TheHints_CarryTheThreeKeys_WithTheSameValues()
+    {
+        var notice = DarlingMcpWindowNotice.Build(null, s_start, "waiting_tasks", emptyAnswer: true);
+        var json = System.Text.Json.JsonSerializer.SerializeToElement(notice.AsHints());
+
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, json.GetProperty("effective_start").ValueKind);
+        Assert.True(json.GetProperty("window_truncated").GetBoolean());
+        Assert.Equal(notice.TruncationNote, json.GetProperty("truncation_note").GetString());
+    }
+
+    /// <summary>
+    /// The two sentences are copies of Lite's (#4966), so a client reads one wording from either app. Lite's source is
+    /// read here and must hold each sentence as a string literal, and Darling's notice must be exactly those literals
+    /// with the table put in. A reword on one side fails until the other follows.
+    /// </summary>
+    [Fact]
+    public void TheNoticeSentences_EqualLitesText()
+    {
+        var lite = ReadRepoFile("Lite", "Mcp", "McpQueryTools.cs").ReplaceLineEndings("\n");
+
+        const string head = "The store holds no collection of {table} for this server in this window, so nothing was read, and this empty answer is not a report that nothing happened. ";
+        Assert.Contains("$\"" + head + "\"", lite, StringComparison.Ordinal);
+        Assert.Contains("\"" + NotCoveredTail + "\"", lite, StringComparison.Ordinal);
+        Assert.Equal(NotCoveredHead + NotCoveredTail, DarlingMcpWindowNotice.Build(null, s_start, "query_snapshots", emptyAnswer: true).TruncationNote);
+
+        const string truncated = "The window reaches further back than this server's raw {table} retains (or this server has been monitored for less time than that), so the older part of it was not read.";
+        Assert.Contains("$\"" + truncated + "\"", lite, StringComparison.Ordinal);
+        Assert.Equal(TruncatedSentence, DarlingMcpWindowNotice.Build(s_start.AddDays(1), s_start, "query_snapshots").TruncationNote);
+    }
+
+    /// <summary>The helper probes with GetAsync: GetForServerAsync answers null for a window of 90 minutes or less, which an empty answer would read as "not covered".</summary>
+    [Fact]
+    public void TheHelperProbes_WithGetAsync_NeverGetForServerAsync()
+    {
+        var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpWindowNotice.cs");
+        Assert.Contains("DataWindowFloor.GetAsync(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("GetForServerAsync(", source.Replace("<see cref=\"DataWindowFloor.GetForServerAsync\"/>", ""), StringComparison.Ordinal);
+    }
 
     /// <summary>The floor walks each table's index in time order, so the walk stops at the first row it meets.</summary>
     [Theory]

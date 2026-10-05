@@ -96,10 +96,14 @@ public sealed class WebDataStartNoteLiveTests
         var threeDays = await store.AskAsync(QuietServerName, hours: 72, ct);
 
         Assert.False(week["truncated"]?.GetValue<bool>());
-        Assert.Null(week["window_truncated"]);
+        /* The tool's own keys (#4966) say covered: false and no note. The web adds nothing of its own, and the page draws
+           a note only for true. */
+        Assert.NotEqual(true, week["window_truncated"]?.GetValue<bool>());
         Assert.Null(week["truncation_note"]);
+        Assert.Null(week["data_start_utc"]);
         Assert.NotNull(week["tasks"]);
-        Assert.Null(threeDays["window_truncated"]);
+        Assert.NotEqual(true, threeDays["window_truncated"]?.GetValue<bool>());
+        Assert.Null(threeDays["data_start_utc"]);
     }
 
     /// <summary>A read that hit its cap lists the newest rows only, so the note names the oldest row it returned, not
@@ -406,7 +410,7 @@ ORDER BY ordinal_position", connection))
         /// <summary>What the web mirror answers for the grid: the tool's own payload, then the data-start note.</summary>
         public async Task<JsonObject> AskAsync(string server, int hours, CancellationToken ct)
         {
-            var payload = await DarlingMcpSessionTools.GetWaitingTasks(DataSource, server, hours, PageCap, null, ct);
+            var payload = await DarlingMcpSessionTools.GetWaitingTasks(DataSource, server, hours, PageCap, null, cancellationToken: ct);
             var answered = await WebDataStartNote.AddAsync(DataSource, "get_waiting_tasks", server, hours, null, payload, null, ct);
             return Assert.IsType<JsonObject>(JsonNode.Parse(answered));
         }

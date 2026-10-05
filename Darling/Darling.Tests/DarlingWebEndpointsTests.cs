@@ -179,19 +179,51 @@ public sealed class DarlingWebEndpointsTests
     [Fact]
     public void ReadEndpoints_ActiveQueries_KeepsTheTwoThousandCharacterWebPreview()
     {
-        /* #4198 lane W2: the MCP default fell to a 500-char query_text preview (QueryTextPreviewLength), but
+        /* #4198 lane W2: the MCP default fell to a 500-char (now 400) query_text preview (QueryTextPreviewLength), but
            the web viewer isn't that budget's caller — its /api/read row calls the internal budget-taking
            overload with an explicit 2000, the pre-#4198 McpHelpers.Truncate budget every caller got, so the
            Active Queries tab doesn't shrink under it. A regression here (dropping the overload, or the literal
-           2000) silently starves that tab's query text down to 500 characters. Source-text pin rather than a
+           2000) silently starves that tab's query text down to the MCP preview (400 characters). Source-text pin rather than a
            live call: no rig in this lane. */
         var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains(
-            "[\"get_active_queries\"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, \"database_name\"), QueryBool(c, \"blocking_only\", false), Rows(c, \"limit\", 50), 2000, AsOf(c), c.RequestAborted),",
+            "[\"get_active_queries\"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, \"database_name\"), QueryBool(c, \"blocking_only\", false), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted),",
             source, StringComparison.Ordinal);
     }
 
     /* ── response-kind mapping (the error envelope -> 500, the invalid envelope -> 400 as the body, the '{'-sniff -> 200, miss envelope -> 200) ── */
+
+    /// <summary>A stored plan arrives from the tool as bare XML; the web route answers it as 200 JSON (the
+    /// classifier would otherwise file a leading "&lt;" as a 400), with the truncation flag decided from the tool's
+    /// own cut marker. Envelopes pass through unchanged.</summary>
+    [Fact]
+    public void WrapPlanXml_AWholePlan_IsJsonThatClassifiesAsPassthrough()
+    {
+        const string xml = "<ShowPlanXML><x a=\"1\"/></ShowPlanXML>";
+        var wrapped = DarlingWebEndpoints.WrapPlanXml(xml, "0xABC", "db1");
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.JsonPassthrough, DarlingWebEndpoints.ClassifyToolResponse(wrapped));
+        using var doc = System.Text.Json.JsonDocument.Parse(wrapped);
+        Assert.Equal(xml, doc.RootElement.GetProperty("plan_xml").GetString());
+        Assert.Equal("0xABC", doc.RootElement.GetProperty("query_hash").GetString());
+        Assert.Equal("db1", doc.RootElement.GetProperty("database_name").GetString());
+        Assert.False(doc.RootElement.GetProperty("truncated").GetBoolean());
+    }
+
+    [Fact]
+    public void WrapPlanXml_ACutPlan_IsFlaggedTruncated_FromTheRealTruncateMarker()
+    {
+        var cut = McpHelpers.Truncate("<ShowPlanXML>" + new string('x', 100) + "</ShowPlanXML>", 20)!;
+        using var doc = System.Text.Json.JsonDocument.Parse(DarlingWebEndpoints.WrapPlanXml(cut, "H", null));
+        Assert.True(doc.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.DoesNotContain("(truncated)", doc.RootElement.GetProperty("plan_xml").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, doc.RootElement.GetProperty("database_name").ValueKind);
+    }
+
+    [Theory]
+    [InlineData("{\"status\":\"unavailable\",\"message\":\"No stored plan found.\"}")]
+    [InlineData("{\"status\":\"not_collected\",\"message\":\"Not collected.\"}")]
+    public void WrapPlanXml_AnEnvelope_PassesThroughUnchanged(string envelope) =>
+        Assert.Equal(envelope, DarlingWebEndpoints.WrapPlanXml(envelope, "H", null));
 
     [Theory]
     [InlineData("{\"cpu_percent\":42}")]
