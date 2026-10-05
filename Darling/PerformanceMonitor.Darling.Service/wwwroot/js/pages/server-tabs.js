@@ -45,6 +45,7 @@ import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } 
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
+import { planColumn } from "./plan-viewer.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -474,7 +475,7 @@ export function topQueriesPanel(server, ctx) {
     const parts = [
       VIZ.table(res.data, {
         rowsKey: "queries",
-        columns: TOP_QUERY_COLUMNS,
+        columns: [...TOP_QUERY_COLUMNS, planColumn(server)],
         emptyText:
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) " +
           "before it reports non-zero values.",
@@ -924,7 +925,7 @@ export const SERVER_TABS = [
         "get_top_queries_by_cpu",
         { server, hours: ctx.hours, top: 20 },
         "queries",
-        TOP_QUERY_COLUMNS,
+        [...TOP_QUERY_COLUMNS, planColumn(server)],
         ctx.label,
         "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
         2,
