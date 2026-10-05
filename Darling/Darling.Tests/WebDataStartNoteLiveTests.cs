@@ -214,7 +214,7 @@ public sealed class WebDataStartNoteLiveTests
     private static readonly string[] PostgresReads =
         [.. WebDataStartNote.TableByRead.Keys.Where(k => k.StartsWith("get_pg_", StringComparison.Ordinal)).OrderBy(k => k, StringComparer.Ordinal)];
 
-    /// <summary>Each of the six PostgreSQL reads (the configuration changes among them, #4966), over its own table, for a server added two days ago whose rows
+    /// <summary>Each of the seventeen PostgreSQL reads (the configuration changes, the window aggregates, the trend grids and Captured Plans among them, #4966), over its own table, for a server added two days ago whose rows
     /// start a day back: the data starts inside the 7-day range, so the note is there and names a start between the
     /// server's first collection and its first row. Which of the two a table reports depends on whether the schedule
     /// gives it a purge edge (the first collection) or not (the oldest row it holds), so the test holds the bounds the
@@ -224,7 +224,7 @@ public sealed class WebDataStartNoteLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         await using var store = await Store.CreateAsync(ct);
-        Assert.Equal(6, PostgresReads.Length);
+        Assert.Equal(17, PostgresReads.Length);
 
         for (var i = 0; i < PostgresReads.Length; i++)
         {
@@ -244,7 +244,7 @@ public sealed class WebDataStartNoteLiveTests
         }
     }
 
-    /// <summary>The same six reads for a server collected for a month whose rows reach back past the 7-day window's
+    /// <summary>The same seventeen reads for a server collected for a month whose rows reach back past the 7-day window's
     /// start (eight days): the store covered the range, so there is no note, over 7 days and over 3. (A quiet start,
     /// rows that begin late in a covered range, is the Waiting Tasks test above: a table the schedule gives no purge
     /// edge reports the oldest row it holds, so for those rows that begin late are a late start.)</summary>

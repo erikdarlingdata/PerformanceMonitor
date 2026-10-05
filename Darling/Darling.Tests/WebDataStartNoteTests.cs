@@ -382,6 +382,61 @@ public sealed class WebDataStartNoteTests
         Assert.Empty(Strings(r, "errors"));
     }
 
+    /// <summary>The PostgreSQL window reads (#4966), run under Node through the shipped <c>server-tabs.js</c>: one read
+    /// answers the three note fields, and the panels that draw them are exactly the ones named. Every panel of these
+    /// fanouts shows the window's figures (the stat tiles are window totals, the grids window aggregates or trend
+    /// points), so none opts out and the stat tile draws beside its grid. The sibling reads on the same tab answer
+    /// nothing and draw none.</summary>
+    [Theory]
+    [InlineData("activity", "get_pg_blocking", "Blocking Sampling|Blocking Chains|Lock Cycles")]
+    [InlineData("activity", "get_pg_top_queries", "Statement Evictions|Top Query Shapes")]
+    [InlineData("activity", "get_pg_database_stats", "Database Activity|By Database")]
+    [InlineData("vacuum", "get_pg_session_states", "Sessions Holding a Transaction Open|By Session")]
+    [InlineData("io", "get_pg_io_stats", "I/O Summary|By Backend, Object and Context")]
+    [InlineData("replication", "get_pg_replication_stats", "Connected Replicas")]
+    [InlineData("activity", "get_pg_database_trend", "Database Trend")]
+    [InlineData("activity", "get_pg_query_duration_trend", "Query Duration Trend")]
+    [InlineData("waits", "get_pg_wait_trend", "Wait Trend")]
+    [InlineData("io", "get_pg_io_trend", "I/O Trend")]
+    [InlineData("activity", "get_pg_plans", "Captured Plans")]
+    public void EveryPanelOfAPostgresWindowRead_DrawsTheNote_TheStatTilesBesideTheirGrids(string tab, string read, string panels)
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorPg:" + tab + "|" + read, out var r)) return;
+
+        var expected = panels.Split('|');
+        var notices = Strings(r, "notices");
+        Assert.Equal(expected.Length, notices.Length);
+        foreach (var heading in expected)
+        {
+            var notice = Assert.Single(notices, n => n.StartsWith(heading, StringComparison.Ordinal));
+            Assert.Contains("partial window:", notice, StringComparison.Ordinal);
+        }
+
+        Assert.Empty(Strings(r, "errors"));
+    }
+
+    /// <summary>The same decision in the source text, so it holds without Node: none of the PostgreSQL window panels
+    /// opts out of the note, because each one shows the window's own figures.</summary>
+    [Fact]
+    public void NoPostgresWindowPanel_OptsOutOfTheNote()
+    {
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var postgres = tabs[tabs.IndexOf("export const POSTGRES_TABS", StringComparison.Ordinal)..];
+
+        foreach (var read in new[]
+        {
+            "get_pg_top_queries", "get_pg_blocking", "get_pg_database_stats", "get_pg_session_states", "get_pg_io_stats",
+            "get_pg_replication_stats", "get_pg_database_trend", "get_pg_query_duration_trend", "get_pg_wait_trend", "get_pg_io_trend", "get_pg_plans",
+        })
+        {
+            var at = postgres.IndexOf("\"" + read + "\"", StringComparison.Ordinal);
+            Assert.True(at > 0, read + " is not on a PostgreSQL tab");
+            Assert.Equal(at, postgres.LastIndexOf("\"" + read + "\"", StringComparison.Ordinal));
+        }
+
+        Assert.DoesNotContain("windowNote", postgres, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ASpecWithAFloorKey_DrawsTheNestedNote_NotTheTopLevelOne()
     {
