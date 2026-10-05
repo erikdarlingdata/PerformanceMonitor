@@ -56,6 +56,7 @@ const confirms = [];
 globalThis.confirm = (m) => { confirms.push(m); return true; };
 let readFails = false;
 let postGate = null;
+let detailsReply = () => ({ status: 200, body: { details: [] } });
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   if (init && init.method === "POST") {
@@ -66,6 +67,10 @@ globalThis.fetch = async (url, init) => {
     return { status: r.status, ok: r.status < 300, text: async () => JSON.stringify(r.body) };
   }
   urls.push(u);
+  if (u.includes("/get_alert_details")) {
+    const r = detailsReply(Object.fromEntries(new URL(u, "http://x").searchParams));
+    return { status: r.status, ok: r.status < 300, text: async () => JSON.stringify(r.body) };
+  }
   if (readFails && u.includes("/get_alert_history")) return { status: 500, ok: false, text: async () => JSON.stringify({ error: "read failed" }) };
   let body = {};
   if (u.startsWith("/api/session")) body = { can_edit: canEdit };
@@ -73,6 +78,7 @@ globalThis.fetch = async (url, init) => {
   else if (u.includes("/get_alert_history")) body = typeof alertsReply === "function" ? alertsReply(u) : alertsReply;
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
 };
+const detailReadsOf = () => urls.filter((u) => u.includes("/get_alert_details")).map((u) => Object.fromEntries(new URL(u, "http://x").searchParams));
 const readsOf = () => urls.filter((u) => u.includes("/get_alert_history")).map((u) => Object.fromEntries(new URL(u, "http://x").searchParams));
 
 const row = (i, over = {}) => ({
@@ -122,42 +128,84 @@ try {
   };
   const script = { heading: "Remediation T-SQL", fields: [], is_code_block: true, body: "EXEC sys.sp_query_store_force_plan 1, 2;" };
   const diagnosis = { heading: "Diagnosis", fields: [{ label: "Story", value: "PLAN_REGRESSION" }], body: null, is_code_block: false };
+  const analysisMetric = "Analysis: plan_regression [524101aa]";
+  const analysisRow = (over = {}) => row(1, { metric_name: analysisMetric, detail_text: "Diagnosis\n  Story: PLAN_REGRESSION\n  Severity: 1.20", ...over });
+  const shape = (d) => {
+    const all = walk(d);
+    return {
+      paragraphs: all.filter((n) => n.tag === "p").map((n) => n.textContent),
+      pres: all.filter((n) => n.tag === "pre").map((n) => n.textContent),
+      buttons: all.filter((n) => n.tag === "button").map((n) => n.textContent),
+      fields: all.filter((n) => n.className === "detail-field").map((n) => n.textContent),
+      headings: all.filter((n) => n.className === "detail-heading").map((n) => n.textContent),
+    };
+  };
   const scenarios = {
     async withDetails() {
-      alertsReply = { alerts: [row(1, { detail_text: "Diagnosis\n  Story: PLAN_REGRESSION\n  Severity: 1.20", details: [diagnosis, advice, script] })], truncated: false };
+      alertsReply = { alerts: [analysisRow()], truncated: false };
+      detailsReply = () => ({ status: 200, body: { details: [diagnosis, advice, script] } });
       const main = newMain(); await renderAlerts(main);
       out.requested = readsOf()[0];
-      const d = await open(main);
-      const all = walk(d);
-      out.paragraphs = all.filter((n) => n.tag === "p").map((n) => n.textContent);
-      out.pres = all.filter((n) => n.tag === "pre").map((n) => n.textContent);
-      out.buttons = all.filter((n) => n.tag === "button").map((n) => n.textContent);
-      out.fields = all.filter((n) => n.className === "detail-field").map((n) => n.textContent);
-      out.headings = all.filter((n) => n.className === "detail-heading").map((n) => n.textContent);
-      const copyBtn = all.find((n) => n.tag === "button");
+      out.callsBeforeOpen = detailReadsOf().length;
+      const d = main.all("details")[0];
+      d.open = true; d.fire("toggle");
+      out.loadingWhileFetching = walk(d).some((n) => n.className && String(n.className).includes("loading"));
+      await tick();
+      Object.assign(out, shape(d));
+      out.detailRequest = detailReadsOf()[0];
+      const copyBtn = walk(d).find((n) => n.tag === "button");
       if (copyBtn) { copyBtn.fire("click"); await tick(); }
       out.copied = copied.slice();
       out.buttonAfter = copyBtn ? copyBtn.textContent : null;
+      /* Closing and re-opening the same row, then a fresh render of the same page (the poll rebuild), ask nothing more. */
+      d.open = false; d.fire("toggle"); d.open = true; d.fire("toggle"); await tick();
+      const again = newMain(); await renderAlerts(again);
+      const d2 = await open(again);
+      out.callsAfterReopenAndRerender = detailReadsOf().length;
+      out.rerenderPres = shape(d2).pres;
     },
     async withoutDetails() {
+      alertsReply = { alerts: [analysisRow({ metric_name: "Analysis: other [bbbb]", server_id: 2 })], truncated: false };
+      detailsReply = () => ({ status: 200, body: { details: [] } });
+      const main = newMain(); await renderAlerts(main);
+      const d = await open(main);
+      const s = shape(d);
+      out.calls = detailReadsOf().length;
+      out.paragraphs = s.paragraphs.length; out.pres = s.pres.length; out.buttons = s.buttons.length;
+      out.fields = s.fields; out.headings = s.headings;
+    },
+    async engineAlert() {
       alertsReply = { alerts: [row(1, { detail_text: "Diagnosis\n  Story: x\n  Severity: 1.20" })], truncated: false };
       const main = newMain(); await renderAlerts(main);
       const d = await open(main);
-      const all = walk(d);
-      out.paragraphs = all.filter((n) => n.tag === "p").length;
-      out.pres = all.filter((n) => n.tag === "pre").length;
-      out.buttons = all.filter((n) => n.tag === "button").length;
-      out.fields = all.filter((n) => n.className === "detail-field").map((n) => n.textContent);
-      out.headings = all.filter((n) => n.className === "detail-heading").map((n) => n.textContent);
+      const s = shape(d);
+      out.calls = detailReadsOf().length;
+      out.pres = s.pres.length; out.fields = s.fields; out.headings = s.headings;
+    },
+    async failedFetch() {
+      alertsReply = { alerts: [analysisRow({ server_id: 3 })], truncated: false };
+      detailsReply = () => ({ status: 500, body: { error: "read failed" } });
+      const main = newMain(); await renderAlerts(main);
+      const d = await open(main);
+      const s = shape(d);
+      out.calls = detailReadsOf().length;
+      out.pres = s.pres.length; out.buttons = s.buttons.length; out.fields = s.fields; out.headings = s.headings;
     },
     async hostile() {
-      alertsReply = { alerts: [row(1, { detail_text: "x", details: [{ heading: "<img src=x onerror=alert(1)>", fields: [], is_code_block: true, body: "<script>alert(1)</script>" }] })], truncated: false };
+      const evil = "<img src=x onerror=alert(1)>";
+      alertsReply = { alerts: [analysisRow({ server_id: 4, detail_text: "x" })], truncated: false };
+      detailsReply = () => ({ status: 200, body: { details: [
+        { heading: evil, fields: [{ label: "<b>label</b>", value: "<script>alert(2)</script>" }], is_code_block: false, body: "<svg onload=alert(3)> prose" },
+        { heading: "Fix", fields: [], is_code_block: true, body: "<script>alert(1)</script>" },
+      ] } });
       const main = newMain(); await renderAlerts(main);
       const d = await open(main);
       const all = walk(d);
       out.pre = all.filter((n) => n.tag === "pre").map((n) => n.textContent);
       out.headings = all.filter((n) => n.className === "detail-heading").map((n) => n.textContent);
-      out.imgs = all.filter((n) => n.tag === "img" || n.tag === "script").length;
+      out.fields = all.filter((n) => n.className === "detail-field").map((n) => n.textContent);
+      out.paragraphs = all.filter((n) => n.tag === "p").map((n) => n.textContent);
+      out.imgs = all.filter((n) => ["img", "script", "svg", "b"].includes(n.tag)).length;
     },
   };
   await scenarios[scenario]();

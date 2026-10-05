@@ -219,22 +219,55 @@ function detailCell(a) {
   const node = disclosure(summary, placeholder, { max: 120 });
 
   let built = false;
-  node.addEventListener("toggle", () => {
+  node.addEventListener("toggle", async () => {
     if (built || !node.open) return;
     built = true;
+    /* #5241: an Analysis alert's advice and fix script are fetched here, on the first open, for this one row - not
+     * carried by the 60 s list read for every row. Loading strip while it loads; an error or an empty answer falls
+     * back to the detail_text rendering. Any other alert has no advice beyond detail_text and makes no request. */
+    if (isAnalysisAlert(a)) {
+      mount(placeholder, [loadingStrip()]);
+      const items = await alertAdvice(a);
+      mount(placeholder, detailBody(a, items));
+      return;
+    }
     mount(placeholder, detailBody(a));
   });
   return node;
 }
 
+/* The advice fetched for an opened Analysis row (#5241), by alertKey, for the page's lifetime: the 60 s poll rebuilds
+ * the grid's nodes, and a row an operator already opened must not ask again. An answer (advice, or none) is kept; a
+ * failed read is not, so opening the row again after a transient error asks again. */
+const adviceCache = new Map();
+
+function isAnalysisAlert(a) {
+  return typeof a.metric_name === "string" && a.metric_name.startsWith("Analysis:");
+}
+
+function alertAdvice(a) {
+  const key = alertKey(a);
+  if (!adviceCache.has(key)) {
+    const pending = readTool("get_alert_details", { server_id: a.server_id, metric_name: a.metric_name, alert_time: a.alert_time })
+      .then((res) => {
+        if (res.kind === "data") return Array.isArray(res.data?.details) && res.data.details.length > 0 ? res.data.details : null;
+        if (res.kind === "empty") return null;
+        adviceCache.delete(key);
+        return null;
+      }, () => { adviceCache.delete(key); return null; });
+    adviceCache.set(key, pending);
+  }
+  return adviceCache.get(key);
+}
+
 /* The expansion body: unchanged shape from the pre-#4194 eager version (see detailCell above), just built lazily. */
-function detailBody(a) {
+function detailBody(a, details) {
   const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
-  /* #5241: a row whose stored context holds advice carries `details` (the read asks for them with include_details):
-   * the structured items the desktop's Alert Detail window shows - heading, labelled fields, the advice prose and
+  /* #5241: an Analysis row's stored context holds advice; opening the row fetches it (detailCell) as `details`: the
+   * structured items the desktop's Alert Detail window shows - heading, labelled fields, the advice prose and
    * the fix script. They replace the parsed detail_text, which is the same headings and fields without the prose.
-   * A row without them (no advice, or an older service) keeps the detail_text rendering below. */
-  const items = Array.isArray(a.details) && a.details.length > 0 ? a.details : null;
+   * A row without them (not an Analysis alert, no advice, a failed fetch) keeps the detail_text rendering below. */
+  const items = Array.isArray(details) && details.length > 0 ? details : null;
   const fields = !items && hasDetail ? parseDetailFields(a.detail_text) : null;
   const body = [];
   if (items) {
@@ -395,7 +428,6 @@ function readParams() {
     limit: choices.limit,
     server_name: choices.server || null,
     include_dismissed: choices.dismissed ? "true" : null,
-    include_details: "true",
   };
 }
 

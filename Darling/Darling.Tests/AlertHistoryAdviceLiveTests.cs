@@ -29,9 +29,9 @@ namespace Darling.Tests;
 /// <summary>
 /// #5241: an alert's advice and fix script reach the web Alert History page. The stored context holds them
 /// (<c>AlertDetailItem.Body</c>, a code block for the fix script) but <c>detail_text</c> is the flattened
-/// headings and fields only, so the page had nothing to show. The web mirror's <c>include_details</c> returns the
-/// items; the MCP tool does not take the flag, so its answer is what it was. The typed Apply payload
-/// (<c>Remediation</c>) is never projected: the web is advise-only.
+/// headings and fields only, so the page had nothing to show. The web-only <c>get_alert_details</c> read returns one
+/// alert's items by the page's row identity; it is not an MCP tool, and <c>get_alert_history</c> is untouched. The
+/// typed Apply payload (<c>Remediation</c>) is never projected: the web is advise-only.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class AlertHistoryAdviceLiveTests
@@ -109,22 +109,19 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
     private static Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_alert_log WHERE server_id = $1", ServerId);
 
-    private static async Task<string> WebReadAsync(NpgsqlDataSource postgres, string query, int limit = 50)
+    private static async Task<string> WebReadAsync(NpgsqlDataSource postgres, string read, string query)
     {
         var context = new DefaultHttpContext();
-        context.Request.QueryString = new QueryString("?hours_back=1&limit=" + limit + query);
-        return await DarlingWebEndpoints.BuildReadDispatch()["get_alert_history"](context, postgres, null!);
+        context.Request.QueryString = new QueryString(query);
+        return await DarlingWebEndpoints.BuildReadDispatch()[read](context, postgres, null!);
     }
 
-    private static JsonElement Row(string json, string metric)
-    {
-        using var doc = JsonDocument.Parse(json);
-        return doc.RootElement.GetProperty("alerts").EnumerateArray()
-            .Single(a => a.GetProperty("metric_name").GetString() == metric).Clone();
-    }
+    private static string DetailsQuery(string metric, DateTime alertTime, int serverId = ServerId) =>
+        "?server_id=" + serverId + "&metric_name=" + Uri.EscapeDataString(metric)
+        + "&alert_time=" + Uri.EscapeDataString(alertTime.ToString("o"));
 
     [Fact]
-    public async Task WithIncludeDetails_TheRowCarriesTheAdviceAndTheFixScript_AndNeverTheApplyPayload()
+    public async Task GetAlertDetails_ReturnsTheAdviceAndTheFixScriptForTheKeyedRow_AndNeverTheApplyPayload()
     {
         var cs = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
@@ -135,12 +132,14 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
         var bodySucceeded = false;
         try
         {
-            await SeedAsync(connection, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow), ct);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, now, ct);
             await using var postgres = OpenDataSource(cs);
 
-            var json = await WebReadAsync(postgres, "&include_details=true");
-            var advice = Row(json, AdviceMetric);
-            var details = advice.GetProperty("details").EnumerateArray().ToList();
+            var json = await WebReadAsync(postgres, "get_alert_details", DetailsQuery(AdviceMetric, now.AddMinutes(-2)));
+            using var doc = JsonDocument.Parse(json);
+            Assert.Equal(new[] { "details" }, doc.RootElement.EnumerateObject().Select(p => p.Name).ToArray());
+            var details = doc.RootElement.GetProperty("details").EnumerateArray().ToList();
             Assert.Equal(new[] { "Diagnosis", "Plan regression", "Remediation T-SQL" },
                 details.Select(d => d.GetProperty("heading").GetString()).ToArray());
 
@@ -165,8 +164,43 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
                 new[] { "heading", "fields", "body", "is_code_block" },
                 d.EnumerateObject().Select(p => p.Name).ToArray()));
 
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs, bodySucceeded, DeleteAsync);
+        }
+    }
+
+    [Fact]
+    public async Task GetAlertDetails_AnswersEmptyDetails_ForAnEngineAlert_AnUnknownKey_AndAMalformedKey()
+    {
+        var cs = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, now, ct);
+            await using var postgres = OpenDataSource(cs);
+
+            const string empty = "{\"details\":[]}";
             /* An engine alert's context holds no prose: its detail_text already says everything, so it gets none. */
-            Assert.False(Row(json, EngineMetric).TryGetProperty("details", out _));
+            Assert.Equal(empty, await WebReadAsync(postgres, "get_alert_details", DetailsQuery(EngineMetric, now.AddMinutes(-1))));
+            /* Unknown metric, unknown time, unknown server: no match is an empty answer, not an error. */
+            Assert.Equal(empty, await WebReadAsync(postgres, "get_alert_details", DetailsQuery("Analysis: nothing [00000000]", now.AddMinutes(-2))));
+            Assert.Equal(empty, await WebReadAsync(postgres, "get_alert_details", DetailsQuery(AdviceMetric, now.AddMinutes(-3))));
+            Assert.Equal(empty, await WebReadAsync(postgres, "get_alert_details", DetailsQuery(AdviceMetric, now.AddMinutes(-2), ServerId - 1)));
+            /* The stamp exactly as get_alert_history spells it (the store's naive UTC, seven fraction digits, no zone). */
+            var naive = DateTime.SpecifyKind(now.AddMinutes(-2), DateTimeKind.Unspecified);
+            Assert.Contains("force the better plan", await WebReadAsync(postgres, "get_alert_details", DetailsQuery(AdviceMetric, naive)), StringComparison.Ordinal);
+            /* A key that does not parse is the same empty answer. */
+            Assert.Equal(empty, await WebReadAsync(postgres, "get_alert_details", "?server_id=" + ServerId + "&metric_name=x&alert_time=not-a-time"));
+            Assert.Equal(empty, await WebReadAsync(postgres, "get_alert_details", "?server_id=abc&metric_name=x&alert_time=" + Uri.EscapeDataString(now.ToString("o"))));
 
             bodySucceeded = true;
         }
@@ -177,7 +211,25 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
     }
 
     [Fact]
-    public async Task WithoutIncludeDetails_TheWebRowIsByteIdenticalToTheMcpToolsAnswer_AndCarriesNoDetails()
+    public async Task GetAlertDetails_RefusesAMissingParameter()
+    {
+        var cs = RequireLivePostgres();
+        await using var postgres = OpenDataSource(cs);
+        foreach (var query in new[]
+        {
+            "?metric_name=x&alert_time=2026-01-01T00:00:00Z",
+            "?server_id=1&alert_time=2026-01-01T00:00:00Z",
+            "?server_id=1&metric_name=x",
+        })
+        {
+            var json = await WebReadAsync(postgres, "get_alert_details", query);
+            using var doc = JsonDocument.Parse(json);
+            Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task GetAlertHistory_IsUnchanged_TheWebRowAndTheMcpToolAnswerTheSameBytes_AndCarryNoDetails()
     {
         var cs = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
@@ -192,17 +244,14 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
             await using var postgres = OpenDataSource(cs);
 
             var tool = await DarlingMcpAlertTools.GetAlertHistory(postgres, null, 1, 50, cancellationToken: ct);
-            var web = await WebReadAsync(postgres, "");
-            var explicitOff = await WebReadAsync(postgres, "&include_details=false");
+            var web = await WebReadAsync(postgres, "get_alert_history", "?hours_back=1&limit=50");
+            /* The old flag is gone: sending it changes nothing. */
+            var withOldFlag = await WebReadAsync(postgres, "get_alert_history", "?hours_back=1&limit=50&include_details=true");
 
             Assert.Equal(tool, web);
-            Assert.Equal(tool, explicitOff);
+            Assert.Equal(tool, withOldFlag);
             Assert.DoesNotContain("\"details\"", tool, StringComparison.Ordinal);
-
-            /* The MCP tool answers the same whether or not the flag exists: it cannot be asked for details. */
-            var withFlag = await WebReadAsync(postgres, "&include_details=true");
-            Assert.NotEqual(tool, withFlag);
-            Assert.Equal(tool, (await DarlingMcpAlertTools.GetAlertHistory(postgres, null, 1, 50, cancellationToken: ct)));
+            Assert.DoesNotContain("force the better plan", tool, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
@@ -213,64 +262,34 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
     }
 
     [Fact]
-    public async Task OnlyTheNewestRowsUpToTheCapCarryDetails_SoAThousandRowPageStaysBounded()
+    public void GetAlertDetails_IsWebOnly_NotAnMcpTool_AndTheHistoryReadHasNoDetailsFlag()
     {
-        var cs = RequireLivePostgres();
-        var ct = TestContext.Current.CancellationToken;
-        await using var connection = new NpgsqlConnection(cs);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
+        /* No [McpServerTool] anywhere names it, and its implementation carries no tool attribute, so tools/list never sees it. */
+        var toolNames = typeof(DarlingMcpAlertTools).Assembly.GetTypes()
+            .Where(t => t.GetCustomAttribute<McpServerToolTypeAttribute>() is not null)
+            .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance))
+            .Select(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name)
+            .Where(n => n is not null)
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.DoesNotContain("get_alert_details", toolNames);
+        Assert.Contains("get_alert_details", DarlingWebEndpoints.WebOnlyReadNames);
 
-        var bodySucceeded = false;
-        try
-        {
-            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
-            await DeleteAsync(connection, ct);
-            var total = DarlingMcpAlertTools.MaxDetailRows + 5;
-            var context = AdviceContextJson();
-            for (var i = 0; i < total; i++)
-                await InsertAlertAsync(connection, ct, now.AddSeconds(-i), AdviceMetric + i, "Diagnosis\n  Story: x\n  Severity: 1.20", context);
-            await using var postgres = OpenDataSource(cs);
-
-            var json = await WebReadAsync(postgres, "&include_details=true", total);
-            using var doc = JsonDocument.Parse(json);
-            var rows = doc.RootElement.GetProperty("alerts").EnumerateArray()
-                .Where(a => a.GetProperty("server_id").GetInt32() == ServerId).ToList();
-            Assert.Equal(total, rows.Count);
-            Assert.Equal(DarlingMcpAlertTools.MaxDetailRows, rows.Count(a => a.TryGetProperty("details", out _)));
-            Assert.All(rows.Take(DarlingMcpAlertTools.MaxDetailRows), a => Assert.True(a.TryGetProperty("details", out _)));
-            Assert.All(rows.Skip(DarlingMcpAlertTools.MaxDetailRows), a => Assert.False(a.TryGetProperty("details", out _)));
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(cs, bodySucceeded, DeleteAsync);
-        }
-    }
-
-    [Fact]
-    public void TheMcpTool_CannotBeAskedForDetails_AndTheWebCatalogAdvertisesTheFlag()
-    {
-        var method = typeof(DarlingMcpAlertTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "get_alert_history");
-        Assert.DoesNotContain(method.GetParameters(), p => p.Name!.Contains("detail", StringComparison.OrdinalIgnoreCase) && p.Name != "detail_text");
-        Assert.DoesNotContain("include_details", method.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
-
-        /* The projection lives on an un-attributed internal method, so tools/list never sees it. */
-        var read = typeof(DarlingMcpAlertTools).GetMethod("GetAlertHistoryRead", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var read = typeof(DarlingMcpAlertTools).GetMethod("GetAlertDetails", BindingFlags.NonPublic | BindingFlags.Static)!;
         Assert.Null(read.GetCustomAttribute<McpServerToolAttribute>());
 
-        var param = DarlingWebEndpoints.CatalogDescriptors["get_alert_history"].Params.Single(p => p.Name == "include_details");
-        Assert.Equal("bool", param.Type);
-        Assert.False(param.Required);
-        Assert.Equal(false, param.Default);
+        var history = typeof(DarlingMcpAlertTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "get_alert_history");
+        Assert.DoesNotContain(history.GetParameters(), p => p.Name!.Contains("detail", StringComparison.OrdinalIgnoreCase) && p.Name != "detail_text");
+        Assert.DoesNotContain("include_details", history.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingWebEndpoints.CatalogDescriptors["get_alert_history"].Params, p => p.Name == "include_details");
+        Assert.DoesNotContain("include_details", DarlingWebEndpoints.CatalogDescriptors["get_alert_history"].Description, StringComparison.Ordinal);
 
-        var source = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"));
-        var dispatchLine = source.Split('\n').Single(l =>
-            l.Contains("DarlingMcpAlertTools.GetAlertHistoryRead(", StringComparison.Ordinal));
-        Assert.Contains("includeDetails: QueryBool(c,", dispatchLine, StringComparison.Ordinal);
+        /* Same role as get_alert_history (the catalog carries no role: both are plain /api/read reads of the viewer role),
+           and its own descriptor, with the page's row identity as required parameters. */
+        var descriptor = DarlingWebEndpoints.CatalogDescriptors["get_alert_details"];
+        Assert.Equal(DarlingWebEndpoints.CatalogDescriptors["get_alert_history"].Category, descriptor.Category);
+        Assert.Equal(new[] { "server_id", "metric_name", "alert_time" }, descriptor.Params.Select(p => p.Name).ToArray());
+        Assert.All(descriptor.Params, p => Assert.True(p.Required));
     }
 
     [Fact]
@@ -278,7 +297,7 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs"));
-        var start = source.IndexOf("internal static object WithDetails(", StringComparison.Ordinal);
+        var start = source.IndexOf("internal static JsonArray? ProjectDetails(", StringComparison.Ordinal);
         Assert.True(start >= 0);
         var end = source.IndexOf("[McpServerTool(Name = ", start, StringComparison.Ordinal);
         var projection = source.Substring(start, end - start);

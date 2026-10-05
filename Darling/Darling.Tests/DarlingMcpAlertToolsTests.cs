@@ -246,7 +246,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         var source = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"));
         var dispatchLine = source.Split('\n').Single(l =>
-            l.Contains("DarlingMcpAlertTools.GetAlertHistoryRead(", StringComparison.Ordinal));
+            l.Contains("DarlingMcpAlertTools.GetAlertHistory(", StringComparison.Ordinal));
         Assert.Contains("include_dismissed: QueryBool(c,", dispatchLine, StringComparison.Ordinal);
         Assert.Contains("as_of: AsOf(c)", dispatchLine, StringComparison.Ordinal);
     }

@@ -242,6 +242,7 @@ public sealed class AsOfWindowAnchorTests
     public void EveryDispatchedReadWhoseToolTakesAnAnchor_AdvertisesItInTheCatalog()
     {
         var missing = DarlingWebEndpoints.BuildReadDispatch().Keys
+            .Where(name => !DarlingWebEndpoints.WebOnlyReadNames.Contains(name)) // no tool behind it, and a keyed read has no window (#5241)
             .Where(ToolTakesAnAnchor)
             .Where(name => !DarlingWebEndpoints.CatalogDescriptors[name].Params.Any(p => p.Name == "as_of"))
             .OrderBy(n => n, StringComparer.Ordinal)

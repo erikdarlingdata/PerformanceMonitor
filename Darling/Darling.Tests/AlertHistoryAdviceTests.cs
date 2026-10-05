@@ -19,9 +19,11 @@ namespace Darling.Tests;
 /// <summary>
 /// #5241: an expanded alert on the web Alert History page shows the advice and the fix script, as the desktop's
 /// Alert Detail does. The shipped <c>alerts.js</c> runs under Node (<c>alert-history-advice-harness.mjs</c>) against
-/// a recording fetch: a row with <c>details</c> shows the advice as a paragraph and the fix script in a
-/// <c>&lt;pre&gt;</c> with a Copy button; a row without them shows its <c>detail_text</c> as before; and every value
-/// reaches the DOM as text. Node is skipped when it is not installed.
+/// a recording fetch: the list read asks for no advice; the first expand of an Analysis row makes one
+/// <c>get_alert_details</c> read (once per row, however often it is re-opened or re-rendered) and shows the advice as
+/// a paragraph and the fix script in a <c>&lt;pre&gt;</c> with a Copy button; any other row, and a failed or empty
+/// answer, show the row's <c>detail_text</c> as before; and every value reaches the DOM as text. Node is skipped when
+/// it is not installed.
 /// </summary>
 public sealed class AlertHistoryAdviceTests
 {
@@ -61,16 +63,23 @@ public sealed class AlertHistoryAdviceTests
     private static string[] Strings(JsonElement array) => array.EnumerateArray().Select(e => e.GetString()!).ToArray();
 
     [Fact]
-    public void ThePageAsksForTheDetails()
+    public void TheListReadCarriesNoIncludeDetails_AndOpeningNothingFetchesNothing()
     {
         var r = Run("withDetails");
-        Assert.Equal("true", r.GetProperty("requested").GetProperty("include_details").GetString());
+        Assert.False(r.GetProperty("requested").TryGetProperty("include_details", out _));
+        Assert.Equal(0, r.GetProperty("callsBeforeOpen").GetInt32());
     }
 
     [Fact]
-    public void AnExpandedAlertWithDetails_ShowsTheAdviceAsAParagraphAndTheFixScriptInAPreWithCopy()
+    public void TheFirstExpandOfAnAnalysisRow_MakesExactlyOneKeyedRead_ShowsLoading_ThenTheAdviceAndTheFixScriptInAPreWithCopy()
     {
         var r = Run("withDetails");
+        var request = r.GetProperty("detailRequest");
+        Assert.Equal("1", request.GetProperty("server_id").GetString());
+        Assert.Equal("Analysis: plan_regression [524101aa]", request.GetProperty("metric_name").GetString());
+        Assert.Equal("2026-01-01T11:59:00.000Z", request.GetProperty("alert_time").GetString());
+        Assert.True(r.GetProperty("loadingWhileFetching").GetBoolean());
+
         Assert.Equal(new[] { "Diagnosis", "Advice", "Remediation T-SQL" }, Strings(r.GetProperty("headings")));
         Assert.Equal(new[] { "StoryPLAN_REGRESSION" }, Strings(r.GetProperty("fields")));
 
@@ -87,13 +96,43 @@ public sealed class AlertHistoryAdviceTests
     }
 
     [Fact]
-    public void AnExpandedAlertWithoutDetails_KeepsTheDetailTextRendering()
+    public void ASecondExpand_AndAPollRerenderOfTheSameRow_MakeNoFurtherRead()
+    {
+        var r = Run("withDetails");
+        Assert.Equal(1, r.GetProperty("callsAfterReopenAndRerender").GetInt32());
+        Assert.Equal(new[] { "EXEC sys.sp_query_store_force_plan 1, 2;" }, Strings(r.GetProperty("rerenderPres")));
+    }
+
+    [Fact]
+    public void AnAnalysisRowWhoseAnswerIsEmpty_KeepsTheDetailTextRendering()
     {
         var r = Run("withoutDetails");
+        Assert.Equal(1, r.GetProperty("calls").GetInt32());
         Assert.Equal(0, r.GetProperty("paragraphs").GetInt32());
         Assert.Equal(0, r.GetProperty("pres").GetInt32());
         Assert.Equal(0, r.GetProperty("buttons").GetInt32());
+        Assert.Equal(new[] { "StoryPLAN_REGRESSION", "Severity1.20" }, Strings(r.GetProperty("fields")));
+        Assert.Equal(new[] { "Diagnosis" }, Strings(r.GetProperty("headings")));
+    }
+
+    [Fact]
+    public void ANonAnalysisRow_MakesNoRead_AndKeepsTheDetailTextRendering()
+    {
+        var r = Run("engineAlert");
+        Assert.Equal(0, r.GetProperty("calls").GetInt32());
+        Assert.Equal(0, r.GetProperty("pres").GetInt32());
         Assert.Equal(new[] { "Storyx", "Severity1.20" }, Strings(r.GetProperty("fields")));
+        Assert.Equal(new[] { "Diagnosis" }, Strings(r.GetProperty("headings")));
+    }
+
+    [Fact]
+    public void AFailedRead_FallsBackToTheDetailText()
+    {
+        var r = Run("failedFetch");
+        Assert.Equal(1, r.GetProperty("calls").GetInt32());
+        Assert.Equal(0, r.GetProperty("pres").GetInt32());
+        Assert.Equal(0, r.GetProperty("buttons").GetInt32());
+        Assert.Equal(new[] { "StoryPLAN_REGRESSION", "Severity1.20" }, Strings(r.GetProperty("fields")));
         Assert.Equal(new[] { "Diagnosis" }, Strings(r.GetProperty("headings")));
     }
 
@@ -102,7 +141,9 @@ public sealed class AlertHistoryAdviceTests
     {
         var r = Run("hostile");
         Assert.Equal(new[] { "<script>alert(1)</script>" }, Strings(r.GetProperty("pre")));
-        Assert.Equal(new[] { "<img src=x onerror=alert(1)>" }, Strings(r.GetProperty("headings")));
+        Assert.Equal(new[] { "<img src=x onerror=alert(1)>", "Fix" }, Strings(r.GetProperty("headings")));
+        Assert.Equal(new[] { "<b>label</b><script>alert(2)</script>" }, Strings(r.GetProperty("fields")));
+        Assert.Equal(new[] { "<svg onload=alert(3)> prose" }, Strings(r.GetProperty("paragraphs")));
         Assert.Equal(0, r.GetProperty("imgs").GetInt32());
     }
 }
