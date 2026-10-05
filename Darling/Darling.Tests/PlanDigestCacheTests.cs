@@ -228,7 +228,12 @@ public sealed class PlanDigestCacheTests
         Assert.True(write > 0 && committedSet > write, "the commit flag is set only after WriteBatchAsync returns");
         Assert.True(confirm > committedSet, "ConfirmPending runs after the commit");
         Assert.True(discard > confirm, "DiscardPending covers the failed write");
-        Assert.Equal(1, Count(source, "ConfirmPending("));
+        /* One confirm per collector's cache: query_stats' and procedure_stats', each after the same commit flag. */
+        Assert.Equal(2, Count(source, "ConfirmPending("));
+        var procedureConfirm = source.IndexOf("procedurePlanCache.ConfirmPending(", StringComparison.Ordinal);
+        var procedureDiscard = source.IndexOf("procedurePlanCache.DiscardPending(", StringComparison.Ordinal);
+        Assert.True(procedureConfirm > committedSet, "procedure_stats confirms only after the commit");
+        Assert.True(procedureDiscard > procedureConfirm, "and discards when the write failed");
     }
 
     private static int Count(string text, string needle)
