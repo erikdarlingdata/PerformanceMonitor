@@ -1459,7 +1459,11 @@ export const SERVER_TABS = [
         QUERY_STORE_REGRESSION_COLUMNS,
         ctx.label,
         "No query regressed against its baseline in this window. If this server has no history OLDER than " +
-          "the window there is nothing to compare against, and the read says so rather than calling it clear."
+          "the window there is nothing to compare against, and the read says so rather than calling it clear.",
+        2,
+        null,
+        null,
+        QUERY_STORE_REGRESSION_GROUPS
       ),
       /* #3797: the clutter view. ONE fetch, three panels — the per-database rows, the per-server QDS wait
          block and the per-server memory clerk — because the read composes four arms over two raw hypertables
@@ -1536,7 +1540,11 @@ export const SERVER_TABS = [
         "completions",
         LONG_QUERY_COLUMNS,
         ctx.label,
-        "No long-running completions in this window. This collector is opt-in and off by default."
+        "No long-running completions in this window. This collector is opt-in and off by default.",
+        2,
+        null,
+        null,
+        LONG_QUERY_GROUPS
       ),
       /* One read, two panels. get_plan_corrections returns both arrays, and automatic_tuning comes from an
          unconditional latest-snapshot query that ignores hours/limit entirely — so the second fetch was paying
@@ -1548,6 +1556,8 @@ export const SERVER_TABS = [
           viz: "table",
           rowsKey: "recommendations",
           columns: PLAN_CORRECTION_COLUMNS,
+          groups: PLAN_CORRECTION_GROUPS.groups,
+          defaultGroups: PLAN_CORRECTION_GROUPS.defaultGroups,
           emptyText: "No tuning recommendations in this window.",
         },
         {
@@ -3166,6 +3176,8 @@ const TOP_PROC_GROUPS = {
    same finding as one that went from 1 s to 4 s, and the percent alone cannot tell them apart. Extra
    duration is the ranking key and the column that says whether the regression matters at all. */
 /* Stays local: this page's column set differs from the catalog entry's. */
+const QUERY_STORE_REGRESSION_GROUPS = { groups: ["CPU and reads", "Executions and plans"], defaultGroups: [] };
+
 const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "severity", label: "Severity" },
   { key: "database_name", label: "Database" },
@@ -3176,17 +3188,17 @@ const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "baseline_duration_ms", label: "Baseline Duration", format: "ms" },
   { key: "recent_duration_ms", label: "Recent Duration", format: "ms" },
   { key: "cpu_regression_percent", label: "CPU +%", format: "num1" },
-  { key: "baseline_cpu_ms", label: "Baseline CPU", format: "ms" },
-  { key: "recent_cpu_ms", label: "Recent CPU", format: "ms" },
+  { key: "baseline_cpu_ms", label: "Baseline CPU", group: "CPU and reads", format: "ms" },
+  { key: "recent_cpu_ms", label: "Recent CPU", group: "CPU and reads", format: "ms" },
   { key: "io_regression_percent", label: "Reads +%", format: "num1" },
-  { key: "baseline_reads", label: "Base Reads (pages)", format: "int" },
-  { key: "recent_reads", label: "Recent Reads (pages)", format: "int" },
-  { key: "baseline_exec_count", label: "Base Execs", format: "int" },
-  { key: "recent_exec_count", label: "Recent Execs", format: "int" },
+  { key: "baseline_reads", label: "Base Reads (pages)", group: "CPU and reads", format: "int" },
+  { key: "recent_reads", label: "Recent Reads (pages)", group: "CPU and reads", format: "int" },
+  { key: "baseline_exec_count", label: "Base Execs", group: "Executions and plans", format: "int" },
+  { key: "recent_exec_count", label: "Recent Execs", group: "Executions and plans", format: "int" },
   /* A plan count that moved between the two sides is the first thing to check: a query that regressed
      while gaining a plan is usually a plan-choice problem, not a data one. */
-  { key: "baseline_plan_count", label: "Baseline Plans", format: "int" },
-  { key: "recent_plan_count", label: "Recent Plans", format: "int" },
+  { key: "baseline_plan_count", label: "Baseline Plans", group: "Executions and plans", format: "int" },
+  { key: "recent_plan_count", label: "Recent Plans", group: "Executions and plans", format: "int" },
   { key: "last_execution_time", label: "Last Exec", format: "time" },
 ];
 
@@ -3284,27 +3296,31 @@ const QS_CLERK_STATS = [
   { key: "qs_overhead.memory_clerk.latest_clerk_captured_at", label: "Clerk Last Seen", format: "time" },
 ];
 
+const LONG_QUERY_GROUPS = { groups: ["I/O and rows", "Session"], defaultGroups: [] };
+
 const LONG_QUERY_COLUMNS = [
   { key: "event_time", label: "Time", format: "time" },
   { key: "statement", label: "Statement", render: (r) => codeDisclosure(r.statement) },
   { key: "event_type", label: "Event Type" },
   { key: "duration_ms", label: "Duration", format: "ms" },
   { key: "cpu_ms", label: "CPU", format: "ms" },
-  { key: "logical_reads", label: "Logical Reads", format: "int" },
-  { key: "physical_reads", label: "Physical Reads", format: "int" },
-  { key: "writes", label: "Writes", format: "int" },
-  { key: "row_count", label: "Rows", format: "int" },
+  { key: "logical_reads", label: "Logical Reads", group: "I/O and rows", format: "int" },
+  { key: "physical_reads", label: "Physical Reads", group: "I/O and rows", format: "int" },
+  { key: "writes", label: "Writes", group: "I/O and rows", format: "int" },
+  { key: "row_count", label: "Rows", group: "I/O and rows", format: "int" },
   { key: "result", label: "Result" },
   { key: "database_name", label: "Database" },
   { key: "object_name", label: "Object" },
-  { key: "session_id", label: "SPID", format: "int" },
-  { key: "client_app_name", label: "App" },
-  { key: "server_principal_name", label: "Login" },
+  { key: "session_id", label: "SPID", group: "Session", format: "int" },
+  { key: "client_app_name", label: "App", group: "Session" },
+  { key: "server_principal_name", label: "Login", group: "Session" },
   { key: "query_hash", label: "Query Hash" },
 ];
 
 /* The Script, Executable and Revertable columns the desktop grid adds are not here: get_plan_corrections
    returns no implementation script or action flags, and the page does not rebuild them. */
+const PLAN_CORRECTION_GROUPS = { groups: ["Plans", "Plan metrics", "Lifecycle"], defaultGroups: [] };
+
 const PLAN_CORRECTION_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
@@ -3315,21 +3331,21 @@ const PLAN_CORRECTION_COLUMNS = [
   { key: "score", label: "Score", format: "int" },
   { key: "estimated_gain_seconds", label: "Est. gain (s)", format: "num1" },
   { key: "query_id", label: "Query ID", format: "int" },
-  { key: "regressed_plan_id", label: "Regressed Plan", format: "int" },
-  { key: "last_good_plan_id", label: "Last Good Plan", format: "int" },
-  { key: "last_good_plan_forcing_type", label: "Forcing Type" },
-  { key: "last_good_plan_is_forced", label: "Forced", format: "bool" },
-  { key: "last_good_plan_force_failure_reason", label: "Force Failure", wrap: true },
-  { key: "regressed_plan_execution_count", label: "Regressed Execs", format: "int" },
-  { key: "regressed_plan_cpu_time_average_ms", label: "Regressed CPU (ms)", format: "num2" },
-  { key: "last_good_plan_execution_count", label: "Last Good Execs", format: "int" },
-  { key: "last_good_plan_cpu_time_average_ms", label: "Last Good CPU (ms)", format: "num2" },
-  { key: "valid_since", label: "Valid Since", format: "time" },
-  { key: "last_refresh", label: "Last Refresh", format: "time" },
-  { key: "execute_action_initiated_by", label: "Executed By" },
-  { key: "execute_action_initiated_time", label: "Executed At", format: "time" },
-  { key: "revert_action_initiated_by", label: "Reverted By" },
-  { key: "revert_action_initiated_time", label: "Reverted At", format: "time" },
+  { key: "regressed_plan_id", label: "Regressed Plan", group: "Plans", format: "int" },
+  { key: "last_good_plan_id", label: "Last Good Plan", group: "Plans", format: "int" },
+  { key: "last_good_plan_forcing_type", label: "Forcing Type", group: "Plans" },
+  { key: "last_good_plan_is_forced", label: "Forced", group: "Plans", format: "bool" },
+  { key: "last_good_plan_force_failure_reason", label: "Force Failure", group: "Plans", wrap: true },
+  { key: "regressed_plan_execution_count", label: "Regressed Execs", group: "Plan metrics", format: "int" },
+  { key: "regressed_plan_cpu_time_average_ms", label: "Regressed CPU (ms)", group: "Plan metrics", format: "num2" },
+  { key: "last_good_plan_execution_count", label: "Last Good Execs", group: "Plan metrics", format: "int" },
+  { key: "last_good_plan_cpu_time_average_ms", label: "Last Good CPU (ms)", group: "Plan metrics", format: "num2" },
+  { key: "valid_since", label: "Valid Since", group: "Lifecycle", format: "time" },
+  { key: "last_refresh", label: "Last Refresh", group: "Lifecycle", format: "time" },
+  { key: "execute_action_initiated_by", label: "Executed By", group: "Lifecycle" },
+  { key: "execute_action_initiated_time", label: "Executed At", group: "Lifecycle", format: "time" },
+  { key: "revert_action_initiated_by", label: "Reverted By", group: "Lifecycle" },
+  { key: "revert_action_initiated_time", label: "Reverted At", group: "Lifecycle", format: "time" },
 ];
 
 const AUTO_TUNING_COLUMNS = [
