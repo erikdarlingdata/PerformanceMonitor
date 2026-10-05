@@ -9,7 +9,8 @@
 /* FinOps "Index Analysis" tab: get_finops view index_analysis, shown as the caveat notes, the reclaimable-space
    roll-up (the overall row first, then one row per database) and the cleanup recommendations.
    Rows stay in payload order: recommendations largest index first, databases by total maximum savings. At most LIMIT
-   recommendations and the first databases come back, and the notice says so. Differences from the desktop grid:
+   recommendations (500, the most the view takes, #5238) and the first databases come back, and the notice says so: when the
+   read cut the list it names the limit and how many are not shown, and points at the Database box. Differences from the desktop grid:
    the overall row has no workload figures, so those cells show "—", and its Collected cell shows "—" too (the desktop leaves it blank); an average wait of none shows 0.00; script and
    definition text is cut by the read unless the "Full script and definition text" box is ticked; analyzer notes sit in a
    collapsed block; there are no tooltips. A Database box (any name; the list suggests the databases shown by the last
@@ -19,7 +20,9 @@
 import { VIZ } from "../../panels.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtNum } from "../../util.js";
 
-const LIMIT = 50;
+// The most recommendations the view lists (#5238). The desktop grid shows every finding, so the tab asks for the ceiling, as the
+// Database Sizes tab asks for its 500 files; the view's own default of 10 and the 50 of its other top-N views are not for this tab.
+const LIMIT = 500;
 const DERIVED_KEYS = ["reads_breakdown", "index_size_gb_text", "captured_at"];
 
 const ROLLUP_COLUMNS = [
@@ -99,13 +102,19 @@ function choiceFor(server) {
 let listCounter = 0;
 
 function noticeText(data, n, db) {
+  // The read says when rows were cut (truncated, with the count of every finding), so the notice never guesses: a list of exactly
+  // the limit that cut nothing says nothing. A cut list of the whole server points at the Database box, whose list is cut on its own.
+  const rowsCut = n > 0 && data.truncated;
   const count = n === 0
     ? "No cleanup recommendations: indexes look clean."
-    : (data.truncated ? "The largest " + n + " of " + data.recommendation_count + " recommendations." : n + (n === 1 ? " recommendation." : " recommendations."));
+    : (rowsCut
+      ? "Showing the largest " + n + " of " + data.recommendation_count + " recommendations. The list stops at " + n + ", so " + (data.recommendation_count - n) + " more are not shown."
+      : n + (n === 1 ? " recommendation." : " recommendations."));
+  const narrow = rowsCut && !db ? " Choose a database above to see its own list." : "";
   const cut = data.databases_truncated ? " Showing the largest databases of " + data.database_count + "." : "";
   const workload = data.overall_workload_reason ? " Overall row: " + data.overall_workload_reason + "." : "";
   const filter = db ? " Database " + db + "." : "";
-  return count + filter + cut + " Analyzed from each database's newest collected snapshot." + workload;
+  return count + filter + narrow + cut + " Analyzed from each database's newest collected snapshot." + workload;
 }
 
 export const tab = {

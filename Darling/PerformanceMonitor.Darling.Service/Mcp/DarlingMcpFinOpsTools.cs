@@ -75,6 +75,17 @@ public sealed partial class DarlingMcpFinOpsTools
     private const int DefaultLimit = 10;
     private const int MaxLimit = 50;
 
+    /// <summary>The largest <c>limit</c> a view takes: 500 for database_sizes (files), index_analysis (recommendations) and the databases
+    /// level of storage_growth (#5238), the 50 of the other views' top-N lists for the rest. A default <c>limit</c> keeps the size of a
+    /// default call. storage_growth's objects level refuses what is over 20 itself, and its indexes level any non-default <c>limit</c>.</summary>
+    internal static int MaxLimitFor(string normalizedView) => normalizedView switch
+    {
+        DatabaseSizesView => MaxDatabaseSizeRows,
+        IndexAnalysisView => MaxIndexAnalysisRecommendations,
+        StorageGrowthView => MaxStorageGrowthDatabaseRows,
+        _ => MaxLimit,
+    };
+
     [McpServerTool(Name = "get_finops"), Description(
         "FinOps views for one server, picked by view. Windowed over hours_back, UTC; no as_of." + SetAViewLines + SetBViewLines + " An unknown view is refused with the valid list. <<GUIDE>>" + SetAGuides + SetBGuides)]
     public static async Task<string> GetFinOps(
@@ -100,7 +111,7 @@ public sealed partial class DarlingMcpFinOpsTools
         /* storage_growth validates its own window (24, or 7 to 90 whole days): the shared ceiling is 168 hours. */
         var validation = normalized == StorageGrowthView ? null : McpHelpers.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
-        var maxLimit = normalized == DatabaseSizesView ? MaxDatabaseSizeRows : MaxLimit;
+        var maxLimit = MaxLimitFor(normalized);
         if (limit < 1 || limit > maxLimit)
             return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {maxLimit}.");
 
