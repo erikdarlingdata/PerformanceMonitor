@@ -197,6 +197,59 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
         return this;
     }
 
+    /// <summary>
+    /// A payload the host already knows the store holds: when <paramref name="knownDigest"/> is set and
+    /// <paramref name="content"/> is null, the row's digest column gets that digest directly, with no plan
+    /// text and no dim insert, and the digest joins the batch's touch set so the flush keeps the dim row
+    /// alive. Anything else is exactly <see cref="Value(string?)"/>. <paramref name="knownDigest"/> is the
+    /// 64-character hex of the SHA-256 <see cref="PayloadDimensions.Digest"/> produced; a malformed one
+    /// throws rather than writing a digest that resolves to nothing, and so does a known digest at a position
+    /// with no diverted payload (a writer set up without the diversion plan).
+    /// </summary>
+    public ICollectorRowWriter PayloadOrDigest(string? content, string? knownDigest)
+    {
+        if (knownDigest is null || content is not null)
+        {
+            return Value(content);
+        }
+
+        var digest = ParseKnownDigest(knownDigest);
+        if (!_diversionPlan.TryGetValue(_payloadIndex, out var dimension))
+        {
+            throw new InvalidOperationException(
+                "A known payload digest needs a diverted payload position — this position has none, so the row would be written with no plan.");
+        }
+
+        var dimensions = _dimensions ?? throw new InvalidOperationException(
+            "A diversion plan is set but no dimension batch — call UseDimensions with both.");
+        NextPayloadIndex();
+        dimensions.AddTouch(dimension.DimTable, digest);
+        Target.Write(digest, NpgsqlDbType.Bytea);
+        return this;
+    }
+
+    private static byte[] ParseKnownDigest(string knownDigest)
+    {
+        byte[] digest;
+        try
+        {
+            digest = Convert.FromHexString(knownDigest);
+        }
+        catch (FormatException ex)
+        {
+            throw new ArgumentException("A known payload digest must be hex text.", nameof(knownDigest), ex);
+        }
+
+        if (digest.Length != PayloadDimensions.DigestLengthBytes)
+        {
+            throw new ArgumentException(
+                $"A known payload digest must be {PayloadDimensions.DigestLengthBytes} bytes, got {digest.Length}.",
+                nameof(knownDigest));
+        }
+
+        return digest;
+    }
+
     public ICollectorRowWriter Value(long value)
     {
         NextPayloadIndex();
