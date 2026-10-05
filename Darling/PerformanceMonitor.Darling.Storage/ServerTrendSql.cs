@@ -184,4 +184,232 @@ public static class ServerTrendSql
         WHERE server_id = $1
         LIMIT 1
         """;
+
+    /// <summary>The server-wide session-summary trend (the Activity tab's chart): the eight status and count gauges averaged per bucket, plus the top application and host of each bucket's newest collection (they cannot be averaged). Runs on <c>v_session_summary_stats</c>. Also carries <c>latest_collection_time</c>.</summary>
+    public const string SessionSummary = $"""
+        WITH raw AS
+        (
+            SELECT
+                collection_time,
+                GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+                total_sessions,
+                running_sessions,
+                sleeping_sessions,
+                background_sessions,
+                dormant_sessions,
+                idle_sessions_over_30min,
+                sessions_waiting_for_memory,
+                databases_with_connections,
+                top_application_name,
+                top_application_connections,
+                top_host_name,
+                top_host_connections
+            FROM v_session_summary_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+        ),
+        agg AS
+        (
+            SELECT
+                bucket_start,
+                AVG(COALESCE(total_sessions, 0)) AS total_sessions,
+                AVG(COALESCE(running_sessions, 0)) AS running_sessions,
+                AVG(COALESCE(sleeping_sessions, 0)) AS sleeping_sessions,
+                AVG(COALESCE(background_sessions, 0)) AS background_sessions,
+                AVG(COALESCE(dormant_sessions, 0)) AS dormant_sessions,
+                AVG(COALESCE(idle_sessions_over_30min, 0)) AS idle_sessions_over_30min,
+                AVG(COALESCE(sessions_waiting_for_memory, 0)) AS sessions_waiting_for_memory,
+                AVG(COALESCE(databases_with_connections, 0)) AS databases_with_connections,
+                MIN(collection_time) AS first_collection_time,
+                COUNT(*) AS collection_count
+            FROM raw
+            GROUP BY bucket_start
+        ),
+        latest AS
+        (
+            SELECT DISTINCT ON (bucket_start)
+                bucket_start,
+                top_application_name,
+                top_application_connections,
+                top_host_name,
+                top_host_connections,
+                collection_time AS latest_collection_time
+            FROM raw
+            ORDER BY bucket_start, collection_time DESC
+        )
+        SELECT
+            agg.bucket_start,
+            agg.total_sessions,
+            agg.running_sessions,
+            agg.sleeping_sessions,
+            agg.background_sessions,
+            agg.dormant_sessions,
+            agg.idle_sessions_over_30min,
+            agg.sessions_waiting_for_memory,
+            agg.databases_with_connections,
+            latest.top_application_name,
+            latest.top_application_connections,
+            latest.top_host_name,
+            latest.top_host_connections,
+            agg.first_collection_time,
+            agg.collection_count,
+            latest.latest_collection_time
+        FROM agg
+        JOIN latest ON latest.bucket_start = agg.bucket_start
+        ORDER BY agg.bucket_start
+        """;
+
+    /// <summary>
+    /// The latch-class wait trend for <paramref name="nameCount"/> latch classes in one query, grouped by class and
+    /// bucket. The <c>latch_class IN (...)</c> list takes $4 onward and the bucket width the parameter after it. Each
+    /// bucket's <c>wait_time_ms_per_second</c> is the summed delta over the summed stored interval of the collections
+    /// whose interval was knowable (the stored interval, or for rows that never stored one the per-class LAG), so a
+    /// restart's fabricated zero is dropped and a bucket the window cuts short still holds a true rate.
+    /// </summary>
+    public static string LatchWaits(int nameCount) => RatedByName(
+        "v_latch_stats", "latch_class", "delta_wait_time_ms", "wait_time_ms_per_second", nameCount);
+
+    /// <summary>The spinlock twin of <see cref="LatchWaits"/>: <c>collisions_per_second</c> per spinlock name and bucket.</summary>
+    public static string SpinlockCollisions(int nameCount) => RatedByName(
+        "v_spinlock_stats", "spinlock_name", "delta_collisions", "collisions_per_second", nameCount);
+
+    private static string RatedByName(string view, string nameColumn, string deltaColumn, string rateColumn, int nameCount)
+    {
+        var nameParams = string.Join(", ", Enumerable.Range(0, nameCount).Select(i => "$" + (i + 4)));
+        var widthParam = "$" + (nameCount + 4);
+        return $$"""
+            WITH raw AS
+            (
+                SELECT
+                    {{nameColumn}},
+                    collection_time,
+                    {{deltaColumn}},
+                    /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+                       and the bucket drops the row rather than reading 0.00. NULL (a pre-V127 row) falls back to the LAG. */
+                    CASE WHEN sample_interval_seconds IS NULL
+                         THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY {{nameColumn}} ORDER BY collection_time))))
+                         ELSE NULLIF(sample_interval_seconds, 0)
+                    END AS interval_seconds
+                FROM {{view}}
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   {{nameColumn}} IN ({{nameParams}})
+            )
+            SELECT
+                {{nameColumn}},
+                GREATEST(date_bin(CAST({{widthParam}} AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                CAST(SUM(CASE WHEN interval_seconds > 0 AND {{deltaColumn}} IS NOT NULL THEN {{deltaColumn}} END) AS double precision) / SUM(CASE WHEN interval_seconds > 0 AND {{deltaColumn}} IS NOT NULL THEN interval_seconds END) AS {{rateColumn}},
+                MIN(collection_time) AS first_collection_time,
+                COUNT(*) AS collection_count
+            FROM raw
+            GROUP BY {{nameColumn}}, 2
+            HAVING COUNT(CASE WHEN interval_seconds > 0 AND {{deltaColumn}} IS NOT NULL THEN 1 END) > 0
+            ORDER BY {{nameColumn}}, 2
+            """;
+    }
+
+    /// <summary>
+    /// The collector run-duration trend for <paramref name="nameCount"/> collectors in one query, grouped by collector
+    /// and bucket: the bucket's longest and average successful run and its run count. The <c>collector_name IN (...)</c>
+    /// list takes $4 onward and the bucket width the parameter after it. A run counts when status is SUCCESS with a duration.
+    /// </summary>
+    public static string CollectorDurations(int nameCount)
+    {
+        var nameParams = string.Join(", ", Enumerable.Range(0, nameCount).Select(i => "$" + (i + 4)));
+        var widthParam = "$" + (nameCount + 4);
+        return $$"""
+            SELECT
+                collector_name,
+                GREATEST(date_bin(CAST({{widthParam}} AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                CAST(MAX(duration_ms) AS double precision) AS max_duration_ms,
+                CAST(AVG(duration_ms) AS double precision) AS avg_duration_ms,
+                CAST(COUNT(*) AS double precision) AS run_count,
+                MIN(collection_time) AS first_collection_time,
+                COUNT(*) AS collection_count
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   status = 'SUCCESS'
+            AND   duration_ms IS NOT NULL
+            AND   collector_name IN ({{nameParams}})
+            GROUP BY collector_name, 2
+            ORDER BY collector_name, 2
+            """;
+    }
+
+    /// <summary>The latch classes with the most wait time in the window, for the default selection. $1 server_id, $2/$3 window (naive UTC), $4 how many to return.</summary>
+    public const string TopLatchClasses = """
+        SELECT
+            latch_class
+        FROM v_latch_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        GROUP BY latch_class
+        ORDER BY SUM(delta_wait_time_ms) DESC, latch_class
+        LIMIT CAST($4 AS integer)
+        """;
+
+    /// <summary>The spinlocks with the most collisions in the window, for the default selection. $1 server_id, $2/$3 window (naive UTC), $4 how many to return.</summary>
+    public const string TopSpinlocks = """
+        SELECT
+            spinlock_name
+        FROM v_spinlock_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        GROUP BY spinlock_name
+        ORDER BY SUM(delta_collisions) DESC, spinlock_name
+        LIMIT CAST($4 AS integer)
+        """;
+
+    /// <summary>The collectors with the longest successful run in the window, for the default selection. $1 server_id, $2/$3 window (naive UTC), $4 how many to return.</summary>
+    public const string TopCollectors = """
+        SELECT
+            collector_name
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   status = 'SUCCESS'
+        AND   duration_ms IS NOT NULL
+        GROUP BY collector_name
+        ORDER BY MAX(duration_ms) DESC, collector_name
+        LIMIT CAST($4 AS integer)
+        """;
+
+    /// <summary>Whether the server has EVER recorded a latch-stats sample. $1 server_id.</summary>
+    public const string HasAnyLatch = """
+        SELECT 1
+        FROM v_latch_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Whether the server has EVER recorded a spinlock-stats sample. $1 server_id.</summary>
+    public const string HasAnySpinlock = """
+        SELECT 1
+        FROM v_spinlock_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Whether the server has EVER recorded a session-summary sample. $1 server_id.</summary>
+    public const string HasAnySessionSummary = """
+        SELECT 1
+        FROM v_session_summary_stats
+        WHERE server_id = $1
+        LIMIT 1
+        """;
+
+    /// <summary>Whether the server has EVER logged a collector run. $1 server_id.</summary>
+    public const string HasAnyCollectionLog = """
+        SELECT 1
+        FROM v_collection_log
+        WHERE server_id = $1
+        LIMIT 1
+        """;
 }
