@@ -2162,6 +2162,16 @@ public static class DarlingCliCommands
             storeNow.Roles is null ? null : string.Join(", ", storeNow.Roles), storeNow.DegradeReason));
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "MCP  ", mcpNowExposed, config.Mcp.Network?.Listen, config.Mcp.Network?.AllowFrom, null, mcpNowDegrade));
+
+        /* #5288: the MCP twin of the dashboard's TLS line below, printed directly under the MCP line it
+           belongs to, with the same rule: only when exposed, because TLS means nothing on a loopback-only
+           endpoint. Both lines come from DescribeExposureTls, so the two cannot drift. */
+        if (mcpNowExposed)
+        {
+            output.WriteLine(DescribeExposureTls(
+                config.Mcp.Network?.Tls, "mcp", "MCP server", "the bearer token and every tool result cross the segment in the clear"));
+        }
+
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "Web  ", webNowExposed, config.Web.Network?.Listen, config.Web.Network?.AllowFrom, null, webNowDegrade));
 
@@ -2172,24 +2182,8 @@ public static class DarlingCliCommands
            (web.network.tls is file-defined and restart-only, like the rest of the block); it reports it. */
         if (webNowExposed)
         {
-            var tls = DarlingWebTls.Describe(config.Web.Network?.Tls);
-            output.WriteLine(tls.Shape switch
-            {
-                DarlingWebTls.TlsShape.NotConfigured =>
-                    "         TLS: off — the access token and its session cookie cross the segment in the clear. "
-                    + "Set web.network.tls to serve HTTPS.",
-                DarlingWebTls.TlsShape.Invalid =>
-                    $"         TLS: MISCONFIGURED — {tls.Problem} The dashboard will bind loopback-only.",
-                /* The warning rides along: this verb is the one an operator runs to see what is open, and a
-                   stale PKCS#12 password beside a working PEM pair is exactly the "I thought the bundle was
-                   being served" state they came here to resolve. The service logs it at every start; nobody
-                   reading this summary should have to go find that line. */
-                DarlingWebTls.TlsShape.Pem =>
-                    $"         TLS: on (PEM pair, {config.Web.Network!.Tls!.CertPath})."
-                    + (tls.Warning is null ? string.Empty : $" NOTE: {tls.Warning}"),
-                _ => $"         TLS: on (PKCS#12, {config.Web.Network!.Tls!.PfxPath})."
-                     + (tls.Warning is null ? string.Empty : $" NOTE: {tls.Warning}"),
-            });
+            output.WriteLine(DescribeExposureTls(
+                config.Web.Network?.Tls, "web", "dashboard", "the access token and its session cookie cross the segment in the clear"));
         }
 
         output.WriteLine($"  Service: {await DescribeServiceStateAsync(cancellationToken)}");
@@ -2417,7 +2411,8 @@ public static class DarlingCliCommands
             output,
             store is not null, postgres.Port, store?.AllowFrom,
             mcp is not null, config.Mcp.Port, mcp?.AllowFrom, config.Mcp.Enabled,
-            web is not null, config.Web.Port, web?.AllowFrom, config.Web.Enabled, web?.Listen);
+            web is not null, config.Web.Port, web?.AllowFrom, config.Web.Enabled, web?.Listen,
+            reparsed.Web.Network?.Tls);
 
         await OfferRestartAsync(input, output, error, cancellationToken);
         return 0;
@@ -2947,7 +2942,7 @@ public static class DarlingCliCommands
         TextWriter output,
         bool storeConfigured, int storePort, string? storeCidr,
         bool mcpConfigured, int mcpPort, string? mcpCidr, bool mcpEnabled,
-        bool webConfigured, int webPort, string? webCidr, bool webEnabled, string? webListen)
+        bool webConfigured, int webPort, string? webCidr, bool webEnabled, string? webListen, WebTlsConfig? webTls)
     {
         output.WriteLine();
         output.WriteLine("Next steps:");
@@ -2993,17 +2988,93 @@ public static class DarlingCliCommands
             output.WriteLine("   --configure-firewall ELEVATED instead and it resolves the effective port and moves the rule.)");
 
             /* The one login step a human does differently for Web: a remote browser presents the access token
-               once via ?token= and is 302'd back with a session cookie. A 0.0.0.0 bind has no single address
-               to print, so fall back to a placeholder. */
-            var webHost = webListen == "0.0.0.0" ? "<a-LAN-IP-of-this-machine>" : webListen;
-            output.WriteLine("  Remote browser login (after the service restarts):");
-            output.WriteLine($"    http://{webHost}:{webPort}/?token=<your-access-token>");
-            output.WriteLine("  (the token is exchanged for a session cookie and stripped from the URL; loopback needs no token)");
+               once via ?token= and is 302'd back with a session cookie. BuildWebLoginHint decides the scheme
+               and the host, so a test can pin them. */
+            foreach (var line in BuildWebLoginHint(webListen, webPort, webTls))
+            {
+                output.WriteLine(line);
+            }
             /* #2389: the MCP note's twin — unconditional, and about which plane decides. */
             output.WriteLine("  NOTE: the network block you just wrote is FILE-authoritative and applies on restart, but whether");
             output.WriteLine("        the dashboard runs at all is config.config_service.web_enabled — darling.json's web.enabled is");
             output.WriteLine($"        only the first-run seed, and it currently reads {(webEnabled ? "true" : "false")}. Enable with --enable-web or Settings.");
         }
+    }
+
+    /// <summary>
+    /// The TLS line the <c>--configure-network</c> exposure summary prints under an EXPOSED endpoint. #2562 wrote
+    /// it for the dashboard and #5288 shares it with MCP, so the two cannot drift. <paramref name="section"/> is
+    /// <c>"web"</c> or <c>"mcp"</c>: it names the setting (<c>{section}.network.tls</c>) in every branch, through
+    /// <see cref="DarlingWebTls.Describe"/>, which is also the decision the running service makes.
+    /// <paramref name="surface"/> names what binds loopback-only when the block is MISCONFIGURED, and
+    /// <paramref name="cleartextRisk"/> says what crosses the segment when there is no block. With the dashboard's
+    /// words the text is byte-for-byte what it was before MCP had a line. The PKCS#12 / PEM warning rides along
+    /// because this verb is the one an operator runs to see what is open, and a stale password beside a working
+    /// PEM pair is the "I thought the bundle was being served" state they came here to resolve. Pure.
+    /// </summary>
+    internal static string DescribeExposureTls(WebTlsConfig? tls, string section, string surface, string cleartextRisk)
+    {
+        var plan = DarlingWebTls.Describe(tls, section);
+        return plan.Shape switch
+        {
+            DarlingWebTls.TlsShape.NotConfigured =>
+                $"         TLS: off — {cleartextRisk}. Set {section}.network.tls to serve HTTPS.",
+            DarlingWebTls.TlsShape.Invalid =>
+                $"         TLS: MISCONFIGURED — {plan.Problem} The {surface} will bind loopback-only.",
+            DarlingWebTls.TlsShape.Pem =>
+                $"         TLS: on (PEM pair, {tls!.CertPath})."
+                + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
+            _ => $"         TLS: on (PKCS#12, {tls!.PfxPath})."
+                 + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
+        };
+    }
+
+    /// <summary>
+    /// The browser-login hint the wizard prints after it writes a web block: the URL a remote browser opens once
+    /// with the token, then one line on what becomes of the token. Pure, so the three facts it states can be pinned.
+    ///
+    /// <list type="bullet">
+    /// <item><b>The scheme follows the certificate (#5288).</b> It is <c>https</c> when <c>web.network.tls</c> names a
+    /// PKCS#12 bundle or a PEM pair, because the network listener then speaks TLS only and an <c>http://</c> URL
+    /// fails the handshake. Anything else, a MISCONFIGURED block included, keeps <c>http</c>: a refused block
+    /// leaves the dashboard loopback-only, so there is no remote URL to get right.</item>
+    /// <item><b>A wildcard listen has no single address to print.</b> <c>0.0.0.0</c> and <c>::</c> both print the
+    /// placeholder. Any other IPv6 literal is bracketed, because <c>http://2001:db8::5:5153/</c> is not a URL.</item>
+    /// <item><b>Loopback presents the token too.</b> While the dashboard is exposed a request from the box itself
+    /// still needs the token or the cookie (#1649), so the line no longer says loopback needs no token.</item>
+    /// </list>
+    /// </summary>
+    internal static IReadOnlyList<string> BuildWebLoginHint(string? listen, int port, WebTlsConfig? tls)
+    {
+        var scheme = DarlingWebTls.Describe(tls).Shape is DarlingWebTls.TlsShape.Pfx or DarlingWebTls.TlsShape.Pem
+            ? "https"
+            : "http";
+
+        return
+        [
+            "  Remote browser login (after the service restarts):",
+            $"    {scheme}://{WebLoginHost(listen)}:{port}/?token=<your-access-token>",
+            "  (the token is exchanged for a session cookie and stripped from the URL; loopback presents the token too)",
+        ];
+    }
+
+    /// <summary>The host part of the login URL: a placeholder for a wildcard listen, brackets around an IPv6 literal, the text as given otherwise.</summary>
+    private static string WebLoginHost(string? listen)
+    {
+        if (string.IsNullOrWhiteSpace(listen) || !IPAddress.TryParse(listen.Trim(), out var address))
+        {
+            return listen ?? string.Empty;
+        }
+
+        if (address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any))
+        {
+            return "<a-LAN-IP-of-this-machine>";
+        }
+
+        var text = listen.Trim();
+        return address.AddressFamily == AddressFamily.InterNetworkV6 && !text.StartsWith('[')
+            ? $"[{text}]"
+            : listen;
     }
 
     /// <summary>

@@ -514,6 +514,65 @@ public sealed class DarlingNetworkConfigEditorTests
         Assert.Equal(Host.McpBindMode.NetworkAndLoopback, Host.ResolveMcpBind(DarlingConfig.Parse(edited).Mcp, managed: true).Mode);
     }
 
+    /// <summary>
+    /// #5288: <c>mcp.network.tls</c> and <c>mcp.network.hostName</c> are not keys the wizard owns, so the #4743 rule
+    /// keeps them when the wizard replaces the block, byte for byte with their comments, and the "Kept ..." line
+    /// names both. No change to <see cref="Editor.McpNetworkOwnedKeys"/> was needed: this pins that none is.
+    /// </summary>
+    [Fact]
+    public void UpsertMcpBlock_KeepsTlsAndHostName_AndSaysSo()
+    {
+        const string json = """
+            {
+              "postgres": { "managed": true },
+              "mcp": {
+                "network": {
+                  "listen": "192.168.1.205",  // old bind
+                  "allowFrom": "192.168.1.0/24",
+                  "encryptedToken": "OLD-BLOB",
+                  "tls": {
+                    "certPath": "C:\\certs\\mcp.crt",
+                    "keyPath": "C:\\certs\\mcp.key"
+                  },  // HTTPS for MCP
+                  "hostName": "darling.example.test"  // the name on the certificate
+                }
+              },
+              "servers": [ { "host": "S" } ]
+            }
+            """;
+
+        var edited = Editor.UpsertNetworkBlock(json, "mcp",
+            Editor.BuildMcpNetworkBlock("10.0.0.5", " 10.8.0.0/16 , 192.168.1.5/24", encryptedToken: "NEW-BLOB", plaintextToken: null),
+            Editor.McpNetworkOwnedKeys, out var kept);
+
+        AssertStrictJson(edited);
+        var config = DarlingConfig.Parse(edited);
+
+        /* The prompted keys took the new answers (a list lands as ONE canonical string), and nothing old survives. */
+        Assert.Equal("10.0.0.5", config.Mcp.Network!.Listen);
+        Assert.Equal("10.8.0.0/16,192.168.1.0/24", config.Mcp.Network!.AllowFrom);
+        Assert.Equal("NEW-BLOB", config.Mcp.Network!.EncryptedToken);
+        Assert.DoesNotContain("OLD-BLOB", edited, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.168.1.205", edited, StringComparison.Ordinal);
+
+        /* tls and hostName came through byte for byte, comments included, and still mean what they meant. */
+        foreach (var key in new[] { "tls", "hostName" })
+        {
+            Assert.Equal(NetworkMemberText(json, "mcp", key), NetworkMemberText(edited, "mcp", key));
+        }
+
+        Assert.Contains("},  // HTTPS for MCP", edited, StringComparison.Ordinal);
+        Assert.Contains("\"hostName\": \"darling.example.test\"  // the name on the certificate", edited, StringComparison.Ordinal);
+        Assert.Equal(@"C:\certs\mcp.crt", config.Mcp.Network!.Tls!.CertPath);
+        Assert.Equal("darling.example.test", config.Mcp.Network!.HostName);
+
+        /* ... and the wizard SAYS so, naming both, in the order they sat in the block. */
+        Assert.Equal(["tls", "hostName"], kept);
+        Assert.Equal(
+            "Kept mcp.network.tls and mcp.network.hostName from the existing darling.json.",
+            Editor.FormatKeptLine(kept.Select(key => $"mcp.network.{key}").ToList()));
+    }
+
     [Fact]
     public void UpsertStore_OverLiveBlock_ReplacesItsRole_KeepsAnUnknownKey()
     {

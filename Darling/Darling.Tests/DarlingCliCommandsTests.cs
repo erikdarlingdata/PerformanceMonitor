@@ -71,6 +71,126 @@ public sealed class DarlingCliCommandsTests
         Assert.Contains("CIDR list", refused.Note, StringComparison.Ordinal);
     }
 
+    /* ---- #5288 (F9): the web login hint the wizard prints after it writes a web block ---- */
+
+    [Theory]
+    [InlineData("pfx")]
+    [InlineData("pem")]
+    public void WebLoginHint_TlsSet_PrintsHttps(string form)
+    {
+        var tls = form == "pfx"
+            ? new WebTlsConfig { PfxPath = @"C:\certs\dash.pfx" }
+            : new WebTlsConfig { CertPath = @"C:\certs\dash.crt", KeyPath = @"C:\certs\dash.key" };
+
+        var hint = DarlingCliCommands.BuildWebLoginHint("192.168.1.205", 5153, tls);
+
+        /* The network listener speaks TLS only once a certificate is set, so an http:// URL fails the handshake. */
+        Assert.Equal("    https://192.168.1.205:5153/?token=<your-access-token>", hint[1]);
+        Assert.DoesNotContain(hint, line => line.Contains("http://", StringComparison.Ordinal));
+
+        /* A block the service REFUSES (both forms) leaves the dashboard loopback-only: no remote URL, so http stays. */
+        var refused = DarlingCliCommands.BuildWebLoginHint(
+            "192.168.1.205", 5153, new WebTlsConfig { PfxPath = "a.pfx", CertPath = "a.crt", KeyPath = "a.key" });
+        Assert.Equal("    http://192.168.1.205:5153/?token=<your-access-token>", refused[1]);
+    }
+
+    [Fact]
+    public void WebLoginHint_NoTls_ByteIdentical()
+    {
+        /* Without a certificate the header and the URL line are exactly what the wizard printed before #5288. */
+        foreach (var tls in new WebTlsConfig?[] { null, new WebTlsConfig() })
+        {
+            var hint = DarlingCliCommands.BuildWebLoginHint("192.168.1.205", 5153, tls);
+            Assert.Equal(3, hint.Count);
+            Assert.Equal("  Remote browser login (after the service restarts):", hint[0]);
+            Assert.Equal("    http://192.168.1.205:5153/?token=<your-access-token>", hint[1]);
+        }
+
+        Assert.Equal(
+            "    http://<a-LAN-IP-of-this-machine>:5153/?token=<your-access-token>",
+            DarlingCliCommands.BuildWebLoginHint("0.0.0.0", 5153, null)[1]);
+
+        /* The one line that changed (F9): loopback presents the token too (#1649), so it no longer says it needs none. */
+        var note = DarlingCliCommands.BuildWebLoginHint("192.168.1.205", 5153, null)[2];
+        Assert.Contains("loopback presents the token too", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs no token", note, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("2001:db8::5", "    http://[2001:db8::5]:5153/?token=<your-access-token>")]
+    [InlineData("[2001:db8::5]", "    http://[2001:db8::5]:5153/?token=<your-access-token>")]
+    [InlineData("::", "    http://<a-LAN-IP-of-this-machine>:5153/?token=<your-access-token>")]
+    [InlineData("0.0.0.0", "    http://<a-LAN-IP-of-this-machine>:5153/?token=<your-access-token>")]
+    public void WebLoginHint_Ipv6Listen_IsBracketed(string listen, string expectedUrlLine)
+    {
+        /* http://2001:db8::5:5153/ is not a URL, and a :: listen printed http://:::5153/ before this. */
+        Assert.Equal(expectedUrlLine, DarlingCliCommands.BuildWebLoginHint(listen, 5153, null)[1]);
+
+        /* TLS only changes the scheme. */
+        Assert.Equal(
+            expectedUrlLine.Replace("http://", "https://", StringComparison.Ordinal),
+            DarlingCliCommands.BuildWebLoginHint(listen, 5153, new WebTlsConfig { PfxPath = "a.pfx" })[1]);
+    }
+
+    /* ---- #5288: the TLS line the exposure summary prints, shared by MCP and web ---- */
+
+    private const string McpRisk = "the bearer token and every tool result cross the segment in the clear";
+    private const string WebRisk = "the access token and its session cookie cross the segment in the clear";
+
+    [Fact]
+    public void ExposureSummary_McpTlsLine_NotConfigured_SaysOff_AndNamesTheMcpSetting()
+    {
+        Assert.Equal(
+            "         TLS: off — the bearer token and every tool result cross the segment in the clear. Set mcp.network.tls to serve HTTPS.",
+            DarlingCliCommands.DescribeExposureTls(null, "mcp", "MCP server", McpRisk));
+        Assert.Equal(
+            DarlingCliCommands.DescribeExposureTls(null, "mcp", "MCP server", McpRisk),
+            DarlingCliCommands.DescribeExposureTls(new McpNetworkConfig().Tls, "mcp", "MCP server", McpRisk));
+    }
+
+    [Fact]
+    public void ExposureSummary_McpTlsLine_Invalid_NamesTheProblem_AndLoopbackOnly()
+    {
+        var both = new WebTlsConfig { PfxPath = "a.pfx", CertPath = "a.crt", KeyPath = "a.key" };
+        var line = DarlingCliCommands.DescribeExposureTls(both, "mcp", "MCP server", McpRisk);
+
+        Assert.StartsWith("         TLS: MISCONFIGURED — mcp.network.tls names BOTH", line, StringComparison.Ordinal);
+        Assert.EndsWith(" The MCP server will bind loopback-only.", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("web.network.tls", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExposureSummary_McpTlsLine_Pfx_And_Pem_NameTheFile_AndCarryTheWarning()
+    {
+        Assert.Equal(
+            @"         TLS: on (PKCS#12, C:\certs\mcp.pfx).",
+            DarlingCliCommands.DescribeExposureTls(new WebTlsConfig { PfxPath = @"C:\certs\mcp.pfx" }, "mcp", "MCP server", McpRisk));
+        Assert.Equal(
+            @"         TLS: on (PEM pair, C:\certs\mcp.crt).",
+            DarlingCliCommands.DescribeExposureTls(
+                new WebTlsConfig { CertPath = @"C:\certs\mcp.crt", KeyPath = @"C:\certs\mcp.key" }, "mcp", "MCP server", McpRisk));
+
+        /* A stale PKCS#12 password beside a working PEM pair: the service logs it at every start, and so does this line. */
+        var stale = DarlingCliCommands.DescribeExposureTls(
+            new WebTlsConfig { CertPath = "c.crt", KeyPath = "c.key", PfxPassword = "x" }, "mcp", "MCP server", McpRisk);
+        Assert.Contains(" NOTE: mcp.network.tls sets a PKCS#12 password alongside a PEM pair", stale, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExposureSummary_WebTlsLine_StaysByteIdentical_AfterTheSharing()
+    {
+        Assert.Equal(
+            "         TLS: off — the access token and its session cookie cross the segment in the clear. Set web.network.tls to serve HTTPS.",
+            DarlingCliCommands.DescribeExposureTls(null, "web", "dashboard", WebRisk));
+        Assert.Equal(
+            @"         TLS: on (PKCS#12, C:\certs\dash.pfx).",
+            DarlingCliCommands.DescribeExposureTls(new WebTlsConfig { PfxPath = @"C:\certs\dash.pfx" }, "web", "dashboard", WebRisk));
+        Assert.EndsWith(
+            " The dashboard will bind loopback-only.",
+            DarlingCliCommands.DescribeExposureTls(new WebTlsConfig { CertPath = "only.crt" }, "web", "dashboard", WebRisk),
+            StringComparison.Ordinal);
+    }
+
     [Fact]
     public void FormatProbeLine_Success_ShowsVersionEditionAndMsdb()
     {
@@ -1400,6 +1520,55 @@ public sealed class DarlingConfigureNetworkTests
                 DarlingHostBinding.BindMode.LoopbackOnly,
                 WebHost.ResolveWebBind(config.Web, managed: true).Mode);
             Assert.NotEmpty(Directory.GetFiles(root.FullName, "darling.json.bak-*"));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #5288: the wizard's exposure summary prints each endpoint's TLS line directly under its own surface line, and
+    /// only for an exposed one. The pure tests pin the words; this one pins that the wizard calls them, in that
+    /// order, with the arguments the endpoint needs (a correct builder nothing calls is a defect we have had).
+    /// </summary>
+    [Fact]
+    public async Task ExposureSummary_McpTlsLine_PrintsUnderTheMcpLine_BeforeTheWebLine()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard queries the Windows service.");
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-tlsline-");
+        try
+        {
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, """
+                {
+                  "postgres": { "managed": true },
+                  "mcp": {
+                    "network": {
+                      "listen": "192.168.1.205", "allowFrom": "192.168.1.0/24", "token": "mcp-secret",
+                      "tls": { "pfxPath": "C:\\certs\\mcp.pfx" }
+                    }
+                  },
+                  "web": {
+                    "network": { "listen": "192.168.1.205", "allowFrom": "192.168.1.0/24", "token": "web-secret" }
+                  },
+                  "servers": [ { "host": "S" } ]
+                }
+                """);
+
+            var output = new StringWriter();
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(
+                configPath, Script("q"), output, new StringWriter(), CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            var text = output.ToString().Replace("\r\n", "\n", StringComparison.Ordinal);
+            Assert.Contains(
+                "  MCP  : EXPOSED — listen 192.168.1.205, allowFrom 192.168.1.0/24\n"
+                + "         TLS: on (PKCS#12, C:\\certs\\mcp.pfx).\n"
+                + "  Web  : EXPOSED — listen 192.168.1.205, allowFrom 192.168.1.0/24\n"
+                + "         TLS: off — the access token and its session cookie cross the segment in the clear. Set web.network.tls to serve HTTPS.\n",
+                text, StringComparison.Ordinal);
         }
         finally
         {

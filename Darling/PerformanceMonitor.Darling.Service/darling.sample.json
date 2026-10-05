@@ -351,9 +351,12 @@
   // (any missing precondition — token / valid allowFrom / managed mode — keeps it loopback-only).
   // THREAT MODEL: the token gates the whole read surface AND analyze_server, which opens LIVE outbound
   // connections to your monitored SQL Servers — so this is a trusted-LAN opt-in, NEVER internet-exposed.
-  // There is deliberately NO TLS on MCP (a self-signed cert breaks real MCP clients), so the token
-  // travels cleartext on-segment: the MITM control is a TLS REVERSE PROXY in front of the endpoint
-  // (the in-app CIDR only bounds WHO can route to it, not the wire).
+  // TLS is OPT-IN via the "tls" block below (#5288) and applies to the network listener only. WITHOUT it the
+  // token travels cleartext on-segment and every exposed start warns about exactly that: the in-app CIDR only
+  // bounds WHO can route to the port, never what an on-path attacker reads off the wire. The product consumes a
+  // certificate, it does not issue one: no ACME, and no self-signed fallback. A missing, unreadable, ambiguous or
+  // EXPIRED certificate keeps MCP loopback-only rather than quietly serving the LAN over HTTP. A TLS REVERSE
+  // PROXY in front of the endpoint remains a perfectly good alternative.
   // "enabled"/"port" here are the SEED; after first start they live in the control plane and the
   // Viewer's Settings toggles them LIVE (the service starts/stops/rebinds the endpoint within
   // seconds - no restart). The "network" exposure block below stays file-defined and restart-only
@@ -366,7 +369,33 @@
     // "network": {
     //   "listen": "192.168.1.205",                     // specific bind IP preferred; "0.0.0.0" = all interfaces.
     //   "allowFrom": "192.168.1.0/24",                 // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).
-    //   "encryptedToken": "<output of --encrypt-password>"  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
+    //                                                  // One CIDR, or several separated by commas: "10.8.0.0/16,192.168.1.0/24".
+    //                                                  // Every entry in CIDR form (/32 for one address) and of the listen address
+    //                                                  // family (a "::" listen takes IPv6 entries only). One bad entry keeps MCP
+    //                                                  // loopback-only. A JSON array also loads, but only on this version or later:
+    //                                                  // an older service refuses to start on one, so prefer the comma string.
+    //   "encryptedToken": "<output of --encrypt-password>",  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
+    //
+    //   // OPTIONAL: the one DNS name clients use to reach MCP (no scheme, port or wildcard). The anti-DNS-rebind
+    //   // Host guard admits "listen", localhost and exactly this name, and no others. Set it to the name on
+    //   // the certificate below, so a client that connects by name is not answered with a 400.
+    //   "hostName": "darling.example.com",
+    //
+    //   // OPTIONAL TLS (#5288) -- omit the whole block for plain HTTP. Give ONE form, never both. It is the MCP
+    //   // twin of web.network.tls below and takes the same settings. The certificate must name the address or
+    //   // the hostName clients actually use; issue it from your internal CA. Renew it: an EXPIRED certificate
+    //   // keeps MCP loopback-only (by design -- it will not fall back to HTTP), the service logs a warning for
+    //   // the last 30 days before that, and the "MCP TLS Certificate Expiring" self-alert fires too.
+    //   // With a specific "listen" the network listener is HTTPS and the two loopback listeners stay plain HTTP;
+    //   // with "0.0.0.0" or "::" the one listener is HTTPS for everyone, loopback included.
+    //   "tls": {
+    //     "pfxPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\mcp.pfx",
+    //     "encryptedPfxPassword": "<output of --encrypt-password>"  // or "pfxPassword" (file:/env: reference, or plaintext for dev)
+    //                                                               // omit both if the bundle has no password
+    //     // ... OR a PEM pair instead of the two lines above:
+    //     // "certPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\mcp.crt",
+    //     // "keyPath":  "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\mcp.key"
+    //   }
     // }
   },
 
@@ -393,7 +422,7 @@
   // buy encryption without authentication and train you to click through the warning). An internal CA is the
   // normal answer here. A missing, unreadable, ambiguous or EXPIRED certificate keeps the dashboard
   // loopback-only rather than quietly serving the LAN over HTTP. A TLS reverse proxy in front of the port
-  // remains a perfectly good alternative -- it is what MCP still relies on. NEVER internet-exposed either way.
+  // remains a perfectly good alternative. MCP has its own "tls" block (see "mcp" above). NEVER internet-exposed either way.
   // "enabled"/"port" here are the SEED; after first start they live in the control plane and the Viewer's
   // Settings toggles them LIVE (the service starts/stops/rebinds the endpoint within seconds - no restart).
   // The "network" exposure block below stays file-defined and restart-only; the Viewer toggle still stops an
@@ -426,6 +455,7 @@
     // "network": {
     //   "listen": "192.168.1.205",                     // specific bind IP preferred; "0.0.0.0" = all interfaces.
     //   "allowFrom": "192.168.1.0/24",                 // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).
+    //                                                  // One CIDR, or several separated by commas, exactly as for mcp.network.allowFrom.
     //   "encryptedToken": "<output of --encrypt-password>",  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
     //
     //   // OPTIONAL TLS (#2562) -- omit the whole block for plain HTTP. Give ONE form, never both.

@@ -831,9 +831,11 @@ Two gates apply, in this order: the **bearer token**, checked constant-time with
 then the **in-app CIDR check** on the remote address (loopback always allowed). A remote client with a bad or
 missing token gets **401**; one from outside `allowFrom` is refused before any response.
 
-**There is no TLS on MCP** — a self-signed certificate breaks real MCP clients, so the bearer token travels in
-clear on the segment. The MITM control is a TLS-terminating reverse proxy in front of the port. **Never expose
-this to the internet.**
+**TLS on MCP is opt-in, and without it the bearer token travels in clear on the segment.** Point
+`mcp.network.tls` at a PKCS#12 bundle or a PEM pair (`Darling/README.md` has the shape) and the LAN listener
+serves HTTPS only, or put a TLS-terminating reverse proxy in front of the port. Set `mcp.network.hostName` when
+clients connect by a DNS name. A missing, unreadable or expired certificate keeps MCP loopback-only rather than
+falling back to cleartext. **Never expose this to the internet.**
 
 ### 4.4 When it says enabled and still will not connect
 
@@ -870,7 +872,7 @@ If the block itself is bad the service *is* loud, and it fails closed to loopbac
 ```
 MCP network exposure requested (mcp.network.listen is non-loopback) but no bearer token is set — refusing to expose; binding loopback-only. Set mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token.
 MCP network token could not be decrypted (...) — refusing to expose; binding loopback-only.
-MCP network exposure requested but mcp.network.allowFrom '...' is not a valid CIDR or its address family does not match mcp.network.listen — refusing to expose; binding loopback-only.
+MCP network exposure requested but mcp.network.allowFrom '...' is not a valid CIDR list or an entry's address family does not match mcp.network.listen — refusing to expose; binding loopback-only. Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas or as a JSON array (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address) and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked (192.168.1.5/24 means 192.168.1.0/24).
 mcp.network.* is set but postgres.managed = false — MCP network exposure is managed-mode (or container) only and is ignored ...
 ```
 
@@ -938,9 +940,9 @@ Every one of these has cost somebody real time.
 
 These are known, current, and not bugs:
 
-- **No TLS on the MCP endpoint**, and none on the web endpoint unless you configure `web.network.tls`. The
-  bearer token travels in clear on the segment in both cases otherwise; the named control is a
-  TLS-terminating reverse proxy. Both are trusted-LAN opt-ins.
+- **TLS is opt-in on the MCP and the web endpoint** (`mcp.network.tls`, `web.network.tls`). Without it the
+  token travels in clear on the segment; the other control is a TLS-terminating reverse proxy. Both are
+  trusted-LAN opt-ins.
 - **No client-side secret store for the viewer.** A remote seat's `darling.json` holds the store role password
   in cleartext; ACL it. Fine for the read-only `viewer` role, worth thinking about for `admin`.
 - **The web dashboard has no plan analysis and no live-server actions** — that is the WPF viewer's job — and
