@@ -466,7 +466,7 @@ function perfmonTrendLines(points) {
 export function topQueriesPanel(server, ctx) {
   const { panel, body } = panelShell("Top Queries by CPU", ctx.label + ", with a per-collection trend for the query you pick");
   (async () => {
-    const res = await readToolWithinKeptHistory("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20 });
+    const res = await readToolWithinKeptHistory("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20, detail: "full" });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
@@ -475,6 +475,8 @@ export function topQueriesPanel(server, ctx) {
       VIZ.table(res.data, {
         rowsKey: "queries",
         columns: TOP_QUERY_COLUMNS,
+        groups: TOP_QUERY_GROUPS.groups,
+        defaultGroups: TOP_QUERY_GROUPS.defaultGroups,
         emptyText:
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) " +
           "before it reports non-zero values.",
@@ -922,13 +924,15 @@ export const SERVER_TABS = [
       table(
         "Top Queries by CPU",
         "get_top_queries_by_cpu",
-        { server, hours: ctx.hours, top: 20 },
+        { server, hours: ctx.hours, top: 20, detail: "full" },
         "queries",
         TOP_QUERY_COLUMNS,
         ctx.label,
         "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
         2,
-        "truncation_note"
+        "truncation_note",
+        null,
+        TOP_QUERY_GROUPS
       ),
       table(
         "Top Procedures by CPU",
@@ -2916,21 +2920,63 @@ const SPINLOCK_COLUMNS = [
 ];
 
 /* #1949 ordering, which every query grid in both apps follows: the time/identity anchor, then the QUERY TEXT,
-   then the metrics. Text pushed behind the metrics is text nobody scrolls to. */
+   then the metrics. Text pushed behind the metrics is text nobody scrolls to.
+   The desktop grid's columns in its order, except that Query and Module sit right of Database (the rule above)
+   rather than behind the two timestamps. The ungrouped columns are the core set and always show; the rest follow the toggles in
+   TOP_QUERY_GROUPS, all off at first. Last Execution and Creation Time are the monitored server's own clock and
+   print as the read sends them; every grouped field is omitted by the read on the hourly tier and prints a dash. */
 const TOP_QUERY_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
-  { key: "host_object", label: "Host object" },
+  { key: "host_object", label: "Module" },
+  { key: "last_execution_time", label: "Last Execution", group: "Times" },
+  { key: "creation_time", label: "Creation Time", group: "Times" },
   { key: "execution_count", label: "Execs", format: "int" },
   { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
   { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
-  { key: "total_elapsed_ms", label: "Total Elapsed", format: "ms" },
-  { key: "avg_elapsed_ms", label: "Avg Elapsed", format: "ms" },
-  { key: "max_cpu_ms", label: "Max CPU", format: "ms" },
-  { key: "max_dop", label: "Max DOP", format: "int" },
-  { key: "total_spills", label: "Spills", format: "int" },
+  { key: "worker_time_per_second", label: "Peak CPU ms/s", format: "num1", group: "Times" },
+  { key: "plan_generation_num", label: "Plan Gen", format: "int", group: "Times" },
+  { key: "total_clr_ms", label: "Total CLR", format: "ms", group: "Times" },
+  { key: "total_elapsed_ms", label: "Total Duration", format: "ms" },
+  { key: "avg_elapsed_ms", label: "Avg Duration", format: "ms" },
+  { key: "total_logical_reads", label: "Total Reads", format: "int" },
+  { key: "avg_reads", label: "Avg Reads", format: "int" },
+  { key: "total_logical_writes", label: "Total Writes", format: "int", group: "I/O and rows" },
+  { key: "total_physical_reads", label: "Physical Reads", format: "int", group: "I/O and rows" },
+  { key: "total_rows", label: "Total Rows", format: "int", group: "I/O and rows" },
+  { key: "total_spills", label: "Total Spills", format: "int" },
+  { key: "min_cpu_ms", label: "Min CPU", format: "ms", group: "Extremes" },
+  { key: "max_cpu_ms", label: "Max CPU", format: "ms", group: "Extremes" },
+  { key: "min_elapsed_ms", label: "Min Duration", format: "ms", group: "Extremes" },
+  { key: "max_elapsed_ms", label: "Max Duration", format: "ms", group: "Extremes" },
+  { key: "min_physical_reads", label: "Min Phys Reads", format: "int", group: "Extremes" },
+  { key: "max_physical_reads", label: "Max Phys Reads", format: "int", group: "Extremes" },
+  { key: "min_rows", label: "Min Rows", format: "int", group: "Extremes" },
+  { key: "max_rows", label: "Max Rows", format: "int", group: "Extremes" },
+  { key: "min_grant_kb", label: "Min Grant KB", format: "int", group: "Memory grants" },
+  { key: "max_grant_kb", label: "Max Grant KB", format: "int", group: "Memory grants" },
+  { key: "min_used_grant_kb", label: "Min Used Grant KB", format: "int", group: "Memory grants" },
+  { key: "max_used_grant_kb", label: "Max Used Grant KB", format: "int", group: "Memory grants" },
+  { key: "min_ideal_grant_kb", label: "Min Ideal Grant KB", format: "int", group: "Memory grants" },
+  { key: "max_ideal_grant_kb", label: "Max Ideal Grant KB", format: "int", group: "Memory grants" },
+  { key: "min_spills", label: "Min Spills", format: "int", group: "Extremes" },
+  { key: "max_spills", label: "Max Spills", format: "int", group: "Extremes" },
+  { key: "min_dop", label: "Min DOP", format: "int", group: "Parallelism" },
+  { key: "max_dop", label: "Max DOP", format: "int", group: "Parallelism" },
+  { key: "min_reserved_threads", label: "Min Rsvd Threads", format: "int", group: "Parallelism" },
+  { key: "max_reserved_threads", label: "Max Rsvd Threads", format: "int", group: "Parallelism" },
+  { key: "min_used_threads", label: "Min Used Threads", format: "int", group: "Parallelism" },
+  { key: "max_used_threads", label: "Max Used Threads", format: "int", group: "Parallelism" },
   { key: "query_hash", label: "Query Hash", mono: true },
+  { key: "query_plan_hash", label: "Plan Hash", group: "Hashes and handles", mono: true },
+  { key: "sql_handle", label: "SQL Handle", group: "Hashes and handles", mono: true },
+  { key: "plan_handle", label: "Plan Handle", group: "Hashes and handles", mono: true },
 ];
+
+const TOP_QUERY_GROUPS = {
+  groups: ["Times", "I/O and rows", "Extremes", "Memory grants", "Parallelism", "Hashes and handles"],
+  defaultGroups: [],
+};
 
 /* The per-collection snapshots get_query_trend returns, minus the two the chart already draws. Executions,
    DOP and the plan hash are here rather than on the chart because they are not milliseconds and one y-domain
