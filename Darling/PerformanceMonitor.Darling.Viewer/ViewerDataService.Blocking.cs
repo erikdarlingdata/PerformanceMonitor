@@ -302,6 +302,102 @@ public sealed partial class ViewerDataService
         return answers.Where(a => a is not null).Min();
     }
 
+    /// <summary>
+    /// Whether the XE blocked_process_reports source holds a report in the window: the same predicate the Blocking charts' reads
+    /// use for their <c>bpr</c> arm (event time in the window, the event-window floor on collection time, the database filter),
+    /// so true here means the charts draw from XE rows and not from the DMV fallback beside them.
+    /// </summary>
+    public const string BlockedProcessReportsInWindowSql = """
+        SELECT EXISTS (
+            SELECT 1
+            FROM v_blocked_process_reports
+            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $5
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        )
+        """;
+
+    /// <summary>Whether the XE blocked-process-report source has a report in the window for the optional database filter (see <see cref="BlockedProcessReportsInWindowSql"/>).</summary>
+    public async Task<bool> HasBlockedProcessReportsInWindowAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(BlockedProcessReportsInWindowSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        AddBlockingParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
+    }
+
+    /// <summary>
+    /// Where the Blocking charts' data starts for the window (#5098). The Trends, Stats and Overview-lane reads draw from the XE
+    /// table when it holds a report in the window and from the DMV snapshots only when it holds none, so when it does the XE
+    /// collector alone names the start (its first logged run, or its earliest report in the window if that is earlier): the DMV
+    /// collector's longer history is not what the chart shows. With no XE report in the window it is the grid's two-source probe
+    /// (<see cref="GetBlockedProcessReportsDataStartAsync"/>). A window that starts before the collection log's horizon falls back
+    /// to the XE table rule, since the log cannot prove a first run that far back. The existence check and the probe run one after
+    /// the other, so the caller's fan-out count is unchanged. A check or probe that throws throws here.
+    /// </summary>
+    public async Task<DateTime?> GetBlockingChartDataStartAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
+        /* A window no longer than the truncation slack can never get a note: no query runs for it (the probe it replaces answers null too). */
+        if (endUtc - startUtc <= DurationTrendRouting.TruncationSlack)
+            return null;
+
+        if (!await HasBlockedProcessReportsInWindowAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken))
+            return await GetBlockedProcessReportsDataStartAsync(serverId, startUtc, endUtc, cancellationToken);
+
+        /* The run log keeps CollectionLogRetentionDays, so a window that starts before its horizon cannot prove a first run: the log's
+           oldest run is its purge edge, not the collector's start, and a store that keeps the XE table longer would get a false notice.
+           There the old table rule answers, as the grid's probe does. */
+        if (startUtc < DarlingRetentionHorizons.CollectionLogHorizon(DateTime.UtcNow))
+            return await DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("blocked_process_reports"), serverId, startUtc, endUtc,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+        /* The XE collector's own start, not the table rule of DataWindowFloor.Source.ForCollectorTable or the run rule of ForCollectorRuns:
+           both answer the later of the retention edge and the server's registration, so a long-registered server reads covered however
+           late the collector began. The coverage here is the collector's first logged run, and an XE report carries its own event time,
+           which can come before it (the first collection stores history): the earlier of the two is where the charts' data starts. */
+        await using var command = _dataSource.CreateCommand(BlockingChartXeStartSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        AddBlockingParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
+        var answer = await command.ExecuteScalarAsync(cancellationToken);
+        return answer is DateTime start && start < endUtc ? start : null;
+    }
+
+    /// <summary>
+    /// Where the XE blocked-process-report data starts for one server: the earlier of the XE collector's first logged run
+    /// in the window (or the window's start when a run exists before it, which is covered) and the earliest XE report in the
+    /// window (the same predicate as <see cref="BlockedProcessReportsInWindowSql"/>).
+    /// $1 server, $2 window start, $3 window end, $4 database filter, $5 the event-window floor on collection time. Both run
+    /// reads are bounded, the first run in <c>[$2, $3]</c> and the newest run before $2, and ride
+    /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>.
+    /// </summary>
+    public const string BlockingChartXeStartSql = """
+        SELECT LEAST(
+            CASE WHEN EXISTS (SELECT 1
+                              FROM collect.collection_log AS p
+                              WHERE p.server_id = $1 AND p.collector_name = 'blocked_process_report' AND p.collection_time < $2
+                              ORDER BY p.collection_time DESC
+                              LIMIT 1)
+                 THEN $2::timestamp
+                 ELSE (SELECT c.collection_time
+                       FROM collect.collection_log AS c
+                       WHERE c.server_id = $1 AND c.collector_name = 'blocked_process_report'
+                       AND   c.collection_time >= $2 AND c.collection_time <= $3
+                       ORDER BY c.collection_time
+                       LIMIT 1)
+            END,
+            (SELECT MIN(b.event_time)
+             FROM v_blocked_process_reports AS b
+             WHERE b.server_id = $1 AND b.event_time >= $2 AND b.event_time <= $3
+             AND   b.collection_time >= $5
+             AND   ($4::text[] IS NULL OR b.database_name = ANY($4))))
+        """;
+
     /// <summary>Maps the full 37-column blocked-process-report read into the widened grid row.</summary>
     private async Task<List<ViewerBlockedProcessRow>> ReadBlockedProcessRowsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)

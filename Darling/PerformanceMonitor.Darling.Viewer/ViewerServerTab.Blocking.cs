@@ -144,7 +144,7 @@ public partial class ViewerServerTab
                 /* #4966: each chart has its own floor (wait_stats, the blocked-process-report sources, deadlocks), so each has its own probe
                    and banner. The probes start beside the reads and stay OUT of any join, so one that throws costs only its chart's note. */
                 var lockWaitStartTask = _dataService.GetLockWaitTrendDataStartAsync(_server.ServerId, startUtc, endUtc);
-                var blockingStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, startUtc, endUtc);
+                var blockingStartTask = _dataService.GetBlockingChartDataStartAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
                 var deadlockStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, startUtc, endUtc);
 
                 /* #5022: a join that throws skips the banner steps below, so the probes would go unawaited. Each call watches one probe and
@@ -187,7 +187,7 @@ public partial class ViewerServerTab
                 var deadlockSeverityTask = _dataService.GetDeadlockSeverityStatsAsync(_server.ServerId, startUtc, endUtc);
                 /* #4966: the blocking pair draws from the blocked-process-report sources and the deadlock pair from deadlocks, so each pair has its
                    own probe and banner. The probes stay OUT of any join: one that throws costs only its pair's note. */
-                var blockingStartTask = _dataService.GetBlockedProcessReportsDataStartAsync(_server.ServerId, startUtc, endUtc);
+                var blockingStartTask = _dataService.GetBlockingChartDataStartAsync(_server.ServerId, startUtc, endUtc);
                 var deadlockStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, startUtc, endUtc);
 
                 /* #5022: as in Trends, each call watches one probe and passes the join on. */
