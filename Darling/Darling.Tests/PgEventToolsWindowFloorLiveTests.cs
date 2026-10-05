@@ -23,8 +23,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #4966: where the data starts on Darling's two PostgreSQL event lists, <c>get_pg_deadlocks</c> and <c>get_pg_log_events</c>.
-/// Both are sparse, newest first and capped, and both window on the event's own time, so the notice is the earlier of the
-/// coverage floor and the oldest event shown, and a full page names its oldest row with no probe. Every instant is an offset
+/// Both are sparse, newest first and capped, and both window on the event's own time, so the notice is always coverage: the earlier of the
+/// coverage floor and the oldest event shown, whether or not the cap cut the page (the cap is reported by truncated). Every instant is an offset
 /// from one anchor minute, so the probe's purge edge never lands inside a window.
 /// </summary>
 public sealed class PgEventToolsWindowFloorLiveTests
@@ -202,43 +202,43 @@ VALUES ($1,$2,$3,$4,$5,'error','ERROR',$6,$7)",
     }
 
     [Fact]
-    public async Task AFullCappedPage_NamesItsOldestRowShown_WithNoProbe_AgainstDevPostgres()
+    public async Task AFullCappedPage_BesideAnEarlyCoverage_ReadsCovered_WhileTruncatedIsTrue_AgainstDevPostgres()
     {
         var ct = TestContext.Current.CancellationToken;
         await ForEachToolAsync("capped", async (connection, postgres, tool, name, end) =>
         {
-            /* Events at 10, 9 and 8 hours back; a page of 2 shows 8 and 9 hours back, so the answer starts 9 hours back. */
+            /* Events at 10, 9 and 8 hours back, a page of 2, and a server registered 30 days ago: the cap is reported by truncated,
+               and the notice is coverage, which reaches back past the window's start. */
             await SeedAsync(connection, tool, name, end.AddDays(-30), end.AddHours(-10), ct);
-
-            var probes = 0;
-            await WithProbeAsync(() => { probes++; throw new TimeoutException("the probe must not run"); }, async () =>
-            {
-                var root = Parse(await CallAsync(postgres, tool, name, 24, end, limit: 2));
-
-                Assert.Equal(0, probes);
-                Assert.True(root.GetProperty("truncated").GetBoolean(), tool.Name);
-                Assert.Equal(2, root.GetProperty(tool.ArrayKey).GetArrayLength());
-                Assert.True(root.GetProperty("window_truncated").GetBoolean(), tool.Name);
-                Assert.Equal(McpHelpers.FormatEffectiveStart(end.AddHours(-9)), root.GetProperty("effective_start").GetString());
-                Assert.Contains("page is full", root.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
-            });
-        });
-    }
-
-    [Fact]
-    public async Task ACappedPage_ReachingTheWindowStart_GivesNoNotice_AgainstDevPostgres()
-    {
-        var ct = TestContext.Current.CancellationToken;
-        await ForEachToolAsync("cappedstart", async (connection, postgres, tool, name, end) =>
-        {
-            /* The page's oldest row is 22h48m back, 72 minutes past the window's start: inside the 90-minute slack. */
-            await SeedAsync(connection, tool, name, end.AddDays(-30), end.AddHours(-23.8), ct);
 
             var root = Parse(await CallAsync(postgres, tool, name, 24, end, limit: 2));
 
             Assert.True(root.GetProperty("truncated").GetBoolean(), tool.Name);
+            Assert.Equal(2, root.GetProperty(tool.ArrayKey).GetArrayLength());
             Assert.False(root.GetProperty("window_truncated").GetBoolean(), tool.Name);
             Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+        });
+    }
+
+    [Fact]
+    public async Task ACappedPage_BesideALateCoverage_NamesTheEarlierOfTheCoverageAndTheOldestEventShown_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachToolAsync("cappedlate", async (connection, postgres, tool, name, end) =>
+        {
+            /* The page of 2 shows the events 8 and 9 hours back; coverage starts 6 hours back, later than both, so the answer starts
+               at the oldest event shown. */
+            await SeedAsync(connection, tool, name, end.AddDays(-30), end.AddHours(-10), ct);
+
+            await WithProbeAsync(() => Task.FromResult<DateTime?>(end.AddHours(-6)), async () =>
+            {
+                var root = Parse(await CallAsync(postgres, tool, name, 24, end, limit: 2));
+
+                Assert.True(root.GetProperty("truncated").GetBoolean(), tool.Name);
+                Assert.True(root.GetProperty("window_truncated").GetBoolean(), tool.Name);
+                Assert.Equal(McpHelpers.FormatEffectiveStart(end.AddHours(-9)), root.GetProperty("effective_start").GetString());
+                Assert.NotEqual(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+            });
         });
     }
 

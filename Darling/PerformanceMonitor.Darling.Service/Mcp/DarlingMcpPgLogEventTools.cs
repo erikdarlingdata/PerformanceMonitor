@@ -121,12 +121,12 @@ public sealed class DarlingMcpPgLogEventTools
             var truncated = page.Rows.Count > limit;
             var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows.ToList();
 
-            /* #4966: a sparse event list kept newest first, windowed on the event's own time. A full page starts at its oldest row
-               (no probe); otherwise the floor is the earlier of the coverage probe (the schedule's retention edge and the server's first
-               collection, never an oldest row) and the oldest event shown (a first run stores events from before itself). */
-            var notice = await DarlingMcpWindowNotice.ReadEventPageAsync(
+            /* #4966: the notice is always COVERAGE, whether or not the cap cut the page (the cap is reported by truncated). A sparse event
+               list windowed on the event's own time: the floor is the earlier of the coverage probe (the schedule's retention edge and the
+               server's first collection, never an oldest row) and the oldest event shown (a first run stores events from before itself). */
+            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "pg_log_events", resolved.ServerName, windowStart, windowEnd, cancellationToken),
-                rows.Min(r => r.OccurredAtUtc), truncated, windowStart, windowEnd, "pg_log_events", logger: logger, cancellationToken: cancellationToken);
+                rows.Min(r => r.OccurredAtUtc), windowStart, windowEnd, "pg_log_events", logger: logger, cancellationToken: cancellationToken);
 
             var json = JsonSerializer.Serialize(new
             {
