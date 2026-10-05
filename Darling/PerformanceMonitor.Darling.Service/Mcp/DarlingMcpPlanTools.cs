@@ -8,6 +8,7 @@
 
 using System;
 using System.ComponentModel;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -223,6 +224,123 @@ public sealed class DarlingMcpPlanTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_plan_xml", ex);
+        }
+    }
+
+    [McpServerTool(Name = "get_query_store_plan_xml"), Description(
+        "Returns the raw stored Query Store showplan XML for database_name + query_id (optional plan_id). Use after get_query_store_top. Truncated at 500KB.")]
+    public static async Task<string> GetQueryStorePlanXml(
+        NpgsqlDataSource postgres,
+        [Description("The database_name from get_query_store_top.")] string database_name,
+        [Description("The query_id from get_query_store_top.")] long query_id,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Optional plan_id to pin one compiled plan. Omit for the most recently captured plan.")] long? plan_id = null,
+        CancellationToken cancellationToken = default)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        if (error != null) return error;
+
+        try
+        {
+            var xml = await DarlingStoredPlanReader.GetQueryStorePlanTextAsync(
+                postgres, resolved.ServerId, database_name, query_id, plan_id, cancellationToken: cancellationToken);
+            if (string.IsNullOrEmpty(xml))
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}.");
+
+            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_query_store_plan_xml", ex);
+        }
+    }
+
+    [McpServerTool(Name = "get_procedure_plan_xml"), Description(
+        "Returns the raw stored showplan XML for a procedure identified by sql_handle. Use after get_top_procedures_by_cpu. Truncated at 500KB.")]
+    public static async Task<string> GetProcedurePlanXml(
+        NpgsqlDataSource postgres,
+        [Description("The sql_handle value from get_top_procedures_by_cpu.")] string sql_handle,
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsSqlHandle(sql_handle))
+            return McpHelpers.Refusal("sql_handle", "Expected a hex sql_handle such as 0x0300..., as get_top_procedures_by_cpu returned it.");
+
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        if (error != null) return error;
+
+        try
+        {
+            var xml = await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(
+                postgres, resolved.ServerId, sql_handle, cancellationToken);
+            if (string.IsNullOrEmpty(xml))
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
+                    ?? McpHelpers.Status("unavailable", $"No stored plan found for sql_handle '{sql_handle}'.");
+
+            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_procedure_plan_xml", ex);
+        }
+    }
+
+    /// <summary>The ISO 8601 round-trip forms get_active_queries emits: 7 fractional digits at most, with or without a
+    /// trailing Z or an offset. Anything else (a bare date, "3/4/2026") is refused, never guessed at.</summary>
+    private static readonly string[] CollectionTimeFormats =
+    {
+        "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:sszzz",
+        "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFzzz",
+    };
+
+    private static readonly System.Text.RegularExpressions.Regex SqlHandleShape =
+        new("^0x[0-9A-Fa-f]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>A sql_handle is hex with a 0x prefix. get_procedure_plan_xml refuses anything else; analyze_procedure_plan
+    /// predates this check and still takes the text as given.</summary>
+    internal static bool IsSqlHandle(string? text) => text != null && SqlHandleShape.IsMatch(text);
+
+    internal static bool TryParseCollectionTime(string? text, out DateTime utc) =>
+        DateTime.TryParseExact(text, CollectionTimeFormats, CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out utc);
+
+    [McpServerTool(Name = "get_active_query_plan_xml"), Description(
+        "Returns the raw showplan XML captured for one get_active_queries row (collection_time + session_id); live=true gives the live plan. Truncated at 500KB.")]
+    public static async Task<string> GetActiveQueryPlanXml(
+        NpgsqlDataSource postgres,
+        [Description("The row's collection_time, exactly as get_active_queries returned it.")] string collection_time,
+        [Description("The row's session_id.")] int session_id,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("The row's request_id; omit for 0.")] int request_id = 0,
+        [Description("True for the live (actual) plan; false for the estimated plan.")] bool live = false,
+        CancellationToken cancellationToken = default)
+    {
+        /* Parsed as an instant in UTC with every fractional digit kept: the store compares collection_time
+           for equality, so a value rounded to the second would match nothing. */
+        if (!TryParseCollectionTime(collection_time, out var collectionTimeUtc))
+            return McpHelpers.Refusal("collection_time", "Expected the collection_time exactly as get_active_queries returned it (ISO 8601, UTC).");
+
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        if (error != null) return error;
+
+        try
+        {
+            var xml = await DarlingStoredPlanReader.GetQuerySnapshotPlanXmlAsync(
+                postgres, resolved.ServerId, collectionTimeUtc, session_id, request_id, live, cancellationToken);
+            if (string.IsNullOrEmpty(xml))
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots", cancellationToken)
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No stored {(live ? "live " : "")}plan found for session_id {session_id} (request_id {request_id}) at collection_time '{collection_time}'.");
+
+            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_active_query_plan_xml", ex);
         }
     }
 

@@ -17,7 +17,24 @@ param analyze_query_store_plan.plan_id 107
 param analyze_query_store_plan.query_id 38
 param analyze_query_store_plan.server_name 28
 
+tool get_active_query_plan_xml 151
+param get_active_query_plan_xml.collection_time 69
+param get_active_query_plan_xml.live 62
+param get_active_query_plan_xml.request_id 33
+param get_active_query_plan_xml.server_name 28
+param get_active_query_plan_xml.session_id 21
+
 tool get_plan_xml 176
 param get_plan_xml.database_name 118
 param get_plan_xml.query_hash 49
 param get_plan_xml.server_name 28
+
+tool get_procedure_plan_xml 134
+param get_procedure_plan_xml.server_name 28
+param get_procedure_plan_xml.sql_handle 52
+
+tool get_query_store_plan_xml 147
+param get_query_store_plan_xml.database_name 43
+param get_query_store_plan_xml.plan_id 84
+param get_query_store_plan_xml.query_id 38
+param get_query_store_plan_xml.server_name 28

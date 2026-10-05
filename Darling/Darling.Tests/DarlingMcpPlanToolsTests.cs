@@ -45,8 +45,8 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
 {
     /* ---------------- ungated: tool-surface pin ---------------- */
 
-    /// <summary>The five plan-analysis tool names, ordinal-sorted — the same names the Dashboard's
-    /// and Lite's McpPlanTools register, so MCP clients see one consistent product.</summary>
+    /// <summary>The five plan-analysis tool names the Dashboard's and Lite's McpPlanTools register too, so MCP
+    /// clients see one consistent product.</summary>
     private static readonly string[] SharedPlanToolSurface =
     {
         "analyze_plan_xml",
@@ -56,13 +56,25 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
         "get_plan_xml"
     };
 
+    /// <summary>The Darling-only raw-plan reads behind the web grids' plan buttons (#5228): one per row key shape.
+    /// Lite's cross-app inventory pin lists them as Darling-only.</summary>
+    private static readonly string[] RowPlanToolSurface =
+    {
+        "get_active_query_plan_xml",
+        "get_procedure_plan_xml",
+        "get_query_store_plan_xml"
+    };
+
+    private static readonly string[] FullPlanToolSurface =
+        SharedPlanToolSurface.Concat(RowPlanToolSurface).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpPlanTools)
         .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance)
         .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheFivePlanTools()
+    public void ToolSurface_IsTheFiveSharedPlanTools_PlusTheThreeRowPlanReads()
     {
         var toolMethods = ToolMethods();
 
@@ -71,7 +83,7 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Equal(SharedPlanToolSurface, names);
+        Assert.Equal(FullPlanToolSurface, names);
 
         /* Discoverable as a tool type, every tool static (WithGeminiCompatibleTools REJECTS instance
            methods), and every tool returning the string envelope both apps' tools return (Task<string>
@@ -381,10 +393,10 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForAllFivePlanTools()
+    public void AdvertisedSchema_IsGeminiClean_ForAllPlanTools()
     {
         var tools = BuildPlanToolSchemas();
-        Assert.Equal(5, tools.Count);
+        Assert.Equal(FullPlanToolSurface.Length, tools.Count);
 
         var violations = tools.SelectMany(t => SchemaViolations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0,
@@ -403,6 +415,48 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
         Assert.Equal(new[] { "database_name", "query_id" }, RequiredOf(tools["analyze_query_store_plan"]));
         Assert.Equal(new[] { "plan_xml" }, RequiredOf(tools["analyze_plan_xml"]));
         Assert.Equal(new[] { "query_hash" }, RequiredOf(tools["get_plan_xml"]));
+
+        /* #5228: each row read requires exactly the key its grid row carries; the rest is optional. */
+        Assert.Equal(new[] { "database_name", "query_id" }, RequiredOf(tools["get_query_store_plan_xml"]));
+        Assert.Equal(new[] { "sql_handle" }, RequiredOf(tools["get_procedure_plan_xml"]));
+        Assert.Equal(new[] { "collection_time", "session_id" }, RequiredOf(tools["get_active_query_plan_xml"]));
+    }
+
+    [Fact]
+    public void ParamContract_RowPlanReads_MirrorTheirAnalyzeTwinsKey()
+    {
+        var qs = McpParams("get_query_store_plan_xml");
+        Assert.Equal(new[] { "database_name", "query_id", "server_name", "plan_id" }, qs.Select(x => x.Name).ToArray());
+        var proc = McpParams("get_procedure_plan_xml");
+        Assert.Equal(new[] { "sql_handle", "server_name" }, proc.Select(x => x.Name).ToArray());
+        var active = McpParams("get_active_query_plan_xml");
+        Assert.Equal(new[] { "collection_time", "session_id", "server_name", "request_id", "live" }, active.Select(x => x.Name).ToArray());
+        Assert.True(Optional(active, "request_id"));
+        Assert.True(Optional(active, "live"));
+    }
+
+    [Fact]
+    public void RowPlanReadDescriptions_AreAtMost160Characters()
+    {
+        foreach (var name in RowPlanToolSurface)
+        {
+            var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == name);
+            var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+            Assert.True(description.Length <= 160, $"{name}: description is {description.Length} characters");
+        }
+    }
+
+    [Fact]
+    public void ActiveQuerySnapshotPlanSql_IsByteEqualToTheViewers()
+    {
+        /* The web read and the desktop read must fetch a snapshot's plan by the same statement. Line endings are the
+           checkout's (each file is read as CRLF on Windows), so they are not part of the comparison. */
+        Assert.Equal(
+            PerformanceMonitor.Darling.Viewer.ViewerDataService.QuerySnapshotEstimatedPlanSql.ReplaceLineEndings("\n"),
+            DarlingStoredPlanReader.QuerySnapshotPlanSql.ReplaceLineEndings("\n"));
+        Assert.Equal(
+            PerformanceMonitor.Darling.Viewer.ViewerDataService.QuerySnapshotLivePlanSql.ReplaceLineEndings("\n"),
+            DarlingStoredPlanReader.QuerySnapshotLivePlanSql.ReplaceLineEndings("\n"));
     }
 
     [Fact]

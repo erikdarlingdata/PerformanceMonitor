@@ -119,12 +119,15 @@ public sealed class DarlingMcpPgWaitSamplingTools
 
                 return McpHelpers.Status(
                         "empty",
-                        $"No sampled waits for {resolved.ServerName} in the last {hours_back} hour(s). The "
-                        + "figures here are per-interval deltas, so a single collection has nothing to "
-                        + "difference against and the window fills on the second one. On a genuinely idle "
-                        + "server this is the healthy state: the profiler samples backends, and an idle "
-                        + "server has none to sample."
-                        + DescribeInstrumentForEmpty(instrument),
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                            factual: $"No sampled waits for {resolved.ServerName} in the last {hours_back} hour(s). The "
+                                + "figures here are per-interval deltas, so a single collection has nothing to "
+                                + "difference against and the window fills on the second one",
+                            coveredClaim: ". On a genuinely idle "
+                                + "server this is the healthy state: the profiler samples backends, and an idle "
+                                + "server has none to sample.",
+                            tail: DescribeInstrumentForEmpty(instrument, windowTruncated: emptyNotice.WindowTruncated)),
                         emptyNotice.AsHints());
             }
 
@@ -147,7 +150,8 @@ public sealed class DarlingMcpPgWaitSamplingTools
     /// that is what is sampling, nothing when the extension is (its idle answer needs no qualification), and a
     /// plain "not yet recorded" when no cycle has stated an arm.
     /// </summary>
-    internal static string DescribeInstrumentForEmpty(DarlingPgWaitSamplingReader.WaitInstrumentState? instrument)
+    internal static string DescribeInstrumentForEmpty(
+        DarlingPgWaitSamplingReader.WaitInstrumentState? instrument, bool windowTruncated = false)
     {
         if (instrument is null)
         {
@@ -157,7 +161,9 @@ public sealed class DarlingMcpPgWaitSamplingTools
 
         return string.Equals(instrument.Instrument, PgWaitInstrument.ServiceSampled, StringComparison.Ordinal)
             ? " This server is on the service_sampled tier (the pg_wait_sampling extension is not installed), "
-              + "so \"none to sample\" was measured over one-second polls in a 30-second window each cycle. "
+              + (windowTruncated
+                  ? "so an empty sample is measured over one-second polls in a 30-second window each cycle. "
+                  : "so \"none to sample\" was measured over one-second polls in a 30-second window each cycle. ")
               + PgWaitInstrument.ServiceSampledCaveat
             : string.Empty;
     }

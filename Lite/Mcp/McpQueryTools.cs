@@ -1111,8 +1111,18 @@ public sealed class McpQueryTools
     /// window. On an answer WITH rows a null floor keeps its old meaning (covered, at the start that was asked for).</para>
     /// </summary>
     internal static McpWindowNotice WindowNotice(
-        DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false)
+        DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false, bool listOnly = false)
     {
+        if (floor is null && listOnly)
+        {
+            /* The windowed list is empty but the answer carries other data (a latest-snapshot block), so it is not an empty answer. */
+            return new McpWindowNotice(
+                null,
+                true,
+                $"The store holds no collection of {table} for this server in this window, so no windowed rows were read, and a list with no rows is not a report that nothing happened. "
+                    + "The window may reach further back than the store retains, this server may have been monitored for less time than that, or collection may have stopped; get_collection_health shows which.");
+        }
+
         if (floor is null && emptyAnswer)
         {
             return new McpWindowNotice(
@@ -1145,10 +1155,10 @@ public sealed class McpQueryTools
     /// that finds no row and no run in the window then reads as NOT covered (<see cref="WindowNotice"/>).</para>
     /// </summary>
     internal static async Task<McpWindowNotice> WindowNoticeAsync(
-        Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null, bool emptyAnswer = false) =>
+        Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null, bool emptyAnswer = false, bool listOnly = false) =>
         WindowNotice(
-            emptyAnswer || CanWindowBeTruncated(requestedStart, windowEnd) ? await probe() : null,
-            requestedStart, table, tail, emptyAnswer);
+            emptyAnswer || listOnly || CanWindowBeTruncated(requestedStart, windowEnd) ? await probe() : null,
+            requestedStart, table, tail, emptyAnswer, listOnly);
 
     /// <summary>
     /// #4966: <see cref="WindowNoticeAsync"/> for an EVENT list (deadlocks, blocked process reports, long query
