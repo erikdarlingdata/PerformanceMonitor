@@ -306,6 +306,13 @@ OUTER APPLY
     public readonly record struct PlanFetchKey(byte[] PlanHandle, int StartOffset, int EndOffset);
 
     /// <summary>
+    /// The most keys one <see cref="BuildPlanFetchQuery"/> call accepts. The inline <c>VALUES</c> list has no
+    /// engine limit as a derived table, so this is a bound on the statement a host can ask a monitored
+    /// server to compile, not a limit of the engine: a host with more misses splits its call.
+    /// </summary>
+    public const int MaxPlanFetchKeys = 1000;
+
+    /// <summary>
     /// #5158: the second target query for a host that sets <see cref="CollectorContext.DeferPlanXmlFetch"/>.
     /// The main query ships no plan, and this renders plan XML for only the keys the host does not yet
     /// have committed. Row <c>ord</c> is the key's position in <paramref name="keys"/>, so the host maps a
@@ -342,6 +349,14 @@ OUTER APPLY
         {
             throw new InvalidOperationException(
                 "The plan fetch key list must be non-empty; an empty list means no fetch should be issued at all.");
+        }
+
+        if (keys.Count > MaxPlanFetchKeys)
+        {
+            throw new InvalidOperationException(
+                "The plan fetch key list holds " + keys.Count.ToString(CultureInfo.InvariantCulture)
+                + " keys; one call takes at most " + MaxPlanFetchKeys.ToString(CultureInfo.InvariantCulture)
+                + ", so the caller must split it.");
         }
 
         var values = new System.Text.StringBuilder();

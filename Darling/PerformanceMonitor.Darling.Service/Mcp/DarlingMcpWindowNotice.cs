@@ -164,6 +164,14 @@ internal static class DarlingMcpWindowNotice
         first is DateTime a && second is DateTime b ? (a <= b ? a : b) : first ?? second;
 
     /// <summary>
+    /// The later of two instants, a null (nothing to report) giving way to the other; null when both are. For an answer that
+    /// carries two separate series (get_blocking_stats): the one notice names the later of the two floors, since the answer is
+    /// only as complete as its least-covered series. Lite's <c>LocalDataService.LaterCoverageFloor</c>.
+    /// </summary>
+    internal static DateTime? Later(DateTime? first, DateTime? second) =>
+        first is DateTime a && second is DateTime b ? (a >= b ? a : b) : first ?? second;
+
+    /// <summary>
     /// <see cref="ReadAsync"/> for an EVENT list (deadlocks, blocked process reports, long query completions), where a first run
     /// of the collector can store events from before itself (#4966): the coverage probe reads the collector's table on
     /// <c>collection_time</c>, but the rows are windowed on the event's own time, so a page can show an event older than the

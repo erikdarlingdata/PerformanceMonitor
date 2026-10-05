@@ -256,11 +256,17 @@ public sealed class QuerySnapshotPlanOnDemandTests : IClassFixture<SharedDuckDbF
         var liveXml = "<ShowPlanXML>" + new string('a', planSize) + "</ShowPlanXML>";
         var t = WholeSecondsNow();
 
-        for (var i = 0; i < rowCount; i++)
-        {
-            await SeedSnapshotAsync(t.AddSeconds(-i), sessionId: 100 + (i % 500), requestId: 0,
-                queryPlan: estimatedXml, liveQueryPlan: liveXml);
-        }
+        // One set-based statement (one commit) instead of 3,500 auto-committed single-row inserts (#5208): the
+        // same rows the loop produced -- collection_id -1..-3500, session 100 + i % 500, time t - i seconds.
+        await ExecAsync(@"
+INSERT INTO query_snapshots
+    (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status,
+     blocking_session_id, wait_type, cpu_time_ms, total_elapsed_time_ms, query_plan, live_query_plan, request_id)
+SELECT $1 - r.i, $2 - to_seconds(r.i), $3, $4, 100 + (r.i % 500), 'TestDb', 'SELECT 1', 'running',
+       0, NULL, 1000, 1500, $5, $6, 0
+FROM range($7) AS r(i)",
+            _nextId, Naive(t), _serverId, ServerName, estimatedXml, liveXml, rowCount);
+        _nextId -= rowCount;
 
         // OLD shape: the payload select GetLatestQuerySnapshotsAsync used before #4239.
         var oldSw = Stopwatch.StartNew();
