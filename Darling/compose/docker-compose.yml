@@ -6,7 +6,7 @@
 #   1. cp darling.sample.json darling.json           # then edit: servers, tokens, alerting
 #   2. echo 'YourSqlPassword' > secrets/sql_password.txt   # one file per secret; see `secrets:` below
 #   3. docker compose up -d
-#   4. web dashboard: http://<host>:5153  ·  MCP: http://<host>:5152 (bearer token)
+#   4. web dashboard: http://<host>:5153  ·  MCP: http://<host>:5152 (bearer token; https with mcp.network.tls)
 #
 # Secrets never land in darling.json: the config references them (env:NAME / file:/path — #1804 stage 1),
 # and compose delivers them as env vars or mounted secret files. The web/MCP network blocks are honored
@@ -127,9 +127,14 @@ services:
       # session cookie cross the network in the clear.
       # - web_tls_cert
       # - web_tls_key
+      # The same for MCP (#5288): uncomment with the `secrets:` entries at the bottom, then point
+      # mcp.network.tls at these paths in darling.json (and set mcp.network.hostName to the name on the
+      # certificate). Without them the MCP bearer token and every tool result cross the network in the clear.
+      # - mcp_tls_cert
+      # - mcp_tls_key
     ports:
       - "5153:5153"   # web dashboard (token → cookie gate; plain HTTP unless web.network.tls is set)
-      - "5152:5152"   # MCP (bearer token)
+      - "5152:5152"   # MCP (bearer token; plain HTTP unless mcp.network.tls is set)
     # #4733: reports unhealthy once a startup failure has stopped collection for good. The process stays up after
     # such a failure on purpose (exiting would restart a plain config error in a loop), so without this the
     # container shows as running although it never collects. `restart: unless-stopped` does not act on health,
@@ -163,3 +168,8 @@ secrets:
   #   file: ./secrets/web_tls_cert.pem
   # web_tls_key:
   #   file: ./secrets/web_tls_key.pem
+  # HTTPS for MCP (#5288) — uncomment together with the `secrets:` list above.
+  # mcp_tls_cert:
+  #   file: ./secrets/mcp_tls_cert.pem
+  # mcp_tls_key:
+  #   file: ./secrets/mcp_tls_key.pem

@@ -5166,7 +5166,9 @@ public sealed class DarlingManagedPostgres
         if (string.IsNullOrWhiteSpace(network.AllowFrom) || !IPNetwork.TryParse(network.AllowFrom.Trim(), out var cidr))
         {
             return Degrade(
-                $"postgres.network.allowFrom '{network.AllowFrom}' is not a valid CIDR (e.g. 192.168.1.0/24, with host bits zeroed)");
+                $"postgres.network.allowFrom '{network.AllowFrom}' is not a valid CIDR. The store takes ONE range in CIDR form "
+                + "(e.g. 192.168.1.0/24, or /32 for one address), never a list. Host bits are masked, not refused "
+                + "(192.168.1.5/24 means 192.168.1.0/24)");
         }
 
         if (cidr.BaseAddress.AddressFamily != listenIp.AddressFamily)
@@ -5195,7 +5197,7 @@ public sealed class DarlingManagedPostgres
                 "move postgres.dataDirectory to a space-free path to expose the store over TLS");
         }
 
-        /* Canonical base/prefix form (IPNetwork requires zeroed host bits) for the pg_hba line + firewall. */
+        /* Canonical base/prefix form (IPNetwork.TryParse masked any host bits) for the pg_hba line + firewall. */
         return new NetworkExposureDecision(true, listenIp.ToString(), $"{cidr.BaseAddress}/{cidr.PrefixLength}", roles, null);
 
         static NetworkExposureDecision Degrade(string reason) => new(false, null, null, null, reason);
