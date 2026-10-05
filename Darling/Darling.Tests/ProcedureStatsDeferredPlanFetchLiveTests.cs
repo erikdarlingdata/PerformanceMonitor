@@ -303,6 +303,39 @@ END;";
     });
 
     [Fact]
+    public Task On_TheCadenceGateStillDecidesWhenMissesRender_AndHitsCarryTheirDigestOnEveryCycle() => WithRigAsync("pm5158p-gate", async (rig, _, ct) =>
+    {
+        var runner = NewRunner(rig.Store, "on", planCycleInterval: 2);
+        var runs = new List<CollectorRunResult>();
+        for (var i = 0; i < 6; i++)
+        {
+            runs.Add(await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct));
+        }
+
+        var firstCapture = runs.FindIndex(r => Measured(r, "plans_rendered") > 0);
+        Assert.InRange(firstCapture, 0, 1); /* every other cycle may capture */
+
+        /* A gated cycle with a cold cache renders nothing and ships no plan, as the gate always did. */
+        for (var i = 0; i < firstCapture; i++)
+        {
+            Assert.Equal(0, Measured(runs[i], "plans_rendered"));
+            Assert.True(Measured(runs[i], "deferred_miss") >= 4);
+            Assert.Equal(0, Measured(runs[i], "deferred_hit"));
+        }
+
+        /* After the capture every cycle, gated or not, renders nothing and its hits carry the digest. */
+        for (var i = firstCapture + 1; i < runs.Count; i++)
+        {
+            Assert.Equal(0, Measured(runs[i], "plans_rendered"));
+            Assert.True(Measured(runs[i], "deferred_hit") >= 4);
+        }
+
+        var stored = await StoredAsync(rig, ct);
+        Assert.True(stored.Count(r => r.HasDigest) >= 4 * (runs.Count - firstCapture), "hits on gated cycles carry the digest");
+        Assert.True(stored.Count(r => !r.HasDigest && !r.PlanResolves) >= 4 * firstCapture, "gated cold cycles ship no plan");
+    });
+
+    [Fact]
     public Task On_AStatementCompiledForTheFirstTime_ChangesTheFingerprint_AndIsRenderedAgain() => WithRigAsync("pm5158p-new", async (rig, target, ct) =>
     {
         var runner = NewRunner(rig.Store, "on");
