@@ -1227,12 +1227,16 @@ function attachChartMenu(chart, root, opts, rows) {
         end = now;
         start = now - 2 * AT_TIME_HALF_WINDOW_MS;
       }
-      const err = mod.applyCustomRange(atTime.server, start, end);
+      const err = mod.applyCustomRange(atTime.server, start, end, now, { redraw: false });
       if (err) {
         say(err);
         return;
       }
-      location.hash = "#/server/" + encodeURIComponent(atTime.server) + "/" + tab;
+      /* A full render, not a panel redraw, so the range picker in the page head shows the new range too (#5230). Setting
+         the hash to the tab already open fires no hashchange, so then the event is raised here. */
+      const target = "#/server/" + encodeURIComponent(atTime.server) + "/" + tab;
+      if (location.hash === target) window.dispatchEvent(new Event("hashchange"));
+      else location.hash = target;
     } catch (e) {
       say("Could not open that time: " + (e && e.message ? e.message : "the page refused."));
     }

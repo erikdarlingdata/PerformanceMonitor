@@ -95,6 +95,20 @@ public sealed class WebChartAtTimeBehaviourTests
     }
 
     [Fact]
+    public void EachItem_SetsTheRangeWithoutAPanelRedraw_AndRebuildsThroughTheRouter()
+    {
+        // The range picker sits in the page head, which only a full render rebuilds. A panel redraw would leave it on the old
+        // preset (the tab already open) or start reads the route change then aborts (another tab), so no item asks for one.
+        var r = Run();
+        foreach (var item in new[] { "queries", "blocking", "deadlocks" })
+            Assert.False(OneCall(r, item).GetProperty("redraw").GetBoolean(), item);
+        // Another tab: the hash move fires the router's own hashchange, so no event is raised for it.
+        Assert.Equal(0, r.GetProperty("dispatchedOnTabChange").GetInt32());
+        // The tab already open: setting the same hash fires nothing, so the event is raised here, once.
+        Assert.Equal(1, r.GetProperty("dispatchedOnSameTab").GetInt32());
+    }
+
+    [Fact]
     public void ARangeThePageRefuses_IsSaidOnTheChart_AndTheTabDoesNotMove()
     {
         var r = Run();

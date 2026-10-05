@@ -70,6 +70,11 @@ const copyAll = (from, to) => {
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-at-time-")));
 let charts;
 const out = {};
+/* The browser fires no hashchange when the hash is set to the value it already holds, so goToTime raises the event itself
+   on the tab already open (window.dispatchEvent). Counted here; the router that listens for it is not under test. */
+globalThis.dispatchEvent = () => {
+  out.dispatched = (out.dispatched || 0) + 1;
+};
 try {
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
 
@@ -94,7 +99,7 @@ try {
   copyAll(jsDir, scratch);
   fs.writeFileSync(
     path.join(scratch, "pages", "server.js"),
-    'export const calls = []; export function applyCustomRange(server, startMs, endMs) { calls.push({ server, startMs, endMs, hash: globalThis.location.hash }); return globalThis.__rangeError || null; }\n'
+    'export const calls = []; export function applyCustomRange(server, startMs, endMs, nowMs, { redraw = true } = {}) { calls.push({ server, startMs, endMs, redraw, hash: globalThis.location.hash }); return globalThis.__rangeError || null; }\n'
   );
   charts = await import(pathToFileURL(path.join(scratch, "charts.js")).href);
   var stub = await import(pathToFileURL(path.join(scratch, "pages", "server.js")).href);
@@ -141,9 +146,13 @@ out.queries = take();
 rightClick(a, 521);
 await click(a, "Show Blocking at This Time");
 out.blocking = take();
+/* The hash moved to another tab, so the router's own hashchange rebuilds the page: no event is raised for it. */
+out.dispatchedOnTabChange = out.dispatched || 0;
 rightClick(a, 521);
 await click(a, "Show Deadlocks at This Time");
 out.deadlocks = take();
+/* The hash was already #/server/A/blocking: setting it again fires nothing, so the event is raised once. */
+out.dispatchedOnSameTab = out.dispatched || 0;
 out.hashAfter = globalThis.location.hash;
 out.t0Plus5 = T0 + 5 * MIN;
 
