@@ -37,6 +37,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="HourlyEdges"/> is an optional count-guard verdict for the hourly-raw-edges route: the compiler takes
 /// that route only when the verdict equals <see cref="ComposeSourceRouter.HourlyRawEdgesCandidate"/> for this run;
 /// null (the default) leaves every compile on its existing route.
+/// <see cref="ModuleMapThrough"/> is the module map's watermark (naive UTC, <see cref="DateTimeKind.Unspecified"/>): the
+/// largest procedure_stats <c>collection_time</c> the last map refresh read. The runner supplies it only for a panel that
+/// joins modules and takes the hourly-raw-edges route; with it, that route resolves names from the map plus a recent
+/// overlay of procedure_stats instead of ranking the whole window. Null (the default, and every other route) keeps the
+/// window-wide ranking CTE.
 public sealed record ComposeRunContext(
     IReadOnlyList<string>? Servers,
     DateTime StartUtc,
@@ -47,7 +52,8 @@ public sealed record ComposeRunContext(
     RollupCoverage Coverage,
     bool QueryStoreWideEligible = false,
     DateTime? QueryStoreWideStart = null,
-    ComposeHourlyEdgesVerdict? HourlyEdges = null)
+    ComposeHourlyEdgesVerdict? HourlyEdges = null,
+    DateTime? ModuleMapThrough = null)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -414,6 +420,16 @@ public static class ComposeCompiler
             edgeEndParam = p.AddTimestamp(route.EdgeEndUtc!.Value);
         }
 
+        /* The recent-overlay floor of the hourly-raw-edges module join: the later of the window start and the map's
+           watermark less the refresh slack. Bound only when the module join is emitted below from the map, so no other
+           compile gains a parameter. */
+        string? moduleOverlayFloorParam = null;
+        if (route.Tier == ComposeSourceTier.HourlyRawEdges && plan.UsesModuleJoin && context.ModuleMapThrough is DateTime moduleMapThrough)
+        {
+            var overlayFloor = moduleMapThrough - DarlingModuleMap.WatermarkSlack;
+            moduleOverlayFloorParam = p.AddTimestamp(overlayFloor > context.StartUtc ? overlayFloor : context.StartUtc);
+        }
+
         /* #4689: below raw's floor the interval table is exact only from the runner's common start
            (ComposeRunContext.QueryStoreWideStart, the latest per-server read start), so an eligible Query Store
            read binds the later of that and the window start, in the same collection_time column the window
@@ -506,15 +522,24 @@ public static class ComposeCompiler
            retained module_map instead (procedure_stats raw is dropped at 4d, so the CTE can't cover old windows). */
         if (plan.UsesModuleJoin && !route.IsCagg)
         {
-            /* Window-bounded AND scoped to the same server set — partitioned by (server_name, sql_handle) so a
-               handle reused across servers attributes per server, not globally. */
-            sql.Append("WITH ").Append(ModuleAlias).Append(" AS (\n");
+            /* The hourly-raw-edges route with a map watermark ranks only the recent overlay [floor, end] and takes every
+               older handle from collect.module_map. Without a watermark (or on any other route) the CTE ranks the whole
+               window, exactly as before.
+
+               Each (server_name, sql_handle) appears once in m: the overlay keeps rn = 1 per pair, the map's primary key
+               is that pair, and the NOT EXISTS drops a map row the overlay already carries, so the outer LEFT JOIN and
+               the group references are unchanged. A map row with last_seen before the window start is skipped, so a handle
+               with no procedure_stats row in the window still reads '(ad hoc)'. The map is forward-only, so a handle
+               renamed before the floor reads its newest name from the map and one renamed after it reads the overlay's.
+               A rename inside the last minute (the gap between the window end and now) can show the newer name. */
+            var fromMap = moduleOverlayFloorParam is not null;
+            sql.Append("WITH ").Append(fromMap ? "m_recent" : ModuleAlias).Append(" AS (\n");
             sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name\n");
             sql.Append("    FROM (\n");
             sql.Append("        SELECT server_name, sql_handle, object_name, schema_name, database_name,\n");
             sql.Append("               ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle ORDER BY collection_time DESC) AS rn\n");
             sql.Append("        FROM ").Append(PgSchemaGenerator.CollectSchema).Append(".procedure_stats\n");
-            sql.Append("        WHERE collection_time >= ").Append(startParam).Append('\n');
+            sql.Append("        WHERE collection_time >= ").Append(fromMap ? moduleOverlayFloorParam : startParam).Append('\n');
             sql.Append("          AND collection_time <= ").Append(endParam).Append('\n');
             if (hasServerScope)
             {
@@ -525,6 +550,23 @@ public static class ComposeCompiler
             sql.Append("          AND sql_handle <> ''\n");
             sql.Append("    ) ranked_modules\n");
             sql.Append("    WHERE rn = 1\n");
+            if (fromMap)
+            {
+                sql.Append("),\n");
+                sql.Append(ModuleAlias).Append(" AS (\n");
+                sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_recent\n");
+                sql.Append("    UNION ALL\n");
+                sql.Append("    SELECT mm.server_name, mm.sql_handle, mm.object_name, mm.schema_name, mm.database_name\n");
+                sql.Append("    FROM ").Append(PgSchemaGenerator.CollectSchema).Append(".module_map AS mm\n");
+                sql.Append("    WHERE mm.last_seen >= ").Append(startParam).Append('\n');
+                if (hasServerScope)
+                {
+                    sql.Append("      AND mm.server_name = ANY(").Append(serverScopeParam).Append(")\n");
+                }
+
+                sql.Append("      AND NOT EXISTS (SELECT 1 FROM m_recent AS r WHERE r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle)\n");
+            }
+
             sql.Append(")\n");
         }
 

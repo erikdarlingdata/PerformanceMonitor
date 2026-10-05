@@ -3486,7 +3486,7 @@ public sealed class DarlingComposeTests
         RollupAvailability.All,
         new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.QueryStatsIntervalHourlyView] = EdgeNow.AddMinutes(-20) });
 
-    private static ComposeRunContext EdgeContext(PanelPlan plan, bool withVerdict, IReadOnlyList<string>? servers = null)
+    private static ComposeRunContext EdgeContext(PanelPlan plan, bool withVerdict, IReadOnlyList<string>? servers = null, DateTime? moduleMapThrough = null)
     {
         var coverage = EdgeCoverage();
         var start = EdgeNow.AddHours(-24);
@@ -3494,7 +3494,8 @@ public sealed class DarlingComposeTests
         Assert.NotNull(candidate);
         return new ComposeRunContext(
             servers, start, EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, coverage,
-            HourlyEdges: withVerdict ? new ComposeHourlyEdgesVerdict(candidate!.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc, servers) : null);
+            HourlyEdges: withVerdict ? new ComposeHourlyEdgesVerdict(candidate!.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc, servers) : null,
+            ModuleMapThrough: moduleMapThrough);
     }
 
     private static ComposeCompiled CompileEdge(PanelPlan plan, ComposeRunContext context)
@@ -3542,6 +3543,148 @@ public sealed class DarlingComposeTests
             + "LIMIT $5", compiled.Sql);
         Assert.Contains("collect.procedure_stats", compiled.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("module_map", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_WithAModuleMapWatermark_EmitsTheMapPlusRecentOverlaySql()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var compiled = CompileEdge(plan, EdgeContext(plan, withVerdict: true, moduleMapThrough: EdgeNow.AddMinutes(-30)));
+
+        Assert.Equal("WITH m_recent AS (\n"
+            + "    SELECT server_name, sql_handle, object_name, schema_name, database_name\n"
+            + "    FROM (\n"
+            + "        SELECT server_name, sql_handle, object_name, schema_name, database_name,\n"
+            + "               ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle ORDER BY collection_time DESC) AS rn\n"
+            + "        FROM collect.procedure_stats\n"
+            + "        WHERE collection_time >= $5\n"
+            + "          AND collection_time <= $2\n"
+            + "          AND sql_handle IS NOT NULL\n"
+            + "          AND sql_handle <> ''\n"
+            + "    ) ranked_modules\n"
+            + "    WHERE rn = 1\n"
+            + "),\n"
+            + "m AS (\n"
+            + "    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_recent\n"
+            + "    UNION ALL\n"
+            + "    SELECT mm.server_name, mm.sql_handle, mm.object_name, mm.schema_name, mm.database_name\n"
+            + "    FROM collect.module_map AS mm\n"
+            + "    WHERE mm.last_seen >= $1\n"
+            + "      AND NOT EXISTS (SELECT 1 FROM m_recent AS r WHERE r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle)\n"
+            + ")\n"
+            + "SELECT f.database_name AS database_name, COALESCE(m.object_name, '(ad hoc)') AS object_name, (CAST(SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS double precision)) * 1.0 / 1000.0 AS value\n"
+            + "FROM " + EdgeFrom("sum") + " AS f\n"
+            + "LEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\n"
+            + "WHERE f.collection_time >= $1\n"
+            + "  AND f.collection_time <= $2\n"
+            + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
+            + "ORDER BY value DESC NULLS LAST\n"
+            + "LIMIT $6", compiled.Sql);
+        Assert.Contains("collect.module_map AS mm", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("m_recent", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("NOT EXISTS", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(6, compiled.Parameters.Count);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_TheOverlayFloor_IsTheWatermarkLessTheSlack_WhenInsideTheWindow()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var watermark = EdgeNow.AddMinutes(-30);
+        var compiled = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: watermark));
+
+        Assert.Equal(watermark - DarlingModuleMap.WatermarkSlack, (DateTime)compiled.Parameters[4].Value!);
+        Assert.Equal(DateTimeKind.Unspecified, ((DateTime)compiled.Parameters[4].Value!).Kind);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_AWatermarkOlderThanTheWindowStart_FloorsTheOverlayAtTheWindowStart()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var start = EdgeNow.AddHours(-24);
+        var compiled = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: start.AddHours(-5)));
+
+        Assert.Equal(start, (DateTime)compiled.Parameters[4].Value!);
+        Assert.Equal(start, (DateTime)compiled.Parameters[0].Value!);
+        Assert.Contains("WHERE collection_time >= $5\n", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_WithAModuleMapWatermark_AppliesTheServerScopeInBothArms()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var servers = new[] { "PROD-01" };
+        var compiled = CompileEdge(plan, EdgeContext(plan, true, servers, EdgeNow.AddMinutes(-30)));
+
+        /* $3 is the scope: the overlay's procedure_stats scan, the map arm and the fact each carry it. */
+        Assert.Contains("          AND server_name = ANY($3)\n", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("      AND mm.server_name = ANY($3)\n", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("  AND f.server_name = ANY($3)\n", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(7, compiled.Parameters.Count);
+        Assert.Equal(servers, (string[])compiled.Parameters[2].Value!);
+        Assert.Equal(EdgeNow.AddMinutes(-30) - DarlingModuleMap.WatermarkSlack, (DateTime)compiled.Parameters[5].Value!);
+        Assert.Contains("LIMIT $7", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_ANullWatermark_IsByteIdenticalToTheWindowWideCte()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        foreach (var servers in new[] { (IReadOnlyList<string>?)null, new[] { "PROD-01" } })
+        {
+            var withNull = CompileEdge(plan, EdgeContext(plan, true, servers, moduleMapThrough: null));
+            var without = CompileEdge(plan, EdgeContext(plan, true, servers));
+
+            Assert.Equal(without.Sql, withNull.Sql);
+            Assert.Equal(without.Parameters.Count, withNull.Parameters.Count);
+            Assert.StartsWith("WITH m AS (\n", withNull.Sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("module_map", withNull.Sql, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Compile_AWatermark_ChangesNothingOnTheRawRoute_NorOnACaggRoute()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var start = EdgeNow.AddHours(-24);
+        var watermark = EdgeNow.AddMinutes(-30);
+
+        /* Raw: no verdict, so the hourly-raw-edges route is not taken. */
+        var rawWith = CompileEdge(plan, EdgeContext(plan, false, moduleMapThrough: watermark));
+        var rawWithout = CompileEdge(plan, EdgeContext(plan, false));
+        Assert.Equal(rawWithout.Sql, rawWith.Sql);
+        Assert.Equal(rawWithout.Parameters.Count, rawWith.Parameters.Count);
+        Assert.StartsWith("WITH m AS (\n", rawWith.Sql, StringComparison.Ordinal);
+
+        /* CAGG: a window old enough for the daily tier joins collect.module_map directly, with or without a watermark. */
+        var caggStart = EdgeNow.AddDays(-20);
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal));
+        ComposeCompiled Cagg(DateTime? through) => CompileEdge(plan, new ComposeRunContext(
+            null, caggStart, EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, coverage, ModuleMapThrough: through));
+        var caggWith = Cagg(watermark);
+        var caggWithout = Cagg(null);
+        Assert.Equal(caggWithout.Sql, caggWith.Sql);
+        Assert.Equal(caggWithout.Parameters.Count, caggWith.Parameters.Count);
+        Assert.Contains("LEFT JOIN collect.module_map AS m ON", caggWith.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("m_recent", caggWith.Sql, StringComparison.Ordinal);
+        Assert.True(start < EdgeNow);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_APlanWithoutTheModuleJoin_IgnoresTheWatermark()
+    {
+        var plan = ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}");
+        var with = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: EdgeNow.AddMinutes(-30)));
+        var without = CompileEdge(plan, EdgeContext(plan, true));
+
+        Assert.Equal(without.Sql, with.Sql);
+        Assert.Equal(without.Parameters.Count, with.Parameters.Count);
+        Assert.DoesNotContain("module_map", with.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
