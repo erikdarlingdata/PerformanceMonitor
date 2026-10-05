@@ -192,6 +192,38 @@ public sealed class DarlingWebEndpointsTests
 
     /* ── response-kind mapping (the error envelope -> 500, the invalid envelope -> 400 as the body, the '{'-sniff -> 200, miss envelope -> 200) ── */
 
+    /// <summary>A stored plan arrives from the tool as bare XML; the web route answers it as 200 JSON (the
+    /// classifier would otherwise file a leading "&lt;" as a 400), with the truncation flag decided from the tool's
+    /// own cut marker. Envelopes pass through unchanged.</summary>
+    [Fact]
+    public void WrapPlanXml_AWholePlan_IsJsonThatClassifiesAsPassthrough()
+    {
+        const string xml = "<ShowPlanXML><x a=\"1\"/></ShowPlanXML>";
+        var wrapped = DarlingWebEndpoints.WrapPlanXml(xml, "0xABC", "db1");
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.JsonPassthrough, DarlingWebEndpoints.ClassifyToolResponse(wrapped));
+        using var doc = System.Text.Json.JsonDocument.Parse(wrapped);
+        Assert.Equal(xml, doc.RootElement.GetProperty("plan_xml").GetString());
+        Assert.Equal("0xABC", doc.RootElement.GetProperty("query_hash").GetString());
+        Assert.Equal("db1", doc.RootElement.GetProperty("database_name").GetString());
+        Assert.False(doc.RootElement.GetProperty("truncated").GetBoolean());
+    }
+
+    [Fact]
+    public void WrapPlanXml_ACutPlan_IsFlaggedTruncated_FromTheRealTruncateMarker()
+    {
+        var cut = McpHelpers.Truncate("<ShowPlanXML>" + new string('x', 100) + "</ShowPlanXML>", 20)!;
+        using var doc = System.Text.Json.JsonDocument.Parse(DarlingWebEndpoints.WrapPlanXml(cut, "H", null));
+        Assert.True(doc.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.DoesNotContain("(truncated)", doc.RootElement.GetProperty("plan_xml").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, doc.RootElement.GetProperty("database_name").ValueKind);
+    }
+
+    [Theory]
+    [InlineData("{\"status\":\"unavailable\",\"message\":\"No stored plan found.\"}")]
+    [InlineData("{\"status\":\"not_collected\",\"message\":\"Not collected.\"}")]
+    public void WrapPlanXml_AnEnvelope_PassesThroughUnchanged(string envelope) =>
+        Assert.Equal(envelope, DarlingWebEndpoints.WrapPlanXml(envelope, "H", null));
+
     [Theory]
     [InlineData("{\"cpu_percent\":42}")]
     [InlineData("  {\"cpu_percent\":42}")]                 // leading whitespace still sniffs as JSON

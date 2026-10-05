@@ -36,8 +36,8 @@ globalThis.fetch = async (url) => {
   fetches.push(String(url));
   return { status: reply.status, ok: reply.status < 400, text: async () => reply.body };
 };
-/* What the read route answers: a plan is a bare string, so the route wraps it as {"error": <xml>} under a 400. */
-const planReply = (xml) => { reply = { status: 400, body: JSON.stringify({ error: xml }) }; };
+/* What the read route answers for a stored plan: 200 JSON with the XML and a server-decided truncated flag. */
+const planReply = (xml, truncated = false) => { reply = { status: 200, body: JSON.stringify({ query_hash: "H1", database_name: null, plan_xml: xml, truncated }) }; };
 const noPlanReply = () => { reply = { status: 200, body: JSON.stringify({ status: "unavailable", message: "No stored plan found for query_hash 'H1'." }) }; };
 
 const root = process.argv[2];
@@ -106,7 +106,7 @@ const scenarios = {
     out.matchesShown = clip[0] === pre(cell).textContent;
   },
   async truncated() {
-    planReply(XML.slice(0, 120) + "... (truncated)");
+    planReply(XML.slice(0, 120), true);
     const cell = viewer.storedPlanCell("srv-a", row);
     cell.byText("Plan").click();
     await flush();
@@ -144,7 +144,7 @@ const scenarios = {
     viewer.resetPlanViewer();
     let release;
     const gate = new Promise((r) => { release = r; });
-    globalThis.fetch = async () => { await gate; return { status: 400, ok: false, text: async () => JSON.stringify({ error: XML }) }; };
+    globalThis.fetch = async () => { await gate; return { status: 200, ok: true, text: async () => JSON.stringify({ query_hash: "H1", database_name: null, plan_xml: XML, truncated: false }) }; };
     const c1 = viewer.storedPlanCell("srv-a", row);
     c1.byText("Plan").click();
     const c2 = viewer.storedPlanCell("srv-a", row);

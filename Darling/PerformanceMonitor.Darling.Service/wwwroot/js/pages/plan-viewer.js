@@ -113,19 +113,16 @@ function redraw(key) {
   }
 }
 
-/* What the read answers (DarlingMcpPlanTools.GetPlanXml): the stored showplan XML as the bare response text, cut at
-   512,000 characters with "... (truncated)" appended, or a status envelope ("unavailable" / "not_collected") when
-   there is no plan. The text is not JSON, so the read route's classifier files a plan as a 400 whose error message
-   is the XML itself; an envelope arrives as kind "empty". This recognises the XML by its first character. */
-const TRUNCATED_SUFFIX = "... (truncated)";
+/* What the read answers (the web route's wrapper around DarlingMcpPlanTools.GetPlanXml): JSON { query_hash,
+   database_name, plan_xml, truncated } for a stored plan (`truncated` is decided on the server), or a status envelope
+   ("unavailable" / "not_collected") when there is no plan, which arrives as kind "empty". */
 
 /** Turns a read result into { kind: "plan" | "none" | "error", ... }, or null when the read was abandoned. */
 export function classifyPlanRead(res) {
   if (!res || res.kind === "aborted" || res.kind === "auth") return null;
   const text = typeof res.message === "string" ? res.message : "";
-  if (res.kind === "error" && text.trimStart().startsWith("<")) {
-    const truncated = text.endsWith(TRUNCATED_SUFFIX);
-    return { kind: "plan", xml: truncated ? text.slice(0, -TRUNCATED_SUFFIX.length) : text, truncated };
+  if (res.kind === "data" && res.data && typeof res.data.plan_xml === "string") {
+    return { kind: "plan", xml: res.data.plan_xml, truncated: res.data.truncated === true };
   }
   if (res.kind === "error") return { kind: "error", message: text || "The plan could not be read." };
   if (res.kind === "empty") return { kind: "none", message: text || NO_PLAN };

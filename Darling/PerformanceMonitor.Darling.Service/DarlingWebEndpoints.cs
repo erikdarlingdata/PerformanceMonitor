@@ -4230,7 +4230,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── stored plan XML (READ; the analyze_*_plan compute family stays excluded) ── */
             ["get_plan_xml"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
-                ? DarlingMcpPlanTools.GetPlanXml(pg, queryHash, Server(c), Str(c, "database_name"), c.RequestAborted)
+                ? WrapPlanXmlAsync(DarlingMcpPlanTools.GetPlanXml(pg, queryHash, Server(c), Str(c, "database_name"), c.RequestAborted), queryHash, Str(c, "database_name"))
                 : MissingParam("query_hash"),
 
             /* ── default trace ── */
@@ -4416,6 +4416,31 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>The dispatch layer's own refusal for a required text parameter the caller did not send — the
     /// <c>invalid</c> envelope (<see cref="McpHelpers.Refusal"/>, #3739) rather than the bare sentence it was, so
     /// a missing <c>wait_type</c> answers with the same shape and the same 400 a tool's own refusal does.</summary>
+    private const string PlanTruncatedMarker = "... (truncated)";
+
+    private static async Task<string> WrapPlanXmlAsync(Task<string> read, string queryHash, string? databaseName)
+        => WrapPlanXml(await read, queryHash, databaseName);
+
+    /// <summary>The web answer for <c>get_plan_xml</c>. The tool returns the stored showplan XML as bare text, which
+    /// the read route's classifier would file as a 400, so a plan is wrapped as JSON here (the MCP tool's own output
+    /// is unchanged). A status or error envelope, which starts with <c>{</c>, passes through untouched. A plan cut
+    /// by <see cref="McpHelpers.Truncate"/> ends with its marker (a whole plan ends with a closing tag); the marker
+    /// is removed and <c>truncated</c> says so.</summary>
+    internal static string WrapPlanXml(string result, string queryHash, string? databaseName)
+    {
+        if (!result.AsSpan().TrimStart().StartsWith("<", StringComparison.Ordinal)) return result;
+
+        var truncated = result.EndsWith(PlanTruncatedMarker, StringComparison.Ordinal);
+        var xml = truncated ? result[..^PlanTruncatedMarker.Length] : result;
+        return System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["query_hash"] = queryHash,
+            ["database_name"] = databaseName,
+            ["plan_xml"] = xml,
+            ["truncated"] = truncated,
+        });
+    }
+
     private static Task<string> MissingParam(string key) => Task.FromResult(McpHelpers.Refusal(key, $"Missing required parameter '{key}'."));
 
     /// <summary>
