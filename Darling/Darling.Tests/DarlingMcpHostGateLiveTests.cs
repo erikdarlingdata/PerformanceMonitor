@@ -274,6 +274,26 @@ public sealed class DarlingMcpHostGateLiveTests
     }
 
     /// <summary>
+    /// #5288: IDNA names are case-insensitive, so a punycode host name written in upper case is admitted exactly like
+    /// the lower-case spelling. The framework decodes a Host header's <c>xn--</c> labels only when the prefix is lower
+    /// case (the form a client sends), so the configured name is held in lower case and decodes the same way; a
+    /// different internationalized name is still refused.
+    /// </summary>
+    [Theory]
+    [InlineData("XN--BCHER-KVA.EXAMPLE")]
+    [InlineData("xn--bcher-kva.example")]
+    public async Task HostName_UpperCasePunycode_IsAdmitted(string configured)
+    {
+        using var server = await BuildServer(networkMode: true, hostName: configured);
+
+        var (punycode, body) = await ToolsListAsync(server, "/", "xn--bcher-kva.example", InCidrRemote, bearer: Token);
+        Assert.True(punycode == StatusCodes.Status200OK, $"expected 200, got {punycode}: {body}");
+
+        var other = await SendRaw(server, "/", "xn--e1afmkfd.example", InCidrRemote, bearer: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, other.Response.StatusCode);
+    }
+
+    /// <summary>
     /// #5288 item 2: a host name that is SET but is not a bare DNS name admits NOTHING, not even the part a lenient
     /// parser would keep (the host before a port, a name a wildcard would match), and logs exactly one Warning at
     /// start that names the key and the value as written. The listener is otherwise unaffected: the listen IP and
