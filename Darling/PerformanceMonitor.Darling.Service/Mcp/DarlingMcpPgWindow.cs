@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -46,6 +47,22 @@ internal static class DarlingMcpPgWindow
     /// </summary>
     internal static string Finish(string json, McpWindowNotice notice) =>
         notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+
+    /// <summary>
+    /// An empty answer written with <c>hints = notice.AsHints()</c>, without the <c>hints</c> key when the probe failed (a null
+    /// there would otherwise be written as <c>"hints":null</c>).
+    /// </summary>
+    internal static string FinishEmpty(string json, McpWindowNotice notice)
+    {
+        if (!notice.IsUnavailable)
+        {
+            return json;
+        }
+
+        var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        node.Remove("hints");
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
 
     /// <summary>The notice for one read over [<paramref name="start"/>, <paramref name="end"/>].</summary>
     internal static Task<McpWindowNotice> ReadAsync(

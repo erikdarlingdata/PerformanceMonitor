@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -84,6 +85,7 @@ public sealed class DarlingMcpPgBlockingTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum chains to return, worst-first by victim count. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -118,10 +120,15 @@ public sealed class DarlingMcpPgBlockingTools
             if (chains.Count == 0 && cycleEntries.Count > 0)
             {
                 /* Cycles but no chains. Reporting "no blocking sampled" here would be a flat lie. */
-                return JsonSerializer.Serialize(new
+                var notice = await DarlingMcpPgWindow.ReadAsync(
+                    postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: false, logger, cancellationToken);
+                return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,
                     hours_back,
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
                     status = "cycles_only",
                     captures_total = captures.CapturesTotal,
                     captures_with_blocking = captures.CapturesWithBlocking,
@@ -130,7 +137,7 @@ public sealed class DarlingMcpPgBlockingTools
                         + "(deadlock) rather than a chain with a root. There is no root blocker to name, "
                         + "which is why these are reported separately.",
                     cycles = cycleEntries,
-                }, McpHelpers.JsonOptions);
+                }, McpHelpers.JsonOptions), notice);
             }
 
             if (chains.Count == 0)
@@ -153,11 +160,18 @@ public sealed class DarlingMcpPgBlockingTools
                    a sampled signal. No captures at all means the collector never ran — nothing is known
                    about this window either way. Captures with no blocking is a real all-clear, bounded by
                    the sampling interval. */
-                return JsonSerializer.Serialize(new
+                /* #4966: only the all-clear (captures, no blocking) is an empty answer that carries the window floor under hints; "not_sampled"
+                   says the collector never ran in the window and stays bare. */
+                var emptyNotice = captures.CapturesTotal == 0
+                    ? McpWindowNotice.Unavailable
+                    : await DarlingMcpPgWindow.ReadAsync(
+                        postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: true, logger, cancellationToken);
+                return DarlingMcpPgWindow.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,
                     hours_back,
                     status = captures.CapturesTotal == 0 ? "not_sampled" : "no_blocking_sampled",
+                    hints = emptyNotice.AsHints(),
                     captures_total = captures.CapturesTotal,
                     captures_with_blocking = 0,
                     first_capture_at = captures.FirstCaptureAt,
@@ -170,11 +184,13 @@ public sealed class DarlingMcpPgBlockingTools
                         + "window. Note the limit of that statement: captures are periodic, so blocking that "
                         + "started and cleared between two of them left no trace. PostgreSQL has no "
                         + "engine-side blocked-process recorder to fall back on.",
-                }, McpHelpers.JsonOptions);
+                }, McpHelpers.JsonOptions), emptyNotice);
             }
 
+            var chainsNotice = await DarlingMcpPgWindow.ReadAsync(
+                postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: false, logger, cancellationToken);
             return BuildBlockingChainsJson(
-                resolved.ServerName, hours_back, chains, cycleEntries, captures);
+                resolved.ServerName, hours_back, chains, cycleEntries, captures, chainsNotice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -223,8 +239,10 @@ public sealed class DarlingMcpPgBlockingTools
         int hoursBack,
         IReadOnlyList<DarlingPgBlockingReader.PgBlockingChainRow> chains,
         List<object> cycleEntries,
-        DarlingPgBlockingReader.PgBlockingCaptureCounts captures)
+        DarlingPgBlockingReader.PgBlockingCaptureCounts captures,
+        McpWindowNotice? windowNotice = null)
     {
+        var notice = windowNotice ?? McpWindowNotice.Unavailable;
         var entries = chains.Select(c => new
         {
             captured_at = c.CapturedAt,
@@ -274,10 +292,14 @@ public sealed class DarlingMcpPgBlockingTools
 
         var worst = entries[0];
 
-        return JsonSerializer.Serialize(new
+        return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,
+            /* #4966: the window floor, right after hours_back. */
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
             status = "blocking_sampled",
             captures_total = captures.CapturesTotal,
             captures_with_blocking = captures.CapturesWithBlocking,
@@ -298,6 +320,6 @@ public sealed class DarlingMcpPgBlockingTools
             /* Always present, even when empty, so its absence is never mistaken for "not checked". */
             cycles_sampled = cycleEntries.Count,
             cycles = cycleEntries,
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
     }
 }

@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -47,6 +48,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -59,21 +61,34 @@ public sealed class DarlingMcpPgReplicationStatsTools
 
         try
         {
+            var windowStart = windowEnd.AddHours(-hours_back);
             var rows = await DarlingPgReplicationStatsReader.GetPgReplicationStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit, cancellationToken);
+                postgres, resolved.ServerId, windowStart, windowEnd, limit, cancellationToken);
 
             if (rows.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_stats", cancellationToken)
-                    ?? McpHelpers.Status(
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_stats", cancellationToken);
+                if (notCollected is not null)
+                {
+                    return notCollected;
+                }
+
+                /* #4966: the empty answer carries the window floor under hints. */
+                var emptyNotice = await DarlingMcpPgWindow.ReadAsync(
+                    postgres, "get_pg_replication_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+                return DarlingMcpPgWindow.FinishEmpty(McpHelpers.Status(
                         "empty",
                         $"No replica was connected to {resolved.ServerName} in the last {hours_back} "
                         + "hour(s). On a server with no replicas that is the expected answer. If a "
                         + "replica is SUPPOSED to be attached, check get_pg_replication_slots — a slot "
                         + "that persists with nothing connected to it retains WAL indefinitely, which is "
-                        + "the case worth acting on.");
+                        + "the case worth acting on.",
+                        emptyNotice.AsHints()), emptyNotice);
             }
+
+            var notice = await DarlingMcpPgWindow.ReadAsync(
+                postgres, "get_pg_replication_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
 
             var replicas = rows.Select(r => new
             {
@@ -94,17 +109,21 @@ public sealed class DarlingMcpPgReplicationStatsTools
                 last_seen = r.LastSeen,
             });
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 replica_count = rows.Count,
                 note = "Read the worst_* columns, not just the latest: lag is spiky and a sample catches "
                      + "one instant. `samples` against `total_samples` says how much of the window each "
                      + "replica was actually connected for — a replica present in only a few captures "
                      + "reconnected repeatedly, which the latest lag figure alone would hide.",
                 replicas,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

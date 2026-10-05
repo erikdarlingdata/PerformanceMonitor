@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -63,6 +64,7 @@ public sealed class DarlingMcpPgXminTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze, used for the persistence figures. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -99,6 +101,7 @@ public sealed class DarlingMcpPgXminTools
                    that never ran in this window leaves behind. The capture count is the witness. */
                 if (capturesInWindow == 0)
                 {
+                    /* "unavailable" says nothing is known about the window and stays bare. */
                     return JsonSerializer.Serialize(new
                     {
                         server = resolved.ServerName,
@@ -109,18 +112,22 @@ public sealed class DarlingMcpPgXminTools
                     }, McpHelpers.JsonOptions);
                 }
 
-                return JsonSerializer.Serialize(new
+                /* #4966: the all-clear is an empty answer, and carries the window floor under hints. */
+                var emptyNotice = await DarlingMcpPgWindow.ReadAsync(
+                    postgres, "get_pg_xmin_horizon", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
+                return DarlingMcpPgWindow.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,
                     hours_back,
                     status = "no_holder",
+                    hints = emptyNotice.AsHints(),
                     captures_in_window = capturesInWindow,
                     finding = $"Nothing is holding back the xmin horizon in this window: the collector captured "
                             + $"{capturesInWindow} time(s) and recorded no holder. Vacuum is free to "
                             + "reclaim dead rows, so bloat growth has a different cause — look at whether "
                             + "autovacuum is being triggered at all (per-table thresholds and dead-tuple "
                             + "counts) rather than at whether it is being blocked.",
-                }, McpHelpers.JsonOptions);
+                }, McpHelpers.JsonOptions), emptyNotice);
             }
 
             var holders = rows.Select(r => new
@@ -152,10 +159,19 @@ public sealed class DarlingMcpPgXminTools
 
             var winner = holders.FirstOrDefault(h => h.is_currently_winning) ?? holders[0];
 
-            return JsonSerializer.Serialize(new
+            /* #4966: the latest holder per source and the window's peak and persistence figures are both read over the window, so the
+               answer names where the store's coverage of it starts. The collector stores nothing on an unheld capture, so its table is
+               sparse, but it is not run-probed: it has a schedule edge, which the table probe uses. */
+            var notice = await DarlingMcpPgWindow.ReadAsync(
+                postgres, "get_pg_xmin_horizon", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
+            return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 status = "holder_present",
                 /* The window's denominator: successful pg_xmin_horizon runs logged in the window, from
                    collection_log — every time the collector LOOKED, held or not. */
@@ -169,7 +185,7 @@ public sealed class DarlingMcpPgXminTools
                 winning_xmin_age = winner.xmin_age,
                 recommended_action = winner.remedy,
                 holders,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
