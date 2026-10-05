@@ -1188,4 +1188,355 @@ public sealed class AdminServerEditBehaviourTests
         Assert.Equal(forms, page.GetProperty("forms").GetInt32());
         Assert.Equal(forms, page.GetProperty("formBoxChildren").GetInt32());
     }
+
+    // ------------------------------------------------------------------ T4: the stale edit (a 409 conflict)
+
+    private const string Token2 = "2026-10-05T13:00:00.7654321Z";
+
+    private const string Stale = "This server was changed since you opened it. Nothing was saved.";
+
+    private const string NoneChanged = "None of the fields on this form changed. Another setting, such as the enabled state, changed.";
+
+    private static string Body(JsonElement patch) => patch.GetProperty("body").GetRawText();
+
+    private static string[] FormValues(JsonElement step, params string[] keys) =>
+        keys.Select(k => step.GetProperty("form").GetProperty("values").GetProperty(k).GetString()!).ToArray();
+
+    [Theory]
+    [InlineData("reapply")]
+    [InlineData("reload")]
+    [InlineData("reloadnone")]
+    [InlineData("again")]
+    [InlineData("none")]
+    public void AStaleEdit_Shows409Changes_AndReapplyOrReloadNeverResubmits(string how)
+    {
+        var page = Run("conflict:" + how);
+        var stale = page.GetProperty("stale");
+        var staleView = stale.GetProperty("view");
+        var none = how == "none";
+        var userBody = none
+            ? """{"display_name":"Charlie Two","password":"SECRET-PW","expected_modified_at":"READ"}"""
+            : """{"host":"charlie-two","display_name":"Charlie Two","password":"SECRET-PW","expected_modified_at":"READ"}""";
+
+        // The 409: the page's own sentence, what the other edit changed (and what the user entered for the same field), the two
+        // buttons, exactly one PATCH, and the password gone from the box and from the page.
+        Assert.Equal(new[] { Stale }, Lines(staleView, "banner"));
+        var panel = staleView.GetProperty("conflict");
+        Assert.Equal(new[] { "Reapply my changes", "Reload current values" }, Strings(panel.GetProperty("buttons")));
+        if (none)
+        {
+            Assert.Empty(panel.GetProperty("lines").EnumerateArray());
+            Assert.Equal(NoneChanged, panel.GetProperty("none").GetString());
+        }
+        else
+        {
+            Assert.Equal(
+                new[]
+                {
+                    "Server Name / Address: was charlie, now charlie-new (you entered charlie-two)",
+                    "Display Name: was Charlie, now Charlie Elsewhere (you entered Charlie Two)",
+                    "Database: was Sales, now Orders",
+                },
+                Strings(panel.GetProperty("lines")));
+            Assert.Equal(new[] { "host", "display_name", "database" }, Strings(panel.GetProperty("fields")));
+            Assert.Equal(JsonValueKind.Null, panel.GetProperty("none").ValueKind);
+        }
+
+        Assert.Equal(userBody.Replace("READ", ReadToken, StringComparison.Ordinal), Body(Assert.Single(Patches(staleView))));
+        Assert.Equal(1, staleView.GetProperty("forms").GetInt32());
+        Assert.False(staleView.GetProperty("saveDisabled").GetBoolean());
+        Assert.Equal("", stale.GetProperty("pw").GetProperty("value").GetString());
+        Assert.Equal(0, stale.GetProperty("secretNodes").GetInt32());
+        Assert.Equal(none ? "charlie" : "charlie-two", FormValues(stale, "host")[0]);
+
+        if (how != "again")
+        {
+            // Pressing either button sends nothing at all: no PATCH, no read. The form is drawn again, focused, with a fresh empty password box.
+            var pressed = page.GetProperty("pressed");
+            var pressedView = pressed.GetProperty("view");
+            Assert.Equal(0, pressed.GetProperty("sent").GetInt32());
+            Assert.Single(Patches(pressedView));
+            Assert.Equal(JsonValueKind.Null, pressedView.GetProperty("conflict").ValueKind);
+            Assert.Empty(Lines(pressedView, "banner"));
+            Assert.Equal(1, pressedView.GetProperty("forms").GetInt32());
+            Assert.True(pressed.GetProperty("form").GetProperty("headingFocused").GetBoolean());
+            Assert.Equal("", pressed.GetProperty("form").GetProperty("passwordValue").GetString());
+            Assert.Equal("", pressed.GetProperty("oldPw").GetProperty("value").GetString());
+            var values = FormValues(pressed, "host", "display_name", "database");
+            Assert.Equal(
+                how switch
+                {
+                    "reapply" => new[] { "charlie-two", "Charlie Two", "Orders" },
+                    "none" => new[] { "charlie", "Charlie Two", "Sales" },
+                    _ => new[] { "charlie-new", "Charlie Elsewhere", "Orders" },
+                },
+                values);
+        }
+
+        var saved = page.GetProperty("saved");
+        var savedView = saved.GetProperty("view");
+        Assert.Equal(0, saved.GetProperty("secretNodes").GetInt32());
+        Assert.Equal(0, saved.GetProperty("otherNodes").GetInt32());
+        switch (how)
+        {
+            case "reapply":
+                // The next Save is the user's own: the password has to be typed again, then it sends the user's fields and the NEW token.
+                Assert.Equal(new[] { PasswordNeeded }, Lines(page.GetProperty("refused").GetProperty("view"), "banner"));
+                Assert.Single(Patches(page.GetProperty("refused").GetProperty("view")));
+                Assert.Equal(2, Patches(savedView).Length);
+                Assert.Equal(
+                    """{"host":"charlie-two","display_name":"Charlie Two","password":"OTHER-PW","expected_modified_at":"TOKEN2"}""".Replace("TOKEN2", Token2, StringComparison.Ordinal),
+                    Body(Patches(savedView)[1]));
+                Assert.StartsWith("Saved \"Charlie Two\".", Notice(savedView), StringComparison.Ordinal);
+                Assert.Equal(0, savedView.GetProperty("forms").GetInt32());
+                break;
+            case "reload":
+                // The user's host and name are gone; a new edit goes out against the current values and the NEW token.
+                Assert.Equal(2, Patches(savedView).Length);
+                Assert.Equal("""{"monthly_cost_usd":5,"expected_modified_at":"TOKEN2"}""".Replace("TOKEN2", Token2, StringComparison.Ordinal), Body(Patches(savedView)[1]));
+                break;
+            case "reloadnone":
+                Assert.Single(Patches(savedView));
+                Assert.Equal("No change.", Notice(savedView));
+                Assert.Equal(0, savedView.GetProperty("forms").GetInt32());
+                break;
+            case "again":
+                // Save without choosing is the stale save again: the OLD token, so the service says conflict again, and one panel shows, not two.
+                Assert.Equal(2, Patches(savedView).Length);
+                Assert.Equal(userBody.Replace("READ", ReadToken, StringComparison.Ordinal).Replace("SECRET-PW", "OTHER-PW", StringComparison.Ordinal), Body(Patches(savedView)[1]));
+                Assert.Equal(new[] { Stale }, Lines(savedView, "banner"));
+                Assert.Equal(3, savedView.GetProperty("conflict").GetProperty("lines").GetArrayLength());
+                break;
+            default:
+                Assert.Equal(2, Patches(savedView).Length);
+                Assert.Equal("""{"display_name":"Charlie Two","expected_modified_at":"TOKEN2"}""".Replace("TOKEN2", Token2, StringComparison.Ordinal), Body(Patches(savedView)[1]));
+                break;
+        }
+    }
+
+    // ------------------------------------------------------------------ T6: nothing secret stays in the page
+
+    [Theory]
+    [InlineData("cancel", 0, false)]
+    [InlineData("saved", 0, false)]
+    [InlineData("hash", 0, false)]
+    // Review finding 8: the next list read answers 401 and the shell takes the page over; the form is closed, the password cleared.
+    [InlineData("listexpired", 0, false)]
+    [InlineData("badrequest", 1, true)]
+    [InlineData("echo", 1, true)]
+    [InlineData("limited", 1, true)]
+    [InlineData("conflict", 1, true)]
+    // Reapply and Reload draw the form again, so the box typed into is gone and its replacement is empty.
+    [InlineData("reapply", 1, false)]
+    [InlineData("reload", 1, false)]
+    public void NothingSecret_StaysInTheDom_AfterCloseSaveErrorOrLeaving(string path, int forms, bool connected)
+    {
+        var page = Run("secret:" + path);
+
+        Assert.Equal("SECRET-PW", page.GetProperty("typed").GetString());
+        // The very box typed into, read after whatever happened to it, holds nothing, and no text, attribute or value on the page does.
+        Assert.Equal("", page.GetProperty("value").GetString());
+        Assert.Equal(connected, page.GetProperty("connected").GetBoolean());
+        Assert.Equal(0, page.GetProperty("secretNodes").GetInt32());
+        Assert.Equal(forms, page.GetProperty("forms").GetInt32());
+        if (forms == 1)
+        {
+            Assert.Equal("", page.GetProperty("nextValue").GetString());
+        }
+
+        var view = page.GetProperty("view");
+        if (path == "echo")
+        {
+            Assert.Equal(new[] { "The host 'charlie two' is not valid: [redacted] is not allowed here." }, Lines(view, "banner"));
+        }
+
+        if (path == "conflict")
+        {
+            Assert.Contains("Display Name: was Charlie, now [redacted]", Strings(view.GetProperty("conflict").GetProperty("lines")));
+        }
+    }
+
+    // ------------------------------------------------------------------ T2, T3 and T13: the flow halves, through the real form
+
+    // The by-id read of one kind of server, as editFormValues turns it into Base(kind).
+    private static JsonObject ReadFor(string kind, string token)
+    {
+        var read = JsonNode.Parse("""{"server_id":1,"display_name":"Orders","engine":"sqlserver","host":"sql-a","port":0,"database":null,"read_only_intent":false,"auth":"Windows","username":null,"encrypt_mode":"Mandatory","trust_server_certificate":false,"multi_subnet_failover":false,"monthly_cost_usd":100}""")!.AsObject();
+        switch (kind)
+        {
+            case "windows":
+                break;
+            case "sql":
+                read["auth"] = "SQL";
+                read["username"] = "sa";
+                break;
+            case "sp":
+                read["auth"] = "ServicePrincipal";
+                read["username"] = "11111111-1111-1111-1111-111111111111";
+                break;
+            case "managed":
+                read["auth"] = "ManagedIdentity";
+                break;
+            case "postgres":
+                read["engine"] = "postgres";
+                read["host"] = "pg-a";
+                read["port"] = 5433;
+                read["auth"] = "SQL";
+                read["username"] = "pgmon";
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(kind), kind, null);
+        }
+
+        read["modified_at"] = token;
+        return read;
+    }
+
+    // One edit made through the form of that server (the edits typed, ticked or chosen in the order given, the authentication first).
+    private static JsonElement Flow(string kind, string edits, string password, string token = Token) =>
+        Run("flow", JsonSerializer.Serialize(new { read = ReadFor(kind, token), edits = JsonNode.Parse(edits), password }));
+
+    private static readonly string[] EditableKeys =
+        ["host", "display_name", "port", "auth", "username", "encrypt_mode", "trust_server_certificate", "database", "read_only_intent", "multi_subnet_failover", "monthly_cost_usd", "password", "expected_modified_at"];
+
+    [Theory]
+    // A name-only edit sends exactly the name and the token; nothing that did not change goes out.
+    [InlineData("windows", """{"display_name":"Payments"}""", "", """{"display_name":"Payments","expected_modified_at":"TOKEN"}""")]
+    [InlineData("windows", """{}""", "", "null")]
+    [InlineData("windows", """{"host":"  sql-a ","display_name":"Orders  "}""", "", "null")]
+    [InlineData("windows", """{"monthly_cost_usd":"250.50"}""", "", """{"monthly_cost_usd":250.5,"expected_modified_at":"TOKEN"}""")]
+    [InlineData("windows", """{"monthly_cost_usd":"100.00"}""", "", "null")]
+    [InlineData("windows", """{"encrypt_mode":"Strict"}""", "", """{"encrypt_mode":"Strict","expected_modified_at":"TOKEN"}""")]
+    [InlineData("windows", """{"trust_server_certificate":true,"multi_subnet_failover":true,"read_only_intent":true}""", "", """{"trust_server_certificate":true,"read_only_intent":true,"multi_subnet_failover":true,"expected_modified_at":"TOKEN"}""")]
+    [InlineData("windows", """{"database":"Sales"}""", "", """{"database":"Sales","expected_modified_at":"TOKEN"}""")]
+    // SQL Server never sends a port; a password goes only with an auth that stores one.
+    [InlineData("sql", """{"host":"sql-b"}""", "typed", """{"host":"sql-b","password":"typed","expected_modified_at":"TOKEN"}""")]
+    [InlineData("sql", """{}""", "typed", """{"password":"typed","expected_modified_at":"TOKEN"}""")]
+    [InlineData("sp", """{}""", "secret", """{"password":"secret","expected_modified_at":"TOKEN"}""")]
+    [InlineData("windows", """{"host":"sql-b"}""", "typed", """{"host":"sql-b","expected_modified_at":"TOKEN"}""")]
+    [InlineData("windows", """{}""", "typed", "null")]
+    [InlineData("managed", """{}""", "typed", "null")]
+    // An auth switch always sends the username box of the new mode, and Windows sends none.
+    [InlineData("windows", """{"auth":"SQL","username":"sa"}""", "typed", """{"auth":"SQL","username":"sa","password":"typed","expected_modified_at":"TOKEN"}""")]
+    [InlineData("windows", """{"auth":"ServicePrincipal","username":"app-id"}""", "secret", """{"auth":"ServicePrincipal","username":"app-id","password":"secret","expected_modified_at":"TOKEN"}""")]
+    [InlineData("sql", """{"auth":"ManagedIdentity"}""", "", """{"auth":"ManagedIdentity","username":null,"expected_modified_at":"TOKEN"}""")]
+    [InlineData("sql", """{"auth":"Windows"}""", "typed", """{"auth":"Windows","expected_modified_at":"TOKEN"}""")]
+    // PostgreSQL never sends auth, and a blank port is sent as 0, the default.
+    [InlineData("postgres", """{"display_name":"Payments"}""", "", """{"display_name":"Payments","expected_modified_at":"TOKEN"}""")]
+    [InlineData("postgres", """{"port":""}""", "typed", """{"port":0,"password":"typed","expected_modified_at":"TOKEN"}""")]
+    [InlineData("postgres", """{"port":"5434"}""", "typed", """{"port":5434,"password":"typed","expected_modified_at":"TOKEN"}""")]
+    [InlineData("postgres", """{"host":"pg-b"}""", "typed", """{"host":"pg-b","password":"typed","expected_modified_at":"TOKEN"}""")]
+    public void TheEditBody_CarriesOnlyChangedEditableFields_AndTheToken(string kind, string edits, string password, string expected)
+    {
+        var after = Flow(kind, edits, password).GetProperty("after");
+        var patches = Patches(after);
+
+        if (expected == "null")
+        {
+            Assert.Empty(patches);
+            Assert.Equal("No change.", Notice(after));
+            return;
+        }
+
+        var body = Assert.Single(patches).GetProperty("body");
+        Assert.Equal(Expand(expected), body.GetRawText());
+        // No PATCH body of any case has a key that is not editable (never server_id, engine, is_enabled, the secret store ...), the token is last,
+        // a SQL Server body has no port and a PostgreSQL body no auth.
+        var keys = body.EnumerateObject().Select(p => p.Name).ToArray();
+        Assert.All(keys, key => Assert.Contains(key, EditableKeys));
+        Assert.Equal("expected_modified_at", keys.Last());
+        Assert.False(kind == "postgres" && keys.Contains("auth"));
+        Assert.False(kind != "postgres" && keys.Contains("port"));
+    }
+
+    [Theory]
+    // Required and blank: no request, and the service's own sentence in the banner.
+    [InlineData("sql", """{"host":"sql-b"}""", "", true, PasswordNeeded)]
+    [InlineData("sp", """{"username":"22222222-2222-2222-2222-222222222222"}""", "", true, PasswordNeeded)]
+    [InlineData("postgres", """{"host":"pg-b"}""", "", true, PasswordNeeded)]
+    [InlineData("windows", """{"auth":"SQL","username":"sa"}""", "", true, "Switching to SQL authentication needs the password.")]
+    // Not required: name or cost only, and Windows or managed identity (a typed password is not even sent).
+    [InlineData("windows", """{"display_name":"Payments"}""", "", false, null)]
+    [InlineData("sql", """{"monthly_cost_usd":"250"}""", "", false, null)]
+    [InlineData("windows", """{"host":"sql-b"}""", "typed", false, null)]
+    [InlineData("managed", """{"host":"sql-b"}""", "typed", false, null)]
+    public void ThePassword_IsRequiredExactlyWhenTheRulesSay(string kind, string edits, string password, bool required, string? sentence)
+    {
+        var page = Flow(kind, edits, password);
+        var after = page.GetProperty("after");
+
+        Assert.EndsWith(required ? "(required for this change)" : "(leave blank to keep the stored one)", page.GetProperty("label").GetString(), StringComparison.Ordinal);
+        if (sentence is null)
+        {
+            var body = Assert.Single(Patches(after)).GetProperty("body");
+            Assert.False(body.TryGetProperty("password", out _));
+            Assert.Empty(Lines(after, "banner"));
+        }
+        else
+        {
+            Assert.Empty(Patches(after));
+            Assert.Equal(new[] { sentence }, Lines(after, "banner"));
+            Assert.Equal(1, after.GetProperty("forms").GetInt32());
+        }
+    }
+
+    [Theory]
+    // The token goes out exactly as the read gave it: microseconds, trailing zeros, a zone offset, no fraction, odd spacing.
+    [InlineData(Token)]
+    [InlineData("2026-01-02T03:04:05.1230000Z")]
+    [InlineData("2026-01-02T03:04:05.0000001+00:00")]
+    [InlineData("2026-01-02T03:04:05Z")]
+    [InlineData(" as-is ")]
+    public void TheTokenRoundTripsVerbatim_AndInterpretEditBranchesOnStatusWords(string token)
+    {
+        var body = Assert.Single(Patches(Flow("windows", """{"display_name":"Payments","monthly_cost_usd":"7"}""", "", token).GetProperty("after"))).GetProperty("body");
+
+        Assert.Equal(token, body.GetProperty("expected_modified_at").GetString());
+        Assert.Equal("expected_modified_at", body.EnumerateObject().Last().Name);
+    }
+
+    [Fact]
+    public void TheAnswerIsReadByItsStatusWord_NotByItsMessage()
+    {
+        // A collision whose sentence talks about a change is no conflict: its own sentence in the banner, no panel.
+        var collides = Run("save:collidesTalk").GetProperty("after");
+        Assert.Equal(new[] { "This server was changed since you opened it: another monitored server already uses the address." }, Lines(collides, "banner"));
+        Assert.Equal(JsonValueKind.Null, collides.GetProperty("conflict").ValueKind);
+
+        // A conflict whose sentence talks about a collision still shows the page's own sentence and the panel.
+        var conflict = Run("save:conflictTalk").GetProperty("after");
+        Assert.Equal(new[] { Stale }, Lines(conflict, "banner"));
+        Assert.Equal(new[] { "Server Name / Address: was charlie, now charlie-new (you entered alpha)" }, Strings(conflict.GetProperty("conflict").GetProperty("lines")));
+    }
+
+    // ------------------------------------------------------------------ the password-manager attributes
+
+    [Fact]
+    public void TheUsernameAndPasswordBoxes_AskPasswordManagersToLeaveThemAlone_AndSitInNoFormElement()
+    {
+        var page = Run("inputs");
+
+        foreach (var engine in new[] { "sql", "postgres" })
+        {
+            var form = page.GetProperty(engine);
+            Assert.Equal(0, form.GetProperty("formElements").GetInt32());
+            foreach (var box in new[] { "username", "password" })
+            {
+                var input = form.GetProperty(box);
+                var attrs = input.GetProperty("attrs");
+                Assert.False(input.GetProperty("inForm").GetBoolean());
+                // No name and no id: only data-field says what the box is, so a browser has no sign-in field to take it for.
+                Assert.False(attrs.TryGetProperty("name", out _), engine + " " + box + " has a name");
+                Assert.False(attrs.TryGetProperty("id", out _), engine + " " + box + " has an id");
+                Assert.Equal(box, attrs.GetProperty("data-field").GetString());
+                Assert.Equal("", attrs.GetProperty("data-1p-ignore").GetString());
+                Assert.Equal("true", attrs.GetProperty("data-lpignore").GetString());
+                Assert.Equal("", attrs.GetProperty("data-bwignore").GetString());
+                Assert.Equal("other", attrs.GetProperty("data-form-type").GetString());
+                Assert.Equal(box == "password" ? "new-password" : "off", attrs.GetProperty("autocomplete").GetString());
+            }
+
+            Assert.Equal("password", form.GetProperty("password").GetProperty("type").GetString());
+        }
+    }
 }
