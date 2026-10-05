@@ -164,6 +164,16 @@ public sealed class WebPerfmonMultiSelectBehaviourTests
     }
 
     [Fact]
+    public void ACounterWithNoTrend_ListsTheCollectedCountersAsText_NotAsAJsonPath()
+    {
+        var r = Run("hintedEmpty");
+        var note = Assert.Single(Strings(r.GetProperty("notes")), n => n.StartsWith("SQL Compilations/sec:"));
+        Assert.Contains("Collected here: Alpha/sec, Beta pages.", note);
+        Assert.DoesNotContain("hints.collected_counters", note);
+        Assert.Empty(r.GetProperty("errors").EnumerateArray());
+    }
+
+    [Fact]
     public void FastClicks_AbortTheSupersededReads_AndLeaveOneDrawsReadsInFlight()
     {
         var r = Run("fastClicks");

@@ -118,7 +118,7 @@ try {
   fs.mkdirSync(path.join(scratch, "pages"));
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   for (const f of ["util.js", "panels.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js")]) {
+  for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js")]) {
     const from = path.join(jsDir, rel);
     if (!fs.existsSync(from)) continue;
     fs.mkdirSync(path.dirname(path.join(scratch, rel)), { recursive: true });
@@ -168,12 +168,14 @@ const trendFor = (name) => data({
 });
 let failing = new Set();
 let emptyTrends = false;
+let hintedEmpty = false;
 let statNames = NAMES;
 answer = (url) => {
   const t = tool(url);
   if (t === "get_perfmon_stats") return statsFor(statNames);
   if (t === "get_perfmon_trend") {
     const w = url.searchParams.get("counter_name");
+    if (hintedEmpty && w === "SQL Compilations/sec") return data({ status: "no_data", message: "No trend data for counter '" + w + "'. It may not be a counter this server collects \u2014 see hints.collected_counters for the 2 that are.", hints: { collected_counters: ["Alpha/sec", "Beta pages"] } });
     if (emptyTrends) return data({ status: "no_data", message: "No trend rows for " + w + "." });
     return failing.has(w) ? { status: 500, body: { error: "boom" } } : trendFor(w);
   }
@@ -220,6 +222,11 @@ const scenarios = {
     emptyTrends = true;
     const root = await build("SRV1");
     return { chart: chartInfo(), errors: all(root, (n) => n.className === "strip error").map((n) => n.textContent), empties: all(root, (n) => n.className === "strip empty").map((n) => n.textContent) };
+  },
+  hintedEmpty: async () => {
+    hintedEmpty = true;
+    const root = await build("SRV1");
+    return { chart: chartInfo(), notes: notes(root), errors: all(root, (n) => n.className === "strip error").map((n) => n.textContent) };
   },
   fastClicks: async () => {
     const root = await build("SRV1");
