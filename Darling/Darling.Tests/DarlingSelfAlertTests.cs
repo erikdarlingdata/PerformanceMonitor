@@ -2134,6 +2134,374 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("The web dashboard is no longer serving a TLS certificate to watch", gone.DetailText);
     }
 
+    /* ---------------- MCP endpoint TLS certificate expiry (#5288) ---------------- */
+
+    private const string McpCertThumbprint = "MCP9876FEDC";
+
+    /// <summary>A certificate the MCP host SERVES: the web helper's shape under the MCP listener's own
+    /// subject and thumbprint, so a failure names the listener it came from.</summary>
+    private static DarlingSelfAlertEvaluator.WebTlsCertReport McpCert(DateTime notAfterUtc) =>
+        Cert(notAfterUtc, "CN=Darling MCP", McpCertThumbprint);
+
+    /// <summary>A certificate the MCP host REFUSED at load because its window had not opened (#3517's arm, for
+    /// the MCP listener): the host's verdict rides the flag, NotAfter is far out.</summary>
+    private static DarlingSelfAlertEvaluator.WebTlsCertReport McpNotYetValidCert(DateTime notBeforeUtc) =>
+        new(
+            Configured: true,
+            NotBeforeUtc: new DateTimeOffset(notBeforeUtc, TimeSpan.Zero),
+            NotAfterUtc: new DateTimeOffset(notBeforeUtc.AddDays(365), TimeSpan.Zero),
+            Subject: "CN=Darling MCP (rotation)",
+            Thumbprint: "MCPFUTURE01",
+            RefusedNotYetValid: true);
+
+    [Fact]
+    public async Task McpTlsCert_InWindow_Warns()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(10)), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        /* The metric string and the key are the webhook-automation identity: pinned as literals, not through the
+           constants, so a rename of either has to be a deliberate edit here. */
+        Assert.Equal("MCP TLS Certificate Expiring", fired.MetricName);
+        Assert.Equal(DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric, fired.MetricName);
+        Assert.Equal("mcptlscert", fired.ServerKey);   // its OWN fleet sentinel, never the web alert's
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal("MCP server TLS certificate expires in 10 days (2026-07-11 12:00:00Z)", fired.ShortMessage);
+        Assert.Contains("The MCP server's TLS certificate expires on", fired.DetailText);
+        Assert.Contains("the LAN MCP endpoint stops serving", fired.DetailText);
+        Assert.Contains(McpCertThumbprint, fired.DetailText);   // ties the alert to the host's own log line
+        Assert.DoesNotContain("dashboard", fired.ShortMessage + fired.DetailText);
+        Assert.Equal(0d, fired.NumericCurrentValue);   // state-only, like every firing of this family
+        Assert.Equal(0d, fired.NumericThresholdValue);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task McpTlsCert_Expired_FiresCritical()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(-2)), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric, fired.MetricName);
+        Assert.Equal("mcptlscert", fired.ServerKey);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Equal("MCP server TLS certificate EXPIRED 2026-06-29 12:00:00Z (2 days ago)", fired.ShortMessage);
+        Assert.Contains("The MCP server's TLS certificate expired on", fired.DetailText);
+        Assert.Contains("the LAN MCP endpoint is unreachable now and binds loopback-only", fired.DetailText);
+        Assert.DoesNotContain("dashboard", fired.ShortMessage + fired.DetailText);
+    }
+
+    [Fact]
+    public async Task McpTlsCert_NotYetValid_FiresCritical()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyMcpTlsCertificateAsync(McpNotYetValidCert(CertClock.AddDays(3)), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric, fired.MetricName);   // the family, not a third metric
+        Assert.Equal("mcptlscert", fired.ServerKey);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);   // as unreachable as expired
+        Assert.Equal(
+            "MCP server TLS certificate NOT YET VALID (valid from 2026-07-04 12:00:00Z) — LAN MCP endpoint is loopback-only",
+            fired.ShortMessage);
+        Assert.Contains("The MCP server's configured TLS certificate was not yet valid", fired.DetailText);
+        Assert.Contains("the LAN MCP endpoint is bound LOOPBACK-ONLY", fired.DetailText);
+        Assert.Contains("restart the service", fired.DetailText);
+        Assert.Contains("MCPFUTURE01", fired.DetailText);
+        Assert.DoesNotContain("dashboard", fired.ShortMessage + fired.DetailText);
+        Assert.Empty(h.History.Records);
+
+        /* The verdict is the host's, not the clock's: past the date the alert still stands (same as the web arm). */
+        h.Now = CertClock.AddDays(5);
+        await e.ApplyMcpTlsCertificateAsync(McpNotYetValidCert(CertClock.AddDays(3)), Ct);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>The recovery half: a healthy served certificate (renewed past the window) and a listener that
+    /// stopped serving one each resolve the active MCP alert exactly once, under the MCP resolution title and
+    /// the MCP key, never the web pair.</summary>
+    [Fact]
+    public async Task McpTlsCert_Renewed_ResolvesWithMcpMetric()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(5)), Ct);   // fires
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(400)), Ct);   // re-published, outside the window
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal("MCP TLS Certificate Renewed", resolution.MetricName);
+        Assert.Equal(DarlingSelfAlertEvaluator.McpTlsCertRenewedMetric, resolution.MetricName);
+        Assert.Equal("mcptlscert", resolution.ServerId);
+        Assert.Equal(
+            "The MCP server's TLS certificate is being served and is outside the expiry window", resolution.DetailText);
+
+        /* One edge, one resolution: a further healthy sweep writes nothing more. */
+        await e.ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(400)), Ct);
+        Assert.Single(h.History.Records);
+
+        /* The other resolve arm: the MCP host stopped serving TLS (its state was Clear()ed). */
+        var stopped = new Harness { Now = CertClock };
+        var e2 = stopped.Build();
+        await e2.ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(5)), Ct);
+        await e2.ApplyMcpTlsCertificateAsync(NoWebTlsCert, Ct);
+        var gone = Assert.Single(stopped.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.McpTlsCertRenewedMetric, gone.MetricName);
+        Assert.Equal("The MCP server is no longer serving a TLS certificate to watch", gone.DetailText);
+    }
+
+    /// <summary>
+    /// One certificate served by BOTH listeners raises TWO alerts, each under its own key and metric and each
+    /// naming its own listener, and each resolves on its own: a listener drops to loopback-only on its own, so
+    /// the web alert clearing says nothing about the MCP endpoint, and the daily re-state is per listener. One
+    /// shared key would fail the second fire here (the first listener's active flag and stamp would swallow it).
+    /// </summary>
+    [Fact]
+    public async Task SharedCertificate_TwoListeners_FireAndResolveSeparately()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+        var shared = Cert(CertClock.AddDays(10), "CN=Darling Shared", "SHARED0123");
+
+        await e.ApplyWebTlsCertificateAsync(shared, Ct);
+        await e.ApplyMcpTlsCertificateAsync(shared, Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var web = Assert.Single(h.Deliverer.Outcomes, o => o.ServerKey == "webtlscert");
+        var mcp = Assert.Single(h.Deliverer.Outcomes, o => o.ServerKey == "mcptlscert");
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric, web.MetricName);
+        Assert.Equal(DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric, mcp.MetricName);
+        Assert.StartsWith("web dashboard TLS certificate expires in 10 days", web.ShortMessage, StringComparison.Ordinal);
+        Assert.StartsWith("MCP server TLS certificate expires in 10 days", mcp.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("SHARED0123", web.DetailText);   // the same certificate, named by both
+        Assert.Contains("SHARED0123", mcp.DetailText);
+
+        /* The same sweep again: each listener holds on its own stamp, so nothing re-fires. */
+        await e.ApplyWebTlsCertificateAsync(shared, Ct);
+        await e.ApplyMcpTlsCertificateAsync(shared, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* The web dashboard stops serving it (a web restart or disable clears the WEB state only): the web alert
+           resolves under the web pair, and the MCP alert is still standing, so its next sweep is silent. */
+        await e.ApplyWebTlsCertificateAsync(NoWebTlsCert, Ct);
+        var webResolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, webResolution.MetricName);
+        Assert.Equal("webtlscert", webResolution.ServerId);
+
+        await e.ApplyMcpTlsCertificateAsync(shared, Ct);
+        Assert.Single(h.History.Records);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* A day on, the MCP alert (still standing) re-states on its own stamp; the resolved web alert is silent. */
+        h.Now = CertClock.Add(DarlingSelfAlertEvaluator.WebTlsCertRefire).AddMinutes(1);
+        await e.ApplyWebTlsCertificateAsync(NoWebTlsCert, Ct);
+        await e.ApplyMcpTlsCertificateAsync(shared, Ct);
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        Assert.Equal("mcptlscert", h.Deliverer.Outcomes[^1].ServerKey);
+
+        /* Then the MCP side resolves on its own, under the MCP pair, and the web resolution is not repeated. */
+        await e.ApplyMcpTlsCertificateAsync(NoWebTlsCert, Ct);
+        Assert.Equal(2, h.History.Records.Count);
+        Assert.Equal(DarlingSelfAlertEvaluator.McpTlsCertRenewedMetric, h.History.Records[1].MetricName);
+        Assert.Equal("mcptlscert", h.History.Records[1].ServerId);
+    }
+
+    /// <summary>The MCP alert's words, pinned in full beside the web pin above: the MCP nouns are "MCP server"
+    /// and "LAN MCP endpoint", and nothing else in the text moves.</summary>
+    [Fact]
+    public async Task McpTlsCert_RenderedText_NamesTheMcpServerAndTheLanMcpEndpoint()
+    {
+        var thresholdDays = $"{(int)DarlingSelfAlertEvaluator.WebTlsCertWarnWindow.TotalDays} days";
+        const string certRef = "Certificate: subject CN=Darling MCP, thumbprint " + McpCertThumbprint + ".";
+
+        var inWindow = new Harness { Now = CertClock };
+        await inWindow.Build().ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(10)), Ct);
+        var warned = Assert.Single(inWindow.Deliverer.Outcomes);
+        Assert.Equal("expires 2026-07-11 12:00:00Z (in 10 days)", warned.CurrentValue);
+        Assert.Equal(thresholdDays, warned.ThresholdValue);
+        Assert.Equal(
+            "The MCP server's TLS certificate expires on 2026-07-11 12:00:00Z, in 10 days. When it lapses the LAN MCP "
+            + "endpoint stops serving (it fails closed to loopback-only, never plain HTTP), so renew it and restart the "
+            + "service before then. " + certRef,
+            warned.DetailText);
+
+        var expired = new Harness { Now = CertClock };
+        await expired.Build().ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(-2)), Ct);
+        var lapsed = Assert.Single(expired.Deliverer.Outcomes);
+        Assert.Equal("expired 2026-06-29 12:00:00Z", lapsed.CurrentValue);
+        Assert.Equal(
+            "The MCP server's TLS certificate expired on 2026-06-29 12:00:00Z. An expired certificate fails every TLS "
+            + "handshake, so the LAN MCP endpoint is unreachable now and binds loopback-only on the next service restart. "
+            + "Install a renewed certificate and restart the service. " + certRef,
+            lapsed.DetailText);
+
+        var refused = new Harness { Now = CertClock };
+        await refused.Build().ApplyMcpTlsCertificateAsync(McpNotYetValidCert(CertClock.AddDays(3)), Ct);
+        var early = Assert.Single(refused.Deliverer.Outcomes);
+        Assert.Equal("not valid until 2026-07-04 12:00:00Z; not being served", early.CurrentValue);
+        Assert.Equal("valid at service start", early.ThresholdValue);
+        Assert.Equal(
+            "The MCP server's configured TLS certificate was not yet valid when the service started (not valid until "
+            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN MCP endpoint is bound LOOPBACK-ONLY — "
+            + "unreachable from the network, and it will not fall back to plain HTTP. The window opens 2026-07-04 12:00:00Z: "
+            + "if that is in the past by any wall clock you trust, this host's clock is behind; if it is genuinely ahead, "
+            + "the certificate installed is one issued for a future rotation. Correct the system clock or install the "
+            + "currently-valid certificate, then restart the service so the host loads it again. "
+            + "Certificate: subject CN=Darling MCP (rotation), thumbprint MCPFUTURE01.",
+            early.DetailText);
+    }
+
+    /// <summary>Both listeners' Evaluate wrappers isolate a throw (a broken mute rule must never stop the
+    /// collection sweep) and each logs its OWN listener's line, while the Apply bodies underneath let the same
+    /// throw out, so the isolation is the wrapper's. The web line is the one it has always logged.</summary>
+    [Fact]
+    public async Task TlsCertEvaluateWrappers_IsolateAThrow_AndEachLogsItsOwnListenersLine()
+    {
+        var web = new Harness { Now = CertClock, MuteThrows = true };
+        await web.Build().EvaluateWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);   // must not throw
+        Assert.Empty(web.Deliverer.Outcomes);
+        Assert.Contains(
+            web.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Error
+                && x.Message == "Web TLS certificate self-alert failed: mute check boom");
+        Assert.DoesNotContain(web.Log.Entries, x => x.Message.StartsWith("MCP TLS", StringComparison.Ordinal));
+
+        var mcp = new Harness { Now = CertClock, MuteThrows = true };
+        await mcp.Build().EvaluateMcpTlsCertificateAsync(McpCert(CertClock.AddDays(10)), Ct);   // must not throw
+        Assert.Empty(mcp.Deliverer.Outcomes);
+        Assert.Contains(
+            mcp.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Error
+                && x.Message == "MCP TLS certificate self-alert failed: mute check boom");
+        Assert.DoesNotContain(mcp.Log.Entries, x => x.Message.StartsWith("Web TLS", StringComparison.Ordinal));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new Harness { Now = CertClock, MuteThrows = true }.Build()
+                .ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new Harness { Now = CertClock, MuteThrows = true }.Build()
+                .ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(10)), Ct));
+    }
+
+    /// <summary>Master switch off: the MCP alert is as silent as the web one, even for an expired certificate.</summary>
+    [Fact]
+    public async Task McpTlsCert_MasterSwitchOff_StaysSilentEvenWhenExpired()
+    {
+        var h = new Harness { Now = CertClock };
+        h.Settings.AlertsEnabled = false;
+
+        await h.Build().ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(-5)), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>The MCP metric is registered everywhere its web twin is: the family census, the state-only
+    /// classifier (its fire site stores the 0 sentinel), the resolution suffix, and the triage page for both the
+    /// firing and its resolution title. The census tests catch a missed registration only for names they can see;
+    /// this names the new metric directly.</summary>
+    [Fact]
+    public void McpTlsCert_Metrics_AreRegisteredWhereverTheWebTwinIs()
+    {
+        var expiring = DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric;
+        var renewed = DarlingSelfAlertEvaluator.McpTlsCertRenewedMetric;
+
+        Assert.Equal("MCP TLS Certificate Expiring", expiring);
+        Assert.Equal("MCP TLS Certificate Renewed", renewed);
+        Assert.NotEqual(DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric, expiring);
+        Assert.NotEqual(DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, renewed);
+
+        Assert.Equal(AlertFamily.SelfMonitor, AlertFamily.Of(expiring));
+        Assert.Equal(AlertFamily.Of(DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric), AlertFamily.Of(expiring));
+
+        Assert.True(AlertMetricClassifier.IsStateOnly(expiring));
+        Assert.False(AlertMetricClassifier.IsResolution(expiring));
+        Assert.True(AlertMetricClassifier.IsResolution(renewed));
+
+        var firing = DarlingTriageEndpoint.SectionsFor(expiring);
+        Assert.NotSame(DarlingTriageEndpoint.DefaultSections, firing);
+        Assert.Contains(firing, s => s.Read == "get_alert_history");
+        Assert.All(firing, s => Assert.True(s.FleetLevel));
+        Assert.Same(firing, DarlingTriageEndpoint.SectionsFor(renewed));
+    }
+
+    /// <summary>The MCP seam is its own singleton type, not an alias of the web one: publishing to one never
+    /// shows in the other and clearing one never clears the other, so a web restart can never resolve an MCP
+    /// alert. It speaks the same snapshot type, so the worker's one report builder maps both, and the inherited
+    /// <c>WebTlsCertificateState.Snapshot</c> name every web caller uses still resolves.</summary>
+    [Fact]
+    public void McpTlsCertificateState_IsItsOwnSeam_AndNeverTouchesTheWebState()
+    {
+        var web = new WebTlsCertificateState();
+        var mcp = new McpTlsCertificateState();
+        Assert.IsAssignableFrom<ListenerTlsCertificateState>(web);
+        Assert.IsAssignableFrom<ListenerTlsCertificateState>(mcp);
+        Assert.Same(typeof(WebTlsCertificateState.Snapshot), typeof(McpTlsCertificateState.Snapshot));
+        Assert.Null(mcp.Read());
+
+        var from = new DateTimeOffset(2029, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var to = new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        mcp.Publish(from, to, "CN=mcp", "MCPTHUMB", refusedNotYetValid: false);
+        Assert.NotNull(mcp.Read());
+        Assert.Null(web.Read());
+
+        web.Publish(from, to, "CN=web", "WEBTHUMB", refusedNotYetValid: true);
+        mcp.Clear();
+        Assert.Null(mcp.Read());
+        Assert.Equal("WEBTHUMB", web.Read()?.Thumbprint);
+
+        mcp.Publish(from, to, "CN=mcp", "MCPTHUMB", refusedNotYetValid: true);
+        var report = DarlingWorker.BuildWebTlsCertReport(mcp.Read());
+        Assert.True(report.Configured);
+        Assert.True(report.RefusedNotYetValid);   // the host's verdict crosses the seam untouched
+        Assert.Equal("MCPTHUMB", report.Thumbprint);
+        Assert.False(DarlingWorker.BuildWebTlsCertReport(null).Configured);
+    }
+
+    /// <summary>The wiring the behavioural pins above cannot see: the MCP state is registered as its OWN
+    /// singleton beside the web one (never the shared base type, which would hand both hosts one instance), and
+    /// the worker's hourly certificate block evaluates the MCP certificate on the SAME gate as the web one, so the
+    /// MCP alert is reached on every deployment with no second timer to drift.</summary>
+    [Fact]
+    public void McpTlsCert_IsRegisteredAsItsOwnSingleton_AndSweptOnTheWebCertificatesHourlyGate()
+    {
+        var program = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Program.cs");
+        Assert.Contains("builder.Services.AddSingleton<WebTlsCertificateState>();", program, StringComparison.Ordinal);
+        Assert.Contains("builder.Services.AddSingleton<McpTlsCertificateState>();", program, StringComparison.Ordinal);
+        Assert.DoesNotContain("AddSingleton<ListenerTlsCertificateState>", program, StringComparison.Ordinal);
+
+        var lines = RepoFile
+            .ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs")
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n');
+        var webCall = Assert.Single(
+            Enumerable.Range(0, lines.Length),
+            i => lines[i].Contains("EvaluateWebTlsCertificateAsync(", StringComparison.Ordinal));
+        var mcpCall = Assert.Single(
+            Enumerable.Range(0, lines.Length),
+            i => lines[i].Contains("EvaluateMcpTlsCertificateAsync(", StringComparison.Ordinal));
+        Assert.True(mcpCall > webCall, "the MCP evaluation follows the web one");
+
+        /* The nearest StampIsDue above the MCP call is the web certificate's own gate, and it opens above the web
+           call too: the two calls share one block, not two. */
+        var guard = Enumerable.Range(0, mcpCall).Reverse()
+            .First(i => lines[i].Contains("StampIsDue(", StringComparison.Ordinal));
+        Assert.Contains("_nextWebTlsCheckUtc", lines[guard]);
+        Assert.True(guard < webCall, "the web and MCP evaluations sit under the same hourly gate");
+        Assert.Equal(1, lines.Count(l => l.Contains("StampIsDue(_nextWebTlsCheckUtc", StringComparison.Ordinal)));
+    }
+
     [Fact]
     public async Task StaleMute_AFreshUnboundedRule_StaysSilent()
     {
