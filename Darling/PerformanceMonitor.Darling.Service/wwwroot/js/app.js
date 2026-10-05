@@ -57,6 +57,8 @@ import { getSession, listViews } from "./views-api.js";
 import { renderMuteRules } from "./pages/mute-rules.js";
 import { renderManageTags } from "./pages/manage-tags.js";
 import { renderJobHistory } from "./pages/job-history.js";
+import { favoritesFirst, refreshAttention, onChange as onLocalChange } from "./viewer-local.js";
+import { favoriteStar, alertBadge, initSidebarCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
 
 /* The shell (sidebar, view list, AG nav) refreshes every POLL_MS; the page re-renders on its own interval. */
 const POLL_MS = 60000;
@@ -242,7 +244,19 @@ async function refreshSidebar() {
     return;
   }
 
-  const cards = [...(res.data.cards || [])].sort((a, b) => a.display_name.localeCompare(b.display_name));
+  lastSidebarFleet = res;
+  /* One fleet-wide alert read per poll feeds every badge; it repaints the sidebar when it lands. */
+  refreshAttention(readTool).then(() => paintSidebar());
+  paintSidebar();
+}
+
+/* The last good fleet read, kept at module scope so a favourite or acknowledgement repaints without a refetch. */
+let lastSidebarFleet = null;
+
+function paintSidebar() {
+  const res = lastSidebarFleet;
+  if (!res) return;
+  const cards = [...(res.data.cards || [])].sort(favoritesFirst((a, b) => a.display_name.localeCompare(b.display_name)));
   const r = currentRoute();
   mount(
     serverList,
@@ -256,7 +270,12 @@ async function refreshSidebar() {
           dataset: { server: target, display: c.display_name },
           onActivate: () => navigateServer(target),
         },
-        [el("span", { class: "dot " + bandClass(c.band) }), el("span", { class: "name", text: c.display_name })]
+        [
+          el("span", { class: "dot " + bandClass(c.band) }),
+          el("span", { class: "name", text: c.display_name }),
+          alertBadge(c.server_id),
+          favoriteStar(c.server_id),
+        ]
       );
     })
   );
@@ -704,6 +723,9 @@ function start() {
   onSessionExpired(showSignedOutState);
   initAutoRefreshToggle();
   initPageRefreshControl();
+  initSidebarCollapse(document.getElementById("app"), document.getElementById("sidebar-collapse"));
+  initSeverityColorSettings(document.getElementById("viewer-settings"));
+  onLocalChange(paintSidebar);
 
   refreshSidebar();
   refreshViewList();

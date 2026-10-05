@@ -134,11 +134,15 @@ public sealed class DarlingWebHostService : BackgroundService
     /// records nothing rather than needing its own instance.</summary>
     private readonly ReadLatencyAccumulator? _readLatency;
 
+    /* #5097: where the web recorders offer a slow or failed read; null in a test-constructed host. */
+    private readonly SlowReadLog? _slowReads;
+
     /// <summary>The live monitored-server registry, so the read tools scope an Azure master target's blocking and deadlock facts per call.</summary>
     private readonly MonitoredServerRegistryState? _registryState;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null)
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null)
     {
+        _slowReads = slowReads;
         _registryState = registryState;
         _logger = logger;
         _state = state;
@@ -1297,7 +1301,7 @@ public sealed class DarlingWebHostService : BackgroundService
             await next(context);
         });
 
-        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState);
+        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads);
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes
