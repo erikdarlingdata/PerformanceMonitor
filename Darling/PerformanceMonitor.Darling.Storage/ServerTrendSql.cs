@@ -417,8 +417,9 @@ public static class ServerTrendSql
                 SELECT
                     database_name || '.' || file_name AS file_label,
                     collection_time,
-                    delta_read_bytes,
-                    delta_write_bytes,
+                    /* A counter reset on an old row (no stored interval) gives a negative delta; it is not a rate, so it counts as no delta. */
+                    CASE WHEN delta_read_bytes >= 0 THEN delta_read_bytes END AS delta_read_bytes,
+                    CASE WHEN delta_write_bytes >= 0 THEN delta_write_bytes END AS delta_write_bytes,
                     /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
                        and the row is dropped. NULL (a pre-V127 row) falls back to the gap since the file's previous collection. */
                     CASE WHEN sample_interval_seconds IS NULL

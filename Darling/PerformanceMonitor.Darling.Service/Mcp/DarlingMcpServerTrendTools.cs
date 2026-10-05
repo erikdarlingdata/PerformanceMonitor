@@ -262,7 +262,7 @@ public sealed class DarlingMcpServerTrendTools
         if (metric == "tempdb_file_io")
         {
             return $"Each point summarizes the collections of one tempdb file in one {TrendBuckets.Adjective(bucketMinutes)} bucket and {stamp}"
-                + "avg_read_latency_ms and avg_write_latency_ms are recomputed from the summed stall time over the summed operations, never averaged from per-collection latencies; a collection whose interval was unknowable is left out, and a bucket with no reads or writes reads 0. "
+                + "avg_read_latency_ms and avg_write_latency_ms are recomputed from the summed stall time over the summed operations, never averaged from per-collection latencies; a collection whose interval was unknowable is left out; a bucket with usable rows but no reads (or no writes) reads 0 for that side, and a bucket with no usable read row at all (writes only) is left out. "
                 + TrendBuckets.Sizing(requested, budgetPoints);
         }
 

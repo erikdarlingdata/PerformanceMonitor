@@ -398,7 +398,7 @@ SELECT 4000000 + g * 2 + o, $1::timestamp + g * INTERVAL '1 minute', $2, $3, 'Co
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            var later = new[] { "latch", "spinlock", "session_stats", "collector_duration" };
+            var later = new[] { "latch", "spinlock", "session_stats", "collector_duration", "tempdb_file_io", "tempdb_size", "file_io_throughput" };
             foreach (var metric in later)
             {
                 Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(await DarlingMcpServerTrendTools.GetServerTrend(postgres, metric, ServerName)));
@@ -483,6 +483,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             Assert.Equal([9000.0, 9100.0], slow.Select(p => p.GetProperty("max_duration_ms").GetDouble()).ToArray());
             Assert.All(slow, p => Assert.Equal(1.0, p.GetProperty("run_count").GetDouble(), 2));
 
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds) SELECT $1 + n, $2, $3, $4, d, 'f.mdf', 'ROWS', 'x', 100, 1, 1, 1, 1, 1, 1, 60 FROM unnest(ARRAY['tempdb','userdb']) WITH ORDINALITY AS t(d, n)",
+                CollectionIdGenerator.Next() * 10, DarlingMcpTestData.Naive(end.AddDays(-20)), ServerId, ServerName);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb, version_store_reserved_mb, total_reserved_mb, unallocated_mb) VALUES ($1,$2,$3,$4,1,1,1,10,5)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(end.AddDays(-20)), ServerId, ServerName);
             // A quiet window on a server that HAS collected says empty.
             var quiet = end.AddDays(-3).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
             foreach (var metric in later)
@@ -491,7 +497,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             }
 
             // A week of one-minute collections: the default answer stays under the 32 KB target; the widest is measured.
-            await DarlingMcpTestData.ExecAsync(connection, ct, string.Join(" ", new[] { "latch_stats", "spinlock_stats", "session_summary_stats", "collection_log" }.Select(tb => $"DELETE FROM {tb} WHERE server_id = {ServerId};")));
+            await DarlingMcpTestData.ExecAsync(connection, ct, string.Join(" ", new[] { "latch_stats", "spinlock_stats", "session_summary_stats", "collection_log", "file_io_stats", "tempdb_stats" }.Select(tb => $"DELETE FROM {tb} WHERE server_id = {ServerId};")));
             var weekStart = DarlingMcpTestData.Naive(end.AddMinutes(-(7 * 24 * 60 - 5)));
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO latch_stats (collection_id, collection_time, server_id, server_name, latch_class, waiting_requests_count, wait_time_ms, max_wait_time_ms, delta_waiting_requests_count, delta_wait_time_ms, delta_max_wait_time_ms, sample_interval_seconds)
@@ -508,6 +514,15 @@ SELECT 7000000 + g, $1::timestamp + g * INTERVAL '1 minute', $2, $3, 100 + g % 5
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status)
 SELECT 8000000 + g * 12 + c, $2, $3, 'collector_' || c, $1::timestamp + g * INTERVAL '1 minute', 100 + g % 997 + c * 13, 'SUCCESS' FROM generate_series(0, 10070) g, generate_series(1, 12) c",
+                weekStart, ServerId, ServerName);
+
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
+SELECT 9000000 + g * 8 + c, $1::timestamp + g * INTERVAL '1 minute', $2, $3, CASE WHEN c <= 4 THEN 'tempdb' ELSE 'userdb' END, 'file_' || c, 'ROWS', 'x', 100, 100 + g % 50, 50, 1048576 * (1 + g % 7), 524288, 1000 + g % 97, 500, 60 FROM generate_series(0, 10070) g, generate_series(1, 8) c",
+                weekStart, ServerId, ServerName);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb, version_store_reserved_mb, total_reserved_mb, unallocated_mb)
+SELECT 9900000 + g, $1::timestamp + g * INTERVAL '1 minute', $2, $3, 1, 1, 1, 100 + g % 211, 20 FROM generate_series(0, 10070) g",
                 weekStart, ServerId, ServerName);
 
             var sizes = new System.Collections.Generic.List<string>();
@@ -648,12 +663,19 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(11)), ServerId, ServerName, "tempdb", "tempdev", 20L, 4L, 10485760L, 0L, 100L, 12L, 60);
             await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(12)), ServerId, ServerName, "tempdb", "tempdev", 900L, 900L, 999999999L, 999999999L, 99999L, 99999L, 0);
             await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(13)), ServerId, ServerName, "tempdb", "tempdev", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, 60);
+            /* Reads set but the read stall NULL: the paired guard must leave the 500 reads out of the average (still 5.0 ms). */
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(14)), ServerId, ServerName, "tempdb", "tempdev", 500L, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, 60);
             /* A user database file with no stored interval: the gap to its previous collection (30 s) is the interval; the first row has no gap and is dropped. 3 MiB read over 30 s = 0.1 MB/s. */
             await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(20)), ServerId, ServerName, "salesdb", "sales.mdf", 1L, 1L, 99999999L, 99999999L, 1L, 1L, DBNull.Value);
             await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(20).AddSeconds(30)), ServerId, ServerName, "salesdb", "sales.mdf", 1L, 1L, 3145728L, 1048576L, 1L, 1L, DBNull.Value);
             /* A known interval with a NULL write delta adds no seconds to the write rate: 2 MiB over 60 s is 0.03 MB/s, from the one row that has one. */
             await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(30)), ServerId, ServerName, "salesdb", "log.ldf", 1L, 1L, 0L, 2097152L, 1L, 1L, 60);
             await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(31)), ServerId, ServerName, "salesdb", "log.ldf", 1L, 1L, 0L, DBNull.Value, 1L, 1L, 60);
+
+            /* An old row (no stored interval) whose counter reset gives a negative delta must not drag the bucket down: only the 3 MiB over 30 s row counts, 0.1 MB/s. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(40)), ServerId, ServerName, "salesdb", "reset.mdf", 1L, 1L, 99999999L, 0L, 1L, 1L, DBNull.Value);
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(40).AddSeconds(30)), ServerId, ServerName, "salesdb", "reset.mdf", 1L, 1L, 3145728L, 0L, 1L, 1L, DBNull.Value);
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(41)), ServerId, ServerName, "salesdb", "reset.mdf", 1L, 1L, -52428800L, 0L, 1L, 1L, DBNull.Value);
 
             foreach (var (minute, reserved, free) in new[] { (10, 100m, 20m), (11, 300m, 40m) })
             {
@@ -677,9 +699,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             var sizePoint = Assert.Single(size.GetProperty("trend").EnumerateArray().ToArray());
             Assert.Equal(230.0, sizePoint.GetProperty("allocated_mb").GetDouble(), 2);
 
-            var throughput = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "file_io_throughput", ServerName, 3, asOf, bucket_minutes: 60, names: "salesdb.sales.mdf, salesdb.log.ldf, tempdb.tempdev, salesdb.nope")).RootElement;
+            var throughput = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "file_io_throughput", ServerName, 3, asOf, bucket_minutes: 60, names: "salesdb.sales.mdf, salesdb.log.ldf, salesdb.reset.mdf, tempdb.tempdev, salesdb.nope")).RootElement;
             var byLabel = throughput.GetProperty("series").EnumerateArray().ToDictionary(x => x.GetProperty("file_label").GetString()!, x => Assert.Single(x.GetProperty("trend").EnumerateArray().ToArray()));
             Assert.Equal(0.1, byLabel["salesdb.sales.mdf"].GetProperty("read_mb_per_sec").GetDouble(), 2);
+            Assert.Equal(0.1, byLabel["salesdb.reset.mdf"].GetProperty("read_mb_per_sec").GetDouble(), 2);
             Assert.Equal(0.03, byLabel["salesdb.log.ldf"].GetProperty("write_mb_per_sec").GetDouble(), 2);
             /* tempdev: 20 MiB over 120 s of rated rows (the interval-0 and NULL-delta rows add neither bytes nor seconds). */
             Assert.Equal(0.17, byLabel["tempdb.tempdev"].GetProperty("read_mb_per_sec").GetDouble(), 2);
