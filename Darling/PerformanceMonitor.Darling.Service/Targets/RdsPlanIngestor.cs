@@ -164,8 +164,8 @@ public sealed class RdsPlanIngestor
            store or was nothing to store; anything else threw out of StoreAsync and left the marker where it
            was, so the next cycle asks RDS for the same window again rather than resuming past it.
 
-           Plan rows dedup on (queryid, plan_hash), so the repeat this can cause costs a re-store of shapes
-           the store already has. The loss it replaces was unbounded and silent. The csvlog carry moves
+           Plan rows are grouped on (queryid, plan_hash) at read time, so the repeat this can cause costs
+           duplicate capture rows that the readers fold together, a re-store of shapes the store already has. The loss it replaces was unbounded and silent. The csvlog carry moves
            alongside it for the same reason RdsDeadlockIngestor's own commit does (#4053 part c3). */
         _logs.CommitResume(chunk.Value.Resume);
 
