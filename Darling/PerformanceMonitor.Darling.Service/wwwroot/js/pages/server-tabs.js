@@ -568,7 +568,7 @@ function perfmonRows(counters) {
 export function topQueriesPanel(server, ctx) {
   const { panel, body } = panelShell("Top Queries by CPU", ctx.label + ", with a per-collection trend for the query you pick");
   (async () => {
-    const res = await readToolWithinKeptHistory("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20 });
+    const res = await readToolWithinKeptHistory("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20, detail: "full" });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
@@ -577,6 +577,8 @@ export function topQueriesPanel(server, ctx) {
       VIZ.table(res.data, {
         rowsKey: "queries",
         columns: [...TOP_QUERY_COLUMNS, planColumn(server)],
+        groups: TOP_QUERY_GROUPS.groups,
+        defaultGroups: TOP_QUERY_GROUPS.defaultGroups,
         emptyText:
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) " +
           "before it reports non-zero values.",
@@ -1018,30 +1020,35 @@ export const SERVER_TABS = [
         emptyText: "No CPU samples in this window.",
       }),
       stat("Scheduler Pressure", "get_cpu_scheduler_pressure", { server }, SCHEDULER_STATS, SNAPSHOT, 2),
+      serverTrendPanel(server, ctx, "cpu_scheduler"),
       /* #4231: `noteKey` (#3278) carries `truncation_note` — raw query_stats/procedure_stats are dropped at
          4 days once the rollups are armed, and a window asking further back than that silently served less
          than it asked for. Null when the floor did not bite, the same as every other noteKey panel. */
       table(
         "Top Queries by CPU",
         "get_top_queries_by_cpu",
-        { server, hours: ctx.hours, top: 20 },
+        { server, hours: ctx.hours, top: 20, detail: "full" },
         "queries",
         [...TOP_QUERY_COLUMNS, planColumn(server)],
         ctx.label,
         "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
         2,
-        "truncation_note"
+        "truncation_note",
+        null,
+        TOP_QUERY_GROUPS
       ),
       table(
         "Top Procedures by CPU",
         "get_top_procedures_by_cpu",
-        { server, hours: ctx.hours, top: 20 },
+        { server, hours: ctx.hours, top: 20, detail: "full" },
         "procedures",
         TOP_PROC_COLUMNS,
         ctx.label,
         "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
         2,
-        "truncation_note"
+        "truncation_note",
+        null,
+        TOP_PROC_GROUPS
       ),
     ],
   },
@@ -1057,6 +1064,8 @@ export const SERVER_TABS = [
         span: 2,
         emptyText: "No memory samples in this window.",
       }),
+      memoryClerksTrendPanel(server, ctx),
+      serverTrendPanel(server, ctx, "plan_cache"),
       table(
         "Memory Clerks",
         "get_memory_clerks",
@@ -1414,13 +1423,15 @@ export const SERVER_TABS = [
       table(
         "Top Procedures by CPU",
         "get_top_procedures_by_cpu",
-        { server, hours: ctx.hours, top: 20 },
+        { server, hours: ctx.hours, top: 20, detail: "full" },
         "procedures",
         TOP_PROC_COLUMNS,
         ctx.label,
         "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
         2,
-        "truncation_note"
+        "truncation_note",
+        null,
+        TOP_PROC_GROUPS
       ),
       table(
         "Query Store",
@@ -1431,7 +1442,10 @@ export const SERVER_TABS = [
         ctx.label,
         "No Query Store rows in this window.",
         2,
-        "truncation_note"
+        "truncation_note",
+        /* #5094: when whole days came from the daily summary the answer says so (`approximate`), and its note is
+           drawn above the grid as text, so the totals are not read as exact. Null (no line) on an exact answer. */
+        ["approximation_note"]
       ),
       /* #2484: the Query Store Regressions tab -- the only tab in the per-server page that was entirely
          unreachable from a browser rather than merely reduced. Built with table(), not an object literal:
@@ -1445,7 +1459,11 @@ export const SERVER_TABS = [
         QUERY_STORE_REGRESSION_COLUMNS,
         ctx.label,
         "No query regressed against its baseline in this window. If this server has no history OLDER than " +
-          "the window there is nothing to compare against, and the read says so rather than calling it clear."
+          "the window there is nothing to compare against, and the read says so rather than calling it clear.",
+        2,
+        null,
+        null,
+        QUERY_STORE_REGRESSION_GROUPS
       ),
       /* #3797: the clutter view. ONE fetch, three panels — the per-database rows, the per-server QDS wait
          block and the per-server memory clerk — because the read composes four arms over two raw hypertables
@@ -1522,7 +1540,11 @@ export const SERVER_TABS = [
         "completions",
         LONG_QUERY_COLUMNS,
         ctx.label,
-        "No long-running completions in this window. This collector is opt-in and off by default."
+        "No long-running completions in this window. This collector is opt-in and off by default.",
+        2,
+        null,
+        null,
+        LONG_QUERY_GROUPS
       ),
       /* One read, two panels. get_plan_corrections returns both arrays, and automatic_tuning comes from an
          unconditional latest-snapshot query that ignores hours/limit entirely — so the second fetch was paying
@@ -1534,6 +1556,8 @@ export const SERVER_TABS = [
           viz: "table",
           rowsKey: "recommendations",
           columns: PLAN_CORRECTION_COLUMNS,
+          groups: PLAN_CORRECTION_GROUPS.groups,
+          defaultGroups: PLAN_CORRECTION_GROUPS.defaultGroups,
           emptyText: "No tuning recommendations in this window.",
         },
         {
@@ -3029,21 +3053,63 @@ const SPINLOCK_COLUMNS = [
 ];
 
 /* #1949 ordering, which every query grid in both apps follows: the time/identity anchor, then the QUERY TEXT,
-   then the metrics. Text pushed behind the metrics is text nobody scrolls to. */
+   then the metrics. Text pushed behind the metrics is text nobody scrolls to.
+   The desktop grid's columns in its order, except that Query and Module sit right of Database (the rule above)
+   rather than behind the two timestamps. The ungrouped columns are the core set and always show; the rest follow the toggles in
+   TOP_QUERY_GROUPS, all off at first. Last Execution and Creation Time arrive as UTC instants (the read converts them from the monitored
+   server's clock) and print in the browser's local time; every grouped field is omitted by the read on the hourly tier and prints a dash. */
 const TOP_QUERY_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
-  { key: "host_object", label: "Host object" },
+  { key: "host_object", label: "Module" },
+  { key: "last_execution_time", label: "Last Execution", format: "time", group: "Times" },
+  { key: "creation_time", label: "Creation Time", format: "time", group: "Times" },
   { key: "execution_count", label: "Execs", format: "int" },
   { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
   { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
-  { key: "total_elapsed_ms", label: "Total Elapsed", format: "ms" },
-  { key: "avg_elapsed_ms", label: "Avg Elapsed", format: "ms" },
-  { key: "max_cpu_ms", label: "Max CPU", format: "ms" },
-  { key: "max_dop", label: "Max DOP", format: "int" },
-  { key: "total_spills", label: "Spills", format: "int" },
+  { key: "worker_time_per_second", label: "Peak CPU ms/s", format: "num1", group: "Times" },
+  { key: "plan_generation_num", label: "Plan Gen", format: "int", group: "Times" },
+  { key: "total_clr_ms", label: "Total CLR", format: "ms", group: "Times" },
+  { key: "total_elapsed_ms", label: "Total Duration", format: "ms" },
+  { key: "avg_elapsed_ms", label: "Avg Duration", format: "ms" },
+  { key: "total_logical_reads", label: "Total Reads", format: "int" },
+  { key: "avg_reads", label: "Avg Reads", format: "int" },
+  { key: "total_logical_writes", label: "Total Writes", format: "int", group: "I/O and rows" },
+  { key: "total_physical_reads", label: "Physical Reads", format: "int", group: "I/O and rows" },
+  { key: "total_rows", label: "Total Rows", format: "int", group: "I/O and rows" },
+  { key: "total_spills", label: "Total Spills", format: "int" },
+  { key: "min_cpu_ms", label: "Min CPU", format: "ms", group: "Extremes" },
+  { key: "max_cpu_ms", label: "Max CPU", format: "ms", group: "Extremes" },
+  { key: "min_elapsed_ms", label: "Min Duration", format: "ms", group: "Extremes" },
+  { key: "max_elapsed_ms", label: "Max Duration", format: "ms", group: "Extremes" },
+  { key: "min_physical_reads", label: "Min Phys Reads", format: "int", group: "Extremes" },
+  { key: "max_physical_reads", label: "Max Phys Reads", format: "int", group: "Extremes" },
+  { key: "min_rows", label: "Min Rows", format: "int", group: "Extremes" },
+  { key: "max_rows", label: "Max Rows", format: "int", group: "Extremes" },
+  { key: "min_grant_kb", label: "Min Grant KB", format: "int", group: "Memory grants" },
+  { key: "max_grant_kb", label: "Max Grant KB", format: "int", group: "Memory grants" },
+  { key: "min_used_grant_kb", label: "Min Used Grant KB", format: "int", group: "Memory grants" },
+  { key: "max_used_grant_kb", label: "Max Used Grant KB", format: "int", group: "Memory grants" },
+  { key: "min_ideal_grant_kb", label: "Min Ideal Grant KB", format: "int", group: "Memory grants" },
+  { key: "max_ideal_grant_kb", label: "Max Ideal Grant KB", format: "int", group: "Memory grants" },
+  { key: "min_spills", label: "Min Spills", format: "int", group: "Extremes" },
+  { key: "max_spills", label: "Max Spills", format: "int", group: "Extremes" },
+  { key: "min_dop", label: "Min DOP", format: "int", group: "Parallelism" },
+  { key: "max_dop", label: "Max DOP", format: "int", group: "Parallelism" },
+  { key: "min_reserved_threads", label: "Min Rsvd Threads", format: "int", group: "Parallelism" },
+  { key: "max_reserved_threads", label: "Max Rsvd Threads", format: "int", group: "Parallelism" },
+  { key: "min_used_threads", label: "Min Used Threads", format: "int", group: "Parallelism" },
+  { key: "max_used_threads", label: "Max Used Threads", format: "int", group: "Parallelism" },
   { key: "query_hash", label: "Query Hash", mono: true },
+  { key: "query_plan_hash", label: "Plan Hash", group: "Hashes and handles", mono: true },
+  { key: "sql_handle", label: "SQL Handle", group: "Hashes and handles", mono: true },
+  { key: "plan_handle", label: "Plan Handle", group: "Hashes and handles", mono: true },
 ];
+
+const TOP_QUERY_GROUPS = {
+  groups: ["Times", "I/O and rows", "Extremes", "Memory grants", "Parallelism", "Hashes and handles"],
+  defaultGroups: [],
+};
 
 /* The per-collection snapshots get_query_trend returns, minus the two the chart already draws. Executions,
    DOP and the plan hash are here rather than on the chart because they are not milliseconds and one y-domain
@@ -3063,24 +3129,55 @@ const QUERY_TREND_COLUMNS = [
   { key: "query_plan_hash", label: "Plan Hash", mono: true },
 ];
 
+/* The desktop Top Procedures grid's columns in its order (its Query Plan download column is the separate plan work).
+   The ungrouped columns are the core set and always show; the rest follow the toggles in TOP_PROC_GROUPS, all off at
+   first. Last Execution and Cached Time arrive as UTC instants (the read converts them from the monitored server's
+   clock) and print in the browser's local time. The hourly tier carries none of the grouped fields, nor Type, the
+   write and read totals or Avg Reads, and prints a dash for each. */
 const TOP_PROC_COLUMNS = [
-  { key: "full_name", label: "Procedure" },
   { key: "database_name", label: "Database" },
+  { key: "full_name", label: "Procedure" },
   { key: "object_type", label: "Type" },
+  { key: "last_execution_time", label: "Last Execution", format: "time", group: "Times" },
+  { key: "cached_time", label: "Cached Time", format: "time", group: "Times" },
   { key: "execution_count", label: "Execs", format: "int" },
   { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
   { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
-  { key: "total_elapsed_ms", label: "Total Elapsed", format: "ms" },
-  { key: "avg_elapsed_ms", label: "Avg Elapsed", format: "ms" },
-  { key: "max_cpu_ms", label: "Max CPU", format: "ms" },
-  { key: "total_spills", label: "Spills", format: "int" },
+  { key: "total_elapsed_ms", label: "Total Duration", format: "ms" },
+  { key: "avg_elapsed_ms", label: "Avg Duration", format: "ms" },
+  { key: "total_logical_reads", label: "Total Reads", format: "int" },
+  { key: "avg_reads", label: "Avg Reads", format: "int" },
+  { key: "total_logical_writes", label: "Total Writes", format: "int", group: "I/O and spills" },
+  { key: "total_physical_reads", label: "Physical Reads", format: "int", group: "I/O and spills" },
+  { key: "total_spills", label: "Total Spills", format: "int" },
+  { key: "avg_spills", label: "Avg Spills", format: "num2", group: "I/O and spills" },
+  { key: "min_cpu_ms", label: "Min CPU", format: "ms", group: "Extremes" },
+  { key: "max_cpu_ms", label: "Max CPU", format: "ms", group: "Extremes" },
+  { key: "min_elapsed_ms", label: "Min Duration", format: "ms", group: "Extremes" },
+  { key: "max_elapsed_ms", label: "Max Duration", format: "ms", group: "Extremes" },
+  { key: "min_logical_reads", label: "Min Reads", format: "int", group: "Extremes" },
+  { key: "max_logical_reads", label: "Max Reads", format: "int", group: "Extremes" },
+  { key: "min_physical_reads", label: "Min Phys Reads", format: "int", group: "Extremes" },
+  { key: "max_physical_reads", label: "Max Phys Reads", format: "int", group: "Extremes" },
+  { key: "min_logical_writes", label: "Min Writes", format: "int", group: "Extremes" },
+  { key: "max_logical_writes", label: "Max Writes", format: "int", group: "Extremes" },
+  { key: "min_spills", label: "Min Spills", format: "int", group: "Extremes" },
+  { key: "max_spills", label: "Max Spills", format: "int", group: "Extremes" },
 ];
+
+const TOP_PROC_GROUPS = {
+  groups: ["Times", "I/O and spills", "Extremes"],
+  defaultGroups: [],
+};
+
 
 /* #2484: the regression grid. Baseline and recent sit BESIDE each other for each metric rather than being
    collapsed into the percent alone -- a 300% regression on a query that went from 1 ms to 4 ms is not the
    same finding as one that went from 1 s to 4 s, and the percent alone cannot tell them apart. Extra
    duration is the ranking key and the column that says whether the regression matters at all. */
 /* Stays local: this page's column set differs from the catalog entry's. */
+const QUERY_STORE_REGRESSION_GROUPS = { groups: ["CPU and reads", "Executions and plans"], defaultGroups: [] };
+
 const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "severity", label: "Severity" },
   { key: "database_name", label: "Database" },
@@ -3091,17 +3188,17 @@ const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "baseline_duration_ms", label: "Baseline Duration", format: "ms" },
   { key: "recent_duration_ms", label: "Recent Duration", format: "ms" },
   { key: "cpu_regression_percent", label: "CPU +%", format: "num1" },
-  { key: "baseline_cpu_ms", label: "Baseline CPU", format: "ms" },
-  { key: "recent_cpu_ms", label: "Recent CPU", format: "ms" },
+  { key: "baseline_cpu_ms", label: "Baseline CPU", group: "CPU and reads", format: "ms" },
+  { key: "recent_cpu_ms", label: "Recent CPU", group: "CPU and reads", format: "ms" },
   { key: "io_regression_percent", label: "Reads +%", format: "num1" },
-  { key: "baseline_reads", label: "Base Reads (pages)", format: "int" },
-  { key: "recent_reads", label: "Recent Reads (pages)", format: "int" },
-  { key: "baseline_exec_count", label: "Base Execs", format: "int" },
-  { key: "recent_exec_count", label: "Recent Execs", format: "int" },
+  { key: "baseline_reads", label: "Base Reads (pages)", group: "CPU and reads", format: "int" },
+  { key: "recent_reads", label: "Recent Reads (pages)", group: "CPU and reads", format: "int" },
+  { key: "baseline_exec_count", label: "Base Execs", group: "Executions and plans", format: "int" },
+  { key: "recent_exec_count", label: "Recent Execs", group: "Executions and plans", format: "int" },
   /* A plan count that moved between the two sides is the first thing to check: a query that regressed
      while gaining a plan is usually a plan-choice problem, not a data one. */
-  { key: "baseline_plan_count", label: "Baseline Plans", format: "int" },
-  { key: "recent_plan_count", label: "Recent Plans", format: "int" },
+  { key: "baseline_plan_count", label: "Baseline Plans", group: "Executions and plans", format: "int" },
+  { key: "recent_plan_count", label: "Recent Plans", group: "Executions and plans", format: "int" },
   { key: "last_execution_time", label: "Last Exec", format: "time" },
 ];
 
@@ -3199,27 +3296,31 @@ const QS_CLERK_STATS = [
   { key: "qs_overhead.memory_clerk.latest_clerk_captured_at", label: "Clerk Last Seen", format: "time" },
 ];
 
+const LONG_QUERY_GROUPS = { groups: ["I/O and rows", "Session"], defaultGroups: [] };
+
 const LONG_QUERY_COLUMNS = [
   { key: "event_time", label: "Time", format: "time" },
   { key: "statement", label: "Statement", render: (r) => codeDisclosure(r.statement) },
   { key: "event_type", label: "Event Type" },
   { key: "duration_ms", label: "Duration", format: "ms" },
   { key: "cpu_ms", label: "CPU", format: "ms" },
-  { key: "logical_reads", label: "Logical Reads", format: "int" },
-  { key: "physical_reads", label: "Physical Reads", format: "int" },
-  { key: "writes", label: "Writes", format: "int" },
-  { key: "row_count", label: "Rows", format: "int" },
+  { key: "logical_reads", label: "Logical Reads", group: "I/O and rows", format: "int" },
+  { key: "physical_reads", label: "Physical Reads", group: "I/O and rows", format: "int" },
+  { key: "writes", label: "Writes", group: "I/O and rows", format: "int" },
+  { key: "row_count", label: "Rows", group: "I/O and rows", format: "int" },
   { key: "result", label: "Result" },
   { key: "database_name", label: "Database" },
   { key: "object_name", label: "Object" },
-  { key: "session_id", label: "SPID", format: "int" },
-  { key: "client_app_name", label: "App" },
-  { key: "server_principal_name", label: "Login" },
+  { key: "session_id", label: "SPID", group: "Session", format: "int" },
+  { key: "client_app_name", label: "App", group: "Session" },
+  { key: "server_principal_name", label: "Login", group: "Session" },
   { key: "query_hash", label: "Query Hash" },
 ];
 
 /* The Script, Executable and Revertable columns the desktop grid adds are not here: get_plan_corrections
    returns no implementation script or action flags, and the page does not rebuild them. */
+const PLAN_CORRECTION_GROUPS = { groups: ["Plans", "Plan metrics", "Lifecycle"], defaultGroups: [] };
+
 const PLAN_CORRECTION_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
@@ -3230,21 +3331,21 @@ const PLAN_CORRECTION_COLUMNS = [
   { key: "score", label: "Score", format: "int" },
   { key: "estimated_gain_seconds", label: "Est. gain (s)", format: "num1" },
   { key: "query_id", label: "Query ID", format: "int" },
-  { key: "regressed_plan_id", label: "Regressed Plan", format: "int" },
-  { key: "last_good_plan_id", label: "Last Good Plan", format: "int" },
-  { key: "last_good_plan_forcing_type", label: "Forcing Type" },
-  { key: "last_good_plan_is_forced", label: "Forced", format: "bool" },
-  { key: "last_good_plan_force_failure_reason", label: "Force Failure", wrap: true },
-  { key: "regressed_plan_execution_count", label: "Regressed Execs", format: "int" },
-  { key: "regressed_plan_cpu_time_average_ms", label: "Regressed CPU (ms)", format: "num2" },
-  { key: "last_good_plan_execution_count", label: "Last Good Execs", format: "int" },
-  { key: "last_good_plan_cpu_time_average_ms", label: "Last Good CPU (ms)", format: "num2" },
-  { key: "valid_since", label: "Valid Since", format: "time" },
-  { key: "last_refresh", label: "Last Refresh", format: "time" },
-  { key: "execute_action_initiated_by", label: "Executed By" },
-  { key: "execute_action_initiated_time", label: "Executed At", format: "time" },
-  { key: "revert_action_initiated_by", label: "Reverted By" },
-  { key: "revert_action_initiated_time", label: "Reverted At", format: "time" },
+  { key: "regressed_plan_id", label: "Regressed Plan", group: "Plans", format: "int" },
+  { key: "last_good_plan_id", label: "Last Good Plan", group: "Plans", format: "int" },
+  { key: "last_good_plan_forcing_type", label: "Forcing Type", group: "Plans" },
+  { key: "last_good_plan_is_forced", label: "Forced", group: "Plans", format: "bool" },
+  { key: "last_good_plan_force_failure_reason", label: "Force Failure", group: "Plans", wrap: true },
+  { key: "regressed_plan_execution_count", label: "Regressed Execs", group: "Plan metrics", format: "int" },
+  { key: "regressed_plan_cpu_time_average_ms", label: "Regressed CPU (ms)", group: "Plan metrics", format: "num2" },
+  { key: "last_good_plan_execution_count", label: "Last Good Execs", group: "Plan metrics", format: "int" },
+  { key: "last_good_plan_cpu_time_average_ms", label: "Last Good CPU (ms)", group: "Plan metrics", format: "num2" },
+  { key: "valid_since", label: "Valid Since", group: "Lifecycle", format: "time" },
+  { key: "last_refresh", label: "Last Refresh", group: "Lifecycle", format: "time" },
+  { key: "execute_action_initiated_by", label: "Executed By", group: "Lifecycle" },
+  { key: "execute_action_initiated_time", label: "Executed At", group: "Lifecycle", format: "time" },
+  { key: "revert_action_initiated_by", label: "Reverted By", group: "Lifecycle" },
+  { key: "revert_action_initiated_time", label: "Reverted At", group: "Lifecycle", format: "time" },
 ];
 
 const AUTO_TUNING_COLUMNS = [
@@ -3561,6 +3662,166 @@ export function pressureEventBuckets(events, win) {
     .sort((a, b) => a - b)
     .map((h) => ({ time: new Date(h).toISOString().slice(0, 19), ...(counts.get(h) || { sql_medium: 0, sql_severe: 0, os_medium: 0, os_severe: 0 }) }));
   return { points, drawn };
+}
+
+/**
+ * The instance trends get_server_trend serves as one line per field (#5117): the CPU tab's scheduler pressure and the
+ * Memory tab's plan cache. The desktop's CPU Scheduler chart plots the runnable, blocked and queued task counts under a
+ * "Task Count" axis; its Plan Cache chart plots single-use and multi-use plan cache size under "Plan Cache Size (MB)".
+ * Both are levels the read averages per bucket, so the unit is the read's own.
+ */
+const SERVER_TRENDS = {
+  cpu_scheduler: {
+    title: "CPU Scheduler",
+    metric: "cpu_scheduler",
+    unit: "tasks",
+    series: [
+      { key: "runnable_tasks", label: "Runnable Tasks" },
+      { key: "blocked_tasks", label: "Blocked Tasks" },
+      { key: "queued_requests", label: "Queued Requests" },
+    ],
+    emptyText: "No CPU scheduler samples in this window.",
+  },
+  plan_cache: {
+    title: "Plan Cache",
+    metric: "plan_cache",
+    unit: "MB",
+    series: [
+      { key: "single_use_mb", label: "Single-Use" },
+      { key: "multi_use_mb", label: "Multi-Use" },
+    ],
+    emptyText: "No plan cache samples in this window.",
+  },
+};
+
+/** A get_server_trend line panel for `kind` (a key of SERVER_TRENDS), over the page's range and its `as_of`. */
+export function serverTrendPanel(server, ctx, kind) {
+  const spec = SERVER_TRENDS[kind];
+  const { panel, body } = panelShell(spec.title + " Trend", ctx.label);
+  (async () => {
+    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal);
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message || spec.emptyText)]);
+    const points = res.data.trend || [];
+    if (!points.length) return mount(body, [keptWindowStrip(res), emptyStrip(spec.emptyText)]);
+    /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+    const notes = discontinuityNotes(res.data);
+    mount(body, [
+      keptWindowStrip(res),
+      notes.length ? noticeStrip(notes.join(" ")) : null,
+      zoomableLineChart({
+        points,
+        xKey: "time",
+        series: spec.series.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
+        formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+        unit: spec.unit,
+        ...windowFromHours(res.keptHours || ctx.hours),
+      }, "server-trend|" + server + "|" + spec.metric, chartZoomScope(ctx.hours)),
+      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? el("div", { class: "mp-metric-note", text: res.data.aggregate_note }) : null,
+    ]);
+  })();
+  return panel;
+}
+
+/** The most clerk types get_server_trend takes in one read (its own cap), and how many the desktop checks to begin with. */
+const MAX_CLERKS_CHARTED = 10;
+const DEFAULT_CLERKS_CHECKED = 5;
+
+/**
+ * Memory Clerks trend with a clerk-type selector, the web twin of the desktop's clerk picker. The options are the clerks
+ * of the latest snapshot (get_memory_clerks, heaviest first); the first time a server is shown the heaviest five are
+ * checked, as the desktop does. The checked set and search text live in multi-picker.js's module state keyed by server (the first show and the Top clerks button both check the heaviest five),
+ * so the 60 s rebuild keeps them.
+ */
+export function memoryClerksTrendPanel(server, ctx) {
+  const { panel, body } = panelShell("Memory Clerks Trend", ctx.label + ", with a trend for the clerks you check");
+  (async () => {
+    const res = await readToolWithinKeptHistory("get_memory_clerks", { server }, ctx && ctx.signal);
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
+    const options = (res.data.clerks || []).map((c) => c.clerk_type);
+    if (!options.length) return mount(body, emptyStrip("No memory clerks in the latest snapshot — the clerk collector may not have run yet."));
+
+    const key = "clerks|" + server;
+    const chartSlot = el("div", {}, [loadingStrip()]);
+    const picker = multiPicker({
+      key,
+      label: "Clerks",
+      options,
+      max: MAX_CLERKS_CHARTED,
+      noun: "clerk",
+      defaultsLabel: "Top clerks",
+      defaults: (o) => o.slice(0, DEFAULT_CLERKS_CHECKED),
+      onChange: (checked) => drawClerkTrends(chartSlot, server, ctx, checked),
+    });
+    mount(body, [picker.node, chartSlot]);
+    drawClerkTrends(chartSlot, server, ctx, picker.checked());
+    picker.restoreFocus();
+  })();
+  return panel;
+}
+
+/* The newest clerk draw's AbortController per server: a new draw aborts the previous one's read. */
+const clerkDraws = new Map();
+
+export async function drawClerkTrends(slot, server, ctx, checked) {
+  const clerkTypes = checked.slice(0, MAX_CLERKS_CHARTED);
+  const previous = clerkDraws.get(server);
+  if (previous) previous.abort();
+  const mine = new AbortController();
+  clerkDraws.set(server, mine);
+  if (!clerkTypes.length) {
+    mount(slot, emptyStrip("Check at least one clerk to chart its trend."));
+    return;
+  }
+  mount(slot, loadingStrip());
+  const signal = ctx && ctx.signal && typeof AbortSignal !== "undefined" && AbortSignal.any ? AbortSignal.any([mine.signal, ctx.signal]) : mine.signal;
+  const trend = await readToolWithinKeptHistory(
+    "get_server_trend",
+    { server, metric: "memory_clerks", hours: ctx.hours, clerk_types: clerkTypes.join(",") },
+    signal
+  );
+  if (clerkDraws.get(server) !== mine || mine.signal.aborted) return;
+
+  if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
+  const missingOf = (data) => (data && Array.isArray(data.missing_clerk_types) ? data.missing_clerk_types : []);
+  const missingStrip = (data) => (missingOf(data).length ? noticeStrip("No samples in this window for: " + missingOf(data).join(", ") + ".") : null);
+  if (trend.kind === "empty") {
+    /* The empty envelope carries its lists under hints; the server's sentence points at them as JSON paths a
+       reader cannot open, so they are shown as text. */
+    const hints = trend.hints || {};
+    const heaviest = Array.isArray(hints.heaviest_clerk_types) ? hints.heaviest_clerk_types : [];
+    return mount(slot, [
+      keptWindowStrip(trend),
+      missingStrip(hints),
+      emptyStrip(trend.message || "No clerk samples in this window."),
+      heaviest.length ? el("div", { class: "mp-metric-note", text: "Heaviest clerks in this window: " + heaviest.join(", ") + "." }) : null,
+    ]);
+  }
+
+  const drawn = (trend.data.series || []).map((s, i) => ({
+    key: "c" + i,
+    label: s.clerk_type,
+    rows: s.trend || [],
+    color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length],
+  }));
+  if (!drawn.length) return mount(slot, [keptWindowStrip(trend), missingStrip(trend.data), emptyStrip("No clerk samples in this window.")]);
+  /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+  const notes = discontinuityNotes(trend.data);
+  mount(slot, [
+    keptWindowStrip(trend),
+    notes.length ? noticeStrip(notes.join(" ")) : null,
+    missingStrip(trend.data),
+    zoomableLineChart({
+      points: mergeSeriesRows(drawn, "time", "memory_mb"),
+      xKey: "time",
+      series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
+      formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+      unit: "MB",
+      ...windowFromHours(trend.keptHours || ctx.hours),
+    }, "clerk-trend|" + server, chartZoomScope(ctx.hours)),
+    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? el("div", { class: "mp-metric-note", text: trend.data.aggregate_note }) : null,
+  ]);
 }
 
 /**

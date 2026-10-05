@@ -66,6 +66,7 @@ param get_tempdb_trend.server_name 28
 tool get_top_procedures_by_cpu 532
 param get_top_procedures_by_cpu.as_of 167
 param get_top_procedures_by_cpu.database_name 30
+param get_top_procedures_by_cpu.detail 122
 param get_top_procedures_by_cpu.hours_back 29
 param get_top_procedures_by_cpu.server_name 28
 param get_top_procedures_by_cpu.top 37
@@ -73,6 +74,7 @@ param get_top_procedures_by_cpu.top 37
 tool get_top_queries_by_cpu 600
 param get_top_queries_by_cpu.as_of 167
 param get_top_queries_by_cpu.database_name 30
+param get_top_queries_by_cpu.detail 122
 param get_top_queries_by_cpu.group_by 167
 param get_top_queries_by_cpu.hours_back 29
 param get_top_queries_by_cpu.min_dop 132

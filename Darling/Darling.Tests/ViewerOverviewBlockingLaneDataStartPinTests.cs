@@ -59,7 +59,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartPinTests
 
         var step = Between(code, "private async Task ShowBlockingLaneDataStartAsync(", "private void UpdateBlockingLane(");
         Assert.Contains("endUtc - startUtc > DurationTrendRouting.TruncationSlack", step, StringComparison.Ordinal);
-        Assert.Contains("_dataService!.GetBlockedProcessReportsDataStartAsync(_serverId, startUtc, endUtc)", step, StringComparison.Ordinal);
+        Assert.Contains("_dataService!.GetBlockingChartDataStartAsync(_serverId, startUtc, endUtc)", step, StringComparison.Ordinal);
         Assert.Contains("_dataService!.GetDeadlocksDataStartAsync(_serverId, startUtc, endUtc)", step, StringComparison.Ordinal);
         Assert.Contains("ViewerBlockingLaneDataStart.ChooseAsync(blockingProbe, deadlockProbe, blockingBars, deadlockBars)", step, StringComparison.Ordinal);
         Assert.Contains("ViewerServerTab.UpdateTruncationBanner(BlockingLaneDataStartBanner, start, startUtc)", step, StringComparison.Ordinal);

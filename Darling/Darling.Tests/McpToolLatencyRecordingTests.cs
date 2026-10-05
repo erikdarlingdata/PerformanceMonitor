@@ -66,6 +66,10 @@ public sealed class McpToolLatencyRecordingTests
             return PerformanceMonitor.Common.McpHelpers.FormatError("latency_probe_gate_failed_then_error", new InvalidOperationException("probe failed"));
         }
 
+        [McpServerTool(Name = "latency_probe_servers_json"), Description("Test-only: takes a JSON-bearing string like add_servers does and fails.")]
+        public static string ProbeServersJson([Description("A JSON batch.")] string servers_json) =>
+            PerformanceMonitor.Common.McpHelpers.FormatError("latency_probe_servers_json", new InvalidOperationException("probe failed"));
+
         [McpServerTool(Name = "latency_probe_timeout"), Description("Test-only: answers the 57014 statement-timeout envelope.")]
         public static string ProbeTimeout() =>
             PerformanceMonitor.Common.McpHelpers.FormatError(
@@ -77,7 +81,7 @@ public sealed class McpToolLatencyRecordingTests
     /// and <see cref="DarlingMcpHostService.ConfigurePipeline"/>, wired to <paramref name="readLatency"/> — the
     /// same construction <see cref="DarlingMcpHostGateLiveTests.BuildServer"/> uses, plus the test-only probe
     /// tool registered directly on <c>builder.Services</c> (never through production's tool registrations).</summary>
-    private static async Task<TestServer> BuildServer(ReadLatencyAccumulator readLatency)
+    private static async Task<TestServer> BuildServer(ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -94,7 +98,7 @@ public sealed class McpToolLatencyRecordingTests
 
         DarlingMcpHostService.ConfigureMcpServices(
             builder.Services, DarlingPeerDirectory.Snapshot.Empty, readLatency,
-            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, slowReads);
 
         /* The probe tool is added AFTER ConfigureMcpServices's own AddMcpServer() call, chaining onto the
            SAME builder — WithGeminiCompatibleTools appends to the already-registered tool set rather than
@@ -143,6 +147,23 @@ public sealed class McpToolLatencyRecordingTests
         using var reader = new System.IO.StreamReader(ctx.Response.Body);
         var body = await reader.ReadToEndAsync();
         return (ctx.Response.StatusCode, body);
+    }
+
+    [Fact]
+    public async Task AFailedWriteToolCall_CarryingAServerBatchWithAPassword_IsRecordedWithoutThePassword()
+    {
+        var slowReads = new SlowReadLog(0);
+        using var server = await BuildServer(new ReadLatencyAccumulator(), slowReads);
+        var batch = "[{\\\"server_name\\\":\\\"x\\\",\\\"password\\\":\\\"Hunter2!\\\"}]";
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"latency_probe_servers_json\",\"arguments\":{\"servers_json\":\"" + batch + "\"}}}";
+
+        await SendJsonRpcAsync(server, "/", requestBody);
+
+        Assert.True(slowReads.TryRead(out var record));
+        Assert.Equal("latency_probe_servers_json", record!.Route);
+        Assert.DoesNotContain("Hunter2!", record.ArgumentsJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("password\":\"", record.ArgumentsJson, StringComparison.Ordinal);
+        Assert.Contains(SlowReadLog.OmittedMarker, record.ArgumentsJson, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -110,8 +110,12 @@ public sealed class DarlingMcpHostService : BackgroundService
        null-reference, exactly like BaselineCache above. */
     private readonly ReadLatencyAccumulator _readLatency;
 
-    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null)
+    /* #5097: where the tool filter offers a slow or failed call; null in a test-constructed host. */
+    private readonly SlowReadLog? _slowReads;
+
+    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, SlowReadLog? slowReads = null)
     {
+        _slowReads = slowReads;
         _logger = logger;
         _state = state;
         _registryState = registryState;
@@ -583,7 +587,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             /* Register MCP server with the analysis tool class. */
-            ConfigureMcpServices(builder.Services, declaredPeers, _readLatency, _logger);
+            ConfigureMcpServices(builder.Services, declaredPeers, _readLatency, _logger, _slowReads);
 
             _app = builder.Build();
 
@@ -680,7 +684,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
     /// there vs. the parameter here) changes.
     /// </summary>
-    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null)
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null)
     {
         /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
            worker flush use (Program.cs registers ONE ReadLatencyAccumulator for the whole process) -- an
@@ -689,7 +693,7 @@ public sealed class DarlingMcpHostService : BackgroundService
            null-reference. Production's one real call site (TryStartServerAsync) resolves the DI singleton and
            passes it here explicitly. */
         var hostReadLatency = readLatency ?? new ReadLatencyAccumulator();
-        var toolLatency = new McpToolLatencyFilter(hostReadLatency, readLatencyLogger);
+        var toolLatency = new McpToolLatencyFilter(hostReadLatency, readLatencyLogger, slowReads);
 
         /* #4782: run_custom_view_panel records its composed-panel run through the shared runner, which used to
            find the accumulator in a process-wide static that only the web host set -- so the run was dropped
@@ -697,7 +701,7 @@ public sealed class DarlingMcpHostService : BackgroundService
            were set up in one process. The tool now takes this seat as a DI service parameter, over the SAME
            accumulator the filter above records into. Typed-generic AddSingleton<T>, as the seat census
            (McpServiceParameterDiSeatCensusTests) greps this file's source text for it. */
-        services.AddSingleton<ReadLatencyRecorder>(new ReadLatencyRecorder(hostReadLatency, readLatencyLogger));
+        services.AddSingleton<ReadLatencyRecorder>(new ReadLatencyRecorder(hostReadLatency, readLatencyLogger, slowReads));
 
         services
             .AddMcpServer(options =>
@@ -801,6 +805,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                surface beside get_store_metrics. */
             .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
             .WithGeminiCompatibleTools<DarlingMcpReadLatencyTools>()
+            .WithGeminiCompatibleTools<DarlingMcpSlowReadTools>()
             /* #4214 part 2 get_store_host — the store HOST's profile (platform/RAM/data volume, store
                facts, per-setting verdicts), the read side of part 1's --check-settings verb. Darling-only:
                Lite has no managed PostgreSQL store to profile. */

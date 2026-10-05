@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -64,8 +65,18 @@ internal static class DarlingMcpWindowNotice
     /// <paramref name="tail"/> is one more sentence a truncated note carries.
     /// </summary>
     internal static McpWindowNotice Build(
-        DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false)
+        DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false, bool listOnly = false)
     {
+        if (floor is null && listOnly)
+        {
+            /* The windowed list is empty but the answer carries other data (a latest-snapshot block), so it is not an empty answer. */
+            return new McpWindowNotice(
+                null,
+                true,
+                $"The store holds no collection of {table} for this server in this window, so no windowed rows were read, and a list with no rows is not a report that nothing happened. "
+                    + "The window may reach further back than the store retains, this server may have been monitored for less time than that, or collection may have stopped; get_collection_health shows which.");
+        }
+
         if (floor is null && emptyAnswer)
         {
             return new McpWindowNotice(
@@ -89,7 +100,8 @@ internal static class DarlingMcpWindowNotice
     /// <see cref="Build"/> with its coverage probe, which a window no longer than
     /// <see cref="DurationTrendRouting.TruncationSlack"/> that answered rows never needs: the probe cannot find a floor
     /// later than the start by more than the slack, so the answer is covered whatever it would read. The probe is a
-    /// delegate and is not started for such a window. An EMPTY answer is always probed, whatever the window's length:
+    /// delegate and is not started for such a window. <paramref name="listOnly"/> probes whatever the window, for an answer whose
+    /// windowed list is empty but which carries other data (so it is not an <paramref name="emptyAnswer"/>). An EMPTY answer is always probed, whatever the window's length:
     /// nothing was read, so nothing else says the store held the window at all.
     ///
     /// <para>A probe that throws, other than because the CALLER cancelled, is logged at Warning and answers
@@ -98,19 +110,46 @@ internal static class DarlingMcpWindowNotice
     /// </summary>
     internal static async Task<McpWindowNotice> ReadAsync(
         Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null, bool emptyAnswer = false,
-        ILogger? logger = null, CancellationToken cancellationToken = default)
+        bool listOnly = false, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(probe);
         try
         {
-            var floor = emptyAnswer || windowEnd - requestedStart > DurationTrendRouting.TruncationSlack ? await probe() : null;
-            return Build(floor, requestedStart, table, tail, emptyAnswer);
+            var floor = emptyAnswer || listOnly || windowEnd - requestedStart > DurationTrendRouting.TruncationSlack ? await probe() : null;
+            return Build(floor, requestedStart, table, tail, emptyAnswer, listOnly);
         }
         catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
         {
             logger?.LogWarning(ex, "The coverage probe of {Table} failed; the answer goes without its window-floor notice.", table);
             return McpWindowNotice.Unavailable;
         }
+    }
+
+    /// <summary>
+    /// The earlier of two instants, a null (nothing to report) giving way to the other; null when both are. Lite's
+    /// <c>LocalDataService.EarlierCoverageFloor</c>.
+    /// </summary>
+    internal static DateTime? Earlier(DateTime? first, DateTime? second) =>
+        first is DateTime a && second is DateTime b ? (a <= b ? a : b) : first ?? second;
+
+    /// <summary>
+    /// <see cref="ReadAsync"/> for an EVENT list (deadlocks, blocked process reports, long query completions), where a first run
+    /// of the collector can store events from before itself (#4966): the coverage probe reads the collector's table on
+    /// <c>collection_time</c>, but the rows are windowed on the event's own time, so a page can show an event older than the
+    /// probe's floor, and a notice that names a start later than a row it shows is wrong on its face. On a data answer the floor is
+    /// the EARLIER of the probe's and <paramref name="oldestEventShown"/> (the oldest event time on the page; null when the page
+    /// holds none, as on an empty answer). The comparison runs inside the probe delegate, so a window the probe is skipped for
+    /// (90 minutes or less, with rows) stays covered at the start that was asked for, as every other window-floor tool does, and
+    /// a probe that throws still answers <see cref="McpWindowNotice.Unavailable"/> (the event time is not a verdict on its own).
+    /// </summary>
+    internal static Task<McpWindowNotice> ReadEventAsync(
+        Func<Task<DateTime?>> probe, DateTime? oldestEventShown, DateTime requestedStart, DateTime windowEnd, string table,
+        bool emptyAnswer = false, ILogger? logger = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(probe);
+        return ReadAsync(
+            async () => Earlier(await probe(), oldestEventShown),
+            requestedStart, windowEnd, table, emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
     }
 
     /// <summary>
@@ -143,7 +182,15 @@ internal static class DarlingMcpWindowNotice
 
     /// <summary>The coverage probe over a source the caller built (the collection log, one collector's runs, a stitched read).</summary>
     internal static Task<DateTime?> Probe(
-        NpgsqlDataSource postgres, DataWindowFloor.Source source, string serverName, DateTime start, DateTime end, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, DataWindowFloor.Source source, string serverName, DateTime start, DateTime end, CancellationToken cancellationToken) =>
+        Probe(postgres, [source], serverName, start, end, cancellationToken);
+
+    /// <summary>
+    /// The coverage probe over several sources a page is fed by (get_blocking's XE reports and DMV snapshots, #4966):
+    /// <see cref="DataWindowFloor.GetAsync"/> answers the EARLIEST of them in one read.
+    /// </summary>
+    internal static Task<DateTime?> Probe(
+        NpgsqlDataSource postgres, IReadOnlyList<DataWindowFloor.Source> sources, string serverName, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
         var stub = TestOnlyProbe;
         if (stub != null)
@@ -151,6 +198,6 @@ internal static class DarlingMcpWindowNotice
             return stub();
         }
 
-        return DataWindowFloor.GetAsync(postgres, [source], [serverName], start, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+        return DataWindowFloor.GetAsync(postgres, sources, [serverName], start, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
     }
 }
