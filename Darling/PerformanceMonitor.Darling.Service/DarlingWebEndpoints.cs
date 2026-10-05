@@ -3549,6 +3549,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// get_fleet_overview's detail (#4198), whose default "summary" is part of the contract, not an absence.</summary>
     private static CatalogParam PTextDefault(string name, string def) => new(name, TypeText, false, def);
     private static CatalogParam PReqText(string name) => new(name, TypeText, true, null);
+
+    /// <summary>A REQUIRED integer with no default — a point read's key (a Query Store <c>query_id</c>, a snapshot
+    /// <c>session_id</c>), where there is no sensible value to fall back to.</summary>
+    private static CatalogParam PReqInt(string name) => new(name, TypeInt, true, null);
     private static CatalogParam PInt(string name, int def) => new(name, TypeInt, false, def);
 
     /// <summary>
@@ -3742,6 +3746,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── stored plan XML (DarlingMcpPlanTools; the analyze_*_plan compute family stays excluded) ── */
             ["get_plan_xml"] = R(CatPlans, "The stored execution-plan XML for a query (requires query_hash).", PReqText("query_hash"), PServer(), PText("database_name")),
+            /* #5228: the three grid-row plan reads — point reads by a row's own key, so no window (no PHours/PAsOf). */
+            ["get_query_store_plan_xml"] = R(CatPlans, "The stored Query Store plan XML for a query (requires database_name, query_id).", PReqText("database_name"), PReqInt("query_id"), PServer(), PInt("plan_id")),
+            ["get_procedure_plan_xml"] = R(CatPlans, "The stored plan XML for a procedure (requires sql_handle).", PReqText("sql_handle"), PServer()),
+            ["get_active_query_plan_xml"] = R(CatPlans, "The plan captured with one Active Queries row (requires collection_time, session_id).", PReqText("collection_time"), PReqInt("session_id"), PServer(), PInt("request_id", 0), PBool("live", false)),
 
             /* ── default trace (DarlingMcpDefaultTraceTools) ── */
             ["get_default_trace_events"] = R(CatDefaultTrace, "Default-trace events (file growth, DDL, security).", PServer(), PHours(24), PLimit(100), PAsOf()),
@@ -4694,6 +4702,27 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ? WrapPlanXmlAsync(DarlingMcpPlanTools.GetPlanXml(pg, queryHash, Server(c), Str(c, "database_name"), c.RequestAborted), queryHash, Str(c, "database_name"))
                 : MissingParam("query_hash"),
 
+            /* #5228: the grid-row plan reads. A key that is present but unreadable is REFUSED, never defaulted — a
+               plan fetched for the wrong row is worse than none. */
+            ["get_query_store_plan_xml"] = (c, pg, an) => !RequireText(c, "database_name", out var qsDatabase)
+                ? MissingParam("database_name")
+                : !OptionalLong(c, "query_id", out var qsQueryId) ? UnparseableParam("query_id")
+                : qsQueryId is null ? MissingParam("query_id")
+                : !OptionalLong(c, "plan_id", out var qsPlanId) ? UnparseableParam("plan_id")
+                : WrapPlanXmlAsync(DarlingMcpPlanTools.GetQueryStorePlanXml(pg, qsDatabase, qsQueryId.Value, Server(c), qsPlanId, c.RequestAborted),
+                    PlanIdentity(("database_name", qsDatabase), ("query_id", qsQueryId), ("plan_id", qsPlanId))),
+            ["get_procedure_plan_xml"] = (c, pg, an) => RequireText(c, "sql_handle", out var procSqlHandle)
+                ? WrapPlanXmlAsync(DarlingMcpPlanTools.GetProcedurePlanXml(pg, procSqlHandle, Server(c), c.RequestAborted),
+                    PlanIdentity(("sql_handle", procSqlHandle)))
+                : MissingParam("sql_handle"),
+            ["get_active_query_plan_xml"] = (c, pg, an) => !RequireText(c, "collection_time", out var snapTime)
+                ? MissingParam("collection_time")
+                : !OptionalInt(c, "session_id", out var snapSession) ? UnparseableParam("session_id")
+                : snapSession is null ? MissingParam("session_id")
+                : !OptionalInt(c, "request_id", out var snapRequest) ? UnparseableParam("request_id")
+                : WrapPlanXmlAsync(DarlingMcpPlanTools.GetActiveQueryPlanXml(pg, snapTime, snapSession.Value, Server(c), snapRequest ?? 0, QueryBool(c, "live", false), c.RequestAborted),
+                    PlanIdentity(("collection_time", snapTime), ("session_id", snapSession), ("request_id", snapRequest ?? 0), ("live", QueryBool(c, "live", false)))),
+
             /* ── default trace ── */
             ["get_default_trace_events"] = (c, pg, an) => DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(pg, Server(c), Hours(c, 24), Rows(c, "limit", 100), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
@@ -4882,24 +4911,42 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private static async Task<string> WrapPlanXmlAsync(Task<string> read, string queryHash, string? databaseName)
         => WrapPlanXml(await read, queryHash, databaseName);
 
+    private static async Task<string> WrapPlanXmlAsync(Task<string> read, IReadOnlyDictionary<string, object?> identity)
+        => WrapPlanXml(await read, identity);
+
+    /// <summary>The identity a plan answer echoes back: the key the caller read by, in the order given.</summary>
+    private static IReadOnlyDictionary<string, object?> PlanIdentity(params (string Key, object? Value)[] pairs)
+    {
+        var identity = new Dictionary<string, object?>(pairs.Length, StringComparer.Ordinal);
+        foreach (var (key, value) in pairs) identity[key] = value;
+        return identity;
+    }
+
     /// <summary>The web answer for <c>get_plan_xml</c>. The tool returns the stored showplan XML as bare text, which
     /// the read route's classifier would file as a 400, so a plan is wrapped as JSON here (the MCP tool's own output
     /// is unchanged). A status or error envelope, which starts with <c>{</c>, passes through untouched. A plan cut
     /// by <see cref="McpHelpers.Truncate"/> ends with its marker (a whole plan ends with a closing tag); the marker
     /// is removed and <c>truncated</c> says so.</summary>
     internal static string WrapPlanXml(string result, string queryHash, string? databaseName)
+        => WrapPlanXml(result, new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["query_hash"] = queryHash,
+            ["database_name"] = databaseName,
+        });
+
+    /// <summary>The same wrap for any plan read (#5228): <paramref name="identity"/> is echoed first, then
+    /// <c>plan_xml</c> and <c>truncated</c>.</summary>
+    internal static string WrapPlanXml(string result, IReadOnlyDictionary<string, object?> identity)
     {
         if (!result.AsSpan().TrimStart().StartsWith("<", StringComparison.Ordinal)) return result;
 
         var truncated = result.EndsWith(PlanTruncatedMarker, StringComparison.Ordinal);
         var xml = truncated ? result[..^PlanTruncatedMarker.Length] : result;
-        return System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
-        {
-            ["query_hash"] = queryHash,
-            ["database_name"] = databaseName,
-            ["plan_xml"] = xml,
-            ["truncated"] = truncated,
-        });
+        var payload = new Dictionary<string, object?>(identity.Count + 2, StringComparer.Ordinal);
+        foreach (var pair in identity) payload[pair.Key] = pair.Value;
+        payload["plan_xml"] = xml;
+        payload["truncated"] = truncated;
+        return System.Text.Json.JsonSerializer.Serialize(payload);
     }
 
     private static Task<string> MissingParam(string key) => Task.FromResult(McpHelpers.Refusal(key, $"Missing required parameter '{key}'."));
@@ -4941,6 +4988,25 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     private static bool OptionalInt(HttpContext context, string key, out int? value) =>
         TryParseOptionalInt(First(context, key), out value);
+
+    /// <summary>An OPTIONAL 64-bit integer parameter (a Query Store <c>query_id</c> / <c>plan_id</c>), with
+    /// <see cref="OptionalInt"/>'s three outcomes.</summary>
+    private static bool OptionalLong(HttpContext context, string key, out long? value) =>
+        TryParseOptionalLong(First(context, key), out value);
+
+    /// <summary>PURE optional-long binding — <see cref="TryParseOptionalInt"/>'s 64-bit twin.</summary>
+    internal static bool TryParseOptionalLong(string? raw, out long? value)
+    {
+        if (raw is null)
+        {
+            value = null;
+            return true;
+        }
+
+        var parsed = long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number);
+        value = parsed ? number : null;
+        return parsed;
+    }
 
     /// <summary>PURE optional-integer binding — <see cref="TryParseOptionalDouble"/>'s twin.</summary>
     internal static bool TryParseOptionalInt(string? raw, out int? value)

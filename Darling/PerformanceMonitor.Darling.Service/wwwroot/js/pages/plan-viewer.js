@@ -6,18 +6,22 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-/* Stored plan viewer (#4843): a "Plan" action on a grid row that carries a query_hash. It reads the query's stored
-   showplan XML (get_plan_xml) and shows it, indented, in a panel under the button, with Copy and Download .sqlplan.
-   The XML is only ever drawn as text (textContent of a <pre>), never as markup.
+/* Stored plan viewer (#4843): a "Plan" action on a grid row. It reads the row's stored showplan XML and shows it,
+   indented, in a panel under the button, with Copy and Download .sqlplan. The XML is only ever drawn as text
+   (textContent of a <pre>), never as markup.
 
-   Which plans are open, and what they came back with, live at MODULE scope keyed by server + database + hash, so the
+   A row names its plan with a SOURCE (#5228): { kind, ...the row's own key }. SOURCES says, per kind, which read
+   answers it and how the key travels. The plan is fetched when the button is clicked and never carried in the
+   grid payload, which keeps the pages small. Key values go to the read exactly as the row holds them: a
+   timestamp is matched for equality in the store, so it is never put through a Date.
+
+   Which plans are open, and what they came back with, live at MODULE scope keyed by server + source, so the
    page's 60 s rebuild draws the same panels open again instead of closing them. A read still in flight when its
    cell is rebuilt reports to the new cell as well as the old one. */
 
 import { el, readTool } from "../util.js";
 import { copyText } from "../grid-tools.js";
 
-const PLAN_READ = "get_plan_xml";
 const NO_PLAN = "No stored plan was found for this query.";
 const TRUNCATED_NOTE =
   "The stored plan is larger than the 500 KB the read returns, so it is cut off here. A cut-off plan will not open " +
@@ -28,7 +32,47 @@ const openPlans = new Map();
 /* key -> Set of redraw functions, one per cell currently showing the key. */
 const views = new Map();
 
-const keyOf = (server, hash, database) => [server, database || "", hash].join("|");
+/* The plan sources. `read` is the tool; `params(source)` is its query (empty values are dropped by the read call);
+   `stem(source)` names a download. `query_hash` keeps its original panel key (server|database|hash) so a panel open
+   before this change stays the same panel. */
+const SOURCES = {
+  query_hash: {
+    read: "get_plan_xml",
+    params: (s) => ({ query_hash: s.query_hash, database_name: s.database_name || null }),
+    key: (s) => [s.database_name || "", s.query_hash],
+    stem: (s) => s.query_hash,
+  },
+  active_snapshot: {
+    read: "get_active_query_plan_xml",
+    params: (s) => ({
+      collection_time: s.collection_time,
+      session_id: s.session_id,
+      request_id: s.request_id == null ? 0 : s.request_id,
+      live: s.live ? "true" : null,
+    }),
+    key: (s) => [s.collection_time, s.session_id, s.request_id == null ? 0 : s.request_id, s.live ? "live" : "est"],
+    stem: (s) => "active-" + s.session_id + "-" + s.collection_time + (s.live ? "-live" : ""),
+  },
+  query_store: {
+    read: "get_query_store_plan_xml",
+    params: (s) => ({ database_name: s.database_name, query_id: s.query_id, plan_id: s.plan_id == null ? null : s.plan_id }),
+    key: (s) => [s.database_name, s.query_id, s.plan_id == null ? "" : s.plan_id],
+    stem: (s) => "qs-" + s.database_name + "-" + s.query_id + (s.plan_id == null ? "" : "-" + s.plan_id),
+  },
+  procedure: {
+    read: "get_procedure_plan_xml",
+    params: (s) => ({ sql_handle: s.sql_handle }),
+    key: (s) => [s.sql_handle],
+    stem: (s) => s.sql_handle,
+  },
+};
+
+/* A panel's key: server, then the kind (left out for query_hash, whose key never had one), then the kind's own parts.
+   The kind in the key is what keeps two sources with equal-looking parts from sharing a panel. */
+const keyOf = (server, source) => {
+  const parts = SOURCES[source.kind].key(source);
+  return [server, ...(source.kind === "query_hash" ? [] : ["@" + source.kind]), ...parts].join("|");
+};
 
 /** The state of every open panel, for tests: a copy, so the caller cannot change the module's. */
 export function openPlanKeys() {
@@ -83,9 +127,10 @@ export function prettyPrintXml(xml) {
   return lines.join("\n");
 }
 
-/** The file name a plan downloads as: the query hash, made safe for a file name, plus .sqlplan. */
-export function planFileName(queryHash) {
-  return String(queryHash).replace(/[^A-Za-z0-9._-]/g, "_") + ".sqlplan";
+/** The file name a plan downloads as: the source's stem (the query hash for a stored query), made safe for a file
+ *  name, plus .sqlplan. */
+export function planFileName(stem) {
+  return String(stem).replace(/[^A-Za-z0-9._-]/g, "_") + ".sqlplan";
 }
 
 const REVOKE_AFTER_MS = 10000;
@@ -113,8 +158,8 @@ function redraw(key) {
   }
 }
 
-/* What the read answers (the web route's wrapper around DarlingMcpPlanTools.GetPlanXml): JSON { query_hash,
-   database_name, plan_xml, truncated } for a stored plan (`truncated` is decided on the server), or a status envelope
+/* What every plan read answers (the web route's wrapper around the DarlingMcpPlanTools reads): JSON { <the key it was
+   read by>, plan_xml, truncated } for a stored plan (`truncated` is decided on the server), or a status envelope
    ("unavailable" / "not_collected") when there is no plan, which arrives as kind "empty". */
 
 /** Turns a read result into { kind: "plan" | "none" | "error", ... }, or null when the read was abandoned. */
@@ -129,12 +174,11 @@ export function classifyPlanRead(res) {
   return { kind: "none", message: NO_PLAN };
 }
 
-async function load(key, server, hash, database) {
-  const params = { server, query_hash: hash };
-  if (database) params.database_name = database;
+async function load(key, server, source) {
+  const spec = SOURCES[source.kind];
   let res;
   try {
-    res = await readTool(PLAN_READ, params);
+    res = await readTool(spec.read, { server, ...spec.params(source) });
   } catch (e) {
     res = { kind: "error", message: e && e.message ? e.message : String(e) };
   }
@@ -145,9 +189,9 @@ async function load(key, server, hash, database) {
   redraw(key);
 }
 
-/** Opens the stored-plan panel for a query, or closes it if it is already open. */
-export function openStoredPlan(server, queryHash, database) {
-  const key = keyOf(server, queryHash, database);
+/** Opens the plan panel for a source, or closes it if it is already open. */
+export function openPlanSource(server, source) {
+  const key = keyOf(server, source);
   if (openPlans.has(key)) {
     openPlans.delete(key);
     redraw(key);
@@ -155,10 +199,15 @@ export function openStoredPlan(server, queryHash, database) {
   }
   openPlans.set(key, { phase: "loading" });
   redraw(key);
-  return load(key, server, queryHash, database);
+  return load(key, server, source);
 }
 
-function panelFor(key, queryHash) {
+/** Opens the stored-plan panel for a query, or closes it if it is already open. */
+export function openStoredPlan(server, queryHash, database) {
+  return openPlanSource(server, { kind: "query_hash", query_hash: queryHash, database_name: database || null });
+}
+
+function panelFor(key, stem) {
   const state = openPlans.get(key);
   const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
   if (state.phase === "loading") return el("div", { class: "plan-panel" }, [el("div", { class: "strip loading", text: "Loading the stored plan..." })]);
@@ -179,8 +228,8 @@ function panelFor(key, queryHash) {
   } else {
     download.addEventListener("click", () => {
       try {
-        downloadPlan(queryHash, r.xml);
-        status.textContent = "Downloaded " + planFileName(queryHash) + ".";
+        downloadPlan(stem, r.xml);
+        status.textContent = "Downloaded " + planFileName(stem) + ".";
       } catch (e) {
         status.textContent = "Download failed: " + (e && e.message ? e.message : "the browser refused it.");
       }
@@ -194,14 +243,15 @@ function panelFor(key, queryHash) {
 }
 
 /**
- * The Plan cell for a grid row: a button when the row carries a query_hash, and the panel under it while that
- * query's plan is open. Nothing for a row without a hash.
+ * The Plan cell for a plan source: a button, and the panel under it while that source's plan is open. A null source
+ * (a row that has no key to read by) is a dash. `label` is the button text (default "Plan"); `title` its tooltip.
  */
-export function storedPlanCell(server, row) {
-  const hash = row && row.query_hash;
-  if (hash == null || hash === "") return document.createTextNode("—");
-  const database = row.database_name || null;
-  const key = keyOf(server, hash, database);
+export function planSourceCell(server, source, label, title) {
+  if (!source) return document.createTextNode("—");
+  const spec = SOURCES[source.kind];
+  const key = keyOf(server, source);
+  const stem = spec.stem(source);
+  const text = label || "Plan";
   const host = el("div", { class: "plan-cell" });
   const draw = () => {
     while (host.firstChild) host.removeChild(host.firstChild);
@@ -209,19 +259,99 @@ export function storedPlanCell(server, row) {
     const button = el("button", {
       type: "button",
       class: "grid-tool",
-      text: isOpen ? "Hide plan" : "Plan",
+      text: isOpen ? "Hide plan" : text,
       "aria-expanded": isOpen ? "true" : "false",
-      title: "Show the stored plan for this query",
+      title: title || "Show the stored plan for this row",
     });
-    button.addEventListener("click", () => openStoredPlan(server, hash, database));
+    button.addEventListener("click", () => openPlanSource(server, source));
     host.appendChild(button);
-    if (isOpen) host.appendChild(panelFor(key, hash));
+    if (isOpen) host.appendChild(panelFor(key, stem));
   };
   draw.host = host;
   if (!views.has(key)) views.set(key, new Set());
   views.get(key).add(draw);
   draw();
   return host;
+}
+
+/**
+ * The Plan cell for a grid row: a button when the row carries a query_hash, and the panel under it while that
+ * query's plan is open. Nothing for a row without a hash.
+ */
+export function storedPlanCell(server, row) {
+  const hash = row && row.query_hash;
+  if (hash == null || hash === "") return planSourceCell(server, null);
+  return planSourceCell(server, { kind: "query_hash", query_hash: hash, database_name: row.database_name || null }, "Plan", "Show the stored plan for this query");
+}
+
+/* A column's key decides whether `hideWhenEmpty` keeps it: the column is dropped when no row has a value at its key
+   (0 and false count as values). Each factory below keys on the field that is present exactly when a button can be
+   drawn, so the column shows when some row has a plan and is hidden when none does, and no two plan columns on one
+   grid share a key. */
+
+/** Active Queries: an "Estimated plan" and a "Live plan" column, each gated on the row's own presence flag (the flags
+ *  arrive only when true, so a row without one gets a dash). */
+export function activePlanColumns(server) {
+  const source = (row, live) => ({
+    kind: "active_snapshot",
+    collection_time: row.collection_time,
+    session_id: row.session_id,
+    request_id: row.request_id == null ? 0 : row.request_id,
+    live,
+  });
+  return [
+    {
+      key: "has_query_plan",
+      label: "Plan",
+      render: (row) =>
+        planSourceCell(server, row && row.has_query_plan === true ? source(row, false) : null, "Plan", "Show the estimated plan captured with this request"),
+      hideWhenEmpty: true,
+      sortable: false,
+      csv: false,
+    },
+    {
+      key: "has_live_query_plan",
+      label: "Live plan",
+      render: (row) =>
+        planSourceCell(server, row && row.has_live_query_plan === true ? source(row, true) : null, "Live plan", "Show the live plan captured with this request"),
+      hideWhenEmpty: true,
+      sortable: false,
+      csv: false,
+    },
+  ];
+}
+
+/** Query Store: a plan button keyed by database, query and plan. Keyed on query_id, which every row has, so the
+ *  column always shows; a query with no stored plan answers "No stored plan" in the panel. */
+export function queryStorePlanColumn(server) {
+  return {
+    key: "query_id",
+    label: "Plan",
+    render: (row) =>
+      planSourceCell(
+        server,
+        row && row.database_name != null && row.query_id != null
+          ? { kind: "query_store", database_name: row.database_name, query_id: row.query_id, plan_id: row.plan_id == null ? null : row.plan_id }
+          : null,
+        "Plan",
+        "Show the stored Query Store plan for this query"
+      ),
+    sortable: false,
+    csv: false,
+  };
+}
+
+/** Top Procedures: a plan button keyed by sql_handle. Hidden when no row has one (the hourly tier carries none). */
+export function procedurePlanColumn(server) {
+  return {
+    key: "sql_handle",
+    label: "Plan",
+    render: (row) =>
+      planSourceCell(server, row && row.sql_handle ? { kind: "procedure", sql_handle: row.sql_handle } : null, "Plan", "Show the stored plan for this procedure"),
+    hideWhenEmpty: true,
+    sortable: false,
+    csv: false,
+  };
 }
 
 /** The grid column every plan-capable grid adds: hidden when no row carries a query_hash. */

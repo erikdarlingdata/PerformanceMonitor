@@ -115,6 +115,71 @@ internal static class DarlingStoredPlanReader
         """;
 
     /// <summary>
+    /// The latest captured Query Store plan for a query as it is stored since #2210: the fact rows carry no
+    /// plan text (the collector ships a NULL placeholder), and a plan lives ONCE in <c>query_plan_dim</c>,
+    /// reached through <c>collect.query_store_plan_map</c> on (server_id, database_name, plan_id). The inner
+    /// query picks the plans this query_id ran under, newest first (the fact table's own index on
+    /// server, database, query_id, plan_id answers it); the join then resolves the first one whose
+    /// content exists. A map row with a NULL digest is the content-less marker for a plan the engine could
+    /// not persist, so it joins to nothing and the next-newest plan is tried. The dimension row carries
+    /// text, gzip bytes or (for the oldest rows) text only, so both columns come back and the C# side
+    /// resolves text-else-gz. $1 server_id, $2 database_name, $3 query_id, $4 plan_id (NULL = any plan).
+    /// </summary>
+    public const string QueryStorePlanViaMapSql = """
+        SELECT d.query_plan_xml, d.query_plan_gz
+        FROM (
+            SELECT plan_id, MAX(collection_time) AS last_collected
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   database_name = $2
+            AND   query_id = $3
+            AND   ($4::bigint IS NULL OR plan_id = $4)
+            GROUP BY plan_id
+        ) AS r
+        JOIN collect.query_store_plan_map AS m
+          ON  m.server_id = $1
+          AND m.database_name = $2
+          AND m.plan_id = r.plan_id
+        JOIN query_plan_dim AS d
+          ON d.digest = m.digest
+        WHERE (d.query_plan_xml IS NOT NULL OR d.query_plan_gz IS NOT NULL)
+        ORDER BY r.last_collected DESC
+        LIMIT 1
+        """;
+
+    /// <summary>
+    /// The stored estimated execution plan for one Active Queries snapshot row, keyed by its natural key
+    /// (server, collection_time, session_id, request_id). BYTE-EQUAL to the Viewer's
+    /// <c>ViewerDataService.QuerySnapshotEstimatedPlanSql</c> (a test pins the equality), so the desktop and
+    /// the web fetch the same row the same way. <c>COALESCE(request_id, 0)</c> matches a row collected with
+    /// no request_id, which the grids carry as 0. $1 server_id, $2 collection_time (naive UTC,
+    /// microsecond-exact), $3 session_id, $4 request_id.
+    /// </summary>
+    public const string QuerySnapshotPlanSql = """
+        SELECT query_plan
+        FROM query_snapshots
+        WHERE server_id = $1
+        AND   collection_time = $2
+        AND   session_id = $3
+        AND   COALESCE(request_id, 0) = $4
+        AND   query_plan IS NOT NULL
+        LIMIT 1
+        """;
+
+    /// <summary>The live/actual plan twin of <see cref="QuerySnapshotPlanSql"/>; byte-equal to the Viewer's
+    /// <c>ViewerDataService.QuerySnapshotLivePlanSql</c>.</summary>
+    public const string QuerySnapshotLivePlanSql = """
+        SELECT live_query_plan
+        FROM query_snapshots
+        WHERE server_id = $1
+        AND   collection_time = $2
+        AND   session_id = $3
+        AND   COALESCE(request_id, 0) = $4
+        AND   live_query_plan IS NOT NULL
+        LIMIT 1
+        """;
+
+    /// <summary>
     /// The stored execution plan XML for a query (query_stats), or null when no plan was captured for the
     /// key. Read as text — no length cap (the collector stored the whole plan; the MCP tool truncates for
     /// transport).
@@ -190,19 +255,58 @@ internal static class DarlingStoredPlanReader
     }
 
     /// <summary>
-    /// The stored Query Store execution plan for a query (query_store_stats.query_plan_text — Query Store
-    /// already stores plans as ShowPlanXML text), or null when no plan text was captured for the key.
+    /// The stored Query Store execution plan for a query, or null when none was captured for the key. Since
+    /// #2210 a plan is stored once in <c>query_plan_dim</c> and reached through
+    /// <c>collect.query_store_plan_map</c> (<see cref="QueryStorePlanViaMapSql"/>); rows written before that
+    /// carry the text inline on <c>query_store_stats.query_plan_text</c> (<see cref="QueryStorePlanTextSql"/>).
+    /// The map is asked first, so the newest plan wins when a query has both kinds, and the inline column
+    /// second, so older rows keep resolving.
     /// </summary>
     public static async Task<string?> GetQueryStorePlanTextAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, long? planId,
         CancellationToken cancellationToken = default)
     {
+        await using (var viaMap = postgres.CreateCommand(QueryStorePlanViaMapSql))
+        {
+            viaMap.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            viaMap.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            viaMap.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
+            viaMap.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });
+            viaMap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)planId ?? DBNull.Value });
+            var resolved = await ReadPlanTextOrGzipAsync(viaMap, cancellationToken);
+            if (resolved is not null)
+            {
+                return resolved;
+            }
+        }
+
         await using var command = postgres.CreateCommand(QueryStorePlanTextSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)planId ?? DBNull.Value });
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is string s ? s : null;
+    }
+
+    /// <summary>
+    /// The stored plan for one Active Queries snapshot row (<see cref="QuerySnapshotPlanSql"/> /
+    /// <see cref="QuerySnapshotLivePlanSql"/>), or null when that request captured none.
+    /// <paramref name="collectionTimeUtc"/> must be the row's collection_time exactly — naive UTC, with the
+    /// microseconds the store keeps — and is relabelled <c>Unspecified</c> here so Npgsql binds it as a
+    /// <c>timestamp</c> and not a <c>timestamptz</c> (the #1969 trap).
+    /// </summary>
+    public static async Task<string?> GetQuerySnapshotPlanXmlAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime collectionTimeUtc, int sessionId, int requestId, bool live,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(live ? QuerySnapshotLivePlanSql : QuerySnapshotPlanSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = sessionId });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = requestId });
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is string s ? s : null;
     }

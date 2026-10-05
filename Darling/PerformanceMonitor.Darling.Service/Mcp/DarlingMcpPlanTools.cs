@@ -8,6 +8,7 @@
 
 using System;
 using System.ComponentModel;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -219,6 +220,102 @@ public sealed class DarlingMcpPlanTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_plan_xml", ex);
+        }
+    }
+
+    [McpServerTool(Name = "get_query_store_plan_xml"), Description(
+        "Returns the raw stored Query Store showplan XML for database_name + query_id (optional plan_id). Use after get_query_store_top. Truncated at 500KB.")]
+    public static async Task<string> GetQueryStorePlanXml(
+        NpgsqlDataSource postgres,
+        [Description("The database_name from get_query_store_top.")] string database_name,
+        [Description("The query_id from get_query_store_top.")] long query_id,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Optional plan_id to pin one compiled plan. Omit for the most recently captured plan.")] long? plan_id = null,
+        CancellationToken cancellationToken = default)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        if (error != null) return error;
+
+        try
+        {
+            var xml = await DarlingStoredPlanReader.GetQueryStorePlanTextAsync(
+                postgres, resolved.ServerId, database_name, query_id, plan_id, cancellationToken);
+            if (string.IsNullOrEmpty(xml))
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}.");
+
+            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_query_store_plan_xml", ex);
+        }
+    }
+
+    [McpServerTool(Name = "get_procedure_plan_xml"), Description(
+        "Returns the raw stored showplan XML for a procedure identified by sql_handle. Use after get_top_procedures_by_cpu. Truncated at 500KB.")]
+    public static async Task<string> GetProcedurePlanXml(
+        NpgsqlDataSource postgres,
+        [Description("The sql_handle value from get_top_procedures_by_cpu.")] string sql_handle,
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        if (error != null) return error;
+
+        try
+        {
+            var xml = await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(
+                postgres, resolved.ServerId, sql_handle, cancellationToken);
+            if (string.IsNullOrEmpty(xml))
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
+                    ?? McpHelpers.Status("unavailable", $"No stored plan found for sql_handle '{sql_handle}'.");
+
+            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_procedure_plan_xml", ex);
+        }
+    }
+
+    [McpServerTool(Name = "get_active_query_plan_xml"), Description(
+        "Returns the raw showplan XML captured for one get_active_queries row (collection_time + session_id); live=true gives the live plan. Truncated at 500KB.")]
+    public static async Task<string> GetActiveQueryPlanXml(
+        NpgsqlDataSource postgres,
+        [Description("The row's collection_time, exactly as get_active_queries returned it.")] string collection_time,
+        [Description("The row's session_id.")] int session_id,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("The row's request_id; omit for 0.")] int request_id = 0,
+        [Description("True for the live (actual) plan; false for the estimated plan.")] bool live = false,
+        CancellationToken cancellationToken = default)
+    {
+        /* Parsed as an instant in UTC with every fractional digit kept: the store compares collection_time
+           for equality, so a value rounded to the second would match nothing. */
+        if (!DateTime.TryParse(collection_time, CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var collectionTimeUtc))
+            return McpHelpers.Refusal("collection_time", "Expected the collection_time exactly as get_active_queries returned it (ISO 8601, UTC).");
+
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        if (error != null) return error;
+
+        try
+        {
+            var xml = await DarlingStoredPlanReader.GetQuerySnapshotPlanXmlAsync(
+                postgres, resolved.ServerId, collectionTimeUtc, session_id, request_id, live, cancellationToken);
+            if (string.IsNullOrEmpty(xml))
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots", cancellationToken)
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No stored {(live ? "live " : "")}plan found for session_id {session_id} (request_id {request_id}) at collection_time '{collection_time}'.");
+
+            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_active_query_plan_xml", ex);
         }
     }
 

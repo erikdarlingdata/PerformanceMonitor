@@ -224,6 +224,12 @@ public sealed class DarlingMcpSessionTools
                 open_transaction_count = r.OpenTransactionCount > 0 ? r.OpenTransactionCount : (int?)null,
                 percent_complete = r.PercentComplete > 0 ? r.PercentComplete : null,
                 query_hash = string.IsNullOrEmpty(r.QueryHash) ? null : r.QueryHash,
+                /* #5228: the plan key and its presence flags. request_id completes the row's natural key
+                   (collection_time, session_id, request_id); the flags are written only when true (the omit-false
+                   rule), and the XML itself is get_active_query_plan_xml's, on demand. */
+                request_id = r.RequestId,
+                has_query_plan = r.HasQueryPlan ? true : (bool?)null,
+                has_live_query_plan = r.HasLiveQueryPlan ? true : (bool?)null,
                 login_name = r.LoginName,
                 host_name = r.HostName,
                 program_name = r.ProgramName,
