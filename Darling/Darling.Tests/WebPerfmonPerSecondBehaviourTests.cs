@@ -138,15 +138,15 @@ public sealed class WebPerfmonPerSecondBehaviourTests
     {
         if (!TryRun("mixed", out var r)) return;
 
+        /* The snapshot's default counters (Batch Requests/sec, SQL Compilations/sec) are both rates: one line each,
+           named for its counter, on a per-second axis. */
         var chart = Assert.Single(r.GetProperty("charts").EnumerateArray());
-        var line = Assert.Single(chart.GetProperty("series").EnumerateArray());
-        Assert.Equal("per_second", line.GetProperty("key").GetString());
-        Assert.Equal("Per second", line.GetProperty("label").GetString());
+        Assert.Equal(new[] { "Batch Requests/sec", "SQL Compilations/sec" }, chart.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("label").GetString()!).ToArray());
         Assert.Equal("/s", chart.GetProperty("unit").GetString());
 
         /* The first point's rate was not knowable, so it reads as no number; the second is 66 over 300 s. */
-        Assert.Equal(new[] { new[] { "Per second", "—" } }, Tooltip(chart, "left"));
-        Assert.Equal(new[] { new[] { "Per second", "0.22" } }, Tooltip(chart, "right"));
+        Assert.Equal(new[] { new[] { "Batch Requests/sec", "—" }, new[] { "SQL Compilations/sec", "—" } }, Tooltip(chart, "left"));
+        Assert.Equal(new[] { new[] { "Batch Requests/sec", "0.22" }, new[] { "SQL Compilations/sec", "0.22" } }, Tooltip(chart, "right"));
     }
 
     /// <summary>One deadlock in a 300 s collection is 0.0033 a second. Printed to two decimals it was 0, on every
@@ -158,8 +158,8 @@ public sealed class WebPerfmonPerSecondBehaviourTests
 
         var chart = Assert.Single(r.GetProperty("charts").EnumerateArray());
         Assert.Equal(new[] { "0", "0.001", "0.002", "0.003", "0.004" }, Strings(chart.GetProperty("axis")));
-        Assert.Equal(new[] { new[] { "Per second", "0.0033" } }, Tooltip(chart, "right"));
-        Assert.Equal(new[] { new[] { "Per second", "0" } }, Tooltip(chart, "left"));
+        Assert.Equal(new[] { new[] { "Number of Deadlocks/sec", "0.0033" } }, Tooltip(chart, "right"));
+        Assert.Equal(new[] { new[] { "Number of Deadlocks/sec", "0" } }, Tooltip(chart, "left"));
     }
 
     /// <summary>A bucket a day wide holds 86,400 s, so one deadlock in it is 0.000012 a second: smaller than any
@@ -171,7 +171,7 @@ public sealed class WebPerfmonPerSecondBehaviourTests
 
         var chart = Assert.Single(r.GetProperty("charts").EnumerateArray());
         Assert.Equal(new[] { "0", "0.000005", "0.00001", "0.000015" }, Strings(chart.GetProperty("axis")));
-        Assert.Equal(new[] { new[] { "Per second", "0.000012" } }, Tooltip(chart, "right"));
+        Assert.Equal(new[] { new[] { "Number of Deadlocks/sec", "0.000012" } }, Tooltip(chart, "right"));
     }
 
     /// <summary>The same two rules in the trend chart's tooltip: the older point's 1234.5678 reads 1,234.57, and the
@@ -182,23 +182,22 @@ public sealed class WebPerfmonPerSecondBehaviourTests
         if (!TryRun("digits", out var r)) return;
 
         var chart = Assert.Single(r.GetProperty("charts").EnumerateArray());
-        Assert.Equal(new[] { new[] { "Per second", "1,234.57" } }, Tooltip(chart, "left"));
-        Assert.Equal(new[] { new[] { "Per second", "0.23" } }, Tooltip(chart, "right"));
+        Assert.Equal(new[] { new[] { "Page Splits/sec", "1,234.57" } }, Tooltip(chart, "left"));
+        Assert.Equal(new[] { new[] { "Page Splits/sec", "0.23" } }, Tooltip(chart, "right"));
     }
 
-    /// <summary>A gauge's chart is what it was: its reading, and the delta line its points leave empty.</summary>
+    /// <summary>A gauge's chart draws its reading as one line named for the counter.</summary>
     [Fact]
     public void TheTrendChart_ForAGauge_IsUnchanged()
     {
         if (!TryRun("gauge", out var r)) return;
 
         var chart = Assert.Single(r.GetProperty("charts").EnumerateArray());
-        Assert.Equal(new[] { "value", "delta_value" }, chart.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("key").GetString()!).ToArray());
-        Assert.Equal(new[] { "Value", "Delta" }, chart.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("label").GetString()!).ToArray());
+        Assert.Equal(new[] { "Total Server Memory (KB)" }, chart.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("label").GetString()!).ToArray());
         Assert.Equal(JsonValueKind.Null, chart.GetProperty("unit").ValueKind);
 
         /* ...and it prints as it did: grouped whole numbers, with no digits added for it. */
         Assert.Equal(new[] { "0", "2,000,000", "4,000,000", "6,000,000", "8,000,000" }, Strings(chart.GetProperty("axis")));
-        Assert.Equal(new[] { new[] { "Value", "8,000,000" }, new[] { "Delta", "—" } }, Tooltip(chart, "right"));
+        Assert.Equal(new[] { new[] { "Total Server Memory (KB)", "8,000,000" } }, Tooltip(chart, "right"));
     }
 }

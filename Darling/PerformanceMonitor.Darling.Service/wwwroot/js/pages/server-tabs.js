@@ -45,6 +45,8 @@ import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } 
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
+import { downloadText } from "../grid-tools.js";
+import { planColumn } from "./plan-viewer.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -73,6 +75,36 @@ function xmlDisclosure(text) {
   return disclosure("XML capture (" + String(text).length.toLocaleString() + " chars)", el("pre", { class: "code" }, [text]), {
     max: 60,
   });
+}
+
+/** "20260105_143007" from an ISO stamp (its UTC digits), for a download's file name; "unknown" when there is none. */
+function fileStamp(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/.exec(String(iso ?? ""));
+  return m ? m[1] + m[2] + m[3] + "_" + m[4] + m[5] + m[6] : "unknown";
+}
+
+/**
+ * A Save XML button: downloads `text` as `fileName`. The rows already carry the XML, so there is no fetch and nothing in
+ * flight. Disabled, with the reason on hover, when there is no XML or the read cut it short (a saved cut graph would not
+ * open as a graph).
+ */
+function saveXmlButton(text, fileName, mime, truncated) {
+  const none = text == null || text === "";
+  const btn = el("button", { class: "btn small", type: "button", text: "Save XML" });
+  if (none || truncated) {
+    btn.disabled = true;
+    btn.setAttribute("disabled", "");
+    btn.setAttribute("title", none ? "No XML was captured for this row." : "This read sent only a preview of the XML, so it is not saved. Reload with the full graph to save it.");
+    return btn;
+  }
+  btn.addEventListener("click", () => {
+    try {
+      downloadText(fileName, [text], mime);
+    } catch (e) {
+      btn.setAttribute("title", "Save failed: " + (e && e.message ? e.message : "the browser refused the download."));
+    }
+  });
+  return btn;
 }
 
 /**
@@ -335,20 +367,41 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
   ]);
 }
 
+/** The most counters the Perfmon chart draws at once: one read each, and the palette has ten colors. */
+const MAX_COUNTERS_CHARTED = 10;
+
+/** The desktop's General Throughput pack: the counters checked when the reader has not chosen any. */
+const PERFMON_DEFAULT_COUNTERS = [
+  "Batch Requests/sec",
+  "SQL Compilations/sec",
+  "SQL Re-Compilations/sec",
+  "Query optimizations/sec",
+  "Network IO waits",
+];
+
+/** The default counter set, bounded by `max` and drawn only from the counters this server holds (case-insensitive,
+    as the desktop matches them); when none of the pack is collected, the first counter in the list. */
+function perfmonDefaults(available, max) {
+  const picked = [];
+  for (const want of PERFMON_DEFAULT_COUNTERS) {
+    const hit = available.find((n) => n.toLowerCase() === want.toLowerCase());
+    if (hit && picked.length < max && !picked.includes(hit)) picked.push(hit);
+  }
+  return picked.length || !available.length ? picked : [available[0]];
+}
+
 /**
- * Perfmon counters: a picker over the counters this server actually collects, charting the chosen one.
+ * Perfmon counters: the latest snapshot's table, and a multi-series trend over the counters the reader checks.
  *
- * The desktop viewer's Perfmon tab is a searchable counter list over a multi-series chart. get_perfmon_trend
- * REQUIRES a counter_name, so without a picker the read is unreachable from the browser — which is why the
- * options come from get_perfmon_stats (the latest snapshot's counter list) rather than being hardcoded: a
- * hardcoded name is exactly how you end up charting a counter this server does not collect.
- *
- * When the trend read still comes back empty it can carry hints.collected_counters. Its message tells the
- * reader to "see hints.collected_counters", which is a JSON path no browser reader can open, so the hint list
- * is rendered here instead of being dropped.
+ * The desktop viewer's Perfmon tab is a searchable counter list over a multi-series chart, opening on the General
+ * Throughput pack. get_perfmon_trend REQUIRES a counter_name, so the options come from get_perfmon_stats (the latest
+ * snapshot's counter list) rather than being hardcoded: a hardcoded name is exactly how you end up charting a counter
+ * this server does not collect. The trend read takes a counter name and no instance, so the list is by counter name.
+ * Each checked counter is one get_perfmon_trend read; the checked set and the search text live in multi-picker.js's
+ * module state keyed by server, so the 60 s rebuild keeps them.
  */
 export function perfmonPanel(server, ctx) {
-  const { panel, body } = panelShell("Perfmon Counters", "latest snapshot, with a trend for the counter you pick");
+  const { panel, body } = panelShell("Perfmon Counters", "latest snapshot, with a trend for the counters you check");
   (async () => {
     const res = await readTool("get_perfmon_stats", { server });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -361,49 +414,115 @@ export function perfmonPanel(server, ctx) {
        exact payload it would render, and a second panel would have paid for get_perfmon_stats twice to show the
        list the picker above it is built from. */
     const chartSlot = el("div", {}, [loadingStrip()]);
-    const picker = pickerControl("Counter", names, (name) => drawPerfmonTrend(chartSlot, server, ctx, name));
+    const picker = multiPicker({
+      key: "perfmon|" + server,
+      label: "Counters",
+      options: names,
+      max: MAX_COUNTERS_CHARTED,
+      noun: "counter",
+      defaultsLabel: "Default counters",
+      defaults: perfmonDefaults,
+      onChange: (checked) => drawPerfmonTrends(chartSlot, server, ctx, checked),
+    });
     mount(body, [
       VIZ.table({ ...res.data, counters: perfmonRows(res.data.counters) }, {
         rowsKey: "counters",
         columns: PERFMON_COLUMNS,
         emptyText: "No perfmon counters in the latest snapshot.",
       }),
-      el("div", { class: "picker-row" }, [picker]),
+      picker.node,
       chartSlot,
     ]);
-    drawPerfmonTrend(chartSlot, server, ctx, names[0]);
+    picker.restoreFocus();
+    drawPerfmonTrends(chartSlot, server, ctx, picker.checked());
   })();
   return panel;
 }
 
-async function drawPerfmonTrend(slot, server, ctx, counterName) {
-  mount(slot, loadingStrip());
-  const trend = await readToolWithinKeptHistory("get_perfmon_trend", { server, counter_name: counterName, hours: ctx.hours });
-  if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
-  if (trend.kind === "empty") {
-    const hinted = trend.hints && Array.isArray(trend.hints.collected_counters) ? trend.hints.collected_counters : null;
-    mount(slot, [
-      keptWindowStrip(trend),
-      emptyStrip(trend.message),
-      hinted && hinted.length
-        ? el("div", { class: "muted", style: "margin-top:0.4rem", text: "Collected here: " + hinted.join(", ") })
-        : null,
-    ]);
+/* The newest Perfmon draw's AbortController per server: a new draw aborts the previous one's reads, and a read that
+   finishes after that is dropped. */
+const perfmonDraws = new Map();
+
+export async function drawPerfmonTrends(slot, server, ctx, checked) {
+  const counters = checked.slice(0, MAX_COUNTERS_CHARTED);
+  const previous = perfmonDraws.get(server);
+  if (previous) previous.abort();
+  const mine = new AbortController();
+  perfmonDraws.set(server, mine);
+  if (!counters.length) {
+    mount(slot, emptyStrip("Check at least one counter to chart its trend."));
     return;
   }
-  /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
-  const notes = discontinuityNotes(trend.data);
+  mount(slot, loadingStrip());
+  const results = await Promise.all(
+    counters.map((counter) => readToolWithinKeptHistory("get_perfmon_trend", { server, counter_name: counter, hours: ctx.hours }, mine.signal))
+  );
+  if (perfmonDraws.get(server) !== mine || mine.signal.aborted) return;
+
+  const drawn = [];
+  const notes = [];
+  const kept = [];
+  let keptHours = 0;
+  const seenNotes = new Set();
+  let failed = 0;
+  let allRates = true;
+  results.forEach((trend, i) => {
+    const counter = counters[i];
+    if (trend.kind !== "data") {
+      if (trend.kind !== "empty") failed++;
+      /* The server's no-trend sentence points at hints.collected_counters, a JSON path a reader cannot open, so
+         the counters it holds are listed here as text instead. */
+      const collected = trend.hints && Array.isArray(trend.hints.collected_counters) ? trend.hints.collected_counters : null;
+      const said = collected && trend.message ? trend.message.replace(/\s*[—-]\s*see hints\.collected_counters.*$/, ".") : trend.message;
+      notes.push(counter + ": " + (said || (trend.kind === "empty" ? "no trend data." : "the read failed.")) + (collected && collected.length ? " Collected here: " + collected.join(", ") + "." : ""));
+      return;
+    }
+    if (trend.keptHours) {
+      keptHours = Math.max(keptHours, trend.keptHours);
+      kept.push(trend);
+    }
+    /* #3653 A5: the payload's baseline discontinuities render as a notice above the chart. They are about the
+       server, so the same sentence from two counters shows once. */
+    for (const n of discontinuityNotes(trend.data)) seenNotes.add(n);
+    const points = trend.data.trend || [];
+    /* A rate counter plots its per_second (its stored value only climbs); any other counter plots its value. */
+    const rate = points.some((p) => p && "per_second" in p);
+    if (!rate) allRates = false;
+    drawn.push({
+      key: "c" + i,
+      label: counter,
+      rows: points.map((p) => ({ time: p.time, v: rate ? p.per_second : p.value })),
+      color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length],
+    });
+  });
+
+  const failures = notes.map((n) => noticeStrip(n));
+  if (!drawn.length && !failed) {
+    mount(slot, emptyStrip("None of the " + counters.length + " checked counters has trend data in this window."));
+    return;
+  }
+  if (!drawn.length) {
+    mount(slot, [failures.length ? failures : null, errorStrip("None of the " + counters.length + " checked counters returned a trend.")]);
+    return;
+  }
   mount(slot, [
-    keptWindowStrip(trend),
-    notes.length ? noticeStrip(notes.join(" ")) : null,
+    kept.length ? keptWindowStrip(kept[0]) : null,
+    seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
+    ...failures,
     zoomableLineChart({
-      points: trend.data.trend || [],
+      points: mergeSeriesRows(drawn, "time", "v"),
       xKey: "time",
-      ...perfmonTrendLines(trend.data.trend || []),
+      series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
+      /* Rates print through fmtRate so a small real rate never reads as 0; a chart that mixes in a gauge or an
+         average prints plain numbers, since one axis serves every line. */
+      ...(allRates
+        ? { unit: "/s", formatValue: fmtRate }
+        : { formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }) }),
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
-      ...windowFromHours(trend.keptHours || ctx.hours),
-    }, "perfmon-trend|" + counterName, chartZoomScope(ctx.hours)),
+      ...windowFromHours(keptHours || ctx.hours),
+    }, "perfmon-trend|" + server, chartZoomScope(ctx.hours)),
+    el("div", { class: "mp-metric-note", text: "Rate counters plot per second; other counters plot their value." }),
   ]);
 }
 
@@ -423,23 +542,6 @@ function perfmonRows(counters) {
       ? { ...c, running_total: c.value, value: null, delta_value: c.per_second == null ? null : c.delta_value }
       : c
   );
-}
-
-/* The trend chart's lines for the picked counter. A rate counter's points carry per_second, the figure the desktop
-   charts plot for it, and that is the one line: its value only climbs. Its axis and tooltip print through fmtRate,
-   so a small real rate never reads as 0. Every other counter keeps its value and delta lines and its own number
-   format, so a gauge still plots its reading. */
-function perfmonTrendLines(points) {
-  if (points.some((p) => p && "per_second" in p)) {
-    return { series: [{ key: "per_second", label: "Per second", color: SERIES_COLORS[0] }], unit: "/s", formatValue: fmtRate };
-  }
-  return {
-    series: [
-      { key: "value", label: "Value", color: SERIES_COLORS[0] },
-      { key: "delta_value", label: "Delta", color: SERIES_COLORS[1] },
-    ],
-    formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }),
-  };
 }
 
 /**
@@ -466,7 +568,7 @@ function perfmonTrendLines(points) {
 export function topQueriesPanel(server, ctx) {
   const { panel, body } = panelShell("Top Queries by CPU", ctx.label + ", with a per-collection trend for the query you pick");
   (async () => {
-    const res = await readToolWithinKeptHistory("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20 });
+    const res = await readToolWithinKeptHistory("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20, detail: "full" });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
@@ -474,7 +576,9 @@ export function topQueriesPanel(server, ctx) {
     const parts = [
       VIZ.table(res.data, {
         rowsKey: "queries",
-        columns: TOP_QUERY_COLUMNS,
+        columns: [...TOP_QUERY_COLUMNS, planColumn(server)],
+        groups: TOP_QUERY_GROUPS.groups,
+        defaultGroups: TOP_QUERY_GROUPS.defaultGroups,
         emptyText:
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) " +
           "before it reports non-zero values.",
@@ -922,13 +1026,15 @@ export const SERVER_TABS = [
       table(
         "Top Queries by CPU",
         "get_top_queries_by_cpu",
-        { server, hours: ctx.hours, top: 20 },
+        { server, hours: ctx.hours, top: 20, detail: "full" },
         "queries",
-        TOP_QUERY_COLUMNS,
+        [...TOP_QUERY_COLUMNS, planColumn(server)],
         ctx.label,
         "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
         2,
-        "truncation_note"
+        "truncation_note",
+        null,
+        TOP_QUERY_GROUPS
       ),
       table(
         "Top Procedures by CPU",
@@ -1063,7 +1169,9 @@ export const SERVER_TABS = [
         ctx.label,
         "No blocking events in this window.",
         2,
-        "separately_monitored_note"
+        "separately_monitored_note",
+        null,
+        BLOCKING_GROUPS
       ),
       table(
         "Deadlocks",
@@ -1559,6 +1667,15 @@ export const SERVER_TABS = [
         JOB_COLUMNS,
         SNAPSHOT,
         "No SQL Agent jobs were running at the last collection — the normal state for most servers."
+      ),
+      table(
+        "Job History",
+        "get_job_history",
+        { server, hours: ctx.hours, limit: 100 },
+        "runs",
+        JOB_HISTORY_COLUMNS,
+        ctx.label + ", newest 100 runs (steps and job outcomes)",
+        "No SQL Agent job runs were retained in this window."
       ),
       table(
         "Index Usage",
@@ -2916,21 +3033,63 @@ const SPINLOCK_COLUMNS = [
 ];
 
 /* #1949 ordering, which every query grid in both apps follows: the time/identity anchor, then the QUERY TEXT,
-   then the metrics. Text pushed behind the metrics is text nobody scrolls to. */
+   then the metrics. Text pushed behind the metrics is text nobody scrolls to.
+   The desktop grid's columns in its order, except that Query and Module sit right of Database (the rule above)
+   rather than behind the two timestamps. The ungrouped columns are the core set and always show; the rest follow the toggles in
+   TOP_QUERY_GROUPS, all off at first. Last Execution and Creation Time arrive as UTC instants (the read converts them from the monitored
+   server's clock) and print in the browser's local time; every grouped field is omitted by the read on the hourly tier and prints a dash. */
 const TOP_QUERY_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
-  { key: "host_object", label: "Host object" },
+  { key: "host_object", label: "Module" },
+  { key: "last_execution_time", label: "Last Execution", format: "time", group: "Times" },
+  { key: "creation_time", label: "Creation Time", format: "time", group: "Times" },
   { key: "execution_count", label: "Execs", format: "int" },
   { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
   { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
-  { key: "total_elapsed_ms", label: "Total Elapsed", format: "ms" },
-  { key: "avg_elapsed_ms", label: "Avg Elapsed", format: "ms" },
-  { key: "max_cpu_ms", label: "Max CPU", format: "ms" },
-  { key: "max_dop", label: "Max DOP", format: "int" },
-  { key: "total_spills", label: "Spills", format: "int" },
+  { key: "worker_time_per_second", label: "Peak CPU ms/s", format: "num1", group: "Times" },
+  { key: "plan_generation_num", label: "Plan Gen", format: "int", group: "Times" },
+  { key: "total_clr_ms", label: "Total CLR", format: "ms", group: "Times" },
+  { key: "total_elapsed_ms", label: "Total Duration", format: "ms" },
+  { key: "avg_elapsed_ms", label: "Avg Duration", format: "ms" },
+  { key: "total_logical_reads", label: "Total Reads", format: "int" },
+  { key: "avg_reads", label: "Avg Reads", format: "int" },
+  { key: "total_logical_writes", label: "Total Writes", format: "int", group: "I/O and rows" },
+  { key: "total_physical_reads", label: "Physical Reads", format: "int", group: "I/O and rows" },
+  { key: "total_rows", label: "Total Rows", format: "int", group: "I/O and rows" },
+  { key: "total_spills", label: "Total Spills", format: "int" },
+  { key: "min_cpu_ms", label: "Min CPU", format: "ms", group: "Extremes" },
+  { key: "max_cpu_ms", label: "Max CPU", format: "ms", group: "Extremes" },
+  { key: "min_elapsed_ms", label: "Min Duration", format: "ms", group: "Extremes" },
+  { key: "max_elapsed_ms", label: "Max Duration", format: "ms", group: "Extremes" },
+  { key: "min_physical_reads", label: "Min Phys Reads", format: "int", group: "Extremes" },
+  { key: "max_physical_reads", label: "Max Phys Reads", format: "int", group: "Extremes" },
+  { key: "min_rows", label: "Min Rows", format: "int", group: "Extremes" },
+  { key: "max_rows", label: "Max Rows", format: "int", group: "Extremes" },
+  { key: "min_grant_kb", label: "Min Grant KB", format: "int", group: "Memory grants" },
+  { key: "max_grant_kb", label: "Max Grant KB", format: "int", group: "Memory grants" },
+  { key: "min_used_grant_kb", label: "Min Used Grant KB", format: "int", group: "Memory grants" },
+  { key: "max_used_grant_kb", label: "Max Used Grant KB", format: "int", group: "Memory grants" },
+  { key: "min_ideal_grant_kb", label: "Min Ideal Grant KB", format: "int", group: "Memory grants" },
+  { key: "max_ideal_grant_kb", label: "Max Ideal Grant KB", format: "int", group: "Memory grants" },
+  { key: "min_spills", label: "Min Spills", format: "int", group: "Extremes" },
+  { key: "max_spills", label: "Max Spills", format: "int", group: "Extremes" },
+  { key: "min_dop", label: "Min DOP", format: "int", group: "Parallelism" },
+  { key: "max_dop", label: "Max DOP", format: "int", group: "Parallelism" },
+  { key: "min_reserved_threads", label: "Min Rsvd Threads", format: "int", group: "Parallelism" },
+  { key: "max_reserved_threads", label: "Max Rsvd Threads", format: "int", group: "Parallelism" },
+  { key: "min_used_threads", label: "Min Used Threads", format: "int", group: "Parallelism" },
+  { key: "max_used_threads", label: "Max Used Threads", format: "int", group: "Parallelism" },
   { key: "query_hash", label: "Query Hash", mono: true },
+  { key: "query_plan_hash", label: "Plan Hash", group: "Hashes and handles", mono: true },
+  { key: "sql_handle", label: "SQL Handle", group: "Hashes and handles", mono: true },
+  { key: "plan_handle", label: "Plan Handle", group: "Hashes and handles", mono: true },
 ];
+
+const TOP_QUERY_GROUPS = {
+  groups: ["Times", "I/O and rows", "Extremes", "Memory grants", "Parallelism", "Hashes and handles"],
+  defaultGroups: [],
+};
 
 /* The per-collection snapshots get_query_trend returns, minus the two the chart already draws. Executions,
    DOP and the plan hash are here rather than on the chart because they are not milliseconds and one y-domain
@@ -3170,18 +3329,38 @@ const ACTIVE_COLUMNS = [
   { key: "query_hash", label: "Query Hash" },
 ];
 
+/* The desktop Blocked Process Reports grid's columns, order and headers, for every field get_blocking returns. Object is
+   the web's own extra. */
+/* Blocking column groups: the report, the pair and the wait are always shown; the sessions' status and isolation, the blocked
+   transaction and the logins, hosts and apps follow the desktop order in three toggles, with the first two on at first. */
+const BLOCKING_GROUPS = { groups: ["Status and isolation", "Transaction", "Sessions"], defaultGroups: ["Status and isolation", "Transaction"] };
+
 const BLOCKING_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
+  { key: "event_time", label: "Event Time", format: "time" },
   { key: "blocked_sql_text", label: "Blocked SQL", render: (r) => codeDisclosure(r.blocked_sql_text) },
   { key: "blocking_sql_text", label: "Blocking SQL", render: (r) => codeDisclosure(r.blocking_sql_text) },
+  { key: "source", label: "Source" },
   { key: "database_name", label: "Database" },
-  { key: "blocked_spid", label: "Blocked", format: "int" },
-  { key: "blocking_spid", label: "Blocker", format: "int" },
-  { key: "wait_time_ms", label: "Wait", format: "ms" },
-  { key: "lock_mode", label: "Mode" },
+  { key: "blocked_spid", label: "Blocked SPID", format: "int" },
+  { key: "blocking_spid", label: "Blocking SPID", format: "int" },
+  { key: "wait_time_ms", label: "Wait Time", format: "ms" },
+  { key: "wait_resource", label: "Wait Resource", wrap: true },
+  { key: "lock_mode", label: "Lock Mode" },
+  { key: "blocked_status", label: "Blocked Status", group: "Status and isolation" },
+  { key: "blocking_status", label: "Blocking Status", group: "Status and isolation" },
+  { key: "blocked_isolation_level", label: "Blocked Isolation", group: "Status and isolation" },
+  { key: "blocking_isolation_level", label: "Blocking Isolation", group: "Status and isolation" },
+  { key: "blocked_transaction_name", label: "Blocked Tran", group: "Transaction" },
+  { key: "blocked_priority", label: "Blocked Priority", format: "int", group: "Transaction" },
+  { key: "blocked_transaction_count", label: "Blocked Tran Count", format: "int", group: "Transaction" },
+  { key: "blocked_log_used", label: "Blocked Log Used", format: "int", group: "Transaction" },
+  { key: "blocked_login_name", label: "Blocked Login", group: "Sessions" },
+  { key: "blocked_host_name", label: "Blocked Host", group: "Sessions" },
+  { key: "blocked_client_app", label: "Blocked App", wrap: true, group: "Sessions" },
+  { key: "blocking_login_name", label: "Blocking Login", group: "Sessions" },
+  { key: "blocking_host_name", label: "Blocking Host", group: "Sessions" },
+  { key: "blocking_client_app", label: "Blocking App", wrap: true, group: "Sessions" },
   { key: "contentious_object", label: "Object" },
-  { key: "blocked_client_app", label: "Blocked App" },
-  { key: "blocking_client_app", label: "Blocking App" },
 ];
 
 /* Stays local: this page renders the deadlock text through a codeDisclosure and orders the columns differently from the catalog. */
@@ -3253,17 +3432,33 @@ function deadlockXmlColumns(server) {
   return [
     { key: "deadlock_time", label: "Deadlock Time", format: "time" },
     { key: "victim_process_id", label: "Victim" },
+    {
+      key: "deadlock_graph_xml_save",
+      label: "XML",
+      sortable: false,
+      csv: false,
+      render: (r) =>
+        saveXmlButton(r.deadlock_graph_xml, "deadlock_" + fileStamp(r.deadlock_time) + ".xdl", "application/xml;charset=utf-8", r.deadlock_graph_xml_truncated === true),
+    },
     { key: "processes", label: "Processes", sortable: false, render: (r) => deadlockProcessesCell(server, r) },
     { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
   ];
 }
 
+/* The desktop Blocked Process Reports columns get_blocked_process_xml returns, under the desktop's headers. */
 const BPR_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
+  { key: "event_time", label: "Event Time", format: "time" },
+  {
+    key: "blocked_process_report_xml_save",
+    label: "XML",
+    sortable: false,
+    csv: false,
+    render: (r) => saveXmlButton(r.blocked_process_report_xml, "blocked_process_" + fileStamp(r.event_time) + ".xml", "application/xml;charset=utf-8", false),
+  },
   { key: "database_name", label: "Database" },
-  { key: "blocked_spid", label: "Blocked", format: "int" },
-  { key: "blocking_spid", label: "Blocker", format: "int" },
-  { key: "wait_time_ms", label: "Wait", format: "ms" },
+  { key: "blocked_spid", label: "Blocked SPID", format: "int" },
+  { key: "blocking_spid", label: "Blocking SPID", format: "int" },
+  { key: "wait_time_ms", label: "Wait Time", format: "ms" },
   { key: "blocked_process_report_xml", label: "Report", render: (r) => xmlDisclosure(r.blocked_process_report_xml) },
 ];
 
@@ -3620,6 +3815,19 @@ const JOB_COLUMNS = [
   { key: "percent_of_average", label: "% of avg", format: "num1" },
   { key: "is_running_long", label: "Long", format: "bool" },
   { key: "successful_run_count", label: "Successes", format: "int" },
+];
+
+/* The Job History grid on the Activity tab: the cross-server page's columns less Server, since the tab is one server's. */
+const JOB_HISTORY_COLUMNS = [
+  { key: "run_time", label: "Run Time", format: "time" },
+  { key: "job_name", label: "Job" },
+  { key: "category", label: "Category" },
+  { key: "step", label: "Step" },
+  { key: "status", label: "Status" },
+  { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
+  { key: "retries", label: "Retries", format: "int" },
+  { key: "last_success", label: "Last Success", format: "time" },
+  { key: "message", label: "Message", wrap: true },
 ];
 
 const PERFMON_COLUMNS = [

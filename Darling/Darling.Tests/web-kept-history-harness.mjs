@@ -114,7 +114,7 @@ try {
   const findings = path.join("pages", "analysis-findings.js");
   if (fs.existsSync(path.join(jsDir, findings))) fs.copyFileSync(path.join(jsDir, findings), path.join(scratch, findings));
   fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
-  for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js")]) {
+  for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js")]) {
     const from = path.join(jsDir, rel);
     if (!fs.existsSync(from)) continue;
     fs.mkdirSync(path.dirname(path.join(scratch, rel)), { recursive: true });
@@ -246,7 +246,36 @@ const tabFloor = (tabId, read, body) => {
   return panels;
 };
 
+/* The PostgreSQL tabs, the same way (#4966): one read answering `body`, every other read answering nothing. */
+const pgTabFloor = (tabId, read, body) => {
+  answer = (url) => data(tool(url) === read ? body : {});
+  const tab = modules.tabs.POSTGRES_TABS.find((t) => t.id === tabId);
+  const panels = [].concat(tab.build("SRV1", RANGE));
+  for (const panel of panels) panel.where = panel.children[0] ? panel.children[0].textContent : "";
+  return panels;
+};
+
+/* Enough of each PostgreSQL window read's answer for every panel of its fanout to draw (a stat tile needs one of its keys). */
+const PG_WINDOW_BODIES = {
+  get_pg_top_queries: { evictions: { eviction_passes_in_window: 0, max_entries: 5000 }, queries: [{ queryid: "1" }] },
+  get_pg_blocking: { captures_total: 10, captures_with_blocking: 1, chains: [{ root_pid: 1 }], cycles: [{ pid: 2 }] },
+  get_pg_database_stats: { database_count: 1, databases: [{ database_name: "db1" }] },
+  get_pg_session_states: { captures_in_window: 3, sessions: [{ pid: 1 }] },
+  get_pg_io_stats: { combinations_returned: 1, combinations: [{ backend_type: "client backend" }] },
+  get_pg_replication_stats: { replicas: [{ application_name: "r1" }] },
+  get_pg_database_trend: { points: [{ collection_time: "2026-01-01T00:00:00" }] },
+  get_pg_query_duration_trend: { points: [{ collection_time: "2026-01-01T00:00:00" }] },
+  get_pg_wait_trend: { points: [{ collection_time: "2026-01-01T00:00:00" }] },
+  get_pg_io_trend: { points: [{ collection_time: "2026-01-01T00:00:00" }] },
+  get_pg_plans: { plans: [{ query_id: 1 }] },
+};
+
 const scenarios = {
+  // #4966: every panel of a PostgreSQL window read's fanout draws the note (the value is "tab|read"), the stat tiles with the grids.
+  floorPg: () => {
+    const [tabId, read] = scenarioValue.split("|");
+    return pgTabFloor(tabId, read, { ...PG_WINDOW_BODIES[read], window_truncated: true, truncation_note: FLOOR_NOTE });
+  },
   // The page asks for 30 days; the read keeps 7 and says so; the retry at 168 hours answers.
   loaderRefused: () => {
     answer = (url) => (asked(url) === "720" ? refusal(720, 168, 7) : data(CPU));

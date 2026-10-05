@@ -436,6 +436,10 @@ table.data td.mono { font-family: var(--mono); font-size: 0.78rem; }
 table.data td.sev-Warning { color: var(--warn); }
 table.data td.sev-Critical { color: var(--err); }
 table.data td.sev-Healthy { color: var(--ok); }
+/* Job History runs: failed red, long-running and retry amber, canceled grey (the desktop grid's row colours). */
+table.data tbody tr.sev-Critical { background: rgba(229, 115, 115, 0.18); }
+table.data tbody tr.sev-Warning { background: rgba(255, 213, 79, 0.16); }
+table.data tbody tr.band-Offline { background: rgba(168, 174, 186, 0.16); }
 
 /* Copy and CSV strip above a data table (#4843). */
 .grid-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
@@ -447,6 +451,10 @@ table.data td.sev-Healthy { color: var(--ok); }
 .col-picker .col-picker-label { font-size: 12px; opacity: 0.8; margin-right: 2px; }
 .col-picker .col-toggle { font-size: 12px; padding: 2px 8px; }
 .col-picker .col-toggle.on { border-color: var(--accent, currentColor); font-weight: 600; }
+/* The stored-plan panel under a row's Plan button (#4843): the indented XML in a scrollable block. */
+.plan-cell { min-width: 8rem; }
+.plan-panel { margin-top: 6px; max-width: 70vw; }
+.plan-panel pre.plan-xml { max-height: 28rem; overflow: auto; white-space: pre; overflow-wrap: normal; padding: 6px; border: 1px solid var(--border); }
 td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* ─────────────────────────── band list ─────────────────────────── */
@@ -512,6 +520,13 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
   display: none;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
 }
+.chart-menu-btn { position: absolute; top: 2px; right: 4px; background: transparent; border: 1px solid transparent; color: var(--muted); border-radius: var(--radius-sm); cursor: pointer; line-height: 1; padding: 0.1rem 0.4rem; }
+.chart-menu-btn:hover, .chart-menu-btn:focus-visible { border-color: var(--border); color: var(--fg); }
+.chart-menu { position: absolute; top: 24px; right: 4px; z-index: 5; display: flex; flex-direction: column; min-width: 11rem; background: var(--bg-dark); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.2rem 0; }
+.chart-menu-item { background: transparent; border: 0; color: var(--fg); text-align: left; padding: 0.3rem 0.7rem; font-size: 0.78rem; cursor: pointer; }
+.chart-menu-item:hover, .chart-menu-item:focus-visible { background: var(--border); }
+.chart-menu-status { font-size: 0.72rem; color: var(--muted); }
+.chart-source { margin-top: 0.3rem; font-size: 0.72rem; color: var(--muted); font-family: var(--mono, monospace); }
 .chart-tooltip .t-time { color: var(--muted); margin-bottom: 0.2rem; }
 .chart-tooltip .t-row { display: flex; align-items: center; gap: 0.35rem; }
 .chart-tooltip .t-row .swatch { width: 10px; height: 3px; border-radius: 2px; }

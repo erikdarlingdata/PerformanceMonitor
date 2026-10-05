@@ -28,7 +28,7 @@ public sealed record WaitCategorySummary(
 /// <summary>One of the most expensive statements by total CPU over the window.</summary>
 public sealed record ExpensiveQuery(
     string DatabaseName, long TotalCpuMs, decimal AvgCpuMsPerExec, long TotalReads, decimal AvgReadsPerExec,
-    long Executions, string QueryPreview, string FullQueryText, string? QueryPlanXml);
+    long Executions, string QueryPreview, string FullQueryText, string? QueryPlanXml, string? QueryHash = null);
 
 /// <summary>
 /// The FinOps Optimization reads: idle databases, the tempdb summary, wait time by category and the most expensive
@@ -266,7 +266,8 @@ SELECT
     LEFT(query_text, 200) AS query_preview,
     query_text AS full_query_text,
     MAX(query_plan_xml) AS query_plan_xml,
-    MAX(query_plan_gz) AS query_plan_gz
+    MAX(query_plan_gz) AS query_plan_gz,
+    MAX(query_hash) AS query_hash
 FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -307,7 +308,8 @@ LIMIT $3";
                 /* #2069: plans written since V54 ride as gzip bytes with the text column NULL: text-else-gz. */
                 PayloadDimensions.ResolveContent(
                     reader.IsDBNull(8) ? null : reader.GetString(8),
-                    reader.IsDBNull(9) ? null : reader.GetFieldValue<byte[]>(9))));
+                    reader.IsDBNull(9) ? null : reader.GetFieldValue<byte[]>(9)),
+                reader.IsDBNull(10) ? null : reader.GetString(10)));
         }
         return items;
     }
