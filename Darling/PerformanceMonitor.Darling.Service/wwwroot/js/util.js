@@ -44,7 +44,7 @@ export function el(tag, props = {}, children = []) {
  * activate it exactly like a click. Used by the clickable-div affordances (fleet cards, band rows, sidebar
  * servers) so they get a keyboard path + a :focus-visible ring without becoming real <button>s (a11y).
  */
-function makeActivatable(node, handler) {
+export function makeActivatable(node, handler) {
   node.setAttribute("role", "button");
   node.setAttribute("tabindex", "0");
   node.addEventListener("click", handler);
