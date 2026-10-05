@@ -109,7 +109,7 @@ public sealed class McpMissMessageParityPinTests
         "A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected.",
         "This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist.",
 
-        /* #4966: the server-instructions sentence naming the three window keys, with the same sentence in get_tool_guide's description. */
+        /* #4966: the server-instructions sentence naming the three window keys (both apps' instructions carry it). */
         "`window_truncated` true: the window starts before the store's data, not a cut page (`effective_start`, `truncation_note`).",
 
         /* get_memory_clerks */
