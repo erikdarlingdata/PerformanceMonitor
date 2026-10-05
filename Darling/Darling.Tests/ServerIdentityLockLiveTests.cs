@@ -17,6 +17,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 using Edit = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools;
 
@@ -37,6 +38,14 @@ namespace Darling.Tests;
 /// lets the probes finish, so both callers reach their write with the address still free in the table. With the
 /// lock in both write paths, both queue behind the held lock and the winner's commit is what the loser re-checks
 /// against. Without it, both writes land: the assertions on the table fail, and the queue assertion with them.</para>
+///
+/// <para><b>The desktop viewer's writes (#5240, PR 2).</b> The viewer's add (<c>AddMonitoredServerAsync</c>) and edit
+/// (<c>UpsertMonitoredServerAsync</c>) take the same lock and re-read the addresses under it. The viewer has no probe
+/// to park in, so its facts make the race the other way round: the lock is taken from a second connection FIRST, both
+/// callers are started, and the test waits until both are queued on it before releasing it. A viewer write that took no
+/// lock would not queue (the wait ends early and the queue assertion fails) and would write over the other caller (the
+/// table assertions fail). The startup seed's INSERT loop takes the lock too, and skips an address that was claimed
+/// while it waited.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class ServerIdentityLockLiveTests
@@ -349,6 +358,251 @@ public sealed class ServerIdentityLockLiveTests
             {
                 parked.Release();
                 return Task.CompletedTask;
+            });
+        }
+    }
+
+    /// <summary>A probe that answers at once: the viewer's callers have none, and the MCP caller in the same race
+    /// must reach its write without waiting.</summary>
+    private static readonly Edit.ServerProbe ReachedAtOnce = (_, _) => Task.FromResult(Reached);
+
+    private static MonitoredServerRow ViewerRow(int id, string name, string host) => new() { ServerId = id, Name = name, Host = host };
+
+    /// <summary>The viewer's edit save, as one word: <c>Updated</c>, or <c>Claimed</c> when it refused the address.</summary>
+    private static async Task<string> ViewerEditAsync(ViewerDataService viewer, MonitoredServerRow row, CancellationToken ct)
+    {
+        try
+        {
+            await viewer.UpsertMonitoredServerAsync(row, ct);
+            return "Updated";
+        }
+        catch (MonitoredServerAddressClaimedException)
+        {
+            return "Claimed";
+        }
+    }
+
+    /// <summary>
+    /// The race the viewer's writes are held to: takes the SERVICE's identity lock (<see cref="Edit.IdentityLockSql"/>)
+    /// from a second connection first, starts both callers, waits until both are queued on it (or one is already done,
+    /// which is what a write path without the lock looks like), then releases it and returns both answers.
+    /// </summary>
+    private static async Task<Race> QueuedRaceAsync(Rig rig, Func<Task<string>> first, Func<Task<string>> second, CancellationToken ct)
+    {
+        var holder = new NpgsqlConnection(rig.OwnerString);
+        NpgsqlTransaction? held = null;
+        var bodySucceeded = false;
+        try
+        {
+            await holder.OpenAsync(ct);
+            held = await holder.BeginTransactionAsync(ct);
+            await using (var take = new NpgsqlCommand(Edit.IdentityLockSql, holder, held))
+            {
+                await take.ExecuteNonQueryAsync(ct);
+            }
+
+            var firstCall = Task.Run(first, ct);
+            var secondCall = Task.Run(second, ct);
+            var bothQueued = false;
+            await WaitUntilAsync(async () =>
+            {
+                if (await AdvisoryLocksAsync(rig.Owner, false, ct) >= 2)
+                {
+                    bothQueued = true;
+                    return true;
+                }
+
+                return firstCall.IsCompleted || secondCall.IsCompleted;
+            }, TimeSpan.FromSeconds(30), ct);
+
+            await held.RollbackAsync(ct);
+            var answers = await Task.WhenAll(firstCall, secondCall).WaitAsync(TimeSpan.FromSeconds(60), ct);
+            var left = await AdvisoryLocksAsync(rig.Owner, true, ct) + await AdvisoryLocksAsync(rig.Owner, false, ct);
+            bodySucceeded = true;
+            return new Race(answers[0], answers[1], bothQueued, left);
+        }
+        finally
+        {
+            /* The holder's own rollback: only the session holding the lock can end its transaction. */
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+            {
+                if (held is not null)
+                {
+                    await held.DisposeAsync();
+                }
+
+                await holder.DisposeAsync();
+            });
+        }
+    }
+
+    [Fact]
+    public async Task AViewerAddAndAnMcpEditThatClaimOneAddress_QueueOnTheLock_AndExactlyOneRowEndsWithIt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        await SeedServerAsync(rig.Owner, 7341, "race-x", "race-x.example.test", ct);
+
+        var race = await QueuedRaceAsync(rig,
+            async () => (await viewer.AddMonitoredServerAsync(
+                ViewerRow(ViewerDataService.ComputeServerId(AddressK, null, false), "viewer-added", AddressK), ct)).Outcome.ToString(),
+            async () => Parse(await Edit.EditServerByNameAsync(
+                rig.Owner, "race-x", "{\"host\":\"" + AddressK + "\"}", ReachedAtOnce, true, null, ct))["status"]!.GetValue<string>(),
+            ct);
+
+        var viewerWon = race.FirstAnswer == nameof(MonitoredServerAddOutcome.Added) && race.SecondAnswer == "collides";
+        var mcpWon = race.FirstAnswer == nameof(MonitoredServerAddOutcome.Duplicate) && race.SecondAnswer == "updated";
+        Assert.True(viewerWon ^ mcpWon, $"Exactly one caller should win. viewer add: {race.FirstAnswer}, MCP edit: {race.SecondAnswer}.");
+
+        var keys = await StorageKeysAsync(rig.Owner, ct);
+        Assert.Equal(keys.Count, keys.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.Single(keys, key => key.Contains(AddressK, StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(viewerWon ? 2 : 1, keys.Count);
+        Assert.Equal(0, race.LocksLeftAfterwards);
+        Assert.True(race.BothQueuedOnTheLock, "Both the viewer's add and the MCP edit should have queued behind the held identity lock.");
+    }
+
+    [Fact]
+    public async Task AViewerEditAndAnMcpAddThatClaimOneAddress_QueueOnTheLock_AndExactlyOneRowEndsWithIt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        await SeedServerAsync(rig.Owner, 7351, "race-x", "race-x.example.test", ct);
+
+        var race = await QueuedRaceAsync(rig,
+            () => ViewerEditAsync(viewer, ViewerRow(7351, "race-x", AddressK), ct),
+            async () => AddStatusOf(await Edit.AddServersAsync(rig.Owner, AddJson(AddressK), ReachedAtOnce, ct)),
+            ct);
+
+        var viewerWon = race.FirstAnswer == "Updated" && race.SecondAnswer == "duplicate";
+        var mcpWon = race.FirstAnswer == "Claimed" && race.SecondAnswer == "added";
+        Assert.True(viewerWon ^ mcpWon, $"Exactly one caller should win. viewer edit: {race.FirstAnswer}, MCP add: {race.SecondAnswer}.");
+
+        var keys = await StorageKeysAsync(rig.Owner, ct);
+        Assert.Equal(keys.Count, keys.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.Single(keys, key => key.Contains(AddressK, StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(mcpWon ? 2 : 1, keys.Count);
+        Assert.Equal(0, race.LocksLeftAfterwards);
+        Assert.True(race.BothQueuedOnTheLock, "Both the viewer's edit and the MCP add should have queued behind the held identity lock.");
+    }
+
+    [Fact]
+    public async Task TwoViewerEditsThatMoveTwoServersOntoOneAddress_QueueOnTheLock_AndExactlyOneRowEndsWithIt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        await SeedServerAsync(rig.Owner, 7361, "race-x", "race-x.example.test", ct);
+        await SeedServerAsync(rig.Owner, 7362, "race-y", "race-y.example.test", ct);
+
+        var race = await QueuedRaceAsync(rig,
+            () => ViewerEditAsync(viewer, ViewerRow(7361, "race-x", AddressK), ct),
+            () => ViewerEditAsync(viewer, ViewerRow(7362, "race-y", AddressK), ct),
+            ct);
+
+        Assert.Equal(new[] { "Claimed", "Updated" }, new[] { race.FirstAnswer, race.SecondAnswer }.Order().ToArray());
+
+        var keys = await StorageKeysAsync(rig.Owner, ct);
+        Assert.Equal(2, keys.Count);
+        Assert.Equal(keys.Count, keys.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.Single(keys, key => key.Contains(AddressK, StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(0, race.LocksLeftAfterwards);
+        Assert.True(race.BothQueuedOnTheLock, "Both viewer edits should have queued behind the held identity lock.");
+    }
+
+    [Fact]
+    public async Task AViewerAddAndAViewerEditOnDifferentAddresses_BothSucceed_AfterQueueingOnTheLock()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        await SeedServerAsync(rig.Owner, 7371, "race-x", "race-x.example.test", ct);
+
+        var race = await QueuedRaceAsync(rig,
+            async () => (await viewer.AddMonitoredServerAsync(
+                ViewerRow(ViewerDataService.ComputeServerId("race-added.example.test", null, false), "viewer-added", "race-added.example.test"), ct)).Outcome.ToString(),
+            () => ViewerEditAsync(viewer, ViewerRow(7371, "race-x", "race-moved.example.test"), ct),
+            ct);
+
+        Assert.Equal(nameof(MonitoredServerAddOutcome.Added), race.FirstAnswer);
+        Assert.Equal("Updated", race.SecondAnswer);
+
+        var keys = await StorageKeysAsync(rig.Owner, ct);
+        Assert.Equal(2, keys.Count);
+        Assert.Single(keys, key => key.Contains("race-added.example.test", StringComparison.OrdinalIgnoreCase));
+        Assert.Single(keys, key => key.Contains("race-moved.example.test", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(0, race.LocksLeftAfterwards);
+        Assert.True(race.BothQueuedOnTheLock, "Both the viewer's add and its edit should have queued behind the held identity lock.");
+    }
+
+    /// <summary>
+    /// The startup seed's INSERT loop takes the identity lock, and reads the addresses again under it. The lock is held
+    /// from a second connection; the seed (two servers from darling.json, the second at address K) queues behind it and
+    /// writes nothing while it waits; the holder then commits a definition that an edit would have left at K under
+    /// another id, and releases the lock. The seed's own INSERT for K would land under <c>hash(K)</c>, a different id,
+    /// so nothing but the re-read keeps the registry at one row for K.
+    /// </summary>
+    [Fact]
+    public async Task TheStartupSeed_QueuesOnTheLock_WritesNothingWhileItWaits_AndSkipsAnAddressClaimedMeanwhile()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+
+        var config = new DarlingConfig();
+        config.Servers.Add(new MonitoredServer { Name = "seed-a", Host = "seed-a.example.test", Auth = "integrated" });
+        config.Servers.Add(new MonitoredServer { Name = "seed-k", Host = AddressK, Auth = "integrated" });
+        var provider = new StoreConfigProvider(rig.Owner);
+
+        var holder = new NpgsqlConnection(rig.OwnerString);
+        NpgsqlTransaction? held = null;
+        var bodySucceeded = false;
+        try
+        {
+            await holder.OpenAsync(ct);
+            held = await holder.BeginTransactionAsync(ct);
+            await using (var take = new NpgsqlCommand(Edit.IdentityLockSql, holder, held))
+            {
+                await take.ExecuteNonQueryAsync(ct);
+            }
+
+            var seed = Task.Run(() => provider.SeedIfEmptyAsync(config, ct), ct);
+            Assert.True(
+                await WaitUntilAsync(async () => await AdvisoryLocksAsync(rig.Owner, false, ct) >= 1, TimeSpan.FromSeconds(30), ct),
+                "The seed should queue behind the held identity lock.");
+            Assert.Equal(0, await CountAsync(rig.Owner, "SELECT count(*) FROM config_monitored_servers", ct));
+
+            /* The definition an edit left at K under an older id, committed in the lock's own transaction. */
+            await using (var claim = new NpgsqlCommand(
+                $@"INSERT INTO config_monitored_servers (server_id, name, host, auth, excluded_databases, is_enabled, monthly_cost_usd)
+                   VALUES (7381, 'mover', '{AddressK}', 'integrated', ARRAY[]::text[], TRUE, 0)", holder, held))
+            {
+                await claim.ExecuteNonQueryAsync(ct);
+            }
+
+            await held.CommitAsync(ct);
+            await seed.WaitAsync(TimeSpan.FromSeconds(60), ct);
+
+            var keys = await StorageKeysAsync(rig.Owner, ct);
+            Assert.Equal(2, keys.Count);
+            Assert.Equal(keys.Count, keys.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+            Assert.Single(keys, key => key.Contains(AddressK, StringComparison.OrdinalIgnoreCase));
+            Assert.Single(keys, key => key.Contains("seed-a.example.test", StringComparison.OrdinalIgnoreCase));
+            Assert.Equal(1, await CountAsync(rig.Owner, "SELECT count(*) FROM config_monitored_servers WHERE server_id = 7381 AND name = 'mover'", ct));
+            Assert.Equal(0, await AdvisoryLocksAsync(rig.Owner, true, ct) + await AdvisoryLocksAsync(rig.Owner, false, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+            {
+                if (held is not null)
+                {
+                    await held.DisposeAsync();
+                }
+
+                await holder.DisposeAsync();
             });
         }
     }

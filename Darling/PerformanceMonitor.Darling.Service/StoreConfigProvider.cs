@@ -1146,9 +1146,48 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
     private static async Task SeedMonitoredServersAsync(NpgsqlConnection connection, DarlingConfig config, DateTime now, CancellationToken ct)
     {
         /* Guarded by the caller's COUNT == 0 check — only reached when the registry is empty, so a later
-           Viewer deletion (Stage 3) is never resurrected by a re-seed. */
+           Viewer deletion (Stage 3) is never resurrected by a re-seed.
+
+           #5240: this does NOT always finish before the web and MCP listeners can accept a write, so its INSERTs take
+           the identity lock like every other write that gives a server an address. Program.cs registers the worker,
+           the MCP host and the web host as three independent hosted services; the MCP host's supervisor starts its
+           listener from the file's mcp.enabled (or the store's published toggle) without waiting for this seed
+           (DarlingMcpHostService.ExecuteAsync), and a managed store's mcp credential, the only thing it does wait for,
+           appears when role provisioning ends, which DarlingWorker runs BEFORE SeedIfEmptyAsync. So an add_servers
+           (or a web add, then an edit of it) can land between the COUNT above and these INSERTs. The lock alone is not
+           enough: a writer that finished before this transaction took it is only seen by reading the addresses again,
+           so an entry whose address is already held is skipped, as the add core skips a key claimed in the meantime. */
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        /* Two-arg on the store connection with the transaction set on it, as the other identity writers' commands are. */
+        await using (var identityLock = new NpgsqlCommand(Mcp.DarlingMcpServerAdminTools.IdentityLockSql, connection, transaction)
+                     { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
+        {
+            await identityLock.ExecuteNonQueryAsync(ct);
+        }
+
+        var heldAddresses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var existing = new NpgsqlCommand(Mcp.DarlingMcpServerAdminTools.ExistingServersSql, connection, transaction)
+                     { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
+        await using (var reader = await existing.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                heldAddresses.Add(ServerIdHelper.BuildStorageName(
+                    reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), !reader.IsDBNull(2) && reader.GetBoolean(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? 0 : reader.GetInt32(4)));
+            }
+        }
+
         foreach (var server in config.Servers)
         {
+            /* Add also records this entry's own address, so two file entries with one address seed one row, as the
+               INSERT's ON CONFLICT (server_id) did when both derived the same id. */
+            if (!heldAddresses.Add(server.StorageName))
+            {
+                continue;
+            }
+
             using var command = new NpgsqlCommand(@"
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
@@ -1156,7 +1195,7 @@ INSERT INTO config_monitored_servers (
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, plan_force_bot_enabled,
     remediation_username, remediation_encrypted_password, created_at, modified_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $18, $19, $15, $15)
-ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             /* THE ALLOCATION SITE. A darling.json entry has no StoredServerId, so this is the derivation —
                and this is where it is minted and made permanent. When new rows stop being hash-keyed
                (#2218), this is the write that changes; every READ already goes through the stored value. */
@@ -1197,6 +1236,10 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
             AddNullableText(command, server.RemediationEncryptedPassword);
             await command.ExecuteNonQueryAsync(ct);
         }
+
+        /* Ends the transaction and with it the lock; a throw above rolls back, so the registry is seeded whole or
+           not at all and SeedIfEmptyAsync (which warns and carries on) re-seeds on the next start. */
+        await transaction.CommitAsync(ct);
     }
 
     /* ---------------- read (store -> in-memory view) ---------------- */
