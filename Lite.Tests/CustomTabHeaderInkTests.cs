@@ -35,6 +35,7 @@ namespace Lite.Tests;
 /// need a whole window or a loaded plan (server tab, plan tabs of a server tab, the XAML Plan Viewer tab, the Darling
 /// Viewer twin) are pinned in source.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class CustomTabHeaderInkTests
 {
     private static ResourceDictionary Theme(string name) =>

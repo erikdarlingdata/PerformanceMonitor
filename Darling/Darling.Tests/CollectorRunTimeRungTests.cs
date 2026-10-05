@@ -38,7 +38,7 @@ public sealed class CollectorRunTimeRungTests
 
     private const string Table = "config_collector_run_times";
 
-    /// <summary>The probe's newest sentinel, so the last argument; the ordinal is a fact of the probe's shape.</summary>
+    /// <summary>This rung's sentinel; the ordinal is a fact of the probe's shape. A newer rung's sentinel follows it.</summary>
     private const int ProbeOrdinal = 135;
 
     private const int ServerId = 41;
@@ -48,12 +48,13 @@ public sealed class CollectorRunTimeRungTests
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Name == RungName);
 
     [Fact]
-    public void TheRungIsTheTopOfADenseLadder_AtVersion160()
+    public void TheRungIsRegisteredInADenseLadder_AtVersion160()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
-        Assert.Equal(160, StorageVersion.SchemaVersion);
+        /* No longer the top rung: V161 (the Query Store top daily summary) landed above it. */
         Assert.Equal(160, Rung.Version);
+        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
@@ -120,34 +121,35 @@ public sealed class CollectorRunTimeRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheTableAsItsLastArm_AndMapsFullyMigratedToTheTopRung()
+    public void TheProbeCarriesTheTableAsAnArm_AndMapsAStoreThroughTheRungToTheRung()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = $"to_regclass('config.{Table}') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.LastIndexOf("EXISTS", StringComparison.Ordinal) < probe.IndexOf(arm, StringComparison.Ordinal),
-            "the new arm is the probe's last EXISTS, so it reads at the next ordinal");
+        Assert.True(probe.IndexOf(arm, StringComparison.Ordinal) < probe.IndexOf("collect.query_store_top_daily", StringComparison.Ordinal),
+            "the newer rung's sentinel follows this one");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        Assert.True(ProbeOrdinal < arity - 1, "a newer rung's sentinel follows this one");
         Assert.Equal("hasCollectorRunAt", method.GetParameters()[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
+        var all = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(160, (int)method.Invoke(null, all)!);
 
         var behind = (object[])all.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(159, (int)method.Invoke(null, behind)!);
 
+        var nextArm = viewer.IndexOf("if (hasQueryStoreTopDaily)", StringComparison.Ordinal);
         var thisArm = viewer.IndexOf("if (hasCollectorRunAt)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasInstallIdTableOid)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "no sentinel arm: a fully-migrated store would map one rung short");
-        Assert.True(thisArm < previousArm, "this arm sits below the previous rung's, so a current store maps one rung short");
+        Assert.True(thisArm >= 0, "no sentinel arm: a store at this rung would map one rung short");
+        Assert.True(nextArm >= 0 && nextArm < thisArm, "the newer rung's arm sits above this one's");
+        Assert.True(thisArm < previousArm, "this arm sits below the newer rung's and above the previous one's");
         Assert.Contains("return 160;", viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the table is named in the probe line and nowhere in the arm's prose. The comment block sits
@@ -769,7 +771,7 @@ public sealed class CollectorRunTimeRungLiveTests
             const string Row = "0a1b2c3d|7000000000000000001|16384|16400|17|2026-01-02 03:04:05.678901";
             const string Shape = "id:smallint,install_id:text,system_identifier:bigint,database_oid:bigint,created_at:timestamp without time zone,table_oid:bigint,server_major:integer";
 
-            Assert.Equal(160, await VersionAsync(connection, ct));
+            Assert.Equal(StorageVersion.SchemaVersion, await VersionAsync(connection, ct));
             Assert.Equal(Shape, await ScalarAsync(connection, ReadShape, ct));
 
             /* Put the store back at V159: the run time's table and stamp gone, an install id row the service already made. */
@@ -789,7 +791,7 @@ public sealed class CollectorRunTimeRungLiveTests
 
             await PgMigrations.MigrateAsync(connection, ct);
 
-            Assert.Equal(160, await VersionAsync(connection, ct));
+            Assert.Equal(StorageVersion.SchemaVersion, await VersionAsync(connection, ct));
             Assert.True(await ScalarAsync(connection, "SELECT to_regclass('config.config_collector_run_times') IS NOT NULL", ct) is true);
             Assert.Equal(Row, await ScalarAsync(connection, ReadRow, ct));
             Assert.Equal(Shape, await ScalarAsync(connection, ReadShape, ct));

@@ -41,7 +41,8 @@
 
 import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
-import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
+import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 
@@ -169,7 +170,7 @@ function fanout(read, params, specs) {
       const body = shells[i].body;
       if (hidesPanel(spec, res, shells[i], keys[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
+      if (res.kind === "empty") return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), emptyStrip(res.message)]);
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
            hand vizLine the fetch's `hours` as `windowHours` — otherwise a fanout line panel (Current Waits,
@@ -192,17 +193,27 @@ function fanout(read, params, specs) {
   return shells.map((s) => s.panel);
 }
 
+/** The most waits the Wait Stats chart draws at once: one read each, and the palette has ten colors. */
+const MAX_WAITS_CHARTED = 10;
+
+/** The metrics the wait trend read carries. It has no waits-per-interval count, so the desktop's ms/wait is not offered. */
+const WAIT_METRICS = [
+  { value: "wait_time_ms_per_second", label: "Wait ms/s" },
+  { value: "signal_wait_time_ms_per_second", label: "Signal wait ms/s" },
+];
+
 /**
- * Wait Stats table + a trend for ONE wait type, chosen from a picker seeded with the heaviest.
+ * Wait Stats table + a multi-series trend over the waits the reader checks.
  *
- * The desktop viewer's Wait Stats tab is a checkbox list of wait types over a multi-series chart. This is the
- * single-select version of the same idea: the picker's options are the rows of the table directly above it,
- * heaviest first, so the reader is choosing from what they can already see rather than from a second list that
- * may disagree with it. That is also why get_wait_types is NOT read here — it returns the full distinct set,
- * which would offer wait types absent from the table and make the two disagree.
+ * The desktop viewer's Wait Stats tab is a checkbox list of wait types over a multi-series chart; this is the same
+ * idea. The picker's options are the rows of the table directly above it, heaviest first, so the reader is choosing
+ * from what they can already see rather than from a second list that may disagree with it. That is also why
+ * get_wait_types is NOT read here — it returns the full distinct set, which would offer wait types absent from the
+ * table and make the two disagree. Each checked wait is one get_wait_trend read; the checked set, the search text and
+ * the metric live in multi-picker.js's module state keyed by server, so the 60 s rebuild keeps them.
  */
 export function waitsPanel(server, ctx) {
-  const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the wait you pick");
+  const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the waits you check");
   (async () => {
     const res = await readToolWithinKeptHistory("get_wait_stats", { server, hours: ctx.hours, limit: 20 });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -214,13 +225,19 @@ export function waitsPanel(server, ctx) {
 
     if (waits.length) {
       const chartSlot = el("div", {}, [loadingStrip()]);
-      const picker = pickerControl(
-        "Trend",
-        waits.map((w) => w.wait_type),
-        (waitType) => drawWaitTrend(chartSlot, server, ctx, waitType)
-      );
-      parts.push(el("div", { class: "picker-row" }, [picker]), chartSlot);
-      drawWaitTrend(chartSlot, server, ctx, waits[0].wait_type);
+      const picker = multiPicker({
+        key: "waits|" + server,
+        label: "Waits",
+        options: waits.map((w) => w.wait_type),
+        max: MAX_WAITS_CHARTED,
+        metrics: WAIT_METRICS,
+        onChange: (checked, metric) => drawWaitTrends(chartSlot, server, ctx, checked, metric),
+      });
+      parts.push(picker.node, chartSlot);
+      drawWaitTrends(chartSlot, server, ctx, picker.checked(), picker.metric());
+      mount(body, parts);
+      picker.restoreFocus();
+      return;
     }
     mount(body, parts);
   })();
@@ -246,32 +263,75 @@ function discontinuityNotes(data) {
   );
 }
 
-async function drawWaitTrend(slot, server, ctx, waitType) {
-  mount(slot, loadingStrip());
-  const trend = await readToolWithinKeptHistory("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours });
-  if (trend.kind !== "data") {
-    mount(slot, trend.kind === "empty" ? [keptWindowStrip(trend), emptyStrip(trend.message)] : readErrorStrip(trend.message));
+/* The newest draw's AbortController per server (the 60 s rebuild makes a new chart slot, so the slot is no key). A new
+   draw aborts the previous one's reads, and a read that finishes after that is dropped. */
+const waitDraws = new Map();
+
+export async function drawWaitTrends(slot, server, ctx, checked, metric) {
+  const waitTypes = checked.slice(0, MAX_WAITS_CHARTED);
+  const previous = waitDraws.get(server);
+  if (previous) previous.abort();
+  const mine = new AbortController();
+  waitDraws.set(server, mine);
+  if (!waitTypes.length) {
+    mount(slot, emptyStrip("Check at least one wait to chart its trend."));
     return;
   }
-  /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the chart whose step a restart or
-     failover most directly manufactures; the payload's discontinuities render as a notice above it. */
-  const notes = discontinuityNotes(trend.data);
+  mount(slot, loadingStrip());
+  const results = await Promise.all(
+    waitTypes.map((waitType) => readToolWithinKeptHistory("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours }, mine.signal))
+  );
+  if (waitDraws.get(server) !== mine || mine.signal.aborted) return;
+
+  const drawn = [];
+  const notes = [];
+  const kept = [];
+  let keptHours = 0;
+  const seenNotes = new Set();
+  let failed = 0;
+  results.forEach((trend, i) => {
+    const waitType = waitTypes[i];
+    if (trend.kind !== "data") {
+      if (trend.kind !== "empty") failed++;
+      notes.push(waitType + ": " + (trend.message || (trend.kind === "empty" ? "no trend data." : "the read failed.")));
+      return;
+    }
+    if (trend.keptHours) {
+      keptHours = Math.max(keptHours, trend.keptHours);
+      kept.push(trend);
+    }
+    /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the chart whose step a restart or
+       failover most directly manufactures; the payload's discontinuities render as a notice above it. They are
+       about the server, not the wait, so the same sentence from two waits shows once. */
+    for (const n of discontinuityNotes(trend.data)) seenNotes.add(n);
+    drawn.push({ key: "w" + i, label: waitType, rows: trend.data.trend || [], color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] });
+  });
+
+  const failures = notes.map((n) => noticeStrip(n));
+  if (!drawn.length && !failed) {
+    mount(slot, emptyStrip("None of the " + waitTypes.length + " checked waits has trend data in this window."));
+    return;
+  }
+  if (!drawn.length) {
+    mount(slot, [failures.length ? failures : null, errorStrip("None of the " + waitTypes.length + " checked waits returned a trend.")]);
+    return;
+  }
+  const metricLabel = (WAIT_METRICS.find((m) => m.value === metric) || WAIT_METRICS[0]).label;
   mount(slot, [
-    keptWindowStrip(trend),
-    notes.length ? noticeStrip(notes.join(" ")) : null,
+    kept.length ? keptWindowStrip(kept[0]) : null,
+    seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
+    ...failures,
     zoomableLineChart({
-      points: trend.data.trend || [],
+      points: mergeSeriesRows(drawn, "time", metric),
       xKey: "time",
-      series: [
-        { key: "wait_time_ms_per_second", label: "Wait ms/s", color: SERIES_COLORS[0] },
-        { key: "signal_wait_time_ms_per_second", label: "Signal ms/s", color: SERIES_COLORS[1] },
-      ],
+      series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
       formatValue: (v) => Math.round(v).toLocaleString(),
       unit: "ms/s",
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
-      ...windowFromHours(trend.keptHours || ctx.hours),
-    }, "wait-trend|" + waitType, chartZoomScope(ctx.hours)),
+      ...windowFromHours(keptHours || ctx.hours),
+    }, "wait-trend|" + server + "|" + metric, chartZoomScope(ctx.hours)),
+    el("div", { class: "mp-metric-note", text: metricLabel + ", one line per checked wait." }),
   ]);
 }
 
@@ -927,6 +987,7 @@ export const SERVER_TABS = [
           title: "Memory Grants",
           subtitle: "newest snapshot in " + ctx.label + ", per resource pool - a moment, not the window",
           viz: "table",
+          windowNote: false,
           rowsKey: "grants",
           columns: GRANT_COLUMNS,
           emptyText: "No memory grant snapshot in this window.",
@@ -945,6 +1006,7 @@ export const SERVER_TABS = [
           title: "Resource Semaphore",
           subtitle: "newest snapshot in " + ctx.label + ", per semaphore and pool - a moment, not the window",
           viz: "table",
+          windowNote: false,
           rowsKey: "grants",
           columns: SEMAPHORE_COLUMNS,
           emptyText: "No resource-semaphore snapshot in this window.",
@@ -1075,7 +1137,7 @@ export const SERVER_TABS = [
         "get_deadlock_detail",
         { server, hours: ctx.hours, limit: 5 },
         "deadlocks",
-        DEADLOCK_XML_COLUMNS,
+        deadlockXmlColumns(server),
         ctx.label,
         "No deadlock graph XML captured in this window."
       ),
@@ -1295,6 +1357,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label + ", per database, worst first",
           viz: "table",
           rowsKey: "databases",
+          floorKey: "window",
           columns: QS_CLUTTER_COLUMNS,
           noteKey: "server_note",
           emptyText:
@@ -1306,6 +1369,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label,
           viz: "table",
           rowsKey: "qs_overhead.wait_stats.included",
+          floorKey: "window",
           columns: QS_OVERHEAD_WAIT_COLUMNS,
           noteKey: "qs_overhead.wait_stats.excluded_note",
           emptyText:
@@ -1367,6 +1431,7 @@ export const SERVER_TABS = [
           subtitle: SNAPSHOT,
           span: 1,
           viz: "table",
+          windowNote: false,
           rowsKey: "automatic_tuning",
           columns: AUTO_TUNING_COLUMNS,
           emptyText: "No per-database FORCE_LAST_GOOD_PLAN state recorded.",
@@ -3027,7 +3092,7 @@ const LONG_QUERY_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "object_name", label: "Object" },
   { key: "session_id", label: "SPID", format: "int" },
-  { key: "client_app_name", label: "Application" },
+  { key: "client_app_name", label: "App" },
   { key: "server_principal_name", label: "Login" },
   { key: "query_hash", label: "Query Hash" },
 ];
@@ -3120,11 +3185,70 @@ const DEADLOCK_COLUMNS = [
   { key: "has_deadlock_xml", label: "Graph", format: "bool" },
 ];
 
-const DEADLOCK_XML_COLUMNS = [
-  { key: "deadlock_time", label: "Deadlock Time", format: "time" },
-  { key: "victim_process_id", label: "Victim" },
-  { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
+/* The per-process rows of one deadlock, the desktop Deadlocks grid's columns and header text, plus Log Used and Status, which the web adds. The service parses the graph and sends
+   processes[] (absent values left off), so the browser never reads the XML. */
+const DEADLOCK_PROCESS_COLUMNS = [
+  { key: "deadlock_type", label: "Type" },
+  { key: "victim", label: "Victim", render: (r) => document.createTextNode(r.victim ? "Victim" : "") },
+  { key: "spid", label: "SPID", format: "int" },
+  { key: "database_name", label: "Database" },
+  { key: "object_names", label: "Object(s)", wrap: true },
+  { key: "proc_name", label: "Procedure" },
+  { key: "lock_mode", label: "Lock Mode" },
+  { key: "owner_mode", label: "Owner Mode" },
+  { key: "waiter_mode", label: "Waiter Mode" },
+  { key: "wait_resource", label: "Wait Resource", wrap: true },
+  { key: "wait_time_ms", label: "Wait (ms)", format: "ms" },
+  { key: "isolation_level", label: "Isolation" },
+  { key: "transaction_name", label: "Tran Name" },
+  { key: "transaction_count", label: "Tran Count", format: "int" },
+  { key: "priority", label: "Priority", format: "int" },
+  { key: "log_used", label: "Log Used", format: "int" },
+  { key: "login_name", label: "Login" },
+  { key: "host_name", label: "Host" },
+  { key: "client_app", label: "App", wrap: true },
+  { key: "status", label: "Status" },
+  { key: "sql_text", label: "Statement", render: (r) => codeDisclosure(r.sql_text) },
 ];
+
+/* Which deadlocks have their process sub-grid open, at MODULE scope so the 60 s rebuild of the tab keeps it open. Keyed by
+   server and deadlock id (the dedup key, else the deadlock's own timestamps); one entry per deadlock the session opens. */
+const deadlockProcessesOpen = new Set();
+
+function deadlockProcessKey(server, row) {
+  return server + "\u0001" + (row.dedup_key || (row.collection_time || "") + "|" + (row.deadlock_time || ""));
+}
+
+/** The expandable per-process sub-grid for one deadlock row of get_deadlock_detail. */
+function deadlockProcessesCell(server, row) {
+  const rows = Array.isArray(row.processes) ? row.processes : [];
+  if (!rows.length) {
+    /* The shared page row budget can cut every row of a deadlock; say so and how to get them, rather than a bare dash. */
+    const cut = Number(row.processes_truncated) || 0;
+    if (cut <= 0) return document.createTextNode("—");
+    return document.createTextNode(cut + (cut === 1 ? " process" : " processes") + " not sent (page row limit); pick Custom… in the time range and narrow it to this deadlock to see them");
+  }
+  const key = deadlockProcessKey(server, row);
+  const more = row.processes_truncated > 0 ? " (+" + row.processes_truncated + " more in the graph)" : "";
+  const node = disclosure(rows.length + (rows.length === 1 ? " process" : " processes") + more, [
+    VIZ.table({ processes: rows }, { id: "deadlock-processes", rowsKey: "processes", columns: DEADLOCK_PROCESS_COLUMNS }),
+  ]);
+  if (deadlockProcessesOpen.has(key)) node.setAttribute("open", "");
+  node.addEventListener("toggle", () => {
+    if (node.open) deadlockProcessesOpen.add(key);
+    else deadlockProcessesOpen.delete(key);
+  });
+  return node;
+}
+
+function deadlockXmlColumns(server) {
+  return [
+    { key: "deadlock_time", label: "Deadlock Time", format: "time" },
+    { key: "victim_process_id", label: "Victim" },
+    { key: "processes", label: "Processes", sortable: false, render: (r) => deadlockProcessesCell(server, r) },
+    { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
+  ];
+}
 
 const BPR_COLUMNS = [
   { key: "event_time", label: "Time", format: "time" },
@@ -3470,7 +3594,7 @@ const TRACE_FLAG_CHANGE_COLUMNS = [
 ];
 
 const APPLICATION_COLUMNS = [
-  { key: "program_name", label: "Application" },
+  { key: "program_name", label: "App" },
   { key: "connections", label: "Connections", format: "int" },
   { key: "running", label: "Running", format: "int" },
   { key: "sleeping", label: "Sleeping", format: "int" },
@@ -4018,7 +4142,7 @@ const PG_LOG_EVENT_COLUMNS = [
   { key: "sqlstate", label: "SQLSTATE", small: true },
   { key: "database_name", label: "Database" },
   { key: "user_name", label: "User" },
-  { key: "application_name", label: "Application" },
+  { key: "application_name", label: "App" },
   { key: "pid", label: "PID", format: "int", small: true },
   { key: "message", label: "Message" },
   { key: "detail", label: "Detail" },
@@ -4272,7 +4396,7 @@ const PG_BLOCKING_CHAIN_COLUMNS = [
   { key: "root_pid", label: "Root PID", format: "int" },
   { key: "databases", label: "Databases", render: (row) => listCell(row.databases) },
   { key: "root_username", label: "User" },
-  { key: "root_application", label: "Application", wrap: true },
+  { key: "root_application", label: "App", wrap: true },
   { key: "root_state", label: "Root State" },
   { key: "root_is_idle_in_transaction", label: "Idle in Txn", format: "bool" },
   { key: "root_xact_duration_ms", label: "Txn Age", render: sentinelDuration("root_xact_duration_ms") },
@@ -4292,7 +4416,7 @@ const PG_BLOCKING_CYCLE_COLUMNS = [
   { key: "participant_count", label: "Participants", format: "int" },
   { key: "pids", label: "PIDs", render: (row) => listCell(row.pids) },
   { key: "database", label: "Database" },
-  { key: "application", label: "Application", wrap: true },
+  { key: "application", label: "App", wrap: true },
   { key: "blocked_behind_count", label: "Queued Behind", format: "int" },
   { key: "blocked_behind_pids", label: "Queued PIDs", render: (row) => listCell(row.blocked_behind_pids) },
   { key: "finding", label: "Finding", wrap: true },
@@ -4496,7 +4620,7 @@ const PG_SESSION_STATE_COLUMNS = [
   { key: "severity", label: "Severity", sevKey: "severity" },
   { key: "database", label: "Database" },
   { key: "username", label: "User" },
-  { key: "application_name", label: "Application" },
+  { key: "application_name", label: "App" },
   { key: "client_addr", label: "Client" },
   { key: "backend_type", label: "Backend Type" },
   { key: "last_state", label: "State" },

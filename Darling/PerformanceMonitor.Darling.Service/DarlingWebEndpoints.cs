@@ -139,6 +139,11 @@ public static class DarlingWebEndpoints
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
         "list_custom_alert_templates",
+        "create_server_tag",
+        "update_server_tag",
+        "delete_server_tag",
+        "assign_server_tag",
+        "unassign_server_tag",
         "get_tool_guide",
     };
 
@@ -433,6 +438,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCustomViews(app, postgres, logger, readLatencyRecorder);
         MapCustomAlerts(app, postgres, logger);
         MapMuteRules(app, postgres, logger);
+        MapServerTags(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
@@ -1155,6 +1161,339 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         return System.Text.Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+    }
+
+    /// <summary>
+    /// The fleet server-tag write routes (#5085), the same shape as <see cref="MapMuteRules"/>: each route parses
+    /// its JSON body and hands it to the matching <c>DarlingMcpServerTagTools.*Core</c> over a
+    /// <see cref="ServerTagStore"/> on the viewer-role pool, so the web surface and the MCP tools share one set of
+    /// rules (names, colours, depth, cycles, sibling uniqueness) and one set of answers. <c>application/json</c> is
+    /// required on every route, the same CSRF discipline as the mute-rule routes. The admin gate is the seat's
+    /// method gate (<see cref="DarlingWebSeat.IsRequestAllowed"/> refuses every non-GET from a read-only seat);
+    /// the viewer role's two single-table grants are only the floor beneath it.
+    ///
+    /// <para><b>Routes.</b> <c>POST /api/server-tags</c> (<c>{name, parent_id?, colour?}</c>, 201 on
+    /// <c>created</c>); <c>PATCH /api/server-tags/{id}</c> (the body IS the partial <c>changes_json</c>);
+    /// <c>DELETE /api/server-tags/{id}?confirm=true</c> (the flag rides the query string, so the DELETE stays
+    /// bodyless like <c>DELETE /api/mute-rules/{id}</c>); <c>POST /api/server-tags/{id}/servers</c> and
+    /// <c>DELETE /api/server-tags/{id}/servers</c> (<c>{server_ids: [...]}</c> in the body).</para>
+    ///
+    /// <para><b>Statuses.</b> See <see cref="ServerTagEnvelopeStatus"/>: the mute-rule mapping plus
+    /// <c>conflict</c> and <c>confirm_required</c> as 409, the latter with its full envelope (the
+    /// <c>affected_rules</c> a delete would orphan) as the body.</para>
+    /// </summary>
+    internal static void MapServerTags(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    {
+        var store = new ServerTagStore(postgres, DarlingMcpServerTagTools.WriteCommandSeconds);
+
+        app.MapPost("/api/server-tags", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (body, bodyError) = await ReadJsonObjectAsync(context);
+            if (body is null)
+            {
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
+            }
+
+            if (!TryReadCreateBody(body, out var name, out var parentId, out var colour, out var createError))
+            {
+                return ErrorResult(createError!, StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpServerTagTools.CreateServerTagCore(store, name, parentId, colour, context.RequestAborted);
+            LogServerTagWrite(logger, context, "create", null, result, 0);
+            return ServerTagToolResult(result, "/api/server-tags", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created);
+        });
+
+        app.MapPatch("/api/server-tags/{id:int}", async (HttpContext context, int id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            string changes;
+            try
+            {
+                changes = await ReadBoundedBodyAsync(context, MaxServerTagBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpServerTagTools.UpdateServerTagCore(store, id, changes, context.RequestAborted);
+            LogServerTagWrite(logger, context, "update", id, result, 0);
+            return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds);
+        });
+
+        app.MapDelete("/api/server-tags/{id:int}", async (HttpContext context, int id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var confirmText = context.Request.Query["confirm"].ToString();
+            if (confirmText.Length > 0 && !string.Equals(confirmText, "true", StringComparison.Ordinal))
+            {
+                return ErrorResult("confirm must be true, or omitted.", StatusCodes.Status400BadRequest);
+            }
+
+            var confirm = confirmText.Length > 0;
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpServerTagTools.DeleteServerTagCore(store, id, confirm, context.RequestAborted);
+            LogServerTagWrite(logger, context, "delete", id, result, 0);
+            return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds);
+        });
+
+        app.MapPost("/api/server-tags/{id:int}/servers", async (HttpContext context, int id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (serverIds, idsError) = await ReadServerIdsAsync(context);
+            if (serverIds is null)
+            {
+                return ErrorResult(idsError!, StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpServerTagTools.AssignServerTagCore(store, id, serverIds, context.RequestAborted);
+            LogServerTagWrite(logger, context, "assign", id, result, serverIds.Count);
+            return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds);
+        });
+
+        app.MapDelete("/api/server-tags/{id:int}/servers", async (HttpContext context, int id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (serverIds, idsError) = await ReadServerIdsAsync(context);
+            if (serverIds is null)
+            {
+                return ErrorResult(idsError!, StatusCodes.Status400BadRequest);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpServerTagTools.UnassignServerTagCore(store, id, serverIds, context.RequestAborted);
+            LogServerTagWrite(logger, context, "unassign", id, result, serverIds.Count);
+            return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds);
+        });
+    }
+
+    /// <summary>Parses the request body as one JSON object, or names why it is not.</summary>
+    private static async Task<(JsonObject? Body, string? Error)> ReadJsonObjectAsync(HttpContext context)
+    {
+        string text;
+        try
+        {
+            text = await ReadBoundedBodyAsync(context, MaxServerTagBodyBytes);
+        }
+        catch (InvalidDataException)
+        {
+            return (null, "Request body is too large.");
+        }
+
+        try
+        {
+            var root = JsonNode.Parse(text);
+            if (root is not JsonObject body)
+            {
+                return (null, "Request body must be a JSON object.");
+            }
+
+            /* A duplicate property name throws ArgumentException on the first enumeration; force it here so it
+               answers 400 (a caller's malformed body), like the dismiss route. */
+            _ = body.Count;
+            return (body, null);
+        }
+        catch (JsonException)
+        {
+            return (null, "Request body is not valid JSON.");
+        }
+        catch (ArgumentException)
+        {
+            return (null, "Request body has a duplicate field.");
+        }
+    }
+
+    /// <summary>The most request-body bytes a server-tag write route reads before it answers 400 (1000 ids is about 12 KB).</summary>
+    internal const int MaxServerTagBodyBytes = 64 * 1024;
+
+    /// <summary>Who changed tag scope is not stored on the row; this line is the only record. Verb, tag id and
+    /// counts only, never a tag name or body text. Logged for a successful write (not invalid / refused).</summary>
+    private static void LogServerTagWrite(ILogger logger, HttpContext context, string verb, int? tagId, string result, int serverCount)
+    {
+        if (ServerTagEnvelopeStatus(result) is < 200 or >= 300)
+        {
+            return;
+        }
+
+        logger.LogInformation(
+            "Server tag {Verb} by {Principal}: tag {TagId}, servers {ServerCount}",
+            verb, DarlingWebSeat.FromContext(context).EditorPrincipal, tagId, serverCount);
+    }
+
+    /// <summary>Reads <c>{name, parent_id?, colour?}</c>: only those keys, with their JSON types, so a stray or
+    /// mistyped field is a 400 here rather than a silently dropped one.</summary>
+    internal static bool TryReadCreateBody(JsonObject body, out string? name, out int? parentId, out string? colour, out string? error)
+    {
+        name = null;
+        parentId = null;
+        colour = null;
+        error = null;
+
+        foreach (var property in body)
+        {
+            if (property.Key is not ("name" or "parent_id" or "colour"))
+            {
+                error = $"Unknown field '{property.Key}'. A server tag takes name, parent_id and colour.";
+                return false;
+            }
+        }
+
+        if (body["name"] is JsonValue nameValue && nameValue.TryGetValue<string>(out var nameText))
+        {
+            name = nameText;
+        }
+        else if (body["name"] is not null)
+        {
+            error = "name must be a string.";
+            return false;
+        }
+
+        if (body["parent_id"] is JsonNode parentNode)
+        {
+            if (parentNode is JsonValue parentValue && parentValue.TryGetValue<int>(out var parent))
+            {
+                parentId = parent;
+            }
+            else
+            {
+                error = "parent_id must be a whole number, or null for a root tag.";
+                return false;
+            }
+        }
+
+        if (body["colour"] is JsonNode colourNode)
+        {
+            if (colourNode is JsonValue colourValue && colourValue.TryGetValue<string>(out var colourText))
+            {
+                colour = colourText;
+            }
+            else
+            {
+                error = "colour must be a #RRGGBB string, or null for the palette colour.";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Reads <c>{server_ids: [int, ...]}</c> from the body, or names why it cannot.</summary>
+    private static async Task<(List<int>? ServerIds, string? Error)> ReadServerIdsAsync(HttpContext context)
+    {
+        var (body, error) = await ReadJsonObjectAsync(context);
+        if (body is null)
+        {
+            return (null, error);
+        }
+
+        if (body.Count != 1 || body["server_ids"] is not JsonArray array)
+        {
+            return (null, "Request body must be exactly {\"server_ids\": [whole numbers]}.");
+        }
+
+        var ids = new List<int>(array.Count);
+        foreach (var element in array)
+        {
+            if (element is JsonValue value && value.TryGetValue<int>(out var id))
+            {
+                ids.Add(id);
+            }
+            else
+            {
+                return (null, "server_ids must hold only whole numbers.");
+            }
+        }
+
+        return (ids, null);
+    }
+
+    /// <summary>
+    /// The HTTP status a server-tag verb's returned string maps to: the mute-rule mapping
+    /// (<see cref="MuteRuleEnvelopeStatus"/>: <c>invalid</c> 400, <c>not_found</c> 404, the caught-exception
+    /// envelope 500, any other envelope the success status) plus the two statuses the tag verbs add —
+    /// <c>conflict</c> (a sibling already holds the name) and <c>confirm_required</c> (a delete that would orphan
+    /// custom alert rules until repeated with <c>confirm=true</c>) — both 409. The body is untouched either way,
+    /// so <c>affected_rules</c> reaches the caller.
+    /// </summary>
+    internal static int ServerTagEnvelopeStatus(string result, int successStatus = StatusCodes.Status200OK)
+    {
+        if (ClassifyToolResponse(result) is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal)
+        {
+            try
+            {
+                var status = JsonNode.Parse(result) is JsonObject envelope ? TryGetString(envelope, "status") : null;
+                if (status is "conflict" or "confirm_required")
+                {
+                    return StatusCodes.Status409Conflict;
+                }
+            }
+            catch (JsonException)
+            {
+                /* Not a shape the cores produce; the mute-rule mapping below answers it. */
+            }
+        }
+
+        var mapped = MuteRuleEnvelopeStatus(result, successStatus);
+        if (mapped != successStatus)
+        {
+            return mapped;
+        }
+
+        /* Allow-list: only a known success status answers 2xx; a status a future verb adds is a 500 until it is
+           mapped here, never a silent 200. */
+        try
+        {
+            var status = JsonNode.Parse(result) is JsonObject envelope ? TryGetString(envelope, "status") : null;
+            return status is "created" or "updated" or "unchanged" or "deleted" or "assigned" or "unassigned"
+                ? successStatus
+                : StatusCodes.Status500InternalServerError;
+        }
+        catch (JsonException)
+        {
+            return StatusCodes.Status500InternalServerError;
+        }
+    }
+
+    /// <summary>The envelope pass-through the server-tag routes share: <see cref="MuteRuleToolResult"/>'s error
+    /// handling (the caught-exception sentence never reaches the wire) with <see cref="ServerTagEnvelopeStatus"/>'s
+    /// status.</summary>
+    internal static IResult ServerTagToolResult(string result, string route, ILogger logger, long elapsedMs, int successStatus = StatusCodes.Status200OK)
+    {
+        var kind = ClassifyToolResponse(result);
+        if (kind is ToolResponseKind.ServerError)
+        {
+            return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs);
+        }
+
+        var httpStatus = ServerTagEnvelopeStatus(result, successStatus);
+        return kind is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
+            ? Results.Text(result, "application/json", statusCode: httpStatus)
+            : ErrorResult(McpHelpers.ErrorMessageOf(result), httpStatus);
     }
 
     /// <summary>Reads the raw request body text — what the mute-rule cores parse themselves, so the web layer
@@ -3253,6 +3592,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── trends (DarlingMcpTrendTools) ── */
             ["get_file_io_trend"] = R(CatTrends, "File I/O read and write latency over time per database and file type, heaviest stall first; database_name charts one database per file.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("database_name")),
             ["get_memory_trend"] = R(CatTrends, "Memory usage over time.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
+            ["get_server_trend"] = R(CatTrends, "One instance trend over time, picked by metric: total_waits, cpu_scheduler, memory_clerks or plan_cache.", PReqText("metric"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("clerk_types")),
             ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             /* #3653 item 17: the four reads below disclose the WINDOW floor as window_truncated (beside
                effective_start / effective_hours_back) — not the page dialect's truncated, which they never had. */
@@ -4175,6 +4515,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_memory_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpTrendTools.GetMemoryTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
+            ["get_server_trend"] = (c, pg, an) => RequireText(c, "metric", out var serverTrendMetric)
+                ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                    ? DarlingMcpServerTrendTools.GetServerTrend(pg, serverTrendMetric, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "clerk_types"), TrendBudget.Chart, c.RequestAborted)
+                    : UnparseableParam("bucket_minutes"))
+                : MissingParam("metric"),
             ["get_perfmon_trend"] = (c, pg, an) => RequireText(c, "counter_name", out var counter)
                 ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                     ? DarlingMcpTrendTools.GetPerfmonTrend(pg, counter, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)

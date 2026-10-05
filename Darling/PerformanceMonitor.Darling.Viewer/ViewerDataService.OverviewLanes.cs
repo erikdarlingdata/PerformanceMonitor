@@ -59,45 +59,7 @@ public sealed partial class ViewerDataService
     /// <c>collection_count</c> let the C# reader stamp a bucket that merged nothing at its one collection's
     /// own raw time (ruling item 3) rather than the bucket grid. $4 the bucket width in minutes.</para>
     /// </summary>
-    public static readonly string TotalWaitTrendSql = $"""
-        WITH per_collection AS
-        (
-            SELECT
-                collection_time,
-                SUM(delta_wait_time_ms) AS total_delta_ms,
-                /* #3540: the collection's STORED interval — MAX over its rows, because a wait type first
-                   seen in an otherwise steady pass carries 0 beside its siblings' real interval and adds 0
-                   to the sum; MAX is 0 only when EVERY row was unknowable (a restart), and that 0 becomes
-                   NULL through NULLIF so the point is dropped rather than rendered as 0.00. NULL (pre-V127
-                   rows) falls back to the LAG this read always used. */
-                CASE WHEN MAX(sample_interval_seconds) IS NULL
-                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
-                END AS interval_seconds
-            FROM v_wait_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            GROUP BY collection_time
-        ),
-        rated AS
-        (
-            SELECT
-                collection_time,
-                CASE WHEN interval_seconds > 0 THEN total_delta_ms END AS rated_delta_ms,
-                CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
-            FROM per_collection
-        )
-        SELECT
-            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
-            CAST(SUM(rated_delta_ms) AS double precision) / SUM(rated_seconds) AS wait_time_ms_per_second,
-            MIN(collection_time) AS first_collection_time,
-            COUNT(*) AS collection_count
-        FROM rated
-        GROUP BY 1
-        HAVING COUNT(rated_seconds) > 0
-        ORDER BY 1
-        """;
+    public static readonly string TotalWaitTrendSql = ServerTrendSql.TotalWaits;
 
     /// <summary>
     /// The memory trend — Lite's <c>GetMemoryTrendAsync</c> ported to Postgres. Reads the four MB metrics

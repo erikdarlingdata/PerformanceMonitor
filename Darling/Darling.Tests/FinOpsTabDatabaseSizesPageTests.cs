@@ -14,51 +14,56 @@ using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
-/// <summary>Source pins for the FinOps Database Sizes tab: it reads get_database_sizes and shows only columns that read emits.</summary>
+/// <summary>Source pins for the FinOps Database Sizes tab: it reads the get_finops database_sizes view and shows only columns that view emits.</summary>
 public sealed class FinOpsTabDatabaseSizesPageTests
 {
     private static string Tab() =>
         ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "finops", "database-sizes.js")
             .ReplaceLineEndings("\n");
 
-    private static string ToolSource() =>
-        ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpObjectStatsTools.cs")
+    private static string ViewSource() =>
+        ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.DatabaseSizes.cs")
             .ReplaceLineEndings("\n");
 
     [Fact]
-    public void TheTabReadsGetDatabaseSizesForTheServer()
+    public void TheTabReadsTheDatabaseSizesViewOfGetFinOpsForTheServer()
     {
-        Assert.Contains("readTool(\"get_database_sizes\", { server }", Tab());
+        var tab = Tab();
+        Assert.Contains("readTool(\"get_finops\", { server, view: \"database_sizes\", limit: MAX_FILES }, ctx && ctx.signal)", tab);
+        Assert.DoesNotContain("get_database_sizes", tab);
+        var tabMax = Regex.Match(tab, "const MAX_FILES = (\\d+);").Groups[1].Value;
+        var viewMax = Regex.Match(ViewSource(), "int MaxDatabaseSizeRows = (\\d+);").Groups[1].Value;
+        Assert.NotEmpty(viewMax);
+        Assert.Equal(viewMax, tabMax);
+        Assert.Contains("DatabaseSizesView = \"database_sizes\"", ViewSource());
     }
 
     [Fact]
-    public void EveryShownColumnKeyIsEmittedByTheTool()
+    public void EveryShownColumnKeyIsEmittedByTheViewRow()
     {
         var keys = Regex.Matches(Tab(), "\\bkey: \"([a-z_]+)\"").Select(m => m.Groups[1].Value).ToList();
         Assert.NotEmpty(keys);
-        var source = ToolSource();
-        var fileSlice = source[source.IndexOf("FilePayload(DarlingObjectStatsReader.DatabaseSizeRow", StringComparison.Ordinal)..];
+        var source = ViewSource();
+        var rowSlice = source[source.IndexOf("DatabaseSizesRow(DatabaseSizeFileDto", StringComparison.Ordinal)..];
         var rowNoteKey = Regex.Match(
             ReadRepoFile("PerformanceMonitor.Common", "AzureSiblingDatabaseSize.cs"),
             "const string RowNoteKey = \"([a-z_]+)\"").Groups[1].Value;
         Assert.NotEmpty(rowNoteKey);
         foreach (var key in keys)
         {
-            if (key == "database_name")
-                Assert.Contains("\"database_name\"", source[source.IndexOf("DatabaseSizesPayload(string", StringComparison.Ordinal)..]);
-            else if (key == rowNoteKey)
-                Assert.Contains("[AzureSiblingDatabaseSize.RowNoteKey]", fileSlice);
+            if (key == rowNoteKey)
+                Assert.Contains("[AzureSiblingDatabaseSize.RowNoteKey]", rowSlice);
             else
-                Assert.Contains("\"" + key + "\"", fileSlice);
+                Assert.Contains("[\"" + key + "\"]", rowSlice);
         }
-        Assert.Contains(rowNoteKey, keys);
+        foreach (var added in new[] { "auto_growth_mb", "free_space_mb", "used_pct", "recovery_model", "vlf_count", "monthly_cost_usd" })
+            Assert.Contains(added, keys);
     }
 
     [Fact]
     public void AnAbortedReadReturnsBeforeAnythingIsMounted()
     {
         var tab = Tab();
-        Assert.Contains("readTool(\"get_database_sizes\", { server }, ctx && ctx.signal)", tab);
         Assert.Contains("if (res.kind === \"aborted\" || res.kind === \"auth\") return;", tab);
     }
 
@@ -67,7 +72,7 @@ public sealed class FinOpsTabDatabaseSizesPageTests
     {
         var tab = Tab();
         Assert.Contains("row.max_size_mb === -1 ? \"Unlimited\"", tab);
-        Assert.DoesNotContain("auto_growth_mb", tab);
+        Assert.Contains("\"Disabled\"", tab);
         Assert.Contains("relTime(data.captured_at)", tab);
         Assert.Contains("localTime(data.captured_at)", tab);
         Assert.Contains("e?.name !== \"AbortError\"", tab);

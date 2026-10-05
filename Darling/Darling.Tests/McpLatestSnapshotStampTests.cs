@@ -712,6 +712,19 @@ public sealed class McpLatestSnapshotStampTests
         Assert.Contains("IndexAnalysisRollupRow(result.OverallRollup, false)", source, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Same reason as above for <c>database_sizes</c>: its partial file has no tool mark, so this pins the latest read and
+    /// the stamp, built through the shared UTC formatter from the snapshot's own time.
+    /// </summary>
+    [Fact]
+    public void DatabaseSizes_IsStamped_FromTheSnapshotsOwnTime()
+    {
+        var source = Strip(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.DatabaseSizes.cs"));
+        Assert.Contains("DarlingFinOpsDatabaseSizesReader.GetLatestAsync(", source, StringComparison.Ordinal);
+        Assert.Matches(CapturedAtKey, source);
+        Assert.Contains("captured_at = McpHelpers.FormatEffectiveStart(files[0].CollectionTime)", source, StringComparison.Ordinal);
+    }
+
     /* ───────────────────────── plumbing ───────────────────────── */
 
     private static IEnumerable<(string Label, string Body, Shape Shape)> LatestToolBodies()

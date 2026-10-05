@@ -207,7 +207,7 @@ public sealed class FinOpsIndexAnalysisViewTests
     [Fact]
     public void OtherViews_RefuseDatabaseNameFullTextAndObjectName_OnlyTheNamedViewsAccept()
     {
-        foreach (var view in new[] { "utilization", "high_impact", "database_resources", "application_connections", "optimization", "storage_growth" })
+        foreach (var view in new[] { "utilization", "high_impact", "database_resources", "application_connections", "optimization", "storage_growth", "database_sizes" })
         {
             var text = DarlingMcpFinOpsTools.OptionalParamMisuse(view, null, true);
             Assert.Equal("full_text", text!.Value.Parameter);
@@ -215,7 +215,7 @@ public sealed class FinOpsIndexAnalysisViewTests
             Assert.Null(DarlingMcpFinOpsTools.OptionalParamMisuse(view, null, false));
         }
 
-        foreach (var view in new[] { "utilization", "high_impact", "database_resources", "application_connections", "optimization" })
+        foreach (var view in new[] { "utilization", "high_impact", "database_resources", "application_connections", "optimization", "database_sizes" })
         {
             var db = DarlingMcpFinOpsTools.OptionalParamMisuse(view, "d", false);
             Assert.Equal("database_name", db!.Value.Parameter);

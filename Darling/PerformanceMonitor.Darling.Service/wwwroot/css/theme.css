@@ -67,3 +67,18 @@ tr.mute-rules-highlight { outline: 2px solid var(--accent); }
 .range-custom[hidden] { display: none; }
 .range-custom-input { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 0.15rem 0.3rem; font-size: 0.78rem; }
 .range-custom-error { color: var(--err); font-size: 0.78rem; }
+/* Alert History (#4843): a dismissed row, shown when "Show dismissed" is on. */
+tr.alert-dismissed { opacity: 0.55; font-style: italic; }
+
+/* Manage Tags page (#5085) */
+.tags-layout { display: flex; gap: 24px; align-items: flex-start; }
+.tag-tree { list-style: none; margin: 0; padding: 0; min-width: 260px; }
+.tag-node { display: flex; align-items: center; gap: 8px; background: none; border: 0; color: inherit; cursor: pointer; padding: 4px 6px; font: inherit; }
+.tag-node.tag-selected { outline: 2px solid var(--accent); }
+.tag-swatch { display: inline-block; width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--border, #888); background: transparent; }
+.tag-swatch-pick { cursor: pointer; margin-left: 4px; padding: 0; }
+.tag-form { padding: 12px 16px; margin-bottom: 12px; }
+.tag-field { display: block; margin: 6px 0; }
+.tag-input { width: 100%; max-width: 420px; }
+.tags-server { display: block; margin: 2px 0; }
+.tags-rules ul { margin: 4px 0 8px 18px; }

@@ -427,6 +427,92 @@ CREATE TRIGGER trg_bump_collector_run_times
     AFTER INSERT OR UPDATE OR DELETE ON config.config_collector_run_times
     FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
 
+    /// <summary>
+    /// V161 (#5094) — <c>collect.query_store_top_daily</c> and <c>collect.query_store_top_daily_built</c>: a per-day
+    /// summary of <c>collect.query_store_interval_wide</c>, which <c>get_query_store_top</c>'s long windows read for the
+    /// whole UTC days inside the window instead of scanning every interval row.
+    ///
+    /// <para><b>Approximate by design.</b> A day's row is built once after the day ends (and rebuilt once more a day
+    /// later), so a wide-table row that changes after its day was summarized is missed, and a row whose collection time
+    /// moves into the next day after the first build can be counted in both days for about a day. Everything the table
+    /// holds is exactly recombinable for the rows it saw: <c>interval_rows</c>, <c>execution_count_sum</c>, and for each
+    /// of the six averaged columns a sum of the non-NULL values and a count of them (<c>_sum</c>, <c>_n</c>), so a
+    /// reader reproduces the unweighted mean of the interval averages as <c>SUM(_sum) / NULLIF(SUM(_n), 0)</c>. A reader
+    /// that uses it says so in its answer. Rebuilding a day is the builder's job: the service owns every write here, and
+    /// no reader or writer uses these tables yet.</para>
+    ///
+    /// <para><b>Plain tables, not hypertables</b>: one row per server, day and query identity, and the builder deletes
+    /// and re-inserts a whole day, which a compressed chunk would not allow. The key's column types are the wide
+    /// table's, copied, and the unique index is <c>NULLS NOT DISTINCT</c> because <c>replica_role</c>,
+    /// <c>module_name</c> and the others are NULL for most rows. <c>collect.query_store_top_daily_built</c> records
+    /// which days are built, at which pass, and how many wide-table rows the build read.</para>
+    ///
+    /// <para><b>No GRANT</b>: the <c>collect</c> schema's blanket <c>GRANT SELECT ON ALL TABLES</c> to the read-only
+    /// roles (re-run on every managed start and by <c>tools/provision-roles.sql</c>) covers a table a migration
+    /// introduces. Every statement is <c>IF NOT EXISTS</c>, so a second run changes nothing.</para>
+    /// </summary>
+    private const string V161Sql = @"
+/* V161 (#5094): the daily summary for get_query_store_top's long windows. APPROXIMATE by design: a day is summarized
+   after it ends, so a late change to a summarized day is missed. The builder owns every write. Schema-qualified
+   collect.* like every rung; plain tables; timestamps are naive UTC. */
+CREATE TABLE IF NOT EXISTS collect.query_store_top_daily
+(
+    server_id integer NOT NULL,
+    day date NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    query_hash text,
+    execution_type_desc text,
+    replica_role text,
+    module_name text,
+    interval_rows bigint NOT NULL,
+    execution_count_sum numeric,
+    avg_duration_us_sum numeric,
+    avg_duration_us_n bigint NOT NULL,
+    avg_cpu_time_us_sum numeric,
+    avg_cpu_time_us_n bigint NOT NULL,
+    avg_logical_io_reads_sum numeric,
+    avg_logical_io_reads_n bigint NOT NULL,
+    avg_logical_io_writes_sum numeric,
+    avg_logical_io_writes_n bigint NOT NULL,
+    avg_physical_io_reads_sum numeric,
+    avg_physical_io_reads_n bigint NOT NULL,
+    avg_rowcount_sum numeric,
+    avg_rowcount_n bigint NOT NULL,
+    last_execution_time_max timestamp,
+    query_plan_hash_max text,
+    first_execution_time_min timestamp
+);
+
+/* NULLS NOT DISTINCT: replica_role, module_name and the other key columns are NULL for most rows, and two NULLs must
+   be the same group. */
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_top_daily
+ON collect.query_store_top_daily
+(
+    server_id,
+    day,
+    database_name,
+    query_id,
+    plan_id,
+    query_hash,
+    execution_type_desc,
+    replica_role,
+    module_name
+)
+NULLS NOT DISTINCT;
+
+/* Which days are built, at which pass (1 = early, 2 = final), when, and how many wide-table rows the build read. */
+CREATE TABLE IF NOT EXISTS collect.query_store_top_daily_built
+(
+    server_id integer NOT NULL,
+    day date NOT NULL,
+    pass smallint NOT NULL,
+    built_at timestamp NOT NULL,
+    source_rows bigint NOT NULL,
+    CONSTRAINT pk_query_store_top_daily_built PRIMARY KEY (server_id, day)
+);";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -625,6 +711,7 @@ CREATE TRIGGER trg_bump_collector_run_times
         new Migration(158, "install-id", V158Sql),
         new Migration(159, "install-id-table-oid", V159Sql),
         new Migration(160, "collector-run-time", V160Sql),
+        new Migration(161, "query-store-top-daily", V161Sql),
     };
 
     /// <summary>
@@ -3255,8 +3342,8 @@ CREATE TABLE IF NOT EXISTS config.custom_views (
     ///
     /// <para><b>Nesting.</b> <c>parent_id</c> is a self-reference; NULL = a root tag. Depth is capped
     /// app-side at 4 levels — Postgres cannot express that without a trigger, and the tag table is tiny
-    /// (dozens of rows), so the Viewer loads it whole, builds the tree in memory, and checks both the cap
-    /// and cycle-freedom there. No recursive CTE, no ltree extension, no closure table.
+    /// (dozens of rows), so <c>ServerTagRules</c> (Storage) enforces both the cap and cycle-freedom for every
+    /// writer. No recursive CTE, no ltree extension, no closure table.
     /// <c>ON DELETE CASCADE</c> on the self-reference means deleting a tag removes its whole subtree and
     /// (via the map's own cascade) those assignments — the folder mental model. It can never reach
     /// <c>config_monitored_servers</c>: there is no FK to it, so no server row, credential blob, or
@@ -3270,8 +3357,8 @@ CREATE TABLE IF NOT EXISTS config.custom_views (
     /// operator-entered names.</para>
     ///
     /// <para><b>NO <c>config_bump_version</c> trigger</b>, same reasoning as V31: tags feed the VIEWER's
-    /// sidebar, never the collector/service loop, so there is nothing for the service to reload and a
-    /// beacon bump would only cost a needless fleet reconcile. <c>id</c> is
+    /// sidebar and never the collector loop. The alert evaluator reads them, but through its own cache refresh,
+    /// so a beacon is still unnecessary and a bump would only cost a needless fleet reconcile. <c>id</c> is
     /// <c>GENERATED ALWAYS AS IDENTITY</c> so INSERTs need no sequence USAGE grant. No explicit grant is
     /// added: both tables are picked up by the blanket <c>GRANT ... ON ALL TABLES IN SCHEMA config</c>
     /// statements that provisioning re-runs on EVERY service start. Note it is those, not
@@ -3698,9 +3785,9 @@ ALTER TABLE config.config_alert_settings
     /// by running V32 then V50 in order, the same path an upgraded store takes; nothing else needs editing.
     /// <para>Deliberately nullable with NO backfill: existing tags stay NULL and render as a neutral pill
     /// until a user picks a colour, while newly-created tags get a palette colour assigned at creation time
-    /// (rotated by tag id, in the viewer). Stored as <c>#RRGGBB</c> text — the viewer's only concern, the
-    /// service never reads server_tags — so no CHECK constraint is imposed here; the viewer writes only
-    /// palette values or a user pick.</para>
+    /// (rotated by tag id, in the viewer). Stored as <c>#RRGGBB</c> text — read by the service's tag-scoped alert
+    /// rules since #3350 and validated by <c>ServerTagRules</c> — so no CHECK constraint is imposed here; writers
+    /// store only palette values or a user pick.</para>
     /// </summary>
     private const string V50Sql = @"
 ALTER TABLE config.server_tags
