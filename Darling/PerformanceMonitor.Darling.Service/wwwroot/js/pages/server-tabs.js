@@ -93,7 +93,7 @@ function saveXmlButton(text, fileName, mime, truncated) {
   if (none || truncated) {
     btn.disabled = true;
     btn.setAttribute("disabled", "");
-    btn.setAttribute("title", none ? "No XML was captured for this row." : "The read cut this XML short, so it is not saved. Narrow the time range to this row to get the whole document.");
+    btn.setAttribute("title", none ? "No XML was captured for this row." : "This read sent only a preview of the XML, so it is not saved. Reload with the full graph to save it.");
     return btn;
   }
   btn.addEventListener("click", () => {
