@@ -223,6 +223,63 @@ public sealed class DiagnosticsBundleStoreHistoryLiveTests
         }
     }
 
+    /// <summary>The status the manifest lists for a section.</summary>
+    private static string ManifestStatus(JsonNode bundle, string section) =>
+        bundle["manifest"]!["sections"]!.AsArray().Single(s => s!["name"]!.GetValue<string>() == section)!["status"]!.GetValue<string>();
+
+    [Fact]
+    public async Task AHistoryReadThatErrors_ListsTheSectionAsError_InTheManifestAndInTheSection_ExitsPartial_AndKeepsTheOtherMembers()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var root = Directory.CreateTempSubdirectory("darling-bundle-historyerror-");
+        var ok = false;
+        try
+        {
+            var options = DiagnosticsBundle.ParseArgs(new[] { Path.Combine(root.FullName, "b.json"), "--log-dir", root.FullName }).Options!;
+            var config = new DarlingConfig { Servers = { new MonitoredServer { Name = "alpha-sql-01" } } };
+
+            /* The control: the same store with a history that reads. The section is ok in the manifest and in its own body. */
+            var control = await DiagnosticsBundleRunner.BuildAsync(options, config, scratch.ConnectionString, source, null, null, ct);
+            var controlTree = JsonNode.Parse(control.Text!)!;
+            Assert.Equal("ok", ManifestStatus(controlTree, "store_statements"));
+            Assert.Null(controlTree["sections"]!["store_statements"]!["status"]);
+            Assert.NotEqual("error", controlTree["sections"]!["store_statements"]!["history"]!["status"]?.GetValue<string>());
+            Assert.Equal(DarlingCliCommands.DiagnosticsBundleExitCode.Ok, control.ExitCode);
+
+            /* Break only the history read. The existence probe still finds both tables, so the tool is asked, and its read of the
+               capture table names a column that is gone, so the tool answers an error. */
+            await ExecAsync(source, "ALTER TABLE collect.store_statement_captures RENAME COLUMN outcome TO outcome_renamed", ct);
+
+            var broken = await DiagnosticsBundleRunner.BuildAsync(options, config, scratch.ConnectionString, source, null, null, ct);
+            var tree = JsonNode.Parse(broken.Text!)!;
+
+            /* The exit code reports a partial bundle and the manifest agrees: the section reads "error", the status a section that throws gets. */
+            Assert.Equal(DarlingCliCommands.DiagnosticsBundleExitCode.PartialBundle, broken.ExitCode);
+            Assert.Equal("error", ManifestStatus(tree, "store_statements"));
+
+            /* The section says so itself, and keeps its other member and the history member with the tool's own error. */
+            var section = tree["sections"]!["store_statements"]!;
+            Assert.Equal("error", section["status"]!.GetValue<string>());
+            Assert.NotNull(section["cumulative"]);
+            Assert.Equal("error", section["history"]!["status"]!.GetValue<string>());
+            Assert.Contains("get_store_query_history", section["history"]!["message"]!.GetValue<string>(), StringComparison.Ordinal);
+
+            /* Nothing else in the bundle was marked failed by it. */
+            Assert.Equal(
+                new[] { "store_statements" },
+                tree["manifest"]!["sections"]!.AsArray().Where(s => s!["status"]!.GetValue<string>() == "error").Select(s => s!["name"]!.GetValue<string>()).ToArray());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+            root.Delete(recursive: true);
+        }
+    }
+
     [Fact]
     public void TheBundle_ReadsNoHistoryTableItself_ExceptTheExistenceProbe()
     {

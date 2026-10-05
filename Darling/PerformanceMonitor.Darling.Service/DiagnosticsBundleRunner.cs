@@ -295,8 +295,8 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
                 async c => DropStatementSummaries(DiagnosticsBundle.ParseReader(await DarlingMcpSlowReadTools.GetSlowReads(postgres, hours, scopeServerName, null, null, 100, true, c))), ct));
             sections.Add(await DiagnosticsBundle.RunSectionAsync("read_latency",
                 async c => DiagnosticsBundle.ParseReader(await DarlingMcpReadLatencyTools.GetReadLatency(postgres, hours, null, null, 200, c)), ct));
-            var statements = await DiagnosticsBundle.RunSectionAsync("store_statements", c => StoreStatementsSectionAsync(postgres, hours, c), ct);
-            sections.Add(statements with { AfterAlias = CompactStatementTexts, Failed = statements.Failed || HistoryFailed(statements.Node) });
+            sections.Add((await DiagnosticsBundle.RunSectionAsync("store_statements",
+                c => StoreStatementsSectionAsync(postgres, hours, c), ct)) with { AfterAlias = CompactStatementTexts });
             sections.Add(await DiagnosticsBundle.RunSectionAsync("store_log",
                 async c => DiagnosticsBundle.ParseReader(await DarlingMcpStoreLogTools.GetStoreLog(postgres, hours, 50, null, c)), ct));
         }
@@ -512,11 +512,22 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
     {
         var cumulative = DiagnosticsBundle.ParseReader(
             await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(postgres, null, "total_time", 25, true, ct));
-        return new JsonObject
+        var section = new JsonObject
         {
             ["cumulative"] = cumulative,
             ["history"] = await StatementHistoryAsync(postgres, hours, ct),
         };
+
+        /* The tool's error answer is the history member, one level down, so the section's own status would still read ok while
+           the verb exits as a partial bundle (#5097). A section that throws reads error in its body, in the manifest and in the
+           exit code; this one reads the same, keeping its other member and the history member with the tool's own error. The
+           exit code (RunSectionAsync) and the manifest (Assemble) both take a section's failure from this status. */
+        if (HistoryFailed(section))
+        {
+            section.Insert(0, "status", "error");
+        }
+
+        return section;
     }
 
     /// <summary>
@@ -559,7 +570,9 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
 
     /// <summary>
     /// Whether the section's <c>history</c> member is the tool's error answer. The member is nested under the section, so the
-    /// section's own status does not show it; the bundle still counts the section as failed, as it did when a failed history read threw.
+    /// section's own status does not show it; <see cref="StoreStatementsSectionAsync"/> then gives the section the status a section
+    /// that throws gets (<c>error</c>), so the exit code and the manifest both count it as failed, as they did when a failed
+    /// history read threw.
     /// </summary>
     internal static bool HistoryFailed(JsonNode? section) =>
         section is JsonObject o && DiagnosticsBundle.StatusOf(o["history"]) == "error";
