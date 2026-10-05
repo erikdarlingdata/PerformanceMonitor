@@ -337,6 +337,13 @@ GRANT INSERT ON config.config_monitored_servers TO viewer;
 --     and stays SELECT-carved, so viewer can replace a password blob and never read one back. SELECT ... FOR UPDATE
 --     needs UPDATE on one column, which this supplies. RE-RUN THIS SCRIPT AFTER UPGRADING to the release that adds
 --     the edit route (the precedent is the V117 note above): without it every web edit answers a 500 (42501).
+--     REVOKE first, like the SELECT carve above: revoking the table privilege also revokes every column privilege on
+--     it, so each run resets viewer to EXACTLY the columns listed below. A bare GRANT only ever adds: a later release
+--     that narrows this list (or a revert) would leave viewer holding the old columns, and a table-level UPDATE granted
+--     by hand would survive every run and make the column list meaningless. A plain REVOKE removes only the privileges
+--     recorded as granted by the role that issues it (a superuser or the owner counts as the owner), so run this script
+--     as the same owner every time, as above: it then undoes its own grants and any the owner or a superuser added by hand.
+REVOKE UPDATE ON config.config_monitored_servers FROM viewer;
 GRANT UPDATE (name, host, port, database, read_only_intent, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at) ON config.config_monitored_servers TO viewer;
 
 -- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as viewer) and the MCP rule

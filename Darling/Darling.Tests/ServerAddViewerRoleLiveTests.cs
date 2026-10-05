@@ -343,6 +343,107 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         }
     }
 
+    /// <summary>The UPDATE columns the edit grant (#5240) gives viewer, comma-joined in column-name order: the exact list the
+    /// grant names, so a column added to the grant by mistake (or dropped from it) changes this string.</summary>
+    private const string EditColumnList =
+        "auth,database,encrypt_mode,encrypted_password,host,modified_at,monthly_cost_usd,multi_subnet_failover,name,port,read_only_intent,trust_server_certificate,username";
+
+    /// <summary>The UPDATE privileges <paramref name="roleName"/> holds on <c>config.config_monitored_servers</c> columns, as
+    /// the owner reads them (column privileges, so a table-level UPDATE shows as every column).</summary>
+    private static async Task<string> GrantedUpdateColumnsAsync(NpgsqlDataSource owner, string roleName, CancellationToken ct)
+    {
+        await using var granted = owner.CreateCommand(
+            "SELECT COALESCE(string_agg(column_name, ',' ORDER BY column_name), '') FROM information_schema.column_privileges " +
+            $"WHERE grantee = '{roleName}' AND table_schema = 'config' AND table_name = 'config_monitored_servers' AND privilege_type = 'UPDATE'");
+        return (string)(await granted.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>Runs the managed batch's viewer statements again (what the next managed startup does).</summary>
+    private static async Task RunViewerStatementsAsync(NpgsqlDataSource owner, string roleName, CancellationToken ct)
+    {
+        foreach (var statement in ViewerStatements(roleName, null))
+        {
+            await ExecAsync(owner, statement, ct);
+        }
+    }
+
+    private static async Task<bool> HasTableLevelUpdateAsync(NpgsqlDataSource owner, string roleName, CancellationToken ct)
+    {
+        await using var tableLevel = owner.CreateCommand($"SELECT has_table_privilege('{roleName}', 'config.config_monitored_servers', 'UPDATE')");
+        return (bool)(await tableLevel.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>
+    /// The edit grant is REVOKE-then-GRANT (#5240 review), so every run of the batch resets viewer to EXACTLY the listed
+    /// columns. A bare GRANT only ever adds, so a table-level UPDATE granted by hand (a DBA, a support script) would survive
+    /// every startup and make the column list meaningless, and a column a later release takes out of the list would stay
+    /// granted. Re-running the same statements leaves the same grants (idempotent).
+    /// </summary>
+    [Fact]
+    public async Task EveryRunOfTheEditGrant_ResetsViewerToExactlyTheEditColumns_StripsAHandGrantedUpdate_AndIsIdempotent()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var roleName = "srv_rst_" + Guid.NewGuid().ToString("N")[..8];
+        var (scratch, owner, ownerString) = await OpenAsync(ct);
+        await using var _ = scratch;
+        await using var __ = owner;
+
+        await using var asViewer = await ProvisionAsync(owner, ownerString, roleName, null, ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* The first run grants exactly the edit columns and no table-level UPDATE. */
+            Assert.Equal(EditColumnList, await GrantedUpdateColumnsAsync(owner, roleName, ct));
+            Assert.False(await HasTableLevelUpdateAsync(owner, roleName, ct));
+
+            await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+            await ExecAsync(owner, "INSERT INTO config_monitored_servers (server_id, name, host) VALUES (-5244, 'reset', 'reset-host')", ct);
+
+            /* A single column the list never names, granted by hand (what a narrowed list leaves behind on a store that ran
+               the older build). The setup proves itself: viewer can write it until the batch runs again. */
+            await ExecAsync(owner, $"GRANT UPDATE (is_enabled) ON config.config_monitored_servers TO {roleName}", ct);
+            await using (var beforeRun = asViewer.CreateCommand("UPDATE config_monitored_servers SET is_enabled = TRUE WHERE server_id = -5244"))
+            {
+                Assert.Equal(1, await beforeRun.ExecuteNonQueryAsync(ct));
+            }
+
+            await RunViewerStatementsAsync(owner, roleName, ct);
+            Assert.Equal(EditColumnList, await GrantedUpdateColumnsAsync(owner, roleName, ct));
+            var denied = await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var update = asViewer.CreateCommand("UPDATE config_monitored_servers SET is_enabled = FALSE WHERE server_id = -5244");
+                await update.ExecuteNonQueryAsync(ct);
+            });
+            Assert.Equal("42501", denied.SqlState);
+
+            /* A table-level UPDATE, granted by hand: it covers every column (is_enabled and the remediation credential
+               included) and, left in place, makes the column list meaningless. */
+            await ExecAsync(owner, $"GRANT UPDATE ON config.config_monitored_servers TO {roleName}", ct);
+            Assert.True(await HasTableLevelUpdateAsync(owner, roleName, ct), "setup: the hand-granted table-level UPDATE did not take");
+
+            await RunViewerStatementsAsync(owner, roleName, ct);
+            Assert.False(await HasTableLevelUpdateAsync(owner, roleName, ct), "the batch left a hand-granted table-level UPDATE in place");
+            Assert.Equal(EditColumnList, await GrantedUpdateColumnsAsync(owner, roleName, ct));
+
+            /* Idempotent: the batch run again changes nothing. */
+            await RunViewerStatementsAsync(owner, roleName, ct);
+            Assert.False(await HasTableLevelUpdateAsync(owner, roleName, ct));
+            Assert.Equal(EditColumnList, await GrantedUpdateColumnsAsync(owner, roleName, ct));
+
+            /* And the reset costs the edit core nothing: its UPDATE still works after the re-run. */
+            await using (var update = asViewer.CreateCommand("UPDATE config_monitored_servers SET name = 'still-edits' WHERE server_id = -5244"))
+            {
+                Assert.Equal(1, await update.ExecuteNonQueryAsync(ct));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => ExecAsync(owner, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
+        }
+    }
+
     private static async Task ExecAsync(NpgsqlDataSource source, string sql, CancellationToken ct)
     {
         await using var command = source.CreateCommand(sql);
