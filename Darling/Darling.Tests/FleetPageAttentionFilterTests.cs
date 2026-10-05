@@ -301,7 +301,7 @@ public sealed class FleetPageAttentionFilterTests
            57" invites reading 4 as the fleet's problem count; the other 53 were never looked at. */
         Assert.Contains("attentionNotice(matched.length, searched.length)", FleetJs, StringComparison.Ordinal);
 
-        Assert.Contains("mount(gridNode, [notice, renderGrouped(matched)]);", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("mount(gridNode, [silenceNoticeNode(), notice, renderGrouped(matched)]);", FleetJs, StringComparison.Ordinal);
 
         /* One sentence per state. The notice already explains an empty grid whenever it is showing, and in
            more precise words, so the grid-area fallback is suppressed under it rather than stacking a second

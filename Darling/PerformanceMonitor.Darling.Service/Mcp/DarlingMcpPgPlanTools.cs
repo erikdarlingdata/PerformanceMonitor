@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -56,6 +57,7 @@ public sealed class DarlingMcpPgPlanTools
         [Description("Maximum plan shapes to return. Default 10. See the tool's reading guide.")] int limit = 10,
         [Description("Only return plans for this queryid, as a string. Optional. See the tool's reading guide.")] string? query_id = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -102,10 +104,12 @@ public sealed class DarlingMcpPgPlanTools
             if (rows.Count == 0)
             {
                 return await NoPlansStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, wantedQueryId, hours_back, cancellationToken);
+                    postgres, resolved.ServerId, resolved.ServerName, wantedQueryId, hours_back, start, now, logger, cancellationToken);
             }
 
-            return BuildPlansJson(resolved.ServerName, hours_back, rows, limit);
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_plans", resolved.ServerName, start, now, emptyAnswer: false, logger, cancellationToken);
+            return BuildPlansJson(resolved.ServerName, hours_back, rows, limit, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -280,7 +284,7 @@ public sealed class DarlingMcpPgPlanTools
     /// </summary>
     private static async Task<string> NoPlansStatusAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, long? wantedQueryId, int hoursBack,
-        CancellationToken cancellationToken = default)
+        DateTime start, DateTime end, ILogger? logger, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
             postgres, serverId, serverName, "pg_plan_capture", cancellationToken);
@@ -312,7 +316,10 @@ public sealed class DarlingMcpPgPlanTools
                 + "satisfied or not, in the order they have to be fixed in.");
         }
 
-        return McpHelpers.Status("empty", NoPlanCapturedMessage(wantedQueryId, hoursBack));
+        /* #4966: only the empty answer carries the window floor; not_collected and precondition above stay bare. */
+        var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_plans", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
+        return McpHelpers.Status("empty", NoPlanCapturedMessage(wantedQueryId, hoursBack), notice.AsHints());
     }
 
     /// <summary>
@@ -401,8 +408,10 @@ public sealed class DarlingMcpPgPlanTools
         string serverName,
         int hoursBack,
         IReadOnlyList<DarlingPgPlanCaptureReader.PgPlanCaptureRow> fetched,
-        int limit)
+        int limit,
+        McpWindowNotice? windowNotice = null)
     {
+        var notice = windowNotice ?? McpWindowNotice.Unavailable;
         var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
         var result = rows.Select(r => new
@@ -427,10 +436,14 @@ public sealed class DarlingMcpPgPlanTools
             plan = ParsePlan(r.PlanJson),
         }).ToList();
 
-        return JsonSerializer.Serialize(new
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,
+            /* #4966: the window floor, right after hours_back. */
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
             plan_shapes = result.Count,
             /* Observed off the limit + 1 fetch, never inferred from a full page (#3653): true means the window
                held at least one more plan shape, ranked below these by total duration, than this page shows. */
@@ -445,7 +458,7 @@ public sealed class DarlingMcpPgPlanTools
                        + "statement's plans wherever they rank."
                      : string.Empty),
             plans = result,
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>
