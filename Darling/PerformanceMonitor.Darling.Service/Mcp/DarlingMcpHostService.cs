@@ -758,6 +758,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                three raw-plan reads behind the web grids' plan buttons (#5228: get_query_store_plan_xml /
                get_procedure_plan_xml / get_active_query_plan_xml), which are Darling-only. */
             .WithGeminiCompatibleTools<DarlingMcpPlanTools>()
+            /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History button. */
+            .WithGeminiCompatibleTools<DarlingMcpQueryStoreHistoryTools>()
             /* The core data-read tools (resource metrics, query performance, discovery/health —
                get_cpu_utilization / get_wait_stats / get_wait_trend / get_memory_stats /
                get_memory_clerks / get_file_io_stats / get_tempdb_trend / get_perfmon_stats /

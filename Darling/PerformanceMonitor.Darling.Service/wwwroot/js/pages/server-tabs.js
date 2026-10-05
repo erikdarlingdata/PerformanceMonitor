@@ -47,6 +47,7 @@ import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { downloadText } from "../grid-tools.js";
 import { activePlanColumns, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
+import { queryStoreHistoryColumn } from "./query-store-history.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -1454,7 +1455,7 @@ export const SERVER_TABS = [
         "get_query_store_top",
         { server, hours: ctx.hours, top: 20 },
         "queries",
-        [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server)],
+        [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, ctx.hours)],
         ctx.label,
         "No Query Store rows in this window.",
         2,
