@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using DiagnosticsBundleExitCode = PerformanceMonitor.Darling.Service.DarlingCliCommands.DiagnosticsBundleExitCode;
@@ -67,7 +68,7 @@ WHERE collection_time >= (now() AT TIME ZONE 'UTC') - INTERVAL '24 hours'
 AND   database_name IS NOT NULL";
 
     /// <summary>
-    /// Whether the statement-history tables exist. Names are PROVISIONAL until #5097 part 3 merges; the section reads
+    /// Whether the statement-history tables exist. Names match V163 as merged; the section reads
     /// <c>not_present</c> when the tables are absent, so the verb works on a store below that schema.
     /// </summary>
     internal const string StatementHistoryPresentSql = @"
@@ -120,6 +121,60 @@ WHERE queryid = ANY($1)";
         }
 
         return fleet;
+    }
+
+    /// <summary>
+    /// The slow-read <c>statement_summary</c> label is cut to 40 characters by the tool before the bundle sees it, and a
+    /// database name cut to a prefix matches no known name. Each read's <c>statements</c> array carries the same labels
+    /// whole, so the summary is dropped.
+    /// </summary>
+    internal static JsonNode? DropStatementSummaries(JsonNode? slowReads)
+    {
+        if (slowReads is JsonObject o && o["reads"] is JsonArray reads)
+        {
+            foreach (var read in reads.OfType<JsonObject>())
+            {
+                read.Remove("statement_summary");
+            }
+        }
+
+        return slowReads;
+    }
+
+    /// <summary>
+    /// The health rows' <c>last_error</c> and <c>output_finding</c>, cut to the lengths the MCP tool cuts them to, after
+    /// they have been aliased. The rows are read uncut, so a name that straddles the cut is aliased whole first.
+    /// </summary>
+    internal static JsonNode? CutHealthTexts(JsonNode? collection)
+    {
+        if (collection is JsonObject o && o["health_by_server"] is JsonArray perServer)
+        {
+            foreach (var entry in perServer.OfType<JsonObject>())
+            {
+                if (entry["health"] is JsonObject health && health["collectors"] is JsonArray collectors)
+                {
+                    foreach (var row in collectors.OfType<JsonObject>())
+                    {
+                        CutField(row, "last_error", "last_error_truncated", DarlingMcpDataTools.ErrorMessagePreviewLength);
+                        CutField(row, "output_finding", "output_finding_truncated", DarlingMcpDataTools.OutputFindingPreviewLength);
+                    }
+                }
+            }
+        }
+
+        return collection;
+    }
+
+    private static void CutField(JsonObject row, string field, string flag, int length)
+    {
+        if (row[field] is JsonValue v && v.TryGetValue<string>(out var text) && text.Length > length)
+        {
+            row[field] = McpHelpers.Truncate(text, length);
+            if (row.ContainsKey(flag))
+            {
+                row[flag] = true;
+            }
+        }
     }
 
     /// <summary>Statement text in a store-statements section, cut to the preview length after it has been aliased.</summary>
@@ -184,7 +239,7 @@ WHERE queryid = ANY($1)";
         string? connectionString,
         NpgsqlDataSource? postgres,
         Exception? storeError,
-        string? storeErrorSentence,
+        string? storeReason,
         CancellationToken cancellationToken)
     {
         var aliaser = new BundleAliaser();
@@ -194,7 +249,15 @@ WHERE queryid = ANY($1)";
 
         if (postgres is not null)
         {
-            await SeedFromStoreAsync(aliaser, postgres, cancellationToken);
+            var seeded = await SeedFromStoreAsync(aliaser, postgres, cancellationToken);
+            warnings.AddRange(seeded.Notes);
+            if (seeded.FailedNameSource is not null)
+            {
+                /* The registry and the collected-data server list are where every monitored server's name is learned.
+                   With the store up and one unreadable, the bundle cannot prove it removed every server name. */
+                return new Outcome(DiagnosticsBundleExitCode.LeakGuard, null, Array.Empty<BundleLeak>(), aliaser,
+                    seeded.FailedNameSource + ": a server name source could not be read, so the bundle cannot prove it removed every server name.");
+            }
         }
 
         string? scopeServerName = null;
@@ -215,12 +278,24 @@ WHERE queryid = ANY($1)";
 
         if (postgres is null)
         {
+            /* No sentence: an error message and the store's own help text quote paths and addresses nobody registered.
+               The reason is a fixed code, and the two codes a driver gives (a SQLSTATE, a socket error name) are enums. */
             var unreachable = new JsonObject
             {
                 ["status"] = "store_unreachable",
                 ["error_class"] = storeError is null ? "NotConfigured" : SlowReadLog.ErrorClassOf(storeError),
-                ["message"] = storeErrorSentence ?? storeError?.Message ?? "The store could not be opened.",
+                ["reason"] = DiagnosticsBundle.StoreReasonCode(storeReason, storeError),
             };
+            if (DiagnosticsBundle.SqlStateOf(storeError) is { } sqlState)
+            {
+                unreachable["sql_state"] = sqlState;
+            }
+
+            if (DiagnosticsBundle.SocketErrorOf(storeError) is { } socketError)
+            {
+                unreachable["socket_error"] = socketError;
+            }
+
             if (!string.IsNullOrWhiteSpace(options.ServerName))
             {
                 const string ignored = "--server was ignored: the store is unreachable, so the server could not be looked up and no section is limited to it.";
@@ -236,12 +311,12 @@ WHERE queryid = ANY($1)";
             var days = Math.Max(1, (int)Math.Ceiling(hours / 24.0));
             var ct = cancellationToken;
             sections.Add(await DiagnosticsBundle.RunSectionAsync("store", c => StoreSectionAsync(postgres, config, c), ct));
-            sections.Add(await DiagnosticsBundle.RunSectionAsync("collection",
-                c => CollectionSectionAsync(postgres, scopeServerName, hours, days, c), ct));
+            sections.Add((await DiagnosticsBundle.RunSectionAsync("collection",
+                c => CollectionSectionAsync(postgres, scopeServerName, hours, days, c), ct)) with { AfterAlias = CutHealthTexts });
             sections.Add(await DiagnosticsBundle.RunSectionAsync("stall_probes",
                 async c => DiagnosticsBundle.ParseReader(await DarlingMcpStallProbeTools.GetCollectorStallProbes(postgres, scopeServerName, days, 50, c)), ct));
             sections.Add(await DiagnosticsBundle.RunSectionAsync("slow_reads",
-                async c => DiagnosticsBundle.ParseReader(await DarlingMcpSlowReadTools.GetSlowReads(postgres, hours, scopeServerName, null, null, 100, true, c)), ct));
+                async c => DropStatementSummaries(DiagnosticsBundle.ParseReader(await DarlingMcpSlowReadTools.GetSlowReads(postgres, hours, scopeServerName, null, null, 100, true, c))), ct));
             sections.Add(await DiagnosticsBundle.RunSectionAsync("read_latency",
                 async c => DiagnosticsBundle.ParseReader(await DarlingMcpReadLatencyTools.GetReadLatency(postgres, hours, null, null, 200, c)), ct));
             sections.Add((await DiagnosticsBundle.RunSectionAsync("store_statements",
@@ -290,9 +365,16 @@ WHERE queryid = ANY($1)";
         return new Outcome(exit, text, leaks, aliaser, string.Empty, warnings);
     }
 
-    private static async Task SeedFromStoreAsync(BundleAliaser aliaser, NpgsqlDataSource postgres, CancellationToken ct)
+    /// <summary>What reading the store's name sources gave: manifest notes, and the server-name source that failed (null when none did).</summary>
+    internal sealed record SeedResult(IReadOnlyList<string> Notes, string? FailedNameSource);
+
+    internal static async Task<SeedResult> SeedFromStoreAsync(
+        BundleAliaser aliaser, NpgsqlDataSource postgres, CancellationToken ct, string storeRolesSql = StoreRolesSql)
     {
-        await TryReadAsync(postgres, RegistryNamesSql, reader =>
+        var notes = new List<string>();
+        string? failedNameSource = null;
+
+        if (!await TryReadAsync(postgres, RegistryNamesSql, reader =>
         {
             aliaser.AddName(AliasKind.Server, reader.IsDBNull(0) ? null : reader.GetString(0));
             aliaser.AddName(AliasKind.Host, reader.IsDBNull(1) ? null : reader.GetString(1));
@@ -305,10 +387,13 @@ WHERE queryid = ANY($1)";
                     aliaser.AddName(AliasKind.Database, excluded);
                 }
             }
-        }, ct);
+        }, ct))
+        {
+            failedNameSource ??= "config_monitored_servers";
+        }
 
         /* Servers by id first so the alias order follows server_id; display names share their server's alias. */
-        await TryReadAsync(postgres, CollectServersSql, reader =>
+        if (!await TryReadAsync(postgres, CollectServersSql, reader =>
         {
             var id = reader.GetInt32(0);
             var name = reader.IsDBNull(1) ? null : reader.GetString(1);
@@ -317,24 +402,43 @@ WHERE queryid = ANY($1)";
             {
                 aliaser.AddNameLike(reader.GetString(2), name);
             }
-        }, ct);
+        }, ct))
+        {
+            failedNameSource ??= "servers";
+        }
 
-        await TryReadAsync(postgres, StoreRolesSql, reader =>
+        if (!await TryReadAsync(postgres, storeRolesSql, reader =>
         {
             var role = reader.GetString(0);
             if (!BundleAliaser.ProductRoles.Contains(role, StringComparer.OrdinalIgnoreCase))
             {
                 aliaser.AddName(AliasKind.Login, role);
             }
-        }, ct);
+        }, ct))
+        {
+            notes.Add("The store's role list could not be read, so a role named only in free text may not be aliased.");
+        }
 
-        await TryReadAsync(postgres, StoreDatabasesSql, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct);
-        await TryReadAsync(postgres, DatabaseInventorySql, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct);
-        await TryReadAsync(postgres, PgDatabaseInventorySql, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct);
+        if (!await TryReadAsync(postgres, StoreDatabasesSql, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct))
+        {
+            notes.Add("The store's database list could not be read, so a database named only in free text may not be aliased.");
+        }
+
+        if (!await TryReadAsync(postgres, DatabaseInventorySql, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct))
+        {
+            notes.Add("The SQL Server database inventory could not be read, so a monitored database named only in free text may not be aliased.");
+        }
+
+        if (!await TryReadAsync(postgres, PgDatabaseInventorySql, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct))
+        {
+            notes.Add("The PostgreSQL database inventory could not be read, so a monitored database named only in free text may not be aliased.");
+        }
+
+        return new SeedResult(notes, failedNameSource);
     }
 
-    /// <summary>One bounded read for the name set. A failure adds nothing; the harvest pass and the verifier cover what it would have named.</summary>
-    private static async Task TryReadAsync(NpgsqlDataSource postgres, string sql, Action<NpgsqlDataReader> each, CancellationToken ct)
+    /// <summary>One bounded read for the name set. Returns false when the read failed; the caller decides whether that is a note or a refusal.</summary>
+    private static async Task<bool> TryReadAsync(NpgsqlDataSource postgres, string sql, Action<NpgsqlDataReader> each, CancellationToken ct)
     {
         try
         {
@@ -345,10 +449,12 @@ WHERE queryid = ANY($1)";
             {
                 each(reader);
             }
+
+            return true;
         }
         catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException or InvalidCastException)
         {
-            /* A table the store does not have yet (below the schema that adds it) or a read the role may not make. */
+            return false;
         }
     }
 
@@ -390,7 +496,7 @@ WHERE queryid = ANY($1)";
                 continue;
             }
 
-            var json = await DarlingMcpDataTools.GetCollectionHealth(postgres, server.ServerName, false, null, ct);
+            var json = await DarlingMcpDataTools.GetCollectionHealthUncut(postgres, server.ServerName, ct);
             used += System.Text.Encoding.UTF8.GetByteCount(json);
             health.Add(new JsonObject { ["server_name"] = server.ServerName, ["health"] = DiagnosticsBundle.ParseReader(json) });
         }
@@ -422,7 +528,7 @@ WHERE queryid = ANY($1)";
     }
 
     /// <summary>
-    /// Part 3's statement history. Table and column names are provisional until #5097 part 3 merges. Never reads the
+    /// Part 3's statement history. Table and column names match V163 as merged. Never reads the
     /// diff-state baseline table. Absent tables report <c>not_present</c>.
     /// </summary>
     private static async Task<JsonNode?> StatementHistoryAsync(NpgsqlDataSource postgres, int hours, CancellationToken ct)

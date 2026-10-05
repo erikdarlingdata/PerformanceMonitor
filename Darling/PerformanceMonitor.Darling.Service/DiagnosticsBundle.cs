@@ -259,8 +259,24 @@ internal static class DiagnosticsBundle
             return null;
         }
 
+        if (string.IsNullOrWhiteSpace(options.AliasMapPath))
+        {
+            return "--alias-map needs a path.";
+        }
+
         var comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        if (string.Equals(Path.GetFullPath(options.AliasMapPath), Path.GetFullPath(options.OutputPath), comparison))
+        string map, bundle;
+        try
+        {
+            map = ResolveLinks(options.AliasMapPath);
+            bundle = ResolveLinks(options.OutputPath);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return "--alias-map is not a usable path (" + ex.GetType().Name + ").";
+        }
+
+        if (string.Equals(map, bundle, comparison))
         {
             return "--alias-map must be a different file from the bundle: the map holds the real names.";
         }
@@ -271,6 +287,42 @@ internal static class DiagnosticsBundle
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The full path of <paramref name="path"/> with every symbolic link on it followed: each existing component is
+    /// resolved in turn, so a link to a file that does not exist yet still compares equal to that file's own path, and
+    /// a path inside a linked directory compares by the directory's real location plus the file name.
+    /// </summary>
+    internal static string ResolveLinks(string path, int depth = 0)
+    {
+        var full = Path.GetFullPath(path);
+        if (depth > 16)
+        {
+            return full;
+        }
+
+        var root = Path.GetPathRoot(full) ?? string.Empty;
+        var current = root;
+        foreach (var part in full[root.Length..].Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, part);
+            try
+            {
+                FileSystemInfo info = Directory.Exists(current) ? new DirectoryInfo(current) : new FileInfo(current);
+                var target = info.ResolveLinkTarget(returnFinalTarget: true);
+                if (target is not null)
+                {
+                    current = ResolveLinks(target.FullName, depth + 1);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* A component that cannot be inspected is compared as written. */
+            }
+        }
+
+        return current;
     }
 
     /// <summary>Checks the output location before any work: an existing file without --force, or a missing or unwritable directory, is exit 4.</summary>
@@ -353,17 +405,26 @@ internal static class DiagnosticsBundle
         if (config.Smtp is { } smtp)
         {
             aliaser.AddName(AliasKind.Host, smtp.Host);
-            foreach (var list in new[] { smtp.From, smtp.To })
+            AddAddressDomains(aliaser, smtp.From);
+            AddAddressDomains(aliaser, smtp.To);
+
+            /* The SMTP login is a name (and often an address): its domain half too. */
+            aliaser.AddName(AliasKind.Login, smtp.Username);
+            AddAddressDomains(aliaser, smtp.Username);
+        }
+
+        /* A route's destinations: each webhook URL is a host and a secret, the routing key is a secret, and the
+           recipient list names mail domains. */
+        foreach (var route in config.NotificationRoutes ?? Array.Empty<PerformanceMonitor.Notifications.NotificationRoute>())
+        {
+            foreach (var url in new[] { route.TeamsUrl, route.SlackUrl, route.GenericUrl })
             {
-                foreach (var address in (list ?? string.Empty).Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-                {
-                    var at = address.LastIndexOf('@');
-                    if (at >= 0 && at < address.Length - 1)
-                    {
-                        aliaser.AddDomain(address[(at + 1)..]);
-                    }
-                }
+                AddUrlHost(aliaser, url);
+                aliaser.AddSecret(url);
             }
+
+            aliaser.AddSecret(route.PagerDutyRoutingKey);
+            AddAddressDomains(aliaser, route.SmtpRecipients);
         }
 
         AddUrlHost(aliaser, config.Web?.PublicBaseUrl);
@@ -378,6 +439,19 @@ internal static class DiagnosticsBundle
             foreach (var proxy in new[] { hooks.TeamsProxy, hooks.SlackProxy, hooks.GenericProxy })
             {
                 AddUrlHost(aliaser, proxy);
+            }
+        }
+    }
+
+    /// <summary>Registers the domain of every address in a comma- or semicolon-separated list.</summary>
+    private static void AddAddressDomains(BundleAliaser aliaser, string? list)
+    {
+        foreach (var address in (list ?? string.Empty).Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var at = address.LastIndexOf('@');
+            if (at >= 0 && at < address.Length - 1)
+            {
+                aliaser.AddDomain(address[(at + 1)..]);
             }
         }
     }
@@ -471,16 +545,41 @@ internal static class DiagnosticsBundle
         return at > 0 ? (account[(at + 1)..], account[..at]) : (null, account);
     }
 
-    private static string? ReadServiceObjectName()
+    /// <summary>
+    /// What the service registration said about the logon account: the parsed parts, and a manifest note for each path
+    /// that names nothing (the key is missing, the value is not text, or the account is a built-in one).
+    /// </summary>
+    internal static (string? Domain, string? Login, string? Note) ClassifyServiceAccount(bool keyFound, object? value)
+    {
+        if (!keyFound)
+        {
+            return (null, null, "The service's logon account was not read: the service registration was not found (the service may not be installed under its usual name).");
+        }
+
+        if (value is not string text)
+        {
+            return (null, null, "The service's logon account was not read: the registration holds no text value for it.");
+        }
+
+        var (domain, login) = ParseServiceAccount(text);
+        if (domain is null && login is null)
+        {
+            return (null, null, "The service runs as a built-in account, which names nothing; no service account was added to the name set.");
+        }
+
+        return (domain, login, null);
+    }
+
+    private static (bool KeyFound, object? Value) ReadServiceObjectName()
     {
         if (!OperatingSystem.IsWindows())
         {
-            return null;
+            return (false, null);
         }
 
         using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
             @"SYSTEM\CurrentControlSet\Services\" + DarlingCliCommands.ServiceName);
-        return key?.GetValue("ObjectName") as string;
+        return key is null ? (false, null) : (true, key.GetValue("ObjectName"));
     }
 
     private static List<string> AddLocalIdentity(BundleAliaser aliaser)
@@ -498,10 +597,10 @@ internal static class DiagnosticsBundle
 
         try
         {
-            var domain = IPGlobalProperties.GetIPGlobalProperties().DomainName;
-            if (!string.IsNullOrWhiteSpace(domain))
+            var machineDomain = IPGlobalProperties.GetIPGlobalProperties().DomainName;
+            if (!string.IsNullOrWhiteSpace(machineDomain))
             {
-                aliaser.AddName(AliasKind.Domain, domain);
+                aliaser.AddName(AliasKind.Domain, machineDomain);
             }
         }
         catch (Exception ex) when (ex is NetworkInformationException or PlatformNotSupportedException or InvalidOperationException)
@@ -529,9 +628,14 @@ internal static class DiagnosticsBundle
 
         try
         {
-            var (domain, login) = ParseServiceAccount(ReadServiceObjectName());
+            var (found, value) = ReadServiceObjectName();
+            var (domain, login, note) = ClassifyServiceAccount(found, value);
             aliaser.AddName(AliasKind.Domain, domain);
             aliaser.AddName(AliasKind.Login, login);
+            if (note is not null)
+            {
+                notes.Add(note);
+            }
         }
         catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException or InvalidOperationException)
         {
@@ -555,6 +659,91 @@ internal static class DiagnosticsBundle
         {
             return new BundleSection(name, new JsonObject { ["status"] = "error", ["error_class"] = SlowReadLog.ErrorClassOf(ex) }, true);
         }
+    }
+
+    /// <summary>The reason codes an unreachable-store section may carry. Nothing else ever reaches the file.</summary>
+    internal static readonly string[] StoreReasonCodes =
+    {
+        "missing_store_credential", "first_run", "bootstrap_stopped", "connect_failed", "auth_failed", "timeout", "other",
+    };
+
+    /// <summary>The caller's reason when it is one of <see cref="StoreReasonCodes"/>, else the code the error classifies to.</summary>
+    internal static string StoreReasonCode(string? requested, Exception? error) =>
+        requested is not null && StoreReasonCodes.Contains(requested, StringComparer.Ordinal) ? requested : ClassifyStoreError(error);
+
+    /// <summary>The fixed reason code when the config gives no store connection string at all.</summary>
+    internal static string MissingConnectionReason(PostgresConfig postgres)
+    {
+        if (!postgres.Managed || !OperatingSystem.IsWindows())
+        {
+            return "other";
+        }
+
+        try
+        {
+            var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(postgres);
+            var evidence = DarlingStoreBootstrapEvidence.FindBootstrapEvidence(dataDirectory);
+            return evidence is null ? "first_run" : "bootstrap_stopped";
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            return "missing_store_credential";
+        }
+    }
+
+    /// <summary>
+    /// The fixed reason code for an unreachable store: <c>timeout</c>, <c>auth_failed</c> (a SQLSTATE of class 28),
+    /// <c>connect_failed</c> (a socket error or any other driver error before a session), or <c>other</c>.
+    /// </summary>
+    internal static string ClassifyStoreError(Exception? error)
+    {
+        for (var ex = error; ex is not null; ex = ex.InnerException)
+        {
+            if (ex is TimeoutException or OperationCanceledException)
+            {
+                return "timeout";
+            }
+
+            if (ex is PostgresException pg)
+            {
+                return pg.SqlState.StartsWith("28", StringComparison.Ordinal) ? "auth_failed" : "other";
+            }
+
+            if (ex is System.Net.Sockets.SocketException)
+            {
+                return "connect_failed";
+            }
+        }
+
+        return error is NpgsqlException ? "connect_failed" : "other";
+    }
+
+    /// <summary>The SQLSTATE of a PostgresException anywhere on the chain, or null.</summary>
+    internal static string? SqlStateOf(Exception? error)
+    {
+        for (var ex = error; ex is not null; ex = ex.InnerException)
+        {
+            if (ex is PostgresException pg && !string.IsNullOrEmpty(pg.SqlState))
+            {
+                return pg.SqlState;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The name of the <see cref="System.Net.Sockets.SocketError"/> of a SocketException anywhere on the chain, or null.</summary>
+    internal static string? SocketErrorOf(Exception? error)
+    {
+        for (var ex = error; ex is not null; ex = ex.InnerException)
+        {
+            if (ex is System.Net.Sockets.SocketException socket)
+            {
+                return socket.SocketErrorCode.ToString();
+            }
+        }
+
+        return null;
     }
 
     /// <summary>A reader's JSON answer as a tree; text that is not JSON is kept as a string so nothing is lost.</summary>
@@ -664,6 +853,12 @@ internal static class DiagnosticsBundle
     internal static (string? Text, IReadOnlyList<BundleLeak> Leaks, bool OverCap) Assemble(
         IReadOnlyList<BundleSection> sections, BundleAliaser aliaser, JsonObject manifest)
     {
+        aliaser.NoteProductValues(sections.Select(s => s.Name));
+        foreach (var section in sections)
+        {
+            aliaser.NoteKeys(section.Node);
+        }
+
         foreach (var section in sections)
         {
             aliaser.Harvest(section.Node);

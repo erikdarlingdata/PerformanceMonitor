@@ -130,7 +130,7 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
             $"routed raw for zeta-07 (database {DbOne})",
             $$"""[{"ordinal":1,"label":"query_store_stats @ gamma_orders 1a2b3c","ms":8800.5,"rows":12}]""");
 
-        /* The statement history, in the shape part 3 gives it (names provisional); created here only when the store lacks them. */
+        /* The statement history, in the shape V163 gives it (the names match V163 as merged); created here only when the store lacks them. */
         await ExecAsync(c, @"CREATE TABLE IF NOT EXISTS collect.store_statement_captures
 (capture_time timestamp NOT NULL, interval_seconds integer, stats_reset timestamp, dealloc bigint, dealloc_delta bigint, statements_seen integer NOT NULL, statements_kept integer NOT NULL, hidden_statements integer NOT NULL, outcome text NOT NULL)");
         await ExecAsync(c, @"CREATE TABLE IF NOT EXISTS collect.store_statement_history

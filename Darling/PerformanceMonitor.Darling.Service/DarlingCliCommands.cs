@@ -651,12 +651,10 @@ public static class DarlingCliCommands
 
         NpgsqlDataSource? dataSource = null;
         Exception? storeError = null;
-        string? storeSentence = null;
+        string? storeReason = null;
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            storeSentence = postgres.Managed && OperatingSystem.IsWindows()
-                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
-                : "postgres.connectionString is empty, so there is no store to read.";
+            storeReason = DiagnosticsBundle.MissingConnectionReason(postgres);
         }
         else
         {
@@ -684,7 +682,7 @@ public static class DarlingCliCommands
         try
         {
             outcome = await DiagnosticsBundleRunner.BuildAsync(
-                options, config, connectionString, dataSource, storeError, storeSentence, cancellationToken);
+                options, config, connectionString, dataSource, storeError, storeReason, cancellationToken);
         }
         finally
         {
@@ -724,8 +722,16 @@ public static class DarlingCliCommands
             {
                 var lines = new List<string> { DiagnosticsBundle.AliasMapWarning };
                 lines.AddRange(outcome.Aliaser.AliasMapLines());
-                File.WriteAllLines(options.AliasMapPath, lines);
-                output.WriteLine("Alias map written (DO NOT ATTACH it): " + options.AliasMapPath);
+                /* The same writer as the bundle: a random temp name created with CreateNew, then moved, so a planted link is replaced and never written through. */
+                var mapProblem2 = DiagnosticsBundle.WriteAtomically(options.AliasMapPath, string.Join(Environment.NewLine, lines) + Environment.NewLine, options.Force);
+                if (mapProblem2 is null)
+                {
+                    output.WriteLine("Alias map written (DO NOT ATTACH it): " + options.AliasMapPath);
+                }
+                else
+                {
+                    error.WriteLine("Could not write the alias map; the bundle itself was written.");
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

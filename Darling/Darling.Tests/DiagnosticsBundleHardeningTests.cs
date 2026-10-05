@@ -84,7 +84,7 @@ public sealed class DiagnosticsBundleHardeningTests
     }
 
     [Fact]
-    public async Task StoreDown_TheUnreachableMessage_GoesThroughTheAliasPass_NotJustTheVerifier()
+    public async Task StoreDown_TheUnreachableSection_CarriesNoSentence_OnlyFixedCodes()
     {
         var root = Directory.CreateTempSubdirectory("darling-bundle-downmsg-");
         try
@@ -92,13 +92,40 @@ public sealed class DiagnosticsBundleHardeningTests
             var options = DiagnosticsBundle.ParseArgs(new[] { Path.Combine(root.FullName, "b.json"), "--log-dir", root.FullName }).Options!;
             var config = new DarlingConfig { Servers = { new MonitoredServer { Name = "alpha-sql-01" } } };
 
-            /* An address and a quoted account the name set has never seen: only the alias pass (not the verifier) can remove them. */
+            /* The store's own help text quotes the data directory; an error message quotes an address and an account nobody registered. */
+            var error = new InvalidOperationException(@"The managed store credential (E:\qxclient\darling\pg\store.cred) does not exist; connect to 198.51.100.9 failed for user 'QXOTHER\svc_unseen'");
             var outcome = await DiagnosticsBundleRunner.BuildAsync(
-                options, config, null, null, null, "connect to 198.51.100.9 failed for user 'QXOTHER\\svc_unseen'", CancellationToken.None);
+                options, config, null, null, error, "missing_store_credential", CancellationToken.None);
             Assert.Equal(DarlingCliCommands.DiagnosticsBundleExitCode.StoreUnreachable, outcome.ExitCode);
+            foreach (var forbidden in new[] { "qxclient", "198.51.100.9", "QXOTHER", "svc_unseen", "store.cred" })
+            {
+                Assert.DoesNotContain(forbidden, outcome.Text!, StringComparison.OrdinalIgnoreCase);
+            }
+
+            var section = JsonNode.Parse(outcome.Text!)!["sections"]!["store_unreachable"]!.AsObject();
+            Assert.Equal("missing_store_credential", section["reason"]!.GetValue<string>());
+            Assert.Null(section["message"]);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task StoreDown_ASocketFailure_CarriesTheReasonAndTheSocketErrorName()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-bundle-downsock-");
+        try
+        {
+            var options = DiagnosticsBundle.ParseArgs(new[] { Path.Combine(root.FullName, "b.json"), "--log-dir", root.FullName }).Options!;
+            var config = new DarlingConfig { Servers = { new MonitoredServer { Name = "alpha-sql-01" } } };
+            var error = new Npgsql.NpgsqlException("Failed to connect to 198.51.100.9:5432", new SocketException((int)SocketError.ConnectionRefused));
+            var outcome = await DiagnosticsBundleRunner.BuildAsync(options, config, null, null, error, null, CancellationToken.None);
+            var section = JsonNode.Parse(outcome.Text!)!["sections"]!["store_unreachable"]!.AsObject();
+            Assert.Equal("connect_failed", section["reason"]!.GetValue<string>());
+            Assert.Equal("ConnectionRefused", section["socket_error"]!.GetValue<string>());
             Assert.DoesNotContain("198.51.100.9", outcome.Text!, StringComparison.Ordinal);
-            Assert.DoesNotContain("QXOTHER", outcome.Text!, StringComparison.Ordinal);
-            Assert.DoesNotContain("svc_unseen", outcome.Text!, StringComparison.Ordinal);
         }
         finally
         {
