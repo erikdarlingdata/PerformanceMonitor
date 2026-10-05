@@ -381,6 +381,25 @@ public sealed class DarlingCollectorRunner
        all, so it is unaffected either way. */
     private readonly Func<int> _procedureStatsPlanCycleInterval;
 
+    /* #5158: whether query_stats defers its plan fetch (darling.json "queryStatsDeferredPlanFetch", default true).
+       Off gives the inline plan capture exactly as before. Read through a provider like its siblings, so it is
+       honored on the NEXT cycle. */
+    private readonly Func<bool> _queryStatsDeferredPlanFetch;
+
+    /* #5158: what this host knows of the statement plans it has already committed, one cache per server and per
+       service lifetime. A restart starts empty (each server renders its plans once more); nothing seeds it from
+       the store, because a probe costs more than the render it would save (#2831). */
+    private readonly ConcurrentDictionary<int, PlanDigestCache<QueryStatsPlanKey>> _queryStatsPlanCaches = new();
+
+    /// <summary>How long a plan identity may go unseen before the host forgets it (#5158).</summary>
+    internal static readonly TimeSpan QueryStatsPlanCacheMaxAge = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Runs between query_stats' main query and its plan fetch, on the same target connection. A test uses it to
+    /// age a plan out of the cache in that window. Null in production.
+    /// </summary>
+    internal Func<CancellationToken, Task>? BetweenPlanPhasesForTests { get; set; }
+
     /* Resolves the per-collector database scope (#3477) for one (collector, server) pair — the worker
        passes StoreConfigProvider.ResolveDatabaseScope over its live schedule overrides, so a store
        write to config_collector_schedules.databases is honored on the collector's NEXT run through the
@@ -668,6 +687,18 @@ public sealed class DarlingCollectorRunner
         _capturePlans() && ShouldCapturePlanForCollector(collectorName, serverId);
 
     /// <summary>
+    /// #5158: whether this run of this collector leaves plan XML out of its main query and fetches it in a
+    /// second target query for only the plans the host has not committed. True for query_stats on a server-scoped
+    /// target that captures plans, with the knob on. Azure SQL Database reads per database through a path with no
+    /// second query, so it keeps the inline capture.
+    /// </summary>
+    internal bool ShouldDeferPlanFetchFor(string collectorName, bool capturePlanXml, CollectorTargetInfo target) =>
+        capturePlanXml
+        && string.Equals(collectorName, QueryStatsCollector.Instance.Name, StringComparison.Ordinal)
+        && !target.IsAzureSqlDb
+        && _queryStatsDeferredPlanFetch();
+
+    /// <summary>
     /// The instance side of the #2862 cadence: advances this (server, collector) cycle counter and asks the
     /// pure policy. Returns true unconditionally for every collector except
     /// <see cref="PlanCadenceGatedCollector"/>, so no other collector's behaviour changes and no other
@@ -708,7 +739,7 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _queryStoreWriteFence = queryStoreWriteFence;
@@ -726,6 +757,8 @@ public sealed class DarlingCollectorRunner
         _queryStoreIntervalWide = new QueryStoreIntervalWide(logger);
         /* Null provider = 1 = capture a plan on every cycle, i.e. the pre-#2862 behaviour. */
         _procedureStatsPlanCycleInterval = procedureStatsPlanCycleInterval ?? (() => 1);
+        /* Null provider = the deferred plan fetch is on, the shipped default (#5158). */
+        _queryStatsDeferredPlanFetch = queryStatsDeferredPlanFetch ?? (() => true);
         /* Null provider = no scope for any collector = every database the server enumerates, which is
            what Lite's twin and every pre-#3477 test constructs. */
         _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
@@ -2154,6 +2187,7 @@ public sealed class DarlingCollectorRunner
             }
         }
 
+        var capturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId);
         var context = new CollectorContext
         {
             ServerId = server.ServerId,
@@ -2180,7 +2214,10 @@ public sealed class DarlingCollectorRunner
                ShouldCapturePlanForCollector. Every other collector reads exactly _capturePlans().
                Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
                operator asked for by name and which stores nothing, so it always renders. */
-            CapturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId),
+            CapturePlanXml = capturePlanXml,
+            /* #5158: query_stats' main query leaves the plan out and the plan fetch below renders only the plans this
+               host has not committed. */
+            DeferPlanXmlFetch = ShouldDeferPlanFetchFor(definition.Name, capturePlanXml, server.Target),
             /* #4735 item 1: 0 on the first attempt; RunWithSplitCharacterRetryAsync raises it after a 22021. */
             PgLogReadShiftBytes = pgLogReadShiftBytes,
             /* #2150: ON. query_sql_text is no longer carried on every runtime-stats row — it is fetched once
@@ -3382,6 +3419,7 @@ public sealed class DarlingCollectorRunner
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
+                List<QueryStatsPlanKey>? pendingPlanKeys = null;
                 /* #2851: this branch IS the server-scoped path, so its phases are measured from here on.
                    Set before the read rather than after it so the wall-clock-budget catch below reports the
                    phases of the cycle it abandoned — that is the case where "where did the time go" matters
@@ -3522,6 +3560,15 @@ public sealed class DarlingCollectorRunner
                        trigger evidence that included time no reader was waiting on. Dispose is
                        idempotent for exactly this pairing. */
                     stallProbeArm.Dispose();
+
+                    /* #5158: the deferred plan fetch. After the main read is over and on this same target connection,
+                       inside the same wall-clock budget (itemToken), so a slow fetch is cut by the budget like the read. */
+                    if (context.DeferPlanXmlFetch && (object)rows is List<QueryStatsCollector.Row> deferredRows)
+                    {
+                        await reader.CloseAsync();
+                        pendingPlanKeys = await FetchDeferredQueryStatsPlansAsync(
+                            targetProvider, targetConnection, server, context, deferredRows, itemToken);
+                    }
                 }
                 catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(itemBudget, cancellationToken))
                 {
@@ -3584,7 +3631,31 @@ public sealed class DarlingCollectorRunner
 
                 var storageSlice = Stopwatch.StartNew();
                 await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
-                rowsWritten = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
+                var committed = false;
+                try
+                {
+                    rowsWritten = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
+                    committed = true;
+                }
+                finally
+                {
+                    /* #5158: a plan this run rendered counts as stored only once its batch committed (a successful
+                       StoreWriteReattempt included). A batch that failed leaves nothing cached, so the next run
+                       renders those plans again rather than sending a digest the store never received. */
+                    if (pendingPlanKeys is not null
+                        && _queryStatsPlanCaches.TryGetValue(server.ServerId, out var planCache))
+                    {
+                        if (committed)
+                        {
+                            planCache.ConfirmPending(pendingPlanKeys, DateTime.UtcNow);
+                        }
+                        else
+                        {
+                            planCache.DiscardPending(pendingPlanKeys);
+                        }
+                    }
+                }
+
                 storageMs += storageSlice.ElapsedMilliseconds;
 
                 /* The single item's write returned: land what the definition staged for it. A throw above
@@ -4313,9 +4384,19 @@ public sealed class DarlingCollectorRunner
             {
                 if (diversionPlan.Count > 0)
                 {
-                    await PayloadDimensionWriter.FlushAsync(
+                    var absentDigests = await PayloadDimensionWriter.FlushAsync(
                         pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken,
                         compressPlanContent: _compressPlanContent());
+
+                    /* #5158: digests this batch referenced without content that the store holds no plan for. The host
+                       forgets them so the next sighting renders the plan again. FlushAsync reports upper-case hex and
+                       Evict compares ignoring case. */
+                    if (absentDigests.Count > 0
+                        && definition is QueryStatsCollector
+                        && _queryStatsPlanCaches.TryGetValue(server.ServerId, out var absentCache))
+                    {
+                        absentCache.Evict(absentDigests);
+                    }
                 }
 
                 /* #3953: after the COPY and the dimension flush, in the unstamped region (#3095): a fault here is not
@@ -5039,6 +5120,8 @@ public sealed class DarlingCollectorRunner
     {
         context.PerItemPlanFetchMs = 0;
         context.PerItemTextFetchMs = 0;
+        context.PerItemPlanRenderedRows = 0;
+        context.PerItemPlanRenderedBytes = 0;
 
         /* #2811: the sub-phases clear on the SAME rule as their parents, and for the same
            reason - an item whose fetch faults before setting them must not print the previous
@@ -6866,6 +6949,134 @@ RETURNING s.state_key";
     internal async Task<SqlConnection> OpenAzureDatabaseConnectionAsync(ServerRuntime server, string databaseName, CancellationToken cancellationToken)
         => (SqlConnection)await OpenDatabaseConnectionAsync(
             SqlServerTargetProvider.Instance, server, databaseName, cancellationToken);
+
+    /// <summary>
+    /// #5158: the second half of a deferred query_stats read. The main query returned stats rows with no plan; this
+    /// gives each row its plan, rendering on the monitored server only the plans this host has not already committed.
+    ///
+    /// <para>A row whose identity (<see cref="QueryStatsPlanKey"/>) is in the host's cache carries the cached digest and
+    /// measured size, so the writer stores the digest and no plan text crosses the wire. A plan over the capture cap
+    /// is cached with a null digest: its rows carry the size and a NULL plan, and it is not rendered again. The
+    /// rest go to <see cref="QueryStatsCollector.BuildPlanFetchQuery"/>, one call (split above
+    /// <see cref="QueryStatsCollector.MaxPlanFetchKeys"/> keys), on the same connection as the main read. A plan
+    /// whose handle aged out between the two queries comes back with no plan and no size, the pairing the inline form
+    /// gives for the same case, and is not cached.</para>
+    ///
+    /// <para>A fetch that fails ships the rows without plans, caches nothing, and does not fail the run: the plans
+    /// are fetched again next cycle. A stop or the item budget expiring is not a fetch failure and propagates. What
+    /// this run rendered is returned as pending keys: they are confirmed after the batch commits, or discarded.</para>
+    /// </summary>
+    private async Task<List<QueryStatsPlanKey>> FetchDeferredQueryStatsPlansAsync(
+        ITargetProvider provider,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        CollectorContext context,
+        List<QueryStatsCollector.Row> rows,
+        CancellationToken cancellationToken)
+    {
+        var cache = _queryStatsPlanCaches.GetOrAdd(server.ServerId, static _ => new PlanDigestCache<QueryStatsPlanKey>());
+        var pending = new List<QueryStatsPlanKey>();
+        var now = DateTime.UtcNow;
+
+        cache.Prune(now - QueryStatsPlanCacheMaxAge);
+
+        var misses = new List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)>();
+        foreach (var row in rows)
+        {
+            if (QueryStatsPlanKey.TryCreate(server.ServerId, row) is not { } key)
+            {
+                continue;
+            }
+
+            if (cache.TryGet(key, now, out var hit))
+            {
+                /* The cached size rides along with the digest, so a reused row is the row it always was. A null
+                   digest is an over-cap plan: the size and no plan, the pairing the inline capture produces. */
+                row.KnownPlanDigest = hit.Digest;
+                row.QueryPlanXmlBytes = hit.Bytes;
+            }
+            else
+            {
+                misses.Add((key, row));
+            }
+        }
+
+        if (BetweenPlanPhasesForTests is { } hook)
+        {
+            await hook(cancellationToken);
+        }
+
+        if (misses.Count == 0)
+        {
+            context.Measure("plans_rendered", 0);
+            context.Measure("plans_rendered_bytes", 0);
+            return pending;
+        }
+
+        var renderedRows = 0;
+        long renderedBytes = 0;
+        try
+        {
+            for (var offset = 0; offset < misses.Count; offset += QueryStatsCollector.MaxPlanFetchKeys)
+            {
+                var chunk = misses.GetRange(offset, Math.Min(QueryStatsCollector.MaxPlanFetchKeys, misses.Count - offset));
+                var query = QueryStatsCollector.BuildPlanFetchQuery(context, chunk.ConvertAll(m => m.Key.ToFetchKey()));
+
+                Dictionary<int, (string? PlanXml, long? Bytes)> fetched;
+                using (var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds))
+                using (var planReader = await command.ExecuteReaderAsync(cancellationToken))
+                {
+                    fetched = await QueryStatsCollector.ReadPlanFetchAsync(planReader, cancellationToken);
+                }
+
+                foreach (var (ord, result) in fetched)
+                {
+                    var (key, row) = chunk[ord];
+                    if (result.PlanXml is null && result.Bytes is null)
+                    {
+                        /* Aged out between the two queries: no plan and no size, and nothing worth caching. */
+                        continue;
+                    }
+
+                    row.QueryPlanXmlBytes = result.Bytes;
+                    renderedRows++;
+                    renderedBytes += result.Bytes ?? 0;
+
+                    if (result.PlanXml is null)
+                    {
+                        /* Over the cap: the size, a NULL plan, and an entry that stops the next run rendering it again. */
+                        cache.AddPending(key, null, result.Bytes, now);
+                    }
+                    else
+                    {
+                        row.QueryPlanXml = result.PlanXml;
+                        var digest = Convert.ToHexString(
+                            PayloadDimensions.Digest(PgCollectorRowWriter.StripEmbeddedNuls(result.PlanXml)));
+                        cache.AddPending(key, digest, result.Bytes, now);
+                    }
+
+                    pending.Add(key);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
+                                   && !cancellationToken.IsCancellationRequested)
+        {
+            _logger?.LogWarning(
+                ex,
+                "{Collector} on '{Server}': the plan fetch failed, so this run's rows ship without plans for the plans not yet stored; they are fetched again next cycle (#5158).",
+                QueryStatsCollector.Instance.Name, server.Config.DisplayName);
+        }
+        finally
+        {
+            context.PerItemPlanRenderedRows = renderedRows;
+            context.PerItemPlanRenderedBytes = renderedBytes;
+            context.Measure("plans_rendered", renderedRows);
+            context.Measure("plans_rendered_bytes", renderedBytes);
+        }
+
+        return pending;
+    }
 
     /// <summary>
     /// The connection for a collector that reads the server as a whole — engine-resolved from the probed
