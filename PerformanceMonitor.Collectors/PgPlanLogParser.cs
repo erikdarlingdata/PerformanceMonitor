@@ -39,11 +39,22 @@ namespace PerformanceMonitor.Collectors;
 /// stripped only inside condition fields: a blanket numeric strip would rewrite a relation genuinely named
 /// <c>transactionitems1</c> into <c>transactionitems?</c>, destroying identity to hide a value that was
 /// never there.</para>
+///
+/// <para><b>The hash covers the plan's SHAPE, not its estimates (#5114).</b> The stored JSON keeps everything
+/// <c>auto_explain</c> wrote, but the hash is taken over a projection of it: costs, row and width estimates,
+/// every <c>log_analyze</c> counter (WAL, index searches), any <c>Estimated *</c> key, buffer and I/O figures, <c>Settings</c>, <c>JIT</c>, timings and the number of
+/// workers planned are dropped, because they drift between captures of one plan (statistics refresh, cache state,
+/// a setting) and would read as a plan change. What stays is the tree: node types, join order and method, relations,
+/// indexes, scan direction, parallel awareness and every condition and key field. The projection is a DENYLIST, so a
+/// key this parser has never seen stays in the hash and over-splits, which is the safe direction: an allowlist would
+/// silently merge a real difference it did not know about.</para>
 /// </summary>
 public static class PgPlanLogParser
 {
-    /// <param name="PlanHash">Of the REDACTED plan, so one shape recurs to one hash whatever values it ran
-    /// with. Hashing the raw text would defeat dedup exactly where it matters most.</param>
+    /// <param name="PlanHash">Of the REDACTED plan's SHAPE, so one shape recurs to one hash whatever values it ran
+    /// with and whatever its estimates were: costs, row estimates, runtime counters, buffers, <c>Settings</c> and
+    /// <c>JIT</c> are not hashed (#5114), and <paramref name="PlanJson"/> keeps them. Hashing the raw text would defeat
+    /// grouping exactly where it matters most. A plan with none of those fields hashes as it did before #5114.</param>
     public readonly record struct ParsedPlan(
         long QueryId,
         double DurationMs,
@@ -246,7 +257,8 @@ public static class PgPlanLogParser
 
         /* Removed BEFORE anything else touches the tree, so no later step can carry it by accident. Query
            Parameters is the bind values (PostgreSQL 16+, auto_explain.log_parameter_max_length != 0); left in,
-           it would store them and make PlanHash differ per value (#5103). */
+           it would store them and make PlanHash differ per value (#5103). #5114 extends the same rule from bind
+           values to estimates: the hash below is taken over the plan's shape, never its numbers. */
         root.Remove("Query Text");
         root.Remove("Query Parameters");
 
@@ -257,7 +269,7 @@ public static class PgPlanLogParser
         return new ParsedPlan(
             QueryId: queryId,
             DurationMs: durationMs,
-            PlanHash: Hash(json),
+            PlanHash: ShapeHash(root),
             NodeCount: CountNodes(plan),
             TopNodeType: plan["Node Type"]?.GetValue<string>(),
             PlanJson: json);
@@ -329,6 +341,82 @@ public static class PgPlanLogParser
         }
 
         return count;
+    }
+
+    /* Keys that sit beside "Plan" at the root and say how one execution went, not what the plan is. */
+    private static readonly HashSet<string> s_rootVolatile = new(StringComparer.Ordinal)
+    {
+        "Settings", "JIT", "Planning Time", "Execution Time", "Planning", "Triggers",
+    };
+
+    /* Keys on a plan node that are an estimate, a runtime counter, a buffer figure or a degree the planner derives
+       from estimates. The pattern families in IsVolatileNodeKey cover the rest (Actual *, Estimated *, Rows Removed by *,
+       * Blocks, * I/O *, WAL *). Anything NOT listed or matched stays in the hash: unknown means shape. */
+    private static readonly HashSet<string> s_nodeVolatile = new(StringComparer.Ordinal)
+    {
+        "Startup Cost", "Total Cost", "Plan Rows", "Plan Width", "Planned Partitions",
+        "Heap Fetches", "Exact Heap Blocks", "Lossy Heap Blocks",
+        "Sort Method", "Sort Space Used", "Sort Space Type", "Peak Memory Usage",
+        "Hash Buckets", "Original Hash Buckets", "Hash Batches", "Original Hash Batches", "Disk Usage", "HashAgg Batches",
+        "Workers Planned", "Workers Launched", "Workers",
+        "Cache Hits", "Cache Misses", "Cache Evictions", "Cache Overflows",
+        "Full-sort Groups", "Pre-sorted Groups",
+        "Storage", "Maximum Storage",
+        "Tuples Inserted", "Conflicting Tuples",
+        "Index Searches",
+        "Subplans Removed",
+    };
+
+    /// <summary>True for a plan-node key that is not part of the plan's shape (#5114).</summary>
+    internal static bool IsVolatileNodeKey(string key) =>
+        s_nodeVolatile.Contains(key)
+        || key.StartsWith("Actual ", StringComparison.Ordinal)
+        || key.StartsWith("Estimated ", StringComparison.Ordinal)
+        || key.StartsWith("WAL ", StringComparison.Ordinal)
+        || key.StartsWith("Rows Removed by ", StringComparison.Ordinal)
+        || key.EndsWith(" Blocks", StringComparison.Ordinal)
+        || key.Contains("I/O ", StringComparison.Ordinal);
+
+    /// <summary>Removes the volatile keys from a plan node and every node beneath it, in place. InitPlan and SubPlan
+    /// children live in <c>Plans</c> too, and the array order is kept: it is the join order.</summary>
+    internal static void ProjectShape(JsonObject node)
+    {
+        foreach (var property in node.ToList())
+        {
+            if (IsVolatileNodeKey(property.Key))
+            {
+                node.Remove(property.Key);
+            }
+        }
+
+        if (node["Plans"] is JsonArray children)
+        {
+            foreach (var child in children)
+            {
+                if (child is JsonObject childNode)
+                {
+                    ProjectShape(childNode);
+                }
+            }
+        }
+    }
+
+    /// <summary>The hash of a REDACTED root's shape. Works on a clone, so the root (and the JSON stored from it) keeps
+    /// every estimate. 32 uppercase hex characters, as before.</summary>
+    internal static string ShapeHash(JsonObject redactedRoot)
+    {
+        var clone = (JsonObject)redactedRoot.DeepClone();
+        foreach (var key in s_rootVolatile)
+        {
+            clone.Remove(key);
+        }
+
+        if (clone["Plan"] is JsonObject plan)
+        {
+            ProjectShape(plan);
+        }
+
+        return Hash(clone.ToJsonString());
     }
 
     private static string Hash(string json)

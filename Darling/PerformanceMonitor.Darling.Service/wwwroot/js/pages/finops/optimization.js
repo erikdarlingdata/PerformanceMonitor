@@ -12,6 +12,7 @@
    ok shows its table, empty shows an empty strip, not_collected shows the section's message. */
 
 import { VIZ } from "../../panels.js";
+import { planColumn } from "../plan-viewer.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat } from "../../util.js";
 
 // The default window.
@@ -161,7 +162,7 @@ export const tab = {
           sectionView("Idle Databases", data.idle_databases, IDLE_COLUMNS, "No idle databases detected", idleNotice),
           sectionView("tempdb Pressure", data.tempdb_pressure, TEMPDB_COLUMNS, "No tempdb data available", windowNotice),
           sectionView("Wait Stats Summary", data.wait_categories, WAIT_COLUMNS, "No wait stats data available", windowNotice),
-          sectionView("Expensive Queries (Top " + LIMIT + " by CPU)", data.expensive_queries, QUERY_COLUMNS, "No expensive queries found", queryNotice),
+          sectionView("Expensive Queries (Top " + LIMIT + " by CPU)", data.expensive_queries, [...QUERY_COLUMNS, planColumn(server)], "No expensive queries found", queryNotice),
           sectionView("Memory Grant Efficiency", data.memory_grant_efficiency, GRANT_COLUMNS, "No memory grant data available", windowNotice),
         ]);
       } catch (e) {
