@@ -982,6 +982,26 @@ public class StoreLogClassifierTests
         }
     }
 
+    /// <summary>#5114: two runs of one plan whose estimates and runtime counters differ are one row, and the kept sample
+    /// still carries a capture's own estimates.</summary>
+    [Fact]
+    public void TwoRunsOfOneShape_WithDifferentEstimates_AreOneRow()
+    {
+        static string[] Entry(string duration, string cost, string rows) =>
+        [
+            DefaultPrefix + "LOG:  duration: " + duration + " ms  plan:",
+            "\t{\"Plan\":{\"Node Type\":\"Index Scan\",\"Relation Name\":\"orders\",\"Alias\":\"orders\",\"Total Cost\":" + cost
+                + ",\"Plan Rows\":" + rows + ",\"Actual Rows\":" + rows + ",\"Shared Hit Blocks\":" + rows + "},\"Query Identifier\":4242,\"Execution Time\":" + duration + "}",
+        ];
+
+        var census = StoreLogClassifier.Classify(string.Join("\n", Entry("11000.1", "8.5", "1").Concat(Entry("19000.9", "91234.5", "880000"))) + "\n");
+
+        var plan = Assert.Single(census.Groups.Where(g => g.EventClass == StoreLogClassifier.SlowPlanClass));
+        Assert.Equal(2, plan.Occurrences);
+        Assert.EndsWith(" Index Scan queryid=4242", plan.MessageText, StringComparison.Ordinal);
+        Assert.Contains("\"Total Cost\":", plan.SampleLine, StringComparison.Ordinal);
+    }
+
     /// <summary>A plan that parsed but is over the sample cap keeps its hash, top node and query id, and a size marker
     /// in place of the JSON: it still groups, and nothing of it is kept.</summary>
     [Fact]
