@@ -84,6 +84,29 @@ public sealed class DiagnosticsBundleHardeningTests
     }
 
     [Fact]
+    public async Task StoreDown_TheUnreachableMessage_GoesThroughTheAliasPass_NotJustTheVerifier()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-bundle-downmsg-");
+        try
+        {
+            var options = DiagnosticsBundle.ParseArgs(new[] { Path.Combine(root.FullName, "b.json"), "--log-dir", root.FullName }).Options!;
+            var config = new DarlingConfig { Servers = { new MonitoredServer { Name = "alpha-sql-01" } } };
+
+            /* An address and a quoted account the name set has never seen: only the alias pass (not the verifier) can remove them. */
+            var outcome = await DiagnosticsBundleRunner.BuildAsync(
+                options, config, null, null, null, "connect to 198.51.100.9 failed for user 'QXOTHER\\svc_unseen'", CancellationToken.None);
+            Assert.Equal(DarlingCliCommands.DiagnosticsBundleExitCode.StoreUnreachable, outcome.ExitCode);
+            Assert.DoesNotContain("198.51.100.9", outcome.Text!, StringComparison.Ordinal);
+            Assert.DoesNotContain("QXOTHER", outcome.Text!, StringComparison.Ordinal);
+            Assert.DoesNotContain("svc_unseen", outcome.Text!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task StoreDown_WithIncludeLogText_WarnsOnStderrAndInTheManifest()
     {
         var root = Directory.CreateTempSubdirectory("darling-bundle-downtext-");
