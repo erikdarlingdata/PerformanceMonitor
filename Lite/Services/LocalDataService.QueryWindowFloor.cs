@@ -203,6 +203,10 @@ public partial class LocalDataService
     internal static DateTime? EarlierCoverageFloor(DateTime? first, DateTime? second) =>
         first is DateTime a && second is DateTime b ? (a <= b ? a : b) : first ?? second;
 
+    /// <summary>The later of two probe answers, a null (nothing to report in the window) giving way to the other; null when both are. For separate series read in one answer, where the later start is the one a reader could mistake for "none happened".</summary>
+    internal static DateTime? LaterCoverageFloor(DateTime? first, DateTime? second) =>
+        first is DateTime a && second is DateTime b ? (a >= b ? a : b) : first ?? second;
+
     /// <summary>
     /// Whether the relation's time column (<see cref="QueryWindowRelationTimeColumn"/>) holds the monitored server's LOCAL
     /// wall-clock time instead of UTC (#4989). Only the Default Trace does: <c>ft.StartTime</c> is stored as the trace wrote
