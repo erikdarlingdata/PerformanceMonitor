@@ -224,7 +224,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
 
         foreach (var read in WebDataStartNote.TableByRead.Keys)
         {
-            foreach (var status in new[] { "not_collected", "unavailable", "invalid", "error", "empty", "no_changes" })
+            foreach (var status in new[] { "not_collected", "unavailable", "invalid", "error", "empty", "no_changes", "precondition", "not_sampled" })
             {
                 if (WebDataStartNote.NothingFoundStatusByRead.TryGetValue(read, out var admitted) && admitted == status)
                 {
@@ -274,7 +274,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             return end < 0 ? source[start..] : source[start..end];
         }
 
-        foreach (var read in WebDataStartNote.TableByRead.Keys)
+        foreach (var read in WebDataStartNote.TableByRead.Keys.Where(r => !PgWindowReads.Any(p => p.Read == r)))
         {
             var body = Body(read);
             if (WebDataStartNote.NothingFoundStatusByRead.TryGetValue(read, out var word))
@@ -288,6 +288,91 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             {
                 Assert.Contains("\"unavailable\"", body, StringComparison.Ordinal);
                 Assert.DoesNotContain("\"empty\"", body, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    /* The PostgreSQL window aggregates, trend grids and Captured Plans (#4966): each read, the table it reads, the one word it
+       answers when it looked and found nothing (null: none is admitted), the words it answers rows with, and the other words
+       its tool file answers as literals. A word on the last list keeps its own message. */
+    private static readonly (string Read, string Table, string? Admitted, string[] RowWords, string[] KeptWords, string File)[] PgWindowReads =
+    [
+        ("get_pg_top_queries", "pg_statement_stats", null, [], ["unavailable"], "DarlingMcpPgStatementTools.cs"),
+        ("get_pg_blocking", "pg_blocking_edges", "no_blocking_sampled", ["blocking_sampled", "cycles_only"], ["not_sampled"], "DarlingMcpPgBlockingTools.cs"),
+        ("get_pg_database_stats", "pg_database_stats", "empty", ["database_activity"], ["unavailable"], "DarlingMcpPgDatabaseTools.cs"),
+        ("get_pg_session_states", "pg_session_states", "empty", ["session_states"], ["unavailable"], "DarlingMcpPgSessionStatesTools.cs"),
+        ("get_pg_io_stats", "pg_io_stats", "no_io_activity", ["io_activity"], [], "DarlingMcpPgIoTools.cs"),
+        ("get_pg_replication_stats", "pg_replication_stats", "empty", [], [], "DarlingMcpPgReplicationStatsTools.cs"),
+        ("get_pg_database_trend", "pg_database_stats", "empty", ["database_trend"], [], "DarlingMcpPgTrendTools.cs"),
+        ("get_pg_query_duration_trend", "pg_statement_stats", "empty", ["query_duration_trend"], [], "DarlingMcpPgTrendTools.cs"),
+        ("get_pg_wait_trend", "pg_wait_sampling", "empty", ["wait_trend"], [], "DarlingMcpPgTrendTools.cs"),
+        ("get_pg_io_trend", "pg_io_stats", "empty", ["io_trend"], [], "DarlingMcpPgTrendTools.cs"),
+        ("get_pg_plans", "pg_plan_capture", "empty", [], ["precondition"], "DarlingMcpPgPlanTools.cs"),
+    ];
+
+    /* Each read is listed over its raw relation, served by the web mirror, drawn by the page, and admitted for exactly the word
+       its tool answers when it captured and found nothing. The words that say nothing was captured (unavailable, not_collected,
+       not_sampled, precondition) are never admitted. The tools' source holds both halves, so a tool that renames a word fails here. */
+    [Fact]
+    public void ThePostgresWindowReads_AreListedOverTheirTables_AndAdmitOnlyAWordThatMeansCapturedAndFoundNothing()
+    {
+        var dispatch = DarlingWebEndpoints.BuildReadDispatch();
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+
+        foreach (var (read, table, admitted, rowWords, keptWords, file) in PgWindowReads)
+        {
+            Assert.Equal(table, WebDataStartNote.TableByRead[read]);
+            Assert.True(dispatch.ContainsKey(read), read + " is not a read the web mirror serves");
+            Assert.True(WebDataStartNote.TryGetSource(table, out var source), read + " names " + table + ", which the probe cannot read");
+            Assert.Equal(table, source.Relation);
+            Assert.Contains("\"" + read + "\"", tabs, StringComparison.Ordinal);
+
+            var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
+            if (admitted is null)
+            {
+                Assert.DoesNotContain(read, WebDataStartNote.NothingFoundStatusByRead.Keys);
+            }
+            else
+            {
+                Assert.Equal(admitted, WebDataStartNote.NothingFoundStatusByRead[read]);
+                Assert.Contains("\"" + admitted + "\"", tool, StringComparison.Ordinal);
+                Assert.DoesNotContain(admitted, new[] { "unavailable", "not_collected", "not_sampled", "precondition", "invalid" });
+            }
+
+            foreach (var word in rowWords.Concat(keptWords))
+            {
+                Assert.Contains("\"" + word + "\"", tool, StringComparison.Ordinal);
+                Assert.NotEqual(admitted, word);
+            }
+        }
+    }
+
+    /* Behaviour: the admitted word reaches the coverage probe (a store that never connects and a cancelled token show it as an
+       OperationCanceledException), the row words reach it as rows do, and every other word keeps its own message untouched. */
+    [Fact]
+    public async Task ThePostgresWindowReads_SendRowsAndTheirNothingFoundWordToTheProbe_AndLeaveEveryOtherWordAlone()
+    {
+        await using var store = NeverConnects();
+
+        foreach (var (read, _, admitted, rowWords, keptWords, _) in PgWindowReads)
+        {
+            if (admitted is not null)
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                    () => WebDataStartNote.AddAsync(store, read, "pg01", 168, null, Envelope(admitted), null, Cancelled));
+            }
+
+            foreach (var word in rowWords)
+            {
+                var page = "{\"server\":\"pg01\",\"hours_back\":168,\"status\":\"" + word + "\",\"rows\":[{\"n\":1}]}";
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                    () => WebDataStartNote.AddAsync(store, read, "pg01", 168, null, page, null, Cancelled));
+            }
+
+            foreach (var word in keptWords.Concat(new[] { "unavailable", "not_collected", "invalid", "precondition", "not_sampled" }).Where(w => w != admitted))
+            {
+                var envelope = Envelope(word);
+                Assert.Same(envelope, await WebDataStartNote.AddAsync(store, read, "pg01", 168, null, envelope, null, Cancelled));
             }
         }
     }
