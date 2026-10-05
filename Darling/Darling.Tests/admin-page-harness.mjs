@@ -42,6 +42,8 @@ const pathFor = { servers: "/api/admin/servers" };
 
 const context = vm.createContext({
   console, el, mount,
+  /* #5240: the Servers tab asks the session probe whether to draw the Edit column; this old harness is read-only. */
+  getSession: async () => ({ can_edit: false }),
   loadingStrip: strip("strip loading"), errorStrip: strip("strip error"), emptyStrip: strip("strip empty"), noticeStrip: strip("strip notice"),
   apiGet: async (path) => {
     reads.push({ tool: path, params: null });

@@ -194,9 +194,10 @@ globalThis.confirm = (m) => { confirms.push(String(m)); return state.confirmAnsw
 
 /* What the fake service answers. `servers` is GET /api/admin/servers; `byId` maps a server id to the by-id read
    (GET /api/admin/servers/<id>); `responder(method, url, body)` answers every other request ({ status, body, raw? };
-   `raw`, when given, is the response text as it is, a sign-in page or an empty body, instead of JSON). `listReply` and
-   `byIdReply`, when set to a function, answer that read instead ({ status, body, raw? }). `gate` holds a write until it
-   resolves and `listGate` holds a list read the same way. */
+   `raw`, when given, is the response text as it is, a sign-in page or an empty body, instead of JSON). `listReply`,
+   `byIdReply` and `sessionReply`, when set to a function, answer that read instead ({ status, body, raw? }); one that
+   throws is a transport failure. `gate` holds a write until it resolves, `listGate` holds a list read the same way and
+   `byIdGate` holds a by-id read. */
 const state = {
   canEdit: true,
   confirmAnswer: true,
@@ -204,9 +205,11 @@ const state = {
   byId: {},
   listReply: null,
   byIdReply: null,
+  sessionReply: null,
   responder: () => ({ status: 200, body: {} }),
   gate: null,
   listGate: null,
+  byIdGate: null,
   networkDown: false,
 };
 /* Every request the page made, reads included, in order: { method, url, body, contentType }. */
@@ -221,7 +224,10 @@ globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
   const sent = init.body ? JSON.parse(init.body) : null;
   requests.push({ method, url: u, body: sent, contentType: (init.headers || {})["Content-Type"] || null });
-  if (u === "/api/session") return reply(200, { can_edit: state.canEdit });
+  if (u === "/api/session") {
+    const r = state.sessionReply ? state.sessionReply() : { status: 200, body: { can_edit: state.canEdit } };
+    return reply(r.status, r.body, r.raw);
+  }
   if (method === "GET" && u === "/api/admin/servers") {
     if (state.listGate) await state.listGate;
     const r = state.listReply ? state.listReply() : { status: 200, body: { server_count: state.servers.length, servers: state.servers } };
@@ -229,6 +235,7 @@ globalThis.fetch = async (url, init = {}) => {
   }
   const byIdMatch = /^\/api\/admin\/servers\/(\d+)$/.exec(u);
   if (method === "GET" && byIdMatch) {
+    if (state.byIdGate) await state.byIdGate;
     const r = state.byIdReply
       ? state.byIdReply(Number(byIdMatch[1]))
       : state.byId[byIdMatch[1]]
@@ -327,7 +334,262 @@ try {
     monthly_cost: null, monthly_cost_usd: 0, added: "2026-01-02T00:00:00.0000000", last_collected: null,
   });
 
+  /* The by-id read (GET /api/admin/servers/<id>) as the service answers it: no secret, and modified_at, the opaque token. */
+  const TOKEN = "2026-10-05T12:34:56.1234567Z";
+  const read = (id, name, over = {}) => ({
+    server_id: id, display_name: name, engine: "sqlserver", host: name.toLowerCase(), port: 0, database: null, read_only_intent: false,
+    auth: "Windows", username: null, encrypt_mode: "Mandatory", trust_server_certificate: false, multi_subnet_failover: false,
+    monthly_cost_usd: 1234, modified_at: TOKEN, ...over,
+  });
+  const charlie = server(3, "Charlie", { auth: "SQL Server" });
+  const reads = {
+    alpha: read(1, "Alpha"),
+    bravo: read(2, "Bravo", { engine: "postgres", port: 5433, auth: "SQL", username: "pgmon", encrypt_mode: "Optional", monthly_cost_usd: 0 }),
+    charlie: read(3, "Charlie", { auth: "SQL", username: "sa", database: "Sales", read_only_intent: true, trust_server_certificate: true }),
+  };
+  /* The editing seat's Servers tab: Alpha (Windows), Bravo (PostgreSQL) and Charlie (SQL login), each with its by-id read. */
+  const seed = () => {
+    state.servers = [alpha, bravo, charlie];
+    state.byId = { 1: reads.alpha, 2: reads.bravo, 3: reads.charlie };
+  };
+
+  /* What the page drew. The three boxes carry data-box, the form data-edit-form, a field data-field (the API key), a row data-row. */
+  const box = (name) => byAttr(main, "data-box", name)[0] || null;
+  const openForm = () => byAttr(main, "data-edit-form")[0] || null;
+  const field = (key) => byAttr(main, "data-field", key).find((n) => n.tag === "input" || n.tag === "select") || null;
+  const clickEdit = async (id) => {
+    const b = byAttr(main, "data-server-id", id).find((n) => n.tag === "button");
+    if (!b) throw new Error("no Edit button for server " + id);
+    await fire(b, "click");
+  };
+  const rowInfo = (key) => {
+    const r = all(main, (n) => n.attrs["data-row"] === key)[0];
+    return r ? { label: r.children[0] ? text(r.children[0]) : text(r), hidden: r.hidden, display: r.style.display || "" } : null;
+  };
+  const tableRows = () => {
+    const t = byTag(main, "table")[0];
+    return t ? t.children[1].children.map((tr) => (tr.children[0] ? text(tr.children[0]) : "")) : [];
+  };
+  const listGets = () => requests.filter((r) => r.method === "GET" && r.url === "/api/admin/servers").length;
+  const byIdGets = () => requests.filter((r) => r.method === "GET" && /^\/api\/admin\/servers\/\d+$/.test(r.url)).map((r) => r.url);
+  const strips = (name) => box(name).children.map((c) => ({ text: text(c), cls: c.className, role: c.attrs.role || null }));
+  /* The open form as a user sees it: heading, which fields it has, what they hold, the notes, the buttons. */
+  const formSnapshot = () => {
+    const form = openForm();
+    if (!form) return null;
+    const heading = byTag(form, "h3")[0];
+    const input = (key) => byAttr(form, "data-field", key).find((n) => n.tag === "input" || n.tag === "select") || null;
+    const keys = [...new Set(byAttr(form, "data-field").map((n) => n.attrs["data-field"]))];
+    const kind = (k) => (input(k) ? input(k).attrs.type : undefined);
+    return {
+      heading: text(heading),
+      headingFocused: activeElement === heading,
+      headingTabindex: heading.attrs.tabindex,
+      keys,
+      values: Object.fromEntries(keys.filter((k) => input(k) && !["checkbox", "radio"].includes(kind(k))).map((k) => [k, input(k).value])),
+      checks: Object.fromEntries(keys.filter((k) => kind(k) === "checkbox").map((k) => [k, input(k).checked])),
+      auth: byAttr(form, "data-field", "auth").map((r) => ({ value: r.attrs.value, checked: r.checked })),
+      encryption: input("encrypt_mode") ? all(input("encrypt_mode"), (n) => n.tag === "option").map((o) => o.attrs.value) : [],
+      engine: text(byAttr(form, "data-field", "engine")[0]),
+      muted: all(form, (n) => n.className === "muted").map(text),
+      buttons: buttons(form).map(text),
+      passwordType: input("password").attrs.type,
+      passwordValue: input("password").value,
+    };
+  };
+
   const scenarios = {
+    /* T1: what a seat sees by what its session probe said: "readonly", "probefailed" (an HTTP error), "probedropped" (a transport
+       failure) or "editor". The list carries a row without a server_id, which never gets an Edit button. */
+    seat: async (kind) => {
+      state.servers = [alpha, bravo, server(4, "Echo", { server_id: null })];
+      state.byId = { 1: reads.alpha, 2: reads.bravo };
+      if (kind === "readonly") state.canEdit = false;
+      if (kind === "probefailed") state.sessionReply = () => ({ status: 500, body: { error: "session probe failed" } });
+      if (kind === "probedropped") state.sessionReply = () => { throw new Error("connection refused"); };
+      await mountPage("servers");
+      const headRow = byTag(main, "table")[0].children[0].children[0];
+      const edits = buttons(main, "Edit");
+      return {
+        editHeaders: headRow.children.filter((th) => (th.children[0] || th).textContent === "Edit").length,
+        editButtons: edits.length,
+        labels: edits.map((b) => b.attrs["aria-label"]),
+        ids: edits.map((b) => b.attrs["data-server-id"]),
+        rows: tableRows(),
+        notice: all(main, (n) => n.className.split(/\s+/).includes("notice")).map(text),
+        requests: requests.map((r) => r.method + " " + r.url),
+        form: openForm() !== null,
+      };
+    },
+    /* Edit on one row: "alpha" (Windows), "charlie" (SQL login), "bravo" (PostgreSQL, port 5433) or "bravo0" (PostgreSQL, port 0). */
+    open: async (which) => {
+      seed();
+      if (which === "bravo0") state.byId[2] = { ...reads.bravo, port: 0 };
+      await mountPage("servers");
+      await clickEdit({ alpha: 1, bravo: 2, bravo0: 2, charlie: 3 }[which]);
+      return { form: formSnapshot(), byIdGets: byIdGets(), formBoxChildren: box("form").children.length, requests: requests.length };
+    },
+    /* The by-id read held back: the box says it is loading, then the form replaces it. */
+    loading: async () => {
+      seed();
+      await mountPage("servers");
+      let release;
+      state.byIdGate = new Promise((r) => { release = r; });
+      const click = clickEdit(1);
+      await settle();
+      const during = { box: text(box("form")), form: openForm() !== null, strips: strips("form").map((s) => s.cls) };
+      release();
+      await click;
+      await settle();
+      return { during, form: formSnapshot() };
+    },
+    /* T8 and finding 9: the by-id read answers "404" (the server was removed), "403", "500" or "network". */
+    byIdFails: async (kind) => {
+      seed();
+      await mountPage("servers");
+      if (kind === "404") {
+        state.byId = {};
+        state.servers = [bravo, charlie];
+      }
+      if (kind === "403") state.byIdReply = () => ({ status: 403, body: { error: "This account has read-only access." } });
+      if (kind === "500") state.byIdReply = () => ({ status: 500, body: { error: "admin server read failed (InvalidOperationException)" } });
+      if (kind === "network") state.byIdReply = () => { throw new Error("connection refused"); };
+      const listBefore = listGets();
+      await clickEdit(1);
+      return {
+        notice: strips("notice"),
+        form: openForm() !== null,
+        formBoxChildren: box("form").children.length,
+        listReads: listGets() - listBefore,
+        rows: tableRows(),
+        byIdGets: byIdGets(),
+      };
+    },
+    /* T10: the 60 s poll runs renderAdmin again while the user types in an open form. "ok" lets the list read land; "listFails"
+       makes it answer 500. The list read is held until the focus and the value have been looked at. */
+    poll: async (kind) => {
+      seed();
+      await mountPage("servers");
+      await clickEdit(1);
+      const host = field("host");
+      await typeInto(host, "sql-prod-01");
+      const formBox = box("form");
+      const removedBefore = removed.length;
+      state.servers = [alpha, charlie];
+      if (kind === "listFails") state.listReply = () => ({ status: 500, body: { error: "the list could not be read" } });
+      let release;
+      state.listGate = new Promise((r) => { release = r; });
+      page.renderAdmin(main, "servers");
+      await settle();
+      const during = { active: activeElement === host, value: host.value, rows: tableRows() };
+      release();
+      await settle(30);
+      return {
+        during,
+        activeIsHost: activeElement === host,
+        sameHost: field("host") === host,
+        hostValue: host.value,
+        hostConnected: host.isConnected,
+        sameFormBox: box("form") === formBox,
+        ancestorsRemoved: removed.slice(removedBefore).filter((n) => n.contains(formBox)).length,
+        formOpen: openForm() !== null,
+        rows: tableRows(),
+        tableArea: text(box("table")),
+        tableAreaStrips: strips("table").map((s) => s.cls),
+        notice: strips("notice").map((s) => s.text),
+        listReads: listGets(),
+      };
+    },
+    /* Finding 3 and the discard triggers: a password typed into Charlie's form, then the form goes away by "cancel", by Edit
+       on "another" row or by a switch to the Routes "tab". The node typed into is kept, so it is read after it is detached. */
+    closes: async (path) => {
+      seed();
+      await mountPage("servers");
+      await clickEdit(3);
+      const pw = field("password");
+      await typeInto(pw, "SECRET-PW");
+      const typed = pw.value;
+      if (path === "cancel") await clickText(main, "Cancel");
+      else if (path === "another") await clickEdit(1);
+      else await mountPage("routes");
+      await settle();
+      const secret = (n) => n.value === "SECRET-PW" || n.textContent.includes("SECRET-PW") || Object.values(n.attrs).some((v) => String(v).includes("SECRET-PW"));
+      const open = formSnapshot();
+      return {
+        typed,
+        value: pw.value,
+        connected: pw.isConnected,
+        forms: byAttr(main, "data-edit-form").length,
+        heading: open ? open.heading : null,
+        secretNodes: all(main, secret).length,
+      };
+    },
+    /* A by-id read that lands after its form was discarded (by Edit on "another" row, or a switch to the Routes "tab") opens nothing. */
+    staleOpen: async (path) => {
+      seed();
+      await mountPage("servers");
+      let release;
+      state.byIdGate = new Promise((r) => { release = r; });
+      const first = clickEdit(1);
+      await settle();
+      let second = Promise.resolve();
+      if (path === "another") second = clickEdit(2);
+      else await mountPage("routes");
+      await settle();
+      release();
+      await Promise.all([first, second]);
+      await settle();
+      const open = formSnapshot();
+      return { forms: byAttr(main, "data-edit-form").length, heading: open ? open.heading : null, byIdGets: byIdGets() };
+    },
+    /* The authentication choice and the boxes it shows. Alpha is a Windows server; the steps pick each mode in turn, typing a
+       username under SQL. Then Charlie (a SQL login) shows when the password becomes required: a changed host. */
+    authModes: async () => {
+      seed();
+      await mountPage("servers");
+      await clickEdit(1);
+      const snap = (step) => ({
+        step,
+        checked: byAttr(main, "data-field", "auth").filter((r) => r.checked).map((r) => r.attrs.value),
+        username: rowInfo("username"),
+        usernameValue: field("username").value,
+        password: rowInfo("password"),
+        note: rowInfo("managed-identity-note"),
+      });
+      const choose = async (word) => {
+        const radio = byAttr(main, "data-field", "auth").find((r) => r.attrs.value === word);
+        radio.checked = true;
+        await fire(radio, "change");
+      };
+      const steps = [snap("opened")];
+      await choose("SQL");
+      await typeInto(field("username"), "sa-new");
+      steps.push(snap("sql"));
+      await choose("ServicePrincipal");
+      steps.push(snap("serviceprincipal"));
+      await choose("SQL");
+      steps.push(snap("sql again"));
+      await choose("ManagedIdentity");
+      steps.push(snap("managed identity"));
+      await choose("Windows");
+      steps.push(snap("windows"));
+      await clickEdit(3);
+      const suffixes = [rowInfo("password").label];
+      await typeInto(field("host"), "charlie-two");
+      suffixes.push(rowInfo("password").label);
+      await typeInto(field("host"), "charlie");
+      suffixes.push(rowInfo("password").label);
+      return { steps, suffixes };
+    },
+    /* D15: the stored encryption word, in any case or unknown ("none" is a stored null), and the options the form offers. */
+    encrypt: async (word) => {
+      seed();
+      state.byId[1] = { ...reads.alpha, encrypt_mode: word === "none" ? null : word };
+      await mountPage("servers");
+      await clickEdit(1);
+      const select = field("encrypt_mode");
+      return { value: select.value, options: all(select, (n) => n.tag === "option").map((o) => o.attrs.value) };
+    },
     /* The frame's proof: a read-only seat sees the Servers tab drawn by the real grid. */
     frame: async () => {
       state.canEdit = false;
