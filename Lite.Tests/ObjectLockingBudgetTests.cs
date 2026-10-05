@@ -115,6 +115,10 @@ public sealed class ObjectLockingBudgetTests : IClassFixture<SharedDuckDbFixture
         var capture = DateTime.UtcNow;
         var startTime = capture.AddDays(-10);
 
+        // One transaction for the 200 rows (#5208), committed when this method returns and before the tool reads.
+        var seedConn = await SeedConnectionAsync();
+        using var batch = new SeedBatch(_duckDb, seedConn);
+
         for (var i = 0; i < SeededRowCount; i++)
         {
             var dbIndex = i % DatabaseCount;
@@ -148,6 +152,8 @@ public sealed class ObjectLockingBudgetTests : IClassFixture<SharedDuckDbFixture
             P(indexLockPromotionCount); P(pageLatchWaitMs); P(pageIoLatchWaitMs);
             await cmd.ExecuteNonQueryAsync();
         }
+
+        batch.Commit();
     }
 
     private async Task<DuckDBConnection> SeedConnectionAsync()
