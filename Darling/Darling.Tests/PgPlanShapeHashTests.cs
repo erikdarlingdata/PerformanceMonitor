@@ -111,6 +111,9 @@ public sealed class PgPlanShapeHashTests
     [InlineData("Workers", "[{\"Worker Number\": 0, \"Actual Rows\": 5}]")]
     [InlineData("Heap Fetches", "17")]
     [InlineData("Cache Hits", "100")]
+    [InlineData("Index Searches", "3")]
+    [InlineData("WAL Buffers Full", "5")]
+    [InlineData("Estimated Capacity", "1024")]
     public void LogAnalyzeCounters_DoNotSplitTheHash(string key, string valueJson)
     {
         var plain = Parse(AggregateOverIndexScan());
@@ -202,6 +205,36 @@ public sealed class PgPlanShapeHashTests
     public void WorkersPlanned_IsNotShape()
     {
         Assert.Equal(Parse(GatherWith(2)).PlanHash, Parse(GatherWith(4)).PlanHash);
+    }
+
+    private static JsonObject DeepPlan(double cost, long rows)
+    {
+        var c = cost.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return JsonNode.Parse($$"""
+            {
+              "Plan": {
+                "Node Type": "Nested Loop", "Total Cost": {{c}}, "Plan Rows": {{rows}},
+                "Plans": [
+                  {
+                    "Node Type": "Hash Join", "Parent Relationship": "Outer", "Total Cost": {{c}}, "Plan Rows": {{rows}},
+                    "Plans": [
+                      { "Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "a", "Alias": "a",
+                        "Total Cost": {{c}}, "Plan Rows": {{rows}}, "Actual Rows": {{rows}} },
+                      { "Node Type": "Result", "Parent Relationship": "SubPlan", "Subplan Name": "SubPlan 1",
+                        "Total Cost": {{c}}, "Plan Rows": {{rows}}, "Actual Rows": {{rows}} }
+                    ]
+                  }
+                ]
+              }
+            }
+            """)!.AsObject();
+    }
+
+    /// <summary>Estimates and actuals are dropped at every depth, grandchildren and SubPlan nodes included.</summary>
+    [Fact]
+    public void EstimatesBelowTheFirstChild_DoNotSplitTheHash()
+    {
+        Assert.Equal(Parse(DeepPlan(10.5, 1)).PlanHash, Parse(DeepPlan(99999.5, 777)).PlanHash);
     }
 
     /// <summary>The denylist's safe direction: a key this parser has never heard of is part of the shape.</summary>
