@@ -181,7 +181,7 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
 
    Column-header sort (#4843). A header click cycles ascending -> descending -> the server's own order, with a ▲/▼
    indicator and aria-sort; Enter and Space on the focused header do the same. The comparison reads the RAW row value
@@ -217,15 +217,62 @@ function vizTable(data, desc) {
   if (grid) grid.syncHeads();
 
   const wrap = el("div", { class: "table-wrap" }, [el("table", { class: "data" }, [el("thead", {}, [head]), tbody])]);
-  if (desc.tools === false) return wrap;
-  return el("div", { class: "grid-box" }, [gridTools(desc, cols, tbody), wrap]);
+  const picker = columnPicker(desc, cols, head, tbody);
+  if (desc.tools === false) return picker ? el("div", { class: "grid-box" }, [picker, wrap]) : wrap;
+  return el("div", { class: "grid-box" }, picker ? [picker, gridTools(desc, cols, tbody), wrap] : [gridTools(desc, cols, tbody), wrap]);
+}
+
+/* Column groups (#4843). A descriptor with `groups: ["Memory detail", ...]` and `defaultGroups: [...]` marks wide
+   grids: a column carrying `group: "<name>"` is drawn only while its group is on, and a column with no group (or a
+   group the list does not name) is always shown. A "Columns:" strip above the table carries one toggle per group.
+   Every column is still built, and a hidden one is only display:none, so the sort, Copy and CSV indexes stay
+   aligned and Copy / CSV carry ALL columns, the way the desktop grid's export iterates every column whether or not
+   it is shown. A column the user sorted by stays the sort key after its group is hidden. The toggles live at module
+   scope under the table's key (route + identity + columns), so the 60 s repaint keeps them and another server's
+   grid starts from the defaults. Returns null for a descriptor without groups. */
+function columnPicker(desc, cols, head, tbody) {
+  const groups = Array.isArray(desc.groups) ? desc.groups.filter((g) => cols.some((c) => c.group === g)) : [];
+  if (!groups.length) return null;
+  const key = gridSortKey(desc, cols);
+  const on = () => gridGroupsOn.get(key) || new Set(Array.isArray(desc.defaultGroups) ? desc.defaultGroups : []);
+  const shown = (c) => !c.group || !groups.includes(c.group) || on().has(c.group);
+  const show = (node, yes) => {
+    if (node && node.style) node.style.display = yes ? "" : "none";
+  };
+  const buttons = new Map();
+  const apply = () => {
+    const rowsAll = [head, ...tbody.children];
+    cols.forEach((c, i) => {
+      const yes = shown(c);
+      for (const tr of rowsAll) show(tr.children[i], yes);
+    });
+    for (const [g, b] of buttons) {
+      const live = on().has(g);
+      b.setAttribute("aria-pressed", live ? "true" : "false");
+      b.className = "btn col-toggle" + (live ? " on" : "");
+    }
+  };
+  const toggles = groups.map((g) => {
+    const b = el("button", { type: "button", class: "btn col-toggle", text: g, title: "Show or hide the " + g + " columns" });
+    b.addEventListener("click", () => {
+      const next = new Set(on());
+      if (next.has(g)) next.delete(g);
+      else next.add(g);
+      gridGroupsOn.set(key, next);
+      apply();
+    });
+    buttons.set(g, b);
+    return b;
+  });
+  apply();
+  return el("div", { class: "col-picker" }, [el("span", { class: "col-picker-label", text: "Columns:" }), ...toggles]);
 }
 
 /* Copy and CSV for one table (#4843). Both read the tbody as it stands, so they follow the active sort and any
    in-place reconcile. Copy puts what the user sees on the clipboard: the cells' text, tab-separated, with a header
    row on Copy All. The CSV carries RAW values (the stored ISO instant, the unformatted number) under the column
    labels, quoted per RFC 4180 and with a leading ' on a text cell a spreadsheet would run as a formula. A column
-   whose values are arrays or objects has no one-cell form, so the CSV leaves it out, and so does `csv: false` on a column (a link-only cell); a column's `copyValue(row)` supplies the full text for Copy and the CSV when its cell shows a summary (Copy keeps it: it copies the
+   whose values are arrays or objects has no one-cell form, so the CSV leaves it out, and so does `csv: false` on a column (a link-only cell), and `copy: false` leaves a column out of Copy row and Copy all; a column's `copyValue(row)` supplies the full text for Copy and the CSV when its cell shows a summary (Copy keeps it: it copies the
    cell's text). A custom-render column over a key the rows do not carry has no raw value, so its CSV cell is the
    text it shows. Set `tools: false` on the descriptor to draw a table without the strip. */
 function gridTools(desc, cols, tbody) {
@@ -243,6 +290,10 @@ function gridTools(desc, cols, tbody) {
     return c && typeof c.copyValue === "function" && row ? String(c.copyValue(row) ?? "") : tr.children[i].textContent;
   };
   const textRows = (list) => list.map((tr) => [...tr.children].map((_, i) => textOf(tr, i)));
+  /* Copy row and Copy table leave out a `copy: false` column (a control column such as a checkbox); the picked-cell
+     signature and Copy cell still see every column. */
+  const copyIdx = (n) => Array.from({ length: n }, (_, i) => i).filter((i) => !(cols[i] && cols[i].copy === false));
+  const copyRows = (list) => textRows(list).map((r) => copyIdx(r.length).map((i) => r[i]));
   /* The picked cell is remembered as the row's text plus the column, at module scope under the table's key, so the
      60 s repaint (a new tbody, new cells) and an in-place reconcile both resolve it against what is on screen now;
      a row that is gone resolves to nothing. */
@@ -275,9 +326,9 @@ function gridTools(desc, cols, tbody) {
   const copyRow = () => {
     const p = pickedCell();
     if (!p) return say("Click a cell first, then choose Copy row.");
-    return finish(toTsv(textRows([p.tr])), "the row");
+    return finish(toTsv(copyRows([p.tr])), "the row");
   };
-  const copyAll = () => finish(toTsv([cols.map((c) => c.label), ...textRows(trs())]), "the table");
+  const copyAll = () => finish(toTsv([cols.filter((c) => c.copy !== false).map((c) => c.label), ...copyRows(trs())]), "the table");
   const exportCsv = () => {
     const list = trs();
     const objs = list.map((tr) => trRow.get(tr));
@@ -325,6 +376,8 @@ const trRow = new WeakMap();
 const tbodyGrid = new WeakMap();
 /* The cell each grid's Copy cell / Copy row act on (see gridTools), keyed like the sort state. */
 const gridPicked = new Map(); // one entry per table the session clicks in; bounded by routes x tables
+/* The column groups switched on for each grid (see columnPicker), keyed like the sort state; absent means defaultGroups. */
+const gridGroupsOn = new Map(); // one entry per grouped table the session toggles; bounded by routes x tables
 
 /* The table identity: `desc.sortId`, else `desc.id`, else `desc.title`, else `desc.rowsKey`. Panels built by
    renderPanel carry a title; the FinOps tabs call VIZ.table with a rowsKey, and two grids of one tab can share one,

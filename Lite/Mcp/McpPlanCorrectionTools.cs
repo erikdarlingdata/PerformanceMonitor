@@ -67,8 +67,21 @@ public sealed class McpPlanCorrectionTools
                     ?? McpHelpers.Status("empty",
                         "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
                         "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
-                        "that or has no databases with Query Store on.");
+                        "that or has no databases with Query Store on.",
+                        (await McpQueryTools.WindowNoticeAsync(
+                            () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.PlanCorrection, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
+                            windowEnd.AddHours(-hours_back), windowEnd, "plan_correction", emptyAnswer: true)).AsHints());
             }
+
+            /* #4966: where this server's plan_correction data starts for the window. The rows are re-captures stamped with the
+               run's own collection_time, which is the column the probe reads, so the plain notice fits (no event-time form). A
+               page of recommendations that is empty beside an automatic-tuning snapshot is still an empty list: it is probed
+               whatever the window's length, so it cannot be read as "nothing was recommended" over a window nothing covered. The
+               page cut (limit, newest first) is `truncated`; this is the separate window floor. */
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var notice = await McpQueryTools.WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.PlanCorrection, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "plan_correction", emptyAnswer: rows.Count == 0);
 
             var recommendations = page.Select(r => new
             {
@@ -109,6 +122,11 @@ public sealed class McpPlanCorrectionTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: always present (false and null when the store covered the window). No effective_hours_back: this payload
+                   carries a page `truncated`, and the census holds that key apart for the window floor. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 automatic_tuning = tuning.Select(t => new
                 {
                     database_name = t.DatabaseName,

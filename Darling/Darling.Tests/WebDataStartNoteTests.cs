@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -113,7 +114,7 @@ public sealed class WebDataStartNoteTests
         Assert.Same(Rows, await Run("get_waiting_tasks", "sql01", 0, Rows));
 
         // An envelope that keeps its own message (unavailable, not_collected), an error, text that is not an object, and a tool that
-        // already reports its own floor. The empty envelope is not here any more (#4966): it says the read looked and found nothing,
+        // already reports its own floor (not on the listed reads any more: see below). The empty envelope is not here any more (#4966): it says the read looked and found nothing,
         // so it reaches the store like rows do (WebDataStartNoteConfigAndLogTests holds that, read by read).
         const string Empty = "{\"status\":\"unavailable\",\"message\":\"No waiting tasks in this window.\"}";
         const string NotCollected = "{\"status\":\"not_collected\",\"message\":\"This engine has no waiting tasks.\"}";
@@ -126,7 +127,11 @@ public sealed class WebDataStartNoteTests
         Assert.Same(Failed, await Run("get_waiting_tasks", "sql01", 168, Failed));
         Assert.Same("[1,2]", await Run("get_waiting_tasks", "sql01", 168, "[1,2]"));
         Assert.Same("not json", await Run("get_waiting_tasks", "sql01", 168, "not json"));
-        Assert.Same(Own, await Run("get_waiting_tasks", "sql01", 168, Own));
+        /* A tool's own window-floor keys on a LISTED read no longer end the web's decision (#4966: get_waiting_tasks writes them
+           itself): they are stripped and the note is decided as if they were absent, so this answer reaches the store like rows do.
+           A read outside the list is untouched whatever it carries. */
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Run("get_waiting_tasks", "sql01", 168, Own));
+        Assert.Same(Own, await Run("get_query_store_top", "sql01", 168, Own));
     }
 
     /// <summary>
@@ -161,6 +166,101 @@ public sealed class WebDataStartNoteTests
         Assert.True(answer["truncated"]?.GetValue<bool>());
         Assert.Equal(30, answer["tasks_returned"]?.GetValue<int>());
         Assert.Single(answer["tasks"]!.AsArray());
+    }
+
+    /// <summary>
+    /// #4966: the tool writes its own <c>effective_start</c>, <c>window_truncated</c> and <c>truncation_note</c> after
+    /// <c>hours_back</c> (the MCP dialect, in UTC). On a listed read the web still decides its note itself: a capped
+    /// <c>get_waiting_tasks</c> payload that carries the tool's <c>window_truncated: false</c> gets the web's capped
+    /// note, byte for byte what the same payload without the tool's keys gets.
+    /// </summary>
+    [Fact]
+    public async Task ACappedWaitingTasksRead_ThatCarriesTheToolsOwnWindowKeys_StillGetsTheWebsCappedNote()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var withKeys = CappedTasks.Replace(
+            "\"hours_back\":48,",
+            "\"hours_back\":48,\"effective_start\":\"2026-01-01T00:00:00.0000000Z\",\"window_truncated\":false,\"truncation_note\":null,",
+            StringComparison.Ordinal);
+        Assert.NotEqual(CappedTasks, withKeys);
+
+        var plain = await WebDataStartNote.AddAsync(null!, "get_waiting_tasks", "sql01", 48, WindowEnd, CappedTasks, null, ct);
+        var answered = await WebDataStartNote.AddAsync(null!, "get_waiting_tasks", "sql01", 48, WindowEnd, withKeys, null, ct);
+
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        Assert.True(answer["window_truncated"]?.GetValue<bool>());
+        Assert.Equal("2026-01-02T12:30:00.0000000", answer["effective_start"]?.GetValue<string>());
+        Assert.StartsWith("partial window: this grid shows only the newest rows, back to 2026-01-02 12:30 UTC", answer["truncation_note"]?.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Equal("2026-01-02T12:30:00.0000000Z", answer["oldest_shown_utc"]?.GetValue<string>());
+        Assert.Equal(1, answer.Count(p => p.Key == "window_truncated"));
+
+        /* The same fields the plain payload got, with the same values (key order aside: the tool's keys sit earlier). */
+        var plainAnswer = Assert.IsType<JsonObject>(JsonNode.Parse(plain));
+        foreach (var (key, value) in plainAnswer)
+        {
+            Assert.Equal(value?.ToJsonString(), answer[key]?.ToJsonString());
+        }
+    }
+
+    /// <summary>
+    /// #4966: the active-queries panel is not in <see cref="WebDataStartNote.TableByRead"/>, so the page draws the tool's
+    /// own <c>truncation_note</c> as it comes, through <c>windowFloorStrip</c> (a grid only, and only when
+    /// <c>window_truncated</c> is true). That is safe without a page change: the note names no instant, so the page
+    /// has no UTC time to convert and nothing in it mixes two clocks; <c>windowNoteText</c> hands a sentence with no
+    /// matching instant back as sent.
+    /// </summary>
+    [Fact]
+    public void AToolsOwnTruncationNote_OnAPanelOutsideTheList_NamesNoInstant_AndThePageDrawsItOnlyForATruncatedGrid()
+    {
+        Assert.DoesNotContain("get_active_queries", WebDataStartNote.TableByRead.Keys);
+        var notices = new[]
+        {
+            DarlingMcpWindowNotice.Build(null, Utc(2026, 1, 1), "query_snapshots", emptyAnswer: true).TruncationNote!,
+            DarlingMcpWindowNotice.Build(Utc(2026, 1, 3), Utc(2026, 1, 1), "query_snapshots").TruncationNote!,
+        };
+        foreach (var note in notices)
+        {
+            Assert.DoesNotMatch(@"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}", note);
+        }
+
+        var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js").ReplaceLineEndings("\n");
+        Assert.Contains("if (!desc || desc.windowNote === false || (desc.viz !== \"table\" && desc.viz !== \"stat\")) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("if (!source || source.window_truncated !== true) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("return sent;\n}", util, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4966: the query heatmap and the Query Store regressions panels are grids (<c>table()</c> descriptors, no
+    /// <c>noteKey</c>) and neither read is in <see cref="WebDataStartNote.TableByRead"/>, so the page draws the tool's own
+    /// <c>truncation_note</c> above each, through <c>windowFloorStrip</c>, when the answer says <c>window_truncated: true</c>.
+    /// It is the MCP sentence as sent: it names no instant (the regressions tail says "effective_start" and "baseline_end"
+    /// as field names), so nothing in it mixes the server's UTC with the browser's zone. An <c>empty</c> envelope keeps the
+    /// note under <c>hints</c>, which the page does not read, so it draws none there. No page change is needed.
+    /// </summary>
+    [Theory]
+    [InlineData("get_query_heatmap", "Query Heatmap", "query_stats", false)]
+    [InlineData("get_query_store_regressions", "Query Store Regressions", "query_store_stats", true)]
+    public void TheHeatmapAndRegressionsPanels_DrawTheToolsOwnTruncationNote_AsSent(string read, string title, string table, bool baselineTail)
+    {
+        Assert.DoesNotContain(read, WebDataStartNote.TableByRead.Keys);
+
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js").ReplaceLineEndings("\n");
+        var open = tabs.IndexOf("table(\n        \"" + title + "\",\n        \"" + read + "\",", StringComparison.Ordinal);
+        Assert.True(open >= 0, read + " is no longer a table() panel on a server tab");
+        var call = tabs[open..tabs.IndexOf("\n      ),", open, StringComparison.Ordinal)];
+        Assert.DoesNotContain("truncation_note", call, StringComparison.Ordinal);
+
+        var note = DarlingMcpWindowNotice.Build(
+            Utc(2026, 1, 3), Utc(2026, 1, 1), table,
+            baselineTail ? "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end." : null).TruncationNote!;
+        Assert.DoesNotMatch(@"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}", note);
+        Assert.Contains("this server's raw " + table + " retains", note, StringComparison.Ordinal);
+        Assert.Equal(baselineTail, note.EndsWith("baseline_end.", StringComparison.Ordinal));
+
+        var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js").ReplaceLineEndings("\n");
+        Assert.Contains("if (!desc || desc.windowNote === false || (desc.viz !== \"table\" && desc.viz !== \"stat\")) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("if (!source || source.window_truncated !== true) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("return sent;\n}", util, StringComparison.Ordinal);
     }
 
     /// <summary>

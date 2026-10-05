@@ -615,6 +615,160 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     private const string ParityServerName = "query-heatmap-parity";
     private const string ParityDb = "AppDb";
 
+    /// <summary>Runs <paramref name="body"/> against a registered, empty server and removes what it seeded. The seeded
+    /// instants are offsets from the current second, never a fixed date: the data-start probe reads the clock for the
+    /// purge edge, so a fixed past anchor would fall wholly outside the store's coverage.</summary>
+    private async Task WithServerAsync(Func<NpgsqlConnection, NpgsqlDataSource, DateTime, CancellationToken, Task> body)
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live heatmap test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await body(connection, postgres, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow), ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #4966: the first row of the table comes three hours into a 24-hour window, so the grid's left edge is not the
+    /// window's. The three keys sit right after <c>hours_back</c>, <c>effective_start</c> is the first row's time (exact:
+    /// the table is raw, so its coverage starts at its oldest row), and the note names the table.
+    /// </summary>
+    [Fact]
+    public async Task ARealGrid_WhoseRowsStartInsideTheRange_SaysWhereTheDataStarts_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            var t1 = FloorToHour(baseNow.AddHours(-3));
+            await SeedAsync(connection, ct, t1, "0xHOT", deltaExec: 5, deltaElapsed: 250_000);
+            await SeedAsync(connection, ct, t1.AddMinutes(35), "0xNEXT", deltaExec: 3, deltaElapsed: 90_000);
+
+            var grid = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24));
+
+            Assert.True(grid.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(t1), grid.GetProperty("effective_start").GetString());
+            Assert.Equal(
+                DarlingMcpWindowNotice.Build(t1, ParseUtc(grid.GetProperty("window_start").GetString()!), "query_stats").TruncationNote,
+                grid.GetProperty("truncation_note").GetString());
+            Assert.Contains("raw query_stats retains", grid.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+            Assert.False(grid.TryGetProperty("effective_hours_back", out _));
+
+            var names = grid.EnumerateObject().Select(p => p.Name).ToList();
+            Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(names.IndexOf("hours_back") + 1).Take(3));
+        });
+    }
+
+    /// <summary>
+    /// #4966: a quiet start. The table holds a row from before the window, so the window is covered whenever its own rows
+    /// begin: false, no note, and <c>effective_start</c> is the window's start (the one the payload names, not a row's time).
+    /// </summary>
+    [Fact]
+    public async Task ARealGrid_WhoseTableReachesBeforeTheRange_SaysNothing_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), "0xOLD", deltaExec: 4, deltaElapsed: 200_000);
+            await SeedAsync(connection, ct, FloorToHour(baseNow.AddHours(-3)), "0xHOT", deltaExec: 5, deltaElapsed: 250_000);
+
+            var grid = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24));
+
+            Assert.False(grid.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, grid.GetProperty("truncation_note").ValueKind);
+            Assert.Equal(grid.GetProperty("window_start").GetString(), grid.GetProperty("effective_start").GetString());
+        });
+    }
+
+    /// <summary>
+    /// #4966: a failed data-start probe costs the notice, never the answer. The grid comes back with the three keys absent,
+    /// and an empty answer carries no hints.
+    /// </summary>
+    [Fact]
+    public async Task AFailedProbe_CostsTheNotice_NeverTheGrid_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            var t1 = FloorToHour(baseNow.AddHours(-3));
+            await SeedAsync(connection, ct, t1, "0xHOT", deltaExec: 5, deltaElapsed: 250_000);
+
+            var bodySucceeded = false;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
+            try
+            {
+                var grid = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24));
+
+                Assert.False(grid.TryGetProperty("status", out _));
+                Assert.False(grid.TryGetProperty("error", out _));
+                Assert.True(grid.TryGetProperty("window_start", out _));
+                Assert.False(grid.TryGetProperty("effective_start", out _));
+                Assert.False(grid.TryGetProperty("window_truncated", out _));
+                Assert.False(grid.TryGetProperty("truncation_note", out _));
+
+                var empty = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 1));
+                Assert.Equal("empty", empty.GetProperty("status").GetString());
+                Assert.False(empty.TryGetProperty("hints", out _));
+                bodySucceeded = true;
+            }
+            finally
+            {
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () =>
+                {
+                    DarlingMcpWindowNotice.TestOnlyProbe = null;
+                    return Task.CompletedTask;
+                });
+            }
+        });
+    }
+
+    /// <summary>
+    /// #4966: every <c>empty</c> answer carries the three keys under <c>hints</c>, and <c>unavailable</c> carries none.
+    /// Rows only outside the window: the store holds no collection of the window, so the hints say NOT covered with no start
+    /// to name. Then a zero-execution capture inside it: the store did look, so covered, at the window's start.
+    /// </summary>
+    [Fact]
+    public async Task TheEmptyAnswers_CarryTheDataStartHints_AndTheUnavailableOneStaysBare_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            var never = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName));
+            Assert.Equal("unavailable", never.GetProperty("status").GetString());
+            Assert.False(never.TryGetProperty("hints", out _));
+
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), "0xOLD", deltaExec: 4, deltaElapsed: 200_000);
+
+            var outside = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 2));
+            Assert.Equal("empty", outside.GetProperty("status").GetString());
+            var outsideHints = outside.GetProperty("hints");
+            Assert.True(outsideHints.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, outsideHints.GetProperty("effective_start").ValueKind);
+            Assert.Contains("no collection of query_stats", outsideHints.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), "0xIDLE", deltaExec: 0, deltaElapsed: 999_000);
+
+            var idle = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24));
+            Assert.Equal("empty", idle.GetProperty("status").GetString());
+            var idleHints = idle.GetProperty("hints");
+            Assert.False(idleHints.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, idleHints.GetProperty("truncation_note").ValueKind);
+            Assert.EndsWith("Z", idleHints.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
+        });
+    }
+
     /// <summary>
     /// #4233 ruling item 4's live pin: the pre-#4233 SQL (fetched via <c>git show origin/dev:...</c> before
     /// this PR's rewrite landed, pinned below as <see cref="PreQ4233HeatmapSql"/> so it cannot silently rot)

@@ -13,10 +13,32 @@ namespace PerformanceMonitorLite.Mcp;
 /// STORED reads, no live monitored-server hit. Config is captured ON CONNECT (not on a fixed schedule), so
 /// change granularity equals the connect/restart cadence and at least two snapshots are needed before a
 /// change can be detected — the empty result explains this rather than silently returning nothing.
+///
+/// <para>#4966: each tool says where its data starts (<c>effective_start</c>, <c>window_truncated</c>,
+/// <c>truncation_note</c>), from the coverage probe (<see cref="LocalDataService.GetConfigSnapshotCoverageFloorAsync"/>) over
+/// the snapshot view the diff reads (<c>v_server_config</c>, <c>v_database_config</c>, <c>v_trace_flags</c>, on <c>capture_time</c>),
+/// which also counts the snapshot before the window that the diff keeps as its baseline.
+/// A change is stamped with the capture time of the snapshot that showed it, so a first run cannot store a change from
+/// before itself: the oldest change can never be older than the probe's floor, and the plain notice
+/// (<see cref="McpQueryTools.WindowNoticeAsync"/>) is the right one, not the event-time form.</para>
 /// </summary>
 [McpServerToolType]
 public sealed class McpConfigHistoryTools
 {
+    /// <summary>
+    /// #4966: the window notice of one config-change tool. The window is the one the read took
+    /// (<c>windowEnd</c> minus <c>hours_back</c>, which is what <c>GetTimeRange</c> gives for an <c>as_of</c> anchor).
+    /// A data answer over a window of 90 minutes or less starts no probe; an empty one always does.
+    /// </summary>
+    private static Task<McpQueryTools.McpWindowNotice> WindowNoticeAsync(
+        LocalDataService dataService, QueryWindowRelation relation, int serverId, int hoursBack, DateTime windowEnd, string table, bool emptyAnswer = false)
+    {
+        var requestedStart = windowEnd.AddHours(-hoursBack);
+        return McpQueryTools.WindowNoticeAsync(
+            () => dataService.GetConfigSnapshotCoverageFloorAsync(relation, serverId, requestedStart, windowEnd),
+            requestedStart, windowEnd, table, emptyAnswer: emptyAnswer);
+    }
+
     [McpServerTool(Name = "get_server_config_changes"), Description("Gets server configuration change history by diffing sp_configure (sys.configurations) snapshots. Shows which settings changed, their old vs new configured/in-use values, whether the change requires a restart, and dynamic/advanced flags. NOTE: config is captured on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two.")]
     public static async Task<string> GetServerConfigChanges(
         LocalDataService dataService,
@@ -37,12 +59,20 @@ public sealed class McpConfigHistoryTools
             if (rows.Count == 0)
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "server_config")
                     ?? McpHelpers.Status("empty",
-                        $"No server configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.");
+                        $"No server configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                        (await WindowNoticeAsync(dataService, QueryWindowRelation.ServerConfig, resolved.ServerId, hours_back, windowEnd, "server_config", emptyAnswer: true)).AsHints());
+
+            var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.ServerConfig, resolved.ServerId, hours_back, windowEnd, "server_config");
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's config snapshots start for the window, always present (false and null when
+                   the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 change_count = rows.Count,
                 changes = rows.Select(r => new
                 {
@@ -85,12 +115,20 @@ public sealed class McpConfigHistoryTools
             if (rows.Count == 0)
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_config")
                     ?? McpHelpers.Status("empty",
-                        $"No database configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.");
+                        $"No database configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                        (await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config", emptyAnswer: true)).AsHints());
+
+            var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config");
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's config snapshots start for the window, always present (false and null when
+                   the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 change_count = rows.Count,
                 changes = rows.Select(r => new
                 {
@@ -129,12 +167,20 @@ public sealed class McpConfigHistoryTools
             if (rows.Count == 0)
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "trace_flags")
                     ?? McpHelpers.Status("empty",
-                        $"No trace flag changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.");
+                        $"No trace flag changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                        (await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags", emptyAnswer: true)).AsHints());
+
+            var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags");
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where this server's config snapshots start for the window, always present (false and null when
+                   the store covered it). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 change_count = rows.Count,
                 changes = rows.Select(r => new
                 {
