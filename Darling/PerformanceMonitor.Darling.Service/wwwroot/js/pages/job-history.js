@@ -17,7 +17,8 @@
  *
  * Under the head, one line says what SQL Agent is doing now, from the read's own Agent fields (a named server's
  * agent_running / agent_status_desc, or the fleet's agents_total / agents_running / agents_not_running; an empty answer carries them under hints): stopped in
- * red, running, or unknown when no recent snapshot backs it, with an "n of m servers" roll-up across the fleet.
+ * red, running, unknown when no recent snapshot backs it, or a plain "No SQL Agent service" for a server without one, with an
+ * "n of m servers" roll-up across the fleet.
  */
 
 import { VIZ } from "../panels.js";
@@ -148,10 +149,14 @@ export function limitNote(data) {
   return "Showing the newest " + shown + " runs; more matched. Raise the row limit or narrow the filters to see the rest.";
 }
 
+/** The description the tool serves for a server whose collector found no SQL Agent service (DarlingJobReader.NoAgentServiceDescription). */
+const NO_AGENT_SERVICE = "no SQL Agent service found";
+
 /**
  * The Agent line for an answer, or null when the answer carries no Agent state. `src` is the answer (or an empty
  * answer's hints); `serverName` is the server the page asked for, used when the answer does not name one. Returns
- * { level: "stopped" | "running" | "unknown", text }.
+ * { level: "stopped" | "running" | "unknown" | "none", text }. A server with no SQL Agent service is not a stopped one:
+ * it reads "none", drawn as a plain line, and never turns the roll-up red.
  */
 export function agentLine(src, serverName) {
   if (!src || typeof src !== "object") return null;
@@ -165,20 +170,23 @@ export function agentLine(src, serverName) {
   } else if ("agent_running" in src) {
     total = 1;
     running = src.agent_running === true ? 1 : 0;
-    notRunning = src.agent_running === true ? [] : [{ server: src.server || serverName || "", agent_running: src.agent_running }];
+    notRunning = src.agent_running === true ? [] : [{ server: src.server || serverName || "", agent_running: src.agent_running, agent_status_desc: src.agent_status_desc }];
   } else return null;
   if (total === 0) return null;
+  const noService = notRunning.filter((a) => a.agent_running == null && a.agent_status_desc === NO_AGENT_SERVICE).map((a) => a.server || "");
   const stopped = notRunning.filter((a) => a.agent_running === false).map((a) => a.server || "");
-  const unknown = notRunning.filter((a) => a.agent_running !== false).map((a) => a.server || "");
-  const level = stopped.length ? "stopped" : unknown.length ? "unknown" : "running";
+  const unknown = notRunning.filter((a) => a.agent_running !== false && !(a.agent_running == null && a.agent_status_desc === NO_AGENT_SERVICE)).map((a) => a.server || "");
+  const level = stopped.length ? "stopped" : unknown.length ? "unknown" : noService.length === total ? "none" : "running";
   if (total === 1) {
     if (level === "stopped") return { level, text: "SQL Agent is stopped" + (stopped[0] ? " on " + stopped[0] : "") };
     if (level === "unknown") return { level, text: "Agent status unknown (no recent snapshot)" };
+    if (level === "none") return { level, text: "No SQL Agent service" + (noService[0] ? " on " + noService[0] : "") };
     return { level, text: "SQL Agent running" };
   }
   let text = "Agent running on " + running + " of " + total + " servers";
   if (stopped.length) text += "; stopped on " + stopped.join(", ");
   if (unknown.length) text += "; status unknown on " + unknown.join(", ");
+  if (noService.length) text += "; no SQL Agent service on " + noService.join(", ");
   return { level, text };
 }
 

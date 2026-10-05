@@ -117,9 +117,13 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "job-history-"));
 try {
   fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "panels.js", "grid-tools.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  for (const f of ["job-history.js", "analysis-findings.js", "plan-viewer.js"]) {
-    if (fs.existsSync(path.join(jsDir, "pages", f))) fs.copyFileSync(path.join(jsDir, "pages", f), path.join(scratch, "pages", f));
+  /* Copy every module under js/ and js/pages/ rather than a hand-kept list: a new page module that server-tabs.js
+     imports (another PR's pages/*.js) then needs no edit here. Only imported files load, so the rest are inert;
+     charts.js is replaced by the stub below. */
+  for (const dir of ["", "pages"]) {
+    for (const f of fs.readdirSync(path.join(jsDir, dir))) {
+      if (f.endsWith(".js")) fs.copyFileSync(path.join(jsDir, dir, f), path.join(scratch, dir, f));
+    }
   }
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
@@ -254,6 +258,10 @@ try {
     allRunning: await agentLine({ ...run, agents_total: 2, agents_running: 2, agents_not_running: [] }),
     emptyStopped: await agentLine({ status: "empty", message: "No job runs matched in the requested time range.", hints: { effective_start: "2026-03-01T08:00:00Z", window_truncated: false, server: "srv-a", agent_running: false } }),
     emptyFleet: await agentLine({ status: "empty", message: "No job runs matched in the requested time range.", hints: { agents_total: 3, agents_running: 2, agents_not_running: [{ server: "srv-a", agent_running: false }] } }),
+    noService: await agentLine({ ...run, server: "srv-x", agent_running: null, agent_status_desc: "no SQL Agent service found" }),
+    rollupNoService: await agentLine({ ...run, agents_total: 2, agents_running: 1, agents_not_running: [{ server: "srv-x", agent_running: null, agent_status_desc: "no SQL Agent service found" }] }),
+    rollupMixed: await agentLine({ ...run, agents_total: 3, agents_running: 1, agents_not_running: [{ server: "srv-b", agent_running: false, agent_status_desc: "Stopped" }, { server: "srv-x", agent_running: null, agent_status_desc: "no SQL Agent service found" }] }),
+    emptyNoService: await agentLine({ status: "empty", message: "No job runs matched in the requested time range.", hints: { effective_start: "2026-03-01T08:00:00Z", window_truncated: false, server: "srv-x", agent_running: null, agent_status_desc: "no SQL Agent service found" } }),
     absent: await agentLine(run),
   };
 

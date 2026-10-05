@@ -250,6 +250,14 @@ public sealed class JobHistoryPageTests
         // An empty answer carries the Agent under hints, and it is shown there: that is when it matters most.
         Assert.Equal("SQL Agent is stopped on srv-a", Text("emptyStopped"));
         Assert.Equal("Agent running on 2 of 3 servers; stopped on srv-a", Text("emptyFleet"));
+        // A server with no SQL Agent service is not a stopped one: a plain line, never red, and the roll-up stays green.
+        Assert.Equal("No SQL Agent service on srv-x", Text("noService"));
+        Assert.Equal("agent-line agent-none", Class("noService"));
+        Assert.Equal("Agent running on 1 of 2 servers; no SQL Agent service on srv-x", Text("rollupNoService"));
+        Assert.Equal("agent-line agent-running", Class("rollupNoService"));
+        Assert.Equal("Agent running on 1 of 3 servers; stopped on srv-b; no SQL Agent service on srv-x", Text("rollupMixed"));
+        Assert.Equal("agent-line agent-stopped", Class("rollupMixed"));
+        Assert.Equal("No SQL Agent service on srv-x", Text("emptyNoService"));
         // An answer with no Agent fields draws no line.
         Assert.Equal(JsonValueKind.Null, agent.GetProperty("absent").ValueKind);
     }
@@ -269,6 +277,8 @@ public sealed class JobHistoryPageTests
             Assert.Contains("[\"" + field + "\"]", tool, StringComparison.Ordinal);
         var page = Page();
         Assert.Contains("src.agents_total", page);
+        /* The page recognises the no-service server by the exact text the reader serves. */
+        Assert.Contains("const NO_AGENT_SERVICE = \"" + DarlingJobReader.NoAgentServiceDescription + "\";", page);
         Assert.Contains("\"agent_running\" in src", page);
     }
 

@@ -66,36 +66,83 @@ public sealed class DarlingMcpJobHistoryToolSurfaceTests
     }
 
     [Fact]
-    public void TheAgentStateIsJudgedAgainstTheSelfAlertsStalenessWindow_NotACopyOfIt()
+    public void TheAgentStateIsJudgedAgainstTheAlertsLiveStalenessSetting_NotTheShippedDefault()
     {
         var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingJobReader.cs").ReplaceLineEndings("\n");
         var start = reader.IndexOf("internal static AgentState ResolveAgentState(", StringComparison.Ordinal);
         Assert.True(start > 0, "ResolveAgentState is gone");
         var body = reader[start..reader.IndexOf("\n    }\n", start, StringComparison.Ordinal)];
-        Assert.Contains("DarlingSelfAlertEvaluator.StaleWindow", body, StringComparison.Ordinal);
+        Assert.Contains("TimeSpan staleWindow", body, StringComparison.Ordinal);
+        Assert.Contains(">= staleWindow", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("StaleWindow", body.Replace("staleWindow", ""), StringComparison.Ordinal);
         Assert.DoesNotContain("FromMinutes", body, StringComparison.Ordinal);
         Assert.DoesNotContain("AddMinutes", body, StringComparison.Ordinal);
+
+        /* The window is the setting the engine reads (DarlingAlertSettings.CollectionStaleMinutes), with its clamp. */
+        Assert.Equal("SELECT collection_stale_minutes FROM config_alert_settings WHERE id = 1", DarlingJobReader.CollectionStaleMinutesSql);
+        var read = reader[reader.IndexOf("ReadLatestAgentStatesAsync(", StringComparison.Ordinal)..];
+        Assert.Contains("var staleWindow = await ReadStaleWindowAsync(postgres, cancellationToken);", read, StringComparison.Ordinal);
+        var settings = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertSettings.cs").ReplaceLineEndings("\n");
+        Assert.Contains("CollectionStaleMinutes => Math.Clamp(_config.Alerts.CollectionStaleMinutes, 5, 1440);", settings, StringComparison.Ordinal);
+        Assert.Equal(5, DarlingJobReader.StaleMinutesMin);
+        Assert.Equal(1440, DarlingJobReader.StaleMinutesMax);
+    }
+
+    [Fact]
+    public void TheStaleWindowIsTheStoredSettingClamped_AndTheShippedDefaultWhenNoneIsStored()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(60), DarlingJobReader.StaleWindowFor(60));
+        Assert.Equal(TimeSpan.FromMinutes(5), DarlingJobReader.StaleWindowFor(0));
+        Assert.Equal(TimeSpan.FromMinutes(1440), DarlingJobReader.StaleWindowFor(99999));
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleWindow, DarlingJobReader.StaleWindowFor(null));
     }
 
     [Fact]
     public void AStaleSnapshotReadsAsUnknown_AndAFreshOneKeepsItsState()
     {
         var now = new DateTime(2026, 3, 11, 12, 0, 0, DateTimeKind.Utc);
-        var window = DarlingSelfAlertEvaluator.StaleWindow;
+        var window = TimeSpan.FromMinutes(60);
         var next = now.AddHours(1);
 
-        var fresh = DarlingJobReader.ResolveAgentState("s", false, "Stopped", next, now - window + TimeSpan.FromSeconds(1), now);
+        var fresh = DarlingJobReader.ResolveAgentState("s", false, "Stopped", next, now - window + TimeSpan.FromSeconds(1), now, window);
         Assert.False(fresh.AgentRunning);
         Assert.Equal("Stopped", fresh.AgentStatusDesc);
         Assert.Equal(next, fresh.NextRunUtc);
 
-        var atTheWindow = DarlingJobReader.ResolveAgentState("s", true, "Running", next, now - window, now);
+        var atTheWindow = DarlingJobReader.ResolveAgentState("s", true, "Running", next, now - window, now, window);
         Assert.Null(atTheWindow.AgentRunning);
         Assert.Equal(DarlingJobReader.AgentUnknownDescription, atTheWindow.AgentStatusDesc);
         Assert.Null(atTheWindow.NextRunUtc);
 
-        var stoppedAndStale = DarlingJobReader.ResolveAgentState("s", false, "Stopped", null, now - window - TimeSpan.FromHours(1), now);
+        var stoppedAndStale = DarlingJobReader.ResolveAgentState("s", false, "Stopped", null, now - window - TimeSpan.FromHours(1), now, window);
         Assert.Null(stoppedAndStale.AgentRunning);
+
+        /* The same 45-minute-old stopped row: inside a 60-minute window it is stopped, inside the shipped 30 it is unknown. */
+        var age = now - TimeSpan.FromMinutes(45);
+        Assert.False(DarlingJobReader.ResolveAgentState("s", false, "Stopped", null, age, now, TimeSpan.FromMinutes(60)).AgentRunning);
+        Assert.Null(DarlingJobReader.ResolveAgentState("s", false, "Stopped", null, age, now, DarlingSelfAlertEvaluator.StaleWindow).AgentRunning);
+    }
+
+    [Fact]
+    public void AFreshRowWithNoAgentServiceIsNotStopped_ButAStoppedOneIs()
+    {
+        var now = new DateTime(2026, 3, 11, 12, 0, 0, DateTimeKind.Utc);
+        var window = TimeSpan.FromMinutes(30);
+        var captured = now - TimeSpan.FromMinutes(1);
+
+        /* The collector stores agent_running = 0 with NULL descriptions when sys.dm_server_services has no Agent row. */
+        var none = DarlingJobReader.ResolveAgentState("s", false, null, null, captured, now, window);
+        Assert.Null(none.AgentRunning);
+        Assert.Equal("no SQL Agent service found", none.AgentStatusDesc);
+        Assert.Equal("no SQL Agent service found", DarlingJobReader.NoAgentServiceDescription);
+
+        var stopped = DarlingJobReader.ResolveAgentState("s", false, "Stopped", null, captured, now, window);
+        Assert.False(stopped.AgentRunning);
+        Assert.Equal("Stopped", stopped.AgentStatusDesc);
+
+        /* A stale no-service row is just stale. */
+        Assert.Equal(DarlingJobReader.AgentUnknownDescription,
+            DarlingJobReader.ResolveAgentState("s", false, null, null, now - window, now, window).AgentStatusDesc);
     }
 
     [Fact]
@@ -177,8 +224,33 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
             "job-" + job.Replace(' ', '-'), job, category, stepId, stepId == 0 ? "(Job outcome)" : "Step " + stepId.ToString(CultureInfo.InvariantCulture),
             status, status == 1 ? "The job succeeded." : "The job failed.", localRun, seconds, message);
 
+    /* The alert's staleness setting as found before a test moved it (null: no settings row existed); restored by CleanupAsync. */
+    private static (bool Recorded, int? Original) s_staleSetting;
+
+    private static async Task SetStaleMinutesAsync(NpgsqlConnection c, CancellationToken ct, int minutes)
+    {
+        if (!s_staleSetting.Recorded)
+        {
+            await using var read = new NpgsqlCommand("SELECT collection_stale_minutes FROM config_alert_settings WHERE id = 1", c);
+            var value = await read.ExecuteScalarAsync(ct);
+            s_staleSetting = (true, value is null or DBNull ? null : Convert.ToInt32(value, CultureInfo.InvariantCulture));
+        }
+
+        await DarlingMcpTestData.ExecAsync(c, ct, "INSERT INTO config_alert_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
+        await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE config_alert_settings SET collection_stale_minutes = $1 WHERE id = 1", minutes);
+    }
+
     private static async Task CleanupAsync(NpgsqlConnection c, CancellationToken ct)
     {
+        if (s_staleSetting.Recorded)
+        {
+            if (s_staleSetting.Original is { } original)
+                await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE config_alert_settings SET collection_stale_minutes = $1 WHERE id = 1", original);
+            else
+                await DarlingMcpTestData.ExecAsync(c, ct, "DELETE FROM config_alert_settings WHERE id = 1");
+            s_staleSetting = default;
+        }
+
         var ids = $"{ServerA}, {ServerB}, {ServerC}";
         await DarlingMcpTestData.ExecAsync(c, ct, $"DELETE FROM job_history WHERE server_id IN ({ids})");
         await DarlingMcpTestData.ExecAsync(c, ct, $"DELETE FROM agent_status WHERE server_id IN ({ids})");
@@ -422,12 +494,12 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         }
     }
 
-    private static Task SeedAgentAsync(NpgsqlConnection c, CancellationToken ct, int serverId, string serverName, bool? running, string desc, TimeSpan age, DateTime? nextLocal = null) =>
+    private static Task SeedAgentAsync(NpgsqlConnection c, CancellationToken ct, int serverId, string serverName, bool? running, string? desc, TimeSpan age, DateTime? nextLocal = null) =>
         DarlingMcpTestData.ExecAsync(c, ct,
             @"INSERT INTO agent_status (collection_id, collection_time, server_id, server_name, agent_running, agent_status_desc, agent_startup_desc, next_scheduled_run)
               VALUES ($1,$2,$3,$4,$5,$6,'Automatic',$7)",
             CollectionIdGenerator.Next(), DateTime.SpecifyKind(DateTime.UtcNow - age, DateTimeKind.Unspecified), serverId, serverName,
-            (object?)running ?? DBNull.Value, desc, (object?)nextLocal ?? DBNull.Value);
+            (object?)running ?? DBNull.Value, (object?)desc ?? DBNull.Value, (object?)nextLocal ?? DBNull.Value);
 
     [Fact]
     public async Task ANamedServer_CarriesItsAgentStateFromTheNewestSnapshot()
@@ -441,23 +513,26 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         try
         {
             await SeedAsync(c, ct);
-            /* Alpha (UTC-5): an older running row, then the newest says stopped. Bravo: running, with a next run at local 21:00 (UTC). */
+            /* Alpha (UTC-5): an older running row, then the newest says stopped, with a next run at local 21:00 (02:00 UTC the next day).
+               Bravo: running, with a next run at local 21:00 (UTC, so unconverted). */
             await SeedAgentAsync(c, ct, ServerA, NameA, true, "Running", TimeSpan.FromMinutes(12));
-            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", TimeSpan.FromMinutes(2));
+            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", TimeSpan.FromMinutes(2), new DateTime(2026, 3, 11, 21, 0, 0));
             await SeedAgentAsync(c, ct, ServerB, NameB, true, "Running", TimeSpan.FromMinutes(1), new DateTime(2026, 3, 11, 21, 0, 0));
 
             var stopped = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, as_of: AsOfText, cancellationToken: ct)).RootElement;
             Assert.False(stopped.GetProperty("agent_running").GetBoolean());
             Assert.Equal("Stopped", stopped.GetProperty("agent_status_desc").GetString());
-            Assert.Equal(JsonValueKind.Null, stopped.GetProperty("next_run").ValueKind);
+            Assert.Equal("2026-03-12T02:00:00.0000000Z", stopped.GetProperty("next_run").GetString());
             Assert.EndsWith("Z", stopped.GetProperty("captured_at").GetString(), StringComparison.Ordinal);
             Assert.Equal(4, stopped.GetProperty("runs").GetArrayLength());
 
             var running = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameB, as_of: AsOfText, cancellationToken: ct)).RootElement;
             Assert.True(running.GetProperty("agent_running").GetBoolean());
             Assert.Equal("Running", running.GetProperty("agent_status_desc").GetString());
+            Assert.Equal("2026-03-11T21:00:00.0000000Z", running.GetProperty("next_run").GetString());
             Assert.Equal(2, running.GetProperty("runs").GetArrayLength());
-            Assert.False(running.TryGetProperty("agents", out var absent));
+            /* A named server's answer carries the flat fields, never the fleet's counts. */
+            Assert.False(running.TryGetProperty("agents_total", out var absent));
             ok = true;
         }
         finally
@@ -478,6 +553,7 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         try
         {
             await SeedAsync(c, ct);
+            await SetStaleMinutesAsync(c, ct, 30);
             var stale = DarlingSelfAlertEvaluator.StaleWindow + TimeSpan.FromMinutes(5);
             await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", stale, DateTime.UtcNow.AddHours(1));
             await SeedAgentAsync(c, ct, ServerB, NameB, true, "Running", stale);
@@ -517,6 +593,7 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         try
         {
             await SeedAsync(c, ct);
+            await SetStaleMinutesAsync(c, ct, 30);
             await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", TimeSpan.FromMinutes(3));
             await SeedAgentAsync(c, ct, ServerB, NameB, true, "Running", TimeSpan.FromMinutes(3));
             await SeedAgentAsync(c, ct, ServerC, NameC, true, "Running", DarlingSelfAlertEvaluator.StaleWindow + TimeSpan.FromMinutes(1));
@@ -547,6 +624,113 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         }
         finally
         {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
+    public async Task TheAgentIsJudgedAgainstTheAlertsLiveStalenessSetting()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", TimeSpan.FromMinutes(45), DateTime.UtcNow.AddHours(1));
+
+            /* The shipped 30 minutes: a 45-minute-old row says nothing about the Agent now. */
+            await SetStaleMinutesAsync(c, ct, 30);
+            var thirty = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.Equal(JsonValueKind.Null, thirty.GetProperty("agent_running").ValueKind);
+            Assert.Equal("unknown (no recent status)", thirty.GetProperty("agent_status_desc").GetString());
+
+            /* At 60 minutes the Agent Not Running alert fires on that same row, so the tool reports it stopped. */
+            await SetStaleMinutesAsync(c, ct, 60);
+            var sixty = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.False(sixty.GetProperty("agent_running").GetBoolean());
+            Assert.Equal("Stopped", sixty.GetProperty("agent_status_desc").GetString());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
+    public async Task AServerWithNoAgentService_IsNotStopped_NamedOrInTheFleet()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            await SetStaleMinutesAsync(c, ct, 30);
+            /* Bravo has no Agent service: the collector stores agent_running = false with NULL descriptions. Alpha's is really stopped. */
+            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", TimeSpan.FromMinutes(2));
+            await SeedAgentAsync(c, ct, ServerB, NameB, false, null, TimeSpan.FromMinutes(2));
+
+            var named = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameB, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.Equal(JsonValueKind.Null, named.GetProperty("agent_running").ValueKind);
+            Assert.Equal("no SQL Agent service found", named.GetProperty("agent_status_desc").GetString());
+
+            var fleet = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            var listed = fleet.GetProperty("agents_not_running").EnumerateArray()
+                .Where(a => a.GetProperty("server").GetString()!.StartsWith("jobhist-", StringComparison.Ordinal)).ToList();
+            Assert.Equal(new[] { NameA, NameB }, listed.Select(a => a.GetProperty("server").GetString()!).ToArray());
+            Assert.Equal(JsonValueKind.False, listed[0].GetProperty("agent_running").ValueKind);
+            Assert.Equal(JsonValueKind.Null, listed[1].GetProperty("agent_running").ValueKind);
+            Assert.Equal("no SQL Agent service found", listed[1].GetProperty("agent_status_desc").GetString());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
+    public async Task AFailedAgentRead_StillServesTheRuns_WithoutTheAgentFields()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", TimeSpan.FromMinutes(2));
+            DarlingJobReader.AgentReadFaultForTests.Value = new TimeoutException("the Agent read timed out");
+
+            var named = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.Equal(4, named.GetProperty("runs").GetArrayLength());
+            Assert.False(named.TryGetProperty("agent_running", out var absent1));
+            Assert.False(named.TryGetProperty("agent_status_desc", out var absent2));
+
+            var fleet = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.Equal(6, fleet.GetProperty("runs").GetArrayLength());
+            Assert.False(fleet.TryGetProperty("agents_total", out var absent3));
+
+            /* An empty answer keeps its own hints, without the Agent fields. */
+            var empty = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, job_name: "no such job", as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.Equal("empty", empty.GetProperty("status").GetString());
+            Assert.True(empty.GetProperty("hints").TryGetProperty("window_truncated", out var absent4));
+            Assert.False(empty.GetProperty("hints").TryGetProperty("agent_running", out var absent5));
+            ok = true;
+        }
+        finally
+        {
+            DarlingJobReader.AgentReadFaultForTests.Value = null;
             await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
         }
     }
