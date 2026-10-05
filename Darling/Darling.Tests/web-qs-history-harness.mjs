@@ -7,14 +7,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+/* isConnected is a plain flag here: true for a node that was built or put under a parent, false once removeChild took it
+   out (the page throwing a cell away). */
 class FakeNode {
-  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = ""; this.className = ""; this.style = {}; }
+  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = ""; this.className = ""; this.style = {}; this.isConnected = true; }
   get firstChild() { return this.children[0] || null; }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
   set textContent(v) { this._text = String(v); this.children = []; }
   setAttribute(k, v) { this.attrs[k] = String(v); }
-  appendChild(c) { if (c.parent) c.parent.children = c.parent.children.filter((x) => x !== c); c.parent = this; this.children.push(c); return c; }
-  removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; }
+  appendChild(c) { if (c.parent) c.parent.children = c.parent.children.filter((x) => x !== c); c.parent = this; this.children.push(c); c.isConnected = true; return c; }
+  removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; c.isConnected = false; }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   click() { for (const fn of this.listeners.click || []) fn({ preventDefault() {}, target: this }); }
   all(pred, acc = []) { if (pred(this)) acc.push(this); for (const c of this.children) c.all && c.all(pred, acc); return acc; }
@@ -55,6 +57,7 @@ const util = await import(pathToFileURL(scratch + "/util.js").href);
 const flush = () => new Promise((r) => setTimeout(r, 5));
 const out = {};
 const row = { database_name: "Orders", query_id: 42 };
+const KEY = "srv-a|Orders|42"; // the panel's key for `row` (server|database|query id)
 const history = (extra = {}) => ({
   database_name: "Orders", query_id: 42, effective_start: "2026-03-04T00:00:00.0000000Z", window_truncated: false, points_truncated: false,
   plans: [
@@ -153,6 +156,29 @@ const scenarios = {
     await flush();
     out.rangeRefetched = fetches.length - before - 1;
     out.lastAsOf = query(fetches.length - 1).query.as_of;
+  },
+  /* The page throws a cell away (a grid rebuild, a tab switch) while the read is out. When the answer lands, the cell that
+     left is not drawn into and leaves the redraw set, and the cell that replaced it is drawn. */
+  async detachedCell() {
+    respond(history());
+    const gone = body.appendChild(col().render(row));
+    gone.byText("History").click();
+    body.removeChild(gone);
+    const kept = body.appendChild(col().render(row));
+    await flush();
+    out.goneTables = tables(gone).length;
+    out.keptTables = tables(kept).length;
+    out.cells = mod.queryStoreHistoryViewCounts()[KEY];
+  },
+  /* The last cell for a key goes: the key itself leaves the redraw map, not an empty set left behind. */
+  async lastCellGone() {
+    respond(history());
+    const only = body.appendChild(col().render(row));
+    only.byText("History").click();
+    body.removeChild(only);
+    await flush();
+    out.goneTables = tables(only).length;
+    out.keys = Object.keys(mod.queryStoreHistoryViewCounts());
   },
   async cutNotice() {
     respond(history({ points_truncated: true }));

@@ -116,6 +116,23 @@ public sealed class QueryStoreHistoryBehaviourTests
     }
 
     [Fact]
+    public void ACellThePageThrewAway_IsNotDrawnInto_AndLeavesTheRedrawSet()
+    {
+        var r = Run("detachedCell");
+        Assert.Equal(0, r.GetProperty("goneTables").GetInt32());
+        Assert.Equal(1, r.GetProperty("keptTables").GetInt32());
+        Assert.Equal(1, r.GetProperty("cells").GetInt32());
+    }
+
+    [Fact]
+    public void WhenTheLastCellForAKeyIsGone_TheKeyLeavesTheRedrawMap()
+    {
+        var r = Run("lastCellGone");
+        Assert.Equal(0, r.GetProperty("goneTables").GetInt32());
+        Assert.Empty(r.GetProperty("keys").EnumerateArray());
+    }
+
+    [Fact]
     public void ACutPointList_SaysTheNewestAreShown()
     {
         var notices = Run("cutNotice").GetProperty("notices");

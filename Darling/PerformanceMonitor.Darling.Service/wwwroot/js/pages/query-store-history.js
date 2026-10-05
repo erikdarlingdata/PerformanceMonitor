@@ -21,15 +21,26 @@ import { planSourceCell } from "./plan-viewer.js";
 
 /* key -> { phase: "loading" | "done", stamp, result: { kind: "data" | "none" | "error", ... } }. */
 const openHistories = new Map();
-/* key -> Set of redraw functions, one per cell currently showing the key. */
+/* key -> Set of redraw functions, one per cell currently showing the key. Each draw carries `draw.host`, the cell it draws
+   into, so redraw() can tell a cell the page threw away (a grid rebuild, a tab switch) from one still on it. */
 const views = new Map();
 
 const keyOf = (server, row) => [server, row.database_name, row.query_id].join("|");
 /* The window a read was made for: the preset hours and the page's custom range, so a changed window reads again. */
 const stampOf = (hours) => hours + "@" + activeRangeStamp();
 
+/* A draw whose cell has left the page is dropped here instead of being drawn into detached DOM: every rebuild renders a
+   fresh cell per row, and the old cell's draw would otherwise stay in the set for as long as the page lives (#5234).
+   Pruning happens at redraw, never at registration, because a cell is not on the page yet while its grid is being
+   built. The key leaves the map once its last cell is gone. */
 const redraw = (key) => {
-  for (const draw of views.get(key) || []) draw();
+  const set = views.get(key);
+  if (!set) return;
+  for (const draw of [...set]) {
+    if (draw.host && draw.host.isConnected === false) set.delete(draw);
+    else draw();
+  }
+  if (set.size === 0) views.delete(key);
 };
 
 /** Forgets every open panel. Tests only; the page never needs it. */
@@ -41,6 +52,11 @@ export function resetQueryStoreHistory() {
 /** The keys of the open panels, for tests. */
 export function openQueryStoreHistoryKeys() {
   return [...openHistories.keys()];
+}
+
+/** How many cells are registered to redraw for each key, as { key: count }, for tests. */
+export function queryStoreHistoryViewCounts() {
+  return Object.fromEntries([...views].map(([key, set]) => [key, set.size]));
 }
 
 /** Turns a read result into { kind: "data" | "none" | "error", ... }, or null when the read was abandoned. */
@@ -181,6 +197,7 @@ export function queryStoreHistoryColumn(server, hours) {
         host.appendChild(button);
         if (isOpen) host.appendChild(panelFor(key, server, hours));
       };
+      draw.host = host;
       if (!views.has(key)) views.set(key, new Set());
       views.get(key).add(draw);
       draw();
