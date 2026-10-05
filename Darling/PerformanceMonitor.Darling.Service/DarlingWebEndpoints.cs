@@ -88,6 +88,15 @@ public static class DarlingWebEndpoints
         set => s_testOnlyExtraDispatchEntry.Value = value;
     }
 
+    /// <summary>Reads served on <c>/api/read/*</c> that are NOT an MCP tool (#5241): the web page's own keyed reads.
+    /// <c>get_alert_details</c> returns one alert's advice when its row is opened, so the Alert History poll does not
+    /// carry every row's advice. They are the only dispatch keys with no <c>[McpServerTool]</c> behind them; the
+    /// parity test adds exactly this set to the tool catalog.</summary>
+    internal static readonly IReadOnlySet<string> WebOnlyReadNames = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_alert_details",
+    };
+
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
     /// makes a live monitored-server connection; <c>mute_analysis_finding</c> writes; the <c>analyze_*_plan</c> family
     /// is the compute-heavy plan-analysis phase-2 work; the Custom Views tools (#1599) are served by their OWN
@@ -130,6 +139,7 @@ public static class DarlingWebEndpoints
         "delete_mute_rule",
         "set_mute_rule_enabled",
         "add_servers",
+        "edit_server",
         "remove_server",
         "create_custom_alert_rule",
         "get_custom_alert_rule",
@@ -444,6 +454,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCustomAlerts(app, postgres, logger);
         MapMuteRules(app, postgres, logger);
         MapServerTags(app, postgres, logger);
+        MapAdminServers(app, postgres);
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
 
@@ -1568,6 +1579,24 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>
+    /// <c>GET /api/admin/servers</c> (#5239): the Admin page's Manage Servers grid - every configured server,
+    /// enabled or disabled, with its authentication mode, monthly cost and added time (see
+    /// <see cref="DarlingAdminServersReader"/>). It is a web-only route: <c>list_servers</c> keeps its
+    /// enabled-only answer for every other consumer, and a route here adds nothing to the MCP <c>tools/list</c>.
+    /// The gate is the one every web route sits behind (the sign-in gate, then the seat's method gate, which
+    /// lets a read-only seat make a GET); the read runs on the viewer-role pool, whose column grant on
+    /// <c>config_monitored_servers</c> leaves out the credential columns, and the statement names none of them.
+    /// </summary>
+    internal static void MapAdminServers(WebApplication app, NpgsqlDataSource postgres)
+    {
+        app.MapGet(DarlingAdminServersReader.Route, async (HttpContext context) =>
+        {
+            var rows = await DarlingAdminServersReader.ReadAsync(postgres, context.RequestAborted);
+            return Results.Text(DarlingAdminServersReader.Render(rows, DateTime.UtcNow), "application/json");
+        });
+    }
+
+    /// <summary>
     /// The fleet server-tag write routes (#5085), the same shape as <see cref="MapMuteRules"/>: each route parses
     /// its JSON body and hands it to the matching <c>DarlingMcpServerTagTools.*Core</c> over a
     /// <see cref="ServerTagStore"/> on the viewer-role pool, so the web surface and the MCP tools share one set of
@@ -2599,7 +2628,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>#4617: named so the MCP read census (<see cref="Darling.Tests.McpReadCommandTimeoutTests"/>)
     /// recognises the <c>NpgsqlCommand(string, connection)</c> construction below as a store read rather
     /// than an unrecognised receiver.</summary>
-    private const string QueryStoreWideSchemaVersionSql = "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version";
+    internal const string QueryStoreWideSchemaVersionSql = "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version";
 
     /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
     private const string QueryStoreWideServerIdsSql =
@@ -4003,6 +4032,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── alerts / mute rules (DarlingMcpAlertTools) ── */
             ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid).", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false)),
             ["get_alert_settings"] = R(CatAlerts, "The current alert-settings configuration."),
+            /* #5241: a web-only read (no MCP tool behind it, see WebOnlyReadNames): one alert's advice and fix script,
+               fetched when its Analysis row is first expanded. The key is the page's own row identity. */
+            ["get_alert_details"] = R(CatAlerts, "One fired alert's advice: the heading, fields, advice text and fix script the desktop's Alert Detail shows (never the Apply payload), found by server_id, metric_name and alert_time exactly as get_alert_history reports them. An alert with no advice, or no match, answers an empty details list.", new CatalogParam("server_id", TypeInt, true, null), PReqText("metric_name"), PReqText("alert_time")),
             ["get_mute_rules"] = R(CatAlerts, "The alert mute rules (enabled-only by default).", PBool("enabled_only", true)),
             /* #3598: a read the web host's viewer role can serve — the tool selects only the non-secret carve
                (route_id, metric_match, the GENERATED configured_channels presence column, smtp_recipients,
@@ -4859,6 +4891,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── alerts / mute rules ── */
             ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false), cancellationToken: c.RequestAborted),
+            ["get_alert_details"] = (c, pg, an) => First(c, "server_id") is null ? MissingParam("server_id")
+                : !RequireText(c, "metric_name", out var detailsMetric) ? MissingParam("metric_name")
+                : !RequireText(c, "alert_time", out var detailsTime) ? MissingParam("alert_time")
+                : int.TryParse(First(c, "server_id"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var detailsServerId)
+                    ? DarlingMcpAlertTools.GetAlertDetails(pg, detailsServerId, detailsMetric, detailsTime, c.RequestAborted)
+                    : DarlingMcpAlertTools.GetAlertDetails(pg, 0, "", detailsTime, c.RequestAborted),
             ["get_alert_settings"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertSettings(pg, c.RequestAborted),
             ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true), c.RequestAborted),
             ["get_notification_routes"] = (c, pg, an) => DarlingMcpAlertTools.GetNotificationRoutes(pg, c.RequestAborted),
@@ -4889,7 +4927,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                store's tools/list-driven call under the shared response budget), but the web viewer has
                always shown the whole graph. The row pins its OWN default to true so #4198's MCP-side
                budget cut does not silently shrink what the viewer renders. */
-            ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
+            /* #5246: the drawn graph is added here for the web only, so the MCP tool's payload, response budget and Lite parity do not change. */
+            ["get_deadlock_detail"] = async (c, pg, an) => DarlingWebDeadlockGraph.AddGraphs(await DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted)),
             ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
             ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)

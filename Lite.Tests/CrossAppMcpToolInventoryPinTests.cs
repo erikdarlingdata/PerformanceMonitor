@@ -330,6 +330,7 @@ public sealed class CrossAppMcpToolInventoryPinTests
            servers from its own local config + DuckDB, with no central service-honored monitored-server store, so
            there is no Lite twin to port (same reasoning as the Custom Views + alert-tuning tools above). */
         "add_servers",
+        "edit_server",
         "remove_server",
 
         /* #3285: the custom-alert-rule tools — the Darling MCP server's write surface for user-authored alert
