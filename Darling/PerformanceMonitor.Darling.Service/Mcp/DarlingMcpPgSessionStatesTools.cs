@@ -424,12 +424,16 @@ public sealed class DarlingMcpPgSessionStatesTools
                 postgres, "get_pg_session_states", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
             return McpHelpers.Status(
                 "empty",
-                $"No session held a transaction open past the collector's floor on {serverName} in the last "
-                + $"{hoursBack} hour(s), across {captures.CapturesTotal} capture(s). This is the healthy "
-                + "state and a real all-clear rather than missing data - the collector stores nothing when "
-                + "every transaction is short. One caveat that is not a hedge: this samples at the "
-                + "collection interval, so a transaction that opened and closed between two samples is "
-                + "genuinely invisible here.",
+                McpHelpers.QuietUnlessCut(
+                    notice.WindowTruncated, notice.EffectiveStart,
+                    factual: $"No session held a transaction open past the collector's floor on {serverName} in the last "
+                        + $"{hoursBack} hour(s), across {captures.CapturesTotal} capture(s)",
+                    coveredClaim: ". This is the healthy "
+                        + "state and a real all-clear rather than missing data - the collector stores nothing when "
+                        + "every transaction is short.",
+                    tail: " One caveat that is not a hedge: this samples at the "
+                        + "collection interval, so a transaction that opened and closed between two samples is "
+                        + "genuinely invisible here."),
                 notice.IsUnavailable ? hints : new
                 {
                     hints.server,
