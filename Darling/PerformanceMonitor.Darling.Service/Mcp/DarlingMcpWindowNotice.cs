@@ -153,6 +153,29 @@ internal static class DarlingMcpWindowNotice
     }
 
     /// <summary>
+    /// <see cref="ReadEventAsync"/> for an event list that keeps its NEWEST <c>limit</c> rows (#4966). A full page
+    /// (<paramref name="pageFull"/>, observed from the limit + 1 fetch) stops at its oldest row whatever the store covers, so that
+    /// row IS where the answer starts: the notice names it, with no probe (the rows say it), as the viewer's grid does when its read
+    /// hits its cap (<c>ViewerEventDataStart.Of</c>). The Service does not reference the viewer, so the rule is restated here. A page
+    /// under its cap keeps <see cref="ReadEventAsync"/>'s rule: the earlier of the coverage floor and the oldest event shown.
+    /// A capped page that reaches the window's start (within the slack) gives no notice.
+    /// </summary>
+    internal static Task<McpWindowNotice> ReadEventPageAsync(
+        Func<Task<DateTime?>> probe, DateTime? oldestEventShown, bool pageFull, DateTime requestedStart, DateTime windowEnd, string table,
+        ILogger? logger = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(probe);
+        if (pageFull && oldestEventShown is DateTime oldest)
+        {
+            return Task.FromResult(Build(
+                oldest, requestedStart, table,
+                "The page is full, so the events older than its oldest row were not read: raise limit or narrow the window."));
+        }
+
+        return ReadEventAsync(probe, oldestEventShown, requestedStart, windowEnd, table, logger: logger, cancellationToken: cancellationToken);
+    }
+
+    /// <summary>
     /// A payload already serialized with the three window-floor keys, without them: what a tool answers when its probe failed
     /// (<see cref="McpWindowNotice.IsUnavailable"/>). Only top-level keys are touched, and the order of the rest is kept.
     /// </summary>

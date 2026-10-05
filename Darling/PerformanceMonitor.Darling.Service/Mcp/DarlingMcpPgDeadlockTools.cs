@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -81,6 +82,7 @@ public sealed class DarlingMcpPgDeadlockTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum deadlocks to return. Default 25. See the tool's reading guide.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -94,6 +96,7 @@ public sealed class DarlingMcpPgDeadlockTools
 
         try
         {
+            var windowStart = windowEnd.AddHours(-hours_back);
             /* #3653 (the #3541 A3 class, the residue #3679 named): the caller's limit + 1 as the fetch, the
                extra row as the OBSERVED truncation signal. This used to publish `rows.Count >= limit`, which
                says "more" for a window holding exactly `limit` distinct deadlocks - the one case an
@@ -116,15 +119,29 @@ public sealed class DarlingMcpPgDeadlockTools
                     postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
                         postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks", cancellationToken)
+                    /* #4966: not_collected and the precondition stay bare; a quiet answer carries the window keys under hints. */
                     ?? McpHelpers.Status(
                         "no_deadlocks",
-                        NoDeadlocksText(resolved.ServerName, hours_back));
+                        NoDeadlocksText(resolved.ServerName, hours_back),
+                        (await DarlingMcpWindowNotice.ReadEventAsync(
+                            () => DarlingMcpWindowNotice.Probe(postgres, "pg_deadlocks", resolved.ServerName, windowStart, windowEnd, cancellationToken),
+                            null, windowStart, windowEnd, "pg_deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
             }
 
-            return JsonSerializer.Serialize(new
+            /* #4966: a sparse event list kept newest first, windowed on the event's own time. A full page starts at its oldest row
+               (no probe); otherwise the floor is the earlier of the coverage probe (sparse, so the schedule's retention edge and the
+               server's first collection, never an oldest row) and the oldest event shown (a first run stores events from before itself). */
+            var notice = await DarlingMcpWindowNotice.ReadEventPageAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "pg_deadlocks", resolved.ServerName, windowStart, windowEnd, cancellationToken),
+                rows.Min(r => r.OccurredAtUtc), truncated, windowStart, windowEnd, "pg_deadlocks", logger: logger, cancellationToken: cancellationToken);
+
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 status = "deadlocks",
                 deadlock_count = rows.Count,
                 truncated,
@@ -143,6 +160,9 @@ public sealed class DarlingMcpPgDeadlockTools
                     times_seen = r.TimesSeen,
                 }),
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

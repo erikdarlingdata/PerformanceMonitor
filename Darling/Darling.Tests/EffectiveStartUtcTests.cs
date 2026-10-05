@@ -49,6 +49,8 @@ public sealed class EffectiveStartUtcTests
     [InlineData("DarlingMcpSessionTools.cs", 2)]
     [InlineData("DarlingMcpMemoryGrantTools.cs", 1)]
     [InlineData("DarlingMcpPlanCorrectionTools.cs", 1)]
+    [InlineData("DarlingMcpPgDeadlockTools.cs", 1)]
+    [InlineData("DarlingMcpPgLogEventTools.cs", 1)]
     [InlineData("DarlingMcpQueryHeatmapTools.cs", 1)]
     [InlineData("DarlingMcpQueryStoreRegressionTools.cs", 1)]
     public void EveryWindowFloorWrite_RoutesThroughTheSharedFormatter(string file, int minimumRouted)
