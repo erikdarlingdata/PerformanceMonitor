@@ -37,6 +37,7 @@ namespace PerformanceMonitorLite.Tests;
 /// terms (it collects only while it is open): a full row always has the key, a partial row has it only for a collector with a
 /// run time, and a compact row never does. The app's own registration hands the tool the schedule that holds the run times.
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class CollectionHealthRunTimeToolTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const string ServerName = "RunTimeHealthSrv";

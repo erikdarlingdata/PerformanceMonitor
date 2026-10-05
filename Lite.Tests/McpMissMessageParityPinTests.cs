@@ -32,6 +32,7 @@ namespace Lite.Tests;
 /// message either server can produce, and a naive extension that tried to would pass vacuously the day
 /// somebody added an unshared one.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class McpMissMessageParityPinTests
 {
     /// <summary>

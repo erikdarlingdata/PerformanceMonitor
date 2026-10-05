@@ -36,7 +36,7 @@
  * list) still refreshes.
  */
 
-import { el, mount, apiGet, apiGetFleet, bandClass, localTime, hasInFlightReads, isSessionExpired, onSessionExpired } from "./util.js";
+import { el, mount, apiGet, apiGetFleet, readTool, bandClass, localTime, hasInFlightReads, isSessionExpired, onSessionExpired } from "./util.js";
 import { navigateServer } from "./panels.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
@@ -47,7 +47,8 @@ import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderAlertRuleList } from "./pages/alert-rules.js";
 import { renderViewList, renderView, currentViewRefresh, onViewRefreshChange, clearViewRefresh } from "./pages/views.js";
-import { REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel } from "./refresh-policy.js";
+import { REFRESH_CHOICES, PAGE_REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel, loadPageRefreshChoice, savePageRefreshChoice, PAGE_REFRESH_KEY } from "./refresh-policy.js";
+import { buildPageRefreshControl } from "./refresh-control.js";
 import { renderTriage } from "./pages/triage.js";
 import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
@@ -319,10 +320,86 @@ async function refreshViewList() {
 /* ─────────────────────────── status bar ─────────────────────────── */
 
 /* A fixed footer mirroring the WPF viewer's status bar: fleet server count, collectors healthy/failing across
-   the fleet, and the last refresh time. Built from the SAME /api/fleet response the sidebar just read (no extra
-   round-trip). Store size has no web endpoint, so it is deliberately omitted here. */
-function updateStatusBar(d) {
+   the fleet, the store size, this session's seat, the collection state when it is not ok, and the last refresh
+   time. The fleet figures come from the SAME /api/fleet response the sidebar just read (no extra round-trip).
+   The extra items are filled in by refreshStatusExtras and never block or break the bar: each one that cannot
+   be read is simply absent (the store size keeps its last good value, marked stale).
+
+   Module scope on purpose: the 60s poll rebuilds the bar, so the cached size and the last ping state live here
+   rather than inside updateStatusBar. The operator's own "collection paused" flag is not shown: /api/ping does
+   not carry it (it is the unauthenticated health route) and no read the web seat can call exposes it. */
+const STORE_SIZE_TTL_MS = 5 * 60 * 1000;
+const NON_OK_COLLECTION_STATES = new Set(["starting", "degraded", "stopped"]);
+let statusFleet = null;
+let statusSeat = null;
+let statusCollection = null;
+let storeSizeBytes = null;
+let storeSizeStale = false;
+let storeSizeAttemptAt = 0;
+let storeSizeInFlight = false;
+
+/* The Viewer's wording (ViewerSeatIndicator): "Seat: read-write" / "Seat: read-only" / "Seat: not connected". */
+function seatLabel(session) {
+  if (!session) return null;
+  if (session.probe_failed) return "Seat: not connected";
+  return session.can_edit ? "Seat: read-write" : "Seat: read-only";
+}
+
+/* The Viewer's FormatBytes: GB with one decimal from 1 GB up, whole MB below. */
+function formatStoreSize(bytes) {
+  const mb = 1024 * 1024;
+  const gb = mb * 1024;
+  return bytes >= gb ? (bytes / gb).toFixed(1) + " GB" : Math.round(bytes / mb) + " MB";
+}
+
+/* /api/ping answers 503 for degraded/stopped, so apiGet would classify it as an error and drop the body; this
+   reads the body whatever the status. Any failure is null (the item is hidden). */
+async function fetchCollectionState() {
+  try {
+    const resp = await fetch("/api/ping", { headers: { Accept: "application/json" } });
+    const body = await resp.json();
+    return body && typeof body.status === "string" ? body.status : null;
+  } catch {
+    return null;
+  }
+}
+
+/* get_store_host is read at most once per STORE_SIZE_TTL_MS, failures included, so a store that cannot answer is
+   not retried every poll. A failure keeps the last good size and marks it stale. */
+async function refreshStoreSize(now) {
+  if (storeSizeInFlight || (storeSizeAttemptAt && now - storeSizeAttemptAt < STORE_SIZE_TTL_MS)) return;
+  storeSizeInFlight = true;
+  storeSizeAttemptAt = now;
+  try {
+    const res = await readTool("get_store_host", {});
+    const bytes = res && res.kind === "data" && res.data && res.data.store ? res.data.store.size_bytes : null;
+    if (typeof bytes === "number" && isFinite(bytes) && bytes >= 0) {
+      storeSizeBytes = bytes;
+      storeSizeStale = false;
+    } else {
+      storeSizeStale = true;
+    }
+  } catch {
+    storeSizeStale = true;
+  } finally {
+    storeSizeInFlight = false;
+  }
+}
+
+async function refreshStatusExtras() {
+  const [session, state] = await Promise.all([
+    getSession().catch(() => null),
+    fetchCollectionState(),
+    refreshStoreSize(Date.now()),
+  ]);
+  statusSeat = seatLabel(session);
+  statusCollection = state;
+  renderStatusBar();
+}
+
+function renderStatusBar() {
   if (!statusbar) return;
+  const d = statusFleet;
   if (!d) {
     mount(statusbar, el("span", { class: "sb-item muted", text: "Fleet unavailable" }));
     return;
@@ -334,16 +411,33 @@ function updateStatusBar(d) {
     failing += c.failed_collector_count || 0;
   }
   const servers = d.total_servers || 0;
-  mount(statusbar, [
+  const items = [
     el("span", { class: "sb-item", text: servers + (servers === 1 ? " server" : " servers") }),
-    el("span", { class: "sb-sep", text: "·" }),
     el("span", { class: "sb-item", text: healthy + " collectors healthy · " + failing + " failing" }),
-    el("span", { class: "sb-sep", text: "·" }),
-    el("span", { class: "sb-item", text: "Updated " + localTime(d.generated_at) }),
-    el("span", { class: "sb-sep", text: "·" }),
-    el("span", { class: "sb-item", id: "refresh-hint" }),
-  ]);
+  ];
+  if (storeSizeBytes != null) {
+    items.push(el("span", { class: "sb-item sb-store-size" + (storeSizeStale ? " muted" : ""), text: "Database: " + formatStoreSize(storeSizeBytes) + (storeSizeStale ? " (stale)" : "") }));
+  }
+  if (statusSeat) items.push(el("span", { class: "sb-item sb-seat", text: statusSeat }));
+  if (statusCollection && NON_OK_COLLECTION_STATES.has(statusCollection)) {
+    items.push(el("span", { class: "sb-item sb-collection sb-warn", text: "Collection: " + statusCollection[0].toUpperCase() + statusCollection.slice(1) }));
+  }
+  items.push(el("span", { class: "sb-item", text: "Updated " + localTime(d.generated_at) }));
+  items.push(el("span", { class: "sb-item", id: "refresh-hint" }));
+
+  const children = [];
+  items.forEach((item, i) => {
+    if (i) children.push(el("span", { class: "sb-sep", text: "·" }));
+    children.push(item);
+  });
+  mount(statusbar, children);
   updateRefreshHint();
+}
+
+function updateStatusBar(d) {
+  statusFleet = d || null;
+  renderStatusBar();
+  if (d) refreshStatusExtras();
 }
 
 /* ─────────────────────────── refresh loop ─────────────────────────── */
@@ -379,10 +473,60 @@ function pageIntervalMs() {
     const choice = currentViewRefresh() || defaultRefreshChoice(name === "notebook");
     return REFRESH_CHOICES[choice] ?? 0;
   }
+  if (isPickerRoute(name)) return PAGE_REFRESH_CHOICES[pageRefreshChoice] ?? POLL_MS;
   return POLL_MS;
 }
 
+/* The server and FinOps pages carry the shell's interval selector and Refresh button (persisted in localStorage). */
+let pageRefreshChoice = loadPageRefreshChoice(localStorage);
+let pageRefreshControl = null;
+
+function isPickerRoute(routeName) {
+  return routeName === "server" || routeName === "finops";
+}
+
+function syncPageRefreshControl(routeName) {
+  if (!pageRefreshControl) return;
+  pageRefreshControl.root.hidden = !isPickerRoute(routeName);
+}
+
+/* The Refresh button: one shell refresh and one immediate page re-render. While any read is outstanding it does
+   nothing (the button is disabled and marked busy until they settle), so a double-click sends one refresh. */
+function syncRefreshBusy() {
+  if (pageRefreshControl) pageRefreshControl.setBusy(hasInFlightReads());
+}
+
+function refreshPageNow() {
+  if (isSessionExpired() || hasInFlightReads()) return;
+  refreshShell();
+  if (!isNoPollRoute(currentRoute().name)) route({ poll: true, manual: true });
+  syncRefreshBusy();
+}
+
+/* Another tab saved a different interval: take it here too. */
+function onPageRefreshStorage(event) {
+  if (event.key !== null && event.key !== PAGE_REFRESH_KEY) return;
+  pageRefreshChoice = loadPageRefreshChoice(localStorage);
+  if (pageRefreshControl) pageRefreshControl.setChoice(pageRefreshChoice);
+  if (!pageRendering) scheduleNextPageRefresh(Date.now());
+  else updateRefreshHint();
+}
+
+function initPageRefreshControl() {
+  const anchor = document.getElementById("auto-refresh-toggle");
+  if (!anchor || !anchor.parentNode) return;
+  pageRefreshControl = buildPageRefreshControl(pageRefreshChoice, (choice) => {
+    pageRefreshChoice = savePageRefreshChoice(localStorage, choice);
+    if (!pageRendering) scheduleNextPageRefresh(Date.now());
+    else updateRefreshHint();
+  }, refreshPageNow);
+  anchor.parentNode.appendChild(pageRefreshControl.root);
+  window.addEventListener("storage", onPageRefreshStorage);
+  syncPageRefreshControl(currentRoute().name);
+}
+
 function markPageRenderStart(routeName, isPoll) {
+  syncPageRefreshControl(routeName);
   if (!isPoll && (routeName === "view" || routeName === "notebook")) clearViewRefresh();
   if (isNoPollRoute(routeName)) {
     pageRendering = false;
@@ -449,10 +593,12 @@ function schedulerTick() {
      "(slow page)", and pageIsDue never fired because it needs !pageRendering. Settling here stamps the end at
      the first tick that sees no reads outstanding and schedules the next refresh from that moment. */
   if (pageRendering && !hasInFlightReads()) settlePageRender(now);
+  syncRefreshBusy();
   if (document.hidden || isAutoRefreshPaused() || isSessionExpired()) {
     updateRefreshHint();
     return;
   }
+  /* Off pauses only the page's own render; the shell roll-up (sidebar, status bar, session check) keeps running. */
   if (now - shellLastRefreshAt >= POLL_MS) refreshShell();
   if (pageIsDue(now)) refreshPage();
   updateRefreshHint();
@@ -472,7 +618,8 @@ function updateRefreshHint() {
   else if (isBackedOff(interval, pageLastRenderMs) && Number.isFinite(pageNextRefreshAt)) {
     text = "Next refresh " + hhmm(pageNextRefreshAt) + " (slow page)";
   } else {
-    const choice = Object.keys(REFRESH_CHOICES).find((k) => REFRESH_CHOICES[k] === interval);
+    const choices = isPickerRoute(currentRoute().name) ? PAGE_REFRESH_CHOICES : REFRESH_CHOICES;
+    const choice = Object.keys(choices).find((k) => choices[k] === interval);
     text = "Auto-refresh: " + (choice ? refreshLabel(choice) : "1 min");
   }
   hint.textContent = text;
@@ -548,6 +695,7 @@ function start() {
   setInterval(schedulerTick, SCHEDULER_TICK_MS);
   onSessionExpired(showSignedOutState);
   initAutoRefreshToggle();
+  initPageRefreshControl();
 
   refreshSidebar();
   refreshViewList();

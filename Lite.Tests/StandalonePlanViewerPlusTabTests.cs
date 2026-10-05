@@ -45,6 +45,7 @@ namespace Lite.Tests;
 /// is reproduced as the exact call <c>TabItem.OnPreviewGotKeyboardFocus</c> makes, not as a real keyboard
 /// focus change, which needs a shown, activated window.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class StandalonePlanViewerPlusTabTests
 {
     private const string PlusTag = "__PLAN_ADD_TAB__";

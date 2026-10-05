@@ -304,6 +304,10 @@ GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO mcp;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
+-- #5085: the fleet server-tag write tools run as mcp; these two single-table grants are the admin gate. Both
+--     tables are non-secret with no beacon trigger, and server_tags.id is an identity column (no sequence grant).
+GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;
+GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
 
 -- 3d-2. Alert History dismiss (#4843): the web dashboard's POST /api/alert-history/dismiss runs as viewer and
 --     writes `UPDATE config_alert_log SET dismissed = TRUE`. Column-level on exactly that one column, so viewer
@@ -311,6 +315,12 @@ GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
 --     carries no trigger. The WPF read-only probe (has_table_privilege ... 'UPDATE') answers for the table-level
 --     privilege only, so it stays false for viewer. mcp gets none: no MCP tool dismisses an alert.
 GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;
+
+-- #5085: the web dashboard's /api/server-tags endpoints run as viewer, so viewer gets the same two single-table
+--     writes (the seat model decides who may call them; these grants are only the floor). The WPF Viewer's read-only
+--     probe still discriminates on config_alert_log UPDATE, so a connectAs = "viewer" Viewer stays read-only.
+GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;
+GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;
 
 -- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as viewer) and the MCP rule
 --     tools (as mcp) create, edit and delete config.custom_alert_rules -- non-secret rule JSON, the same

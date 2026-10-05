@@ -15,6 +15,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -149,10 +150,10 @@ public sealed class DarlingWebEndpointsTests
             new[]
             {
                 "add_servers", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-                "analyze_server", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "delete_custom_alert_rule",
-                "delete_custom_view", "delete_mute_rule", "delete_notification_route", "describe_custom_view_catalog", "get_custom_alert_rule", "get_custom_view", "get_tool_guide",
+                "analyze_server", "assign_server_tag", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "create_server_tag", "delete_custom_alert_rule",
+                "delete_custom_view", "delete_mute_rule", "delete_notification_route", "delete_server_tag", "describe_custom_view_catalog", "get_custom_alert_rule", "get_custom_view", "get_tool_guide",
                 "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "mute_analysis_finding", "remove_server", "run_custom_view_panel",
-                "set_mute_rule_enabled", "set_notification_route_enabled", "test_custom_alert_rule", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "validate_custom_alert_rule", "validate_custom_view",
+                "set_mute_rule_enabled", "set_notification_route_enabled", "test_custom_alert_rule", "unassign_server_tag", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "update_server_tag", "validate_custom_alert_rule", "validate_custom_view",
             },
             DarlingWebEndpoints.ExcludedToolNames.OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
@@ -412,6 +413,44 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("{ \"status\" : \"invalid\", \"message\": \"spaced\" }", 200, 400)]       // the parsed switch's belt-and-braces: an envelope serialized some other way still reads as invalid
     public void MuteRuleEnvelopeStatus_MapsTheVerbEnvelopeOntoHttp(string envelope, int successStatus, int expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.MuteRuleEnvelopeStatus(envelope, successStatus));
+
+    /* ── the server-tag envelope → HTTP status mapping (#5085): the mute-rule mapping plus conflict and
+       confirm_required as 409, the body untouched. ── */
+
+    [Theory]
+    [InlineData("{\"status\":\"created\",\"tag\":{}}", 201, 201)]
+    [InlineData("{\"status\":\"updated\",\"tag\":{}}", 201, 201)]
+    [InlineData("{\"status\":\"updated\",\"tag\":{}}", 200, 200)]
+    [InlineData("{\"status\":\"unchanged\",\"tag\":{}}", 200, 200)]
+    [InlineData("{\"status\":\"deleted\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"assigned\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"unassigned\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"some_future_status\"}", 200, 500)]   // N2: an unmapped status is a 500, never a silent 2xx
+    [InlineData("{\"status\":\"some_future_status\"}", 201, 500)]
+    [InlineData("{\"status\":\"invalid\",\"refusal\":\"bad_name\",\"message\":\"x\"}", 201, 400)]
+    [InlineData("{\"status\":\"not_found\",\"message\":\"x\"}", 200, 404)]
+    [InlineData("{\"status\":\"conflict\",\"refusal\":\"duplicate_name\",\"message\":\"x\"}", 201, 409)]
+    [InlineData("{\"status\":\"confirm_required\",\"refusal\":\"rules_affected\",\"affected_rules\":[{\"rule_id\":1}]}", 200, 409)]
+    public void ServerTagEnvelopeStatus_MapsTheVerbEnvelopeOntoHttp(string envelope, int successStatus, int expected) =>
+        Assert.Equal(expected, DarlingWebEndpoints.ServerTagEnvelopeStatus(envelope, successStatus));
+
+    [Fact]
+    public void ServerTagEnvelopeStatus_TheCoresCaughtException_IsAServerError() =>
+        Assert.Equal(500, DarlingWebEndpoints.ServerTagEnvelopeStatus(
+            McpHelpers.FormatError("create_server_tag", new InvalidOperationException("connection reset")), 201));
+
+    [Fact]
+    public async Task ServerTagToolResult_ConfirmRequired_KeepsTheEnvelopeAsTheBodyUnder409()
+    {
+        var envelope = "{\"status\":\"confirm_required\",\"refusal\":\"rules_affected\",\"affected_rules\":[{\"rule_id\":1}]}";
+        var result = DarlingWebEndpoints.ServerTagToolResult(envelope, "/api/server-tags/{id}", Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, 5);
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext { RequestServices = new Microsoft.Extensions.DependencyInjection.ServiceCollection().AddLogging().BuildServiceProvider() };
+        context.Response.Body = new System.IO.MemoryStream();
+        await result.ExecuteAsync(context);
+        Assert.Equal(409, context.Response.StatusCode);
+        context.Response.Body.Position = 0;
+        Assert.Contains("affected_rules", await new System.IO.StreamReader(context.Response.Body).ReadToEndAsync(), StringComparison.Ordinal);
+    }
 
     /// <summary>The refusal a shared producer builds reaches the write surface's status mapping through the
     /// same classifier arm the read surface uses (#3739): one recognizer, one word, one code — executed

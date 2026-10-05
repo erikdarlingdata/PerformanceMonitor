@@ -35,7 +35,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// dashboard's write surfaces run as this role, so it holds INSERT/UPDATE/DELETE on
 /// <c>config.custom_views</c> (#1563, the user-authored view definitions), <c>config.custom_alert_rules</c>
 /// (#3285, the user-authored alert rules), <c>config.database_state_expected</c> (#1986, the Viewer's
-/// per-database override editor) and <c>config.config_mute_rules</c> (#3450, the dedicated mute-rule
+/// per-database override editor), <c>config.server_tags</c> and <c>config.server_tag_map</c> (#5085, the
+/// server-tag endpoints) and <c>config.config_mute_rules</c> (#3450, the dedicated mute-rule
 /// endpoints — plus the two <c>config_service</c> beacon columns its bump trigger writes as the caller), and
 /// the single <c>dismissed</c> column of <c>config.config_alert_log</c> (#4843, the web Alert History dismiss).
 /// All non-secret tables; over the web, editing is gated server-side by the host's auth + the seat model
@@ -53,7 +54,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// the single non-secret <c>email_cooldown_minutes</c> column of <c>config.config_notification</c>, plus the
 /// two beacon columns of <c>config.config_service</c> so the settings write's self-bump trigger can fire),
 /// and the server-onboarding writes (INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> for the
-/// <c>add_servers</c>/<c>remove_server</c> tools — a single non-secret-KEY table; the credential column stays
+/// <c>add_servers</c>/<c>remove_server</c> tools — a single non-secret-KEY table; INSERT/UPDATE/DELETE on
+/// <c>config.server_tags</c> and <c>config.server_tag_map</c> (the fleet server-tag tools, #5085); the credential column stays
 /// SELECT-carved, so <c>mcp</c> can WRITE a password blob but never READ one back).
 /// Deliberately NOT <c>admin</c>: a token-holder reachable over the network must never get the
 /// <c>config_command</c> service-credential pivot or the secret columns. Every write grant is an EXPLICIT
@@ -398,7 +400,7 @@ public static class DarlingManagedRoles
                 : "re-asserted for " + DescribeReassert(reassert));
 
         logger.LogInformation(
-            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon + the config_alert_log dismissed column); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer, the web dashboard and the MCP host no longer connect as the superuser");
+            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon + the config_alert_log dismissed column + server_tags, server_tag_map); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers) + tag servers (server_tags, server_tag_map)) — the Viewer, the web dashboard and the MCP host no longer connect as the superuser");
 
         /* CLAMPED, not raw: the batch above wrote the clamped form, so returning the raw read would hand the
            caller a baseline that differs from what the roles actually carry (a stored 0 provisions '15s').
@@ -1000,6 +1002,13 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {mcp};
 GRANT UPDATE ON {config}.config_alert_settings TO {mcp};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
+-- #5085: the fleet server-tag write tools (create/update/delete/assign/unassign_server_tag) run as mcp. The admin
+--    gate is these two single-table grants and nothing else: a role without them gets 42501 on a tag write.
+--    Both tables are non-secret, have no reload-beacon trigger (so no config_service column is needed) and
+--    server_tags.id is GENERATED ALWAYS AS IDENTITY (so no sequence grant). Provisioning re-runs every start, so
+--    no migration rung carries this.
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {mcp};
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {mcp};
 -- #3450: the web dashboard's dedicated mute-rule endpoints (POST/PATCH/PUT/DELETE under /api/mute-rules) run
 --    as the least-privilege viewer role -- the web host's ONLY store identity -- so viewer gets the SAME
 --    single-table config_mute_rules write mcp holds above, the shape of the custom_views/custom_alert_rules
@@ -1027,6 +1036,15 @@ GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {viewer}
 --    (the column-level form is has_column_privilege), so it stays false for viewer and the locked-down Viewer's
 --    dismiss buttons stay hidden. mcp gets no such grant: no MCP tool dismisses an alert.
 GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {viewer};
+-- #5085: the web dashboard's server-tag endpoints (POST/PATCH/DELETE under /api/server-tags) run as viewer, so it
+--    gets the SAME two single-table writes mcp holds above. The seat model decides who may call them (a read-only
+--    seat is refused every unsafe method); these grants are only the floor beneath that gate. Both tables are
+--    non-secret and carry no reload-beacon trigger, so no config_service column is involved. The WPF Viewer's
+--    read-only probe is unchanged: it discriminates on config_alert_log UPDATE (ViewerDataService.ReadOnlyProbeSql),
+--    which these grants do not touch, so a read-only desktop seat still reads as read-only and its tag editors
+--    stay disabled. A server removal also clears that server's server_tag_map rows, which needs the DELETE here.
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {viewer};
 -- #3314: the DELIVERY cooldown -- the sole throttle on a Slack/Teams/PagerDuty/webhook post -- is the one
 -- alert-engine knob stored on config_notification rather than config_alert_settings, so update_alert_settings
 -- spans two tables and needs a write here. This DOES widen mcp into a table holding bearer secrets (the SMTP
