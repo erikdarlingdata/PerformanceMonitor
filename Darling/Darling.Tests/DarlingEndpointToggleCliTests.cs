@@ -360,6 +360,34 @@ public sealed class DarlingEndpointToggleCliTests
         Assert.Equal("", cidr);
     }
 
+    [Theory]
+    [InlineData("010.0.0.0/8")]                                    // a leading zero reads as octal: a different range
+    [InlineData("192.168.010.0/24")]
+    [InlineData("10/8")]                                           // short forms are zero-padded
+    [InlineData("10.1/16")]
+    [InlineData("0x0A.0.0.0/8")]                                   // 0x reads as hex
+    [InlineData("1.2.3.04/32")]
+    [InlineData("10.8.0.0/16,192.168.010.0/24")]                   // refused wherever it sits in the list
+    [InlineData("010.0.0.0/8,10.8.0.0/16")]
+    public void ClassifyAllowFrom_NonCanonicalIPv4_IsInvalid(string allowFrom)
+    {
+        Assert.Equal(DarlingCliCommands.EndpointAllowFromVerdict.Invalid, DarlingCliCommands.ClassifyAllowFrom(allowFrom, out var cidr));
+
+        /* Nothing usable comes back: the toggle never builds a firewall command for a range it would have
+           read as a different one. */
+        Assert.Equal("", cidr);
+    }
+
+    [Theory]
+    [InlineData("fe80::1%5/64")]
+    [InlineData("fe80::1%x';calc;'/64")]
+    [InlineData("10.8.0.0/16,fe80::1%5/64")]
+    public void ClassifyAllowFrom_IPv6ZoneIndex_IsInvalid(string allowFrom)
+    {
+        Assert.Equal(DarlingCliCommands.EndpointAllowFromVerdict.Invalid, DarlingCliCommands.ClassifyAllowFrom(allowFrom, out var cidr));
+        Assert.Equal("", cidr);
+    }
+
     /// <summary>
     /// The property that actually matters: for any allowFrom the verdict accepts, the string handed to the
     /// command builder is the PARSER'S output, so it re-parses and cannot carry shell metacharacters. This is

@@ -5163,12 +5163,20 @@ public sealed class DarlingManagedPostgres
                 $"postgres.network.listen '{network.Listen}' is not a valid IP address (use a specific IP, e.g. 192.168.1.205, or 0.0.0.0 for all interfaces)");
         }
 
-        if (string.IsNullOrWhiteSpace(network.AllowFrom) || !IPNetwork.TryParse(network.AllowFrom.Trim(), out var cidr))
+        /* #5288: the same plain-spelling rule as the MCP and web allowFrom lists (Hosting.CidrAllowList): the
+           address is four plain decimal numbers (no leading zero, no short or hex form) and carries no IPv6 zone
+           index. IPNetwork.TryParse alone would read 192.168.010.0/24 as 192.168.8.0/24, and this value feeds the
+           pg_hba line and the firewall rule, so the range written is the range enforced. Checked as written,
+           before the host bits are masked. */
+        if (string.IsNullOrWhiteSpace(network.AllowFrom)
+            || !IPNetwork.TryParse(network.AllowFrom.Trim(), out var cidr)
+            || !Hosting.CidrAllowList.IsPlainCidrText(network.AllowFrom.Trim()))
         {
             return Degrade(
                 $"postgres.network.allowFrom '{network.AllowFrom}' is not a valid CIDR. The store takes ONE range in CIDR form "
                 + "(e.g. 192.168.1.0/24, or /32 for one address), never a list. Host bits are masked, not refused "
-                + "(192.168.1.5/24 means 192.168.1.0/24)");
+                + "(192.168.1.5/24 means 192.168.1.0/24). Write an IPv4 address as four plain decimal numbers "
+                + "(no leading zeros, no short or hex form), and leave off any IPv6 zone index (%)");
         }
 
         if (cidr.BaseAddress.AddressFamily != listenIp.AddressFamily)

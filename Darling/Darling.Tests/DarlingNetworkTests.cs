@@ -668,6 +668,35 @@ public sealed class DarlingNetworkTests
     public void ResolveNetworkExposure_Degrades_WhenAddressFamilyMismatch()
         => AssertDegraded(new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "2001:db8::/32", Role = "viewer" });
 
+    [Theory]
+    [InlineData("010.0.0.0/8")]            // a leading zero reads as octal: a different range, and the value feeds pg_hba
+    [InlineData("192.168.010.0/24")]
+    [InlineData("10/8")]                   // short forms are zero-padded
+    [InlineData("10.1/16")]
+    [InlineData("0x0A.0.0.0/8")]           // 0x reads as hex
+    [InlineData("1.2.3.04/32")]
+    public void ResolveNetworkExposure_Degrades_WhenAllowFromIsNotFourPlainDecimalNumbers(string allowFrom)
+        => AssertDegraded(new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = allowFrom, Role = "viewer" });
+
+    [Theory]
+    [InlineData("::", "fe80::1%5/64")]
+    [InlineData("::", "fe80::1%x';calc;'/64")]
+    public void ResolveNetworkExposure_Degrades_WhenAllowFromHasAnIPv6ZoneIndex(string listen, string allowFrom)
+        => AssertDegraded(new PostgresNetworkConfig { Listen = listen, AllowFrom = allowFrom, Role = "viewer" });
+
+    [Theory]
+    [InlineData("192.168.1.5/24", "192.168.1.0/24")]   // host bits are still masked, not refused
+    [InlineData("10.0.0.0/8", "10.0.0.0/8")]
+    [InlineData(" 203.0.113.9/32 ", "203.0.113.9/32")]
+    public void ResolveNetworkExposure_PlainDecimalAllowFrom_IsStillExposed_WithTheMaskedCidr(string allowFrom, string expected)
+    {
+        var decision = DarlingManagedPostgres.ResolveNetworkExposure(
+            new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = allowFrom, Role = "viewer" }, CertPath, KeyPath);
+
+        Assert.True(decision.Exposed);
+        Assert.Equal(expected, decision.Cidr);
+    }
+
     [Fact]
     public void ResolveNetworkExposure_Degrades_WhenRoleInvalid()
         => AssertDegraded(new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Role = "darling" });
