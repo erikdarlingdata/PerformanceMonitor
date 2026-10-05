@@ -184,10 +184,10 @@ public sealed class WebDataStartNoteTests
     }
 
     [Fact]
-    public void TheUnlistedMcpReads_AreExactlyTwo_AndShareNoKeyWithTheWebsMaps()
+    public void TheUnlistedMcpReads_AreExactlyOne_AndShareNoKeyWithTheWebsMaps()
     {
         Assert.Equal(
-            ["get_pg_cpu_utilization", "get_pg_xmin_horizon"],
+            ["get_pg_cpu_utilization"],
             DarlingMcpWindowNotice.UnlistedTableByRead.Keys.OrderBy(x => x));
         foreach (var key in DarlingMcpWindowNotice.UnlistedTableByRead.Keys)
         {

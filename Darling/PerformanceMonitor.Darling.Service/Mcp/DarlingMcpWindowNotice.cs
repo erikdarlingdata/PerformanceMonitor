@@ -170,7 +170,6 @@ internal static class DarlingMcpWindowNotice
         new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["get_pg_cpu_utilization"] = "pg_cpu_utilization",
-            ["get_pg_xmin_horizon"] = "pg_xmin_horizon",
         };
 
     /// <summary>The table <paramref name="read"/> is named after in a notice: the web's table when it lists the read, else its own.</summary>

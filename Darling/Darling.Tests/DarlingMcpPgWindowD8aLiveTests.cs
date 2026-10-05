@@ -32,7 +32,7 @@ public sealed class DarlingMcpPgSourceTests
         [["get_pg_top_queries"], ["get_pg_database_stats"], ["get_pg_io_stats"], ["get_pg_plans"],
          ["get_pg_blocking"], ["get_pg_session_states"], ["get_pg_replication_stats"],
          ["get_pg_wait_stats"], ["get_pg_wait_sampling"], ["get_pg_kernel_stats"], ["get_pg_lock_stats"], ["get_pg_predicate_stats"],
-         ["get_pg_server_config_changes"]];
+         ["get_pg_server_config_changes"], ["get_pg_xmin_horizon"]];
 
     /// <summary>A tool the web lists probes the very source the web's note probes, so the tool and the page never name two starts.</summary>
     [Theory]
@@ -50,10 +50,9 @@ public sealed class DarlingMcpPgSourceTests
         Assert.Equal(WebDataStartNote.CollectorRunsByRead.ContainsKey(read), tool.LogCollectorName is not null);
     }
 
-    /// <summary>The two reads the web does not list are probed on their collector's own table.</summary>
+    /// <summary>The one read the web does not list is probed on its collector's own table.</summary>
     [Theory]
     [InlineData("get_pg_cpu_utilization", "pg_cpu_utilization")]
-    [InlineData("get_pg_xmin_horizon", "pg_xmin_horizon")]
     public void AnUnlistedTool_ProbesItsCollectorTable(string read, string table)
     {
         Assert.False(WebDataStartNote.TableByRead.ContainsKey(read));
