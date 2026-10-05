@@ -109,6 +109,8 @@ const scenarios = {
     const plain = viewer.pgPlanCell("srv-a", { queryid: "1", plan_hash: "P", plan: { Plan: { "Node Type": "Result" } } });
     plain.byText("Plan").click();
     out.plainCaveat = plain.textContent.includes("Query ID is exact in the grid");
+    out.expectedCost = (12.5).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    out.expectedRows = (40).toLocaleString(undefined, { maximumFractionDigits: 2 });
     out.plainSummary = viewer.pgPlanSummary({ Plan: { "Node Type": "Result" } }).length;
   },
   async noPlan() {
@@ -124,11 +126,14 @@ const scenarios = {
     const again = viewer.pgPlanCell("srv-a", row);
     out.sameOpen = pre(again) !== null;
     out.otherOpen = pre(viewer.pgPlanCell("srv-b", row)) !== null;
+    const otherHash = viewer.pgPlanCell("srv-a", { queryid: row.queryid, plan_hash: "ZZZ999", plan });
+    out.otherHashOpen = pre(otherHash) !== null;
     out.keys = viewer.openPgPlanKeys();
   },
   async column() {
     const c = viewer.pgPlanColumn("s");
     out.key = c.key; out.label = c.label; out.csv = c.csv; out.sortable = c.sortable; out.hideWhenEmpty = c.hideWhenEmpty;
+    out.filter = c.filter; out.copy = c.copy;
     out.rendered = c.render(row).byText("Plan") !== null;
   },
 };

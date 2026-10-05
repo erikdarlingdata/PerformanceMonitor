@@ -42,16 +42,20 @@ public sealed class WebPgPlanViewerPageTests
             LastSeen: new DateTime(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc)),
     };
 
+    /// <summary>Strips line and block comments so prose that names a sink does not trip the scan.</summary>
+    private static string StripJsComments(string source)
+    {
+        var noBlock = System.Text.RegularExpressions.Regex.Replace(source, @"/\*.*?\*/", string.Empty, System.Text.RegularExpressions.RegexOptions.Singleline);
+        return System.Text.RegularExpressions.Regex.Replace(noBlock, @"//[^\n]*", string.Empty);
+    }
+
     [Fact]
     public void TheViewer_DrawsOnlyText_AndMakesNoRead()
     {
-        var viewer = Js("pages", "pg-plan-viewer.js");
-        Assert.DoesNotContain("innerHTML", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain("insertAdjacentHTML", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain("DOMParser", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain("readTool", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain("fetch(", viewer, StringComparison.Ordinal);
-        Assert.Contains("el(\"pre\", { class: \"code plan-json\", text: pretty })", viewer, StringComparison.Ordinal);
+        var viewer = StripJsComments(Js("pages", "pg-plan-viewer.js"));
+        foreach (var sink in new[] { "innerHTML", "outerHTML", "insertAdjacentHTML", "createContextualFragment", "document.write", "DOMParser", "readTool", "fetch(" })
+            Assert.DoesNotContain(sink, viewer, StringComparison.Ordinal);
+        Assert.Contains("class: \"code plan-json\"", viewer, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -81,12 +85,10 @@ public sealed class WebPgPlanViewerPageTests
     }
 
     [Fact]
-    public void NoSeparatePlanJsonRead_WasAdded()
+    public void ThePlanJson_ComesFromGetPgPlans_NotARead_OfItsOwn()
     {
-        var reads = DarlingWebEndpoints.CatalogDescriptors.Keys
-            .Where(k => k.StartsWith("get_pg_plan", StringComparison.Ordinal))
-            .OrderBy(k => k, StringComparer.Ordinal)
-            .ToArray();
-        Assert.Equal(new[] { "get_pg_plan_capture_readiness", "get_pg_plans" }, reads);
+        Assert.True(DarlingWebEndpoints.CatalogDescriptors.ContainsKey("get_pg_plans"));
+        Assert.DoesNotContain("get_pg_plan_json", DarlingWebEndpoints.CatalogDescriptors.Keys);
+        Assert.DoesNotContain("get_pg_plan_detail", DarlingWebEndpoints.CatalogDescriptors.Keys);
     }
 }

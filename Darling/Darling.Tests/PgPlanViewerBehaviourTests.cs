@@ -75,6 +75,8 @@ public sealed class PgPlanViewerBehaviourTests
     public void ThePlan_IsOnlyEverText()
     {
         var r = Run("textOnly");
+        // The FakeNode DOM never parses markup, so these two counts are 0 whatever the module does. They are
+        // not XSS protection. The Contains check below is: an innerHTML write would leave textContent empty.
         Assert.Equal(0, r.GetProperty("preChildElements").GetInt32());
         Assert.Equal(0, r.GetProperty("scriptNodes").GetInt32());
         Assert.Contains("<script>alert(1)</script>", Str(r, "text"));
@@ -114,8 +116,9 @@ public sealed class PgPlanViewerBehaviourTests
     {
         var r = Run("summary");
         var text = Str(r, "text");
-        Assert.Contains("Total Cost: 12.5", text);
-        Assert.Contains("Plan Rows: 40", text);
+        // The figures are formatted with the machine's locale, so expect what the same call gives here.
+        Assert.Contains("Total Cost: " + Str(r, "expectedCost"), text);
+        Assert.Contains("Plan Rows: " + Str(r, "expectedRows"), text);
         Assert.Contains("Execution Time", text);
         Assert.DoesNotContain("Actual", text);
         Assert.True(r.GetProperty("caveat").GetBoolean());
@@ -138,6 +141,8 @@ public sealed class PgPlanViewerBehaviourTests
         var r = Run("rebuild");
         Assert.True(r.GetProperty("sameOpen").GetBoolean());
         Assert.False(r.GetProperty("otherOpen").GetBoolean());
+        Assert.False(r.GetProperty("otherHashOpen").GetBoolean());
+        Assert.Equal(new[] { "srv-a|-8126435036642491494|ABC123" }, r.GetProperty("keys").EnumerateArray().Select(k => k.GetString()).ToArray());
     }
 
     [Fact]
@@ -147,6 +152,8 @@ public sealed class PgPlanViewerBehaviourTests
         Assert.Equal("plan", Str(r, "key"));
         Assert.False(r.GetProperty("csv").GetBoolean());
         Assert.False(r.GetProperty("sortable").GetBoolean());
+        Assert.False(r.GetProperty("filter").GetBoolean());
+        Assert.False(r.GetProperty("copy").GetBoolean());
         Assert.True(r.GetProperty("hideWhenEmpty").GetBoolean());
         Assert.True(r.GetProperty("rendered").GetBoolean());
     }

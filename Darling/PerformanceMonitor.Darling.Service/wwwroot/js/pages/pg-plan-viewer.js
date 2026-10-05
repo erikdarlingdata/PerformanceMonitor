@@ -146,5 +146,5 @@ export function pgPlanCell(server, row) {
 }
 
 export function pgPlanColumn(server) {
-  return { key: "plan", label: "Plan", render: (row) => pgPlanCell(server, row), hideWhenEmpty: true, sortable: false, csv: false };
+  return { key: "plan", label: "Plan", render: (row) => pgPlanCell(server, row), hideWhenEmpty: true, sortable: false, csv: false, filter: false, copy: false };
 }
