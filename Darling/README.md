@@ -152,7 +152,7 @@ Run it elevated on the store host (a managed store's credential is protected by 
 
 Server, host, database, login and domain names and IP addresses are replaced with ordinal aliases (`server-1`, `db-2`, `ip-1`), and credentials are removed. Before anything is written the verb scans the finished file for every name and secret it knows and writes nothing if one is still there. That proves only that the names it knows are gone, so open the file and check it before you attach it. `--alias-map <path>` writes a separate file that maps the aliases back to names; it starts with a `DO NOT ATTACH` line, and the bundle never contains it.
 
-When the store cannot be reached, the registry cannot be read, so a server known only to it cannot be aliased: the service log is then written as counts only. `--include-log-text` adds the message text anyway (open the file before you attach it). `--alias-map` refuses to overwrite the bundle or an existing file without `--force`.
+When the store cannot be reached, the registry cannot be read, so a server known only to it cannot be aliased: the service log is then written as counts only. `--include-log-text` adds the message text anyway (open the file before you attach it). `--alias-map` refuses to overwrite the bundle or an existing file without `--force`. The `store_unreachable` section holds no sentence, only an error class and a fixed reason code.
 
 Exit codes: `0` written, `1` bad arguments or config, `2` the store could not be reached (a reduced bundle is still written), `3` written but one or more sections failed, `4` the output path cannot be used, `5` a known name or secret survived aliasing (nothing written). If the service log is not where the verb looks, the `service_log` section says so; pass `--log-dir`.
 
