@@ -343,6 +343,14 @@ public sealed class TopQueriesHourlyRoutingLiveTests
             }
 
             Assert.Equal("0xTOPQ1", row.GetProperty("sql_handle").GetString());
+
+            /* detail=full on the rollup: no detail field exists there, and the note says so. */
+            using var fullDoc = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, as_of: asOf, detail: "full"));
+            Assert.Equal("hourly", fullDoc.RootElement.GetProperty("tier_used").GetString());
+            Assert.Contains("detail=full was asked", fullDoc.RootElement.GetProperty("precision_note").GetString()!, StringComparison.Ordinal);
+            Assert.False(fullDoc.RootElement.GetProperty("queries")[0].TryGetProperty("max_grant_kb", out _));
+            Assert.DoesNotContain("detail=full was asked", doc.RootElement.GetProperty("precision_note").GetString()!, StringComparison.Ordinal);
             Assert.Equal(System.Text.Json.JsonValueKind.String, row.GetProperty("text_note").ValueKind);
             Assert.Contains("may be a WAITFOR shell", row.GetProperty("text_note").GetString(), StringComparison.Ordinal);
 
