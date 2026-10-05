@@ -873,6 +873,44 @@ public sealed class DarlingMcpDataTools
         return node;
     }
 
+    /// <summary>The row, plus (detail='full', raw tier) the desktop Top Procedures grid's remaining columns. A field the
+    /// store has no value for is left out, not written as null. The two timestamps are UTC instants, converted from the
+    /// monitored server's clock at the read.</summary>
+    private static JsonObject WithProcedureDetail(object row, DarlingDataReader.TopProcedureDetail? d, long executions, long spills, bool full)
+    {
+        var node = JsonSerializer.SerializeToNode(row, McpHelpers.JsonOptions)!.AsObject();
+        if (!full || d is null)
+        {
+            return node;
+        }
+
+        void Put(string name, JsonNode? value)
+        {
+            if (value is not null)
+            {
+                node[name] = value;
+            }
+        }
+
+        var times = new
+        {
+            last_execution_time = d.LastExecutionTime?.ToString("o"),
+            cached_time = d.CachedTime?.ToString("o"),
+        };
+        Put("last_execution_time", times.last_execution_time);
+        Put("cached_time", times.cached_time);
+        Put("avg_spills", executions > 0 ? (double)spills / executions : null);
+        Put("min_logical_reads", d.MinLogicalReads);
+        Put("max_logical_reads", d.MaxLogicalReads);
+        Put("min_physical_reads", d.MinPhysicalReads);
+        Put("max_physical_reads", d.MaxPhysicalReads);
+        Put("min_logical_writes", d.MinLogicalWrites);
+        Put("max_logical_writes", d.MaxLogicalWrites);
+        Put("min_spills", d.MinSpills);
+        Put("max_spills", d.MaxSpills);
+        return node;
+    }
+
     [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note). Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopProceduresByCpu(
         NpgsqlDataSource postgres,
@@ -881,10 +919,17 @@ public sealed class DarlingMcpDataTools
         [Description("Number of top procedures. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("'summary' (default) or 'full': full adds the remaining desktop columns (times, read/write/spill extremes), omitting nulls.")] string detail = "summary",
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
+
+        var full = string.Equals(detail, "full", StringComparison.OrdinalIgnoreCase);
+        if (!full && !string.Equals(detail, "summary", StringComparison.OrdinalIgnoreCase))
+        {
+            return McpHelpers.Refusal("detail", $"detail must be 'summary' or 'full' (got '{detail}').");
+        }
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
@@ -925,6 +970,12 @@ public sealed class DarlingMcpDataTools
                 precisionNote = "hourly-rollup rows: object_type, sql_handle, plan_handle, reads/writes/physical reads/spills and min/max cpu/elapsed are null — "
                     + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
                     + " " + HourlyWindowEdges.Note(requestedStart, floor, now, routed.HourlyCeiling);
+                if (full)
+                {
+                    precisionNote += " detail=full was asked, but the hourly rollup does not carry the detail fields (last_execution_time, cached_time, "
+                        + "min and max logical reads, physical reads, writes and spills, avg_spills); they are not in these rows. "
+                        + "A window the raw tier still holds returns them.";
+                }
             }
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
@@ -944,7 +995,7 @@ public sealed class DarlingMcpDataTools
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
                 properties?.EngineEdition, properties?.CpuCount ?? 0, properties?.VcoreCount);
 
-            var result = rows.Select(r => new
+            var result = rows.Select(r => (object)WithProcedureDetail(new
             {
                 database_name = r.DatabaseName,
                 full_name = string.IsNullOrEmpty(r.SchemaName) ? r.ObjectName : $"{r.SchemaName}.{r.ObjectName}",
@@ -971,7 +1022,7 @@ public sealed class DarlingMcpDataTools
                 total_logical_writes = hourly ? (long?)null : r.TotalLogicalWrites,
                 total_physical_reads = hourly ? (long?)null : r.TotalPhysicalReads,
                 total_spills = hourly ? (long?)null : r.TotalSpills
-            });
+            }, r.Detail, r.TotalExecutions, r.TotalSpills, full));
 
             return JsonSerializer.Serialize(new
             {
