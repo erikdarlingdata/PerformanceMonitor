@@ -49,7 +49,7 @@ public sealed class WebModuleLoadTests
         catch (Win32Exception)
         {
             Assert.Skip("Node is not installed, so the shipped web modules cannot be loaded.");
-            return;
+            throw;
         }
 
         using (proc)
