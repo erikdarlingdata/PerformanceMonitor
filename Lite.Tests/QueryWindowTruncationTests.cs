@@ -270,8 +270,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         using (var connection = await OpenSeedConnectionAsync())
         {
-            for (var i = 0; i < 500; i++)
-                await SeedQueryStatsAsync(connection, archivedFloor.AddMinutes(i), $"0xARCH{i}");
+            /* One transaction per 500-row loop (#5208): 1,000 auto-committed single-row INSERTs were 1,000 WAL
+               commits. Each batch commits before the COPY / DELETE that follows, which see only committed rows. */
+            using (var archivedBatch = new SeedBatch(_duckDb, connection))
+            {
+                for (var i = 0; i < 500; i++)
+                    await SeedQueryStatsAsync(connection, archivedFloor.AddMinutes(i), $"0xARCH{i}");
+                archivedBatch.Commit();
+            }
 
             var parquetPath = Path.Combine(_archivePath, "20260101_0000_query_stats.parquet").Replace("\\", "/");
             using (var readLock = _duckDb.AcquireReadLock())
@@ -287,8 +293,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
                 await deleteCmd.ExecuteNonQueryAsync();
             }
 
-            for (var i = 0; i < 500; i++)
-                await SeedQueryStatsAsync(connection, hotStart.AddMinutes(i), $"0xHOT{i}");
+            using (var hotBatch = new SeedBatch(_duckDb, connection))
+            {
+                for (var i = 0; i < 500; i++)
+                    await SeedQueryStatsAsync(connection, hotStart.AddMinutes(i), $"0xHOT{i}");
+                hotBatch.Commit();
+            }
         }
 
         await _duckDb.CreateArchiveViewsAsync();
