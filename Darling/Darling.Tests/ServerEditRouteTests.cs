@@ -495,10 +495,16 @@ public sealed class ServerEditRouteTests
     public async Task AnEditThatFinishedInsideTheWait_FreesTheSlotBeforeItsAnswer_SoAnImmediateSecondEditOrAddIsNotRefused()
     {
         await using var rig = await StartAsync();
+        /* Back to back, nothing between the two requests: a release that waited for the continuation would be refused. */
         for (var i = 0; i < SlotCycles; i++)
         {
             var (editStatus, _) = await PatchAsync(rig, Changes());
             Assert.True(editStatus == HttpStatusCode.OK, $"edit {i + 1} of {SlotCycles} answered {(int)editStatus} right after a finished edit");
+        }
+
+        for (var i = 0; i < SlotCycles; i++)
+        {
+            Assert.Equal(HttpStatusCode.OK, (await PatchAsync(rig, Changes())).Status);
             var (addStatus, _) = await PostAddAsync(rig);
             Assert.True(addStatus == HttpStatusCode.OK, $"add {i + 1} of {SlotCycles} answered {(int)addStatus} right after a finished edit");
             var (again, _) = await PatchAsync(rig, Changes());
