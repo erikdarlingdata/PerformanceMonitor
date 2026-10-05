@@ -6,10 +6,12 @@
   lite-shard-pack.py --self-test
 
 `pack` reads the full discovered class list (one class per line) and writes DIR/shard-K.txt for K in
-0..N-1. Weights come from xUnit v3 `-xml` result files (sum of <test time> per `type`). Classes are placed
-longest-first into the shard with the least accumulated time; ties break on class name, then shard index,
-so the same inputs always give the same assignment. A class with no timing history gets the MEAN weight of
-the known classes. When the timings are missing, unreadable, empty, or cover less than MIN_COVERAGE of the
+0..N-1. Weights come from xUnit v3 `-xml` result files (sum of <test time> per `type`; a test with no `time`,
+or a NaN, infinite or negative one, has no timing). Classes are placed longest-first into the shard with the
+least accumulated time; ties break on class name, then shard index, so the same inputs always give the same
+assignment. Every class weighs at least MIN_WEIGHT, so a class whose tests were all skipped still moves a
+shard's load and no shard is left empty. A class with no timing history gets the MEAN weight of the known
+classes. When the timings are missing, unreadable, empty, all zero, or cover less than MIN_COVERAGE of the
 discovered classes, the assignment falls back to the class-name hash (SHA-256 first byte modulo N), the cut
 the workflow used before this script existed.
 
@@ -20,12 +22,14 @@ produce a green run, and the workflow runs it again on the files each shard actu
 import collections
 import glob
 import hashlib
+import math
 import os
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
 MIN_COVERAGE = 0.8
+MIN_WEIGHT = 0.001
 
 
 def read_classes(path):
@@ -45,11 +49,14 @@ def load_weights(dirs):
                 continue
             for t in root.iter("test"):
                 cls = t.get("type")
-                if not cls:
+                raw = t.get("time")
+                if not cls or raw is None:
                     continue
                 try:
-                    secs = float(t.get("time") or 0)
+                    secs = float(raw)
                 except ValueError:
+                    continue
+                if not math.isfinite(secs) or secs < 0:
                     continue
                 weights[cls] += secs
     return dict(weights)
@@ -63,14 +70,16 @@ def pack(classes, shards, weights):
     """Returns (assignment: list of lists, method). Never drops or duplicates a class."""
     unique = sorted(set(classes))
     known = {c: weights[c] for c in unique if c in weights}
-    usable = bool(unique) and bool(known) and len(known) / len(unique) >= MIN_COVERAGE
+    usable = bool(unique) and bool(known) and len(known) / len(unique) >= MIN_COVERAGE and sum(known.values()) > 0
     out = [[] for _ in range(shards)]
     if not usable:
         for c in unique:
             out[hash_shard(c, shards)].append(c)
         return out, "hash"
     default = sum(known.values()) / len(known)
-    weight = {c: known.get(c, default) for c in unique}
+    # The floor makes an empty shard impossible whenever there are at least as many classes as shards: a zero-time
+    # class (every test skipped) would otherwise never move a shard's load off zero.
+    weight = {c: max(known.get(c, default), MIN_WEIGHT) for c in unique}
     load = [0.0] * shards
     for c in sorted(unique, key=lambda c: (-weight[c], c)):
         k = min(range(shards), key=lambda i: (load[i], i))
@@ -186,11 +195,21 @@ def self_test():
     ok(m == "duration" and reconcile(names, a) == [], "unknown classes still assigned")
     ok(names[-1] in {c for s in a for c in s}, "the new class is in a shard")
 
+    # Fewer timed classes than shards, the rest at 0 s (every test skipped): the MIN_WEIGHT floor spreads the
+    # zero-time classes, so no shard goes empty. Without it the lowest-index empty shard took every one of them.
+    many = [f"Lite.Tests.Z{i:03d}" for i in range(100)]
+    a, m = pack(many, 4, {n: (900.0 if i < 2 else 0.0) for i, n in enumerate(many)})
+    ok(m == "duration" and [len(s) for s in a] == [1, 1, 49, 49], "zero-time classes spread instead of emptying a shard")
+
     # Missing, empty and drifted timing data fall back to the hash and drop nothing.
     for w in ({}, {"Other.Gone": 5.0}, {n: 1.0 for n in names[:10]}):
         a, m = pack(names, 4, w)
         ok(m == "hash" and reconcile(names, a) == [], "fallback is the hash and total")
         ok(all(c in a[hash_shard(c, 4)] for c in names), "fallback matches the class-name hash cut")
+    # All-zero timings (no `time` on any test, or every test skipped) carry no information: hash, not a cut that
+    # piles every class onto shard 0.
+    a, m = pack(names, 4, {n: 0.0 for n in names})
+    ok(m == "hash" and reconcile(names, a) == [], "all-zero timings fall back to the hash")
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "bad.xml"), "w") as f:
             f.write("<assemblies><not closed")
@@ -200,6 +219,11 @@ def self_test():
             f.write('<assemblies><assembly><collection><test type="A" time="1.5"/><test type="A" time="0.5"/>'
                     '<test type="B" time="x"/></collection></assembly></assemblies>')
         ok(load_weights([d]) == {"A": 2.0}, "sums per class, skips unparsable time")
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "t.xml"), "w") as f:
+            f.write('<a><test type="A"/><test type="B" time="nan"/><test type="C" time="-1"/><test type="D" time="2"/>'
+                    '<test type="E" time="inf"/></a>')
+        ok(load_weights([d]) == {"D": 2.0}, "no time, NaN, infinite and negative times are not timings")
 
     # The guard must FAIL when a class is withheld, duplicated or invented.
     a, _ = pack(names, 4, skew)

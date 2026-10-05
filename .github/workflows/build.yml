@@ -1822,9 +1822,9 @@ jobs:
   #     the mean weight, so it is placed, never dropped.
   #   - The HASH cut, the original: a SHA-256 over the class name, modulo the shard count (SHA-256
   #     rather than string.GetHashCode(), which is randomized per process ON PURPOSE). It is the
-  #     fallback: no timing source, or timings the packer cannot use (missing, corrupt, empty, or
-  #     covering under 80% of this commit's classes), cut this way. The shard count comes from the
-  #     matrix (strategy.job-total), so the cut and the matrix cannot disagree.
+  #     fallback: no timing source, or timings the packer cannot use (missing, corrupt, empty, all
+  #     zero, or covering under 80% of this commit's classes), cut this way. The shard count comes
+  #     from the matrix (strategy.job-total), so the cut and the matrix cannot disagree.
   # Totality used to hold by arithmetic; the duration cut earns it by proof. The packer's reconcile
   # check fails the leg unless the shard files hold every discovered class exactly once. And a leg
   # whose pinned timings cannot be downloaded, or whose download is not exactly the artifact set the
@@ -2073,7 +2073,8 @@ jobs:
                   $packOutput | ForEach-Object { Write-Host $_ }
                   if ($packExit -ne 0) { throw 'the shard packer failed or could not prove its cut total - failing this shard rather than guessing' }
                   # The packer itself falls back to the hash cut when the timings are unusable (missing, corrupt,
-                  # empty, or under 80% of this commit's classes); it says which it used, and so does the notice below.
+                  # empty, all zero, or under 80% of this commit's classes); it says which it used, and so does
+                  # the notice below.
                   $method = if (($packOutput -join ' ') -match 'shards by (\w+);') { $Matches[1] } else { 'an unreported method' }
                   # The guard again, on the very files this shard reads.
                   python .github/scripts/lite-shard-pack.py reconcile --classes $classesFile --shards $shards --out $planDir
