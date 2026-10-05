@@ -6,9 +6,14 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Linq;
 using System.Net;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using Host = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService;
 
@@ -351,5 +356,257 @@ public sealed class DarlingMcpHostTests
         var line = Assert.Single(logger.Lines);
         Assert.DoesNotContain("\r", line);
         Assert.DoesNotContain("\n", line);
+    }
+
+    /* ---- TLS on the network listener (#5288): the host's own glue, pinned from the shipped source ----
+       #1648's lesson: a pure-function test passes happily on a build where the decision never reaches the
+       server. The listener a certificate produces is proven live by DarlingMcpTlsLiveTests; what only the host can
+       do (adopt, bail, dispose, gate on network mode) cannot be driven from a test, because a network-mode start
+       needs a managed store, so it is pinned where it lives. */
+
+    private static string HostSource()
+        => RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs");
+
+    private static int CountOf(string source, string needle)
+    {
+        var count = 0;
+        for (var at = source.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = source.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>The text of one member, braces balanced from its header (every brace in these bodies is paired).</summary>
+    private static string BodyOf(string source, string header)
+    {
+        var start = source.IndexOf(header, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"'{header}' is gone - this pin needs rewriting");
+        var depth = 0;
+        for (var i = source.IndexOf('{', start); i < source.Length; i++)
+        {
+            if (source[i] == '{')
+            {
+                depth++;
+            }
+            else if (source[i] == '}' && --depth == 0)
+            {
+                return source[start..(i + 1)];
+            }
+        }
+
+        Assert.Fail($"unbalanced braces after '{header}'");
+        return "";
+    }
+
+    [Fact]
+    public void McpHost_OneUseHttps_LoopbackListenersPlain()
+    {
+        var source = HostSource();
+
+        /* Exactly one UseHttps call in the file: a second would mean a loopback listener acquired a certificate. */
+        Assert.Equal(1, CountOf(source, "UseHttps("));
+
+        /* ...and it sits on the NETWORK listener's own callback, handing Kestrel the leaf and the intermediates
+           through the body both hosts share, ahead of both loopback listeners and the loopback-only server. */
+        var network = source.IndexOf("options.Listen(primaryBind, effectivePort, listen =>", StringComparison.Ordinal);
+        var https = source.IndexOf("listen.UseHttps(https => DarlingListenerTls.ConfigureHttps(https, certificate.Value));", StringComparison.Ordinal);
+        var v4 = source.IndexOf("options.Listen(IPAddress.Loopback, effectivePort);", StringComparison.Ordinal);
+        var v6 = source.IndexOf("options.Listen(IPAddress.IPv6Loopback, effectivePort);", StringComparison.Ordinal);
+        var loopbackOnly = source.IndexOf("options.ListenLocalhost(effectivePort);", StringComparison.Ordinal);
+        Assert.True(
+            network > 0 && https > network && v4 > https && v6 > v4 && loopbackOnly > v6,
+            "the network listener must carry the one UseHttps call, ahead of the plain loopback listeners");
+
+        /* The host hands the listener exactly the certificate Resolve returned, and routes through ConfigureListeners. */
+        Assert.Contains(
+            "ConfigureListeners(options, networkMode, primaryBind, effectivePort, serverCertificate)", source, StringComparison.Ordinal);
+        Assert.Contains("serverCertificate = tlsOutcome.Certificate;", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void McpHost_TlsRefusal_SetsNetworkModeFalse()
+    {
+        var source = HostSource();
+        var tryStart = BodyOf(source, "private async Task<bool> TryStartServerAsync(");
+
+        /* One Resolve call, with the MCP labels, the MCP state, the block, and the normalized name. */
+        Assert.Equal(1, CountOf(source, "DarlingListenerTls.Resolve("));
+        var call = tryStart.IndexOf("DarlingListenerTls.Resolve(", StringComparison.Ordinal);
+        var callText = tryStart[call..tryStart.IndexOf(';', call)];
+        Assert.Contains("ListenerTlsLabels.Mcp", callText, StringComparison.Ordinal);
+        Assert.Contains("_mcpTlsCertState", callText, StringComparison.Ordinal);
+        Assert.Contains("network.Tls", callText, StringComparison.Ordinal);
+        Assert.Contains("NormalizedHostName(network.HostName)", callText, StringComparison.Ordinal);
+
+        /* NETWORK mode only: the block that holds the call opens with if (networkMode) and has not closed by it. */
+        var gate = tryStart.LastIndexOf("if (networkMode)", call, StringComparison.Ordinal);
+        Assert.True(gate > 0, "the TLS call must sit under if (networkMode)");
+        Assert.DoesNotContain("\n            }", tryStart[gate..call], StringComparison.Ordinal);
+
+        /* A refusal decides the mode, and the F1 backstop refuses TLS-asked-for-but-no-certificate with a Critical. */
+        Assert.Contains("networkMode = tlsOutcome.Expose;", tryStart, StringComparison.Ordinal);
+        Assert.Matches(
+            @"(?s)if \(tlsOutcome\.ExposesWithoutItsCertificate\)\s*\{\s*_logger\.LogCritical\(.*?tlsOutcome\.Shape\);\s*networkMode = false;\s*\}",
+            tryStart);
+
+        /* Ordered so the decision reaches everything that reads the final mode: after the token (a token that
+           cannot be read already made the mode loopback-only, so no certificate is loaded for it), before the real
+           bind address, before the Host-name decision, and before the pipeline. */
+        var token = tryStart.IndexOf("config.Mcp.Network.ResolveToken(", StringComparison.Ordinal);
+        var primaryBind = tryStart.IndexOf("var primaryBind = networkMode", StringComparison.Ordinal);
+        var hostName = tryStart.IndexOf("var allowedHostName = ResolveAllowedHostName(", StringComparison.Ordinal);
+        var pipeline = tryStart.IndexOf("ConfigurePipeline(_app,", StringComparison.Ordinal);
+        Assert.True(
+            token > 0 && call > token && primaryBind > call && hostName > primaryBind && pipeline > hostName,
+            "TLS must be decided after the token and before primaryBind, the Host-name decision and the pipeline");
+    }
+
+    [Fact]
+    public void McpHost_EveryBailPath_DisposesTheCertificate()
+    {
+        var source = HostSource();
+        var tryStart = BodyOf(source, "private async Task<bool> TryStartServerAsync(");
+
+        /* The host adopts what comes back at once, before the first bail path after the TLS call (the web pin's twin). */
+        var call = tryStart.IndexOf("DarlingListenerTls.Resolve(", StringComparison.Ordinal);
+        var adopted = tryStart.IndexOf("_serverCertificate = tlsOutcome.Certificate;", StringComparison.Ordinal);
+        var firstBail = tryStart.IndexOf("PortUtilityService.IsTcpPortListeningAsync(", StringComparison.Ordinal);
+        Assert.True(call > 0 && adopted > call && firstBail > adopted, "the host no longer adopts the certificate before its bail paths");
+        Assert.Contains("tlsOutcome.ExposesWithoutItsCertificate", tryStart, StringComparison.Ordinal);
+
+        /* Every way out after the adoption releases it: the port bail, the non-Windows bail, both store-credential
+           bails, the shutdown-mid-start catch, and the generic catch. Each return false is preceded by the cleanup. */
+        var bails = System.Text.RegularExpressions.Regex.Matches(tryStart, "return false;")
+            .Where(match => match.Index > adopted)
+            .ToList();
+        Assert.True(bails.Count >= 6, $"expected at least six bail paths after the adoption, found {bails.Count}");
+        foreach (var bail in bails)
+        {
+            Assert.EndsWith(
+                "await DisposeFailedStartAsync();", tryStart[..bail.Index].TrimEnd(), StringComparison.Ordinal);
+        }
+
+        /* The cleanup itself, and the one release both exits share: dispose, forget, withdraw the published facts. */
+        var release = BodyOf(source, "private void ReleaseServerCertificate()");
+        Assert.Contains("_serverCertificate?.Dispose();", release, StringComparison.Ordinal);
+        Assert.Contains("_serverCertificate = null;", release, StringComparison.Ordinal);
+        Assert.Contains("_mcpTlsCertState.Clear();", release, StringComparison.Ordinal);
+        Assert.Contains("ReleaseServerCertificate();", BodyOf(source, "private async Task DisposeFailedStartAsync()"), StringComparison.Ordinal);
+
+        /* StopServerAsync releases BEFORE its early _app-is-null return, so no path skips it, and again after the
+           app has stopped, so a handshake never reaches a key that was already removed. */
+        var stop = BodyOf(source, "private async Task StopServerAsync(CancellationToken cancellationToken)");
+        var nullGuard = stop.IndexOf("if (_app is null)", StringComparison.Ordinal);
+        var earlyRelease = stop.IndexOf("ReleaseServerCertificate();", StringComparison.Ordinal);
+        var earlyReturn = stop.IndexOf("return;", StringComparison.Ordinal);
+        Assert.True(nullGuard >= 0 && earlyRelease > nullGuard && earlyRelease < earlyReturn, "the early return must release the certificate first");
+        Assert.True(
+            stop.LastIndexOf("ReleaseServerCertificate();", StringComparison.Ordinal) > stop.IndexOf("await _app.StopAsync(", StringComparison.Ordinal),
+            "the certificate must also be released after the app has stopped");
+    }
+
+    /* ---- the constructor and the DI seam ---- */
+
+    [Fact]
+    public void Constructor_McpTlsCertState_IsTheLastParameter_AndOptional()
+    {
+        var parameters = typeof(Host).GetConstructors().Single().GetParameters();
+
+        Assert.Equal("mcpTlsCertState", parameters[^1].Name);
+        Assert.Equal(typeof(McpTlsCertificateState), parameters[^1].ParameterType);
+        Assert.True(parameters[^1].IsOptional);
+    }
+
+    [Fact]
+    public void Di_HandsTheHostTheRegisteredMcpTlsCertificateState_TheOneTheWorkerReads()
+    {
+        /* The self-alert worker takes the same registered McpTlsCertificateState singleton, so what the host publishes
+           and clears is what the alert sweep reads. A host that kept its private default would publish into a state
+           nobody reads and the alert would never fire. */
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton<McpRuntimeState>();
+        services.AddSingleton<MonitoredServerRegistryState>();
+        var registered = new McpTlsCertificateState();
+        services.AddSingleton(registered);
+        services.AddHostedService<Host>();
+
+        using var provider = services.BuildServiceProvider();
+        var host = provider.GetServices<Microsoft.Extensions.Hosting.IHostedService>().OfType<Host>().Single();
+
+        var field = typeof(Host).GetField("_mcpTlsCertState", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        Assert.Same(registered, field!.GetValue(host));
+
+        var program = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Program.cs");
+        Assert.Contains("builder.Services.AddHostedService<DarlingMcpHostService>();", program, StringComparison.Ordinal);
+    }
+
+    /* ---- the start line (#5288 review F11) ---- */
+
+    private const string StartOrigin = "the control plane (config.config_service)";
+
+    /* The line this host logged before TLS existed, as its template, so "byte-identical" is measured against the old
+       text rather than restated by hand. */
+    private const string OldStartTemplate =
+        "Starting MCP server on http://{Listen}:{Port} (LAN-exposed to {Cidr} behind a bearer token + in-app CIDR; loopback also bound) \u2014 "
+        + "enabled/port from {Origin}; listen/allowFrom/token from darling.json mcp.network (file-only, restart-only)";
+
+    [Theory]
+    [InlineData("192.168.1.205", "192.168.1.0/24")]
+    [InlineData("0.0.0.0", "192.168.1.0/24")]
+    [InlineData("::", "2001:db8::/32")]
+    [InlineData("127.0.0.1", "127.0.0.0/8")]
+    public void DescribeNetworkStart_NoTls_IsByteIdenticalToTheOldLine(string listen, string allowFrom)
+    {
+        var cidr = CidrAllowList.Parse(allowFrom);
+        var expected = OldStartTemplate
+            .Replace("{Listen}", IPAddress.Parse(listen).ToString(), StringComparison.Ordinal)
+            .Replace("{Port}", "5152", StringComparison.Ordinal)
+            .Replace("{Cidr}", cidr.ToString(), StringComparison.Ordinal)
+            .Replace("{Origin}", StartOrigin, StringComparison.Ordinal);
+
+        Assert.Equal(expected, Host.DescribeNetworkStart(false, IPAddress.Parse(listen), 5152, cidr, StartOrigin));
+    }
+
+    [Fact]
+    public void DescribeNetworkStart_Tls_SpecificListen_SaysHttps_AndLoopbackIsPlainHttp()
+    {
+        var line = Host.DescribeNetworkStart(
+            true, IPAddress.Parse("192.168.1.205"), 5152, CidrAllowList.Parse("192.168.1.0/24"), StartOrigin);
+
+        Assert.Equal(
+            "Starting MCP server on https://192.168.1.205:5152 (LAN-exposed to 192.168.1.0/24 behind a bearer token + in-app CIDR; "
+            + "loopback also bound over plain HTTP) \u2014 enabled/port from the control plane (config.config_service); "
+            + "listen/allowFrom/token/tls from darling.json mcp.network (file-only, restart-only)",
+            line);
+    }
+
+    [Theory]
+    [InlineData("0.0.0.0", "192.168.1.0/24")]
+    [InlineData("::", "2001:db8::/32")]
+    [InlineData("127.0.0.1", "127.0.0.0/8")]
+    public void DescribeNetworkStart_Tls_WildcardOrLoopbackListen_SaysTheOneListenerServesHttpsToLoopbackToo(string listen, string allowFrom)
+    {
+        /* No second set of loopback listeners exists here (ShouldAddLoopbackListeners declines), so the one listener
+           is HTTPS for loopback as well, and saying "plain HTTP" would send a local client to the wrong scheme. */
+        var line = Host.DescribeNetworkStart(
+            true, IPAddress.Parse(listen), 5152, CidrAllowList.Parse(allowFrom), StartOrigin);
+
+        Assert.StartsWith($"Starting MCP server on https://{IPAddress.Parse(listen)}:5152 (LAN-exposed to ", line, StringComparison.Ordinal);
+        Assert.Contains("; the one listener serves HTTPS to loopback too) \u2014 ", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("plain HTTP", line, StringComparison.Ordinal);
+        Assert.Contains("listen/allowFrom/token/tls from darling.json", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void McpHost_LogsTheStartLineThroughDescribeNetworkStart_WithTheAdoptedCertificate()
+    {
+        Assert.Contains(
+            "DescribeNetworkStart(serverCertificate is not null, primaryBind, effectivePort, allowedCidr, origin)",
+            HostSource(),
+            StringComparison.Ordinal);
     }
 }

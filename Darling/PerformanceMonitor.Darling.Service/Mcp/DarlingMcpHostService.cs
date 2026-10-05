@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -50,12 +51,21 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <see cref="ResolveMcpBind"/>; the caller maps its reason to a severity — LogCritical on a missing
 /// precondition (token / valid allowFrom CIDR) and LogWarning in BYO mode — and degrades to loopback-only
 /// either way. Fail-closed, enforced HERE (the MCP host), NEVER in the all-fatal
-/// <see cref="DarlingConfig.Validate"/> (the worker's abort would not stop this host). No TLS on MCP (a
-/// self-signed cert breaks real clients; the named MITM control is a TLS reverse proxy in front of the
-/// endpoint) — the token travels cleartext on-segment, so own that residual with the reverse proxy. The
-/// scoped, idempotent firewall rule is created by the ELEVATED installer (#1771 — this account cannot);
-/// here it is only CHECKED and reported (defense-in-depth; the token + CIDR are the boundary, not the
-/// firewall).</para>
+/// <see cref="DarlingConfig.Validate"/> (the worker's abort would not stop this host). The scoped, idempotent
+/// firewall rule is created by the ELEVATED installer (#1771 — this account cannot); here it is only CHECKED
+/// and reported (defense-in-depth; the token + CIDR are the boundary, not the firewall).</para>
+///
+/// <para><b>TLS on the network listener: opt-in (#5288).</b> With an <c>mcp.network.tls</c> block (a PKCS#12
+/// bundle or a PEM pair, the shapes <c>web.network.tls</c> takes) the LAN listener serves HTTPS, intermediates
+/// included. With no block it serves plain HTTP exactly as before, and the bearer token is readable on the
+/// segment (<see cref="DarlingListenerTls.Resolve"/> warns about that at every start; a TLS-terminating reverse
+/// proxy in front of the endpoint is the other answer). The two loopback listeners stay plain HTTP either way,
+/// because the certificate names the LAN address and that surface never leaves the machine; on a wildcard listen
+/// there is ONE listener and it serves HTTPS to loopback too. A certificate that cannot be used (unreadable,
+/// invalid, expired, not yet valid) degrades to loopback-only with a Critical line, as an unreadable token does,
+/// never to plain HTTP on the LAN. The certificate's expiry reaches the worker's alert sweep through
+/// <see cref="McpTlsCertificateState"/>. Like the rest of <c>mcp.network</c>, the block is read once at start
+/// and a change takes a service restart.</para>
 ///
 /// <para>Gated by darling.json's <c>mcp.enabled</c> (default OFF — a headless service should not open a
 /// port unless the operator asks); when disabled or when the config cannot load (the worker already logs
@@ -113,7 +123,22 @@ public sealed class DarlingMcpHostService : BackgroundService
     /* #5097: where the tool filter offers a slow or failed call; null in a test-constructed host. */
     private readonly SlowReadLog? _slowReads;
 
-    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, SlowReadLog? slowReads = null)
+    /* #5288: where this host publishes the served certificate's expiry facts for the worker's alert sweep. It is
+       the SAME McpTlsCertificateState singleton DI hands the worker (Program.cs registers it once), so a Publish
+       or Clear here is what the "MCP TLS Certificate Expiring" self-alert reads. Optional so a test-constructed
+       host (which passes none) keeps a private, throwaway state rather than a null-reference, exactly like
+       BaselineCache above. */
+    private readonly McpTlsCertificateState _mcpTlsCertState;
+
+    /// <summary>The TLS certificate the current network listener presents (#5288): the leaf AND the intermediates
+    /// that travel with it, held for the listener's lifetime. Disposal is not bookkeeping: on Windows the private
+    /// key is loaded with <c>MachineKeySet</c> and no <c>PersistKeySet</c>, so disposing is what REMOVES the key
+    /// material from the machine key store, and a rebind or a failed start that leaked it would accumulate a key
+    /// per attempt. Adopted the moment <see cref="DarlingListenerTls.Resolve"/> returns, so every later bail path
+    /// releases it; released by <see cref="ReleaseServerCertificate"/>.</summary>
+    private DarlingWebTls.LoadedCertificate? _serverCertificate;
+
+    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null)
     {
         _slowReads = slowReads;
         _logger = logger;
@@ -121,6 +146,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         _registryState = registryState;
         _baselineCache = baselineCache ?? new BaselineCache();
         _readLatency = readLatency ?? new ReadLatencyAccumulator();
+        _mcpTlsCertState = mcpTlsCertState ?? new McpTlsCertificateState();
     }
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort)
@@ -258,6 +284,10 @@ public sealed class DarlingMcpHostService : BackgroundService
     {
         if (_app is null)
         {
+            /* #5288: nothing is serving, but a start that adopted a certificate and then stopped short of building
+               the app (shutdown caught it mid-start, say) must not leave its key held or its expiry published.
+               Released BEFORE this return, so no path through this method skips it. */
+            ReleaseServerCertificate();
             return;
         }
 
@@ -279,10 +309,17 @@ public sealed class DarlingMcpHostService : BackgroundService
             _appDataSource = null;
         }
 
+        /* #5288: the certificate goes only after the listener that served it has stopped, so a handshake can never
+           reach a key already pulled from the machine key store, and its published expiry goes with it, so the
+           worker stops alerting on a certificate nothing serves. A runtime disable of MCP (a no-restart op)
+           reaches here; a port-change rebind runs Stop then Start in the same supervisor tick, so the next start
+           re-publishes before the hourly sweep can observe the empty state. */
+        ReleaseServerCertificate();
+
         _runningPort = 0;
     }
 
-    /// <summary>Failed-start cleanup: a partially built app / data source must not leak between attempts.</summary>
+    /// <summary>Failed-start cleanup: a partially built app / data source / certificate must not leak between attempts.</summary>
     private async Task DisposeFailedStartAsync()
     {
         if (_app is not null)
@@ -296,6 +333,23 @@ public sealed class DarlingMcpHostService : BackgroundService
             try { await _appDataSource.DisposeAsync(); } catch { /* best-effort */ }
             _appDataSource = null;
         }
+
+        /* #5288: a start that adopted its certificate (before the port-in-use / credential bails after it) but never
+           served TLS must not hold the key until the next full stop, nor leave the worker alerting on a certificate
+           nothing serves. */
+        ReleaseServerCertificate();
+    }
+
+    /// <summary>
+    /// Disposes the served certificate, forgets it, and withdraws its published expiry facts (#5288). Best-effort,
+    /// so a throw from releasing a key cannot stop the rest of a stop or a failed-start cleanup. Safe to call when
+    /// there is no certificate.
+    /// </summary>
+    private void ReleaseServerCertificate()
+    {
+        try { _serverCertificate?.Dispose(); } catch { /* best-effort */ }
+        _serverCertificate = null;
+        _mcpTlsCertState.Clear();
     }
 
     /// <summary>
@@ -365,6 +419,45 @@ public sealed class DarlingMcpHostService : BackgroundService
                 }
             }
 
+            /* TLS for the network listener (#5288). Resolved HERE, in network mode only, for the reason the web host
+               resolves its own here: loading a certificate reads files and a clock, and the pure bind ladder
+               (ResolveMcpBind) is kept free of both. A certificate failure therefore degrades exactly as the token
+               failure above does, Critical and then loopback-only, rather than needing a bind reason of its own. It
+               sits BEFORE primaryBind and before the Host-name decision further down, because a refusal changes the
+               final mode and both read it.
+
+               The block itself lives in DarlingListenerTls.Resolve, shared with the web host, so there is one
+               fail-closed path and not two copies of it. What stays here is what only this host can do: adopt the
+               certificate, and refuse to expose when TLS was asked for and no certificate came back. */
+            DarlingWebTls.LoadedCertificate? serverCertificate = null;
+            if (networkMode)
+            {
+                var network = config.Mcp.Network!;
+                var tlsOutcome = DarlingListenerTls.Resolve(
+                    _logger, _mcpTlsCertState, ListenerTlsLabels.Mcp, network.Tls, networkListenIp!, effectivePort,
+                    NormalizedHostName(network.HostName));
+                networkMode = tlsOutcome.Expose;
+
+                /* Adopted by the field IMMEDIATELY, before any of the bail paths below it (port in use, store
+                   credential not ready, shutdown mid-start), so every one of them releases the key through
+                   DisposeFailedStartAsync. Resolve owned the certificate until it returned; from this line the
+                   field does. */
+                serverCertificate = tlsOutcome.Certificate;
+                _serverCertificate = tlsOutcome.Certificate;
+
+                /* #5288 review F1: Kestrel decides HTTPS from "the listener was handed a certificate", not from
+                   "TLS was configured", so TLS asked for + network mode + no certificate would bind the LAN address
+                   in plain HTTP. Resolve never returns that. This refuses it anyway, with its own Critical line,
+                   because the cost of being wrong is cleartext on the segment. */
+                if (tlsOutcome.ExposesWithoutItsCertificate)
+                {
+                    _logger.LogCritical(
+                        "MCP server TLS is configured ({Shape}) but no certificate came back; refusing to expose, binding loopback-only.",
+                        tlsOutcome.Shape);
+                    networkMode = false;
+                }
+            }
+
             /* The REAL primary bind address (network IP when exposed, else loopback): both the port precheck
                and the Kestrel bind use it, so the precheck probes the actual address, not always loopback. */
             var primaryBind = networkMode ? networkListenIp! : IPAddress.Loopback;
@@ -375,6 +468,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             if (await PortUtilityService.IsTcpPortListeningAsync(effectivePort, primaryBind, stoppingToken))
             {
                 _logger.LogError("Port {Port} is already in use — MCP server not started this attempt; will retry", effectivePort);
+                await DisposeFailedStartAsync();
                 return false;
             }
 
@@ -396,12 +490,14 @@ public sealed class DarlingMcpHostService : BackgroundService
                 if (!OperatingSystem.IsWindows())
                 {
                     _logger.LogError("MCP server not started: postgres.managed = true requires Windows");
+                    await DisposeFailedStartAsync();
                     return false;
                 }
 
                 storeConnectionString = await WaitForManagedConnectionStringAsync(config.Postgres, stoppingToken);
                 if (storeConnectionString is null)
                 {
+                    await DisposeFailedStartAsync();
                     return false;
                 }
             }
@@ -413,6 +509,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     DarlingStoreLogins.Surface.Mcp, config.Postgres, _logger, stoppingToken);
                 if (storeConnectionString is null)
                 {
+                    await DisposeFailedStartAsync();
                     return false;
                 }
             }
@@ -485,26 +582,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                 EnvironmentName = Environments.Production,
             });
 
+            /* The listener layout lives in ConfigureListeners (#5288), so a live-HTTP test binds the SAME listeners
+               production does: the network listener carries the certificate, the loopback ones stay plain. */
             builder.WebHost.ConfigureKestrel(options =>
-            {
-                if (networkMode)
-                {
-                    /* Bind the specific family (not ListenAnyIP), then ALSO both loopback families so a local
-                       client resolving "localhost" -> ::1 still works — skipping the loopback Listen(s) when the
-                       listen value is itself loopback or a wildcard (0.0.0.0/::), which would collide on the port. */
-                    options.Listen(primaryBind, effectivePort);
-                    if (ShouldAddLoopbackListeners(primaryBind))
-                    {
-                        options.Listen(IPAddress.Loopback, effectivePort);
-                        options.Listen(IPAddress.IPv6Loopback, effectivePort);
-                    }
-                }
-                else
-                {
-                    /* The default/degraded loopback-only server — byte-for-byte today's bind (both families). */
-                    options.ListenLocalhost(effectivePort);
-                }
-            });
+                ConfigureListeners(options, networkMode, primaryBind, effectivePort, serverCertificate));
 
             /* Suppress ASP.NET Core console logging — the service's own logger reports lifecycle. */
             builder.Logging.ClearProviders();
@@ -609,10 +690,11 @@ public sealed class DarlingMcpHostService : BackgroundService
             var origin = DarlingHostBinding.DescribeToggleOrigin(toggle);
             if (networkMode)
             {
+                /* #2562/#5288 review F11: name the SCHEME the exposed listener actually speaks, and name loopback as
+                   plain HTTP only when it is (see DescribeNetworkStart). With no TLS the text is the line this host
+                   has always logged. Text only: no listener decision moves here. */
                 _logger.LogInformation(
-                    "Starting MCP server on http://{Listen}:{Port} (LAN-exposed to {Cidr} behind a bearer token + in-app CIDR; loopback also bound) — "
-                    + "enabled/port from {Origin}; listen/allowFrom/token from darling.json mcp.network (file-only, restart-only)",
-                    primaryBind, effectivePort, allowedCidr, origin);
+                    "{Line}", DescribeNetworkStart(serverCertificate is not null, primaryBind, effectivePort, allowedCidr, origin));
             }
             else
             {
@@ -647,7 +729,9 @@ public sealed class DarlingMcpHostService : BackgroundService
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            /* Normal shutdown mid-start. */
+            /* Normal shutdown mid-start, still releasing anything already acquired (#5288: the certificate's
+               private key is held in the machine key store until it is disposed). */
+            await DisposeFailedStartAsync();
             return false;
         }
         catch (Exception ex)
@@ -656,6 +740,94 @@ public sealed class DarlingMcpHostService : BackgroundService
             await DisposeFailedStartAsync();
             return false;
         }
+    }
+
+    /// <summary>
+    /// The Kestrel listener layout for one start (#5288), extracted from <c>TryStartServerAsync</c> so a live-HTTP
+    /// test binds the SAME listeners production does instead of a hand-copied set that could drift. In network mode
+    /// the network listener binds <paramref name="primaryBind"/> and, when <paramref name="certificate"/> is not
+    /// null, is the ONE listener that serves HTTPS; both loopback families are added beside it as PLAIN HTTP unless
+    /// the listen is itself loopback or a wildcard (<see cref="ShouldAddLoopbackListeners"/>), which would collide
+    /// on the port. In loopback-only mode there is one plain server on both families.
+    ///
+    /// <para><b>Why loopback stays plain HTTP.</b> The certificate names the LAN address the operator exposes; it
+    /// almost never also names <c>localhost</c>, so serving TLS there would hand every local client a name-mismatch
+    /// failure on the one surface that never leaves the machine, and nothing is lost: loopback traffic is not on the
+    /// segment this protects. When the listen IS a wildcard there is a single listener and it is HTTPS for
+    /// everyone, loopback included, because the operator asked for all interfaces. A client that speaks plain HTTP
+    /// to the TLS listener fails at the handshake: one port cannot speak both schemes, and a second HTTP port to
+    /// redirect from would re-open, on a new port, the cleartext surface this exists to close.</para>
+    ///
+    /// <para>There is exactly ONE HTTPS call in this file, on the network listener, handing Kestrel the leaf and its
+    /// intermediates through the body both hosts share (<see cref="DarlingListenerTls.ConfigureHttps"/>). The
+    /// caller owns the certificate and disposes it after the listener stops.</para>
+    /// </summary>
+    internal static void ConfigureListeners(
+        KestrelServerOptions options,
+        bool networkMode,
+        IPAddress primaryBind,
+        int effectivePort,
+        DarlingWebTls.LoadedCertificate? certificate)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(primaryBind);
+
+        if (networkMode)
+        {
+            /* Bind the specific family (not ListenAnyIP), then ALSO both loopback families so a local
+               client resolving "localhost" -> ::1 still works — skipping the loopback Listen(s) when the
+               listen value is itself loopback or a wildcard (0.0.0.0/::), which would collide on the port. */
+            options.Listen(primaryBind, effectivePort, listen =>
+            {
+                if (certificate is not null)
+                {
+                    /* The leaf AND its intermediates, through the body both hosts share: Kestrel presents ONLY
+                       what it is handed, so see DarlingListenerTls.ConfigureHttps for why the chain travels with
+                       the leaf. This is the one HTTPS call in the file, and it sits on the network listener alone. */
+                    listen.UseHttps(https => DarlingListenerTls.ConfigureHttps(https, certificate.Value));
+                }
+            });
+
+            if (ShouldAddLoopbackListeners(primaryBind))
+            {
+                options.Listen(IPAddress.Loopback, effectivePort);
+                options.Listen(IPAddress.IPv6Loopback, effectivePort);
+            }
+        }
+        else
+        {
+            /* The default/degraded loopback-only server — byte-for-byte today's bind (both families), plain HTTP. */
+            options.ListenLocalhost(effectivePort);
+        }
+    }
+
+    /// <summary>
+    /// The start line for the LAN-exposed listener (#2389, #5288 review F11), as text so a test can render it. It
+    /// names the SCHEME the listener actually speaks, because an operator reading it is deciding whether the token
+    /// they are about to paste crosses the wire in the clear, and it names loopback as plain HTTP only when it is:
+    /// with TLS on and a wildcard listen there is ONE listener, HTTPS for loopback too, and saying otherwise would
+    /// send a local client to the wrong scheme (<see cref="DarlingListenerTls.DescribeLoopbackListener"/>). With no
+    /// TLS the text is exactly the line this host has always logged. PURE; text only, no listener decision moves here.
+    /// </summary>
+    /// <param name="tlsServed">Whether the network listener was handed a certificate.</param>
+    /// <param name="primaryBind">The address the network listener binds.</param>
+    /// <param name="port">The port both listeners serve.</param>
+    /// <param name="allowedCidr">The in-app allowFrom list.</param>
+    /// <param name="origin">Which plane supplied the enabled/port halves (<c>DescribeToggleOrigin</c>).</param>
+    internal static string DescribeNetworkStart(
+        bool tlsServed, IPAddress primaryBind, int port, CidrAllowList allowedCidr, string origin)
+    {
+        ArgumentNullException.ThrowIfNull(primaryBind);
+        ArgumentNullException.ThrowIfNull(origin);
+
+        var scheme = tlsServed ? "https" : "http";
+        var fileFields = tlsServed ? "listen/allowFrom/token/tls" : "listen/allowFrom/token";
+        var loopback = DarlingListenerTls.DescribeLoopbackListener(
+            tlsServed ? "loopback also bound over plain HTTP" : "loopback also bound", tlsServed, primaryBind);
+
+        return $"Starting MCP server on {scheme}://{primaryBind}:{port} "
+            + $"(LAN-exposed to {allowedCidr.ToString()} behind a bearer token + in-app CIDR; {loopback}) — "
+            + $"enabled/port from {origin}; {fileFields} from darling.json mcp.network (file-only, restart-only)";
     }
 
     /// <summary>
@@ -1095,6 +1267,18 @@ public sealed class DarlingMcpHostService : BackgroundService
     }
 
     /// <summary>
+    /// The bare DNS name <c>mcp.network.hostName</c> stands for, or null when none is set or the value is not one
+    /// (#5288). The ONE place the raw value is normalized in this file, so the two things that read it cannot
+    /// disagree about which name the operator meant: the Host guard's admitted name (<see cref="ResolveAllowedHostName"/>,
+    /// network mode only) and the certificate's name check, which compares the same name against the certificate's
+    /// dNSName entries. PURE and silent: the Warning for a value that is set but refused belongs to
+    /// <see cref="ResolveAllowedHostName"/> and is written once, so reading the name for the certificate does not
+    /// log it a second time.
+    /// </summary>
+    internal static string? NormalizedHostName(string? configuredHostName)
+        => McpNetworkConfig.NormalizeHostName(configuredHostName);
+
+    /// <summary>
     /// The ONE extra Host the guard admits beside the names it always admits (#5288): the normalized
     /// <c>mcp.network.hostName</c>, or null for none. NETWORK mode only (review F2): in loopback-only mode, and in
     /// every mode that degraded to it (an unreadable token, a refused certificate), it returns null even for a
@@ -1111,7 +1295,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// </summary>
     internal static string? ResolveAllowedHostName(string? configuredHostName, bool networkMode, ILogger logger)
     {
-        var hostName = McpNetworkConfig.NormalizeHostName(configuredHostName);
+        var hostName = NormalizedHostName(configuredHostName);
         if (hostName is null)
         {
             if (!string.IsNullOrWhiteSpace(configuredHostName))
