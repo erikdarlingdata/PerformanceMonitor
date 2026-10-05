@@ -276,6 +276,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             {
                 for (var i = 0; i < 500; i++)
                     await SeedQueryStatsAsync(connection, archivedFloor.AddMinutes(i), $"0xARCH{i}");
+                archivedBatch.Commit();
             }
 
             var parquetPath = Path.Combine(_archivePath, "20260101_0000_query_stats.parquet").Replace("\\", "/");
@@ -296,6 +297,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             {
                 for (var i = 0; i < 500; i++)
                     await SeedQueryStatsAsync(connection, hotStart.AddMinutes(i), $"0xHOT{i}");
+                hotBatch.Commit();
             }
         }
 

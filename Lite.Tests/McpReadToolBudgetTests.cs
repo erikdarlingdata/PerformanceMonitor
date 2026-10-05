@@ -181,6 +181,10 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
         /* 89 tools total, minus mute_analysis_finding, five analyze_*, compare_analysis and audit_config = 81
            read tools attempted; a tool with no usable default throws and lands in gaps, not measured, so the
            floor is set under 81 rather than at it. */
+        /* An empty store answers every tool in a few hundred bytes and would pass the budget vacuously. The
+           seed is ~DbCount x QueriesPerDb x 2 query-store rows, so the largest answer must be well over a
+           small floor if the seeded rows are visible to the tools. */
+        Assert.True(measured.Max(m => m.Bytes) > 2_000, "the largest tool answer is tiny -- the seed is not visible to the tools, so the budget check is vacuous");
         Assert.True(measured.Count > 60, $"only {measured.Count} read tools were measured -- reflection likely under-enumerated the service assembly");
         Assert.True(overBudget.Length == 0,
             "over the #4198 default budget and not in ExemptOffenders:" + Environment.NewLine + string.Join(Environment.NewLine, overBudget) +
