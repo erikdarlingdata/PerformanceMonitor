@@ -448,8 +448,9 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
 
         var root = Root(await BlockingAsync());
 
+        /* The later of the two series' starts: before day -2 the blocking series was not collected, so its empty head says nothing. */
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        AssertTruncatedAt(root.GetProperty("hints"), Anchor.AddDays(-3), "blocked_process_report and deadlocks");
+        AssertTruncatedAt(root.GetProperty("hints"), Anchor.AddDays(-2), "blocked_process_report and deadlocks");
     }
 
     [Fact]
