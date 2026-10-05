@@ -2907,6 +2907,26 @@ public sealed class DarlingCollectorRunner
             using var targetConnection = CreateTargetConnection(server);
             await targetConnection.OpenAsync(cancellationToken);
 
+            /* #5132: the target's own session id, resolved right after the open and BEFORE any reader
+               exists on this connection. SQL Server's property is 0 under MARS at every point, so the id
+               comes from a lookup cached per physical connection (one SELECT @@SPID per new connection,
+               none on pool reuse); see TargetSessionIdCache. Best-effort: null on any failure.
+
+               The lookup is TIMED into sqlMs (no open-phase column covers this point: ServerScopeOpenMs
+               and PerItemOpenMs time only the reader opens). It stays OUTSIDE PerItemWallClockBudget on
+               purpose; the lookup's own 5 s CommandTimeout bounds it. */
+            var sessionIdWatch = Stopwatch.StartNew();
+            Guid sessionIdKey;
+            try
+            {
+                (context.TargetSessionId, sessionIdKey) =
+                    await TargetSessionIdCache.Shared.ResolveAsync(targetConnection, _logger, cancellationToken);
+            }
+            finally
+            {
+                sqlMs += sessionIdWatch.ElapsedMilliseconds;
+            }
+
             var enumerationPlan = definition.BuildEnumerationQuery(context);
             if (enumerationPlan is not null)
             {
@@ -3435,24 +3455,15 @@ public sealed class DarlingCollectorRunner
 
                     using var reader = opened;
 
-                    /* #2864: the target's own session id, read off the connection as a client property rather
-                       than asked for with SELECT @@SPID — a round trip would be ~25,000 extra queries an hour
-                       across the fleet to fetch a number the client already holds. It is what makes a stalled
-                       run joinable to waiting_tasks / dmv_blocking_snapshot / query_snapshots, all of which
-                       record a session id; without it "what was OUR session waiting on" cannot be asked
-                       retrospectively even for a window where the answering snapshot was captured.
+                    /* A transparent reconnect during the open gives a new physical connection (new
+                       ClientConnectionId, new session); the id resolved at open then belongs to the old
+                       one. Property comparison only. */
+                    if (targetConnection is SqlConnection openedSql
+                        && TargetSessionIdCache.Shared.DiscardIfReplaced(sessionIdKey, openedSql.ClientConnectionId))
+                    {
+                        context.TargetSessionId = null;
+                    }
 
-                       Captured HERE, after ExecuteReaderAsync has returned, and not beside the phase flag
-                       above (#2884): SqlConnection.ServerProcessId is not reliably populated until the
-                       connection has round-tripped a command, so a read placed before the open recorded 0 —
-                       a value no real session has — on exactly the abandoned cycles the id exists to explain.
-                       Here the round trip has provably happened, so a drain-stall abandon (open completes in
-                       ~100-200ms; the budget fires minutes into the read) records its REAL id, which is the
-                       load-bearing case. An abandon that fires INSIDE ExecuteReaderAsync leaves this null,
-                       which the store reads as NOT RECORDED — the honest answer for a connection that never
-                       finished its first exchange, and one of the reachable-NULL cases the V109 write-side
-                       comment already documents. */
-                    context.TargetSessionId = TryReadTargetSessionId(targetConnection);
                     var drainWatch = Stopwatch.StartNew();
 
                     /* #2864: the collector reads through a counting decorator rather than the provider reader
@@ -3661,38 +3672,6 @@ public sealed class DarlingCollectorRunner
             ServerLastReadMs: context.ServerScopeLastReadMs,
             TargetSessionId: context.TargetSessionId,
             FetchPhases: fetchPhases.Result);
-    }
-
-    /// <summary>
-    /// The monitored target's own session id, off the OPEN connection as a property (#2864). SQL Server's
-    /// SPID via <c>SqlConnection.ServerProcessId</c>, PostgreSQL's backend pid via
-    /// <c>NpgsqlConnection.ProcessID</c>; null for any other provider.
-    ///
-    /// <para>A property read rather than <c>SELECT @@SPID</c> deliberately: the value is already on the
-    /// client after the handshake, and asking for it would add a round trip per collector per server per
-    /// cycle — on this fleet roughly 25,000 extra queries an hour to learn something already known. The
-    /// point of the number is joinability: waiting_tasks, dmv_blocking_snapshot and query_snapshots all
-    /// carry a session id, so recording ours turns "what was our own stalled session waiting on" from an
-    /// unanswerable question into a join.</para>
-    ///
-    /// <para>Best-effort by design. A provider that exposes no such property returns null, which reads as
-    /// "not available" — never as a session id of 0, which is a real SPID.</para>
-    /// </summary>
-    private static int? TryReadTargetSessionId(DbConnection connection)
-    {
-        /* A session id of 0 is never real — SQL Server assigns no SPID 0 to a user session, and both
-           providers report 0 from this property for a connection that has not completed the exchange
-           that populates it — so 0 is the provider's "not available" state, not a measurement. #2884
-           found it written to the store as though it were data, on exactly the abandoned cycles where
-           the id is the join key. Normalized to null here, at the source, so every consumer sees the
-           declared NOT-RECORDED convention instead of a real-looking placeholder. */
-        var raw = connection switch
-        {
-            SqlConnection sql => sql.ServerProcessId,
-            NpgsqlConnection npgsql => npgsql.ProcessID,
-            _ => 0,
-        };
-        return raw > 0 ? raw : null;
     }
 
     /// <summary>
