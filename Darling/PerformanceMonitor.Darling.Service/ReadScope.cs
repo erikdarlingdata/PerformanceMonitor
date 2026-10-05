@@ -202,7 +202,8 @@ internal sealed class ReadScope
         }
     }
 
-    /// <summary>Notes a fallback with no log line, for a caller whose callee already logged the fault.</summary>
+    /// <summary>Notes a fallback with no log line: for a caller whose callee already logged the fault, or for an expected
+    /// state that is not a fault (<see cref="ReadFallback.LedgerUncovered"/>, a store before V164).</summary>
     internal static void Note(ReadFallback kind)
     {
         var scope = s_current.Value;
