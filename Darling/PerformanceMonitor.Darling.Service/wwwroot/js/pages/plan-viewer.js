@@ -20,7 +20,7 @@
    cell is rebuilt reports to the new cell as well as the old one. */
 
 import { el, readTool } from "../util.js";
-import { copyText } from "../grid-tools.js";
+import { copyText, downloadText } from "../grid-tools.js";
 
 const NO_PLAN = "No stored plan was found for this query.";
 const TRUNCATED_NOTE =
@@ -29,6 +29,9 @@ const TRUNCATED_NOTE =
 
 /* key -> { phase: "loading" | "done", result: { kind: "plan" | "none" | "error", ... } }. */
 const openPlans = new Map();
+/* key -> { phase: "loading" | "done", result: { kind: "script" | "none" | "error", ... } } for the Repro script under
+   an open plan panel (#5233). Same module-scope reason as openPlans: the 60 s rebuild draws it open again. */
+const openRepros = new Map();
 /* key -> Set of redraw functions, one per cell currently showing the key. */
 const views = new Map();
 /* The grid build a cell belongs to. Each plan column factory below runs once per grid build, so each call starts a new
@@ -46,6 +49,8 @@ const SOURCES = {
     params: (s) => ({ query_hash: s.query_hash, database_name: s.database_name || null }),
     key: (s) => [s.database_name || "", s.query_hash],
     stem: (s) => s.query_hash,
+    repro: true,
+    reproParams: (s) => ({ kind: "query_hash", query_hash: s.query_hash, database_name: s.database_name || null }),
   },
   active_snapshot: {
     read: "get_active_query_plan_xml",
@@ -57,12 +62,22 @@ const SOURCES = {
     }),
     key: (s) => [s.collection_time, s.session_id, s.request_id == null ? 0 : s.request_id, s.live ? "live" : "est"],
     stem: (s) => "active-" + s.session_id + "-" + s.collection_time + (s.live ? "-live" : ""),
+    /* The script is built from the row's stored text and its estimated plan; a live plan row sends no `live`. */
+    repro: true,
+    reproParams: (s) => ({
+      kind: "active_snapshot",
+      collection_time: s.collection_time,
+      session_id: s.session_id,
+      request_id: s.request_id == null ? 0 : s.request_id,
+    }),
   },
   query_store: {
     read: "get_query_store_plan_xml",
     params: (s) => ({ database_name: s.database_name, query_id: s.query_id, plan_id: s.plan_id == null ? null : s.plan_id }),
     key: (s) => [s.database_name, s.query_id, s.plan_id == null ? "" : s.plan_id],
     stem: (s) => "qs-" + s.database_name + "-" + s.query_id + (s.plan_id == null ? "" : "-" + s.plan_id),
+    repro: true,
+    reproParams: (s) => ({ kind: "query_store", database_name: s.database_name, query_id: s.query_id, plan_id: s.plan_id == null ? null : s.plan_id }),
   },
   procedure: {
     read: "get_procedure_plan_xml",
@@ -71,6 +86,8 @@ const SOURCES = {
     stem: (s) => s.sql_handle,
   },
 };
+
+/* A procedure has no `repro`: no query text is kept for one, so no script can be built. */
 
 /* A panel's key: server, then the kind (left out for query_hash, whose key never had one), then the kind's own parts, then
    the source's `scope` when it has one. The kind in the key is what keeps two sources with equal-looking parts from sharing
@@ -91,6 +108,7 @@ export function openPlanKeys() {
 /** Forgets every open panel. Tests only; the page never needs it. */
 export function resetPlanViewer() {
   openPlans.clear();
+  openRepros.clear();
   views.clear();
 }
 
@@ -145,6 +163,11 @@ export function prettyPrintXml(xml) {
  *  name, plus .sqlplan. */
 export function planFileName(stem) {
   return String(stem).replace(/[^A-Za-z0-9._-]/g, "_") + ".sqlplan";
+}
+
+/** The file name a repro script downloads as: the source's stem made safe for a file name, plus .sql. */
+export function reproFileName(stem) {
+  return String(stem).replace(/[^A-Za-z0-9._-]/g, "_") + ".sql";
 }
 
 const REVOKE_AFTER_MS = 10000;
@@ -203,6 +226,77 @@ export function classifyPlanRead(res) {
   return { kind: "none", message: NO_PLAN };
 }
 
+/* What get_query_repro_script answers: JSON { kind, <the key>, plan_found, script } for a script, or a status envelope
+   ("unavailable" / "not_collected") when no query text is stored, which arrives as kind "empty". */
+const NO_REPRO = "No stored query text was found, so no repro script can be built.";
+
+/** Turns a repro read result into { kind: "script" | "none" | "error", ... }, or null when the read was abandoned. */
+export function classifyReproRead(res) {
+  if (!res || res.kind === "aborted" || res.kind === "auth") return null;
+  const text = typeof res.message === "string" ? res.message : "";
+  if (res.kind === "data" && res.data && typeof res.data.script === "string") {
+    return { kind: "script", script: res.data.script, planFound: res.data.plan_found === true };
+  }
+  if (res.kind === "error") return { kind: "error", message: text || "The repro script could not be built." };
+  return { kind: "none", message: text || NO_REPRO };
+}
+
+async function loadRepro(key, server, source) {
+  let res;
+  try {
+    res = await readTool("get_query_repro_script", { server, ...SOURCES[source.kind].reproParams(source) });
+  } catch (e) {
+    res = { kind: "error", message: e && e.message ? e.message : String(e) };
+  }
+  if (!openRepros.has(key)) return; // closed while the read was out
+  const outcome = classifyReproRead(res);
+  if (outcome === null) openRepros.delete(key);
+  else openRepros.set(key, { phase: "done", result: outcome });
+  redraw(key);
+}
+
+/** Opens the Repro script under a plan panel, or closes it if it is already open. */
+export function toggleRepro(server, source) {
+  const key = keyOf(server, source);
+  if (openRepros.has(key)) {
+    openRepros.delete(key);
+    redraw(key);
+    return;
+  }
+  openRepros.set(key, { phase: "loading" });
+  redraw(key);
+  return loadRepro(key, server, source);
+}
+
+function reproPanel(key, stem) {
+  const state = openRepros.get(key);
+  if (state.phase === "loading") return el("div", { class: "repro-panel" }, [el("div", { class: "strip loading", text: "Building the repro script..." })]);
+  const r = state.result;
+  if (r.kind !== "script") {
+    return el("div", { class: "repro-panel" }, [el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
+  }
+  const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
+  const copy = el("button", { type: "button", class: "grid-tool", text: "Copy" });
+  copy.addEventListener("click", async () => {
+    const out = await copyText(r.script);
+    status.textContent = out.message;
+  });
+  const download = el("button", { type: "button", class: "grid-tool", text: "Download .sql" });
+  download.addEventListener("click", () => {
+    try {
+      downloadText(reproFileName(stem), [r.script], "application/sql");
+      status.textContent = "Downloaded " + reproFileName(stem) + ".";
+    } catch (e) {
+      status.textContent = "Download failed: " + (e && e.message ? e.message : "the browser refused it.");
+    }
+  });
+  return el("div", { class: "repro-panel" }, [
+    el("div", { class: "grid-tools" }, [copy, download, status]),
+    r.planFound ? null : el("div", { class: "strip notice", text: "No stored plan was found, so the parameters could not be extracted. The script has the query text only." }),
+    el("pre", { class: "code repro-sql", text: r.script }),
+  ]);
+}
+
 async function load(key, server, source) {
   const spec = SOURCES[source.kind];
   let res;
@@ -223,6 +317,7 @@ export function openPlanSource(server, source) {
   const key = keyOf(server, source);
   if (openPlans.has(key)) {
     openPlans.delete(key);
+    openRepros.delete(key);
     redraw(key);
     return;
   }
@@ -236,7 +331,7 @@ export function openStoredPlan(server, queryHash, database) {
   return openPlanSource(server, { kind: "query_hash", query_hash: queryHash, database_name: database || null });
 }
 
-function panelFor(key, stem) {
+function panelFor(key, stem, server, source) {
   const state = openPlans.get(key);
   const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
   if (state.phase === "loading") return el("div", { class: "plan-panel" }, [el("div", { class: "strip loading", text: "Loading the stored plan..." })]);
@@ -264,8 +359,23 @@ function panelFor(key, stem) {
       }
     });
   }
+  const tools = [copy, download];
+  if (SOURCES[source.kind].repro) {
+    const reproOpen = openRepros.has(key);
+    const repro = el("button", {
+      type: "button",
+      class: "grid-tool",
+      text: reproOpen ? "Hide repro" : "Repro script",
+      "aria-expanded": reproOpen ? "true" : "false",
+      title: "Build a T-SQL repro script from the stored query text and plan",
+    });
+    repro.addEventListener("click", () => toggleRepro(server, source));
+    tools.push(repro);
+  }
+  tools.push(status);
   return el("div", { class: "plan-panel" }, [
-    el("div", { class: "grid-tools" }, [copy, download, status]),
+    el("div", { class: "grid-tools" }, tools),
+    openRepros.has(key) ? reproPanel(key, stem) : null,
     r.truncated ? el("div", { class: "strip notice", text: TRUNCATED_NOTE }) : null,
     el("pre", { class: "code plan-xml", text: pretty }),
   ]);
@@ -294,7 +404,7 @@ export function planSourceCell(server, source, label, title) {
     });
     button.addEventListener("click", () => openPlanSource(server, source));
     host.appendChild(button);
-    if (isOpen) host.appendChild(panelFor(key, stem));
+    if (isOpen) host.appendChild(panelFor(key, stem, server, source));
   };
   draw.host = host;
   draw.generation = generation;

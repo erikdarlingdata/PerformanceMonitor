@@ -304,6 +304,93 @@ const scenarios = {
     out.text = c.textContent;
     out.hasPre = pre(c) !== null;
   },
+  /* #5233: the Repro script under an open plan panel. */
+  async repro() {
+    const src = { kind: "query_store", database_name: "Orders", query_id: 42, plan_id: 7 };
+    const cell = viewer.planSourceCell("srv-a", src);
+    planReply(XML);
+    cell.byText("Plan").click();
+    await flush();
+    out.hasReproButton = cell.byText("Repro script") !== null;
+    reply = { status: 200, body: JSON.stringify({ kind: "query_store", database_name: "Orders", query_id: 42, plan_id: 7, plan_found: true, script: "USE [Orders];\nselect 1;" }) };
+    cell.byText("Repro script").click();
+    await flush();
+    const u = params();
+    out.path = u.pathname;
+    out.query = Object.fromEntries(u.searchParams);
+    const sql = cell.all((n) => n.tag === "pre" && n.className.includes("repro-sql"))[0];
+    out.pre = sql ? sql.textContent : null;
+    out.preTag = sql ? sql.tag : null;
+    out.noNotice = cell.all((n) => n.className.includes("notice")).length === 0;
+    const copies = cell.all((n) => n.tag === "button" && n.textContent === "Copy");
+    copies[copies.length - 1].click();
+    await flush();
+    out.clip = clip[clip.length - 1];
+    cell.byText("Download .sql").click();
+    out.download = downloads[downloads.length - 1].name;
+    out.downloadType = downloads[downloads.length - 1].blob.type;
+    out.hideLabel = cell.byText("Hide repro") !== null;
+  },
+  async reproNoPlanFound() {
+    const cell = viewer.planSourceCell("srv-a", { kind: "query_hash", query_hash: "0xAB", database_name: null });
+    planReply(XML);
+    cell.byText("Plan").click();
+    await flush();
+    reply = { status: 200, body: JSON.stringify({ kind: "query_hash", query_hash: "0xAB", plan_found: false, script: "select 1;" }) };
+    cell.byText("Repro script").click();
+    await flush();
+    out.query = Object.fromEntries(params().searchParams);
+    out.notice = cell.all((n) => n.className.includes("notice")).map((n) => n.textContent).join("|");
+    out.hasScript = cell.all((n) => n.className.includes("repro-sql")).length === 1;
+  },
+  async reproUnavailable() {
+    const cell = viewer.planSourceCell("srv-a", { kind: "query_hash", query_hash: "0xAB", database_name: null });
+    planReply(XML);
+    cell.byText("Plan").click();
+    await flush();
+    reply = { status: 200, body: JSON.stringify({ status: "unavailable", message: "No stored query text found for this query_hash key." }) };
+    cell.byText("Repro script").click();
+    await flush();
+    out.text = cell.all((n) => n.className.includes("repro-panel"))[0].textContent;
+    out.hasScript = cell.all((n) => n.className.includes("repro-sql")).length === 1;
+  },
+  async activeSendsNoLive() {
+    const cell = viewer.planSourceCell("srv-a", { kind: "active_snapshot", collection_time: "2026-03-04T05:06:07.1234560", session_id: 57, request_id: 0, live: true }, "Live plan");
+    planReply(XML);
+    cell.byText("Live plan").click();
+    await flush();
+    reply = { status: 200, body: JSON.stringify({ kind: "active_snapshot", plan_found: true, script: "select 1;" }) };
+    cell.byText("Repro script").click();
+    await flush();
+    out.query = Object.fromEntries(params().searchParams);
+  },
+  async procedureHasNoRepro() {
+    const cell = viewer.planSourceCell("srv-a", { kind: "procedure", sql_handle: "0x03000500AA" });
+    planReply(XML);
+    cell.byText("Plan").click();
+    await flush();
+    out.hasPlan = pre(cell) !== null;
+    out.hasRepro = cell.byText("Repro script") !== null;
+  },
+  async reproSurvivesRebuild() {
+    const src = { kind: "query_store", database_name: "Orders", query_id: 42, plan_id: 7 };
+    const first = viewer.planSourceCell("srv-a", src);
+    planReply(XML);
+    first.byText("Plan").click();
+    await flush();
+    reply = { status: 200, body: JSON.stringify({ plan_found: true, script: "select 1;" }) };
+    first.byText("Repro script").click();
+    await flush();
+    const before = fetches.length;
+    const second = viewer.planSourceCell("srv-a", src);
+    out.open = second.byText("Hide repro") !== null;
+    out.showsScript = second.all((n) => n.className.includes("repro-sql")).length === 1;
+    out.refetched = fetches.length - before;
+    second.byText("Hide plan").click();
+    const third = viewer.planSourceCell("srv-a", src);
+    third.byText("Plan").click();
+    out.reproClosedWithPlan = third.byText("Repro script") === null && third.all((n) => n.className.includes("repro-sql")).length === 0;
+  },
   async nullSource() {
     out.cell = viewer.planSourceCell("srv-a", null).textContent;
   },

@@ -244,6 +244,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_query_store_plan_xml",
         "get_procedure_plan_xml",
         "get_active_query_plan_xml",
+        /* #5233: the repro script behind the web plan panel's Repro button. Lite builds repro scripts in the desktop grid, not over MCP. */
+        "get_query_repro_script",
 
         /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History
            button. Darling-ONLY: Lite's history window reads DuckDB directly and has no MCP twin. */

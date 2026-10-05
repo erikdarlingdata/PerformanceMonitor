@@ -267,4 +267,69 @@ public sealed class PlanViewerBehaviourTests
     {
         Assert.Equal("\u2014", Str(Run("nullSource"), "cell"));
     }
+
+    [Fact]
+    public void TheReproButton_ReadsTheScript_AndShowsItAsTextWithCopyAndSqlDownload()
+    {
+        var r = Run("repro");
+        Assert.True(r.GetProperty("hasReproButton").GetBoolean());
+        Assert.Equal("/api/read/get_query_repro_script", Str(r, "path"));
+        var q = r.GetProperty("query");
+        Assert.Equal("query_store", q.GetProperty("kind").GetString());
+        Assert.Equal("Orders", q.GetProperty("database_name").GetString());
+        Assert.Equal("42", q.GetProperty("query_id").GetString());
+        Assert.Equal("7", q.GetProperty("plan_id").GetString());
+        Assert.Equal("USE [Orders];\nselect 1;", Str(r, "pre"));
+        Assert.Equal("pre", Str(r, "preTag"));
+        Assert.True(r.GetProperty("noNotice").GetBoolean());
+        Assert.Equal("USE [Orders];\nselect 1;", Str(r, "clip"));
+        Assert.Equal("qs-Orders-42-7.sql", Str(r, "download"));
+        Assert.StartsWith("application/sql", Str(r, "downloadType"));
+        Assert.True(r.GetProperty("hideLabel").GetBoolean());
+    }
+
+    [Fact]
+    public void AReproWithNoStoredPlan_SaysSo_AndStillShowsTheScript()
+    {
+        var r = Run("reproNoPlanFound");
+        Assert.Contains("No stored plan was found", Str(r, "notice"));
+        Assert.True(r.GetProperty("hasScript").GetBoolean());
+        Assert.Equal("query_hash", r.GetProperty("query").GetProperty("kind").GetString());
+        Assert.Equal("0xAB", r.GetProperty("query").GetProperty("query_hash").GetString());
+    }
+
+    [Fact]
+    public void AReproWithNoStoredText_ShowsTheEnvelope_NotAScript()
+    {
+        var r = Run("reproUnavailable");
+        Assert.Contains("No stored query text found", Str(r, "text"));
+        Assert.False(r.GetProperty("hasScript").GetBoolean());
+    }
+
+    [Fact]
+    public void ALivePlanRow_AsksForTheReproWithoutLive()
+    {
+        var q = Run("activeSendsNoLive").GetProperty("query");
+        Assert.Equal("active_snapshot", q.GetProperty("kind").GetString());
+        Assert.Equal("57", q.GetProperty("session_id").GetString());
+        Assert.False(q.TryGetProperty("live", out _));
+    }
+
+    [Fact]
+    public void AProcedurePlan_HasNoReproButton()
+    {
+        var r = Run("procedureHasNoRepro");
+        Assert.True(r.GetProperty("hasPlan").GetBoolean());
+        Assert.False(r.GetProperty("hasRepro").GetBoolean());
+    }
+
+    [Fact]
+    public void AnOpenRepro_SurvivesTheRebuild_WithoutAnotherRead_AndClosesWithItsPlan()
+    {
+        var r = Run("reproSurvivesRebuild");
+        Assert.True(r.GetProperty("open").GetBoolean());
+        Assert.True(r.GetProperty("showsScript").GetBoolean());
+        Assert.Equal(0, r.GetProperty("refetched").GetInt32());
+        Assert.True(r.GetProperty("reproClosedWithPlan").GetBoolean());
+    }
 }

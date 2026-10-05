@@ -9,6 +9,8 @@
 using System;
 using System.ComponentModel;
 using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -341,6 +343,102 @@ public sealed class DarlingMcpPlanTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_active_query_plan_xml", ex);
+        }
+    }
+
+    private static readonly JsonSerializerOptions ReproJson = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
+
+    [McpServerTool(Name = "get_query_repro_script"), Description(
+        "Builds a paste-ready T-SQL repro script from a stored query's text and plan. kind: query_hash, query_store or active_snapshot, with that kind's key. Store-only.")]
+    public static async Task<string> GetQueryReproScript(
+        NpgsqlDataSource postgres,
+        [Description("query_hash, query_store or active_snapshot.")] string kind,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("The row's database_name (required for query_store).")] string? database_name = null,
+        [Description("The row's query_hash (kind query_hash).")] string? query_hash = null,
+        [Description("The row's query_id (kind query_store).")] long? query_id = null,
+        [Description("The row's plan_id (kind query_store); omit for the newest plan.")] long? plan_id = null,
+        [Description("The row's collection_time (kind active_snapshot).")] string? collection_time = null,
+        [Description("The row's session_id (kind active_snapshot).")] int? session_id = null,
+        [Description("The row's request_id (kind active_snapshot); omit for 0.")] int request_id = 0,
+        CancellationToken cancellationToken = default)
+    {
+        /* Every refusal comes before the store is touched. */
+        DateTime snapshotTime = default;
+        switch (kind)
+        {
+            case DarlingReproScript.KindQueryHash:
+                if (string.IsNullOrEmpty(query_hash)) return McpHelpers.Refusal("query_hash", "kind query_hash needs the row's query_hash.");
+                break;
+            case DarlingReproScript.KindQueryStore:
+                if (string.IsNullOrEmpty(database_name)) return McpHelpers.Refusal("database_name", "kind query_store needs the row's database_name.");
+                if (query_id is null) return McpHelpers.Refusal("query_id", "kind query_store needs the row's query_id.");
+                break;
+            case DarlingReproScript.KindActiveSnapshot:
+                if (string.IsNullOrEmpty(collection_time)) return McpHelpers.Refusal("collection_time", "kind active_snapshot needs the row's collection_time.");
+                if (session_id is null) return McpHelpers.Refusal("session_id", "kind active_snapshot needs the row's session_id.");
+                if (!TryParseCollectionTime(collection_time, out snapshotTime))
+                    return McpHelpers.Refusal("collection_time", "Expected the collection_time exactly as get_active_queries returned it (ISO 8601, UTC).");
+                break;
+            case "procedure":
+                return McpHelpers.Refusal("kind", "No query text is kept for a procedure, so there is no repro script. Use kind query_hash, query_store or active_snapshot.");
+            default:
+                return McpHelpers.Refusal("kind", "Expected query_hash, query_store or active_snapshot.");
+        }
+
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        if (error != null) return error;
+
+        try
+        {
+            string? text, db, planXml, isolation = null, collector;
+            switch (kind)
+            {
+                case DarlingReproScript.KindQueryHash:
+                    collector = "query_stats";
+                    db = database_name;
+                    text = await DarlingReproScript.ReadQueryStatsTextAsync(postgres, resolved.ServerId, query_hash!, database_name, cancellationToken);
+                    planXml = text == null ? null : await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(
+                        postgres, resolved.ServerId, query_hash!, database_name, cancellationToken);
+                    break;
+                case DarlingReproScript.KindQueryStore:
+                    collector = "query_store";
+                    db = database_name;
+                    text = await DarlingReproScript.ReadQueryStoreTextAsync(postgres, resolved.ServerId, database_name!, query_id!.Value, cancellationToken);
+                    planXml = text == null ? null : await DarlingStoredPlanReader.GetQueryStorePlanTextAsync(
+                        postgres, resolved.ServerId, database_name!, query_id.Value, plan_id, cancellationToken);
+                    break;
+                default:
+                    collector = "query_snapshots";
+                    (text, isolation, db) = await DarlingReproScript.ReadSnapshotTextAsync(
+                        postgres, resolved.ServerId, snapshotTime, session_id!.Value, request_id, cancellationToken);
+                    planXml = text == null ? null : await DarlingStoredPlanReader.GetQuerySnapshotPlanXmlAsync(
+                        postgres, resolved.ServerId, snapshotTime, session_id.Value, request_id, live: false, cancellationToken);
+                    break;
+            }
+
+            var script = DarlingReproScript.Build(kind, text, db, planXml, isolation);
+            if (script == null)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, collector, cancellationToken)
+                    ?? McpHelpers.Status("unavailable", $"No stored query text found for this {kind} key, so no repro script can be built.");
+
+            return JsonSerializer.Serialize(new
+            {
+                kind,
+                query_hash,
+                database_name,
+                query_id,
+                plan_id,
+                collection_time,
+                session_id,
+                request_id = kind == DarlingReproScript.KindActiveSnapshot ? (int?)request_id : null,
+                plan_found = !string.IsNullOrEmpty(planXml),
+                script,
+            }, ReproJson);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_query_repro_script", ex);
         }
     }
 
