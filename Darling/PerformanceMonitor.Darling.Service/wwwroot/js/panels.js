@@ -191,10 +191,23 @@ const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-dete
    on a column it opts that column out. A column's `sortValue(row)` supplies the sort value when the cell is a custom
    render over a derived value. */
 function vizTable(data, desc) {
-  const allCols = Array.isArray(desc.columns) ? desc.columns : [];
-  if (!allCols.length) return emptyStrip(NO_FIELDS_MSG);
+  if (!(Array.isArray(desc.columns) && desc.columns.length)) return emptyStrip(NO_FIELDS_MSG);
   /* rowsKey "." is a read whose payload is one object, drawn as one row. */
   const rows = desc.rowsKey === "." ? (data ? [data] : []) : getPath(data, desc.rowsKey) || [];
+  return gridTable(rows, desc);
+}
+
+/** The grid every table on the web draws through (#4843): sort, column groups, per-column filters, Copy cell / row /
+    all and Export CSV, with their state at module scope under gridSortKey(). vizTable feeds it a read's rows; a page
+    that builds its own rows (a composed panel, the alert-rule test, the sweep tables) calls it with the rows and a
+    descriptor of the same shape, so every table gets the same tools from one implementation. Beyond the vizTable
+    column fields, a column may carry `display(row)` (the text to show, over a raw value or none) and
+    `cellClass(row)` (a class for the cell, such as a severity colour). `desc.id` (or `sortId`) names the table and
+    MUST carry whatever else tells two tables with the same columns apart (the server, the panel): the key is what
+    keeps their sort, filter and picked cell separate. */
+export function gridTable(rows, desc) {
+  const allCols = Array.isArray(desc.columns) ? desc.columns : [];
+  if (!allCols.length) return emptyStrip(NO_FIELDS_MSG);
   if (!rows.length) return emptyStrip(desc.emptyText || "No rows in this window.");
   const cols = visibleColumns(allCols, rows);
 
@@ -342,7 +355,7 @@ function gridTools(desc, cols, tbody) {
         const hasCopy = typeof c.copyValue === "function";
         const raw = objs.map((r) => (r ? (hasCopy ? c.copyValue(r) : getPath(r, c.key)) : undefined));
         if (raw.some(isListValue)) return null;
-        const textOnly = typeof c.render === "function" && raw.every((v) => v === undefined);
+        const textOnly = (typeof c.render === "function" || typeof c.display === "function") && raw.every((v) => v === undefined);
         return { i, c, raw, textOnly };
       })
       .filter(Boolean);
@@ -763,6 +776,7 @@ function cell(row, c) {
     if (c.wrap) rcls.push("wrap");
     if (c.mono) rcls.push("mono");
     if (c.pre) rcls.push("pre");
+    if (typeof c.cellClass === "function") rcls.push(c.cellClass(row));
     return el("td", { class: rcls.join(" ") || null }, [c.render(row)]);
   }
   const raw = getPath(row, c.key);
@@ -773,6 +787,7 @@ function cell(row, c) {
   if (c.pre) cls.push("pre");
   if (c.sevKey) cls.push(sevClass(getPath(row, c.sevKey)));
   if (c.statusSev) cls.push(sevClass(statusToSev(raw)));
+  if (typeof c.cellClass === "function") cls.push(c.cellClass(row));
   /* nullKey names another field of the SAME row that says why this one is empty (get_file_io_stats' size_note:
      "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
      shows it in place of the bare em dash. */
@@ -780,7 +795,9 @@ function cell(row, c) {
   const text =
     why != null && why !== ""
       ? String(why)
-      : c.format
+      : typeof c.display === "function"
+        ? String(c.display(row) ?? "—")
+        : c.format
         ? applyFormat(c.format, raw)
         : raw == null || raw === ""
           ? "—"

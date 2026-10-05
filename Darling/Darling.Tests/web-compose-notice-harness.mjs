@@ -88,7 +88,7 @@ try {
       "export const renderPieChart = stub;\n" +
       "export const renderScatterChart = stub;\n"
   );
-  fs.writeFileSync(path.join(scratch, "panels.js"), "export function navigateServer() {}\n");
+  fs.writeFileSync(path.join(scratch, "panels.js"), "export function navigateServer() {}\nexport function gridTable() { return null; }\n");
   fs.writeFileSync(path.join(scratch, "views-api.js"), "export async function getCatalog() { return { compose: {} }; }\n");
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
   compose = await load("compose.js");

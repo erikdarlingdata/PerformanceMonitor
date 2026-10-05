@@ -22,7 +22,7 @@
 
 import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
 import { renderLineChart, zoomChip, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
-import { navigateServer } from "./panels.js";
+import { navigateServer, gridTable } from "./panels.js";
 import { getCatalog } from "./views-api.js";
 
 /** The most series a time chart draws before pooling the rest into a "+N more" note (readability + palette size). */
@@ -277,7 +277,7 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
        scope), so the drawn axis matches the window the rows were fetched over. renderComposedResult has no
        `scope`, so it is resolved here (where scope + zoom both live) and threaded through opts. */
     const chartWindow = resolveChartWindow(panelSpec, scope, opts.zoom);
-    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, chartWindow })];
+    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, chartWindow, scope })];
     /* The run endpoint's partial-window notice (#1665, #4953): a caveat that the panel did not cover the whole
        requested window. The chosen tier's retention could not cover it, OR the panel's own data starts after
        the window does, OR the row cap truncated the result. Good data, honestly caveated, above the chart.
@@ -483,7 +483,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
       break;
     case "table":
     default:
-      nodes.push(renderComposedTable(rows, unit));
+      nodes.push(renderComposedTable(rows, unit, panelSpec, opts.scope));
       break;
   }
 
@@ -639,30 +639,20 @@ function renderScalar(rows, panelSpec, fmt) {
   ]);
 }
 
-/** Any result as a table of its returned columns — bucket localized, value formatted in the unit, dims as text. */
-function renderComposedTable(rows, unit) {
-  const cols = Object.keys(rows[0] || {});
-  if (!cols.length) return emptyStrip("No columns to show.");
-  const head = el(
-    "tr",
-    {},
-    cols.map((c) => el("th", { text: columnLabel(c), class: c === "value" ? "num" : null }))
-  );
-  const bodyRows = rows.map((row) =>
-    el(
-      "tr",
-      {},
-      cols.map((c) => {
-        if (c === "value") return el("td", { class: "num", text: formatComposedValue(row[c], unit) });
-        if (c === "bucket") return el("td", { text: localBucket(row[c]) });
-        const v = row[c];
-        return el("td", { text: v == null || v === "" ? "—" : String(v) });
-      })
-    )
-  );
-  return el("div", { class: "table-wrap" }, [
-    el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, bodyRows)]),
-  ]);
+/** Any result as a table of its returned columns — bucket localized, value formatted in the unit, dims as text.
+ *  Drawn through the shared grid (panels.js gridTable) so it sorts, filters, copies and exports like every other
+ *  table. Sort, Copy and the CSV read the RAW row (the stored bucket instant, the unscaled number); the cells show
+ *  the formatted text. The grid's state is keyed by the panel's identity and the server it ran for. */
+function renderComposedTable(rows, unit, panelSpec = {}, scope = null) {
+  const keys = Object.keys(rows[0] || {});
+  if (!keys.length) return emptyStrip("No columns to show.");
+  const columns = keys.map((c) => {
+    if (c === "value") return { key: c, label: columnLabel(c), align: "right", display: (r) => formatComposedValue(r[c], unit) };
+    if (c === "bucket") return { key: c, label: columnLabel(c), format: "time", display: (r) => localBucket(r[c]) };
+    return { key: c, label: columnLabel(c), display: (r) => (r[c] == null || r[c] === "" ? "—" : String(r[c])) };
+  });
+  const id = "composed|" + (panelSpec.id ?? panelSpec.title ?? panelSpec.measure ?? panelSpec.ratio ?? "") + "|" + (scope && scope.server != null ? scope.server : "");
+  return gridTable(rows, { id, title: panelSpec.title || measureLabel(panelSpec), columns });
 }
 
 /** A table header for a result column: "Value" gains its unit, "bucket" -> "Time", a dim name is humanized. */

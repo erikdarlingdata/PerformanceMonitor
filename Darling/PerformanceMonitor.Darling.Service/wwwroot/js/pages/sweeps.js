@@ -25,6 +25,7 @@
 
 import { el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, relTime, rollupTextId,
          fmtInt, fmtMb, fmtPct, fmtBool, fmtText, bandClass, disclosure } from "../util.js";
+import { gridTable } from "../panels.js";
 
 /* The watch-item state vocabulary — the label each FleetSweepWatchStateMachine state owes an operator. The
    KEYS are the machine's own constants; Darling.Tests.FleetSweepWebFeedTests parses THIS OBJECT and compares
@@ -215,14 +216,12 @@ function sweepDocument(d) {
     nodes.push(emptyStrip("No band changes, arrivals or departures since the previous sweep."));
   } else {
     if (transitions.length) {
-      nodes.push(table(
-        ["Server", "From", "To", "Reason"],
-        transitions.map((t) => [
-          cellText(t.server),
-          bandCell(t.from),
-          bandCell(t.to),
-          cellText(t.reason || "—", "wrap"),
-        ])));
+      nodes.push(sweepGrid("transitions", [
+        { key: "server", label: "Server" },
+        bandColumn("from", "From"),
+        bandColumn("to", "To"),
+        { key: "reason", label: "Reason", wrap: true, display: (t) => t.reason || "—" },
+      ], transitions));
     }
     for (const [label, list] of [["New servers", changes.new_servers], ["Departed servers", changes.departed_servers]]) {
       const names = asArray(list);
@@ -237,13 +236,11 @@ function sweepDocument(d) {
   if (whp) {
     nodes.push(el("h4", { class: "sweep-section", text: "Would have paged (master switch off)" }));
     nodes.push(whp.length
-      ? table(
-          ["Server", "Family", "Evidence"],
-          whp.map((w) => [
-            cellText(w.server || "server " + w.server_id),
-            cellText(w.family),
-            evidenceCell(w.evidence),
-          ]))
+      ? sweepGrid("would-have-paged", [
+          { key: "server", label: "Server", display: (w) => w.server || "server " + w.server_id },
+          { key: "family", label: "Family" },
+          evidenceColumn(),
+        ], whp)
       : emptyStrip("Muted, and nothing crossed a critical trigger in this span — the mute cost nothing this sweep."));
   }
 
@@ -251,14 +248,12 @@ function sweepDocument(d) {
   const verdicts = Array.isArray(d.verdicts) ? d.verdicts : [];
   nodes.push(el("h4", { class: "sweep-section", text: "Per-server verdicts" }));
   nodes.push(verdicts.length
-    ? table(
-        ["Server", "Previous", "Band", "Reason"],
-        verdicts.map((v) => [
-          cellText(v.server),
-          bandCell(v.previous_band || "—"),
-          bandCell(v.band, v.band_changed),
-          cellText(v.reason || "—", "wrap"),
-        ]))
+    ? sweepGrid("verdicts", [
+        { key: "server", label: "Server" },
+        bandColumn("previous_band", "Previous", (v) => v.previous_band || "—"),
+        bandColumn("band", "Band", (v) => v.band, (v) => v.band_changed),
+        { key: "reason", label: "Reason", wrap: true, display: (v) => v.reason || "—" },
+      ], verdicts)
     : emptyStrip("This sweep carries no per-server verdicts."));
 
   /* The instrument-liveness block, rendered honestly: the verdict, its counters, and every note the
@@ -377,24 +372,26 @@ async function renderWatchItems(box) {
     : "Open right now (open + carried)";
 
   const body = items.length
-    ? table(
-        ["Server", "Item", "State", "Position", "First seen", "Last seen", "Condition / evidence"],
-        items.map((w) => [
-          /* The display name the feed joins from the retained verdict history (#3482); the bare id is
-             the degrade for a name the store no longer holds, and the fleet-scope sentinel renders as
-             the fleet — it has no server name, and "server 0" would be a fabrication. */
-          cellText(w.fleet_scope ? "Fleet" : (w.server || "server " + w.server_id)),
-          cellText(w.item, "mono"),
-          el("td", { class: watchStateSev(w.state), text: SWEEP_WATCH_STATE_LABELS[w.state] || w.state }),
-          cellText(watchPosition(w, d)),
-          cellText(relTime(w.first_seen_at)),
-          cellText(relTime(w.last_seen_at)),
-          el("td", { class: "wrap" }, [
-            w.evidence != null
-              ? disclosure(w.condition, el("pre", { class: "sweep-evidence", text: pretty(w.evidence) }))
-              : el("span", { text: w.condition }),
-          ]),
-        ]))
+    ? sweepGrid("watch-items|" + (watchStateShown || "open"), [
+        /* The display name the feed joins from the retained verdict history (#3482); the bare id is
+           the degrade for a name the store no longer holds, and the fleet-scope sentinel renders as
+           the fleet — it has no server name, and "server 0" would be a fabrication. */
+        { key: "server", label: "Server", display: (w) => (w.fleet_scope ? "Fleet" : (w.server || "server " + w.server_id)) },
+        { key: "item", label: "Item", mono: true },
+        { key: "state", label: "State", display: (w) => SWEEP_WATCH_STATE_LABELS[w.state] || w.state, cellClass: (w) => watchStateSev(w.state) },
+        { key: "position", label: "Position", display: (w) => watchPosition(w, d), sortValue: (w) => watchPosition(w, d) },
+        { key: "first_seen_at", label: "First seen", format: "reltime" },
+        { key: "last_seen_at", label: "Last seen", format: "reltime" },
+        {
+          key: "condition",
+          label: "Condition / evidence",
+          wrap: true,
+          copyValue: (w) => w.condition + (w.evidence != null ? "\n" + pretty(w.evidence) : ""),
+          render: (w) => w.evidence != null
+            ? disclosure(w.condition, el("pre", { class: "sweep-evidence", text: pretty(w.evidence) }))
+            : el("span", { text: w.condition }),
+        },
+      ], items)
     : emptyStrip(watchStateShown
         ? "No " + (SWEEP_WATCH_STATE_LABELS[watchStateShown] || watchStateShown).toLowerCase() + " watch items."
         : "Nothing is open right now — no watch item is open or carried.");
@@ -470,15 +467,13 @@ function renderStoreHostPayload(box, p) {
   ]);
 
   const settingsBody = settings.length
-    ? table(
-        ["Setting", "Current", "Derived", "Source", "Verdict"],
-        settings.map((s) => [
-          cellText(s.name, "mono"),
-          cellText(s.current),
-          cellText(s.derived),
-          cellText(s.source),
-          el("td", { class: verdictSev(s.verdict), text: verdictLabel(s.verdict) }),
-        ]))
+    ? sweepGrid("store-host-settings", [
+        { key: "name", label: "Setting", mono: true },
+        { key: "current", label: "Current" },
+        { key: "derived", label: "Derived" },
+        { key: "source", label: "Source" },
+        { key: "verdict", label: "Verdict", display: (r) => verdictLabel(r.verdict), cellClass: (r) => verdictSev(r.verdict) },
+      ], settings)
     : emptyStrip("No sizing-relevant settings reported.");
 
   mount(box, [
@@ -519,6 +514,40 @@ function verdictSev(v) {
 
 /* ─────────────────────────── small shared builders ─────────────────────────── */
 
+/* The record tables on this page draw through the shared grid (panels.js gridTable), so each sorts by its column
+   headers, filters per column, and copies or exports its rows as CSV. The grid's state lives at module scope under
+   the route plus the id given here, so the poll's redraw keeps it. A cell with no value shows an em dash. The
+   Instrument and Host key/value cards below stay plain `table()`s: two columns of label and sentence are a
+   readout, not rows to sort or export. */
+function sweepGrid(id, columns, rows) {
+  return gridTable(rows, {
+    id: "sweeps|" + id,
+    title: id,
+    columns: columns.map((c) => (c.display || c.render || c.format ? c : { ...c, display: (r) => (r[c.key] == null || r[c.key] === "" ? "—" : String(r[c.key])) })),
+  });
+}
+
+/** A band badge column (with the "changed" tag); sorts, filters and copies as the band's text. */
+function bandColumn(key, label, band = (r) => r[key], changed = () => false) {
+  return {
+    key,
+    label,
+    sortValue: band,
+    copyValue: (r) => band(r) + (changed(r) ? " changed" : ""),
+    render: (r) => bandBadge(band(r), changed(r)),
+  };
+}
+
+function evidenceColumn() {
+  return {
+    key: "evidence",
+    label: "Evidence",
+    wrap: true,
+    copyValue: (w) => pretty(w.evidence),
+    render: (w) => disclosure(pretty(w.evidence), el("pre", { class: "sweep-evidence", text: pretty(w.evidence) })),
+  };
+}
+
 function table(headers, rows) {
   return el("div", { class: "table-wrap" }, [
     el("table", { class: "data" }, [
@@ -532,16 +561,10 @@ function cellText(text, cls) {
   return el("td", { class: cls || null, text: text == null ? "—" : String(text) });
 }
 
-function bandCell(band, changed) {
-  return el("td", {}, [
+function bandBadge(band, changed) {
+  return el("span", {}, [
     el("span", { class: "badge " + sweepBandClass(band), text: band }),
     changed ? el("span", { class: "sweep-changed", text: " changed" }) : null,
-  ]);
-}
-
-function evidenceCell(evidence) {
-  return el("td", { class: "wrap" }, [
-    disclosure(pretty(evidence), el("pre", { class: "sweep-evidence", text: pretty(evidence) })),
   ]);
 }
 
