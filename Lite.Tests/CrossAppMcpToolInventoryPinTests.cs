@@ -212,6 +212,10 @@ public sealed class CrossAppMcpToolInventoryPinTests
            loop of this shape) has no twin of. */
         "get_read_latency",
 
+        /* #5097: the slow-read record's read (get_slow_reads) over collect.slow_reads - the monitoring tool's own
+           slow or failed reads. Darling-ONLY by architecture, the get_read_latency reason. */
+        "get_slow_reads",
+
         /* #3398: the oversized-plan backlog read (get_oversized_plan_backlog) over
            collect.oversized_plan_backlog - which cached plans the capture cap declined, and what the
            out-of-band sweep has since done about each one. Darling-ONLY by architecture rather than a porting
