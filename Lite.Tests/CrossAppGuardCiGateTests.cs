@@ -2913,6 +2913,66 @@ public class CrossAppGuardCiGateTests
     }
 
     /// <summary>
+    /// #5208: the run listing the gate reads its timing source from sometimes returns a STALE page (30 rows of
+    /// runs from weeks ago, whose artifacts are long expired, where the current rows should be), and one such
+    /// page sent every Lite shard to the class-name hash although a qualifying run existed. A page whose newest
+    /// push run is older than five days cannot hold a usable source anyway (artifacts are kept for seven days
+    /// and the gate wants two days of margin), so the step tries the listing up to three times, five seconds
+    /// apart, and takes a page only when its newest push run is younger than that. Pinned as text because the
+    /// step only runs on a hosted runner; the script was also run under bash against a fake gh for each outcome
+    /// (a stale page then a current one, every try stale, a current page with no qualifying run).
+    /// </summary>
+    [Fact]
+    public void TheTimingSourceListing_IsTriedThreeTimes_AndAPageIsTakenOnlyWhenItsNewestPushRunIsFresh()
+    {
+        var pin = StepBlock(JobBlock(ReadBuildYaml(RepoRoot()), "gate"), "Pin the Lite timing source");
+
+        /* ONE listing call site: a second, unguarded one would sidestep the retry and the freshness test. */
+        Assert.Equal(1, pin.Split("actions/workflows/build.yml/runs?", StringSplitOptions.None).Length - 1);
+
+        /* Three tries and a five-day cutoff, each named once: the loop, the cutoff and the notices all read these. */
+        Assert.Contains("          tries=3\n", pin, StringComparison.Ordinal);
+        Assert.Contains("          stale_days=5\n", pin, StringComparison.Ordinal);
+        Assert.Contains("export KEEP_UNTIL FRESH_AFTER", pin, StringComparison.Ordinal);
+        Assert.Contains("FRESH_AFTER=$(date -u -d \"-${stale_days} days\" +%Y-%m-%dT%H:%M:%SZ)", pin, StringComparison.Ordinal);
+
+        /* Five seconds before every try but the first, so the step never waits after its last try. */
+        Assert.Contains(
+            "for attempt in $(seq 1 \"${tries}\"); do\n            if [ \"${attempt}\" -gt 1 ]; then\n              sleep 5\n            fi\n",
+            pin,
+            StringComparison.Ordinal);
+
+        /* The page is judged on its newest PUSH run, by created_at, against the cutoff: a pull request from dev
+           carries head_branch dev too, and its row must not make a stale page look fresh. */
+        Assert.Contains(
+            "--jq '[.workflow_runs[] | select(.event == \"push\")] | (map(.created_at) | max) as $newest | " +
+            "if $newest > env.FRESH_AFTER then .[].id else \"stale \\($newest // \"none\")\" end'",
+            pin,
+            StringComparison.Ordinal);
+
+        /* A stale page is counted and tried again; anything else is the fresh page's ids, which end the loop and
+           feed the per-run artifact test below, still the one that decides whether a run qualifies. */
+        Assert.Matches(
+            @"stale\*\)\s+stale_tries=\$\(\(stale_tries \+ 1\)\)\s+echo [^\r\n]*\s+;;\s+\*\)\s+runs=""\$\{page\}""\s+break\s+;;",
+            pin);
+        Assert.Contains("all(.[]; (.expired | not) and (.expires_at > env.KEEP_UNTIL))", pin, StringComparison.Ordinal);
+        var retryAt = pin.IndexOf("for attempt in ", StringComparison.Ordinal);
+        var perRunAt = pin.IndexOf("for id in ${runs}; do", StringComparison.Ordinal);
+        Assert.True(retryAt > 0 && perRunAt > retryAt, "the retry loop must run before the per-run artifact test");
+
+        /* Three notices, in this order: a pinned run; every try stale, with its own text; and a current page
+           where nothing qualifies (the old text, which also covers a lookup that failed). */
+        var pinnedAt = pin.IndexOf("::notice title=Lite timing source::The Lite shards balance their cut from the timings of run ", StringComparison.Ordinal);
+        var staleAt = pin.IndexOf("elif [ \"${stale_tries}\" -eq \"${tries}\" ]; then", StringComparison.Ordinal);
+        var noneAt = pin.IndexOf("::notice title=Lite timing source::No successful dev push run has unexpired Lite timings (or the lookup failed)", StringComparison.Ordinal);
+        Assert.True(pinnedAt > 0 && staleAt > pinnedAt && noneAt > staleAt, "the step's three notices moved or one is gone");
+        Assert.Contains(
+            "::notice title=Lite timing source::The run listing returned only runs older than ${stale_days} days, ${tries} times (a stale API page",
+            pin,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The cancel-in-progress argument at the top of build.yml rests on one sentence: exactly one thing reads
     /// another run's artifacts, the Lite shard packer's download, and it reads successful runs only. If a second
     /// consumer appeared (a download-artifact or gh run download step, a workflow_run trigger), a cancelled
