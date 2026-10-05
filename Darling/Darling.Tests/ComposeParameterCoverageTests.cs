@@ -170,9 +170,9 @@ public sealed class ComposeParameterCoverageTests
         && verdict.HourEndUtc == candidate.HourEndUtc;
 
     /// <summary>The module-overlay rule from intent alone: the run takes the hourly-raw-edges route, the plan joins modules and a
-    /// module map watermark was supplied, so the compiler binds the overlay floor. Not read back from the compiler's parameters.</summary>
+    /// module map watermark no later than the run's now was supplied, so the compiler binds the overlay floor. Not read back from the compiler's parameters.</summary>
     internal static bool PredictsModuleOverlayFloorBind(PanelPlan plan, ComposeRunContext context) =>
-        context.ModuleMapThrough is not null
+        context.ModuleMapThrough is { } through && through <= context.NowUtc
         && plan.UsesModuleJoin
         && PredictsHourlyEdgesBinds(plan, context);
 

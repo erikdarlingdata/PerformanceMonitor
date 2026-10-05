@@ -3643,6 +3643,27 @@ public sealed class DarlingComposeTests
     }
 
     [Fact]
+    public void Compile_HourlyRawEdges_AWatermarkLaterThanNow_IsTreatedAsNoWatermark()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var without = CompileEdge(plan, EdgeContext(plan, true));
+        foreach (var future in new[] { EdgeNow.AddMinutes(1), EdgeNow.AddDays(1) })
+        {
+            var compiled = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: future));
+
+            Assert.Equal(without.Sql, compiled.Sql);
+            Assert.Equal(without.Parameters.Count, compiled.Parameters.Count);
+            Assert.StartsWith("WITH m AS (\n", compiled.Sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("module_map AS mm", compiled.Sql, StringComparison.Ordinal);
+        }
+
+        /* A watermark exactly at now still serves the overlay. */
+        var atNow = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: EdgeNow));
+        Assert.StartsWith("WITH m_recent AS (\n", atNow.Sql, StringComparison.Ordinal);
+        Assert.Contains("module_map AS mm", atNow.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Compile_AWatermark_ChangesNothingOnTheRawRoute_NorOnACaggRoute()
     {
         var plan = ValidPlan(EdgePanelJson);

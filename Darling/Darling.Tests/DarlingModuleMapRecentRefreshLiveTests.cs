@@ -119,6 +119,46 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
     }
 
     [Fact]
+    public async Task ARowStampedInTheFuture_NeverCarriesTheWatermarkPastTheStoresClock()
+    {
+        await RunLiveAsync(async (connection, ct) =>
+        {
+            var wall = DateTime.UtcNow;
+            var future = DateTime.SpecifyKind(wall.AddDays(1), DateTimeKind.Unspecified);
+            await InsertProcAsync(connection, future, "0xRECENT_FUTURE", "ahead", ct);
+            await DarlingModuleMap.RefreshRecentAsync(connection, null, wall, ct);
+
+            var watermark = await DarlingModuleMap.ReadWatermarkAsync(connection, ct);
+            Assert.NotNull(watermark);
+            Assert.True(watermark <= DateTime.UtcNow.AddSeconds(5), $"the watermark {watermark:O} ran ahead of the store's clock");
+
+            /* The next hourly refresh still picks up a row stamped now. */
+            var current = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-1), DateTimeKind.Unspecified);
+            await InsertProcAsync(connection, current, "0xRECENT_NOW", "current", ct);
+            await DarlingModuleMap.RefreshRecentAsync(connection, null, DateTime.UtcNow, ct);
+            Assert.Equal("current", await ObjectNameForAsync(connection, "0xRECENT_NOW", ct));
+            Assert.True(await DarlingModuleMap.ReadWatermarkAsync(connection, ct) <= DateTime.UtcNow.AddSeconds(5));
+        });
+    }
+
+    [Fact]
+    public async Task AWatermarkAnOlderBuildWroteAheadOfTheClock_StillLetsTheHourlyRefreshReadRecentRows()
+    {
+        await RunLiveAsync(async (connection, ct) =>
+        {
+            await InsertProcAsync(connection, DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-30), DateTimeKind.Unspecified), "0xRECENT_SEED", "seed", ct);
+            await DarlingModuleMap.RefreshRecentAsync(connection, null, DateTime.UtcNow, ct);
+            await ExecAsync(connection, "UPDATE collect.module_map_state SET refreshed_through = (now() AT TIME ZONE 'UTC')::timestamp + interval '1 day' WHERE id = 1", ct);
+
+            var current = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-2), DateTimeKind.Unspecified);
+            await InsertProcAsync(connection, current, "0xRECENT_HEAL", "healed", ct);
+            await DarlingModuleMap.RefreshRecentAsync(connection, null, DateTime.UtcNow, ct);
+
+            Assert.Equal("healed", await ObjectNameForAsync(connection, "0xRECENT_HEAL", ct));
+        });
+    }
+
+    [Fact]
     public async Task TheDailyRefresh_AdvancesTheWatermarkToo()
     {
         await RunLiveAsync(async (connection, ct) =>
@@ -206,6 +246,20 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
             /* The connection survives the failed read, and a refresh without the table warns instead of throwing. */
             Assert.Equal(0, await DarlingModuleMap.RefreshRecentAsync(connection, null, Now, ct));
         });
+    }
+
+    [Fact]
+    public void TheLowerBound_NeverTakesAWatermarkLaterThanNow_AndTheCapDecisionIsNamed()
+    {
+        var now = Anchor;
+        Assert.Equal(now.AddMinutes(-10), DarlingModuleMap.SinceFor(now.AddDays(1), now));
+        Assert.Equal(now.AddMinutes(-10), DarlingModuleMap.SinceFor(now.AddMinutes(1), now));
+
+        Assert.False(DarlingModuleMap.IsCappedByLookback(null, now));
+        Assert.False(DarlingModuleMap.IsCappedByLookback(now.AddMinutes(-60), now));
+        Assert.False(DarlingModuleMap.IsCappedByLookback(now.AddDays(1), now));
+        Assert.True(DarlingModuleMap.IsCappedByLookback(now.AddDays(-5), now));
+        Assert.True(DarlingModuleMap.IsCappedByLookback(now.AddDays(-2), now));
     }
 
     [Fact]

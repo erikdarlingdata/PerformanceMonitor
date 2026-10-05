@@ -69,8 +69,10 @@ public static class DarlingModuleMap
     /// attribution per handle from <c>src</c>, then advance the watermark in the same statement.
     /// ACCUMULATES: a handle that stops appearing keeps its last-known attribution forever (no delete). DISTINCT ON
     /// keeps the most-recent row per handle; the ON CONFLICT only advances a row (never regresses last_seen), so a
-    /// stale run can't overwrite a fresher attribution. The watermark only moves forward too (GREATEST), and an
-    /// empty <c>src</c> writes nothing, so a refresh that read no rows leaves it where it was.
+    /// stale run can't overwrite a fresher attribution. The watermark only moves forward too (GREATEST), never
+    /// runs ahead of the store's clock (LEAST: one row stamped in the future would otherwise pin it there for good,
+    /// since GREATEST never lets it back down), and an empty <c>src</c> writes nothing, so a refresh that read no
+    /// rows leaves it where it was.
     ///
     /// <para>The <c>ORDER BY</c> its DISTINCT ON requires also happens to be a deterministic ascending order
     /// on the conflict key, so concurrent refreshes take these row locks in the same relative order and the
@@ -96,7 +98,7 @@ public static class DarlingModuleMap
 ),
 st AS (
     INSERT INTO collect.module_map_state (id, refreshed_through, refreshed_at)
-    SELECT 1, max(collection_time), (now() AT TIME ZONE 'UTC')::timestamp
+    SELECT 1, LEAST(max(collection_time), (now() AT TIME ZONE 'UTC')::timestamp), (now() AT TIME ZONE 'UTC')::timestamp
     FROM src
     HAVING max(collection_time) IS NOT NULL
     ON CONFLICT (id) DO UPDATE SET
@@ -153,16 +155,25 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
     private const int WatermarkReadTimeoutSeconds = 30;
 
     /// <summary>
-    /// The lower bound of the hourly refresh: the watermark less <see cref="WatermarkSlack"/>, but never older
-    /// than <see cref="MaxLookback"/> before <paramref name="utcNow"/>; with no watermark, exactly that floor.
-    /// The result is a naive (Kind Unspecified) timestamp ready to bind.
+    /// The lower bound of the hourly refresh: the watermark (never later than <paramref name="utcNow"/>) less
+    /// <see cref="WatermarkSlack"/>, but never older than <see cref="MaxLookback"/> before <paramref name="utcNow"/>;
+    /// with no watermark, exactly that floor. The result is a naive (Kind Unspecified) timestamp ready to bind.
     /// </summary>
     public static DateTime SinceFor(DateTime? watermark, DateTime utcNow)
     {
         var floor = utcNow - MaxLookback;
-        var since = watermark is { } w && w - WatermarkSlack > floor ? w - WatermarkSlack : floor;
+        var since = watermark is { } w && Min(w, utcNow) - WatermarkSlack > floor ? Min(w, utcNow) - WatermarkSlack : floor;
         return DateTime.SpecifyKind(since, DateTimeKind.Unspecified);
     }
+
+    /// <summary>True when <see cref="SinceFor"/> had to stop at the <see cref="MaxLookback"/> floor although a
+    /// watermark exists: the rows between the watermark and that floor are not re-read.</summary>
+    public static bool IsCappedByLookback(DateTime? watermark, DateTime utcNow)
+    {
+        return watermark is { } w && Min(w, utcNow) - WatermarkSlack < utcNow - MaxLookback;
+    }
+
+    private static DateTime Min(DateTime a, DateTime b) => a < b ? a : b;
 
     /// <summary>Creates the map and its watermark table if absent (idempotent). Returns true on success; a failure warns and leaves
     /// object_name-on-query_stats routing to fall back to raw (never kills startup).</summary>
@@ -220,7 +231,18 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
         ArgumentNullException.ThrowIfNull(connection);
         try
         {
-            var since = SinceFor(await ReadWatermarkAsync(connection, cancellationToken), utcNow);
+            var watermarkBefore = await ReadWatermarkAsync(connection, cancellationToken);
+            var since = SinceFor(watermarkBefore, utcNow);
+            if (IsCappedByLookback(watermarkBefore, utcNow))
+            {
+                /* The map shares this property with the rollup route and the daily refresh: a stall longer than the
+                   lookback leaves the span between the old watermark and the floor unread, and the map keeps the
+                   names it already had for it. Say so once per run instead of hiding it. */
+                logger?.LogWarning(
+                    "module_map hourly refresh: the watermark {Watermark:yyyy-MM-dd HH:mm:ss} is older than the {Days}-day lookback, so procedure_stats rows between it and {Since:yyyy-MM-dd HH:mm:ss} were not re-read; module names for that span come from the map as it was.",
+                    watermarkBefore, MaxLookback.TotalDays, since);
+            }
+
             using var command = new NpgsqlCommand(RefreshSinceSql, connection) { CommandTimeout = SetupTimeoutSeconds };
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = since });
             var (rows, watermark) = await ReadRefreshResultAsync(command, cancellationToken);

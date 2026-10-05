@@ -422,9 +422,11 @@ public static class ComposeCompiler
 
         /* The recent-overlay floor of the hourly-raw-edges module join: the later of the window start and the map's
            watermark less the refresh slack. Bound only when the module join is emitted below from the map, so no other
-           compile gains a parameter. */
+           compile gains a parameter. A watermark later than the run's now (written ahead of the clock by an older
+           build) counts as no watermark, so that compile ranks the whole window as before. */
         string? moduleOverlayFloorParam = null;
-        if (route.Tier == ComposeSourceTier.HourlyRawEdges && plan.UsesModuleJoin && context.ModuleMapThrough is DateTime moduleMapThrough)
+        if (route.Tier == ComposeSourceTier.HourlyRawEdges && plan.UsesModuleJoin
+            && context.ModuleMapThrough is DateTime moduleMapThrough && moduleMapThrough <= context.NowUtc)
         {
             var overlayFloor = moduleMapThrough - DarlingModuleMap.WatermarkSlack;
             moduleOverlayFloorParam = p.AddTimestamp(overlayFloor > context.StartUtc ? overlayFloor : context.StartUtc);
@@ -531,7 +533,8 @@ public static class ComposeCompiler
                the group references are unchanged. A map row with last_seen before the window start is skipped, so a handle
                with no procedure_stats row in the window still reads '(ad hoc)'. The map is forward-only, so a handle
                renamed before the floor reads its newest name from the map and one renamed after it reads the overlay's.
-               A rename inside the last minute (the gap between the window end and now) can show the newer name. */
+               A rename inside the last minute (the gap between the window end and now) can show the newer name, and so can a handle whose only procedure_stats row is in that
+               minute (it can show a name where the raw route shows (ad hoc)). */
             var fromMap = moduleOverlayFloorParam is not null;
             sql.Append("WITH ").Append(fromMap ? "m_recent" : ModuleAlias).Append(" AS (\n");
             sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name\n");
