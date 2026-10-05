@@ -70,7 +70,9 @@ public sealed class QueryStatsHourLedgerWriterTests
     {
         var code = CopyBatchOnceCode();
 
-        Assert.Contains("var ledgerBatch = definition is QueryStatsCollector;", code, StringComparison.Ordinal);
+        /* Keyed on the table the COPY writes, not on the CLR type: a query_stats-bound definition that is not the catalog's
+           sealed QueryStatsCollector is counted too, or fails loudly (#4605). */
+        Assert.Contains("var ledgerBatch = string.Equals(definition.TargetTable, QueryStatsCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);", code, StringComparison.Ordinal);
 
         var upsert = code.IndexOf("QueryStatsHourLedgerWriter.AddBatchAsync(", StringComparison.Ordinal);
         var call = code[upsert..code.IndexOf(");", upsert, StringComparison.Ordinal)];

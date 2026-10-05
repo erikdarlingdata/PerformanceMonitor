@@ -4242,8 +4242,13 @@ public sealed class DarlingCollectorRunner
            writer's tally of the value it sends into that column, taken at the exact write and never re-derived. The
            writer is built per attempt, so the tally starts from zero on every attempt and a failed attempt's rows
            cannot be counted twice by the re-attempt. All rows of the batch carry the one storedCollectionTime below,
-           so a batch is one hour and one upsert. */
-        var ledgerBatch = definition is QueryStatsCollector;
+           so a batch is one hour and one upsert.
+
+           The batch is a ledger batch by the table this COPY writes, not by the definition's CLR type: a definition
+           aimed at query_stats that is not the catalog's QueryStatsCollector (a one-off import or backfill) is counted
+           too, or fails loudly. IntervalPayloadIndex throws for a definition without the column, and the tally check
+           before the COPY completes catches any other overload. */
+        var ledgerBatch = string.Equals(definition.TargetTable, QueryStatsCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);
         if (ledgerBatch)
         {
             writer.CountNonZeroAt(QueryStatsHourLedgerWriter.IntervalPayloadIndex(definition));
