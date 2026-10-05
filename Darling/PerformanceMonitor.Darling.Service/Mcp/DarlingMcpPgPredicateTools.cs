@@ -81,7 +81,7 @@ public sealed class DarlingMcpPgPredicateTools
                no probe; a failed probe costs the notice, never the rows. */
             var emptyStart = windowEnd.AddHours(-hours_back);
             var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_predicate_stats", "pg_predicate_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+                postgres, "get_pg_predicate_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
                 return McpHelpers.Status(
                         "empty",
@@ -97,7 +97,7 @@ public sealed class DarlingMcpPgPredicateTools
                no probe; a failed probe costs the notice, never the rows. */
             var windowStart = windowEnd.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_predicate_stats", "pg_predicate_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
+                postgres, "get_pg_predicate_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
 
             /* One rate for the server in the ordinary case; distinct() rather than First() because a rate
                changed mid-window would otherwise be reported as whichever row sorted first. */

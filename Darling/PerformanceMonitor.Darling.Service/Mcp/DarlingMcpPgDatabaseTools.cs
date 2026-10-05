@@ -172,7 +172,7 @@ public sealed class DarlingMcpPgDatabaseTools
             }
 
             /* #4966: decided after the empty branch, whose not-collected answer carries no notice. */
-            var notice = await DarlingMcpPgWindow.ReadAsync(
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_database_stats", resolved.ServerName, start, end, emptyAnswer: false, logger, cancellationToken);
             return BuildDatabaseStatsJson(resolved.ServerName, hours_back, page, limit, notice);
         }
@@ -277,7 +277,7 @@ public sealed class DarlingMcpPgDatabaseTools
         })
         .ToList();
 
-        return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,
@@ -381,7 +381,7 @@ public sealed class DarlingMcpPgDatabaseTools
         if (samplesInWindow >= 2)
         {
             /* #4966: the empty answer carries the window floor under hints; the unavailable ones below stay as they were. */
-            var notice = await DarlingMcpPgWindow.ReadAsync(
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_database_stats", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
             return McpHelpers.Status(
                 "empty",

@@ -254,7 +254,7 @@ public sealed class DarlingMcpPgSessionStatesTools
             }
 
             /* #4966: decided after the empty branch, whose not-collected answer carries no notice. */
-            var notice = await DarlingMcpPgWindow.ReadAsync(
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_session_states", resolved.ServerName, start, end, emptyAnswer: false, logger, cancellationToken);
 
             var holders = rows.Count(r => r.HorizonHolderSamples > 0 && !r.StateWasRedacted);
@@ -328,7 +328,7 @@ public sealed class DarlingMcpPgSessionStatesTools
             })
             .ToList();
 
-            return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -420,7 +420,7 @@ public sealed class DarlingMcpPgSessionStatesTools
         if (captures.CapturesTotal > 0)
         {
             /* #4966: the all-clear carries the window floor beside its own hints; the unavailable answer below stays bare. */
-            var notice = await DarlingMcpPgWindow.ReadAsync(
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_session_states", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
             return McpHelpers.Status(
                 "empty",

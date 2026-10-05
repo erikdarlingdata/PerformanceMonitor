@@ -113,9 +113,9 @@ public sealed class DarlingMcpPgXminTools
                 }
 
                 /* #4966: the all-clear is an empty answer, and carries the window floor under hints. */
-                var emptyNotice = await DarlingMcpPgWindow.ReadAsync(
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_xmin_horizon", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
-                return DarlingMcpPgWindow.FinishEmpty(JsonSerializer.Serialize(new
+                return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,
                     hours_back,
@@ -162,9 +162,9 @@ public sealed class DarlingMcpPgXminTools
             /* #4966: the latest holder per source and the window's peak and persistence figures are both read over the window, so the
                answer names where the store's coverage of it starts. The collector stores nothing on an unheld capture, so its table is
                sparse, but it is not run-probed: it has a schedule edge, which the table probe uses. */
-            var notice = await DarlingMcpPgWindow.ReadAsync(
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_xmin_horizon", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
-            return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,

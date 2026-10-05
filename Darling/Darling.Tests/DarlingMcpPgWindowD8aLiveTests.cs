@@ -26,11 +26,13 @@ namespace Darling.Tests;
 /// CPU utilization. Each tool writes <c>effective_start</c>, <c>window_truncated</c> and <c>truncation_note</c> right after
 /// <c>hours_back</c> on a data answer, carries them under <c>hints</c> on an empty one, and leaves a not-collected answer bare.
 /// </summary>
-public sealed class DarlingMcpPgWindowSourceTests
+public sealed class DarlingMcpPgSourceTests
 {
     public static IEnumerable<object[]> WebListed() =>
         [["get_pg_top_queries"], ["get_pg_database_stats"], ["get_pg_io_stats"], ["get_pg_plans"],
-         ["get_pg_blocking"], ["get_pg_session_states"], ["get_pg_replication_stats"]];
+         ["get_pg_blocking"], ["get_pg_session_states"], ["get_pg_replication_stats"],
+         ["get_pg_wait_stats"], ["get_pg_wait_sampling"], ["get_pg_kernel_stats"], ["get_pg_lock_stats"], ["get_pg_predicate_stats"],
+         ["get_pg_server_config_changes"]];
 
     /// <summary>A tool the web lists probes the very source the web's note probes, so the tool and the page never name two starts.</summary>
     [Theory]
@@ -38,7 +40,7 @@ public sealed class DarlingMcpPgWindowSourceTests
     public void AWebListedTool_ProbesTheSourceTheWebProbes(string read)
     {
         Assert.True(WebDataStartNote.TryGetReadSource(read, out var web));
-        var tool = DarlingMcpPgWindow.SourceFor(read);
+        var tool = DarlingMcpWindowNotice.SourceFor(read);
 
         Assert.Equal(web.Relation, tool.Relation);
         Assert.Equal(web.TimeColumn, tool.TimeColumn);
@@ -55,10 +57,10 @@ public sealed class DarlingMcpPgWindowSourceTests
     public void AnUnlistedTool_ProbesItsCollectorTable(string read, string table)
     {
         Assert.False(WebDataStartNote.TableByRead.ContainsKey(read));
-        var source = DarlingMcpPgWindow.SourceFor(read);
+        var source = DarlingMcpWindowNotice.SourceFor(read);
         Assert.Equal(table, source.Relation);
         Assert.Equal("collection_time", source.TimeColumn);
-        Assert.Equal(table, DarlingMcpPgWindow.TableFor(read));
+        Assert.Equal(table, DarlingMcpWindowNotice.TableFor(read));
     }
 }
 
@@ -152,7 +154,7 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
             Assert.False(root.TryGetProperty("status", out var status) && status.GetString() != "database_activity" && status.GetString() != "io_activity", root.ToString());
             Assert.True(root.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(McpHelpers.FormatEffectiveStart(added), root.GetProperty("effective_start").GetString());
-            Assert.Equal(DarlingMcpWindowNotice.Build(added, end.AddHours(-168), DarlingMcpPgWindow.TableFor(read)).TruncationNote, root.GetProperty("truncation_note").GetString());
+            Assert.Equal(DarlingMcpWindowNotice.Build(added, end.AddHours(-168), DarlingMcpWindowNotice.TableFor(read)).TruncationNote, root.GetProperty("truncation_note").GetString());
 
             var names = root.EnumerateObject().Select(p => p.Name).ToList();
             Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(names.IndexOf("hours_back") + 1).Take(3));

@@ -90,7 +90,7 @@ public sealed class DarlingMcpPgStatementTools
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
             /* #4966: where the store's coverage of the window starts, probed on the source the web's note probes. Decided after the
                not-collected branch above, which carries no notice. */
-            var notice = await DarlingMcpPgWindow.ReadAsync(
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_top_queries", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
             return BuildTopQueriesJson(resolved.ServerName, hours_back, page, limit, evictions, notice);
         }
@@ -213,7 +213,7 @@ public sealed class DarlingMcpPgStatementTools
         })
         .ToList();
 
-        return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,

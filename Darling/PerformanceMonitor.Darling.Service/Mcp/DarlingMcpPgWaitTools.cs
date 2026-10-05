@@ -80,7 +80,7 @@ public sealed class DarlingMcpPgWaitTools
                stays bare. A data answer over 90 minutes or less starts no probe; a failed probe costs the notice, never the rows. */
             var windowStart = now.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_wait_stats", "pg_wait_stats", resolved.ServerName, windowStart, now, emptyAnswer: false, logger, cancellationToken);
+                postgres, "get_pg_wait_stats", resolved.ServerName, windowStart, now, emptyAnswer: false, logger, cancellationToken);
             return BuildWaitStatsJson(resolved.ServerName, hours_back, page, limit, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

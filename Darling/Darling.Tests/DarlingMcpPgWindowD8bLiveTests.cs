@@ -100,7 +100,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
 
             Assert.True(root.GetProperty("window_truncated").GetBoolean(), root.ToString());
             Assert.Equal(McpHelpers.FormatEffectiveStart(added), root.GetProperty("effective_start").GetString());
-            Assert.Equal(DarlingMcpWindowNotice.Build(added, end.AddHours(-168), DarlingMcpPgWindow.TableFor(read)).TruncationNote, root.GetProperty("truncation_note").GetString());
+            Assert.Equal(DarlingMcpWindowNotice.Build(added, end.AddHours(-168), DarlingMcpWindowNotice.TableFor(read)).TruncationNote, root.GetProperty("truncation_note").GetString());
 
             var names = root.EnumerateObject().Select(p => p.Name).ToList();
             Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(names.IndexOf("hours_back") + 1).Take(3));

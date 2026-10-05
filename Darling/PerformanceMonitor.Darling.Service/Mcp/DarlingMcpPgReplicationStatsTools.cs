@@ -75,9 +75,9 @@ public sealed class DarlingMcpPgReplicationStatsTools
                 }
 
                 /* #4966: the empty answer carries the window floor under hints. */
-                var emptyNotice = await DarlingMcpPgWindow.ReadAsync(
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_replication_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
-                return DarlingMcpPgWindow.FinishEmpty(McpHelpers.Status(
+                return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                         "empty",
                         $"No replica was connected to {resolved.ServerName} in the last {hours_back} "
                         + "hour(s). On a server with no replicas that is the expected answer. If a "
@@ -87,7 +87,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
                         emptyNotice.AsHints()), emptyNotice);
             }
 
-            var notice = await DarlingMcpPgWindow.ReadAsync(
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_replication_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
 
             var replicas = rows.Select(r => new
@@ -109,7 +109,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
                 last_seen = r.LastSeen,
             });
 
-            return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,

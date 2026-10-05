@@ -120,9 +120,9 @@ public sealed class DarlingMcpPgBlockingTools
             if (chains.Count == 0 && cycleEntries.Count > 0)
             {
                 /* Cycles but no chains. Reporting "no blocking sampled" here would be a flat lie. */
-                var notice = await DarlingMcpPgWindow.ReadAsync(
+                var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: false, logger, cancellationToken);
-                return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
+                return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,
                     hours_back,
@@ -164,9 +164,9 @@ public sealed class DarlingMcpPgBlockingTools
                    says the collector never ran in the window and stays bare. */
                 var emptyNotice = captures.CapturesTotal == 0
                     ? McpWindowNotice.Unavailable
-                    : await DarlingMcpPgWindow.ReadAsync(
+                    : await DarlingMcpWindowNotice.ReadForToolAsync(
                         postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: true, logger, cancellationToken);
-                return DarlingMcpPgWindow.FinishEmpty(JsonSerializer.Serialize(new
+                return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,
                     hours_back,
@@ -187,7 +187,7 @@ public sealed class DarlingMcpPgBlockingTools
                 }, McpHelpers.JsonOptions), emptyNotice);
             }
 
-            var chainsNotice = await DarlingMcpPgWindow.ReadAsync(
+            var chainsNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: false, logger, cancellationToken);
             return BuildBlockingChainsJson(
                 resolved.ServerName, hours_back, chains, cycleEntries, captures, chainsNotice);
@@ -292,7 +292,7 @@ public sealed class DarlingMcpPgBlockingTools
 
         var worst = entries[0];
 
-        return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,

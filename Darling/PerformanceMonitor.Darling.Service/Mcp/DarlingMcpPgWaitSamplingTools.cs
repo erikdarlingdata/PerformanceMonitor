@@ -115,7 +115,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
                no probe; a failed probe costs the notice, never the rows. */
             var emptyStart = windowEnd.AddHours(-hours_back);
             var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_wait_sampling", "pg_wait_sampling", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+                postgres, "get_pg_wait_sampling", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
                 return McpHelpers.Status(
                         "empty",
@@ -133,7 +133,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
                no probe; a failed probe costs the notice, never the rows. */
             var windowStart = windowEnd.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_wait_sampling", "pg_wait_sampling", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
+                postgres, "get_pg_wait_sampling", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
             return BuildWaitSamplingJson(resolved.ServerName, hours_back, page, limit, instrument, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

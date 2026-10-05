@@ -75,9 +75,9 @@ public sealed class DarlingMcpPgIoTools
                 }
 
                 /* #4966: the nothing-found word is an empty answer, so it carries the window floor under hints. */
-                var emptyNotice = await DarlingMcpPgWindow.ReadAsync(
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_io_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
-                return DarlingMcpPgWindow.FinishEmpty(JsonSerializer.Serialize(new
+                return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,
                     hours_back,
@@ -97,7 +97,7 @@ public sealed class DarlingMcpPgIoTools
             var timingSetting = await DarlingPgTrendReader.GetIoTimingTrackedAsync(
                 postgres, resolved.ServerId, windowEnd, cancellationToken);
 
-            var notice = await DarlingMcpPgWindow.ReadAsync(
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_io_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
             return BuildIoJson(resolved.ServerName, hours_back, page, limit, timingSetting, notice);
         }
@@ -211,7 +211,7 @@ public sealed class DarlingMcpPgIoTools
         var bytesMeasured = rows.Any(r => r.ByteCountersTracked);
         var bytesEstimated = !bytesMeasured && rows.Any(r => r.OpBytes > 0);
 
-        return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,

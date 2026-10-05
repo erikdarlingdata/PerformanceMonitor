@@ -91,7 +91,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
 
                 /* #4966: the empty answer carries the window floor under hints. Samples are windowed on collection_time, the
                    probe's own column; the web does not list this read, so the collector table is the source. */
-                var emptyNotice = await DarlingMcpPgWindow.ReadAsync(
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_cpu_utilization", resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, emptyAnswer: true, logger, cancellationToken);
                 return McpHelpers.Status(
                     "empty",
@@ -99,9 +99,9 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                     emptyNotice.AsHints());
             }
 
-            var notice = await DarlingMcpPgWindow.ReadAsync(
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_cpu_utilization", resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, emptyAnswer: false, logger, cancellationToken);
-            return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,

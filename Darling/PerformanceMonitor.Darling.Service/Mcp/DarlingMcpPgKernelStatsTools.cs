@@ -89,7 +89,7 @@ public sealed class DarlingMcpPgKernelStatsTools
                no probe; a failed probe costs the notice, never the rows. */
             var emptyStart = windowEnd.AddHours(-hours_back);
             var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_kernel_stats", "pg_kernel_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+                postgres, "get_pg_kernel_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
                 return McpHelpers.Status(
                         "empty",
@@ -104,7 +104,7 @@ public sealed class DarlingMcpPgKernelStatsTools
                no probe; a failed probe costs the notice, never the rows. */
             var windowStart = windowEnd.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_kernel_stats", "pg_kernel_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
+                postgres, "get_pg_kernel_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
             return BuildKernelStatsJson(resolved.ServerName, hours_back, page, limit, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

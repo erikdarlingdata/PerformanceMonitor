@@ -107,7 +107,7 @@ public sealed class DarlingMcpPgPlanTools
                     postgres, resolved.ServerId, resolved.ServerName, wantedQueryId, hours_back, start, now, logger, cancellationToken);
             }
 
-            var notice = await DarlingMcpPgWindow.ReadAsync(
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_plans", resolved.ServerName, start, now, emptyAnswer: false, logger, cancellationToken);
             return BuildPlansJson(resolved.ServerName, hours_back, rows, limit, notice);
         }
@@ -317,7 +317,7 @@ public sealed class DarlingMcpPgPlanTools
         }
 
         /* #4966: only the empty answer carries the window floor; not_collected and precondition above stay bare. */
-        var notice = await DarlingMcpPgWindow.ReadAsync(
+        var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_plans", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
         return McpHelpers.Status("empty", NoPlanCapturedMessage(wantedQueryId, hoursBack), notice.AsHints());
     }
@@ -436,7 +436,7 @@ public sealed class DarlingMcpPgPlanTools
             plan = ParsePlan(r.PlanJson),
         }).ToList();
 
-        return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,

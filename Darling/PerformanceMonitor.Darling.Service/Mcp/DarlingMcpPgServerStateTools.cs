@@ -429,7 +429,7 @@ public sealed class DarlingMcpPgServerStateTools
                a failed probe costs the notice, never the rows. */
             var emptyStart = windowEnd.AddHours(-hours_back);
             var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_lock_stats", "pg_lock_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+                postgres, "get_pg_lock_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
                 return McpHelpers.Status(
                         "empty",
@@ -445,7 +445,7 @@ public sealed class DarlingMcpPgServerStateTools
                a failed probe costs the notice, never the rows. */
             var windowStart = windowEnd.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_lock_stats", "pg_lock_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
+                postgres, "get_pg_lock_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
 
             var truncated = fetched.Count > limit;
             var rows = truncated ? fetched.Take(limit).ToList() : fetched;
@@ -863,7 +863,7 @@ public sealed class DarlingMcpPgServerStateTools
                a failed probe costs the notice, never the rows. */
             var emptyStart = windowEnd.AddHours(-hours_back);
             var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_server_config_changes", "pg_server_config", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+                postgres, "get_pg_server_config_changes", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
                 return McpHelpers.Status(
                         "no_changes",
@@ -891,7 +891,7 @@ public sealed class DarlingMcpPgServerStateTools
                         ComposeStoreAvailability.BuildCappedListNotice(oldestShown, windowStart, windowEnd))
                     : new McpWindowNotice(McpHelpers.FormatEffectiveStart(windowStart), false, null))
                 : await DarlingMcpWindowNotice.ReadForToolAsync(
-                    postgres, "get_pg_server_config_changes", "pg_server_config", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
+                    postgres, "get_pg_server_config_changes", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
 
             /* #3937: the rows are typed `object` so one list can carry two shapes. A server-wide row is the SAME
                anonymous shape it always was, and System.Text.Json serializes an object-typed element by its
