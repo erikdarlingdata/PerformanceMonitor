@@ -171,7 +171,7 @@ function fanout(read, params, specs) {
       const body = shells[i].body;
       if (hidesPanel(spec, res, shells[i], keys[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
+      if (res.kind === "empty") return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), emptyStrip(res.message)]);
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
            hand vizLine the fetch's `hours` as `windowHours` — otherwise a fanout line panel (Current Waits,
@@ -761,10 +761,16 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  *
  * `moreNoteKeys` is a list of further fields on the same response, each rendered as its own note beneath the
  * `noteKey` one; an empty or absent value draws nothing. Optional, like `noteKey`.
+ *
+ * `columnGroups` ({ groups: [names], defaultGroups: [names] }) is for a wide grid: a column with `group: "<name>"`
+ * is shown only while its group's toggle is on, and the ungrouped columns are always shown (see vizTable's
+ * columnPicker).
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null) {
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
-  return renderPanel({ title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey });
+  const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey };
+  if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
+  return renderPanel(desc);
 }
 
 /**
@@ -988,6 +994,7 @@ export const SERVER_TABS = [
           title: "Memory Grants",
           subtitle: "newest snapshot in " + ctx.label + ", per resource pool - a moment, not the window",
           viz: "table",
+          windowNote: false,
           rowsKey: "grants",
           columns: GRANT_COLUMNS,
           emptyText: "No memory grant snapshot in this window.",
@@ -1006,6 +1013,7 @@ export const SERVER_TABS = [
           title: "Resource Semaphore",
           subtitle: "newest snapshot in " + ctx.label + ", per semaphore and pool - a moment, not the window",
           viz: "table",
+          windowNote: false,
           rowsKey: "grants",
           columns: SEMAPHORE_COLUMNS,
           emptyText: "No resource-semaphore snapshot in this window.",
@@ -1136,7 +1144,7 @@ export const SERVER_TABS = [
         "get_deadlock_detail",
         { server, hours: ctx.hours, limit: 5 },
         "deadlocks",
-        DEADLOCK_XML_COLUMNS,
+        deadlockXmlColumns(server),
         ctx.label,
         "No deadlock graph XML captured in this window."
       ),
@@ -1356,6 +1364,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label + ", per database, worst first",
           viz: "table",
           rowsKey: "databases",
+          floorKey: "window",
           columns: QS_CLUTTER_COLUMNS,
           noteKey: "server_note",
           emptyText:
@@ -1367,6 +1376,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label,
           viz: "table",
           rowsKey: "qs_overhead.wait_stats.included",
+          floorKey: "window",
           columns: QS_OVERHEAD_WAIT_COLUMNS,
           noteKey: "qs_overhead.wait_stats.excluded_note",
           emptyText:
@@ -1428,6 +1438,7 @@ export const SERVER_TABS = [
           subtitle: SNAPSHOT,
           span: 1,
           viz: "table",
+          windowNote: false,
           rowsKey: "automatic_tuning",
           columns: AUTO_TUNING_COLUMNS,
           emptyText: "No per-database FORCE_LAST_GOOD_PLAN state recorded.",
@@ -1633,7 +1644,8 @@ export const SERVER_TABS = [
         "events",
         MEMORY_CONDITION_COLUMNS,
         ctx.label,
-        "No memory condition events in this window."
+        "No memory condition events in this window.",
+        2, null, null, MEMORY_CONDITION_GROUPS
       ),
       table(
         "Memory Broker",
@@ -1651,7 +1663,8 @@ export const SERVER_TABS = [
         "events",
         MEMORY_OOM_COLUMNS,
         ctx.label,
-        "No memory node OOM events in this window — the healthy state for this read."
+        "No memory node OOM events in this window — the healthy state for this read.",
+        2, null, null, MEMORY_OOM_GROUPS
       ),
       /* #2484: the ninth member of the get_health_parser_* family. Built with table(), not a bare object
          literal -- mount() stringifies anything it cannot consume, so a literal renders as [object Object]
@@ -3088,7 +3101,7 @@ const LONG_QUERY_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "object_name", label: "Object" },
   { key: "session_id", label: "SPID", format: "int" },
-  { key: "client_app_name", label: "Application" },
+  { key: "client_app_name", label: "App" },
   { key: "server_principal_name", label: "Login" },
   { key: "query_hash", label: "Query Hash" },
 ];
@@ -3181,11 +3194,70 @@ const DEADLOCK_COLUMNS = [
   { key: "has_deadlock_xml", label: "Graph", format: "bool" },
 ];
 
-const DEADLOCK_XML_COLUMNS = [
-  { key: "deadlock_time", label: "Deadlock Time", format: "time" },
-  { key: "victim_process_id", label: "Victim" },
-  { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
+/* The per-process rows of one deadlock, the desktop Deadlocks grid's columns and header text, plus Log Used and Status, which the web adds. The service parses the graph and sends
+   processes[] (absent values left off), so the browser never reads the XML. */
+const DEADLOCK_PROCESS_COLUMNS = [
+  { key: "deadlock_type", label: "Type" },
+  { key: "victim", label: "Victim", render: (r) => document.createTextNode(r.victim ? "Victim" : "") },
+  { key: "spid", label: "SPID", format: "int" },
+  { key: "database_name", label: "Database" },
+  { key: "object_names", label: "Object(s)", wrap: true },
+  { key: "proc_name", label: "Procedure" },
+  { key: "lock_mode", label: "Lock Mode" },
+  { key: "owner_mode", label: "Owner Mode" },
+  { key: "waiter_mode", label: "Waiter Mode" },
+  { key: "wait_resource", label: "Wait Resource", wrap: true },
+  { key: "wait_time_ms", label: "Wait (ms)", format: "ms" },
+  { key: "isolation_level", label: "Isolation" },
+  { key: "transaction_name", label: "Tran Name" },
+  { key: "transaction_count", label: "Tran Count", format: "int" },
+  { key: "priority", label: "Priority", format: "int" },
+  { key: "log_used", label: "Log Used", format: "int" },
+  { key: "login_name", label: "Login" },
+  { key: "host_name", label: "Host" },
+  { key: "client_app", label: "App", wrap: true },
+  { key: "status", label: "Status" },
+  { key: "sql_text", label: "Statement", render: (r) => codeDisclosure(r.sql_text) },
 ];
+
+/* Which deadlocks have their process sub-grid open, at MODULE scope so the 60 s rebuild of the tab keeps it open. Keyed by
+   server and deadlock id (the dedup key, else the deadlock's own timestamps); one entry per deadlock the session opens. */
+const deadlockProcessesOpen = new Set();
+
+function deadlockProcessKey(server, row) {
+  return server + "\u0001" + (row.dedup_key || (row.collection_time || "") + "|" + (row.deadlock_time || ""));
+}
+
+/** The expandable per-process sub-grid for one deadlock row of get_deadlock_detail. */
+function deadlockProcessesCell(server, row) {
+  const rows = Array.isArray(row.processes) ? row.processes : [];
+  if (!rows.length) {
+    /* The shared page row budget can cut every row of a deadlock; say so and how to get them, rather than a bare dash. */
+    const cut = Number(row.processes_truncated) || 0;
+    if (cut <= 0) return document.createTextNode("—");
+    return document.createTextNode(cut + (cut === 1 ? " process" : " processes") + " not sent (page row limit); pick Custom… in the time range and narrow it to this deadlock to see them");
+  }
+  const key = deadlockProcessKey(server, row);
+  const more = row.processes_truncated > 0 ? " (+" + row.processes_truncated + " more in the graph)" : "";
+  const node = disclosure(rows.length + (rows.length === 1 ? " process" : " processes") + more, [
+    VIZ.table({ processes: rows }, { id: "deadlock-processes", rowsKey: "processes", columns: DEADLOCK_PROCESS_COLUMNS }),
+  ]);
+  if (deadlockProcessesOpen.has(key)) node.setAttribute("open", "");
+  node.addEventListener("toggle", () => {
+    if (node.open) deadlockProcessesOpen.add(key);
+    else deadlockProcessesOpen.delete(key);
+  });
+  return node;
+}
+
+function deadlockXmlColumns(server) {
+  return [
+    { key: "deadlock_time", label: "Deadlock Time", format: "time" },
+    { key: "victim_process_id", label: "Victim" },
+    { key: "processes", label: "Processes", sortable: false, render: (r) => deadlockProcessesCell(server, r) },
+    { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
+  ];
+}
 
 const BPR_COLUMNS = [
   { key: "event_time", label: "Time", format: "time" },
@@ -3531,7 +3603,7 @@ const TRACE_FLAG_CHANGE_COLUMNS = [
 ];
 
 const APPLICATION_COLUMNS = [
-  { key: "program_name", label: "Application" },
+  { key: "program_name", label: "App" },
   { key: "connections", label: "Connections", format: "int" },
   { key: "running", label: "Running", format: "int" },
   { key: "sleeping", label: "Sleeping", format: "int" },
@@ -3643,8 +3715,7 @@ const CPU_TASK_COLUMNS = [
   { key: "did_blocking_occur", label: "Blocking", format: "bool" },
 ];
 
-/* The desktop grid's 32 columns in its order. The grid is wider than 20 columns, so it is a candidate for the
-   shared column picker once that lands. */
+/* The desktop grid's 32 columns in its order. */
 const MEMORY_CONDITION_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
   { key: "last_notification", label: "Last Notification" },
@@ -3652,33 +3723,37 @@ const MEMORY_CONDITION_COLUMNS = [
   { key: "out_of_memory_exceptions", label: "OOM Exceptions", format: "int" },
   { key: "is_any_pool_out_of_memory", label: "Pool OOM", format: "bool" },
   { key: "process_out_of_memory_period", label: "OOM Period", format: "int" },
-  { key: "available_physical_memory_gb", label: "Avail Phys GB", format: "num1" },
-  { key: "available_virtual_memory_gb", label: "Avail Virt GB", format: "num1" },
-  { key: "available_paging_file_gb", label: "Avail Paging GB", format: "num1" },
-  { key: "working_set_gb", label: "Working Set GB", format: "num1" },
-  { key: "percent_of_committed_memory_in_ws", label: "% Committed in WS", format: "int" },
-  { key: "page_faults", label: "Page Faults", format: "int" },
-  { key: "system_physical_memory_high", label: "Sys Phys High", format: "int" },
-  { key: "system_physical_memory_low", label: "Sys Phys Low", format: "int" },
-  { key: "process_physical_memory_low", label: "Proc Phys Low", format: "int" },
-  { key: "process_virtual_memory_low", label: "Proc Virt Low", format: "int" },
-  { key: "vm_reserved_gb", label: "VM Reserved GB", format: "num1" },
-  { key: "vm_committed_gb", label: "VM Committed GB", format: "num1" },
-  { key: "locked_pages_allocated", label: "Locked Pages", format: "int" },
-  { key: "large_pages_allocated", label: "Large Pages", format: "int" },
-  { key: "emergency_memory_gb", label: "Emergency GB", format: "num1" },
-  { key: "emergency_memory_in_use_gb", label: "Emerg In Use GB", format: "num1" },
-  { key: "target_committed_gb", label: "Target Committed GB", format: "num1" },
-  { key: "current_committed_gb", label: "Current Committed GB", format: "num1" },
-  { key: "pages_allocated", label: "Pages Alloc", format: "int" },
-  { key: "pages_reserved", label: "Pages Reserved", format: "int" },
-  { key: "pages_free", label: "Pages Free", format: "int" },
-  { key: "pages_in_use", label: "Pages In Use", format: "int" },
-  { key: "page_alloc_potential", label: "Alloc Potential", format: "int" },
-  { key: "numa_growth_phase", label: "NUMA Growth", format: "int" },
-  { key: "last_oom_factor", label: "Last OOM Factor" },
-  { key: "last_os_error", label: "Last OS Error", format: "int" },
+  { key: "available_physical_memory_gb", label: "Avail Phys GB", format: "num1", group: "Process memory" },
+  { key: "available_virtual_memory_gb", label: "Avail Virt GB", format: "num1", group: "Process memory" },
+  { key: "available_paging_file_gb", label: "Avail Paging GB", format: "num1", group: "Process memory" },
+  { key: "working_set_gb", label: "Working Set GB", format: "num1", group: "Process memory" },
+  { key: "percent_of_committed_memory_in_ws", label: "% Committed in WS", format: "int", group: "Process memory" },
+  { key: "page_faults", label: "Page Faults", format: "int", group: "Process memory" },
+  { key: "system_physical_memory_high", label: "Sys Phys High", format: "int", group: "Pressure flags" },
+  { key: "system_physical_memory_low", label: "Sys Phys Low", format: "int", group: "Pressure flags" },
+  { key: "process_physical_memory_low", label: "Proc Phys Low", format: "int", group: "Pressure flags" },
+  { key: "process_virtual_memory_low", label: "Proc Virt Low", format: "int", group: "Pressure flags" },
+  { key: "vm_reserved_gb", label: "VM Reserved GB", format: "num1", group: "Allocation detail" },
+  { key: "vm_committed_gb", label: "VM Committed GB", format: "num1", group: "Allocation detail" },
+  { key: "locked_pages_allocated", label: "Locked Pages", format: "int", group: "Allocation detail" },
+  { key: "large_pages_allocated", label: "Large Pages", format: "int", group: "Allocation detail" },
+  { key: "emergency_memory_gb", label: "Emergency GB", format: "num1", group: "Allocation detail" },
+  { key: "emergency_memory_in_use_gb", label: "Emerg In Use GB", format: "num1", group: "Allocation detail" },
+  { key: "target_committed_gb", label: "Target Committed GB", format: "num1", group: "Allocation detail" },
+  { key: "current_committed_gb", label: "Current Committed GB", format: "num1", group: "Allocation detail" },
+  { key: "pages_allocated", label: "Pages Alloc", format: "int", group: "Allocation detail" },
+  { key: "pages_reserved", label: "Pages Reserved", format: "int", group: "Allocation detail" },
+  { key: "pages_free", label: "Pages Free", format: "int", group: "Allocation detail" },
+  { key: "pages_in_use", label: "Pages In Use", format: "int", group: "Allocation detail" },
+  { key: "page_alloc_potential", label: "Alloc Potential", format: "int", group: "Allocation detail" },
+  { key: "numa_growth_phase", label: "NUMA Growth", format: "int", group: "Allocation detail" },
+  { key: "last_oom_factor", label: "Last OOM Factor", group: "Allocation detail" },
+  { key: "last_os_error", label: "Last OS Error", format: "int", group: "Allocation detail" },
 ];
+
+/* Memory Conditions column groups: the report, the time and the OOM counters are always shown; the rest follow the
+   desktop grid's order in three toggles, with the process memory figures on at first. */
+const MEMORY_CONDITION_GROUPS = { groups: ["Process memory", "Pressure flags", "Allocation detail"], defaultGroups: ["Process memory"] };
 
 const MEMORY_BROKER_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
@@ -3709,37 +3784,41 @@ const SIGNIFICANT_WAIT_COLUMNS = [
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
 ];
 
-/* The desktop grid's 28 columns in its order; a candidate for the shared column picker once that lands. */
+/* The desktop grid's 28 columns in its order. */
 const MEMORY_OOM_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
   { key: "node_id", label: "Node ID", format: "int" },
   { key: "memory_node_id", label: "Mem Node ID", format: "int" },
   { key: "memory_utilization_pct", label: "Mem Util %", format: "pct" },
-  { key: "total_physical_memory_kb", label: "Total Phys KB", format: "int" },
-  { key: "available_physical_memory_kb", label: "Avail Phys KB", format: "int" },
-  { key: "total_page_file_kb", label: "Total Page KB", format: "int" },
-  { key: "available_page_file_kb", label: "Avail Page KB", format: "int" },
-  { key: "total_virtual_address_space_kb", label: "Total VAS KB", format: "int" },
-  { key: "available_virtual_address_space_kb", label: "Avail VAS KB", format: "int" },
-  { key: "target_kb", label: "Target KB", format: "int" },
-  { key: "reserved_kb", label: "Reserved KB", format: "int" },
-  { key: "committed_kb", label: "Committed KB", format: "int" },
-  { key: "shared_committed_kb", label: "Shared Committed KB", format: "int" },
-  { key: "awe_kb", label: "AWE KB", format: "int" },
-  { key: "pages_kb", label: "Pages KB", format: "int" },
-  { key: "failure_type", label: "Failure" },
-  { key: "failure_value", label: "Failure Val", format: "int" },
-  { key: "resources", label: "Resources", wrap: true },
-  { key: "factor_text", label: "Factor" },
-  { key: "factor_value", label: "Factor Val", format: "int" },
-  { key: "last_error", label: "Last Error" },
-  { key: "pool_metadata_id", label: "Pool Meta ID", format: "int" },
-  { key: "is_process_in_job", label: "In Job" },
-  { key: "is_system_physical_memory_high", label: "Sys Phys High" },
-  { key: "is_system_physical_memory_low", label: "Sys Phys Low" },
-  { key: "is_process_physical_memory_low", label: "Proc Phys Low" },
-  { key: "is_process_virtual_memory_low", label: "Proc Virt Low" },
+  { key: "total_physical_memory_kb", label: "Total Phys KB", format: "int", group: "Memory sizes" },
+  { key: "available_physical_memory_kb", label: "Avail Phys KB", format: "int", group: "Memory sizes" },
+  { key: "total_page_file_kb", label: "Total Page KB", format: "int", group: "Memory sizes" },
+  { key: "available_page_file_kb", label: "Avail Page KB", format: "int", group: "Memory sizes" },
+  { key: "total_virtual_address_space_kb", label: "Total VAS KB", format: "int", group: "Memory sizes" },
+  { key: "available_virtual_address_space_kb", label: "Avail VAS KB", format: "int", group: "Memory sizes" },
+  { key: "target_kb", label: "Target KB", format: "int", group: "Pool detail" },
+  { key: "reserved_kb", label: "Reserved KB", format: "int", group: "Pool detail" },
+  { key: "committed_kb", label: "Committed KB", format: "int", group: "Pool detail" },
+  { key: "shared_committed_kb", label: "Shared Committed KB", format: "int", group: "Pool detail" },
+  { key: "awe_kb", label: "AWE KB", format: "int", group: "Pool detail" },
+  { key: "pages_kb", label: "Pages KB", format: "int", group: "Pool detail" },
+  { key: "failure_type", label: "Failure", group: "Failure" },
+  { key: "failure_value", label: "Failure Val", format: "int", group: "Failure" },
+  { key: "resources", label: "Resources", wrap: true, group: "Failure" },
+  { key: "factor_text", label: "Factor", group: "Failure" },
+  { key: "factor_value", label: "Factor Val", format: "int", group: "Failure" },
+  { key: "last_error", label: "Last Error", group: "Failure" },
+  { key: "pool_metadata_id", label: "Pool Meta ID", format: "int", group: "Flags" },
+  { key: "is_process_in_job", label: "In Job", group: "Flags" },
+  { key: "is_system_physical_memory_high", label: "Sys Phys High", group: "Flags" },
+  { key: "is_system_physical_memory_low", label: "Sys Phys Low", group: "Flags" },
+  { key: "is_process_physical_memory_low", label: "Proc Phys Low", group: "Flags" },
+  { key: "is_process_virtual_memory_low", label: "Proc Virt Low", group: "Flags" },
 ];
+
+/* Node OOM column groups: the event time, node ids and utilisation are always shown; the failure columns are on at
+   first and the size, pool and flag columns follow the desktop grid's order behind their toggles. */
+const MEMORY_OOM_GROUPS = { groups: ["Memory sizes", "Pool detail", "Failure", "Flags"], defaultGroups: ["Failure"] };
 
 const DEFAULT_TRACE_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
@@ -4079,7 +4158,7 @@ const PG_LOG_EVENT_COLUMNS = [
   { key: "sqlstate", label: "SQLSTATE", small: true },
   { key: "database_name", label: "Database" },
   { key: "user_name", label: "User" },
-  { key: "application_name", label: "Application" },
+  { key: "application_name", label: "App" },
   { key: "pid", label: "PID", format: "int", small: true },
   { key: "message", label: "Message" },
   { key: "detail", label: "Detail" },
@@ -4333,7 +4412,7 @@ const PG_BLOCKING_CHAIN_COLUMNS = [
   { key: "root_pid", label: "Root PID", format: "int" },
   { key: "databases", label: "Databases", render: (row) => listCell(row.databases) },
   { key: "root_username", label: "User" },
-  { key: "root_application", label: "Application", wrap: true },
+  { key: "root_application", label: "App", wrap: true },
   { key: "root_state", label: "Root State" },
   { key: "root_is_idle_in_transaction", label: "Idle in Txn", format: "bool" },
   { key: "root_xact_duration_ms", label: "Txn Age", render: sentinelDuration("root_xact_duration_ms") },
@@ -4353,7 +4432,7 @@ const PG_BLOCKING_CYCLE_COLUMNS = [
   { key: "participant_count", label: "Participants", format: "int" },
   { key: "pids", label: "PIDs", render: (row) => listCell(row.pids) },
   { key: "database", label: "Database" },
-  { key: "application", label: "Application", wrap: true },
+  { key: "application", label: "App", wrap: true },
   { key: "blocked_behind_count", label: "Queued Behind", format: "int" },
   { key: "blocked_behind_pids", label: "Queued PIDs", render: (row) => listCell(row.blocked_behind_pids) },
   { key: "finding", label: "Finding", wrap: true },
@@ -4557,7 +4636,7 @@ const PG_SESSION_STATE_COLUMNS = [
   { key: "severity", label: "Severity", sevKey: "severity" },
   { key: "database", label: "Database" },
   { key: "username", label: "User" },
-  { key: "application_name", label: "Application" },
+  { key: "application_name", label: "App" },
   { key: "client_addr", label: "Client" },
   { key: "backend_type", label: "Backend Type" },
   { key: "last_state", label: "State" },

@@ -96,10 +96,14 @@ public sealed class WebDataStartNoteLiveTests
         var threeDays = await store.AskAsync(QuietServerName, hours: 72, ct);
 
         Assert.False(week["truncated"]?.GetValue<bool>());
-        Assert.Null(week["window_truncated"]);
+        /* The tool's own keys (#4966) say covered: false and no note. The web adds nothing of its own, and the page draws
+           a note only for true. */
+        Assert.NotEqual(true, week["window_truncated"]?.GetValue<bool>());
         Assert.Null(week["truncation_note"]);
+        Assert.Null(week["data_start_utc"]);
         Assert.NotNull(week["tasks"]);
-        Assert.Null(threeDays["window_truncated"]);
+        Assert.NotEqual(true, threeDays["window_truncated"]?.GetValue<bool>());
+        Assert.Null(threeDays["data_start_utc"]);
     }
 
     /// <summary>A read that hit its cap lists the newest rows only, so the note names the oldest row it returned, not
@@ -175,6 +179,36 @@ public sealed class WebDataStartNoteLiveTests
         Assert.True(answer["window_truncated"]?.GetValue<bool>());
         Assert.True(Math.Abs((ParseUtc(answer["effective_start"]) - added).TotalSeconds) < 1, "the table starts at the server's first collection, not at the cap fields' time");
         Assert.StartsWith("partial window: this panel's data starts at", answer["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
+    /// <summary>The Memory Grant Pressure read over its own snapshot table (#4966): a server added two days ago whose
+    /// snapshots start a day back is asked for 7 days, through the real tool, so the note is added to rows the tool
+    /// returned. The data starts between the server's first collection and its first snapshot, as for the other
+    /// snapshot tables; the same server asked for a window its snapshots cover (rows from eight days back) gets none.</summary>
+    [Fact]
+    public async Task TheMemoryGrantsRead_WhoseSnapshotsStartInsideTheRange_GetsANoteNamingWhereItsDataStarts_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+        var firstRow = store.End.AddDays(-1);
+        await store.SeedTableAsync("memory_grant_stats", -496630, "web-data-start-memory-grants", added, firstRow, ct);
+
+        var payload = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants", 168, null, ct);
+        var answered = await WebDataStartNote.AddAsync(store.DataSource, "get_memory_grants", "web-data-start-memory-grants", 168, null, payload, null, ct);
+
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        Assert.NotNull(answer["window"]);
+        Assert.True(answer["window_truncated"]?.GetValue<bool>(), "the tool returned rows and the read gets its note");
+        var start = ParseUtc(answer["effective_start"]);
+        Assert.True(start >= added.AddSeconds(-1) && start <= firstRow.AddSeconds(1), "the data starts between the first collection and the first snapshot, got " + start.ToString("o", CultureInfo.InvariantCulture));
+        Assert.StartsWith("partial window: this panel's data starts at", answer["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Equal(start.Ticks, ParseUtc(answer["data_start_utc"]).Ticks);
+        Assert.Equal(TimeSpan.FromHours(168), ParseUtc(answer["window_end_utc"]) - ParseUtc(answer["window_start_utc"]));
+
+        await store.SeedTableAsync("memory_grant_stats", -496631, "web-data-start-memory-grants-covered", store.End.AddDays(-30), firstRow: store.End.AddDays(-8), ct);
+        var covered = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants-covered", 168, null, ct);
+        Assert.Same(covered, await WebDataStartNote.AddAsync(store.DataSource, "get_memory_grants", "web-data-start-memory-grants-covered", 168, null, covered, null, ct));
     }
 
     /// <summary>What a PostgreSQL grid's answer looks like to the note: rows, with no status, error or floor of its
@@ -376,7 +410,7 @@ ORDER BY ordinal_position", connection))
         /// <summary>What the web mirror answers for the grid: the tool's own payload, then the data-start note.</summary>
         public async Task<JsonObject> AskAsync(string server, int hours, CancellationToken ct)
         {
-            var payload = await DarlingMcpSessionTools.GetWaitingTasks(DataSource, server, hours, PageCap, null, ct);
+            var payload = await DarlingMcpSessionTools.GetWaitingTasks(DataSource, server, hours, PageCap, null, cancellationToken: ct);
             var answered = await WebDataStartNote.AddAsync(DataSource, "get_waiting_tasks", server, hours, null, payload, null, ct);
             return Assert.IsType<JsonObject>(JsonNode.Parse(answered));
         }

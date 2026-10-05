@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -53,6 +54,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
         [Description("Maximum rows to return, worst first. Default 30, sized to keep a default call under the shared response budget. Read truncated to know whether the window held more.")] int limit = 30,
         [Description("Return each row's full query text instead of a 240-character preview. Default false.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -77,16 +79,33 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             var rows = await DarlingQueryStoreRegressionReader.GetQueryStoreRegressionsAsync(
                 postgres, resolved.ServerId, start, end, database_name, limit + 1, baselineStart, cancellationToken);
 
+            /* #4966: where this server's query_store_stats start, checked against the EARLIER of the two windows this tool
+               compares: the baseline's start, not the recent window's. A store that began inside the baseline compares
+               against a shorter baseline than baseline_start names, and nothing else on the payload says so. Read ahead of the
+               empty answers, which carry it too: "no query regressed" over a baseline the store only partly holds is not a true
+               negative. Unfiltered by database_name (the floor is a property of the table). */
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "query_store_stats", resolved.ServerName, baselineStart, end, cancellationToken),
+                baselineStart, end, "query_store_stats",
+                "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.",
+                emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
+
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, baselineStart, hours_back, database_name, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, baselineStart, hours_back, database_name, notice, cancellationToken);
 
             var truncated = rows.Count > limit;
             var shown = rows.Take(limit);
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* The window floor, always present (false and null when the store covered the baseline). No effective_hours_back:
+                   this payload carries a page `truncated`, and the census holds that key apart for the window floor, so the reach
+                   is the instant. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 database_name,
                 /*
                     Named so the caller cannot mistake which side is which. "baseline" is NOT a fixed
@@ -138,6 +157,9 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                     query_text_truncated = !full_text && r.QueryTextSample.Length > QueryTextPreviewLength,
                 }),
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -190,7 +212,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, string serverName, int serverId, DateTime start, DateTime end, DateTime baselineStart, int hours_back,
-        string? databaseName, CancellationToken cancellationToken)
+        string? databaseName, McpWindowNotice notice, CancellationToken cancellationToken)
     {
         var (hasBaseline, hasRecent) = await DarlingQueryStoreRegressionReader.GetCoverageAsync(
             postgres, serverId, start, end, baselineStart, cancellationToken: cancellationToken);
@@ -214,7 +236,8 @@ public sealed class DarlingMcpQueryStoreRegressionTools
         {
             return McpHelpers.Status(
                 "empty",
-                $"{serverName} has Query Store history from before this window but nothing collected IN the last {hours_back} hour(s), so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.");
+                $"{serverName} has Query Store history from before this window but nothing collected IN the last {hours_back} hour(s), so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+                notice.AsHints());
         }
 
         /* #5015: the probe above is the SERVER's, so it answers a database_name filter the same whether the database was
@@ -232,7 +255,8 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"No Query Store capture on {serverName} in the last {hours_back} hour(s) or in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline before it matched database_name '{databaseName}', so the filter matched nothing and this is NOT the all-clear: no query in that database was compared. Check the database name, or drop the filter to read every database.");
+                    $"No Query Store capture on {serverName} in the last {hours_back} hour(s) or in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline before it matched database_name '{databaseName}', so the filter matched nothing and this is NOT the all-clear: no query in that database was compared. Check the database name, or drop the filter to read every database.",
+                    notice.AsHints());
             }
 
             if (!filteredBaseline)
@@ -246,12 +270,14 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"{serverName} has Query Store history of database_name '{databaseName}' from before this window but nothing of it collected IN the last {hours_back} hour(s), so that database's recent side is missing rather than nothing to report, and this is NOT the all-clear: no query in that database was compared. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.");
+                    $"{serverName} has Query Store history of database_name '{databaseName}' from before this window but nothing of it collected IN the last {hours_back} hour(s), so that database's recent side is missing rather than nothing to report, and this is NOT the all-clear: no query in that database was compared. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+                    notice.AsHints());
             }
         }
 
         return McpHelpers.Status(
             "empty",
-            $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's average CPU is more than 25% worse than its baseline — this IS the all-clear for this read.");
+            $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's average CPU is more than 25% worse than its baseline — this IS the all-clear for this read.",
+            notice.AsHints());
     }
 }

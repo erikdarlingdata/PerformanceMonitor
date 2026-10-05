@@ -132,6 +132,10 @@ jobs:
         env:
           GATE_RESULT: ${{ needs.gate.result }}
         run: |
+          if [ "${GATE_RESULT}" != "success" ]; then
+            echo "::error title=CI gate failed::needs.gate.result='${GATE_RESULT}' - the job that decides whether CI runs did not succeed, so nothing ran. Re-run the workflow."
+            exit 1
+          fi
           echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it. (gate result: ${GATE_RESULT})"
           exit 1
 
@@ -1426,7 +1430,7 @@ jobs:
             success)
               echo "::notice title=Darling PG shards green::Every shard succeeded, or the Darling gate skipped the suite on all of them." ;;
             skipped)
-              echo "::notice title=Darling PG shards skipped::The matrix job did not run at all (the release event does not run the PG tests)." ;;
+              echo "::notice title=Darling PG shards skipped::The matrix job was skipped although the gate ran and approved this event, so no shard reported." ;;
             *)
               echo "::error title=Darling PG shards failed::needs.darling-pg.result='${RESULT}' - at least one shard failed or was cancelled. The suite has NOT passed on this commit; read the failing shard's log."
               exit 1 ;;

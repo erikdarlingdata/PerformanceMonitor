@@ -110,7 +110,9 @@ try {
   fs.copyFileSync(path.join(jsDir, "panels.js"), path.join(scratch, "panels.js"));
   fs.copyFileSync(path.join(jsDir, "grid-tools.js"), path.join(scratch, "grid-tools.js"));
   fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
-  fs.copyFileSync(path.join(jsDir, "pages", "analysis-findings.js"), path.join(scratch, "pages", "analysis-findings.js"));
+  /* Copied when present, so this harness keeps working in a tree where server-tabs.js does not import it. */
+  const findings = path.join("pages", "analysis-findings.js");
+  if (fs.existsSync(path.join(jsDir, findings))) fs.copyFileSync(path.join(jsDir, findings), path.join(scratch, findings));
   fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
   for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js")]) {
     const from = path.join(jsDir, rel);
@@ -234,6 +236,16 @@ const settleFast = async () => {
   for (let i = 0; i < 200; i++) await new Promise((r) => setImmediate(r));
 };
 
+/* One server tab built at RANGE with one read answering `body` and every other read answering nothing. Each panel the
+   tab drew is marked with its heading (the `where` the strips report), so a notice comes back naming its panel. */
+const tabFloor = (tabId, read, body) => {
+  answer = (url) => data(tool(url) === read ? body : {});
+  const tab = modules.tabs.SERVER_TABS.find((t) => t.id === tabId);
+  const panels = [].concat(tab.build("SRV1", RANGE));
+  for (const panel of panels) panel.where = panel.children[0] ? panel.children[0].textContent : "";
+  return panels;
+};
+
 const scenarios = {
   // The page asks for 30 days; the read keeps 7 and says so; the retry at 168 hours answers.
   loaderRefused: () => {
@@ -308,6 +320,54 @@ const scenarios = {
         : data({ trend: [{ time: "2026-01-01T00:00:00", wait_time_ms_per_second: 1 }] });
     return [modules.tabs.waitsPanel("SRV1", RANGE)];
   },
+  // #4966: a stat tile over a windowed read draws the note too (a stat is not a chart: its figures are the window's).
+  floorStatDraws: () => {
+    answer = () => data({ total: 5, window_truncated: true, truncation_note: FLOOR_NOTE });
+    return [modules.panels.renderPanel({ title: "Totals", read: "get_x", params: { server: "SRV1", hours: 168 }, viz: "stat", stats: [{ key: "total", label: "Total" }] })];
+  },
+  // A descriptor that opts out of the note draws none, over the same truncated answer.
+  floorOptOut: () => {
+    answer = () => data(WAITING_TASKS_FLOOR);
+    return [modules.panels.renderPanel({ ...waitingTasksPanel, windowNote: false })];
+  },
+  // A descriptor with a floorKey reads the nested fields, and a top-level pair beside them is not what it draws.
+  floorNested: () => {
+    answer = () =>
+      data({
+        tasks: WAITING_TASKS_FLOOR.tasks,
+        window: { window_truncated: true, truncation_note: "nested: the raw tier starts later" },
+        window_truncated: true,
+        truncation_note: "top level: not this one",
+      });
+    return [modules.panels.renderPanel({ ...waitingTasksPanel, floorKey: "window" })];
+  },
+  // The server tabs' own specs. Each scenario answers one read with the fields a truncated window carries and marks
+  // every panel the tab drew with its heading, so the test can say which panels drew the note.
+  floorMemoryGrants: () => tabFloor("memory", "get_memory_grants", {
+    window_truncated: true, truncation_note: FLOOR_NOTE,
+    window: [{ pool_id: 1, snapshots_in_window: 3 }], grants: [{ pool_id: 1, waiter_count: 0 }],
+  }),
+  floorResourceSemaphore: () => tabFloor("memory", "get_resource_semaphore", {
+    window_truncated: true, truncation_note: FLOOR_NOTE,
+    window: [{ pool_id: 1, resource_semaphore_id: 0, snapshots_in_window: 3 }], grants: [{ pool_id: 1, resource_semaphore_id: 0 }],
+  }),
+  floorPlanCorrections: () => tabFloor("queries", "get_plan_corrections", {
+    window_truncated: true, truncation_note: FLOOR_NOTE,
+    recommendations: [{ database_name: "db1", query_id: 1 }], automatic_tuning: [{ database_name: "db1" }],
+  }),
+  // An empty Plan Corrections answer: the note rides on the envelope. With the flag set it draws; without it, none.
+  floorPlanCorrectionsEmpty: () => tabFloor("queries", "get_plan_corrections", {
+    status: "empty", message: "No plan corrections in this window.", window_truncated: true, truncation_note: FLOOR_NOTE,
+  }),
+  floorPlanCorrectionsEmptyUntruncated: () => tabFloor("queries", "get_plan_corrections", {
+    status: "empty", message: "No plan corrections in this window.",
+  }),
+
+  floorClutter: () => tabFloor("queries", "get_query_store_clutter", {
+    databases: [{ database_name: "db1" }],
+    qs_overhead: { wait_stats: { included: [{ wait_type: "QDS_X" }] }, memory_clerk: { latest_memory_mb: 1 } },
+    window: { window_truncated: true, truncation_note: "nested: the raw tier starts later" },
+  }),
   // A hand-built composite over one read (File I/O).
   fileIoRefused: () => {
     answer = (url) => (asked(url) === "720" ? refusal(720, 168, 7) : data({ trend: [{ time: "2026-01-01T00:00:00", database_name: "db1", file_type: "ROWS", avg_read_latency_ms: 4 }] }));

@@ -45,6 +45,9 @@ public sealed class EffectiveStartUtcTests
     [Theory]
     [InlineData("DarlingMcpDataTools.cs", 5)]
     [InlineData("DarlingMcpQueryStoreClutterTools.cs", 1)]
+    [InlineData("DarlingMcpSessionTools.cs", 2)]
+    [InlineData("DarlingMcpQueryHeatmapTools.cs", 1)]
+    [InlineData("DarlingMcpQueryStoreRegressionTools.cs", 1)]
     public void EveryWindowFloorWrite_RoutesThroughTheSharedFormatter(string file, int minimumRouted)
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
@@ -54,11 +57,28 @@ public sealed class EffectiveStartUtcTests
             .Where(line => line.StartsWith("effective_start = ", StringComparison.Ordinal))
             .ToList();
 
-        var routed = writes.Count(line => line.StartsWith("effective_start = McpHelpers.FormatEffectiveStart(", StringComparison.Ordinal));
-        var others = writes.Where(line => !line.StartsWith("effective_start = McpHelpers.FormatEffectiveStart(", StringComparison.Ordinal)).ToList();
+        /* #4966: a tool that writes the shared notice (DarlingMcpWindowNotice) writes the value the helper formatted, and the
+           helper's own formatting is pinned below. */
+        bool IsRouted(string line) =>
+            line.StartsWith("effective_start = McpHelpers.FormatEffectiveStart(", StringComparison.Ordinal)
+            || line == "effective_start = notice.EffectiveStart,";
+        var routed = writes.Count(IsRouted);
+        var others = writes.Where(line => !IsRouted(line)).ToList();
 
         Assert.True(routed >= minimumRouted, $"{file} writes effective_start through McpHelpers.FormatEffectiveStart {routed} time(s); expected at least {minimumRouted}.");
         Assert.All(others, line => Assert.Equal("effective_start = (string?)null,", line));
+    }
+
+    /// <summary>
+    /// #4966: the shared notice formats its <c>effective_start</c> through <see cref="McpHelpers.FormatEffectiveStart"/>, so every
+    /// tool that writes <c>notice.EffectiveStart</c> prints UTC with the Z.
+    /// </summary>
+    [Fact]
+    public void TheSharedNotice_FormatsItsEffectiveStart_ThroughTheSharedFormatter()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpWindowNotice.cs");
+        Assert.Contains("McpHelpers.FormatEffectiveStart(RawWindowFloor.EffectiveStart(floor, requestedStart))", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(".ToString(\"o\"", source, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -84,6 +104,35 @@ public sealed class EffectiveStartUtcTests
         /* Two calls per tool: the data answer's, and the empty answer's. */
         Assert.Equal(expectedTools * 2, Regex.Matches(source, @"EventWindowNoticeAsync\(\s*\(\) => dataService\.GetQueryWindowFloorAsync").Count);
         Assert.Equal(expectedTools, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)").Count);
+    }
+
+    /// <summary>
+    /// #4966: the six Lite config and log tools (three config-change tools, the one-server <c>get_collection_log</c>,
+    /// <c>get_plan_corrections</c> and <c>get_memory_pressure_events</c>) write <c>effective_start</c> from the shared notice
+    /// (<c>McpQueryTools.WindowNoticeAsync</c> -> <c>WindowNotice</c>, which prints through
+    /// <see cref="McpHelpers.FormatEffectiveStart(DateTime)"/>), never from a bare <c>ToString("o")</c> of the store's naive floor.
+    /// Each data answer writes the key once, from <c>notice.EffectiveStart</c>; <paramref name="expectedHints"/> counts the
+    /// <c>empty</c> answers that carry the same notice under hints (<c>get_collection_log</c> has two: the filtered one and the quiet window).
+    /// None of them uses the event-time form: their probes read the column the rows are stamped on.
+    /// </summary>
+    [Theory]
+    [InlineData("McpConfigHistoryTools.cs", 3, 3)]
+    [InlineData("McpHealthTools.cs", 1, 2)]
+    [InlineData("McpPlanCorrectionTools.cs", 1, 1)]
+    [InlineData("McpMemoryTools.cs", 1, 1)]
+    public void EveryLiteConfigAndLogWindowFloorWrite_ComesFromTheSharedNotice(string file, int expectedWrites, int expectedHints)
+    {
+        var source = RepoFile.ReadRepoFile("Lite", "Mcp", file);
+        var writes = source
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("effective_start = ", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(expectedWrites, writes.Count);
+        Assert.All(writes, line => Assert.Equal("effective_start = notice.EffectiveStart,", line));
+        Assert.Equal(expectedHints, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)").Count);
+        Assert.DoesNotContain("EventWindowNoticeAsync", source, StringComparison.Ordinal);
     }
 
     /// <summary>

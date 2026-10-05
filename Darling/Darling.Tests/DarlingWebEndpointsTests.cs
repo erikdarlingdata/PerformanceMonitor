@@ -15,6 +15,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -178,15 +179,15 @@ public sealed class DarlingWebEndpointsTests
     [Fact]
     public void ReadEndpoints_ActiveQueries_KeepsTheTwoThousandCharacterWebPreview()
     {
-        /* #4198 lane W2: the MCP default fell to a 500-char query_text preview (QueryTextPreviewLength), but
+        /* #4198 lane W2: the MCP default fell to a 500-char (now 400) query_text preview (QueryTextPreviewLength), but
            the web viewer isn't that budget's caller — its /api/read row calls the internal budget-taking
            overload with an explicit 2000, the pre-#4198 McpHelpers.Truncate budget every caller got, so the
            Active Queries tab doesn't shrink under it. A regression here (dropping the overload, or the literal
-           2000) silently starves that tab's query text down to 500 characters. Source-text pin rather than a
+           2000) silently starves that tab's query text down to the MCP preview (400 characters). Source-text pin rather than a
            live call: no rig in this lane. */
         var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains(
-            "[\"get_active_queries\"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, \"database_name\"), QueryBool(c, \"blocking_only\", false), Rows(c, \"limit\", 50), 2000, AsOf(c), c.RequestAborted),",
+            "[\"get_active_queries\"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, \"database_name\"), QueryBool(c, \"blocking_only\", false), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted),",
             source, StringComparison.Ordinal);
     }
 
@@ -444,6 +445,44 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("{ \"status\" : \"invalid\", \"message\": \"spaced\" }", 200, 400)]       // the parsed switch's belt-and-braces: an envelope serialized some other way still reads as invalid
     public void MuteRuleEnvelopeStatus_MapsTheVerbEnvelopeOntoHttp(string envelope, int successStatus, int expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.MuteRuleEnvelopeStatus(envelope, successStatus));
+
+    /* ── the server-tag envelope → HTTP status mapping (#5085): the mute-rule mapping plus conflict and
+       confirm_required as 409, the body untouched. ── */
+
+    [Theory]
+    [InlineData("{\"status\":\"created\",\"tag\":{}}", 201, 201)]
+    [InlineData("{\"status\":\"updated\",\"tag\":{}}", 201, 201)]
+    [InlineData("{\"status\":\"updated\",\"tag\":{}}", 200, 200)]
+    [InlineData("{\"status\":\"unchanged\",\"tag\":{}}", 200, 200)]
+    [InlineData("{\"status\":\"deleted\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"assigned\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"unassigned\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"some_future_status\"}", 200, 500)]   // N2: an unmapped status is a 500, never a silent 2xx
+    [InlineData("{\"status\":\"some_future_status\"}", 201, 500)]
+    [InlineData("{\"status\":\"invalid\",\"refusal\":\"bad_name\",\"message\":\"x\"}", 201, 400)]
+    [InlineData("{\"status\":\"not_found\",\"message\":\"x\"}", 200, 404)]
+    [InlineData("{\"status\":\"conflict\",\"refusal\":\"duplicate_name\",\"message\":\"x\"}", 201, 409)]
+    [InlineData("{\"status\":\"confirm_required\",\"refusal\":\"rules_affected\",\"affected_rules\":[{\"rule_id\":1}]}", 200, 409)]
+    public void ServerTagEnvelopeStatus_MapsTheVerbEnvelopeOntoHttp(string envelope, int successStatus, int expected) =>
+        Assert.Equal(expected, DarlingWebEndpoints.ServerTagEnvelopeStatus(envelope, successStatus));
+
+    [Fact]
+    public void ServerTagEnvelopeStatus_TheCoresCaughtException_IsAServerError() =>
+        Assert.Equal(500, DarlingWebEndpoints.ServerTagEnvelopeStatus(
+            McpHelpers.FormatError("create_server_tag", new InvalidOperationException("connection reset")), 201));
+
+    [Fact]
+    public async Task ServerTagToolResult_ConfirmRequired_KeepsTheEnvelopeAsTheBodyUnder409()
+    {
+        var envelope = "{\"status\":\"confirm_required\",\"refusal\":\"rules_affected\",\"affected_rules\":[{\"rule_id\":1}]}";
+        var result = DarlingWebEndpoints.ServerTagToolResult(envelope, "/api/server-tags/{id}", Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, 5);
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext { RequestServices = new Microsoft.Extensions.DependencyInjection.ServiceCollection().AddLogging().BuildServiceProvider() };
+        context.Response.Body = new System.IO.MemoryStream();
+        await result.ExecuteAsync(context);
+        Assert.Equal(409, context.Response.StatusCode);
+        context.Response.Body.Position = 0;
+        Assert.Contains("affected_rules", await new System.IO.StreamReader(context.Response.Body).ReadToEndAsync(), StringComparison.Ordinal);
+    }
 
     /// <summary>The refusal a shared producer builds reaches the write surface's status mapping through the
     /// same classifier arm the read surface uses (#3739): one recognizer, one word, one code — executed

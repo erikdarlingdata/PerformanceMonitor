@@ -68,6 +68,9 @@ a:hover { text-decoration: underline; }
 }
 .auto-refresh-toggle:hover { color: var(--fg); border-color: var(--accent); }
 .auto-refresh-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.page-refresh-control { margin-top: 0.6rem; flex-wrap: wrap; }
+.page-refresh-control .auto-refresh-toggle { margin-top: 0; }
+.page-refresh-control[hidden] { display: none; }
 
 .refresh-control { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--muted); }
 .refresh-control .refresh-select { font-size: 0.82rem; }
@@ -439,6 +442,11 @@ table.data td.sev-Healthy { color: var(--ok); }
 .grid-tools .grid-tool { font-size: 12px; padding: 2px 8px; }
 .grid-tools-status { font-size: 12px; opacity: 0.8; margin-left: 6px; }
 
+/* Column-group toggles above a wide table (#4843). */
+.col-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
+.col-picker .col-picker-label { font-size: 12px; opacity: 0.8; margin-right: 2px; }
+.col-picker .col-toggle { font-size: 12px; padding: 2px 8px; }
+.col-picker .col-toggle.on { border-color: var(--accent, currentColor); font-weight: 600; }
 /* The stored-plan panel under a row's Plan button (#4843): the indented XML in a scrollable block. */
 .plan-cell { min-width: 8rem; }
 .plan-panel { margin-top: 6px; max-width: 70vw; }
@@ -691,6 +699,11 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
   min-width: 200px;
 }
 .filter-box:focus { outline: none; border-color: var(--accent); }
+
+/* Alert History: the Dismiss Selected / Dismiss All bar (shown only to a seat that can edit). */
+.dismiss-bar { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 0.6rem; }
+.dismiss-status { font-size: 0.85rem; color: var(--muted); }
+.dismiss-status.dismiss-error { color: var(--crit, #e05050); font-weight: 600; }
 
 .muted { color: var(--muted); }
 .section-title { font-size: 1rem; font-weight: 600; margin: 0 0 0.6rem; }
