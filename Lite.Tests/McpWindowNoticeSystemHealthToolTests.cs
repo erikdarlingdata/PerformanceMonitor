@@ -449,8 +449,10 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         await _duckDb.InitializeAsync();
         var (eventType, _, _) = SourceOf(tool);
 
-        /* Cut, with a start: the collector ran for two days of the seven, and this type was last stored nine days before the window. */
-        await SeedEventAsync(tool, WindowStart.AddDays(-9));
+        /* Cut, with a start: the collector ran for two days of the seven, and this type's only stored event is from after the
+           window's end (the read is anchored at a past as_of). An event stored BEFORE the window would itself be a row older
+           than the start, which makes Lite's probe call the window covered, so that case reaches the covered text. */
+        await SeedEventAsync(tool, Anchor.AddHours(2));
         await SeedLogRunsAsync(Anchor.AddDays(-2), Anchor, everyMinutes: 30);
         var cut = Root(await CallAsync(tool));
         AssertTruncatedAt(cut.GetProperty("hints"), Anchor.AddDays(-2));
