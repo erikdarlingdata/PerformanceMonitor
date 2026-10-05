@@ -4381,7 +4381,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), registryState: registryState, cancellationToken: c.RequestAborted),
             ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
 
             /* ── automatic plan correction (#2028) ── */
@@ -4420,7 +4420,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* #3960: the core trends a page charts take the CHART budget and bind bucket_minutes, as the trends
                below do (#3897). */
             ["get_cpu_utilization"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_file_io_stats"] = (c, pg, an) => DarlingMcpDataTools.GetFileIoStats(pg, Server(c), c.RequestAborted),
             ["get_memory_clerks"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryClerks(pg, Server(c), c.RequestAborted),
@@ -4441,7 +4441,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c), c.RequestAborted),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", cancellationToken: c.RequestAborted),
@@ -4459,7 +4459,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_pg_io_stats"] = (c, pg, an) => DarlingMcpPgIoTools.GetPgIoStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_wait_stats"] = (c, pg, an) => DarlingMcpPgWaitTools.GetPgWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_cpu_utilization"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_pg_wait_sampling"] = (c, pg, an) => DarlingMcpPgWaitSamplingTools.GetPgWaitSampling(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_kernel_stats"] = (c, pg, an) => DarlingMcpPgKernelStatsTools.GetPgKernelStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -4477,13 +4477,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_pg_log_events"] = (c, pg, an) => DarlingMcpPgLogEventTools.GetPgLogEvents(pg, Server(c), Hours(c, 24), Str(c, "family"), Str(c, "min_severity"), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_wait_trend"] = (c, pg, an) => DarlingMcpPgTrendTools.GetPgWaitTrend(pg, Server(c), Str(c, "wait_event"), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpPgTrendTools.GetPgQueryDurationTrend(pg, Server(c), Str(c, "queryid"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpPgTrendTools.GetPgQueryDurationTrend(pg, Server(c), Str(c, "queryid"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_pg_io_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpPgTrendTools.GetPgIoTrend(pg, Server(c), Str(c, "backend_type"), Str(c, "context"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpPgTrendTools.GetPgIoTrend(pg, Server(c), Str(c, "backend_type"), Str(c, "context"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_pg_database_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpPgTrendTools.GetPgDatabaseTrend(pg, Server(c), Str(c, "database"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpPgTrendTools.GetPgDatabaseTrend(pg, Server(c), Str(c, "database"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_pg_replication_stats"] = (c, pg, an) => DarlingMcpPgReplicationStatsTools.GetPgReplicationStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_blocking"] = (c, pg, an) => DarlingMcpPgBlockingTools.GetPgBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -4494,7 +4494,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_wait_stats"] = (c, pg, an) => DarlingMcpDataTools.GetWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_wait_trend"] = (c, pg, an) => RequireText(c, "wait_type", out var waitType)
                 ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                    ? DarlingMcpDataTools.GetWaitTrend(pg, waitType, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                    ? DarlingMcpDataTools.GetWaitTrend(pg, waitType, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("wait_type"),
             ["get_wait_types"] = (c, pg, an) => DarlingMcpDataTools.GetWaitTypes(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -4505,26 +4505,26 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                should read — and bind bucket_minutes, refusing a value that is not a number rather than quietly
                sizing the points itself (the OptionalDouble rule). */
             ["get_file_io_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetFileIoTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "database_name"), TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpTrendTools.GetFileIoTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "database_name"), TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_memory_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetMemoryTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpTrendTools.GetMemoryTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_server_trend"] = (c, pg, an) => RequireText(c, "metric", out var serverTrendMetric)
                 ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                    ? DarlingMcpServerTrendTools.GetServerTrend(pg, serverTrendMetric, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "clerk_types"), Str(c, "names"), TrendBudget.Chart, c.RequestAborted)
+                    ? DarlingMcpServerTrendTools.GetServerTrend(pg, serverTrendMetric, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "clerk_types"), Str(c, "names"), TrendBudget.Chart, cancellationToken: c.RequestAborted)
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("metric"),
             ["get_perfmon_trend"] = (c, pg, an) => RequireText(c, "counter_name", out var counter)
                 ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                    ? DarlingMcpTrendTools.GetPerfmonTrend(pg, counter, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                    ? DarlingMcpTrendTools.GetPerfmonTrend(pg, counter, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("counter_name"),
             ["get_procedure_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_query_store_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_query_trend"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
