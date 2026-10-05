@@ -2436,12 +2436,18 @@ public sealed class DarlingMcpDataTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.ServerName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.", emptyNotice.AsHints());
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated,
+                            $"No collector runs on {resolved.ServerName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly."),
+                        emptyNotice.AsHints());
                 }
 
                 return McpHelpers.Status(
                     "empty",
-                    $"No collector runs recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.", emptyNotice.AsHints());
+                    McpHelpers.QuietUnlessCut(
+                        emptyNotice.WindowTruncated,
+                        $"No collector runs recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs."),
+                    emptyNotice.AsHints());
             }
 
             var result = rows.Select(r => new
@@ -2937,11 +2943,16 @@ public sealed class DarlingMcpDataTools
                 var everRan =
                     await DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId, cancellationToken)
                     || await DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId, cancellationToken);
+                var emptyNotice = everRan
+                    ? await BlockingStatsNoticeAsync(postgres, resolved.ServerName, start, end, null, null, emptyAnswer: true, logger, cancellationToken)
+                    : default;
                 return everRan
                     ? McpHelpers.Status(
                         "empty",
-                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours_back} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.",
-                        (await BlockingStatsNoticeAsync(postgres, resolved.ServerName, start, end, null, null, emptyAnswer: true, logger, cancellationToken)).AsHints())
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated,
+                            $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours_back} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
+                        emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",
                         $"The blocking collectors have NEVER run successfully for {resolved.ServerName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");

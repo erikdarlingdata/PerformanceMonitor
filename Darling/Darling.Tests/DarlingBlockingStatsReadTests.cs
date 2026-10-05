@@ -85,7 +85,9 @@ public sealed class DarlingBlockingStatsReadTests
             var healthyDoc = JsonDocument.Parse(healthy);
             Assert.Equal("empty", healthyDoc.RootElement.GetProperty("status").GetString());
             var healthyText = healthyDoc.RootElement.GetProperty("message").GetString()!;
-            Assert.Contains("genuinely clear", healthyText, StringComparison.Ordinal);
+            /* #4966: the store's only run is 20 minutes old, so a 24-hour window is CUT, and a cut window may not say clear. */
+            Assert.True(healthyDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.CutWindowNothingMessage, healthyText);
             Assert.DoesNotContain("NEVER", healthyText, StringComparison.Ordinal);
 
             /*
@@ -101,6 +103,8 @@ public sealed class DarlingBlockingStatsReadTests
             var quiet = await DarlingMcpDataTools.GetBlockingStats(dataSource, ServerName, 1);
             var quietDoc = JsonDocument.Parse(quiet);
             Assert.Equal("empty", quietDoc.RootElement.GetProperty("status").GetString());
+            /* #4966: a deadlock 48 hours old reaches back past the one-hour window, so it is covered and keeps the clear sentence. */
+            Assert.False(quietDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.Contains("genuinely clear", quietDoc.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
             /* ── in-window deadlock: severity sums EVERY process, not just the victim ── */

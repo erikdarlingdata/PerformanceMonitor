@@ -670,20 +670,26 @@ public sealed class McpHealthParserTools
         var lastOfType = await dataService.GetLastSystemHealthCaptureOfTypeAsync(serverId, eventType);
         if (captured > 0)
         {
+            var notice = await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true);
             return WitnessStatus(
                 "empty",
-                $"{captured} {eventType} event(s) were captured for {serverName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}. Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
+                McpHelpers.QuietUnlessCut(
+                    notice.WindowTruncated,
+                    $"{captured} {eventType} event(s) were captured for {serverName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}. Events ARE being captured, so this is the healthy answer for this read rather than missing data."),
                 sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured,
-                hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
+                hints: notice.AsHints());
         }
 
         if (lastOfType is DateTime seen)
         {
+            var notice = await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true);
             return WitnessStatus(
                 "empty",
-                $"No {eventType} events were captured for {serverName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)}), so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
+                McpHelpers.QuietUnlessCut(
+                    notice.WindowTruncated,
+                    $"No {eventType} events were captured for {serverName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)}), so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events."),
                 sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
-                hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
+                hints: notice.AsHints());
         }
 
         if (lastCapturedAt is DateTime alive)

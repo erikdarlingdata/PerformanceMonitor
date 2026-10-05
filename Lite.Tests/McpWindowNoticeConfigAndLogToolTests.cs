@@ -13,6 +13,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -383,6 +384,28 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         var message = root.GetProperty("message").GetString()!;
         Assert.DoesNotContain("genuinely quiet", message, StringComparison.Ordinal);
         Assert.Contains("matched", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4966: an empty collection log over a cut window carries the shared cut sentence; over a covered one it keeps "genuinely quiet".</summary>
+    [Fact]
+    public async Task CollectionLog_AnEmptyWindow_CarriesTheCutSentence_WhenCut_AndTheQuietOneWhenCovered()
+    {
+        await _duckDb.InitializeAsync();
+        /* Runs exist, all older than the window: the server HAS collected, and the window holds none. */
+        await SeedLogRunsAsync("wait_stats", Anchor.AddDays(-30), Anchor.AddDays(-20), everyMinutes: 60);
+
+        var cut = Root(await McpHealthTools.GetCollectionLog(Service(), _serverManager, ServerName, 24, as_of: AsOf));
+
+        Assert.Equal("empty", cut.GetProperty("status").GetString());
+        Assert.Equal(McpHelpers.CutWindowNothingMessage, cut.GetProperty("message").GetString());
+
+        /* The filtered empty over a window the log covers (runs reach back past its start) keeps its own sentence. */
+        await SeedLogRunsAsync("wait_stats", Anchor.AddDays(-3), Anchor, everyMinutes: 30);
+        var covered = Root(await McpHealthTools.GetCollectionLog(
+            Service(), _serverManager, ServerName, 24, as_of: AsOf, collector_name: "no_such_collector"));
+
+        Assert.False(covered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+        Assert.Contains("says nothing about the window as a whole", covered.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 
     /// <summary>A snapshot before the window with NO run in the window proves nothing was read: not covered.</summary>

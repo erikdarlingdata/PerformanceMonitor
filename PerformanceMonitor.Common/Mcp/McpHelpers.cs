@@ -881,4 +881,18 @@ internal static class McpHelpers
             ? JsonSerializer.Serialize(new { status, message }, JsonOptions)
             : JsonSerializer.Serialize(new { status, message, hints }, JsonOptions);
     }
+
+    /// <summary>
+    /// #4966: the one sentence an empty answer carries INSTEAD of a "quiet" or "all-clear" claim when its window notice
+    /// says the window is cut (<c>hints.window_truncated</c> true). Both apps use this one constant, so a client reads the
+    /// same words from either; <c>McpMissMessageParityPinTests</c> holds the literal.
+    /// </summary>
+    public const string CutWindowNothingMessage = "Nothing in the part of the window the store covers; the store's data for this read starts at effective_start (see hints), so the stretch before it is not a report that nothing happened.";
+
+    /// <summary>
+    /// #4966: chooses the message of an empty answer at run time. A cut window (<paramref name="windowTruncated"/>)
+    /// gets <see cref="CutWindowNothingMessage"/>; a covered window keeps <paramref name="coveredMessage"/> exactly.
+    /// </summary>
+    public static string QuietUnlessCut(bool windowTruncated, string coveredMessage) =>
+        windowTruncated ? CutWindowNothingMessage : coveredMessage;
 }

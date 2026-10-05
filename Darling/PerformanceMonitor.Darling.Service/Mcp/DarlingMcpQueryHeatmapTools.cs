@@ -245,7 +245,9 @@ public sealed class DarlingMcpQueryHeatmapTools
 
         return McpHelpers.Status(
             "empty",
-            $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
+            McpHelpers.QuietUnlessCut(
+                notice.WindowTruncated,
+                $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists."),
             notice.AsHints());
     }
 }

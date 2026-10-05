@@ -9,6 +9,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Lite.Tests;
@@ -99,6 +100,16 @@ public sealed class McpMissMessageParityPinTests
            the only shared miss sentence this list did not name. Darling's sentinel population gets its
            OWN sentences ahead of these three, so what is compared here stays the monitored-server text. */
         "This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.",
+
+        /* #4966: the covered-window variants of the quiet and all-clear sentences, byte-identical on both SKUs.
+           The cut-window variant is one constant in Common (McpHelpers.CutWindowNothingMessage), pinned below. */
+        "The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.",
+        "this IS the all-clear for this read.",
+        "A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected.",
+        "This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist.",
+
+        /* #4966: the server-instructions sentence naming the three window keys. */
+        "effective_start, window_truncated and truncation_note say where the store's data for a read starts; window_truncated true means the window reaches further back than the data, not that the page was cut.",
 
         /* get_memory_clerks */
         "This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks.",
@@ -273,6 +284,21 @@ public sealed class McpMissMessageParityPinTests
         Assert.True(
             AppearsIn(DarlingMcpDir, fragment),
             $"Darling's MCP tools no longer contain the shared sentence: \"{fragment}\"");
+    }
+
+    /// <summary>
+    /// #4966: the sentence an empty answer carries over a CUT window instead of its quiet or all-clear claim. It lives
+    /// once in Common, which both apps compile, so this holds the literal and the constant to the agreed words; each
+    /// app's empty answers pick between it and their covered text at run time through <c>QuietUnlessCut</c>.
+    /// </summary>
+    [Fact]
+    public void TheCutWindowSentence_IsTheAgreedWords_AndReplacesTheQuietClaimOnlyWhenCut()
+    {
+        const string agreed = "Nothing in the part of the window the store covers; the store's data for this read starts at effective_start (see hints), so the stretch before it is not a report that nothing happened.";
+        Assert.Equal(agreed, McpHelpers.CutWindowNothingMessage);
+        Assert.Equal(agreed, McpHelpers.QuietUnlessCut(true, "this window is genuinely quiet"));
+        Assert.Equal("this window is genuinely quiet", McpHelpers.QuietUnlessCut(false, "this window is genuinely quiet"));
+        Assert.True(AppearsIn("PerformanceMonitor.Common/Mcp", agreed), "the shared cut-window sentence left Common");
     }
 
     /// <summary>

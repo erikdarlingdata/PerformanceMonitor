@@ -117,7 +117,10 @@ public sealed class DarlingCollectionLogReadTests
 
             /* Same row count as case 1 -- zero -- and it must NOT reach for the same word. */
             Assert.DoesNotContain("EVER", quietText, StringComparison.Ordinal);
-            Assert.Contains("widen", quietText, StringComparison.OrdinalIgnoreCase);
+            /* #4966: the only run is 48 hours old, so the one-hour window holds none of the log: it is NOT covered, and the
+               answer says so instead of "genuinely quiet". */
+            Assert.True(quietDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.CutWindowNothingMessage, quietText);
 
             /* ── 3. rows in the window: the data path, and the split that makes the log worth reading ── */
             await SeedAsync(connection, ct, "query_store", MinutesAgo(10));
@@ -324,7 +327,7 @@ public sealed class DarlingCollectionLogReadTests
             var noMatchText = noMatchRoot.GetProperty("message").GetString()!;
 
             /* The filter is named back, so a typo is diagnosable from the answer. */
-            Assert.Contains("plan_corection", noMatchText, StringComparison.Ordinal);
+            AssertFilterNamedOrWindowCut(noMatchRoot, "plan_corection");
 
             /*
                 And the two sentences this read already had must NOT be reachable here. Six rows sit in this
@@ -488,7 +491,7 @@ public sealed class DarlingCollectionLogReadTests
             /* The filter is named back — through the shared describe helper, so the sentence says WHICH
                filter produced the nothing — and the window is not called quiet, because eight rows sit in
                it and a filtered read has not looked at the window at all. */
-            Assert.Contains("status SESSION_MISSING", noSuchText, StringComparison.Ordinal);
+            AssertFilterNamedOrWindowCut(noSuchRoot, "status SESSION_MISSING");
             Assert.DoesNotContain("genuinely quiet", noSuchText, StringComparison.Ordinal);
 
             /* ── 12. #3869: no status filter is unchanged behavior ── */
@@ -517,9 +520,8 @@ public sealed class DarlingCollectionLogReadTests
             Assert.Equal("empty", combinedRoot.GetProperty("status").GetString());
 
             /* Both filters named, so the caller can tell which half missed. */
-            var combinedText = combinedRoot.GetProperty("message").GetString()!;
-            Assert.Contains("collector_name 'query_store'", combinedText, StringComparison.Ordinal);
-            Assert.Contains("status ERROR", combinedText, StringComparison.Ordinal);
+            AssertFilterNamedOrWindowCut(combinedRoot, "collector_name 'query_store'");
+            AssertFilterNamedOrWindowCut(combinedRoot, "status ERROR");
 
             bodySucceeded = true;
         }
@@ -587,6 +589,23 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);
+    }
+
+    /// <summary>
+    /// #4966: a filtered nothing names its filter, unless its window is cut, when it carries the one shared sentence and no
+    /// claim about the filter or the window. This fixture's rows are minutes old against a 24-hour window, so it is cut.
+    /// </summary>
+    private static void AssertFilterNamedOrWindowCut(JsonElement root, string filterText)
+    {
+        var message = root.GetProperty("message").GetString()!;
+        if (root.GetProperty("hints").GetProperty("window_truncated").GetBoolean())
+        {
+            Assert.Equal(McpHelpers.CutWindowNothingMessage, message);
+        }
+        else
+        {
+            Assert.Contains(filterText, message, StringComparison.Ordinal);
+        }
     }
 
     private static async Task DeleteFilterRowsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -665,6 +684,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             Assert.Equal("empty", filtered.GetProperty("status").GetString());
             Assert.False(filtered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.Equal(McpHelpers.FormatEffectiveStart(end.AddHours(-1)), filtered.GetProperty("hints").GetProperty("effective_start").GetString());
+            /* #4966: covered, so the filtered sentence keeps its own words instead of the cut sentence. */
+            Assert.Contains("says nothing about the window as a whole", filtered.GetProperty("message").GetString()!, StringComparison.Ordinal);
         });
 
     [Fact]

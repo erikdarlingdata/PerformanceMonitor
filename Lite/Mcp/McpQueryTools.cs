@@ -648,7 +648,9 @@ public sealed class McpQueryTools
 
         return McpHelpers.Status(
             "empty",
-            $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's average CPU is more than 25% worse than its baseline — this IS the all-clear for this read.",
+            McpHelpers.QuietUnlessCut(
+                notice.WindowTruncated,
+                $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's average CPU is more than 25% worse than its baseline — this IS the all-clear for this read."),
             notice.AsHints());
     }
 
@@ -858,7 +860,9 @@ public sealed class McpQueryTools
 
         return McpHelpers.Status(
             "empty",
-            $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
+            McpHelpers.QuietUnlessCut(
+                notice.WindowTruncated,
+                $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists."),
             notice.AsHints());
     }
 
