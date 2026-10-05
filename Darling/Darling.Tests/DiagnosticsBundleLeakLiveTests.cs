@@ -44,15 +44,27 @@ public sealed class DiagnosticsBundleLeakLiveTests
     private const string Login = "betaowner";
     private const string Password = "Sup3rS3cret!";
     private const string Domain = "example.test";
+    private const string StoreRole = "qxreporter";
+    private const string TcpServer = "qxtcpname-09";
+    private const string TcpHostName = "qxtcphost-09.qxzone.test";
+    private const string StoreLogSecretHost = "qxlogged-12";
+    private const string RemovedServer = "qxgone-21";
 
     /// <summary>Everything that must not appear, including the pieces a splitter produces.</summary>
     internal static readonly string[] Forbidden =
     {
         ServerOne, "zeta-07.example.test", "QXINST", ServerTwo, "203.0.113.40", DisplayTwo, "Epsilon", DbOne, DbTwo, Login, Password, Domain,
-        "zeta-07x",
+        "zeta-07x", RemovedServer, StoreLogSecretHost, "QXCORP", "svc_zeta", StoreRole, TcpServer, TcpHostName, "qxtcphost-09", "qxzone",
     };
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    private static async Task DropRoleAsync(string connectionString)
+    {
+        await using var c = new NpgsqlConnection(connectionString);
+        await c.OpenAsync(CancellationToken.None);
+        await ExecAsync(c, $"DROP ROLE IF EXISTS {StoreRole}");
+    }
 
     private static async Task ExecAsync(NpgsqlConnection c, string sql, params object?[] values)
     {
@@ -77,6 +89,25 @@ public sealed class DiagnosticsBundleLeakLiveTests
             await ExecAsync(c, "INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', FALSE)",
                 CollectionIdGenerator.Next(), now.AddMinutes(-5), id, name, db);
         }
+
+        /* A server registered with a protocol prefix (the Azure portal's connection form), a store login that is in no
+           connection string, and a Windows account named only in an error message. */
+        await ExecAsync(c, "INSERT INTO config_monitored_servers (server_id, name, host, database, username, is_enabled) VALUES (703, $1, $2, $3, $4, TRUE) ON CONFLICT (server_id) DO NOTHING",
+            TcpServer, "tcp:" + TcpHostName + ",1433", DbTwo, Login);
+        await ExecAsync(c, "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) VALUES (703, $1, $1, TRUE, 15, $2, $2) ON CONFLICT (server_id) DO NOTHING",
+            TcpServer, now);
+        /* A server removed from the registry keeps its rows in the collected-data tables, and the service log still names it. */
+        await ExecAsync(c, "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) VALUES (704, $1, $1, FALSE, 15, $2, $2) ON CONFLICT (server_id) DO NOTHING",
+            RemovedServer, now);
+        await ExecAsync(c, $"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{StoreRole}') THEN CREATE ROLE {StoreRole} NOLOGIN; END IF; END $$");
+        await ExecAsync(c, @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected)
+VALUES ($1, 701, $2, 'file_io_stats', $3, 3000, 'ERROR', $4, 0)",
+            CollectionIdGenerator.Next(), ServerOne, now.AddMinutes(-12), $"Login failed for user 'QXCORP\\svc_zeta'. connecting to tcp:{TcpHostName},1433 (resolved {TcpHostName})");
+
+        /* A retained store-log row whose text names a host nobody registered, with its capture denominator. */
+        await ExecAsync(c, "INSERT INTO collect.store_log_captures VALUES ($1, 'postgresql-Mon.log', 1000, 0, 10, 4, FALSE, 0)", now.AddMinutes(-4));
+        await ExecAsync(c, "INSERT INTO collect.store_log_events VALUES ($1, 'unrecognised', 'ERROR', 2, $2, $3)",
+            now.AddMinutes(-4), $"connection to server at \"{StoreLogSecretHost}.example.test\" failed for user \"{StoreRole}\"", $"{now:yyyy-MM-dd HH:mm:ss} UTC [123] ERROR:  connection to server at \"{StoreLogSecretHost}.example.test\" failed for user \"{StoreRole}\"");
 
         /* A failed collection run whose error text names the server and a database. */
         await ExecAsync(c, @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected)
@@ -118,6 +149,7 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
             {
                 new { name = ServerOne, host = HostOne, database = DbOne, username = Login },
                 new { name = ServerTwo, host = HostTwo, database = DbTwo, username = Login },
+                new { name = TcpServer, host = "tcp:" + TcpHostName + ",1433", database = DbTwo, username = Login },
             },
         }));
         return path;
@@ -130,7 +162,9 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
             Path.Combine(dir, $"darling-service_{DateTime.Now:yyyyMMdd}.log"),
             $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [ERROR] [Connector] connect failed Server=zeta-07.example.test;Database={DbOne};User ID={Login};Password={Password}\n"
             + $"    at Connector.Open(zeta-07x, {ServerTwo})\n"
-            + $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [WARN ] [Probe] slow answer from 203.0.113.40 for {DbTwo}\n");
+            + $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [WARN ] [Probe] slow answer from 203.0.113.40 for {DbTwo}\n"
+            + $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [ERROR] [Connector] Login failed for user 'QXCORP\\svc_zeta' on tcp:{TcpHostName},1433\n"
+            + $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [WARN ] [Probe] {RemovedServer} no longer answers\n");
     }
 
     /// <summary>The first forbidden string found in the text, in the bytes, case-folded, or in the JSON-unescaped text; null when none.</summary>
@@ -212,8 +246,7 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
 
             var error = new StringWriter();
             var exit = await DarlingCliCommands.DiagnosticsBundleAsync(new[] { first, "--config", config, "--log-dir", logs, "--alias-map", map }, new StringWriter(), error, ct);
-            Assert.True(exit is DarlingCliCommands.DiagnosticsBundleExitCode.Ok or DarlingCliCommands.DiagnosticsBundleExitCode.PartialBundle,
-                $"exit {exit}: {error}");
+            Assert.True(exit == DarlingCliCommands.DiagnosticsBundleExitCode.Ok, $"exit {exit}: {error}");
             Assert.True(File.Exists(first), error.ToString());
 
             var leaked = FirstLeak(first);
@@ -231,6 +264,20 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
                 Assert.True(sections.ContainsKey(name), "missing section " + name);
             }
 
+            /* Every seeded section was read: none may have failed, and the collection section holds the seeded run. */
+            foreach (var (sectionName, node) in sections)
+            {
+                Assert.NotEqual("error", node?["status"]?.GetValue<string>());
+            }
+
+            foreach (var entry in tree["manifest"]!["sections"]!.AsArray())
+            {
+                Assert.NotEqual("error", entry!["status"]!.GetValue<string>());
+            }
+
+            Assert.NotEmpty(sections["collection"]!["slowest_runs"]!["runs"]!.AsArray());
+            Assert.NotEmpty(sections["collection"]!["health_by_server"]!.AsArray());
+            Assert.NotEmpty(sections["store_log"]!["retained_events"]!.AsArray());
             Assert.NotEmpty(sections["stall_probes"]!["probes"]!.AsArray());
             Assert.NotEmpty(sections["slow_reads"]!["reads"]!.AsArray());
             Assert.NotEmpty(sections["service_log"]!["entries"]!.AsArray());
@@ -251,6 +298,7 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
             await scratch.DisposeAsync();
+            await DropRoleAsync(baseConnectionString!);
             root.Delete(recursive: true);
         }
     }
