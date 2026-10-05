@@ -132,6 +132,73 @@ public sealed class DarlingCidrAllowListTests
         Assert.Equal("10.0.0.0/8", Parsed("10.1.2.3/8,10.0.0.0/8").ToString());
     }
 
+    /* ---- an address written any way but four plain decimal numbers is refused, not read as another address ---- */
+
+    [Fact]
+    public void TryParse_NonCanonicalIPv4_Premise_IPNetworkReadsEachSpellingAsADifferentRange()
+    {
+        /* Why the refusal below exists: IPNetwork.TryParse follows inet_aton, so a leading zero is octal, 0x is
+           hex and a short form is zero-padded. Each of these parses, as a range other than the one it reads as. */
+        Assert.Equal("192.168.8.0/24", IPNetwork.Parse("192.168.010.0/24").ToString());
+        Assert.Equal("8.0.0.0/8", IPNetwork.Parse("010.0.0.0/8").ToString());
+        Assert.Equal("0.0.0.0/8", IPNetwork.Parse("10/8").ToString());
+        Assert.Equal("10.0.0.0/16", IPNetwork.Parse("10.1/16").ToString());
+        Assert.Equal("10.0.0.0/8", IPNetwork.Parse("0x0A.0.0.0/8").ToString());
+    }
+
+    [Theory]
+    [InlineData("010.0.0.0/8")]            // a leading zero reads as octal (010 = 8)
+    [InlineData("192.168.010.0/24")]
+    [InlineData("10/8")]                   // a short form is zero-padded
+    [InlineData("10.1/16")]
+    [InlineData("0x0A.0.0.0/8")]           // 0x reads as hex
+    [InlineData("1.2.3.04/32")]
+    public void TryParse_NonCanonicalIPv4_IsRefused(string text)
+    {
+        Assert.False(CidrAllowList.TryParse(text, out var list));
+        Assert.Equal("", list.ToString());
+
+        /* Refused wherever it sits in a list: one bad entry refuses the whole list. */
+        Assert.False(CidrAllowList.TryParse($"10.8.0.0/16,{text}", out _));
+        Assert.False(CidrAllowList.TryParse($"{text},10.8.0.0/16", out _));
+    }
+
+    [Theory]
+    [InlineData("0.0.0.0/0")]
+    [InlineData("10.0.0.0/8")]
+    [InlineData("192.168.1.5/24")]         // host bits are masked afterwards, never refused
+    [InlineData("255.255.255.255/32")]
+    [InlineData("100.64.0.0/10")]
+    [InlineData("1.2.3.0/24")]
+    public void TryParse_PlainDecimalIPv4_IsAccepted(string text)
+        => Assert.True(CidrAllowList.TryParse(text, out _));
+
+    [Theory]
+    [InlineData("fe80::1%5/64")]
+    [InlineData("fe80::1%eth0/64")]
+    [InlineData("fe80::%5/64")]            // IPNetwork even keeps this zone in its own text
+    [InlineData("fe80::1%x';calc;'/64")]   // a zone is free text, so it must not survive the parse
+    [InlineData("fe80::1%a b/64")]
+    [InlineData("fe80::1%$(calc)/64")]
+    [InlineData("10.8.0.0/16,fe80::1%5/64")]
+    public void TryParse_IPv6ZoneIndex_IsRefused(string text)
+    {
+        Assert.False(CidrAllowList.TryParse(text, out var list));
+        Assert.Equal("", list.ToString());
+    }
+
+    [Theory]
+    [InlineData("64:ff9b::192.0.2.33/96", "64:ff9b::/96")]
+    [InlineData("64:ff9b::1.2.3.4/96,10.8.0.0/16", "64:ff9b::/96,10.8.0.0/16")]
+    public void TryParse_IPv6DottedTail_FourPlainNumbers_IsAccepted(string text, string expected)
+        => Assert.Equal(expected, Parsed(text).ToString());
+
+    [Theory]
+    [InlineData("64:ff9b::192.0.2.033/96")]   // the dotted tail follows the same rule as an IPv4 entry
+    [InlineData("64:ff9b::1.2.3.04/96")]
+    public void TryParse_IPv6DottedTail_WithALeadingZero_IsRefused(string text)
+        => Assert.False(CidrAllowList.TryParse(text, out _));
+
     /* ---- F6: an IPv4-mapped IPv6 entry is refused ---- */
 
     [Fact]
