@@ -66,6 +66,14 @@ public sealed class BlockingThresholdCoverageTests
     }
 
     [Fact]
+    public void NonzeroSnapshotsInTheWindow_WithNoZeroSeen_LeaveTodaysAnswer()
+    {
+        /* The snapshots before the window may have been purged, or never taken: no zero seen means the threshold's start is unknown, not late. */
+        Assert.Equal(Start, BlockingThresholdCoverage.Combine(Start, End.AddDays(-1), false, End.AddDays(-4), sawZeroSnapshot: false));
+        Assert.Equal(End.AddDays(-1), BlockingThresholdCoverage.Combine(null, End.AddDays(-1), false, End.AddDays(-4), false));
+    }
+
+    [Fact]
     public void NothingKnown_IsNull()
     {
         Assert.Null(BlockingThresholdCoverage.Combine(null, null, false, null, false));

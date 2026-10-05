@@ -26,11 +26,12 @@ public static class BlockingThresholdCoverage
     /// <param name="earliestReport">The earliest report in the window, read with the chart's own predicate; null if none.</param>
     /// <param name="onAtWindowStart">True when the newest snapshot at or before the window's start read above zero.</param>
     /// <param name="firstOnInWindow">The first snapshot in the window (after its start, up to its end) that read above zero, or null.</param>
-    /// <param name="sawZeroSnapshot">True when any snapshot at or before the window's end read zero.</param>
+    /// <param name="sawZeroSnapshot">True when a snapshot read zero before the threshold was seen on: any zero at or before the window's start, or any zero in the window dated before <paramref name="firstOnInWindow"/> (every zero in the window when there is none).</param>
     /// <returns>
     /// With the threshold on at the start, or with no threshold snapshots to go by, the earlier of the coverage and the report
-    /// (today's answer). Otherwise the earlier of the report and the later of the coverage and the threshold's start, where the
-    /// threshold's start is the first snapshot that read on, or the earliest report when every snapshot read zero.
+    /// (today's answer), and so does a window whose snapshots never read zero. Otherwise the earlier of the report and the later of
+    /// the coverage and the threshold's start, where the threshold's start is the first snapshot that read on, or the earliest report
+    /// when every snapshot read zero. Only the start can move: a zero must be seen, before the first nonzero, for the answer to change.
     /// </returns>
     public static DateTime? Combine(
         DateTime? collectorCoverage, DateTime? earliestReport, bool onAtWindowStart, DateTime? firstOnInWindow, bool sawZeroSnapshot)
@@ -38,7 +39,9 @@ public static class BlockingThresholdCoverage
         DateTime? thresholdStart = null;
         if (!onAtWindowStart)
         {
-            thresholdStart = firstOnInWindow ?? (sawZeroSnapshot ? earliestReport : null);
+            /* The start moves only when a zero was seen. A nonzero in-window snapshot with no zero before it says nothing about when the
+               threshold went on: the earlier snapshots may simply have been purged, or never taken. */
+            thresholdStart = sawZeroSnapshot ? (firstOnInWindow ?? earliestReport) : null;
         }
 
         var covered = Later(collectorCoverage, thresholdStart);

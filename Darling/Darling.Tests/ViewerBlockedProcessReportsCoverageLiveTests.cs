@@ -54,6 +54,8 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
     private const int ThresholdOnBeforeServerId = -499813;
     private const int ThresholdNoRowsServerId = -499814;
     private const int ThresholdDmvServerId = -499815;
+    private const int ThresholdNoZeroSeenServerId = -499816;
+    private const int ThresholdTurnedOffServerId = -499817;
     private const string XeCollector = "blocked_process_report";
     private const string DmvCollector = "dmv_blocking_snapshot";
 
@@ -290,6 +292,45 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
         await store.InsertXeReportsAsync(ThresholdOnBeforeServerId, store.Start.AddHours(5), store.End, store.End.AddDays(-10), ct);
 
         var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ThresholdOnBeforeServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.NotNull(chartsProbe);
+        Assert.False(RawWindowFloor.IsTruncated(chartsProbe, store.Start));
+    }
+
+    /* Nonzero snapshots inside the window, none before it, and no zero ever read: the earlier snapshots may be purged or were never taken,
+       so the threshold's start is unknown, not late. The answer is the collector's coverage, covered. */
+    [Fact]
+    public async Task TheChartsProbe_WithNonzeroSnapshotsInTheWindowAndNoZeroSeen_ReadsCovered_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(ThresholdNoZeroSeenServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(ThresholdNoZeroSeenServerId, XeCollector, store.End.AddDays(-10), store.End, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdNoZeroSeenServerId, store.End.AddDays(-4), store.End, 5, ct);
+        await store.InsertXeReportsAsync(ThresholdNoZeroSeenServerId, store.End.AddDays(-3), store.End, store.End.AddDays(-10), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ThresholdNoZeroSeenServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.NotNull(chartsProbe);
+        Assert.False(RawWindowFloor.IsTruncated(chartsProbe, store.Start));
+    }
+
+    /* The threshold read 5 and then 0 with no earlier snapshot: it was on and later turned off, which is not a late start. The zero
+       dated after the first nonzero snapshot does not count, so the answer stays the collector's, covered. */
+    [Fact]
+    public async Task TheChartsProbe_WithAZeroSnapshotAfterTheFirstNonzeroOne_IsNotALateStart_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(ThresholdTurnedOffServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(ThresholdTurnedOffServerId, XeCollector, store.End.AddDays(-10), store.End, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdTurnedOffServerId, store.End.AddDays(-6), store.End.AddDays(-4), 5, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdTurnedOffServerId, store.End.AddDays(-3), store.End, 0, ct);
+        await store.InsertXeReportsAsync(ThresholdTurnedOffServerId, store.End.AddDays(-5), store.End.AddDays(-4), store.End.AddDays(-10), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ThresholdTurnedOffServerId, store.Start, store.End, cancellationToken: ct);
 
         Assert.NotNull(chartsProbe);
         Assert.False(RawWindowFloor.IsTruncated(chartsProbe, store.Start));

@@ -386,7 +386,7 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// What the daily <c>server_config</c> snapshots say about <c>blocked process threshold (s)</c> over a window (#5098), the three
     /// inputs of <see cref="BlockingThresholdCoverage.Combine"/>: whether the newest snapshot at or before $2 read above zero, the first
-    /// snapshot in <c>($2, $3]</c> that did, and whether any snapshot at or before $3 read zero. $1 server, $2 window start, $3 window
+    /// snapshot in <c>($2, $3]</c> that did, and whether a snapshot read zero before the threshold was seen on (the newest one at or before $2, or one in the window dated before that first nonzero one; a zero after it means the threshold was turned off later, which is not a late start). $1 server, $2 window start, $3 window
     /// end. Two bounded reads: the newest row at or before $2 and the rows in the window, riding the config table's server/time index.
     /// </summary>
     public const string BlockedProcessThresholdOnSql = """
@@ -399,11 +399,15 @@ public sealed partial class ViewerDataService
         inside AS (
             SELECT c.capture_time, c.value_in_use
             FROM v_server_config AS c
-            WHERE c.server_id = $1 AND c.configuration_name = 'blocked process threshold (s)' AND c.capture_time > $2 AND c.capture_time <= $3)
+            WHERE c.server_id = $1 AND c.configuration_name = 'blocked process threshold (s)' AND c.capture_time > $2 AND c.capture_time <= $3),
+        first_on AS (
+            SELECT MIN(i.capture_time) AS capture_time FROM inside AS i WHERE i.value_in_use > 0)
         SELECT
             COALESCE((SELECT b.value_in_use > 0 FROM before AS b), FALSE),
-            (SELECT MIN(i.capture_time) FROM inside AS i WHERE i.value_in_use > 0),
-            EXISTS (SELECT 1 FROM before AS b WHERE b.value_in_use = 0) OR EXISTS (SELECT 1 FROM inside AS i WHERE i.value_in_use = 0)
+            (SELECT f.capture_time FROM first_on AS f),
+            EXISTS (SELECT 1 FROM before AS b WHERE b.value_in_use = 0)
+                OR EXISTS (SELECT 1 FROM inside AS i CROSS JOIN first_on AS f
+                           WHERE i.value_in_use = 0 AND (f.capture_time IS NULL OR i.capture_time < f.capture_time))
         """;
 
     /// <summary>The threshold's history over the window (see <see cref="BlockedProcessThresholdOnSql"/>); no snapshots at all reads as "on at start: no, first on: none, saw zero: no", which <see cref="BlockingThresholdCoverage.Combine"/> leaves unchanged.</summary>

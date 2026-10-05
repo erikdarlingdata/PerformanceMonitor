@@ -1093,7 +1093,7 @@ ORDER BY bucket";
     /// <summary>
     /// #5098: the blocked process threshold's history over the window, the same three outputs as the Darling viewer's
     /// <c>BlockedProcessThresholdOnSql</c>: on at the window's start (the newest snapshot at or before it is above zero), the
-    /// earliest snapshot inside (start, end] that is above zero, and whether any snapshot in or before the window was zero.
+    /// earliest snapshot inside (start, end] that is above zero, and whether a snapshot read zero before the threshold was seen on (the newest one at or before the start, or one in the window dated before that first nonzero one).
     /// <c>capture_time</c> is UTC, like every Lite store column. No snapshots reads as (false, null, false), which
     /// <see cref="PerformanceMonitor.Common.BlockingThresholdCoverage.Combine"/> leaves unchanged. Opens its own connection.
     /// </summary>
@@ -1111,11 +1111,15 @@ WITH before AS (
 inside AS (
     SELECT c.capture_time, c.value_in_use
     FROM v_server_config AS c
-    WHERE c.server_id = $1 AND c.configuration_name = 'blocked process threshold (s)' AND c.capture_time > $2 AND c.capture_time <= $3)
+    WHERE c.server_id = $1 AND c.configuration_name = 'blocked process threshold (s)' AND c.capture_time > $2 AND c.capture_time <= $3),
+first_on AS (
+    SELECT MIN(i.capture_time) AS capture_time FROM inside AS i WHERE i.value_in_use > 0)
 SELECT
     COALESCE((SELECT b.value_in_use > 0 FROM before AS b), FALSE),
-    (SELECT MIN(i.capture_time) FROM inside AS i WHERE i.value_in_use > 0),
-    EXISTS (SELECT 1 FROM before AS b WHERE b.value_in_use = 0) OR EXISTS (SELECT 1 FROM inside AS i WHERE i.value_in_use = 0)";
+    (SELECT f.capture_time FROM first_on AS f),
+    EXISTS (SELECT 1 FROM before AS b WHERE b.value_in_use = 0)
+        OR EXISTS (SELECT 1 FROM inside AS i CROSS JOIN first_on AS f
+                   WHERE i.value_in_use = 0 AND (f.capture_time IS NULL OR i.capture_time < f.capture_time))";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });

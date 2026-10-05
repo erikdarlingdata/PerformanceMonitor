@@ -326,6 +326,42 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)", _
         Assert.Equal(string.Empty, text);
     }
 
+    /// <summary>#5098: nonzero snapshots inside the window, none before it, and no zero ever read: the earlier snapshots may be gone, so the start is unknown, not late. Covered, no note.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task NonzeroSnapshotsInTheWindowAndNoZeroSeen_IsCovered(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
+        await SeedThresholdAsync(FixedEnd.AddDays(-4), 5);
+        await SeedThresholdAsync(FixedEnd.AddDays(-3), 5);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-2));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-2)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>#5098: the threshold read 5 and then 0 with no earlier snapshot: it was turned off later, which is not a late start. Covered, no note.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task AZeroSnapshotAfterTheFirstNonzeroOne_IsNotALateStart(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
+        await SeedThresholdAsync(FixedEnd.AddDays(-6), 5);
+        await SeedThresholdAsync(FixedEnd.AddDays(-3), 0);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-5));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-5)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
     /// <summary>#5098: no server_config rows at all: the answer is the collector's start, as before the threshold was read.</summary>
     [Theory]
     [InlineData("BlockingTrend")]
