@@ -235,6 +235,17 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
                 await connection.OpenAsync(ct);
                 await PgMigrations.MigrateAsync(connection, ct);
                 await SeedAsync(connection);
+
+                /* Store statement TEXT: the extension is installed in the scratch database and a statement naming seeded
+                   names runs, as a literal (the module normalizes it away) and as an identifier (it keeps that). The
+                   run must happen: a missing extension fails here, it does not skip. */
+                var ensured = await StoreStatementStats.EnsureAsync(connection, "config", Array.Empty<string>(), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct);
+                Assert.Equal(StoreStatementStats.SetupOutcome.Ready, ensured);
+                for (var i = 0; i < 3; i++)
+                {
+                    await using var statement = new NpgsqlCommand($"SELECT '{ServerOne}' AS {DbOne}, '{RemovedServer}' AS lit_col, pg_sleep(0.3)", connection);
+                    await statement.ExecuteNonQueryAsync(ct);
+                }
             }
 
             var logs = Path.Combine(root.FullName, "logs");
@@ -284,6 +295,11 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
             Assert.Equal("ok", sections["store_statements"]!["history"]!["status"]!.GetValue<string>());
             Assert.NotEmpty(sections["store_statements"]!["history"]!["top_statement_rows"]!.AsArray());
             Assert.Contains("DeltaLedgerDb", await File.ReadAllTextAsync(map, ct), StringComparison.Ordinal);
+
+            /* The statement ran and its text reached the bundle, with the seeded identifier aliased. */
+            var cumulative = sections["store_statements"]!["cumulative"]!.ToJsonString();
+            Assert.Contains("lit_col", cumulative, StringComparison.Ordinal);
+            Assert.Contains("db-", cumulative, StringComparison.Ordinal);
 
             /* A second run uses the same aliases. */
             var again = await DarlingCliCommands.DiagnosticsBundleAsync(new[] { second, "--config", config, "--log-dir", logs }, new StringWriter(), new StringWriter(), ct);

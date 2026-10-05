@@ -410,6 +410,12 @@ internal static class DiagnosticsBundle
 
             /* The SMTP login is a name (and often an address): its domain half too. */
             aliaser.AddName(AliasKind.Login, smtp.Username);
+            var atUser = smtp.Username?.LastIndexOf('@') ?? -1;
+            if (atUser > 0)
+            {
+                aliaser.AddName(AliasKind.Login, smtp.Username![..atUser]);
+            }
+
             AddAddressDomains(aliaser, smtp.Username);
         }
 
