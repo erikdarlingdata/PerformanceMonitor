@@ -134,17 +134,19 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
         Assert.Equal(Since(oldestReturned), banner);
     }
 
-    /* The Blocking charts read the XE table when it holds a report in the window. The DMV collector has run for 40 days and the
-       XE collector began 3 days before the range's end: the grid's probe takes the earlier of the two and reads covered, while
-       the charts' probe names the XE start, the first day their data can exist. */
+    /* The Blocking charts read the XE table when it holds a report in the window. The server was added 3 days before the range's
+       end; the DMV snapshots reach back to the range's start (a first collection storing history) and the XE reports begin with
+       the server: the grid's probe takes the earlier of the two and reads covered, while the charts' probe names the XE start,
+       the first day their data can exist. */
     [Fact]
     public async Task TheChartsProbe_NamesTheXeStart_WhereTheGridProbeReadsCoveredByTheDmv_AgainstDevPostgres()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
 
-        await store.AddServerAsync(XeMidwayServerId, store.End.AddDays(-40), ct);
-        await store.LogRunsAsync(XeMidwayServerId, DmvCollector, store.End.AddDays(-40), store.End, ct);
+        await store.AddServerAsync(XeMidwayServerId, store.End.AddDays(-3), ct);
+        await store.LogRunsAsync(XeMidwayServerId, DmvCollector, store.Start, store.End, ct);
+        await store.InsertDmvSnapshotsAsync(XeMidwayServerId, store.Start, store.End, TimeSpan.FromHours(6), ct);
         await store.LogRunsAsync(XeMidwayServerId, XeCollector, store.End.AddDays(-3), store.End, ct);
         await store.InsertXeReportsAsync(XeMidwayServerId, store.End.AddDays(-3).AddHours(6), store.End, store.End.AddDays(-3), ct);
 
