@@ -29,13 +29,22 @@ permissions:
 # serializes everyone's CI (#1697 sat queued behind two dev builds; on 2026-07-26 a
 # ~20-merge train left 13 of the day's 30 dev-push runs finishing SHAs a newer merge had
 # already replaced — ~60 reclaimable runner-minutes in one evening). Cancelling a
-# superseded PUSH run is safe because a push run produces nothing any other run consumes:
-# every upload-artifact step in this workflow is gated to the release event (the SignPath
-# signing path) or to failure() (darling-pg diagnostics), except the per-run Lite timing
-# uploads (#5208), which are ungated and harmless because nothing downloads
-# cross-run artifacts (no download-artifact, gh run download, or workflow_run consumer
-# exists), nightly.yml builds its own tree from its own checkout, and a release compiles
-# fresh on the release event. The accepted trade: push builds are diff-scoped, so a
+# superseded PUSH run is safe because no run's RESULT depends on another run's output: every
+# upload-artifact step in this workflow is gated to the release event (the SignPath signing
+# path) or to failure() (darling-pg diagnostics), except the per-run Lite timing uploads
+# (#5208), and exactly ONE thing reads a previous run's artifacts: the Lite shard packer
+# (#5208). The gate job picks, once per run, the newest successful push run on dev (of the 30
+# newest successful dev runs) whose lite-tests-timing artifacts ALL have more than two days of
+# retention left, and pins that run and its exact artifact set; every Lite shard downloads that
+# set and fails if it gets anything else. A cancelled run is not a successful run, so a
+# cancelled push run is never read. With no such run the cut is the plain class-name hash, and
+# timings the packer cannot use (none readable, all zero, or covering under 80% of this commit's
+# classes) send every shard to that same hash. So cancelling can cost shard balance but never a
+# test class or a verdict. No other cross-run consumer (a download-artifact with run-id, a gh
+# run download, or a workflow_run trigger) exists (CrossAppGuardCiGateTests pins both halves),
+# nightly.yml builds its own tree from its own checkout, and a release compiles fresh on the
+# release event. The accepted
+# trade: push builds are diff-scoped, so a
 # cancelled run's areas are not re-verified until the next change touches them — the
 # nightly and the all-areas dev->main release PR are the backstops. Release and
 # merge-queue runs deliberately keep a UNIQUE group per run (run_id) and are NEVER
@@ -70,9 +79,13 @@ jobs:
     name: Decide whether CI runs
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    # actions: read is for the timing-source step below and nothing else: it lists runs and artifacts.
+    permissions:
+      actions: read
     outputs:
       run: ${{ steps.decide.outputs.run }}
+      lite_timing_run: ${{ steps.timing.outputs.run_id }}
+      lite_timing_artifacts: ${{ steps.timing.outputs.artifacts }}
     steps:
       - name: Decide
         id: decide
@@ -102,6 +115,54 @@ jobs:
             echo "::notice title=CI runs::${why}"
           else
             echo "::notice title=CI skipped::${why}"
+          fi
+
+      # #5208: the ONE timing source every Lite shard of this run balances its cut from. It is picked
+      # here, once, because the four shards start minutes apart and a pick made inside each shard would
+      # race a dev run finishing in between: two shards would then cut the suite from different timings,
+      # and a class could land in two shards or none, which no check inside a single shard can see.
+      # Only SUCCESSFUL push runs on dev qualify (a cancelled run is never read, and a push to dev is
+      # code that already merged), and ALL of its timing artifacts must outlive this run by two days, so
+      # they cannot expire while the shards are queued or being re-run. The exact artifact names are
+      # pinned too (the artifacts output), and each shard checks that it downloaded exactly that set.
+      # Every failure here means "no source", which the shards all read the same way: the plain
+      # class-name hash cut. The step cannot fail the gate.
+      - name: Pin the Lite timing source
+        id: timing
+        if: github.event_name != 'release' && steps.decide.outputs.run == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          export KEEP_UNTIL
+          KEEP_UNTIL=$(date -u -d '+2 days' +%Y-%m-%dT%H:%M:%SZ)
+          source_run=""
+          source_artifacts=""
+          # Filtered on the event here, not in the query: the API's branch+event+status combination
+          # returns a stale page of old runs, while branch+status is current. (A pull request FROM dev
+          # carries head_branch dev too, hence the event test.)
+          runs=$(gh api "repos/${GH_REPO}/actions/workflows/build.yml/runs?branch=dev&status=success&per_page=30" --jq '.workflow_runs[] | select(.event == "push") | .id') || runs=""
+          for id in ${runs}; do
+            # EVERY timing artifact of the run must outlive this run by two days, not just one, and the exact set is
+            # pinned so each shard can prove it downloaded the same files as the others.
+            names=$(gh api "repos/${GH_REPO}/actions/runs/${id}/artifacts?per_page=100" --jq '[.artifacts[] | select(.name | test("^lite-tests-timing-[0-9]+$"))] | if length > 0 and all(.[]; (.expired | not) and (.expires_at > env.KEEP_UNTIL)) then (map(.name) | unique | join(",")) else "" end') || names=""
+            if [ -n "${names}" ]; then
+              source_run="${id}"
+              source_artifacts="${names}"
+              break
+            fi
+          done
+
+          echo "run_id=${source_run}" >> "$GITHUB_OUTPUT"
+          echo "artifacts=${source_artifacts}" >> "$GITHUB_OUTPUT"
+          if [ -n "${source_run}" ]; then
+            echo "::notice title=Lite timing source::The Lite shards balance their cut from the timings of run ${source_run}, the newest successful push run on dev that still has them."
+          else
+            echo "::notice title=Lite timing source::No successful dev push run has unexpired Lite timings (or the lookup failed), so every Lite shard cuts by class-name hash."
           fi
 
   build:
@@ -477,16 +538,18 @@ jobs:
           dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release --no-restore
 
       # RELEASE-ONLY here since #3887; on pull requests and pushes the suite runs in the lite-tests
-      # matrix job below, four shards cut by CLASS-NAME HASH, because this one step had grown to
-      # ~9½ of the build job's ~15 minutes — 62% of the PR wall's critical path. The hash cut is the
+      # matrix job below, four shards cut over CLASS NAMES (balanced by recorded duration since #5208,
+      # the class-name hash otherwise), because this one step had grown to
+      # ~9½ of the build job's ~15 minutes — 62% of the PR wall's critical path. The name cut is the
       # deliberate opposite of the SEMANTIC split this step's history retired: it was split into
       # fast / analysis-heavy halves when the seven analysis classes rebuilt the full DuckDB schema
       # inside every test and their subset alone cost ~9 minutes; after the shared class fixtures
       # (#1693, #1698) and batched seeding (#1694) that subset ran in ~1 minute, so the split — and
       # the narrower lite_analysis path gate that let non-analysis Lite changes skip it — stopped
-      # earning its second test-host spin-up and its FILTER-DRIFT RISK. A hash over the class name
-      # cannot drift: every class lands in exactly one shard by arithmetic, a class added tomorrow
-      # included, and no list anywhere has to be maintained. Releases keep this single unsharded
+      # earning its second test-host spin-up and its FILTER-DRIFT RISK. A cut over class names
+      # cannot drift: every class lands in exactly one shard (by arithmetic for the hash, by a
+      # proof for the duration cut), a class added tomorrow included, and no list anywhere has
+      # to be maintained. Releases keep this single unsharded
       # pass so the artifact-producing run still executes the suite whole, in one log.
       - name: Run Lite tests
         if: github.event_name == 'release'
@@ -1744,19 +1807,38 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build
 
-  # The Lite suite on pull requests and pushes: four shards cut by CLASS-NAME HASH (#3887). The
-  # build job's single "Run Lite tests" step had grown to ~9½ minutes of a ~15-minute job — 62% of
-  # the PR wall's critical path over the eight runs measured — and it is release-only there now.
+  # The Lite suite on pull requests and pushes: four shards cut over CLASS NAMES (#3887), balanced
+  # by recorded duration since #5208. The build job's single "Run Lite tests" step had grown to
+  # ~9½ minutes of a ~15-minute job — 62% of the PR wall's critical path over the eight runs
+  # measured — and it is release-only there now.
   #
-  # The cut is a SHA-256 over the class name, modulo four: arithmetic, not a list and not a
-  # semantic filter. This job's own history is the argument (see the retired lite_analysis split
-  # this file documents above the release-only step): any filter somebody has to MAINTAIN drifts,
-  # and a class added tomorrow is exactly the class such a filter misses. A hash cannot drift —
-  # every class lands in exactly one shard, additions included, and the partition is total by
-  # construction. SHA-256 rather than string.GetHashCode() because the latter is randomized per
-  # process ON PURPOSE and would send the same class to a different shard on every run.
+  # Two cuts, both over the class NAME: never a list somebody maintains, never a semantic filter.
+  # This job's own history is the argument (see the retired lite_analysis split this file
+  # documents above the release-only step): any filter somebody has to MAINTAIN drifts, and a
+  # class added tomorrow is exactly the class such a filter misses.
+  #   - The DURATION cut (#5208). The hash balances class COUNT, not time: on one measured run the
+  #     four shards held 12.8, 48.1, 36.6 and 25.3 minutes of test time, and the slowest decides the
+  #     PR wall (at the 30-minute cap below it turns the run red without naming a failing test).
+  #     .github/scripts/lite-shard-pack.py packs classes longest-first into the least-loaded shard,
+  #     weighing each class by the per-test timings the shards already upload (lite-tests-timing-N)
+  #     from the run the gate pinned (its timing-source step). A class with no timing history gets
+  #     the mean weight, so it is placed, never dropped.
+  #   - The HASH cut, the original: a SHA-256 over the class name, modulo the shard count (SHA-256
+  #     rather than string.GetHashCode(), which is randomized per process ON PURPOSE). It is the
+  #     fallback: no timing source, or timings the packer cannot use (missing, corrupt, empty, all
+  #     zero, or covering under 80% of this commit's classes), cut this way. The shard count comes
+  #     from the matrix (strategy.job-total), so the cut and the matrix cannot disagree: that holds
+  #     while `shard` is the matrix's only axis, and a leg whose job-index is not its shard value
+  #     fails (see the run step).
+  # Totality used to hold by arithmetic; the duration cut earns it by proof. The packer's reconcile
+  # check fails the leg unless the shard files hold every discovered class exactly once. And a leg
+  # whose pinned timings cannot be downloaded, or whose download is not exactly the artifact set the
+  # gate pinned (one expired or was deleted since), FAILS instead of falling back or cutting on its
+  # own: all four legs must cut from the same inputs, or the four cuts would disagree and a class
+  # could run twice or not at all, which no check inside one leg can see. A re-run of a failed leg
+  # reuses the pin.
   #
-  # FOUR and not three, decided on measurement rather than taste: the hash balances CLASSES, and
+  # FOUR and not three, decided on measurement (of the hash cut) rather than taste: the hash balances CLASSES, and
   # Lite's classes carry uneven test counts, so a 3-way cut left one shard holding 42% of the tests
   # (~6½ minutes with setup) while another held 25%. At four the worst shard holds 27% (~5 minutes);
   # five would buy 0.4 minutes more for another Windows runner out of the shared pool this file's
@@ -1792,9 +1874,15 @@ jobs:
     # misread as a bug in whatever pull request happened to be in the train. This is a guard against
     # those spurious reds, NOT a fix: the slowdown is tracked in #5208, and this value should come
     # back down when it is fixed. At +7 min/day the slowest shard crosses 30 within about a week.
+    #
+    # The duration cut (#5208) attacks the imbalance, not the growth: on the run measured the slowest
+    # shard held 1.6x the mean test time, and equal shards put every shard near the mean. So the cap
+    # stays at 30 as the guard, and comes down when the slowest shard's measured time says it can.
     timeout-minutes: 30
     permissions:
       contents: read
+      # Reads the pinned run's lite-tests-timing artifacts (gh run download in the shard step), nothing else.
+      actions: read
     steps:
       - uses: actions/checkout@v7
 
@@ -1852,8 +1940,8 @@ jobs:
       # How much of the Lite suite THIS leg runs, decided from the filter answers alone (no build needed):
       #   full  - a Lite, Lite.Tests, core or root path changed, or a Darling.Tests file that Lite.Tests
       #           compiles into itself, or the event is not a pull request (a push
-      #           to dev or main, a merge-queue run): the whole suite, hash-sharded across the four legs,
-      #           exactly as before.
+      #           to dev or main, a merge-queue run): the whole suite, cut across the four legs by
+      #           duration (or by class-name hash when no timing source is pinned), see the job header.
       #   reads - a pull request whose diff reaches ONLY the Darling trees Lite.Tests reads as source: just
       #           the classes tagged [Trait("Reads", "Darling")], all of them in shard 0. Legs 1-3 do nothing.
       #   none  - nothing the Lite suite depends on changed.
@@ -1907,16 +1995,27 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
 
+      # #5208: the packer's own proof (totality, input-order determinism, the hash fallback). No build needed.
+      - name: Shard packer self-test
+        if: matrix.shard == 0
+        run: python .github/scripts/lite-shard-pack.py --self-test
+
       # The class list comes off the built assembly itself (-list classes/json), so the population is
       # whatever exists on THIS commit — no roster. An empty selection is a hard error, not a skip:
       # with zero -class arguments the runner executes the WHOLE suite, so "my shard is empty" and
       # "run everything" are one argument-list apart — the loudest possible difference to get wrong
-      # quietly. (394 classes across four shards make an empty one arithmetically implausible; the
-      # measured split is 27/26/25/22% of tests, so the arm is a guard, not an expectation.)
+      # quietly. (Hundreds of classes across four shards make an empty one implausible under either cut,
+      # so the arm is a guard, not an expectation.)
       - name: Run Lite tests (shard)
         if: steps.scope.outputs.run == 'true'
         shell: pwsh
         env:
+          # The timing source the gate pinned for the WHOLE run (empty: none, so the hash cut). Read from
+          # the gate's output, never looked up here: see the job header and the gate's timing-source step.
+          LITE_TIMING_RUN: ${{ needs.gate.outputs.lite_timing_run }}
+          LITE_TIMING_ARTIFACTS: ${{ needs.gate.outputs.lite_timing_artifacts }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           LITE_SCOPE_MODE: ${{ steps.scope.outputs.mode }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -1946,11 +2045,70 @@ jobs:
               Write-Host "Darling-reads run: $($mine.Count) of $($classes.Count) classes"
           }
           else {
-              $sha = [System.Security.Cryptography.SHA256]::Create()
-              $mine = @($classes | Where-Object {
-                  $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_))
-                  ($hash[0] % 4) -eq ${{ matrix.shard }}
-              })
+              # #5208: all four legs must cut the suite from the SAME inputs (see the job header). The gate
+              # pinned one timing source for the whole run. With none pinned the cut is the class-name hash
+              # (SHA-256, first byte, modulo the shard count), exactly as before the packer. With one, this
+              # leg downloads that run's timings and packs by duration. A pinned source this leg cannot
+              # fetch FAILS the leg: falling back to the hash here alone, while the other legs cut by
+              # duration, would leave the four cuts not partitioning the suite.
+              $shards = ${{ strategy.job-total }}
+              # job-total is the shard count only while `shard` is the matrix's one axis. A second axis would cut into
+              # buckets no leg reads; on a one-axis matrix job-index equals the shard value.
+              if (${{ strategy.job-index }} -ne ${{ matrix.shard }}) { throw "the lite-tests matrix is no longer the single shard axis (job-index ${{ strategy.job-index }}, shard ${{ matrix.shard }}), so strategy.job-total is not the shard count" }
+              if ($env:LITE_TIMING_RUN -match '^\d+$') {
+                  $planDir = Join-Path $env:RUNNER_TEMP 'lite-shard-plan'
+                  $timingDir = Join-Path $planDir 'timings'
+                  New-Item -ItemType Directory -Force -Path $timingDir | Out-Null
+                  $classesFile = Join-Path $planDir 'classes.txt'
+                  Set-Content -Path $classesFile -Value $classes -Encoding utf8NoBOM
+
+                  $PSNativeCommandUseErrorActionPreference = $false
+                  $downloaded = $false
+                  foreach ($attempt in 1..3) {
+                      # Start every try from an empty folder: gh will not overwrite a file that a partial try left.
+                      Remove-Item -Recurse -Force -Path $timingDir -ErrorAction SilentlyContinue
+                      New-Item -ItemType Directory -Force -Path $timingDir | Out-Null
+                      gh run download $env:LITE_TIMING_RUN --pattern 'lite-tests-timing-*' --dir $timingDir
+                      if ($LASTEXITCODE -eq 0) { $downloaded = $true; break }
+                      Write-Host "timing download attempt $attempt of 3 failed with exit code $LASTEXITCODE"
+                      if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+                  }
+                  if (-not $downloaded) { throw "could not download the Lite timings of run $env:LITE_TIMING_RUN that the gate pinned - failing this shard rather than cutting alone, because the other shards may have cut by duration" }
+                  # The gate pinned the exact artifact set. A leg that got fewer (one expired or was deleted since,
+                  # which gh skips without failing) would cut from different inputs than the other legs.
+                  $expected = @(($env:LITE_TIMING_ARTIFACTS -split ',') | Where-Object { $_ } | Sort-Object)
+                  $got = @(Get-ChildItem -Path $timingDir -Directory | ForEach-Object { $_.Name } | Sort-Object)
+                  if ($expected.Count -eq 0 -or ($expected -join ',') -ne ($got -join ',')) { throw "downloaded timing artifacts [$($got -join ', ')] are not the [$($expected -join ', ')] the gate pinned from run $env:LITE_TIMING_RUN - failing this shard rather than cutting from different inputs than the other shards" }
+
+                  $packOutput = @(python .github/scripts/lite-shard-pack.py pack --classes $classesFile --shards $shards --out $planDir --timings $timingDir)
+                  $packExit = $LASTEXITCODE
+                  $packOutput | ForEach-Object { Write-Host $_ }
+                  if ($packExit -ne 0) { throw 'the shard packer failed or could not prove its cut total - failing this shard rather than guessing' }
+                  # The packer itself falls back to the hash cut when the timings are unusable (missing, corrupt,
+                  # empty, all zero, or under 80% of this commit's classes); it says which it used, and so does
+                  # the notice below.
+                  $method = if (($packOutput -join ' ') -match 'shards by (\w+);') { $Matches[1] } else { 'an unreported method' }
+                  # The guard again, on the very files this shard reads.
+                  python .github/scripts/lite-shard-pack.py reconcile --classes $classesFile --shards $shards --out $planDir
+                  if ($LASTEXITCODE -ne 0) { throw 'the shard files are not exactly the discovered classes - failing this shard' }
+
+                  $mine = @(Get-Content -Path (Join-Path $planDir "shard-${{ matrix.shard }}.txt") | Where-Object { $_.Trim() })
+                  # A fingerprint of the whole plan, identical on every leg when they cut from the same inputs. Each
+                  # shard file is labelled, so the same classes split differently across shards give a different id
+                  # (joined bare, [A, B] + [C] and [A] + [B, C] hashed the same). Nothing compares the legs' ids: it
+                  # is a diagnostic to read side by side, and the pinned artifact set above is what keeps them equal.
+                  $planText = (0..($shards - 1) | ForEach-Object { "shard-$_`n" + (Get-Content -Raw -Path (Join-Path $planDir "shard-$_.txt")) }) -join ''
+                  $planId = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($planText))).Substring(0, 12).ToLower()
+                  Write-Host "::notice title=Lite shard plan::cut by $method (timings of run $env:LITE_TIMING_RUN); plan $planId. Every shard of this run must print this same id."
+              }
+              else {
+                  $sha = [System.Security.Cryptography.SHA256]::Create()
+                  $mine = @($classes | Where-Object {
+                      $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_))
+                      ($hash[0] % $shards) -eq ${{ matrix.shard }}
+                  })
+                  Write-Host "::notice title=Lite shard plan::no timing source pinned, so this run cuts by class-name hash"
+              }
               Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
           }
           if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
@@ -2047,7 +2205,7 @@ jobs:
           fi
           case "${RESULT}" in
             success)
-              echo "::notice title=Lite shards green::All four class-hash shards succeeded (or every leg's filters said the Lite suite is untouched by this diff)." ;;
+              echo "::notice title=Lite shards green::All four shards succeeded (or every leg's filters said the Lite suite is untouched by this diff)." ;;
             skipped)
               echo "::notice title=Lite shards skipped::The matrix job itself was skipped, which only the release guard does - and releases run the whole suite unsharded in the build job." ;;
             *)

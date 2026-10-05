@@ -343,6 +343,14 @@ public sealed class CaggGroupIndexDropLiveTests
             await dropEnd.ExecuteNonQueryAsync(ct);
         }
 
+        if (simulatedVersion < QueryStatsHourLedgerTests.RungVersion)
+        {
+            /* V164 (#4605) - the hourly row-count ledger; the ledger table is the probe's sentinel. */
+            await using var dropLedger = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS collect.query_stats_hour_ledger_state, collect.query_stats_hour_ledger", connection);
+            await dropLedger.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < StoreStatementHistoryRungTests.RungVersion)
         {
             /* V163 (#5097) - the store's statement history; the history table is the probe's sentinel. */

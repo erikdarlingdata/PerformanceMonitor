@@ -380,6 +380,8 @@ public sealed class StoreSelfMetricsTests
             ["collect.store_log_captures"] = "self-telemetry about the store's own logging, not collected monitoring data",
             ["collect.read_latency"] = "internal self-telemetry (the read-path histogram), not collected monitoring data (V148 doc)",
             ["collect.pg_statement_text"] = "dimension-shaped content keyed to facts rather than collected as facts, pruned on last_seen (V73 doc)",
+            ["collect.query_stats_hour_ledger"] = "the hourly row count of query_stats the count guard reads, one row per server per hour and pruned to the hourly rollup's horizon, not collected monitoring data (V164 doc)",
+            ["collect.query_stats_hour_ledger_state"] = "one row saying from which hour the ledger is complete, bytes too small to matter (V164 doc)",
             ["collect.store_statement_captures"] = "internal self-telemetry (the store's statement history captures), not collected monitoring data (V163 doc)",
             ["collect.store_statement_history"] = "internal self-telemetry (the store's statement history), pruned to 90 days by its own writer, not collected monitoring data (V163 doc)",
             ["collect.slow_reads"] = "internal self-telemetry (the slow-read record), not collected monitoring data (V162 doc)",

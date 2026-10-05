@@ -222,8 +222,9 @@ public sealed class McpToolsListBudgetTests
     // merged with dev c1679bcdd: 188,119 -> 191,056 (= 188,119 + 1,052 + 1,885), 173 -> 177 tools. The ceiling now covers all 177 served tools.
     /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History button,
        measured on the tree merged with dev c1679bcdd and the raw-plan reads: 191,056 -> 191,824 (+768), 177 -> 178 tools. The ceiling
-       now covers all 178 served tools. */
-    private const int TotalCeilingBytes = 191_824;
+       now covers all 178 served tools. Re-measured after merging dev 9a089ff8e (#5260 landed there squashed): 191,814 bytes, 178 tools,
+       so the ceiling is 191,814. */
+    private const int TotalCeilingBytes = 191_814;
 
 
 

@@ -142,24 +142,23 @@ public sealed class StoreStatementHistoryRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheHistoryTable_AsTheTopArm_AndMapsFullyMigratedToThisRung()
+    public void TheProbeCarriesTheHistoryTable_AndMapsAStoreThroughThisRungToThisRung()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = "to_regclass('collect.store_statement_history') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.LastIndexOf("EXISTS", StringComparison.Ordinal) < probe.IndexOf(arm, StringComparison.Ordinal),
-            "the new arm is the probe's last EXISTS, so it reads at the next ordinal");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        /* No longer the probe's last arm: V164 (the hourly row-count ledger) landed above it. */
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+        Assert.True(ProbeOrdinal < parameters.Length - 1, "a newer rung's sentinel follows this one");
         Assert.Equal("hasStoreStatementHistory", parameters[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
+        var all = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(Rung.Version, (int)method.Invoke(null, all)!);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
