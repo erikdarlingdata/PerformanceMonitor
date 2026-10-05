@@ -289,7 +289,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     {
         var probed = endUtc - startUtc > DurationTrendRouting.TruncationSlack;
         var blockingProbe = probed
-            ? _dataService!.GetBlockedProcessReportsDataStartAsync(_serverId, startUtc, endUtc)
+            ? _dataService!.GetBlockingChartDataStartAsync(_serverId, startUtc, endUtc)
             : Task.FromResult<DateTime?>(null);
         var deadlockProbe = probed
             ? _dataService!.GetDeadlocksDataStartAsync(_serverId, startUtc, endUtc)

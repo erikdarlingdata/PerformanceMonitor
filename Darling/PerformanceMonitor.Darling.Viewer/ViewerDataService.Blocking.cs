@@ -303,11 +303,48 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// Where the Blocking charts' data starts for the window (#5098). Stub: the two-source probe.
+    /// Whether the XE blocked_process_reports source holds a report in the window: the same predicate the Blocking charts' reads
+    /// use for their <c>bpr</c> arm (event time in the window, the event-window floor on collection time, the database filter),
+    /// so true here means the charts draw from XE rows and not from the DMV fallback beside them.
     /// </summary>
-    public Task<DateTime?> GetBlockingChartDataStartAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default) =>
-        GetBlockedProcessReportsDataStartAsync(serverId, startUtc, endUtc, cancellationToken);
+    public const string BlockedProcessReportsInWindowSql = """
+        SELECT EXISTS (
+            SELECT 1
+            FROM v_blocked_process_reports
+            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $5
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        )
+        """;
+
+    /// <summary>Whether the XE blocked-process-report source has a report in the window for the optional database filter (see <see cref="BlockedProcessReportsInWindowSql"/>).</summary>
+    public async Task<bool> HasBlockedProcessReportsInWindowAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(BlockedProcessReportsInWindowSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        AddBlockingParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
+    }
+
+    /// <summary>
+    /// Where the Blocking charts' data starts for the window (#5098). The Trends, Stats and Overview-lane reads draw from the XE
+    /// table when it holds a report in the window and from the DMV snapshots only when it holds none, so when it does the XE
+    /// collector alone names the start: the DMV collector's longer history is not what the chart shows. With no XE report in the
+    /// window it is the grid's two-source probe (<see cref="GetBlockedProcessReportsDataStartAsync"/>). The existence check and
+    /// the probe run one after the other, so the caller's fan-out count is unchanged. A check or probe that throws throws here.
+    /// </summary>
+    public async Task<DateTime?> GetBlockingChartDataStartAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
+        if (!await HasBlockedProcessReportsInWindowAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken))
+            return await GetBlockedProcessReportsDataStartAsync(serverId, startUtc, endUtc, cancellationToken);
+
+        return await DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("blocked_process_reports"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+    }
 
     /// <summary>Maps the full 37-column blocked-process-report read into the widened grid row.</summary>
     private async Task<List<ViewerBlockedProcessRow>> ReadBlockedProcessRowsAsync(
