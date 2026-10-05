@@ -199,10 +199,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
     public async Task ASparseEventType_OnAnOldServer_UsesTheTablesCoverage_AgainstDevPostgres(HealthTool tool) =>
         await RunHealthAsync("sparse-" + tool, async (c, ds, end) =>
         {
-            /* Events of another type sit before the window and none of this type until a day ago, with no collector run logged:
-               the table is covered from before the window whatever this type's first hit says. */
+            /* An event of another type sits inside the window, two days before the first of this type, with no collector run logged:
+               the table is covered from before the window whatever this type's first hit says, and a probe filtered to this type
+               would not see the other type's event at all. */
             await SeedHealthServerAsync(c, "sparse-" + tool, end.AddDays(-30), null, end);
-            await SeedHealthEventAsync(c, "sparse-" + tool, OtherTypeOf(tool), end.AddHours(-168 - 24));
+            await SeedHealthEventAsync(c, "sparse-" + tool, OtherTypeOf(tool), end.AddDays(-3));
             await SeedHealthEventAsync(c, "sparse-" + tool, tool, end.AddDays(-1));
 
             var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "sparse-" + tool, 168, end));
@@ -318,5 +319,59 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             Assert.False(failed.TryGetProperty("window_truncated", out _));
             Assert.False(failed.TryGetProperty("truncation_note", out _));
             Assert.True(failed.GetProperty("shown").GetInt32() >= 1);
+        });
+
+    [Fact]
+    public async Task ALimitedPage_StillNamesTheEarliestEvent_OfEveryQualifyingRow_AgainstDevPostgres() =>
+        await RunHealthAsync("page-cap", async (c, ds, end) =>
+        {
+            /* The read has no SQL cap, so the store reaches the backfilled event even though limit 1 returns only the newest row. */
+            var began = end.AddDays(-1);
+            var backfilled = end.AddDays(-3);
+            await SeedHealthServerAsync(c, "page-cap", began, began, end);
+            await SeedHealthEventAsync(c, "page-cap", HealthTool.SystemHealth, backfilled, collectedAt: began);
+            await SeedHealthEventAsync(c, "page-cap", HealthTool.SystemHealth, end.AddHours(-6));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(HealthTool.SystemHealth, ds, "page-cap", 168, end, limit: 1));
+
+            Assert.Equal(1, root.GetProperty("shown").GetInt32());
+            Assert.Equal(2, root.GetProperty("total_entries").GetInt32());
+            AssertTruncatedAt(root, backfilled, end.AddHours(-168));
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SevereErrors)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task NoCoverageInTheWindow_WithEventsLateInIt_NamesTheEarliestEvent_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("nofloor-late-" + tool, async (c, ds, end) =>
+        {
+            /* The server was registered, and its runs logged, only after as_of: the probe finds no coverage in the window, yet backfilled events sit in it. */
+            var late = end.AddHours(-6);
+            await WindowFloorLiveHarness.SeedServerAsync(c, HealthName("nofloor-late-" + tool), end.AddHours(1), Collector, end.AddHours(1), 30, end.AddHours(3), HealthTables, TestContext.Current.CancellationToken);
+            await SeedHealthEventAsync(c, "nofloor-late-" + tool, tool, late, collectedAt: end.AddHours(1));
+            await SeedHealthEventAsync(c, "nofloor-late-" + tool, tool, end.AddHours(-2), collectedAt: end.AddHours(1));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "nofloor-late-" + tool, 168, end));
+
+            AssertTruncatedAt(root, late, end.AddHours(-168));
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SevereErrors)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task NoCoverageInTheWindow_WithAnEventNearTheWindowStart_IsCovered_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("nofloor-near-" + tool, async (c, ds, end) =>
+        {
+            /* Same shape, but the earliest event is 30 minutes after the window start: within the 90-minute slack, so no notice. */
+            await WindowFloorLiveHarness.SeedServerAsync(c, HealthName("nofloor-near-" + tool), end.AddHours(1), Collector, end.AddHours(1), 30, end.AddHours(3), HealthTables, TestContext.Current.CancellationToken);
+            await SeedHealthEventAsync(c, "nofloor-near-" + tool, tool, end.AddHours(-168).AddMinutes(30), collectedAt: end.AddHours(1));
+            await SeedHealthEventAsync(c, "nofloor-near-" + tool, tool, end.AddHours(-2), collectedAt: end.AddHours(1));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "nofloor-near-" + tool, 168, end));
+
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
         });
 }

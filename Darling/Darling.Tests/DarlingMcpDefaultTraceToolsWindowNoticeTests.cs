@@ -161,7 +161,7 @@ VALUES ($1,$2,$3,$4,$5,'Data File Auto Grow',1500000,256)",
         });
 
     [Fact]
-    public async Task AServerWithNoCollectionAtAll_StaysNotCollectedOrBare_AgainstDevPostgres() =>
+    public async Task AServerWithNoCollectionAtAll_IsEmptyWithTheNotice_AgainstDevPostgres() =>
         await RunTraceAsync("none", async (c, ds, end) =>
         {
             await SeedTraceServerAsync(c, "none", end.AddDays(-30), null, end);
@@ -169,15 +169,60 @@ VALUES ($1,$2,$3,$4,$5,'Data File Auto Grow',1500000,256)",
 
             var json = await CallTraceAsync(ds, "none", 168, end);
 
-            /* An empty store with no capability verdict is `empty`, which always carries the not-covered notice. */
+            /* No engine edition is on record, so there is no capability verdict: the answer is `empty`, and an empty answer over a
+               window nothing covers always carries the not-covered notice under hints. */
             var root = WindowFloorLiveHarness.Parse(json);
-            if (root.GetProperty("status").GetString() == "empty")
-            {
-                Assert.True(root.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
-            }
-            else
-            {
-                Assert.DoesNotContain("effective_start", json, StringComparison.Ordinal);
-            }
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            Assert.True(root.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.False(root.TryGetProperty("window_truncated", out _));
+        });
+
+    [Fact]
+    public async Task ALimitedPage_StillNamesTheEarliestEvent_OfEveryQualifyingRow_AgainstDevPostgres() =>
+        await RunTraceAsync("page-cap", async (c, ds, end) =>
+        {
+            /* The read has no SQL cap, so the store reaches the backfilled event even though limit 1 returns only the newest row. */
+            var began = end.AddDays(-1);
+            var backfilled = end.AddDays(-3);
+            await SeedTraceServerAsync(c, "page-cap", began, began, end);
+            await SeedTraceEventAsync(c, "page-cap", backfilled, collectedAt: began);
+            await SeedTraceEventAsync(c, "page-cap", end.AddHours(-6));
+
+            var root = WindowFloorLiveHarness.Parse(await CallTraceAsync(ds, "page-cap", 168, end, limit: 1));
+
+            Assert.Equal(1, root.GetProperty("shown").GetInt32());
+            Assert.Equal(2, root.GetProperty("total_events").GetInt32());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(backfilled), root.GetProperty("effective_start").GetString());
+        });
+
+    [Fact]
+    public async Task NoCoverageInTheWindow_WithEventsLateInIt_NamesTheEarliestEvent_AgainstDevPostgres() =>
+        await RunTraceAsync("nofloor-late", async (c, ds, end) =>
+        {
+            /* The server was registered, and its runs logged, only after as_of: the probe finds no coverage in the window, yet backfilled events sit in it. */
+            var late = end.AddHours(-6);
+            await SeedTraceServerAsync(c, "nofloor-late", end.AddHours(1), end.AddHours(1), end.AddHours(3));
+            await SeedTraceEventAsync(c, "nofloor-late", late, collectedAt: end.AddHours(1));
+            await SeedTraceEventAsync(c, "nofloor-late", end.AddHours(-2), collectedAt: end.AddHours(1));
+
+            var root = WindowFloorLiveHarness.Parse(await CallTraceAsync(ds, "nofloor-late", 168, end));
+
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(late), root.GetProperty("effective_start").GetString());
+        });
+
+    [Fact]
+    public async Task NoCoverageInTheWindow_WithAnEventNearTheWindowStart_IsCovered_AgainstDevPostgres() =>
+        await RunTraceAsync("nofloor-near", async (c, ds, end) =>
+        {
+            /* Same shape, but the earliest event is 30 minutes after the window start: within the 90-minute slack, so no notice. */
+            await SeedTraceServerAsync(c, "nofloor-near", end.AddHours(1), end.AddHours(1), end.AddHours(3));
+            await SeedTraceEventAsync(c, "nofloor-near", end.AddHours(-168).AddMinutes(30), collectedAt: end.AddHours(1));
+            await SeedTraceEventAsync(c, "nofloor-near", end.AddHours(-2), collectedAt: end.AddHours(1));
+
+            var root = WindowFloorLiveHarness.Parse(await CallTraceAsync(ds, "nofloor-near", 168, end));
+
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
         });
 }

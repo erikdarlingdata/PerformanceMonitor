@@ -89,6 +89,9 @@ public sealed class DarlingMcpHealthParserTools
                 return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SpServerDiagnosticsEvent,
                     "none carried a SYSTEM component result with a timestamp (the other four sp_server_diagnostics components feed the sibling reads)", logger, cancellationToken);
 
+            /* The earliest event is taken from every qualifying row, before the page limit applies: the read has no SQL cap, so the store
+               really reaches that event, and shown / total_entries show the page cap. With a small limit, effective_start can therefore
+               name an event no returned row carries. */
             var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
 
             return Finish(notice, JsonSerializer.Serialize(new
@@ -636,7 +639,7 @@ public sealed class DarlingMcpHealthParserTools
     /// <see cref="Rows"/>. The id rides along for the #2511 engine-capability probe on the zero-row path —
     /// re-resolving the name there would be a second registry read, which could answer for a different server.</summary>
     private readonly record struct Collected<T>(
-        string? EarlyReturn, int ServerId, string ServerName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt, DateTime WindowEnd = default);
+        string? EarlyReturn, int ServerId, string ServerName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt, DateTime WindowEnd);
 
     /// <summary>
     /// Resolves the server, validates hours_back + as_of + limit, reads the raw event_xml for
@@ -656,10 +659,10 @@ public sealed class DarlingMcpHealthParserTools
         Func<string, IEnumerable<T>> shred, Func<T, bool> significant, CancellationToken cancellationToken = default) where T : class
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, cancellationToken);
-        if (error != null) return new Collected<T>(error, 0, "", new List<T>(), 0, null);
+        if (error != null) return new Collected<T>(error, 0, "", new List<T>(), 0, null, default);
 
         var validation = McpHelpers.ValidateWindow(hoursBack, asOf, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
-        if (validation != null) return new Collected<T>(validation, 0, "", new List<T>(), 0, null);
+        if (validation != null) return new Collected<T>(validation, 0, "", new List<T>(), 0, null, default);
 
         var now = windowEnd;
         var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(

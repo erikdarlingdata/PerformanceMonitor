@@ -81,6 +81,8 @@ public sealed class DarlingMcpDefaultTraceTools
                     return notCollected;
             }
 
+            /* Taken from every significant row, before the page limit applies: the read has no SQL cap, so the store really reaches that
+               event, and the answer's shown / total counts show the page cap. effective_start can name an event the page does not carry. */
             var earliestShown = significant.Select(e => e.EventTimeUtc).Where(t => t.HasValue).Min();
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 async () =>
