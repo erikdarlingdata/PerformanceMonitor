@@ -35,4 +35,12 @@ public interface ICollectorRowWriter
     ICollectorRowWriter Value(DateTime value);
     ICollectorRowWriter Value(DateTime? value);
     ICollectorRowWriter NullValue();
+
+    /// <summary>
+    /// Writes a payload column that may already be held by the store under a content digest. A host whose
+    /// store keeps payloads by digest can write <paramref name="knownDigest"/> alone when
+    /// <paramref name="content"/> is null; every other host writes the content, which is this default.
+    /// Exactly one payload column is consumed either way.
+    /// </summary>
+    ICollectorRowWriter PayloadOrDigest(string? content, string? knownDigest) => Value(content);
 }

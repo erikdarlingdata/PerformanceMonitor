@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -41,15 +43,23 @@ public static class PayloadDimensionWriter
     /// per-collector payload flush, whose observed store phases run 1.8–11.4s and which #2776 has no
     /// evidence against. Only the Query Store plan-fetch caller opts in, because that is the path where a
     /// 12 MB flush plus map upsert in one transaction was being cancelled at 30s.</para>
+    ///
+    /// <para>Digests the batch's rows reference WITHOUT content (<see cref="PayloadDimensionBatch.AddTouch"/>)
+    /// get one more statement per dimension table in this same transaction, <see cref="PayloadDimensions.TouchSql"/>,
+    /// which keeps their <c>last_seen</c> alive under the same <see cref="PayloadDimensions.LastSeenRefreshGuardHours"/>
+    /// guard as the insert path, so the dimension GC's liveness invariant is unchanged. The result is the
+    /// touched digests that have NO dim row, as upper-case hex (the form <c>Convert.ToHexString</c> gives);
+    /// empty when there are none, which is every batch that touches nothing.</para>
     /// </summary>
-    public static async Task FlushAsync(
+    public static async Task<IReadOnlyList<string>> FlushAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
         PayloadDimensionBatch batch,
         DateTime collectionTime,
         CancellationToken cancellationToken,
         bool compressPlanContent = true,
-        int? commandTimeoutSeconds = null)
+        int? commandTimeoutSeconds = null,
+        ILogger? logger = null)
     {
         if (connection is null)
         {
@@ -63,7 +73,7 @@ public static class PayloadDimensionWriter
 
         if (batch.IsEmpty)
         {
-            return;
+            return Array.Empty<string>();
         }
 
         /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
@@ -116,5 +126,48 @@ public static class PayloadDimensionWriter
 
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
+
+        List<string>? absent = null;
+        foreach (var dimTable in batch.TouchedDimTables)
+        {
+            var touched = batch.TouchedDigests(dimTable);
+            if (touched.Length == 0)
+            {
+                continue;
+            }
+
+            await using var command = new NpgsqlCommand(PayloadDimensions.TouchSql(dimTable), connection, transaction);
+            if (commandTimeoutSeconds is int timeout)
+            {
+                command.CommandTimeout = timeout;
+            }
+
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea,
+                Value = touched,
+            });
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Timestamp,
+                Value = lastSeen,
+            });
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                (absent ??= new List<string>()).Add(Convert.ToHexString(reader.GetFieldValue<byte[]>(0)));
+            }
+        }
+
+        if (absent is null)
+        {
+            return Array.Empty<string>();
+        }
+
+        logger?.LogDebug(
+            "{AbsentDigests} referenced payload digest(s) have no dimension row; their rows will read without content",
+            absent.Count);
+        return absent;
     }
 }
