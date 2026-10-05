@@ -94,7 +94,7 @@ internal sealed class BundleAliaser
 
     private const string Octet = @"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)";
     private const string Ipv4 = Octet + @"(?:\." + Octet + "){3}";
-    /* An IPv4 address written inside an IPv6 one (::ffff:10.20.30.40, 64:ff9b::10.20.30.40, 0:0:0:0:0:ffff:10.20.30.40).
+    /* An IPv4 address written inside an IPv6 one (::ffff:203.0.113.77, 64:ff9b::203.0.113.77, 0:0:0:0:0:ffff:203.0.113.77).
        It is tried before the plain IPv6 branches, which would otherwise stop at the first octet. */
     private const string Ipv6WithIpv4 = @"(?:[0-9a-f]{0,4}:){2,7}" + Ipv4;
     private const string Ipv6 = @"(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,7}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,5})?|::(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4}";
@@ -700,7 +700,7 @@ internal sealed class BundleAliaser
         var unescaped = string.Join('\n', values.Select(v => v.Text));
         var leaks = new List<BundleLeak>();
 
-        foreach (var secret in _secrets)
+        foreach (var secret in _secrets.Where(Verifiable))
         {
             if (serialized.Contains(secret, StringComparison.Ordinal) || unescaped.Contains(secret, StringComparison.Ordinal))
             {

@@ -73,14 +73,14 @@ public sealed class DiagnosticsBundleAliasHardeningTests
     }
 
     [Theory]
-    [InlineData("::ffff:10.20.30.40")]
-    [InlineData("::FFFF:10.20.30.40")]
-    [InlineData("0:0:0:0:0:ffff:10.20.30.40")]
-    [InlineData("64:ff9b::10.20.30.40")]
+    [InlineData("::ffff:203.0.113.77")]
+    [InlineData("::FFFF:203.0.113.77")]
+    [InlineData("0:0:0:0:0:ffff:203.0.113.77")]
+    [InlineData("64:ff9b::203.0.113.77")]
     public void Ipv4MappedIpv6_AliasesTheWholeAddress(string address)
     {
         var text = new BundleAliaser().Alias("host=" + address + " refused");
-        Assert.DoesNotContain("10.20.30", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("203.0.113", text, StringComparison.Ordinal);
         Assert.DoesNotContain("ffff", text, StringComparison.OrdinalIgnoreCase);
         Assert.Equal("host=ip-1 refused", text);
     }
