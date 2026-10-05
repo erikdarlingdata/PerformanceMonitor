@@ -45,8 +45,8 @@ public sealed class DiagnosticsBundleLeakLiveTests
     private const string Password = "Sup3rS3cret!";
     private const string Domain = "example.test";
     private const string StoreRole = "qxreporter";
-    private const string TcpServer = "qxtcpname-09";
-    private const string TcpHostName = "qxtcphost-09.qxzone.test";
+    private const string TcpServer = "qxtcpname-alpha";
+    private const string TcpHostName = "qxtcphost-alpha.qxzone.test";
     private const string StoreLogSecretHost = "qxlogged-12";
     private const string RemovedServer = "qxgone-21";
 
@@ -54,7 +54,7 @@ public sealed class DiagnosticsBundleLeakLiveTests
     internal static readonly string[] Forbidden =
     {
         ServerOne, "zeta-07.example.test", "QXINST", ServerTwo, "203.0.113.40", DisplayTwo, "Epsilon", DbOne, DbTwo, Login, Password, Domain,
-        "zeta-07x", RemovedServer, StoreLogSecretHost, "QXCORP", "svc_zeta", StoreRole, TcpServer, TcpHostName, "qxtcphost-09", "qxzone",
+        "zeta-07x", RemovedServer, StoreLogSecretHost, "QXCORP", "svc_zeta", StoreRole, TcpServer, TcpHostName, "qxtcphost-alpha", "qxzone",
     };
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
