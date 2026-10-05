@@ -215,7 +215,7 @@ function fanout(read, params, specs) {
            all pages of a population - the aggregate one beside a capped row list is exactly the pairing
            where only one of them needs saying so. */
         const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
-        const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours) });
+        const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server } });
 
         mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
@@ -355,6 +355,7 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
     seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
     ...failures,
     zoomableLineChart({
+      atTime: { server },
       points: mergeSeriesRows(drawn, "time", metric),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
@@ -511,6 +512,7 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
     seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
     ...failures,
     zoomableLineChart({
+      atTime: { server },
       points: mergeSeriesRows(drawn, "time", "v"),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
@@ -664,6 +666,7 @@ async function drawQueryTrend(slot, server, ctx, query) {
     keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
     zoomableLineChart({
+      atTime: { server },
       points: trend.data.trend || [],
       xKey: "collection_time",
       series: [
@@ -731,7 +734,7 @@ export function fileIoPanel(server, ctx) {
        narrowed read spans the hours it answered for. */
     const draw = (title, data, id, empty) =>
       data.series.length
-        ? [el("h4", { text: title }), zoomableLineChart({ points: data.points, xKey: "time", series: data.series, formatValue: (v) => Math.round(v) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours) }, id, chartZoomScope(ctx.hours))]
+        ? [el("h4", { text: title }), zoomableLineChart({ atTime: { server }, points: data.points, xKey: "time", series: data.series, formatValue: (v) => Math.round(v) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours) }, id, chartZoomScope(ctx.hours))]
         : [el("h4", { text: title }), emptyStrip(empty)];
     mount(body, [
       keptWindowStrip(res),
@@ -928,6 +931,9 @@ function line(title, read, params, rowsKey, xKey, series, opts = {}) {
     unit: opts.unit,
     emptyText: opts.emptyText,
     span: opts.span ?? 1,
+    /* The chart menu's "at This Time" items open the SQL Server Queries and Blocking tabs, so a panel on a registry
+       without them (the one PostgreSQL line) passes atTime: false. */
+    atTime: opts.atTime === false || !params || !params.server ? null : { server: params.server },
   });
 }
 
@@ -1958,6 +1964,7 @@ export const POSTGRES_TABS = [
           format: "pct",
           unit: "%",
           emptyText: "No CPU samples in this window. This is an Amazon Aurora feature — on a stock PostgreSQL target this panel is permanently empty.",
+          atTime: false,
         }
       ),
       momentStat(
@@ -3735,6 +3742,7 @@ export function serverTrendPanel(server, ctx, kind) {
       keptWindowStrip(res),
       notes.length ? noticeStrip(notes.join(" ")) : null,
       zoomableLineChart({
+        atTime: { server },
         points,
         xKey: "time",
         series: spec.series.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
@@ -3838,6 +3846,7 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
     notes.length ? noticeStrip(notes.join(" ")) : null,
     missingStrip(trend.data),
     zoomableLineChart({
+      atTime: { server },
       points: mergeSeriesRows(drawn, "time", "memory_mb"),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
@@ -3959,6 +3968,7 @@ export async function drawNamedTrends(slot, server, ctx, kind, checked) {
     notes.length ? noticeStrip(notes.join(" ")) : null,
     missingStrip(trend.data),
     zoomableLineChart({
+      atTime: { server },
       points: mergeSeriesRows(drawn, "time", kind === "latch" ? "wait_time_ms_per_second" : "collisions_per_second"),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
@@ -4001,6 +4011,7 @@ export function sessionStatsTrendPanel(server, ctx) {
       keptWindowStrip(res),
       notes.length ? noticeStrip(notes.join(" ")) : null,
       zoomableLineChart({
+        atTime: { server },
         points,
         xKey: "time",
         series: SESSION_TREND_SERIES.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
@@ -4046,6 +4057,7 @@ export function memoryPressurePanels(server, ctx) {
           "Samples where an indicator reads 2 or more, counted per hour as stacked bars; an hour with none draws no bar. " + PRESSURE_COVERAGE_CAVEAT
         ),
         zoomableLineChart({
+          atTime: { server },
           points,
           xKey: "time",
           series: lines,

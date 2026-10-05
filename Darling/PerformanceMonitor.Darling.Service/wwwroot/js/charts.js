@@ -66,6 +66,9 @@ function svg(tag, attrs) {
  *   source     — optional { read, params }: the read name and parameters behind the chart. The chart menu's
  *                Show Data Source item appears only when this is given.
  *   zoomed / onResetZoom — optional: when zoomed is true and onResetZoom is a function, the chart menu offers Reset zoom.
+ *   atTime     — optional { server }: a server-tab chart. A right-click on the plot then also offers Show Active Queries /
+ *                Blocking / Deadlocks at This Time, which set the server's custom range to the clicked time ±30 minutes
+ *                and open that tab. A menu opened without a pointer (the ⋯ button) has no clicked time and offers none.
  *   windowStart— optional x-axis DOMAIN start, windowEnd its end, both UTC-epoch ms (#2802). When both are given
  *   windowEnd    and windowEnd > windowStart, the axis spans [windowStart, windowEnd] — the REQUESTED time window
  *                — instead of the data's own first/last-point extent, so a sparse discrete-event series (blocking,
@@ -78,7 +81,7 @@ function svg(tag, attrs) {
 export function renderLineChart(spec) {
   const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
   const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
-  const { hiddenKeys = null, onLegend = null } = spec;
+  const { hiddenKeys = null, onLegend = null, atTime = null } = spec;
   /* Legend hide/isolate: a hidden series is dropped from everything below (the y-domain, the stack, the drawn
      marks, the hover tooltip and the CSV) so the axis rescales to what is visible. The legend still lists it,
      marked off, so it can be brought back. Hiding every series is never honoured: the chart keeps all of them. */
@@ -569,7 +572,9 @@ export function renderLineChart(spec) {
   const exportRows = exportPoints
     ? exportPoints.map((r) => ({ t: parseUtc(r[xKey]), r })).filter((p) => p.t).sort((a, b) => a.t - b.t)
     : rows;
-  attachChartMenu(chart, root, { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey }, exportRows);
+  /* The right-click time: the pointer's x mapped through vbToTime, which clamps it to the chart's own x range. */
+  const timeAt = atTime ? (clientX) => vbToTime(toVbX(clientX)) : null;
+  attachChartMenu(chart, root, { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, timeAt }, exportRows);
   return chart;
 }
 
@@ -1009,7 +1014,20 @@ export const CHART_MENU_LABELS = {
   reset: "Reset zoom",
   csv: "Export Data to CSV...",
   source: "Show Data Source",
+  atQueries: "Show Active Queries at This Time",
+  atBlocking: "Show Blocking at This Time",
+  atDeadlocks: "Show Deadlocks at This Time",
 };
+
+/** Half of the range an "at this time" item opens: the smallest custom range the picker allows is one hour. */
+export const AT_TIME_HALF_WINDOW_MS = 30 * 60000;
+
+/** The "at this time" items: label, and the server sub-tab the item opens (Deadlocks is a panel of the Blocking tab). */
+const AT_TIME_TARGETS = [
+  { label: CHART_MENU_LABELS.atQueries, tab: "queries" },
+  { label: CHART_MENU_LABELS.atBlocking, tab: "blocking" },
+  { label: CHART_MENU_LABELS.atDeadlocks, tab: "blocking" },
+];
 
 const SVG_STYLE_PROPS = ["fill", "stroke", "stroke-width", "stroke-dasharray", "stroke-linecap", "stroke-linejoin", "opacity", "fill-opacity", "stroke-opacity", "font-family", "font-size", "font-weight", "font-variant-numeric", "text-anchor", "display"];
 const IMAGE_SCALE = 2;
@@ -1089,7 +1107,7 @@ const chartMenuStates = new Map();
 const MENU_STATE_TTL_MS = 90000;
 
 function attachChartMenu(chart, root, opts, rows) {
-  const { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey } = opts;
+  const { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, timeAt } = opts;
   const owner = {};
   const held = menuKey ? chartMenuStates.get(menuKey) : null;
   const restore = held && Date.now() - held.at < MENU_STATE_TTL_MS ? held : null;
@@ -1197,9 +1215,34 @@ function attachChartMenu(chart, root, opts, rows) {
     sourceBox.style.display = "";
   };
 
-  const open = (x, y) => {
+  /* The custom range an at-this-time item applies: t ± 30 minutes. A range may not end in the future, so near "now"
+     the hour is shifted back to end at the current time (it still holds t). */
+  const goToTime = async (t, tab) => {
+    try {
+      const mod = await import("./pages/server.js");
+      let start = t - AT_TIME_HALF_WINDOW_MS;
+      let end = t + AT_TIME_HALF_WINDOW_MS;
+      const now = Date.now();
+      if (end > now) {
+        end = now;
+        start = now - 2 * AT_TIME_HALF_WINDOW_MS;
+      }
+      const err = mod.applyCustomRange(atTime.server, start, end);
+      if (err) {
+        say(err);
+        return;
+      }
+      location.hash = "#/server/" + encodeURIComponent(atTime.server) + "/" + tab;
+    } catch (e) {
+      say("Could not open that time: " + (e && e.message ? e.message : "the page refused."));
+    }
+  };
+
+  const open = (x, y, t) => {
     if (popup) close();
-    const items = actions.map((a) => {
+    const hasTime = !!atTime && Number.isFinite(t);
+    const timed = hasTime ? AT_TIME_TARGETS.map((g) => ({ label: g.label, run: () => goToTime(t, g.tab) })) : [];
+    const items = actions.concat(timed).map((a) => {
       const b = el("button", { class: "chart-menu-item", type: "button", role: "menuitem", text: a.label });
       b.addEventListener("click", () => {
         close();
@@ -1209,7 +1252,7 @@ function attachChartMenu(chart, root, opts, rows) {
       return b;
     });
     popup = el("div", { class: "chart-menu", role: "menu" }, items);
-    const at0 = typeof x === "number" && typeof y === "number" ? { x, y } : null;
+    const at0 = typeof x === "number" && typeof y === "number" ? (hasTime ? { x, y, t } : { x, y }) : null;
     if (at0) {
       /* The stylesheet pins the menu to the right edge; a click position needs left/top alone. */
       popup.style.right = "auto";
@@ -1259,7 +1302,7 @@ function attachChartMenu(chart, root, opts, rows) {
   chart.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     const box = chart.getBoundingClientRect();
-    open(Math.max(0, e.clientX - box.left), Math.max(0, e.clientY - box.top));
+    open(Math.max(0, e.clientX - box.left), Math.max(0, e.clientY - box.top), timeAt ? timeAt(e.clientX) : undefined);
   });
   chart.appendChild(button);
   chart.appendChild(status);
@@ -1271,7 +1314,7 @@ function attachChartMenu(chart, root, opts, rows) {
     }
     if (restore.menu) {
       const m = restore.menu;
-      open(typeof m.x === "number" ? m.x : undefined, typeof m.y === "number" ? m.y : undefined);
+      open(typeof m.x === "number" ? m.x : undefined, typeof m.y === "number" ? m.y : undefined, typeof m.t === "number" ? m.t : undefined);
     }
   }
 }
