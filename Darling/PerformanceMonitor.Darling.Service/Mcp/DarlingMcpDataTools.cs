@@ -656,6 +656,16 @@ public sealed class DarlingMcpDataTools
                     + " " + HourlyWindowEdges.Note(requestedStart, floor, now, routed.HourlyCeiling);
             }
 
+            /* detail='full' on the hourly tier: the rollup carries none of the detail columns, so the call is
+               answered without them. Said here, since a missing field alone reads as "the store has no value". */
+            if (full && hourly)
+            {
+                precisionNote += (precisionNote is null ? "" : " ")
+                    + "detail=full was asked, but the hourly rollup does not carry the detail fields (last_execution_time, creation_time, "
+                    + "physical-read/row/grant/spill/thread min and max, total_clr_ms, plan_generation_num, worker_time_per_second); they are not in these rows. "
+                    + "A window the raw tier still holds returns them.";
+            }
+
             /* A forced-raw read (parallel_only / min_dop / group_by=host_object) over a window raw no longer
                holds read nothing: the floor is null, and "the whole window" would be a claim about a table that
                was empty. The rollup that does hold the window cannot apply those refinements. */
@@ -816,7 +826,7 @@ public sealed class DarlingMcpDataTools
 
     /// <summary>The row, plus (detail='full', raw tier) the desktop grid's remaining columns. A field the store
     /// has no value for is left out, not written as null, so a full row stays as small as its data. The two
-    /// timestamps are the monitored server's own clock, written without a zone, as the desktop grid shows them.</summary>
+    /// timestamps are naive UTC, converted from the monitored server's clock at the read.</summary>
     private static JsonObject WithDetail(object row, DarlingDataReader.TopQueryDetail? d, bool full)
     {
         var node = JsonSerializer.SerializeToNode(row, McpHelpers.JsonOptions)!.AsObject();
@@ -833,9 +843,13 @@ public sealed class DarlingMcpDataTools
             }
         }
 
-        const string ServerClock = "yyyy-MM-dd HH:mm:ss";
-        Put("last_execution_time", d.LastExecutionTime?.ToString(ServerClock, CultureInfo.InvariantCulture));
-        Put("creation_time", d.CreationTime?.ToString(ServerClock, CultureInfo.InvariantCulture));
+        var times = new
+        {
+            last_execution_time = d.LastExecutionTime?.ToString("o"),
+            creation_time = d.CreationTime?.ToString("o"),
+        };
+        Put("last_execution_time", times.last_execution_time);
+        Put("creation_time", times.creation_time);
         Put("min_physical_reads", d.MinPhysicalReads);
         Put("max_physical_reads", d.MaxPhysicalReads);
         Put("min_rows", d.MinRows);

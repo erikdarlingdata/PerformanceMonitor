@@ -762,7 +762,7 @@ const READS_WITHOUT_AS_OF = new Set(["get_fleet_overview", "get_read_latency", "
    these is cut to the exact range. Fields that say when something last happened (last_execution_time and its kin, and
    the captured_at / measured_at that some aggregate reads stamp with their LAST sample) are left alone: those rows are
    totals over the window, not points in it. */
-const INSTANT_FIELDS = ["sample_time", "time", "collection_time", "event_time", "occurred_at", "deadlock_time", "change_time", "time_bucket"];
+const INSTANT_FIELDS = ["sample_time", "time", "collection_time", "event_time", "occurred_at", "deadlock_time", "change_time", "time_bucket", "run_time"];
 
 /* The range belongs to the server page: a read from any other page is never anchored by it. */
 function liveRange() {

@@ -45,6 +45,7 @@ import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } 
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
+import { planColumn } from "./plan-viewer.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -474,7 +475,7 @@ export function topQueriesPanel(server, ctx) {
     const parts = [
       VIZ.table(res.data, {
         rowsKey: "queries",
-        columns: TOP_QUERY_COLUMNS,
+        columns: [...TOP_QUERY_COLUMNS, planColumn(server)],
         groups: TOP_QUERY_GROUPS.groups,
         defaultGroups: TOP_QUERY_GROUPS.defaultGroups,
         emptyText:
@@ -926,7 +927,7 @@ export const SERVER_TABS = [
         "get_top_queries_by_cpu",
         { server, hours: ctx.hours, top: 20, detail: "full" },
         "queries",
-        TOP_QUERY_COLUMNS,
+        [...TOP_QUERY_COLUMNS, planColumn(server)],
         ctx.label,
         "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
         2,
@@ -1563,6 +1564,15 @@ export const SERVER_TABS = [
         JOB_COLUMNS,
         SNAPSHOT,
         "No SQL Agent jobs were running at the last collection — the normal state for most servers."
+      ),
+      table(
+        "Job History",
+        "get_job_history",
+        { server, hours: ctx.hours, limit: 100 },
+        "runs",
+        JOB_HISTORY_COLUMNS,
+        ctx.label + ", newest 100 runs (steps and job outcomes)",
+        "No SQL Agent job runs were retained in this window."
       ),
       table(
         "Index Usage",
@@ -2923,14 +2933,14 @@ const SPINLOCK_COLUMNS = [
    then the metrics. Text pushed behind the metrics is text nobody scrolls to.
    The desktop grid's columns in its order, except that Query and Module sit right of Database (the rule above)
    rather than behind the two timestamps. The ungrouped columns are the core set and always show; the rest follow the toggles in
-   TOP_QUERY_GROUPS, all off at first. Last Execution and Creation Time are the monitored server's own clock and
-   print as the read sends them; every grouped field is omitted by the read on the hourly tier and prints a dash. */
+   TOP_QUERY_GROUPS, all off at first. Last Execution and Creation Time arrive as UTC instants (the read converts them from the monitored
+   server's clock) and print in the browser's local time; every grouped field is omitted by the read on the hourly tier and prints a dash. */
 const TOP_QUERY_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
   { key: "host_object", label: "Module" },
-  { key: "last_execution_time", label: "Last Execution", group: "Times" },
-  { key: "creation_time", label: "Creation Time", group: "Times" },
+  { key: "last_execution_time", label: "Last Execution", format: "time", group: "Times" },
+  { key: "creation_time", label: "Creation Time", format: "time", group: "Times" },
   { key: "execution_count", label: "Execs", format: "int" },
   { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
   { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
@@ -3666,6 +3676,19 @@ const JOB_COLUMNS = [
   { key: "percent_of_average", label: "% of avg", format: "num1" },
   { key: "is_running_long", label: "Long", format: "bool" },
   { key: "successful_run_count", label: "Successes", format: "int" },
+];
+
+/* The Job History grid on the Activity tab: the cross-server page's columns less Server, since the tab is one server's. */
+const JOB_HISTORY_COLUMNS = [
+  { key: "run_time", label: "Run Time", format: "time" },
+  { key: "job_name", label: "Job" },
+  { key: "category", label: "Category" },
+  { key: "step", label: "Step" },
+  { key: "status", label: "Status" },
+  { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
+  { key: "retries", label: "Retries", format: "int" },
+  { key: "last_success", label: "Last Success", format: "time" },
+  { key: "message", label: "Message", wrap: true },
 ];
 
 const PERFMON_COLUMNS = [

@@ -15,6 +15,7 @@ using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -233,7 +234,7 @@ internal static class DarlingDataReader
 
     /// <summary>The per-group extremes and identity fields the desktop Top Queries grid shows beyond the core
     /// ranking columns. Every field is null when the store has no value. <c>LastExecutionTime</c> and
-    /// <c>CreationTime</c> are the monitored server's own clock, as the desktop grid shows them.</summary>
+    /// <c>CreationTime</c> are naive UTC, converted from the monitored server's clock at the read.</summary>
     public sealed record TopQueryDetail(
         DateTime? LastExecutionTime, DateTime? CreationTime,
         long? MinPhysicalReads, long? MaxPhysicalReads, long? MinRows, long? MaxRows,
@@ -1589,6 +1590,9 @@ internal static class DarlingDataReader
         }
 
         var rows = new List<TopQueryRow>();
+        /* The two detail timestamps are stored on the monitored server's own clock; they are converted to naive
+           UTC per row through the server's clock, as every other server-local column on the MCP surface is. */
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         /* #2235: same parameters, same columns, different GROUP BY — see TopQueriesByHostObjectSql. */
         await using var command = postgres.CreateCommand(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -1623,18 +1627,19 @@ internal static class DarlingDataReader
                 reader.IsDBNull(20) ? "" : reader.GetString(20),
                 reader.IsDBNull(21) ? 0 : reader.GetInt64(21),
                 reader.IsDBNull(22) ? 1 : reader.GetInt64(22),
-                ReadTopQueryDetail(reader, 23)));
+                ReadTopQueryDetail(reader, 23, clock)));
         }
 
         return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced);
     }
 
     /// <summary>The detail columns of <see cref="TopQueriesSql"/> / <see cref="TopQueriesByHostObjectSql"/>, 21
-    /// consecutive fields from <paramref name="first"/>: two timestamps, sixteen integer extremes, CLR time, the
+    /// consecutive fields from <paramref name="first"/>: two timestamps (converted to naive UTC through
+    /// <paramref name="clock"/>), sixteen integer extremes, CLR time, the
     /// plan generation and the peak CPU rate.</summary>
-    private static TopQueryDetail ReadTopQueryDetail(NpgsqlDataReader reader, int first)
+    private static TopQueryDetail ReadTopQueryDetail(NpgsqlDataReader reader, int first, ServerClock clock)
     {
-        DateTime? Time(int i) => reader.IsDBNull(first + i) ? null : reader.GetDateTime(first + i);
+        DateTime? Time(int i) => DarlingServerClockReader.ToUtc(clock, reader, first + i);
         long? Long(int i) => reader.IsDBNull(first + i) ? null : Convert.ToInt64(reader.GetValue(first + i), CultureInfo.InvariantCulture);
         return new TopQueryDetail(
             Time(0), Time(1),
