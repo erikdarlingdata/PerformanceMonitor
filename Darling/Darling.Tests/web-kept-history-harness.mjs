@@ -276,6 +276,7 @@ const PG_WINDOW_BODIES = {
     worst_database: "db1", worst_pct_toward_wraparound: 1, thresholds: { failsafe_engages_around_pct: 74.5 }, databases: [{ database_name: "db1" }],
   },
   get_pg_write_stats: { checkpoints_timed: 4, checkpoints_requested: 1 },
+  get_pg_index_usage: { indexes_returned: 1, indexes: [{ index: "ix1" }] },
 };
 
 const scenarios = {

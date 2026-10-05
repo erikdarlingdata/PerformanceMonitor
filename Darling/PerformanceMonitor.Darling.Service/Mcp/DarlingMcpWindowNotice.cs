@@ -173,6 +173,70 @@ internal static class DarlingMcpWindowNotice
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
+    /// <summary>The reads the web does not list, and the collector table each one windows on (both on <c>collection_time</c>).</summary>
+    internal static readonly System.Collections.Generic.IReadOnlyDictionary<string, string> UnlistedTableByRead =
+        new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["get_pg_cpu_utilization"] = "pg_cpu_utilization",
+        };
+
+    /// <summary>The table <paramref name="read"/> is named after in a notice: the web's table when it lists the read, else its own.</summary>
+    internal static string TableFor(string read) =>
+        WebDataStartNote.TableByRead.TryGetValue(read, out var table) ? table : UnlistedTableByRead[read];
+
+    /// <summary>
+    /// The coverage probe source of <paramref name="read"/>: the one the WEB probes (<see cref="WebDataStartNote.TryGetReadSource"/>)
+    /// when it lists the read, so a tool and the page it shares a read with never name different starts (#4966); else the
+    /// read's collector table.
+    /// </summary>
+    internal static DataWindowFloor.Source SourceFor(string read) =>
+        WebDataStartNote.TryGetReadSource(read, out var source) ? source : DataWindowFloor.Source.ForCollectorTable(UnlistedTableByRead[read]);
+
+    /// <summary>
+    /// <see cref="ReadAsync"/> for one tool over [<paramref name="requestedStart"/>, <paramref name="windowEnd"/>], on
+    /// <see cref="SourceFor"/>, naming <see cref="TableFor"/> in the notice.
+    /// </summary>
+    internal static Task<McpWindowNotice> ReadForToolAsync(
+        NpgsqlDataSource postgres, string tool, string serverName, DateTime requestedStart, DateTime windowEnd,
+        bool emptyAnswer, ILogger? logger, CancellationToken cancellationToken)
+    {
+        /* TableFor throws on a tool in neither map; that must cost only the notice, never the answer. */
+        string table;
+        try
+        {
+            table = TableFor(tool);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            logger?.LogWarning(ex, "No window-notice table is listed for {Tool}; the answer goes without its window-floor notice.", tool);
+            return Task.FromResult(McpWindowNotice.Unavailable);
+        }
+
+        return ReadAsync(
+            () => Probe(postgres, SourceFor(tool), serverName, requestedStart, windowEnd, cancellationToken),
+            requestedStart, windowEnd, table, emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
+    }
+
+    /// <summary>A data answer already serialized: without the three window-floor keys when the probe failed, else as is.</summary>
+    internal static string Finish(string json, McpWindowNotice notice) =>
+        notice.IsUnavailable ? WithoutKeys(json) : json;
+
+    /// <summary>
+    /// An empty answer written with <c>hints = notice.AsHints()</c>, without the <c>hints</c> key when the probe failed (a null
+    /// there would otherwise be written as <c>"hints":null</c>).
+    /// </summary>
+    internal static string FinishEmpty(string json, McpWindowNotice notice)
+    {
+        if (!notice.IsUnavailable)
+        {
+            return json;
+        }
+
+        var node = JsonNode.Parse(json)!.AsObject();
+        node.Remove("hints");
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
     /// <summary>A test's stand-in for the coverage probe, per async flow (null: the store is asked).</summary>
     private static readonly AsyncLocal<Func<Task<DateTime?>>?> s_testOnlyProbe = new();
 

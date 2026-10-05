@@ -154,6 +154,12 @@ internal static class WebDataStartNote
         ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
         ["get_pg_replication_slots"] = "pg_replication_slot_stats",
         ["get_pg_write_stats"] = "pg_write_stats",
+
+        /* The PostgreSQL index usage read (#4966). scans_in_window is the difference between an index's first and last sample in the
+           window, off a collector that runs DAILY, so a short history gives a small difference and an index can look unused only
+           because it has been watched briefly. Both panels of its fanout (the totals and the per-index grid) show window figures, so
+           the page draws the web's own note and the tool's UTC keys are stripped. */
+        ["get_pg_index_usage"] = "pg_index_usage_stats",
     };
 
     /// <summary>
@@ -251,7 +257,7 @@ internal static class WebDataStartNote
         "config_changes",
         "blocking_sampled", "cycles_only", "database_activity", "session_states", "io_activity",
         "database_trend", "query_duration_trend", "wait_trend", "io_trend",
-        "holder_present", "tables_with_pending_maintenance", "slots_present",
+        "holder_present", "tables_with_pending_maintenance", "slots_present", "index_usage",
     };
 
     /// <summary>
@@ -316,6 +322,10 @@ internal static class WebDataStartNote
            and found nothing". Wraparound answers unavailable, autovacuum no_pending_maintenance and slots no_slots without asking the log
            whether the collector ran, and write stats empty for a window too short to difference: none of them is admitted. */
         ["get_pg_xmin_horizon"] = "no_holder",
+
+        /* Index usage (#4966): empty means collection ran and every index is under the size floor, a looked-and-found-nothing answer.
+           Its unavailable (one snapshot, or none in the window) says nothing was read, and is not admitted. */
+        ["get_pg_index_usage"] = "empty",
     };
 
     /// <summary>
@@ -354,6 +364,16 @@ internal static class WebDataStartNote
         "get_collection_log",
         "get_pg_server_config_changes",
         "get_plan_corrections",
+    };
+
+    /// <summary>
+    /// Reads whose tool writes the window-floor keys and whose page panel is a chart over the asked range: the page strips the
+    /// tool's keys and draws no note, because a chart shows its own empty span. They are not in <see cref="TableByRead"/>,
+    /// so nothing else would remove the tool's UTC sentence.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> StripOnlyReads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_pg_cpu_utilization",
     };
 
     /// <summary>
@@ -451,7 +471,7 @@ internal static class WebDataStartNote
         ILogger? logger, CancellationToken cancellationToken)
     {
         var answered = await AddNoteAsync(postgres, tool, server, hoursBack, asOf, result, logger, cancellationToken);
-        if (!ReferenceEquals(answered, result) || !TableByRead.ContainsKey(tool))
+        if (!ReferenceEquals(answered, result) || !(TableByRead.ContainsKey(tool) || StripOnlyReads.Contains(tool)))
         {
             return answered;
         }
