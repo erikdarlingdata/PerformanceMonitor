@@ -136,7 +136,7 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
     };
 
     /// <summary>An event of a different type than the tool reads, so the tool's window is empty beside a collector that IS read.</summary>
-    private static Tool OtherTypeOf(Tool tool) => tool == Tool.SignificantWaits ? Tool.SevereErrors : Tool.MemoryNodeOom;
+    private static Tool OtherTypeOf(Tool tool) => tool is Tool.SignificantWaits or Tool.MemoryNodeOom ? Tool.SevereErrors : Tool.MemoryNodeOom;
 
     private static string LoadFixture(string name) =>
         File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "SystemHealth", name));
