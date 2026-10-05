@@ -43,7 +43,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>Concurrency.</b> The row is read without a lock, probed, then re-checked inside one transaction under
 /// <c>FOR UPDATE</c>; the <c>UPDATE</c> carries <c>modified_at</c> as a predicate, so a write that landed in between
 /// is answered <c>conflict</c> and nothing is written. A caller may also send the <c>modified_at</c> it read as
-/// <c>expected_modified_at</c>.</para>
+/// <c>expected_modified_at</c>. That transaction takes <see cref="IdentityLockSql"/> first, the lock the add's INSERT
+/// takes too, and checks that the new address is still free under it: the address check before the probe is only a
+/// fast refusal, and without the lock an add or another edit could claim the address during the probe (#5240).</para>
 /// </summary>
 public sealed partial class DarlingMcpServerAdminTools
 {
@@ -848,9 +850,10 @@ public sealed partial class DarlingMcpServerAdminTools
         /// <summary>The storage key of every OTHER definition.</summary>
         Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken);
 
-        /// <summary>Re-checks and writes in one transaction: the row under <c>FOR UPDATE</c>, <c>modified_at</c>
-        /// against <paramref name="expectedModifiedAt"/>, and, when <paramref name="newStorageKey"/> is given, the
-        /// other rows' keys; then one column-listed UPDATE.</summary>
+        /// <summary>Re-checks and writes in one transaction: the identity lock (<see cref="IdentityLockSql"/>), the row
+        /// under <c>FOR UPDATE</c>, <c>modified_at</c> against <paramref name="expectedModifiedAt"/>, and, when
+        /// <paramref name="newStorageKey"/> is given, the other rows' keys, now read under the lock; then one
+        /// column-listed UPDATE.</summary>
         Task<ServerEditWrite> WriteAsync(
             int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, CancellationToken cancellationToken);
     }
@@ -944,8 +947,18 @@ FROM config_monitored_servers WHERE server_id = $1";
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-            /* Two-arg on the store connection with the transaction set on it: the shape McpReadCommandTimeoutTests
-               recognises as a store command (see remove_server). */
+            /* #5240: the identity lock, FIRST, before the row lock and the occupancy check below, so that check runs
+               against a table no other identity write (an add's INSERT, another edit) is in the middle of changing.
+               The probe that preceded this write ran outside it; the lock covers this transaction only.
+
+               Every command here is two-arg on the store connection with the transaction set on it: the shape
+               McpReadCommandTimeoutTests recognises as a store command (see remove_server). */
+            await using (var identityLock = new NpgsqlCommand(IdentityLockSql, connection) { Transaction = transaction })
+            {
+                identityLock.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                await identityLock.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             await using (var lockRow = new NpgsqlCommand(LockEditRowSql, connection) { Transaction = transaction })
             {
                 lockRow.CommandTimeout = McpCommandDeadlines.ReadSeconds;
