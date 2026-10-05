@@ -867,6 +867,43 @@ public sealed class EngineCapabilityMissLivePostgresTests
         }
     }
 
+    [Fact]
+    public async Task ANotCollectedAnswer_StartsNoCoverageProbe_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live engine-capability test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterAsync(connection, ct, AzureServerId, AzureServerName, engineEdition: 5);
+            var probes = 0;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => { probes++; return Task.FromResult<DateTime?>(null); };
+
+            /* A 168-hour empty window is always probed; a not_collected answer carries no notice, so it must not be. */
+            var config = await DarlingMcpConfigHistoryTools.GetServerConfigChanges(postgres, AzureServerName);
+            var pressure = await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(postgres, AzureServerName);
+
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(config));
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(pressure));
+            Assert.Equal(0, probes);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingMcpWindowNotice.TestOnlyProbe = null;
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /// <summary>Column list copied from <c>DarlingMcpTestData.RegisterServerAsync</c>, plus the two columns
     /// this test exists to vary. <paramref name="engineKind"/> null is the pre-V82 row — no claim.</summary>
     private static async Task RegisterAsync(
