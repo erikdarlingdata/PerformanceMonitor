@@ -238,7 +238,7 @@ public sealed class DarlingBlockingStatsReadTests
         });
 
     [Fact]
-    public async Task AnEventOlderThanItsCollection_MovesThatSeriesFloorEarlier_AgainstDevPostgres() =>
+    public async Task AnEventOlderThanItsCollection_MovesTheFloorEarlier_AgainstDevPostgres() =>
         await RunWindowAsync("early", async (c, ds, end) =>
         {
             await SeedWindowAsync(c, "early", end, end.AddHours(-10));
