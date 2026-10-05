@@ -22,9 +22,10 @@ namespace Darling.Tests;
 /// A right-click on a server-tab line chart also offers the one item that matches the chart: Show Blocking at This Time
 /// on the blocking charts, Show Deadlocks at This Time on the deadlock charts, Show Active Queries at This Time on the
 /// rest (the desktop's chart drill-downs). Each item sets the server's custom range to the time of the drawn point
-/// nearest the click +- 30 minutes (the smallest range the picker allows) and moves the hash to that tab. These run the
-/// shipped <c>charts.js</c> under Node (<c>web-chart-at-time-harness.mjs</c>), and read <c>server-tabs.js</c> for the
-/// charts that must hand the server over and name their item.
+/// nearest the click +- 30 minutes (the smallest range the picker allows), moves the hash to that tab and, once the router
+/// has built it, scrolls the item's own grid into view. These run the shipped <c>charts.js</c> under Node
+/// (<c>web-chart-at-time-harness.mjs</c>), and read <c>server-tabs.js</c> for the charts that must hand the server over
+/// and name their item, and for the grids the scroll looks for.
 /// </summary>
 public sealed class WebChartAtTimeBehaviourTests
 {
@@ -122,6 +123,60 @@ public sealed class WebChartAtTimeBehaviourTests
         var r = Run();
         Assert.Equal("#/server/A/cpu", r.GetProperty("refusedHash").GetString());
         Assert.Equal("The end cannot be in the future.", r.GetProperty("refusedStatus").GetString());
+    }
+
+    [Theory]
+    [InlineData("scrollQueries", 0, "Active Queries")]
+    [InlineData("scrollBlocking", 2, "Blocking")]
+    [InlineData("scrollDeadlocks", 3, "Deadlocks")]
+    public void EachItem_BringsItsOwnGridIntoView_OnceTheRouterHasBuiltTheTab(string scroll, int index, string title)
+    {
+        // The Blocking tab holds a Deadlocks chart (panel 1) and, further down, the Deadlocks grid (panel 3). The desktop's
+        // Deadlocks item opens its Deadlocks sub-tab, so the item must reach the grid, not the chart that shares its title;
+        // the Blocking item reaches the Blocking grid (2), not the Blocking Events chart (0).
+        var call = OneCall(Run(), scroll);
+        Assert.Equal(title, call.GetProperty("title").GetString());
+        Assert.Equal(index, call.GetProperty("index").GetInt32());
+        Assert.Equal("start", call.GetProperty("block").GetString());
+    }
+
+    [Fact]
+    public void TheScrollListener_RunsOnce_AndIsAddedOnlyOnceTheRangeIsTaken()
+    {
+        var r = Run();
+        // Three items ran, so a listener that outlived its hashchange would be left here (and scroll on every later tab click).
+        Assert.Equal(0, r.GetProperty("listenersLeft").GetInt32());
+        // A range the page refuses opens no tab, so nothing may be left waiting for one either.
+        Assert.Equal(0, r.GetProperty("refusedListeners").GetInt32());
+    }
+
+    [Fact]
+    public void TheGridEachItemScrollsTo_IsAPanelOfTheTabItOpens_AndTheDeadlocksGridSitsBelowItsChart()
+    {
+        var js = new[] { "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js" };
+        var tabs = File.ReadAllText(PathTo(js.Concat(new[] { "pages", "server-tabs.js" }).ToArray()));
+        var charts = File.ReadAllText(PathTo(js.Concat(new[] { "charts.js" }).ToArray()));
+
+        // A tab's source: from its `id: "<id>",` line to the next tab's. The first match is the SQL Server registry's.
+        string Tab(string id)
+        {
+            var open = Regex.Match(tabs, @"\n  \{\r?\n    id: """ + id + @""",");
+            Assert.True(open.Success, id);
+            var next = Regex.Match(tabs[(open.Index + open.Length)..], @"\n  \{\r?\n    id: """);
+            return next.Success ? tabs.Substring(open.Index, open.Length + next.Index) : tabs[open.Index..];
+        }
+
+        // The panel titles charts.js names are the grids the tabs really have: a rename would leave the scroll finding nothing.
+        Assert.Contains("panel: \"Active Queries\"", charts);
+        Assert.Matches(@"table\(\s*""Active Queries"",", Tab("queries"));
+        var blocking = Tab("blocking");
+        Assert.Contains("panel: \"Blocking\"", charts);
+        Assert.Matches(@"table\(\s*""Blocking"",", blocking);
+        Assert.Contains("panel: \"Deadlocks\"", charts);
+        // Both the chart and the grid are titled "Deadlocks", and the scroll takes the later one, so the grid must be the later.
+        var chart = blocking.IndexOf("line(\"Deadlocks\",", StringComparison.Ordinal);
+        var grid = Regex.Match(blocking, @"table\(\s*""Deadlocks"",");
+        Assert.True(chart >= 0 && grid.Success && grid.Index > chart, "the Deadlocks grid must come after the Deadlocks chart on the Blocking tab");
     }
 
     [Fact]

@@ -70,9 +70,9 @@ function svg(tag, attrs) {
  *                Time" item that matches what the chart plots, as the desktop's chart drill-downs do: item "blocking" gives
  *                Show Blocking at This Time, "deadlocks" gives Show Deadlocks at This Time, and "queries" (the default,
  *                also for any other value) gives Show Active Queries at This Time. The item sets the server's custom range
- *                to the time of the drawn point nearest the click ±30 minutes and opens that tab. A menu opened without a
- *                click on the plot (the ⋯ button, Shift+F10, a right-click on the legend, the status line or the open
- *                menu) has no time and offers none.
+ *                to the time of the drawn point nearest the click ±30 minutes and opens that tab, scrolled to the item's own
+ *                grid (Active Queries, Blocking or Deadlocks). A menu opened without a click on the plot (the ⋯ button,
+ *                Shift+F10, a right-click on the legend, the status line or the open menu) has no time and offers none.
  *   windowStart— optional x-axis DOMAIN start, windowEnd its end, both UTC-epoch ms (#2802). When both are given
  *   windowEnd    and windowEnd > windowStart, the axis spans [windowStart, windowEnd] — the REQUESTED time window
  *                — instead of the data's own first/last-point extent, so a sparse discrete-event series (blocking,
@@ -1041,13 +1041,14 @@ export const CHART_MENU_LABELS = {
 /** Half of the range an "at this time" item opens: the smallest custom range the picker allows is one hour. */
 export const AT_TIME_HALF_WINDOW_MS = 30 * 60000;
 
-/* The "at this time" items: label, and the server sub-tab the item opens (Deadlocks is a panel of the Blocking tab).
-   Like the desktop (ServerTab.xaml.cs AddChartDrillDownMenuItem), a chart offers the ONE item that matches what it
-   plots. atTime.item names it; Active Queries is the default. */
+/* The "at this time" items: label, the server sub-tab the item opens (Deadlocks is a panel of the Blocking tab), and the
+   title of the panel it brings into view there (the desktop's Deadlocks item opens its Deadlocks sub-tab, where the web
+   has a grid further down the Blocking tab). Like the desktop (ServerTab.xaml.cs AddChartDrillDownMenuItem), a chart
+   offers the ONE item that matches what it plots. atTime.item names it; Active Queries is the default. */
 const AT_TIME_TARGETS = {
-  queries: { label: CHART_MENU_LABELS.atQueries, tab: "queries" },
-  blocking: { label: CHART_MENU_LABELS.atBlocking, tab: "blocking" },
-  deadlocks: { label: CHART_MENU_LABELS.atDeadlocks, tab: "blocking" },
+  queries: { label: CHART_MENU_LABELS.atQueries, tab: "queries", panel: "Active Queries" },
+  blocking: { label: CHART_MENU_LABELS.atBlocking, tab: "blocking", panel: "Blocking" },
+  deadlocks: { label: CHART_MENU_LABELS.atDeadlocks, tab: "blocking", panel: "Deadlocks" },
 };
 
 const SVG_STYLE_PROPS = ["fill", "stroke", "stroke-width", "stroke-dasharray", "stroke-linecap", "stroke-linejoin", "opacity", "fill-opacity", "stroke-opacity", "font-family", "font-size", "font-weight", "font-variant-numeric", "text-anchor", "display"];
@@ -1238,7 +1239,7 @@ function attachChartMenu(chart, root, opts, rows) {
 
   /* The custom range an at-this-time item applies: t ± 30 minutes. A range may not end in the future, so near "now"
      the hour is shifted back to end at the current time (it still holds t). */
-  const goToTime = async (t, tab) => {
+  const goToTime = async (t, tab, panel) => {
     try {
       const mod = await import("./pages/server.js");
       let start = t - AT_TIME_HALF_WINDOW_MS;
@@ -1252,6 +1253,21 @@ function attachChartMenu(chart, root, opts, rows) {
       if (err) {
         say(err);
         return;
+      }
+      /* Bring the item's own grid into view once the router has built the tab. The router's hashchange listener was
+         added first (app.js), and for a server already on screen renderServer paints the tab synchronously, so the new
+         panels are in place when this one runs. A chart and a grid share the title "Deadlocks"; the grid is the later one.
+         The listener is once-only, and added after the range is taken, so a refused range leaves none behind. */
+      if (typeof window.addEventListener === "function") {
+        window.addEventListener(
+          "hashchange",
+          () => {
+            const heads = [...document.querySelectorAll(".panel > h3")].filter((h) => h.firstChild && h.firstChild.textContent === panel);
+            const last = heads[heads.length - 1];
+            if (last && last.parentNode.scrollIntoView) last.parentNode.scrollIntoView({ block: "start" });
+          },
+          { once: true }
+        );
       }
       /* A full render, not a panel redraw, so the range picker in the page head shows the new range too (#5230). Setting
          the hash to the tab already open fires no hashchange, so then the event is raised here. */
@@ -1267,7 +1283,7 @@ function attachChartMenu(chart, root, opts, rows) {
     if (popup) close();
     const hasTime = !!atTime && Number.isFinite(t);
     const g = hasTime ? AT_TIME_TARGETS[atTime.item] || AT_TIME_TARGETS.queries : null;
-    const timed = g ? [{ label: g.label, run: () => goToTime(t, g.tab) }] : [];
+    const timed = g ? [{ label: g.label, run: () => goToTime(t, g.tab, g.panel) }] : [];
     const items = actions.concat(timed).map((a) => {
       const b = el("button", { class: "chart-menu-item", type: "button", role: "menuitem", text: a.label });
       b.addEventListener("click", () => {

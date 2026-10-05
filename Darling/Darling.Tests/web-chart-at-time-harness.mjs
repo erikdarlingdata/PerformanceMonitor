@@ -1,8 +1,8 @@
 /* Runs the web viewer's shipped charts.js against a stand-in DOM and checks the chart menu's "at This Time" items: a
    right-click on a server-tab chart (spec.atTime = { server, item }) offers the ONE item that matches the chart (Show
    Blocking, Show Deadlocks, or Show Active Queries by default) at This Time, and the item sets the server's custom range
-   to the time of the drawn point nearest the click +- 30 minutes and moves the hash to that tab. Prints the findings as
-   one line of JSON.
+   to the time of the drawn point nearest the click +- 30 minutes, moves the hash to that tab and, once the router has built
+   it, scrolls the item's own grid into view. Prints the findings as one line of JSON.
    WebChartAtTimeBehaviourTests starts it as
        node web-chart-at-time-harness.mjs <path to wwwroot/js>
    Every .js under js/ and js/pages/ is copied into the scratch directory (a hand-kept list breaks whenever a page
@@ -50,6 +50,8 @@ class FakeNode {
 }
 
 globalThis.Node = FakeNode;
+/* The page's panel headings, as the router builds them (see runHashchange): div.panel.card > h3 with the title first. */
+let panelHeads = [];
 globalThis.document = {
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (ns, tag) => new FakeNode(tag),
@@ -57,9 +59,52 @@ globalThis.document = {
   body: new FakeNode("body"),
   addEventListener() {},
   removeEventListener() {},
+  querySelectorAll: (selector) => (selector === ".panel > h3" ? panelHeads : []),
 };
-globalThis.location = { hash: "#/server/A/cpu" };
 globalThis.window = globalThis;
+
+/* The page's hash. The browser fires hashchange, a task later, when the hash is set to a NEW value, and nothing when it is
+   set to the value it already holds (goToTime raises the event itself then, through window.dispatchEvent, counted below).
+   A hashchange runs the router's listener first (app.js adds it at start-up; renderServer paints the tab synchronously),
+   which is modelled here as building the panels of the tab the hash names, then the other listeners in the order they were
+   added; a { once: true } listener goes after it runs. */
+let hashValue = "#/server/A/cpu";
+const hashListeners = [];
+const scrolls = [];
+const panelHead = (title, index) => {
+  const head = new FakeNode("h3");
+  head.appendChild(new FakeNode("#text", title));
+  head.appendChild(new FakeNode("span", " last 24 hours"));
+  head.parentNode = { scrollIntoView: (options) => scrolls.push({ title, index, block: options && options.block }) };
+  return head;
+};
+const tabPanels = {
+  queries: ["Active Queries"],
+  /* The Blocking tab in its order: the Deadlocks chart (1) and the Deadlocks grid (3) share a title. */
+  blocking: ["Blocking Events", "Deadlocks", "Blocking", "Deadlocks", "Waiting Tasks", "Blocked Sessions", "Lock Waits", "Blocking Severity", "Deadlock Severity", "Deadlock Graphs", "Blocked Process Reports"],
+};
+const runHashchange = () => {
+  panelHeads = (tabPanels[hashValue.split("/").pop()] || []).map((title, index) => panelHead(title, index));
+  for (const l of hashListeners.slice()) {
+    if (l.once) hashListeners.splice(hashListeners.indexOf(l), 1);
+    l.fn();
+  }
+};
+globalThis.location = {
+  get hash() { return hashValue; },
+  set hash(value) {
+    if (value === hashValue) return;
+    hashValue = value;
+    setTimeout(runHashchange, 0);
+  },
+};
+/* A move the harness makes between cases, which the page never sees as a hashchange. */
+const jump = (value) => {
+  hashValue = value;
+};
+globalThis.addEventListener = (type, fn, options) => {
+  if (type === "hashchange") hashListeners.push({ fn, once: !!(options && options.once) });
+};
 
 const copyAll = (from, to) => {
   fs.mkdirSync(to, { recursive: true });
@@ -73,9 +118,11 @@ const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-at-
 let charts;
 const out = {};
 /* The browser fires no hashchange when the hash is set to the value it already holds, so goToTime raises the event itself
-   on the tab already open (window.dispatchEvent). Counted here; the router that listens for it is not under test. */
+   on the tab already open (window.dispatchEvent). Counted here, and run like the browser's own; the router that listens for
+   it is not under test. */
 globalThis.dispatchEvent = () => {
   out.dispatched = (out.dispatched || 0) + 1;
+  runHashchange();
 };
 try {
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
@@ -160,26 +207,33 @@ const take = () => stub.calls.splice(0, stub.calls.length);
 
 await click(a, "Show Active Queries at This Time");
 out.queries = take();
+/* Once the router has built the tab, each item scrolls the panel of its own grid to the top of the view (scrolls). */
+out.scrollQueries = scrolls.splice(0);
 rightClick(blk, 521);
 await click(blk, "Show Blocking at This Time");
 out.blocking = take();
+out.scrollBlocking = scrolls.splice(0);
 /* The hash moved to another tab, so the router's own hashchange rebuilds the page: no event is raised for it. */
 out.dispatchedOnTabChange = out.dispatched || 0;
 rightClick(dl, 521);
 await click(dl, "Show Deadlocks at This Time");
 out.deadlocks = take();
+out.scrollDeadlocks = scrolls.splice(0);
 /* The hash was already #/server/A/blocking: setting it again fires nothing, so the event is raised once. */
 out.dispatchedOnSameTab = out.dispatched || 0;
 out.hashAfter = globalThis.location.hash;
 out.t0Plus5 = T0 + 5 * MIN;
+/* Each scroll listener ran once and is gone, so a later hashchange does not scroll again. */
+out.listenersLeft = hashListeners.length;
 
-/* A range the page refuses is reported on the chart and the hash stays put. */
+/* A range the page refuses is reported on the chart, the hash stays put, and no scroll listener is left waiting. */
 globalThis.__rangeError = "The end cannot be in the future.";
-globalThis.location.hash = "#/server/A/cpu";
+jump("#/server/A/cpu");
 rightClick(blk, 521);
 await click(blk, "Show Blocking at This Time");
 out.refusedHash = globalThis.location.hash;
 out.refusedStatus = find(blk, (n) => String(n.className) === "chart-menu-status")[0].textContent;
+out.refusedListeners = hashListeners.length;
 take();
 globalThis.__rangeError = null;
 
