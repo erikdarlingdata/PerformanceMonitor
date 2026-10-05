@@ -227,8 +227,15 @@ WHERE slow_read_id IN
         return (new JsonObject { ["truncated"] = true, ["keys"] = names }.ToJsonString(), true, Unspecified(windowStart), Unspecified(windowEnd));
     }
 
-    private static DateTime? Unspecified(DateTime? value) =>
-        value is { } v ? DateTime.SpecifyKind(v, DateTimeKind.Unspecified) : null;
+    private static DateTime? Unspecified(DateTime? value)
+    {
+        if (value.HasValue)
+        {
+            return DateTime.SpecifyKind(value.Value, DateTimeKind.Unspecified);
+        }
+
+        return null;
+    }
 
     private static double? NumberOf(JsonObject arguments, string key)
     {
@@ -262,10 +269,20 @@ WHERE slow_read_id IN
             ? parsed : null;
 
     /// <summary>The type name or SQLSTATE of a fault, never its message text.</summary>
-    internal static string ErrorClassOf(Exception? ex) =>
-        ex is null ? string.Empty
-        : ex is PostgresException { SqlState: { Length: > 0 } sqlState } ? sqlState
-        : ex.GetType().Name;
+    internal static string ErrorClassOf(Exception? ex)
+    {
+        if (ex is null)
+        {
+            return string.Empty;
+        }
+
+        if (ex is PostgresException postgres && !string.IsNullOrEmpty(postgres.SqlState))
+        {
+            return postgres.SqlState;
+        }
+
+        return ex.GetType().Name;
+    }
 
     /// <summary>The class of an error that arrived as a tool's caught answer rather than an exception.</summary>
     internal static string? ErrorClassOf(ReadOutcome outcome) => outcome switch
