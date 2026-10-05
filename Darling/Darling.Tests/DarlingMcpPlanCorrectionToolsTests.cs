@@ -261,6 +261,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,$10)",
             Assert.False(root.TryGetProperty("window_truncated", out _));
             Assert.False(root.TryGetProperty("truncation_note", out _));
 
+            /* The enablement snapshot answers whatever the window, so the empty answer needs a server with no plan rows at all. */
+            await DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken, "DELETE FROM plan_correction WHERE server_id = $1", ServerIdHelper.GetDeterministicHashCode(WindowName("probefail")));
             var empty = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "probefail", 1, end.AddDays(-9)));
             Assert.Equal("empty", empty.GetProperty("status").GetString());
             Assert.False(empty.TryGetProperty("hints", out _));

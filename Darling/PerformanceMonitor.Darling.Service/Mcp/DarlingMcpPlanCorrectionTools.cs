@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -50,6 +51,7 @@ public sealed class DarlingMcpPlanCorrectionTools
         [Description("Maximum recommendation rows to return, newest capture first. Default 25. This is what bounds the page - read truncated to know whether the window held more.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Return each row's full query_text instead of a 150-character preview. Default false.")] bool full_text = false,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -72,13 +74,23 @@ public sealed class DarlingMcpPlanCorrectionTools
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
+            /* #4966: where the store's coverage of the window starts, in the three keys every window-floor tool writes. Rows are windowed
+               on collection_time, the probe's own column. An answer with recommendation rows over a window of 90 minutes or less needs no
+               probe; an answer without them is always probed, and that includes one the automatic-tuning snapshot alone answers: that is a
+               data answer (the snapshot is the newest capture whatever the window), so it names where the window's coverage starts. */
+            var windowStart = now.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "plan_correction", resolved.ServerName, windowStart, now, cancellationToken),
+                windowStart, now, "plan_correction", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
+
             if (tuning.Count == 0 && rows.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "plan_correction", cancellationToken)
                     ?? McpHelpers.Status("empty",
                         "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
                         "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
-                        "that or has no databases with Query Store on.");
+                        "that or has no databases with Query Store on.",
+                        notice.AsHints());
             }
 
             var recommendations = page.Select(r => new
@@ -110,10 +122,15 @@ public sealed class DarlingMcpPlanCorrectionTools
                 query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > QueryTextPreviewLength,
             });
 
-            return JsonSerializer.Serialize(new
+            var payload = new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: the window floor. No effective_hours_back: this payload carries a page `truncated`, and the census holds that key
+                   apart from the window floor, so the reach is the instant. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 automatic_tuning = tuning.Select(t => new
                 {
                     database_name = t.DatabaseName,
@@ -132,7 +149,9 @@ public sealed class DarlingMcpPlanCorrectionTools
                 newest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Max(r => r.CollectionTime)),
                 order = "collection_time_desc",
                 recommendations,
-            }, McpHelpers.JsonOptions);
+            };
+            var json = JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

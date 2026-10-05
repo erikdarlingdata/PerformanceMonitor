@@ -297,11 +297,12 @@ public sealed class WebDataStartNoteConfigAndLogLiveTests : IClassFixture<Config
         }
     }
 
-    /// <summary>Every field a note adds is absent: the answer is the tool's own.</summary>
+    /// <summary>Every field a note adds is absent: the answer is the tool's own. The tool's own covered verdict (#4966: get_collection_log
+    /// writes <c>window_truncated: false</c> and the start it asked for, with no sentence) is the tool's, not a note, and the page draws a
+    /// note only from a <c>true</c>.</summary>
     private static void AssertNoNote(JsonObject answer)
     {
-        Assert.Null(answer["window_truncated"]);
-        Assert.Null(answer["effective_start"]);
+        Assert.True(answer["window_truncated"] is null || answer["window_truncated"]!.GetValue<bool>() == false);
         Assert.Null(answer["truncation_note"]);
         Assert.Null(answer["data_start_utc"]);
         Assert.Null(answer["oldest_shown_utc"]);

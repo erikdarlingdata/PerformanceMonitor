@@ -404,7 +404,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         {
             /* Collection began ten hours ago; a twelve-hour window. Its one event was SAMPLED eleven and a half hours ago (ring-buffer
                history) and stored by a collection at the end of the window, so sample_time and collection_time differ. */
-            await SeedWindowAsync(c, "early", end.AddDays(-30), end.AddHours(-10), 30, end);
+            await SeedWindowAsync(c, "early", end.AddHours(-10), end.AddHours(-10), 30, end);
             await SeedEventAsync(c, "early", end.AddHours(-1), end.AddMinutes(-30));
 
             var without = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "early", 12, end));

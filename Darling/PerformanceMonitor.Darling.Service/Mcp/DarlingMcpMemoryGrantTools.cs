@@ -12,9 +12,11 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -204,6 +206,7 @@ public sealed class DarlingMcpMemoryGrantTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -217,14 +220,28 @@ public sealed class DarlingMcpMemoryGrantTools
             var now = windowEnd;
             var rows = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
+
+            /* #4966: where the store's coverage of the window starts, in the three keys every window-floor tool writes. The events are
+               windowed on sample_time, and an event can predate the collection that stored it (a ring-buffer read hands back history), so
+               the probe is the memory pressure source (DataWindowFloor.Source.ForMemoryPressureEvents): its SQL takes the earlier of the
+               server's coverage and its first event in the window, and no event shown can sit before the start named. An answer with rows
+               over a window of 90 minutes or less needs no probe; an empty one is always probed. */
+            var windowStart = now.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, DataWindowFloor.Source.ForMemoryPressureEvents(), resolved.ServerName, windowStart, now, cancellationToken),
+                windowStart, now, "memory_pressure_events", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
+
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_pressure_events", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No memory pressure events found in the requested time range.");
+                    ?? McpHelpers.Status("empty", "No memory pressure events found in the requested time range.", notice.AsHints());
 
-            return JsonSerializer.Serialize(new
+            var payload = new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 events = rows.Select(r => new
                 {
                     sample_time = r.SampleTime.ToString("o"),
@@ -232,7 +249,9 @@ public sealed class DarlingMcpMemoryGrantTools
                     memory_indicators_process = r.MemoryIndicatorsProcess,
                     memory_indicators_system = r.MemoryIndicatorsSystem
                 })
-            }, McpHelpers.JsonOptions);
+            };
+            var json = JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
