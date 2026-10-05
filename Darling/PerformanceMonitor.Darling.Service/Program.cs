@@ -90,6 +90,13 @@ if (args.Length > 0 && DarlingCliCommands.IsCheckSettingsVerb(args[0]))
     return await DarlingCliCommands.CheckSettingsAsync(configPath, wantsJson, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: write one aliased diagnostics file for a bug report (#5097). Every argument after the verb is its own
+   (path, --hours, --server, --log-dir, --config, --alias-map, --force). Exit code: see DarlingCliCommands.DiagnosticsBundleExitCode. */
+if (args.Length > 0 && DarlingCliCommands.IsDiagnosticsBundleVerb(args[0]))
+{
+    return await DarlingCliCommands.DiagnosticsBundleAsync(args.Skip(1).ToArray(), Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verb: print a paste-ready remote-viewer connection string + the server TLS cert for the opt-in store
    network endpoint (darling-network-endpoints D8). It DPAPI-decrypts the network role's credential, so it is
    Windows-only (same guard shape as --encrypt-password). Optional second arg = an explicit config path. */

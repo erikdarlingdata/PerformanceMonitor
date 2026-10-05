@@ -47,6 +47,7 @@ import { pgPlanColumn } from "./pg-plan-viewer.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { downloadText } from "../grid-tools.js";
+import { deadlockGraphCell } from "./deadlock-graph.js";
 import { planColumn } from "./plan-viewer.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
@@ -1178,8 +1179,8 @@ export const SERVER_TABS = [
        more than this page's widest Range. The note names that Range from the presets (tabNote), so narrowing them
        cannot leave it wrong. */
     note: (widestHours) =>
-      "Blocked-process reports and deadlock graphs are shown here as their captured XML. The block-chain view " +
-      "and the interactive deadlock graph are desktop-viewer features. This page shows at most " +
+      "Blocked-process reports are shown here as their captured XML. The block-chain view " +
+      "is one of the desktop-viewer features this page does not have. A deadlock graph can be drawn from its row. This page shows at most " +
       daysText(widestHours) +
       ". A Custom View can show more blocking and deadlock history.",
     build: (server, ctx) => [
@@ -3537,6 +3538,7 @@ function deadlockXmlColumns(server) {
       render: (r) =>
         saveXmlButton(r.deadlock_graph_xml, "deadlock_" + fileStamp(r.deadlock_time) + ".xdl", "application/xml;charset=utf-8", r.deadlock_graph_xml_truncated === true),
     },
+    { key: "graph", label: "Graph", sortable: false, csv: false, filter: false, copy: false, render: (r) => deadlockGraphCell(server, r) },
     { key: "processes", label: "Processes", sortable: false, render: (r) => deadlockProcessesCell(server, r) },
     { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
   ];

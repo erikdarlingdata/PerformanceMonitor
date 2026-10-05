@@ -278,6 +278,19 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.DoesNotContain("<html", body, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>#5239 L2: the Manage Servers route is refused for an anonymous network-mode caller through the real
+    /// pipeline, the same as <c>/api/fleet</c>.</summary>
+    [Fact]
+    public async Task NetworkMode_NoToken_AdminServersPath_Returns401Json()
+    {
+        using var server = await BuildServer(networkMode: true);
+        var (ctx, body) = await SendWithBody(server, "/api/admin/servers", ListenIp, InCidrRemote);
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
+        Assert.Contains("\"error\"", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("<html", body, StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>Proves the split is per-request, not per-mode: on the exact same server, the exact same
     /// unauthenticated caller gets 401 for the API path and the 200 form for the page path.</summary>
     [Fact]

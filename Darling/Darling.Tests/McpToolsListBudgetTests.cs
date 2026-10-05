@@ -214,7 +214,8 @@ public sealed class McpToolsListBudgetTests
     // get_server_trend gains latch, spinlock, session_stats and collector_duration (#4843): 186,010 -> 186,158.
     // get_slow_reads (#5097, the slow-read record's read tool) adds one tool, re-measured on the tree merged with dev 85a522f0b: 186,158 -> 186,917, 171 -> 172 tools (unchanged by dev's later commits).
     // get_store_query_history (#5097, the store statement history read) adds one tool, measured on this tree: 187,122 -> 188,119, 172 -> 173 tools.
-    private const int TotalCeilingBytes = 188_119;
+    // edit_server (#5240) adds one tool, measured on this tree: 188,119 -> 189,171, 173 -> 174 tools (+1,052 bytes).
+    private const int TotalCeilingBytes = 189_171;
 
 
 
