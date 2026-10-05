@@ -80,7 +80,7 @@ public sealed class DarlingSignificantWaitsReadTests
             /* #4966: the only capture is 48 hours old, so the one-hour window is not covered: the cut sentence, not "widen". */
             Assert.True(quietDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.StartsWith("No wait_info events were captured for ", quietText, StringComparison.Ordinal);
-            Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, quietText, StringComparison.Ordinal);
+            Assert.EndsWith(". " + McpHelpers.CutWindowNothingReadMessage, quietText, StringComparison.Ordinal);
 
             /* Same zero rows as the branch above, and it must NOT reach for the same word. */
             Assert.DoesNotContain("EVER", quietText, StringComparison.Ordinal);

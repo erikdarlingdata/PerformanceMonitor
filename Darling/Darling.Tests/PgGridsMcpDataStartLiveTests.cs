@@ -266,9 +266,8 @@ VALUES ($1, $2, $3, $4, 'work_mem', $5, NULL, 'Resource Usage / Memory', 'user',
             Assert.Contains(". " + McpHelpers.CutWindowNothingReadMessage, cutMessage, StringComparison.Ordinal);
             Assert.DoesNotContain(coveredClaim, cutMessage, StringComparison.Ordinal);
 
-            await DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
-                "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerIdHelper.GetDeterministicHashCode(name), DarlingMcpTestData.Naive(end.AddDays(-30)));
-            await SeedAsync(c, tool, name, end.AddDays(-20));
+            /* Registered 30 days ago with its collector running since: the store covers the window and found nothing in it. */
+            await WindowFloorLiveHarness.SeedServerAsync(c, name, end.AddDays(-30), TableOf(tool), end.AddDays(-30), 30, end, Tables, TestContext.Current.CancellationToken);
             var covered = WindowFloorLiveHarness.Parse(await Call(tool, ds, name, 1, end));
             var coveredMessage = covered.GetProperty("message").GetString()!;
             Assert.False(covered.GetProperty("hints").GetProperty("window_truncated").GetBoolean(), covered.ToString());
