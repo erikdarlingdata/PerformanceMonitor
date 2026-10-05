@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// callbacks, when the activity stops, which tag carries a row count, what a command outside a scope costs, and
 /// that fan-out loses no entry.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class ReadScopeStatementCaptureLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
