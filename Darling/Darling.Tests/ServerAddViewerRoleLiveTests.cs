@@ -335,6 +335,10 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
                 Assert.False((bool)(await tableLevel.ExecuteScalarAsync(ct))!);
             }
 
+            /* The refused list above names today's nine columns, so a column granted by mistake later would pass every loop
+               above. The granted set itself is compared with the exact list: one extra or one missing column fails here. */
+            Assert.Equal(EditColumnList, await GrantedUpdateColumnsAsync(owner, roleName, ct));
+
             bodySucceeded = true;
         }
         finally
@@ -343,8 +347,9 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         }
     }
 
-    /// <summary>The UPDATE columns the edit grant (#5240) gives viewer, comma-joined in column-name order: the exact list the
-    /// grant names, so a column added to the grant by mistake (or dropped from it) changes this string.</summary>
+    /// <summary>The UPDATE columns the edit grant (#5240) gives viewer, comma-joined in byte order of the column names (the "C"
+    /// collation, so the order does not depend on the cluster's locale): the exact list the grant names, so a column added to
+    /// the grant by mistake (or dropped from it) changes this string.</summary>
     private const string EditColumnList =
         "auth,database,encrypt_mode,encrypted_password,host,modified_at,monthly_cost_usd,multi_subnet_failover,name,port,read_only_intent,trust_server_certificate,username";
 
@@ -353,7 +358,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
     private static async Task<string> GrantedUpdateColumnsAsync(NpgsqlDataSource owner, string roleName, CancellationToken ct)
     {
         await using var granted = owner.CreateCommand(
-            "SELECT COALESCE(string_agg(column_name, ',' ORDER BY column_name), '') FROM information_schema.column_privileges " +
+            "SELECT COALESCE(string_agg(column_name, ',' ORDER BY column_name COLLATE \"C\"), '') FROM information_schema.column_privileges " +
             $"WHERE grantee = '{roleName}' AND table_schema = 'config' AND table_name = 'config_monitored_servers' AND privilege_type = 'UPDATE'");
         return (string)(await granted.ExecuteScalarAsync(ct))!;
     }
