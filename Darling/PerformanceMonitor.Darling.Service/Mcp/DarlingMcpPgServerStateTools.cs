@@ -876,22 +876,13 @@ public sealed class DarlingMcpPgServerStateTools
             var truncated = fetched.Count > limit;
             var rows = truncated ? fetched.Take(limit).ToList() : fetched;
 
-            /* #4966: the window floor. Coverage is the web's source for this read (WebDataStartNote): a snapshot in the window proves the
-               store held the server from that snapshot on, and one before the window is not counted. The list is newest first under a row
-               cap, so a capped page ends at its oldest change and the store's coverage cannot move that: the capped-list rule names the
-               oldest change shown (the web's rule, WebDataStartNote.NewestFirstCappedReads) and starts no probe. A page the cap did not
-               cut, or one that reaches the window's start, takes the coverage rule or none. */
+            /* #4966: the window floor, always COVERAGE. Coverage is the web's source for this read (WebDataStartNote): a snapshot in the
+               window proves the store held the server from that snapshot on, and one before the window is not counted. Changes are
+               snapshot diffs stamped at the snapshot's collection_time, not backfilled events, so the plain coverage rule applies
+               whether or not the row cap cut the page. The cap is reported by truncated, never by the notice. */
             var windowStart = windowEnd.AddHours(-hours_back);
-            var oldestShown = rows.Min(r => r.ChangedAtUtc);
-            var notice = truncated
-                ? (oldestShown > windowStart
-                    ? new McpWindowNotice(
-                        McpHelpers.FormatEffectiveStart(oldestShown),
-                        true,
-                        ComposeStoreAvailability.BuildCappedListNotice(oldestShown, windowStart, windowEnd))
-                    : new McpWindowNotice(McpHelpers.FormatEffectiveStart(windowStart), false, null))
-                : await DarlingMcpWindowNotice.ReadForToolAsync(
-                    postgres, "get_pg_server_config_changes", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_server_config_changes", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
 
             /* #3937: the rows are typed `object` so one list can carry two shapes. A server-wide row is the SAME
                anonymous shape it always was, and System.Text.Json serializes an object-typed element by its

@@ -247,25 +247,40 @@ VALUES ($1, $2, $3, $4, 'work_mem', $5, NULL, 'Resource Usage / Memory', 'user',
             }
         });
 
+    /* The notice is always coverage. The row cap is reported by truncated, never by the notice: a capped page beside an early coverage reads covered. */
     [Fact]
-    public Task ACappedConfigChangesPage_NamesItsOldestChange_AndStartsNoProbe_AgainstDevPostgres() =>
+    public Task ACappedConfigChangesPage_BesideAnEarlyCoverage_ReadsCovered_WhileTruncatedIsTrue_AgainstDevPostgres() =>
         Run("get_pg_server_config_changes", "capped", async (c, ds, end, name) =>
         {
             await SeedServerAsync(c, name, end.AddDays(-30));
             await SeedConfigAsync(c, name, end.AddHours(-5), "1MB");
             await SeedConfigAsync(c, name, end.AddHours(-4), "2MB");
             await SeedConfigAsync(c, name, end.AddHours(-3), "3MB");
-            var calls = 0;
-            DarlingMcpWindowNotice.TestOnlyProbe = () => { calls++; return Task.FromResult<DateTime?>(null); };
 
             var root = WindowFloorLiveHarness.Parse(await Call("get_pg_server_config_changes", ds, name, 168, end, limit: 1));
 
             Assert.True(root.GetProperty("truncated").GetBoolean());
-            Assert.True(root.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(1, root.GetProperty("changes").GetArrayLength());
-            var shown = DateTime.Parse(root.GetProperty("changes")[0].GetProperty("changed_at").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
-            Assert.Equal(McpHelpers.FormatEffectiveStart(shown), root.GetProperty("effective_start").GetString());
-            Assert.Equal(0, calls);
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+        });
+
+    [Fact]
+    public Task ACappedConfigChangesPage_BesideALateCoverage_NamesWhereCoverageStarts_NotTheOldestChangeShown_AgainstDevPostgres() =>
+        Run("get_pg_server_config_changes", "cappedlate", async (c, ds, end, name) =>
+        {
+            await SeedServerAsync(c, name, end.AddDays(-2));
+            await SeedConfigAsync(c, name, end.AddHours(-5), "1MB");
+            await SeedConfigAsync(c, name, end.AddHours(-4), "2MB");
+            await SeedConfigAsync(c, name, end.AddHours(-3), "3MB");
+
+            var root = WindowFloorLiveHarness.Parse(await Call("get_pg_server_config_changes", ds, name, 168, end, limit: 1));
+            var floor = await WebFloorAsync(ds, "get_pg_server_config_changes", name, 168, end);
+
+            Assert.NotNull(floor);
+            Assert.True(root.GetProperty("truncated").GetBoolean());
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(floor!.Value), root.GetProperty("effective_start").GetString());
         });
 
     [Theory]
