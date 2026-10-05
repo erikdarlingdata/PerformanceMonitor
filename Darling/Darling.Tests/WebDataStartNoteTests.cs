@@ -234,7 +234,7 @@ public sealed class WebDataStartNoteTests
 
         // A read that is not on the list: a chart, a newest-snapshot read, an event surface.
         Assert.Same(Rows, await Run("get_cpu_utilization", "sql01", 168, Rows));
-        Assert.Same(Rows, await Run("get_deadlocks", "sql01", 168, Rows));
+        /* get_deadlocks left this line when it joined the listed reads (#4966): WebDataStartNoteBlockingDeadlockTests holds it. */
 
         // A listed read with no server, no window, or a window of nothing.
         Assert.Same(Rows, await Run("get_waiting_tasks", null, 168, Rows));

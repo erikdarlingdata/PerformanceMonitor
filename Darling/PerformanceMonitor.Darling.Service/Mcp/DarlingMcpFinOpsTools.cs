@@ -81,7 +81,7 @@ public sealed partial class DarlingMcpFinOpsTools
         NpgsqlDataSource postgres,
         [Description("Which view to read. Valid: " + SetAValid + SetBValid + ".")] string view,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to read, ending now (default 24).")] int hours_back = 24,
+        [Description("Hours back, default 24 (storage_growth: max 2160).")] int hours_back = 24,
         [Description("Most rows per top-N list the view keeps (1-50, default 10).")] int limit = DefaultLimit,
         [Description("Database to limit the view to (index_analysis, storage_growth).")] string? database_name = null,
         [Description("Return full script and definition text (index_analysis only; default false).")] bool full_text = false,
@@ -97,7 +97,8 @@ public sealed partial class DarlingMcpFinOpsTools
         if (!Views.Contains(normalized))
             return McpHelpers.Refusal("view", $"Invalid view value '{view}'. Valid views: {string.Join(", ", Views)}.");
 
-        var validation = McpHelpers.ValidateHoursBack(hours_back);
+        /* storage_growth validates its own window (24, or 7 to 90 whole days): the shared ceiling is 168 hours. */
+        var validation = normalized == StorageGrowthView ? null : McpHelpers.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
         var maxLimit = normalized == DatabaseSizesView ? MaxDatabaseSizeRows : MaxLimit;
         if (limit < 1 || limit > maxLimit)

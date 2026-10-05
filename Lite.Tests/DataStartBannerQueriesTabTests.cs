@@ -40,6 +40,7 @@ public sealed class DataStartBannerQueriesTabTests : IDisposable
     private const string ServerName = "QueriesTabServer";
     private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private readonly PendingSeedSession _seed;
     private long _nextId = 1;
 
     public DataStartBannerQueriesTabTests()
@@ -47,10 +48,20 @@ public sealed class DataStartBannerQueriesTabTests : IDisposable
         _tempDir = Path.Combine(Path.GetTempPath(), "DataStartQueriesTab_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(_tempDir);
         _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        _seed = new PendingSeedSession(_duckDb);
+    }
+
+    /* #5208: the seed helpers share one open transaction (PendingSeedSession) instead of committing every statement.
+       Every read goes through Service(), which commits it first, so the code under test sees the rows it always did. */
+    private LocalDataService Service()
+    {
+        _seed.Flush();
+        return new LocalDataService(_duckDb);
     }
 
     public void Dispose()
     {
+        _seed.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort cleanup */ }
     }
@@ -59,8 +70,7 @@ public sealed class DataStartBannerQueriesTabTests : IDisposable
 
     private async Task SeedPlanCorrectionAsync(DateTime at)
     {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await _seed.ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -81,8 +91,7 @@ VALUES ($1, $2, $3, $4, 'Db', 'PR_1', 'Active', 50)";
     /// </summary>
     private async Task SeedQueryStatsAsync(DateTime at)
     {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await _seed.ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -104,8 +113,7 @@ VALUES ($1, $2, $3, $4, 'Db', '0xAB', '0xH0xAB', $5, 10, 5000, 5000, 'SELECT 1')
     /// <summary>The collector's runs in collection_log, every <paramref name="everyMinutes"/> minutes, whether or not anything was stored.</summary>
     private async Task SeedLogRunsAsync(string collector, DateTime firstUtc, DateTime lastUtc, int everyMinutes)
     {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await _seed.ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = $@"
@@ -124,7 +132,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     /// <summary>The probe, then the banner step the surface runs on the result: (visible, text).</summary>
     private async Task<(bool Visible, string Text)> BannerForAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc)
     {
-        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc);
+        var floor = await Service().GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc);
         return OnStaThread(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
@@ -226,7 +234,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     /// </summary>
     private async Task<(bool Visible, string Text, DateTime Oldest, int Rows, bool Probed)> CappedPlanCorrectionBannerAsync(DateTime startUtc, DateTime endUtc)
     {
-        var service = new LocalDataService(_duckDb);
+        var service = Service();
         var rows = await service.GetPlanCorrectionsAsync(ServerId, fromDate: startUtc, toDate: endUtc);
         var probedFloor = await service.GetQueryWindowFloorAsync(QueryWindowRelation.PlanCorrection, ServerId, startUtc, endUtc);
         var (visible, text, probed) = OnStaThread(() =>
@@ -548,7 +556,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         var end = start.AddHours(1);
         await SeedQueryStatsAsync(start.AddMinutes(32));
 
-        var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
+        var result = await Service().GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
 
         Assert.Equal(13, result.TimeBuckets.Length);
         Assert.Equal(start, result.TimeBuckets[0]);
@@ -563,8 +571,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     /// <summary>A recommendation re-captured every <paramref name="everySeconds"/> seconds, from <paramref name="firstUtc"/> to <paramref name="lastUtc"/>: enough rows for a one-hour range to fill the grid's cap.</summary>
     private async Task SeedPlanCorrectionEverySecondsAsync(DateTime firstUtc, DateTime lastUtc, int everySeconds)
     {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await _seed.ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = $@"
@@ -587,8 +594,7 @@ FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL {everySeconds} SECON
     /// </summary>
     private async Task SeedMemoryPressureEventAsync(DateTime sampleAt)
     {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await _seed.ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -699,7 +705,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         await SeedQueryStatsAsync(start.AddMinutes(30));
         await SeedQueryStatsAsync(end.AddHours(-1));
 
-        var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
+        var result = await Service().GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
 
         const int buckets = 7 * 24 * 12 + 1;
         Assert.Equal(buckets, result.TimeBuckets.Length);
@@ -746,7 +752,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         var end = new DateTime(2026, 6, 1, 10, 27, 30, DateTimeKind.Unspecified);
         await SeedQueryStatsAsync(new DateTime(2026, 6, 1, 10, 13, 10, DateTimeKind.Unspecified));
 
-        var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
+        var result = await Service().GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
 
         Assert.Equal(
             new[] { 0, 5, 10, 15, 20, 25 }.Select(minute => new DateTime(2026, 6, 1, 10, minute, 0)).ToArray(),
@@ -775,7 +781,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         Assert.True(visible);
         Assert.Equal("Showing since 2026-06-04 10:15:00", text);
 
-        var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
+        var result = await Service().GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
 
         var noticeBucket = new DateTime(2026, 6, 4, 10, 15, 0, DateTimeKind.Unspecified);
         var buckets = (int)((end - noticeBucket).TotalMinutes / 5) + 1;
@@ -810,7 +816,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         Assert.False(visible);
         Assert.Equal(string.Empty, text);
 
-        var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
+        var result = await Service().GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
 
         const int buckets = 7 * 24 * 12 + 1;
         Assert.Equal(buckets, result.TimeBuckets.Length);
@@ -827,7 +833,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     /// </summary>
     private async Task<(bool Visible, string Text, DateTime? FirstColumn, int ProbeCalls)> HeatmapNoticeAsync(DateTime startUtc, DateTime endUtc)
     {
-        var service = new LocalDataService(_duckDb);
+        var service = Service();
         var drawn = await service.GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: startUtc, toDate: endUtc);
         var probeCalls = 0;
         var probed = await ServerTab.ProbeWindowFloorOrNullAsync(
@@ -985,7 +991,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         var (visible, _) = await BannerForAsync(QueryWindowRelation.QueryStats, start, end);
         Assert.True(visible);
 
-        var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
+        var result = await Service().GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
 
         const int buckets = 4 * 24 * 12 + 16 * 12 + 1;
         Assert.Equal(buckets, result.TimeBuckets.Length);
@@ -1026,7 +1032,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
         var end = DateTime.UtcNow;
         await SeedQueryStatsAsync(end.AddDays(-20));
 
-        var result = await new LocalDataService(_duckDb).GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 7 * 24);
+        var result = await Service().GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 7 * 24);
 
         Assert.Empty(result.TimeBuckets);
     }

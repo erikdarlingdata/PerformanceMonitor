@@ -88,6 +88,15 @@ public static class DarlingWebEndpoints
         set => s_testOnlyExtraDispatchEntry.Value = value;
     }
 
+    /// <summary>Reads served on <c>/api/read/*</c> that are NOT an MCP tool (#5241): the web page's own keyed reads.
+    /// <c>get_alert_details</c> returns one alert's advice when its row is opened, so the Alert History poll does not
+    /// carry every row's advice. They are the only dispatch keys with no <c>[McpServerTool]</c> behind them; the
+    /// parity test adds exactly this set to the tool catalog.</summary>
+    internal static readonly IReadOnlySet<string> WebOnlyReadNames = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_alert_details",
+    };
+
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
     /// makes a live monitored-server connection; <c>mute_analysis_finding</c> writes; the <c>analyze_*_plan</c> family
     /// is the compute-heavy plan-analysis phase-2 work; the Custom Views tools (#1599) are served by their OWN
@@ -444,6 +453,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCustomAlerts(app, postgres, logger);
         MapMuteRules(app, postgres, logger);
         MapServerTags(app, postgres, logger);
+        MapAdminServers(app, postgres);
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
 
@@ -1073,6 +1083,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var stopwatch = Stopwatch.StartNew();
+
+            /* Two exits can free the slot: this handler, when the add finished inside the wait, and the
+               add's own continuation, when it outlives the wait. They run on different threads and either
+               may be first, so both go through one object that frees the slot at most once. */
+            var slot = new SingleReleaseSlot(addInFlight);
+
             /* The core takes no request token, like the tool: a client that disconnects mid-batch must not
                leave the entries after it unattempted while the ones before it are already saved and unaudited. */
             Task<string> running;
@@ -1086,14 +1102,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                    exception TYPE is logged: its message could quote a value the request carried. EVERY synchronous
                    throw is caught, cancellation included: the slot is no longer released in a finally, so a type
                    that escaped this catch would hold it for the life of the process and answer 429 forever. */
-                addInFlight.Release();
+                slot.Release();
                 return ServerErrorResult(
                     $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
             }
 
             /* The slot is freed by the add itself, once, when it finishes (completed or faulted) - never by
-               the wait, so an add that outlives the timeout still holds the slot. */
-            _ = running.ContinueWith(_ => addInFlight.Release(), TaskScheduler.Default);
+               the wait's timeout, so an add that outlives the timeout still holds the slot. */
+            _ = running.ContinueWith(_ => slot.Release(), TaskScheduler.Default);
 
             string result;
             try
@@ -1112,6 +1128,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ServerErrorResult(
                     $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
             }
+            finally
+            {
+                /* An add that finished inside the wait frees the slot here, before any response is produced,
+                   so a client that posts again the moment it reads this answer finds the slot free rather than
+                   racing the continuation above. An add still running (the timeout path) keeps it: only its
+                   own continuation frees it. */
+                if (running.IsCompleted)
+                {
+                    slot.Release();
+                }
+            }
 
             var secrets = SubmittedSecrets(entries);
 
@@ -1125,6 +1152,31 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             LogServerAdds(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, entries, answer);
             return Results.Text(answer, "application/json", statusCode: MuteRuleEnvelopeStatus(answer));
         });
+    }
+
+    /// <summary>
+    /// Frees one acquired slot of a one-slot gate at most once, however many exits call <see cref="Release"/> and in
+    /// whatever order. A plain second <c>Release</c> is not harmless: if another add has already taken the slot in
+    /// between, the extra release frees the slot that add holds, and a third add runs beside it.
+    /// </summary>
+    internal sealed class SingleReleaseSlot
+    {
+        private readonly SemaphoreSlim gate;
+        private int held = 1;
+
+        internal SingleReleaseSlot(SemaphoreSlim gate)
+        {
+            this.gate = gate;
+        }
+
+        /// <summary>Frees the slot on the first call; every later call does nothing.</summary>
+        internal void Release()
+        {
+            if (Interlocked.Exchange(ref held, 0) == 1)
+            {
+                gate.Release();
+            }
+        }
     }
 
     /// <summary>
@@ -1523,6 +1575,24 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         return System.Text.Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+    }
+
+    /// <summary>
+    /// <c>GET /api/admin/servers</c> (#5239): the Admin page's Manage Servers grid - every configured server,
+    /// enabled or disabled, with its authentication mode, monthly cost and added time (see
+    /// <see cref="DarlingAdminServersReader"/>). It is a web-only route: <c>list_servers</c> keeps its
+    /// enabled-only answer for every other consumer, and a route here adds nothing to the MCP <c>tools/list</c>.
+    /// The gate is the one every web route sits behind (the sign-in gate, then the seat's method gate, which
+    /// lets a read-only seat make a GET); the read runs on the viewer-role pool, whose column grant on
+    /// <c>config_monitored_servers</c> leaves out the credential columns, and the statement names none of them.
+    /// </summary>
+    internal static void MapAdminServers(WebApplication app, NpgsqlDataSource postgres)
+    {
+        app.MapGet(DarlingAdminServersReader.Route, async (HttpContext context) =>
+        {
+            var rows = await DarlingAdminServersReader.ReadAsync(postgres, context.RequestAborted);
+            return Results.Text(DarlingAdminServersReader.Render(rows, DateTime.UtcNow), "application/json");
+        });
     }
 
     /// <summary>
@@ -2557,7 +2627,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>#4617: named so the MCP read census (<see cref="Darling.Tests.McpReadCommandTimeoutTests"/>)
     /// recognises the <c>NpgsqlCommand(string, connection)</c> construction below as a store read rather
     /// than an unrecognised receiver.</summary>
-    private const string QueryStoreWideSchemaVersionSql = "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version";
+    internal const string QueryStoreWideSchemaVersionSql = "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version";
 
     /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
     private const string QueryStoreWideServerIdsSql =
@@ -3957,6 +4027,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── alerts / mute rules (DarlingMcpAlertTools) ── */
             ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid).", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false)),
             ["get_alert_settings"] = R(CatAlerts, "The current alert-settings configuration."),
+            /* #5241: a web-only read (no MCP tool behind it, see WebOnlyReadNames): one alert's advice and fix script,
+               fetched when its Analysis row is first expanded. The key is the page's own row identity. */
+            ["get_alert_details"] = R(CatAlerts, "One fired alert's advice: the heading, fields, advice text and fix script the desktop's Alert Detail shows (never the Apply payload), found by server_id, metric_name and alert_time exactly as get_alert_history reports them. An alert with no advice, or no match, answers an empty details list.", new CatalogParam("server_id", TypeInt, true, null), PReqText("metric_name"), PReqText("alert_time")),
             ["get_mute_rules"] = R(CatAlerts, "The alert mute rules (enabled-only by default).", PBool("enabled_only", true)),
             /* #3598: a read the web host's viewer role can serve — the tool selects only the non-secret carve
                (route_id, metric_match, the GENERATED configured_channels presence column, smtp_recipients,
@@ -4065,6 +4138,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_ag_health"] = R(CatOverview, "Availability Group topology: replicas and per-database secondary state.", PServer(), PLimit(DarlingMcpAgTools.DefaultGroupLimit)),
             ["get_store_metrics"] = R(CatOverview, "The monitoring store's own size/compression/growth (self-metrics): a summary by default, object_kind to list one kind, an exact object_name for one object's daily series.", PInt("days_back", 30), PText("object_kind"), PText("object_name"), PLimit(DarlingMcpStoreMetricsTools.DefaultLimit)),
             ["get_store_log"] = R(CatOverview, "What the monitoring store's OWN PostgreSQL server log recorded - a per-class census with the capture denominator beside it, not the lines. Deliberately unbanded.", PHours(24), PLimit(DarlingMcpStoreLogTools.DefaultRetainedLimit), PAsOf()),
+            ["get_store_query_history"] = R(CatOverview, "The monitoring store's OWN SQL statements hour by hour (pg_stat_statements deltas the service snapshots every hour): the top statements over the window by time spent, or one statement's hourly series with query_id.", PText("query_id"), PText("role"), PHours(DarlingMcpStoreQueryHistoryTools.DefaultHours), PTop(DarlingMcpStoreQueryHistoryTools.DefaultTop)),
             ["get_store_query_stats"] = R(CatOverview, "The monitoring store's OWN SQL statements ranked by server-side cost (pg_stat_statements), split by the role that ran them (on a managed store: the web viewer, MCP tools, the Darling Viewer, or the service itself).", PText("role"), PText("order_by"), PTop(DarlingMcpStoreQueryStatsTools.DefaultTop), PBool("full_text", false)),
             ["get_store_host"] = R(CatOverview, "The monitoring store's own HOST profile: platform/RAM/data volume, PostgreSQL/TimescaleDB facts, and a verdict per sizing-relevant setting against what this host would derive today - is the store sized right. No parameters; a snapshot."),
             ["get_collector_cost"] = R(CatOverview, "The monitoring tool's OWN per-collector cost on the monitored servers (self-monitoring) - which of our collectors is the most expensive to run. Pass collector_name for that one collector's daily trend instead of the ranked list.", PInt("days_back", 7), PText("collector_name")),
@@ -4808,6 +4882,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── alerts / mute rules ── */
             ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false), cancellationToken: c.RequestAborted),
+            ["get_alert_details"] = (c, pg, an) => First(c, "server_id") is null ? MissingParam("server_id")
+                : !RequireText(c, "metric_name", out var detailsMetric) ? MissingParam("metric_name")
+                : !RequireText(c, "alert_time", out var detailsTime) ? MissingParam("alert_time")
+                : int.TryParse(First(c, "server_id"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var detailsServerId)
+                    ? DarlingMcpAlertTools.GetAlertDetails(pg, detailsServerId, detailsMetric, detailsTime, c.RequestAborted)
+                    : DarlingMcpAlertTools.GetAlertDetails(pg, 0, "", detailsTime, c.RequestAborted),
             ["get_alert_settings"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertSettings(pg, c.RequestAborted),
             ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true), c.RequestAborted),
             ["get_notification_routes"] = (c, pg, an) => DarlingMcpAlertTools.GetNotificationRoutes(pg, c.RequestAborted),
@@ -5002,6 +5082,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c), Rows(c, "limit", DarlingMcpAgTools.DefaultGroupLimit), c.RequestAborted),
             ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), c.RequestAborted),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), c.RequestAborted),
+            ["get_store_query_history"] = (c, pg, an) => DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(pg, Str(c, "query_id"), Str(c, "role"), Hours(c, DarlingMcpStoreQueryHistoryTools.DefaultHours), Rows(c, "top", DarlingMcpStoreQueryHistoryTools.DefaultTop), logger: logger, cancellationToken: c.RequestAborted),
             ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false), c.RequestAborted),
             /* #4214 part 2: postgresConfig rides by closure (this method's own doc comment), the same way
                logger does for get_sweep_reports two screens up. StoreHostProfileCache.Shared as a direct

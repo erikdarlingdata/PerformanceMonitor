@@ -23,9 +23,13 @@ const SECRETS = {
 };
 const reads = [];
 const payloads = {
-  servers: { server_count: 1, servers: [{ server_name: "alpha", display_name: "Alpha", engine_kind: "sqlserver",
-    engine_version: "SQL Server 2022", status: "Online", read_only: false, last_collection: "2026-01-01T00:00:00Z",
-    password: "SECRET-PW" }] },
+  servers: { server_count: 2, servers: [
+    { server_name: "alpha", display_name: "Alpha", engine: "sqlserver", version: "SQL Server 2022", freshness: "Online",
+      status: "Enabled", auth: "Windows", monthly_cost: "$1,234", monthly_cost_usd: 1234, added: "2025-12-31T00:00:00.0000000",
+      read_only: false, last_collected: "2026-01-01T00:00:00Z", password: "SECRET-PW" },
+    { server_name: "bravo", display_name: "Bravo", engine: "postgres", version: "PostgreSQL 18", freshness: "AwaitingFirstCollection",
+      status: "Disabled", auth: "SQL Server", monthly_cost: null, monthly_cost_usd: 0, added: "2026-01-02T00:00:00.0000000",
+      read_only: false, last_collected: null }] },
   routes: { routes: [SECRETS.route] },
   settings: { alerts_enabled: true, cooldown_minutes: 15, cpu: { enabled: true, threshold_percent: 90, webhook_url: "SECRET-HOOK", slack_url: "SECRET-SLACKURL", pagerduty_routing_key: "SECRET-PDKEY", connection_string: "SECRET-CS", auth_token: "SECRET-AUTH", future_knob: "UNLISTED-VALUE" },
     long_running_query: { enabled: true, threshold_minutes: 30, max_results: 10, exclude_backups: true, excluded_logins: ["svc"] },
@@ -34,16 +38,24 @@ const payloads = {
     smtp_password: "SECRET-PW" },
 };
 const toolFor = { servers: "list_servers", routes: "get_notification_routes", settings: "get_alert_settings" };
+const pathFor = { servers: "/api/admin/servers" };
 
 const context = vm.createContext({
   console, el, mount,
   loadingStrip: strip("strip loading"), errorStrip: strip("strip error"), emptyStrip: strip("strip empty"), noticeStrip: strip("strip notice"),
+  apiGet: async (path) => {
+    reads.push({ tool: path, params: null });
+    const key = Object.keys(pathFor).find((k) => pathFor[k] === path);
+    return { kind: "data", data: payloads[key] };
+  },
   readTool: async (tool, params) => {
     reads.push({ tool, params });
     const key = Object.keys(toolFor).find((k) => toolFor[k] === tool);
     return { kind: "data", data: payloads[key] };
   },
-  VIZ: { table: (data, desc) => el("table", {}, flat((data[desc.rowsKey] || []).map((row) => desc.columns.map((c) => el("td", { text: String(row[c.key] ?? "—") })))) ) },
+  VIZ: { table: (data, desc) => el("table", {}, flat((data[desc.rowsKey] || []).map((row) => [
+    el("tr", { text: "rowclass:" + (typeof desc.rowClass === "function" ? desc.rowClass(row) : "") }),
+    ...desc.columns.map((c) => el("td", { text: String(row[c.key] ?? "—") }))]))) },
 });
 vm.runInContext(source, context);
 

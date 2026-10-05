@@ -45,6 +45,7 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
     private readonly int _serverId;
     private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private readonly PendingSeedSession _seed;
     private readonly ServerManager _serverManager;
     private long _nextId = 1;
 
@@ -67,6 +68,7 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
         _tempDir = Path.Combine(Path.GetTempPath(), "McpWindowNoticeSystemHealth_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(Path.Combine(_tempDir, "config"));
         _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        _seed = new PendingSeedSession(_duckDb);
 
         _serverManager = new ServerManager(Path.Combine(_tempDir, "config"));
         var server = new ServerConnection { ServerName = ServerName, DisplayName = ServerName };
@@ -76,6 +78,7 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
 
     public void Dispose()
     {
+        _seed.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort cleanup */ }
     }
@@ -87,7 +90,11 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
 
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
-    private LocalDataService Service() => new(_duckDb);
+    private LocalDataService Service()
+    {
+        _seed.Flush();
+        return new(_duckDb);
+    }
 
     /* ───────────────────────── per-tool wiring ───────────────────────── */
 
@@ -397,6 +404,103 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         Assert.Equal("empty", root.GetProperty("status").GetString());
         Assert.Equal(1, root.GetProperty("events_in_window").GetInt32());
         AssertTruncatedAt(root.GetProperty("hints"), Anchor.AddDays(-2));
+
+        /* #4966: the window is cut, so the healthy-answer claim gives way to the cut sentence; the event count and the reason
+           nothing qualified (the first sentence) are kept. */
+        var message = root.GetProperty("message").GetString()!;
+        Assert.StartsWith("1 " + eventType + " event(s) were captured for " + ServerName, message, StringComparison.Ordinal);
+        Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("healthy answer", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4966: the same gated-out events over a window the collector covers from before its start keep the healthy-answer sentence.</summary>
+    [Theory]
+    [InlineData(Tool.MemoryBroker)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task AnEmptyWindow_EventsCapturedButGatedOut_OverACoveredWindow_KeepsTheHealthyAnswer(Tool tool)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedLogRunsAsync(WindowStart.AddDays(-2), Anchor, everyMinutes: 30);
+        var (eventType, fixture, _) = SourceOf(tool);
+        var xml = LoadFixture(fixture);
+        if (tool == Tool.SignificantWaits)
+        {
+            xml = xml.Replace("<data name=\"duration\"><value>1500</value>", "<data name=\"duration\"><value>10</value>", StringComparison.Ordinal);
+        }
+
+        await ExecuteAsync(@"
+INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1, $2, $3, $4, $2, $5, $6)",
+            _nextId++, Naive(Anchor.AddDays(-1)), _serverId, ServerName, eventType, xml);
+
+        var root = Root(await CallAsync(tool));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        AssertCovered(root.GetProperty("hints"), WindowStart);
+        var message = root.GetProperty("message").GetString()!;
+        Assert.StartsWith("1 " + eventType + " event(s) were captured for " + ServerName, message, StringComparison.Ordinal);
+        Assert.EndsWith(". Events ARE being captured, so this is the healthy answer for this read rather than missing data.", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4966, rung 2 (this type was captured BEFORE the window, none in it): a window cut at a start names effective_start, a
+    /// window the store holds nothing in says nothing was read, and a covered window keeps "genuinely quiet".
+    /// </summary>
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SevereErrors)]
+    [InlineData(Tool.MemoryNodeOom)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task AnEmptyWindow_TheTypeSeenBeforeTheWindow_PicksTheCutVariant_ByTheNotice(Tool tool)
+    {
+        await _duckDb.InitializeAsync();
+        var (eventType, _, _) = SourceOf(tool);
+
+        /* Cut, with a start: the collector ran for two days of the seven, and this type's only stored event is from after the
+           window's end (the read is anchored at a past as_of). An event stored BEFORE the window would itself be a row older
+           than the start, which makes Lite's probe call the window covered, so that case reaches the covered text. */
+        await SeedEventAsync(tool, Anchor.AddHours(2));
+        await SeedLogRunsAsync(Anchor.AddDays(-2), Anchor, everyMinutes: 30);
+        var cut = Root(await CallAsync(tool));
+        AssertTruncatedAt(cut.GetProperty("hints"), Anchor.AddDays(-2));
+        var cutMessage = cut.GetProperty("message").GetString()!;
+        Assert.StartsWith("No " + eventType + " events were captured for " + ServerName, cutMessage, StringComparison.Ordinal);
+        Assert.Contains("This server HAS captured them before", cutMessage, StringComparison.Ordinal);
+        Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, cutMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("genuinely quiet", cutMessage, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task AnEmptyWindow_TheTypeSeenBeforeTheWindow_NoStartToName_SaysNothingWasRead(Tool tool)
+    {
+        await _duckDb.InitializeAsync();
+        var (eventType, _, _) = SourceOf(tool);
+        await SeedEventAsync(tool, WindowStart.AddDays(-9));
+        await SeedLogRunsAsync(WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+
+        var root = Root(await CallAsync(tool));
+
+        AssertNothingHeld(root.GetProperty("hints"));
+        var message = root.GetProperty("message").GetString()!;
+        Assert.StartsWith("No " + eventType + " events were captured for " + ServerName, message, StringComparison.Ordinal);
+        Assert.EndsWith(". " + McpHelpers.CutWindowNothingReadMessage, message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task AnEmptyWindow_TheTypeSeenBeforeTheWindow_OverACoveredWindow_KeepsGenuinelyQuiet(Tool tool)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedEventAsync(tool, WindowStart.AddDays(-1));
+        await SeedLogRunsAsync(WindowStart.AddDays(-2), Anchor, everyMinutes: 30);
+
+        var root = Root(await CallAsync(tool));
+
+        AssertCovered(root.GetProperty("hints"), WindowStart);
+        Assert.EndsWith(", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
     /// <summary>The tool's type was captured before the window and not in it (the second rung): the keys say nothing in the window was read.</summary>
@@ -522,20 +626,9 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
 
     /* ───────────────────────── seeding ───────────────────────── */
 
-    private async Task ExecuteAsync(string sql, params object?[] values)
-    {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
-        using var readLock = _duckDb.AcquireReadLock();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = sql;
-        foreach (var value in values)
-        {
-            cmd.Parameters.Add(new DuckDBParameter { Value = value ?? DBNull.Value });
-        }
-
-        await cmd.ExecuteNonQueryAsync();
-    }
+    /* #5208: every seed statement joins one open transaction (PendingSeedSession) instead of committing on its own;
+       Service() commits it before anything reads, so the code under test sees the same rows in the same order. */
+    private Task ExecuteAsync(string sql, params object?[] values) => _seed.ExecuteAsync(sql, values);
 
     /// <summary>The system_health collector's runs in collection_log, every <paramref name="everyMinutes"/> minutes, whether or not it stored anything.</summary>
     private async Task SeedLogRunsAsync(DateTime firstUtc, DateTime lastUtc, int everyMinutes)

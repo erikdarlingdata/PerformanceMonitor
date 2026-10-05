@@ -97,7 +97,7 @@ try {
   for (const f of ["util.js", "panels.js", "charts.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
   fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
   /* Modules that server-tabs.js and panels.js import: copied when present, so the harness works whichever PR lands first. */
-  for (const f of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js")]) {
+  for (const f of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js"), path.join("pages", "pg-plan-viewer.js")]) {
     if (fs.existsSync(path.join(jsDir, f))) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
   }
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
