@@ -354,6 +354,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var requestedStart = windowEnd.AddDays(-7);
         using (var connection = await OpenSeedConnectionAsync())
         {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
             await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart.AddDays(-20)), "0xOLD");
             await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddHours(-2)), "0xRECENT");
         }
@@ -382,6 +384,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var requestedStart = windowEnd.AddDays(-7);
         using (var connection = await OpenSeedConnectionAsync())
         {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
             await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart.AddDays(-20)), "0xOLD1");
             await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart.AddDays(-10)), "0xOLD2");
         }
@@ -401,6 +405,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var oldest = windowEnd.AddDays(-2);
         using (var connection = await OpenSeedConnectionAsync())
         {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
             await SeedQueryStatsAsync(connection, NaiveUtc(oldest), "0xFIRST");
             await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddHours(-1)), "0xLATER");
         }
@@ -424,6 +430,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var requestedStart = windowEnd.AddDays(-7);
         using (var connection = await OpenSeedConnectionAsync())
         {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
             for (var day = 10; day >= 0; day--)
                 await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddDays(-day).AddMinutes(-5)), $"0xDAY{day}");
         }
@@ -449,6 +457,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var requestedStart = windowEnd.AddDays(-7);
         using (var connection = await OpenSeedConnectionAsync())
         {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
             await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart), "0xATSTART");
             await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddHours(-1)), "0xLATER");
         }
@@ -474,6 +484,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var firstRow = windowEnd.AddDays(-2);
         using (var connection = await OpenSeedConnectionAsync())
         {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
             await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart.AddDays(-20)), "0xNEIGHBOUR", serverId: ServerId + 1);
             await SeedQueryStatsAsync(connection, NaiveUtc(firstRow), "0xFIRST");
             await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddHours(-1)), "0xLATER");
@@ -499,6 +511,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var nowUtc = DateTime.UtcNow;
         using (var connection = await OpenSeedConnectionAsync())
         {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
             await SeedQueryStatsAsync(connection, NaiveUtc(nowUtc.AddDays(-20)), "0xOLDER");
             await SeedQueryStatsAsync(connection, NaiveUtc(nowUtc.AddHours(-2)), "0xQUIETSTART");
         }
