@@ -996,7 +996,7 @@ public class StoreLogClassifierTests
 
         var census = StoreLogClassifier.Classify(string.Join("\n", Entry("11000.1", "8.5", "1").Concat(Entry("19000.9", "91234.5", "880000"))) + "\n");
 
-        var plan = Assert.Single(census.Groups.Where(g => g.EventClass == StoreLogClassifier.SlowPlanClass));
+        var plan = Assert.Single(census.Groups, g => g.EventClass == StoreLogClassifier.SlowPlanClass);
         Assert.Equal(2, plan.Occurrences);
         Assert.EndsWith(" Index Scan queryid=4242", plan.MessageText, StringComparison.Ordinal);
         Assert.Contains("\"Total Cost\":", plan.SampleLine, StringComparison.Ordinal);

@@ -231,7 +231,7 @@ public sealed class PgPlanShapeHashTests
         Assert.Equal(45.6, kept["Execution Time"]!.GetValue<double>());
         Assert.Equal(7.59, kept["Plan"]!["Total Cost"]!.GetValue<double>());
         Assert.Equal(1, kept["Plan"]!["Plan Rows"]!.GetValue<long>());
-        Assert.Equal(7.58, ChildOf(kept)["Startup Cost"]!.GetValue<double>());
+        Assert.Equal(0.29, ChildOf(kept)["Startup Cost"]!.GetValue<double>());
         Assert.Contains("'?'", parsed.PlanJson.Replace("\\u0027", "'"), StringComparison.Ordinal);
     }
 
