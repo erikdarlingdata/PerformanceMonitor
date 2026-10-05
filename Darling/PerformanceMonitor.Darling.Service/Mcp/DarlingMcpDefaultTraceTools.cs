@@ -81,7 +81,7 @@ public sealed class DarlingMcpDefaultTraceTools
                     return notCollected;
             }
 
-            var earliestShown = significant.Select(r => r.EventTimeUtc).Where(t => t.HasValue).Min();
+            var earliestShown = significant.Select(e => e.EventTimeUtc).Where(t => t.HasValue).Min();
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 async () =>
                 {
