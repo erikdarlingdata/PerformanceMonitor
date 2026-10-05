@@ -236,7 +236,10 @@ public sealed class WebDataStartNoteLiveTests
             var name = "web-data-start-" + read.Replace('_', '-');
             var added = store.End.AddDays(-2);
             var firstRow = store.End.AddDays(-1);
-            await store.SeedTableAsync(WebDataStartNote.TableByRead[read], -496610 - i, name, added, firstRow, ct);
+            /* The sparse reads are probed on their collector's runs, so their server logs them from the first collection. */
+            await store.SeedTableAsync(
+                WebDataStartNote.TableByRead[read], -496610 - i, name, added, firstRow, ct,
+                runsCollector: WebDataStartNote.CollectorRunsByRead.GetValueOrDefault(read));
 
             var answered = await WebDataStartNote.AddAsync(store.DataSource, read, name, 168, null, StandInRows, null, ct);
 

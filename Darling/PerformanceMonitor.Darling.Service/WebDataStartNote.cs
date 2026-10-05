@@ -139,6 +139,43 @@ internal static class WebDataStartNote
     internal const string CollectionLogTable = "collection_log";
 
     /// <summary>
+    /// The listed reads whose rows are SPARSE, probed on their collector's own logged runs instead of on the table (#4966). A
+    /// blocking chain, a long transaction behind a pinned horizon and a connected replica each store a row only while it exists,
+    /// so the table's oldest row says when the first one happened, not when collection began: on a server collected for a month
+    /// whose first chain came yesterday it would name yesterday and call a covered week partial. The collector's runs are logged
+    /// whether or not they stored a row, which is what the Captures tile beside the grid counts. Each name is a collector
+    /// <see cref="DataWindowFloor.Source.ForCollectorRuns"/> accepts (it throws on any other, and a test holds each). The read
+    /// stays in <see cref="TableByRead"/> too, for the table its tool reads; this map is consulted first.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> CollectorRunsByRead = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["get_pg_blocking"] = "pg_blocking",
+        ["get_pg_session_states"] = "pg_session_states",
+        ["get_pg_replication_stats"] = "pg_replication_stats",
+    };
+
+    /// <summary>
+    /// The probe source for a listed read: its collector's runs when <see cref="CollectorRunsByRead"/> names one, else the source
+    /// of the table <see cref="TableByRead"/> gives it. False for a read in neither, or a table the probe cannot read by index.
+    /// </summary>
+    internal static bool TryGetReadSource(string read, out DataWindowFloor.Source source)
+    {
+        if (CollectorRunsByRead.TryGetValue(read, out var collector))
+        {
+            source = DataWindowFloor.Source.ForCollectorRuns(collector);
+            return true;
+        }
+
+        if (TableByRead.TryGetValue(read, out var table))
+        {
+            return TryGetSource(table, out source);
+        }
+
+        source = null!;
+        return false;
+    }
+
+    /// <summary>
     /// The probe source for a table <see cref="TableByRead"/> names: the collection log's own source for
     /// <see cref="CollectionLogTable"/>, the collector table's for every other name, false for a table the probe
     /// cannot read by index.
@@ -182,7 +219,9 @@ internal static class WebDataStartNote
     /// reads each tool's source and holds both halves.</para>
     ///
     /// <para>The PostgreSQL window reads (#4966): database stats, session states, replication stats, the four trends and Captured Plans
-    /// answer <c>empty</c> once capture is known to have run; blocking answers <c>no_blocking_sampled</c> (captures exist and none held
+    /// answer <c>empty</c>; a server with no row and no logged run in the window gets no note, whatever the word. (For the database
+    /// and wait trends <c>empty</c>, and for the I/O summary <c>no_io_activity</c>, a history too short to difference may also
+    /// answer it; the coverage fact holds for that case too.) Blocking answers <c>no_blocking_sampled</c> (captures exist and none held
     /// a chain) and the I/O summary <c>no_io_activity</c>. Never admitted: <c>not_sampled</c> (blocking found no capture at all),
     /// <c>precondition</c> (Captured Plans, capture is not configured) and <c>unavailable</c>.</para>
     /// </summary>
@@ -295,11 +334,10 @@ internal static class WebDataStartNote
         NpgsqlDataSource postgres, string tool, string? server, int? hoursBack, string? asOf, string result,
         ILogger? logger, CancellationToken cancellationToken)
     {
-        if (!TableByRead.TryGetValue(tool, out var table)
-            || string.IsNullOrWhiteSpace(server)
+        if (string.IsNullOrWhiteSpace(server)
             || hoursBack is not int hours
             || hours < 1
-            || !TryGetSource(table, out var source))
+            || !TryGetReadSource(tool, out var source))
         {
             return result;
         }

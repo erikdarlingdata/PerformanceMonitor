@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -87,6 +88,37 @@ public sealed class WebDataStartNoteTests
         }
 
         Assert.Equal(WebDataStartNote.TableByRead.Count, WebDataStartNote.TableByRead.Keys.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    /// <summary>The sparse reads are probed on their collector's logged runs (F1): every name in the map is a listed read, a
+    /// collector the catalog lists, and a source that reads the collection log scoped to that collector. Every other listed
+    /// read keeps the source of its table.</summary>
+    [Fact]
+    public void TheSparseReads_AreProbedOnTheirCollectorsRuns_AndEveryOtherReadKeepsItsTable()
+    {
+        Assert.Equal(
+            ["get_pg_blocking", "get_pg_replication_stats", "get_pg_session_states"],
+            WebDataStartNote.CollectorRunsByRead.Keys.Order(StringComparer.Ordinal).ToArray());
+
+        foreach (var (read, collector) in WebDataStartNote.CollectorRunsByRead)
+        {
+            Assert.Contains(read, WebDataStartNote.TableByRead.Keys);
+            Assert.Contains(PerformanceMonitor.Collectors.CollectorCatalog.All, c => string.Equals(c.Name, collector, StringComparison.Ordinal));
+            Assert.True(WebDataStartNote.TryGetReadSource(read, out var source));
+            Assert.Equal("collection_log", source.Relation);
+            Assert.NotNull(source.LogCollectorName);
+            Assert.Equal(collector, source.LogCollectorName);
+        }
+
+        foreach (var (read, table) in WebDataStartNote.TableByRead.Where(kv => !WebDataStartNote.CollectorRunsByRead.ContainsKey(kv.Key)))
+        {
+            Assert.True(WebDataStartNote.TryGetReadSource(read, out var source));
+            Assert.True(WebDataStartNote.TryGetSource(table, out var expected));
+            Assert.Equal(expected.Relation, source.Relation);
+            Assert.Null(source.LogCollectorName);
+        }
+
+        Assert.False(WebDataStartNote.TryGetReadSource("get_active_queries", out _));
     }
 
     [Fact]
@@ -515,8 +547,9 @@ public sealed class WebDataStartNoteTests
         Assert.Empty(Strings(r, "errors"));
     }
 
-    /// <summary>The same decision in the source text, so it holds without Node: none of the PostgreSQL window panels
-    /// opts out of the note, because each one shows the window's own figures.</summary>
+    /// <summary>The same decision in the source text, so it holds without Node: none of the eleven PostgreSQL window reads
+    /// opts a panel out of the note, because each one shows the window's own figures. The check reads only the spec block of
+    /// each listed read (its <c>fanout(</c> or <c>table(</c> call), so another PostgreSQL panel can opt out on its own.</summary>
     [Fact]
     public void NoPostgresWindowPanel_OptsOutOfTheNote()
     {
@@ -532,9 +565,24 @@ public sealed class WebDataStartNoteTests
             var at = postgres.IndexOf("\"" + read + "\"", StringComparison.Ordinal);
             Assert.True(at > 0, read + " is not on a PostgreSQL tab");
             Assert.Equal(at, postgres.LastIndexOf("\"" + read + "\"", StringComparison.Ordinal));
-        }
 
-        Assert.DoesNotContain("windowNote", postgres, StringComparison.Ordinal);
+            /* The block: from the line naming the read to the first later line indented six spaces or fewer, the close of the
+               call (a fanout( opens at six, its panels sit deeper; a table( opens at six and names its read at eight). */
+            var lines = postgres[at..].Split('\n');
+            var block = new List<string> { lines[0] };
+            foreach (var line in lines.Skip(1))
+            {
+                if (line.Trim().Length > 0 && line.Length - line.TrimStart(' ').Length <= 6)
+                {
+                    break;
+                }
+
+                block.Add(line);
+            }
+
+            Assert.True(block.Count > 3, read + ": the spec block was not found");
+            Assert.DoesNotContain("windowNote", string.Join('\n', block), StringComparison.Ordinal);
+        }
     }
 
     [Fact]
