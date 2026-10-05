@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// #4966: the window-floor keys on six PostgreSQL MCP reads (wait stats, wait sampling, kernel stats, lock stats, predicate stats and
 /// the server config changes), probed on the web's own source for each read (<see cref="WebDataStartNote.TryGetReadSource"/>).
 /// </summary>
+[Collection("live-postgres")]
 public sealed class PgGridsMcpDataStartLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
