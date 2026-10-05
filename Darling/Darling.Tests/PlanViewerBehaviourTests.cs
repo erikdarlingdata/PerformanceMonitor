@@ -140,4 +140,96 @@ public sealed class PlanViewerBehaviourTests
         Assert.True(r.GetProperty("loadingInNew").GetBoolean());
         Assert.True(r.GetProperty("filledNew").GetBoolean());
     }
+
+    private static string[] Strs(JsonElement r, string name) => r.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+    [Fact]
+    public void EachRowKind_ReadsItsOwnTool_WithTheRowsKeyExactlyAsHeld()
+    {
+        var r = Run("kinds");
+
+        Assert.Equal(new[] { "has_query_plan", "has_live_query_plan" }, Strs(r, "activeKeys"));
+        Assert.Equal(new[] { "Plan", "Live plan" }, Strs(r, "activeLabels"));
+        Assert.True(r.GetProperty("activeHide").GetBoolean());
+        Assert.True(r.GetProperty("planColsNoFilter").GetBoolean());
+        Assert.True(r.GetProperty("planColsNoFilterNoCopy").GetBoolean(), "every plan column, planColumn included, sets filter, copy and csv to false: an open panel's XML is the cell's text");
+
+        Assert.Equal("/api/read/get_active_query_plan_xml", Str(r, "activePath"));
+        var est = r.GetProperty("activeQuery");
+        Assert.Equal("srv-a", Str(est, "server"));
+        /* The timestamp is the row's own string, all seven fractional digits, untouched. */
+        Assert.Equal("2026-03-04T05:06:07.1234560", Str(est, "collection_time"));
+        Assert.Equal("57", Str(est, "session_id"));
+        Assert.Equal("3", Str(est, "request_id"));
+        Assert.False(est.TryGetProperty("live", out _));
+
+        var live = r.GetProperty("liveQuery");
+        Assert.Equal("true", Str(live, "live"));
+        Assert.Equal("0", Str(live, "request_id"));       /* a row with no request_id reads as 0 */
+        Assert.Equal("\u2014", Str(r, "noFlagCell"));
+        Assert.Equal("\u2014", Str(r, "noLiveFlagCell"));
+
+        Assert.Equal("query_id", Str(r, "qsKey"));
+        Assert.Equal("/api/read/get_query_store_plan_xml", Str(r, "qsPath"));
+        var qs = r.GetProperty("qsQuery");
+        Assert.Equal("Orders", Str(qs, "database_name"));
+        Assert.Equal("42", Str(qs, "query_id"));
+        Assert.Equal("7", Str(qs, "plan_id"));
+        Assert.False(r.GetProperty("qsNoPlanIdQuery").TryGetProperty("plan_id", out _));
+        Assert.Equal("\u2014", Str(r, "qsNoKey"));
+
+        Assert.Equal("sql_handle", Str(r, "procKey"));
+        Assert.True(r.GetProperty("procHide").GetBoolean());
+        Assert.Equal("/api/read/get_procedure_plan_xml", Str(r, "procPath"));
+        Assert.Equal("0x0300050011223344", Str(r.GetProperty("procQuery"), "sql_handle"));
+        Assert.Equal("\u2014", Str(r, "procNoHandle"));
+
+        Assert.True(r.GetProperty("keysUnique").GetBoolean());
+    }
+
+    [Fact]
+    public void TwoSources_NeverShareAPanel_AndTheQueryHashKeyKeepsItsOldShape()
+    {
+        var r = Run("kindsDoNotShareAPanel");
+        Assert.True(r.GetProperty("aOpen").GetBoolean());
+        Assert.False(r.GetProperty("bOpenAfterA").GetBoolean());
+        Assert.False(r.GetProperty("liveOpenAfterEst").GetBoolean());
+        Assert.Equal(2, r.GetProperty("keys").GetArrayLength());
+        Assert.Equal("srv-a|Orders|0xABC", Str(r, "hashKey"));
+    }
+
+    [Fact]
+    public void EachKind_DownloadsUnderAFileNameOfItsOwn()
+    {
+        var r = Run("stems");
+        var names = Strs(r, "names");
+        Assert.Equal(3, names.Distinct().Count());
+        Assert.All(names, n => Assert.EndsWith(".sqlplan", n));
+        Assert.Equal("active-57-2026-03-04T05_06_07.1234560-live.sqlplan", names[0]);
+        Assert.Equal("qs-Orders-42-7.sqlplan", names[1]);
+        Assert.Equal("0x03000500AA.sqlplan", names[2]);
+    }
+
+    [Fact]
+    public void ARowKindPanel_SurvivesTheRebuild_WithoutAnotherRead()
+    {
+        var r = Run("rebuildKinds");
+        Assert.True(r.GetProperty("open").GetBoolean());
+        Assert.True(r.GetProperty("showsPlan").GetBoolean());
+        Assert.Equal(0, r.GetProperty("refetched").GetInt32());
+    }
+
+    [Fact]
+    public void AQueryStoreRowWithNoStoredPlan_SaysSo()
+    {
+        var r = Run("noPlanKind");
+        Assert.Contains("No stored Query Store plan found", Str(r, "text"));
+        Assert.False(r.GetProperty("hasPre").GetBoolean());
+    }
+
+    [Fact]
+    public void ANullSource_IsADash()
+    {
+        Assert.Equal("\u2014", Str(Run("nullSource"), "cell"));
+    }
 }

@@ -385,10 +385,13 @@ public sealed class DarlingMcpPgDatabaseTools
                 postgres, "get_pg_database_stats", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
             return McpHelpers.Status(
                 "empty",
-                $"No database recorded transactions, block accesses, temp files or deadlocks for {serverName} "
-                + $"in the last {hoursBack} hour(s), and no statistics reset either. Collection DID run over "
-                + "this window - at least two snapshots exist to difference - so this is a genuine all-clear "
-                + "rather than missing data.",
+                McpHelpers.QuietUnlessCut(
+                    notice.WindowTruncated, notice.EffectiveStart,
+                    factual: $"No database recorded transactions, block accesses, temp files or deadlocks for {serverName} "
+                        + $"in the last {hoursBack} hour(s), and no statistics reset either. Collection DID run over "
+                        + "this window - at least two snapshots exist to difference",
+                    coveredClaim: " - so this is a genuine all-clear "
+                        + "rather than missing data."),
                 notice.IsUnavailable ? hints : new
                 {
                     hints.server,

@@ -48,7 +48,7 @@ import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell } from "./deadlock-graph.js";
-import { planColumn } from "./plan-viewer.js";
+import { activePlanColumns, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -1060,7 +1060,7 @@ export const SERVER_TABS = [
         "get_top_procedures_by_cpu",
         { server, hours: ctx.hours, top: 20, detail: "full" },
         "procedures",
-        TOP_PROC_COLUMNS,
+        [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
         ctx.label,
         "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
         2,
@@ -1370,7 +1370,7 @@ export const SERVER_TABS = [
         "get_active_queries",
         { server, hours: ctx.hours, limit: 50 },
         "queries",
-        ACTIVE_COLUMNS,
+        [...ACTIVE_COLUMNS, ...activePlanColumns(server)],
         ctx.label,
         "No active-query snapshots in this window."
       ),
@@ -1443,7 +1443,7 @@ export const SERVER_TABS = [
         "get_top_procedures_by_cpu",
         { server, hours: ctx.hours, top: 20, detail: "full" },
         "procedures",
-        TOP_PROC_COLUMNS,
+        [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
         ctx.label,
         "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
         2,
@@ -1456,7 +1456,7 @@ export const SERVER_TABS = [
         "get_query_store_top",
         { server, hours: ctx.hours, top: 20 },
         "queries",
-        QUERY_STORE_COLUMNS,
+        [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server)],
         ctx.label,
         "No Query Store rows in this window.",
         2,
@@ -3155,7 +3155,7 @@ const QUERY_TREND_COLUMNS = [
   { key: "query_plan_hash", label: "Plan Hash", mono: true },
 ];
 
-/* The desktop Top Procedures grid's columns in its order (its Query Plan download column is the separate plan work).
+/* The desktop Top Procedures grid's columns in its order (its Query Plan column is procedurePlanColumn, added where the grid is built).
    The ungrouped columns are the core set and always show; the rest follow the toggles in TOP_PROC_GROUPS, all off at
    first. Last Execution and Cached Time arrive as UTC instants (the read converts them from the monitored server's
    clock) and print in the browser's local time. The hourly tier carries none of the grouped fields, nor Type, the
@@ -3382,7 +3382,7 @@ const AUTO_TUNING_COLUMNS = [
   { key: "as_of", label: "As of", format: "time" },
 ];
 
-/* The Active Queries grid, in the desktop viewer's column order and wording (Collected and Query Text lead, the anchor rule; the desktop's plan column is not here). */
+/* The Active Queries grid, in the desktop viewer's column order and wording (Collected and Query Text lead, the anchor rule; the plan buttons are added where the grid is built: activePlanColumns). */
 const ACTIVE_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
   { key: "query_text", label: "Query Text", render: (r) => codeDisclosure(r.query_text) },
@@ -4587,6 +4587,11 @@ const COLLECTOR_COLUMNS = [
      showed the floor, but no column showed the sentence behind it, so a regressed row read WARNING with
      every other cell blank. Composed server-side from the shared formatter, like the two columns above. */
   { key: "regression_finding", label: "Regression", wrap: true },
+  /* #5249: a PostgreSQL collector this server's engine does not collect (a collector this engine kind can never run: an Aurora-only reader on stock PostgreSQL, the sampler on Aurora) has no log row,
+     so the server lists it with status not_collected and the sentence saying why. The status paints with the
+     neutral Unknown band, not an error one: a gate is not a fault. Left out unless a row has a message, so a
+     server with no such collector (and every SQL Server tab) shows no column of dashes. */
+  { key: "message", label: "Why not collected", wrap: true, hideWhenEmpty: true },
 ];
 
 const HEAVIEST_COLUMNS = [

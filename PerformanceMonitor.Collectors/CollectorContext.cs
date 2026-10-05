@@ -302,6 +302,18 @@ public sealed class CollectorContext
     public bool DeferPlanXmlFetch { get; init; }
 
     /// <summary>
+    /// #5158: when true, <c>procedure_stats</c> appends the three plan-identity columns (<c>plan_statement_count</c>,
+    /// <c>plan_last_statement_compile</c>, <c>plan_generation_sum</c>) to its SELECT, so a host can recognize the
+    /// plans it holds. With <see cref="CapturePlanXml"/> on and <see cref="DeferPlanXmlFetch"/> off they follow the
+    /// inline plan columns (ordinals 29-31) and the plans render exactly as without the flag: this is how a host
+    /// measures whether its identity would have recognized plans it just rendered, without changing what is stored.
+    /// With <see cref="CapturePlanXml"/> off they stand alone at ordinals 27-29, which lets a host that defers its
+    /// plan fetch recognize plans on a cycle that renders none. Default false: no collector's SQL changes until a
+    /// host sets it.
+    /// </summary>
+    public bool PlanIdentityColumns { get; init; }
+
+    /// <summary>
     /// Whether this target has granted <c>pg_read_binary_file</c> (#4046 part 1c), resolved by the host
     /// through <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/> BEFORE <c>BuildQuery</c> runs, for
     /// the three collectors that read <see cref="PgServerLogTail"/>'s tail. False (the default, and what

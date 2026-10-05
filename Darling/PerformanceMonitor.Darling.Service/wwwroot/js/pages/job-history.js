@@ -14,6 +14,11 @@
  * The filters live at MODULE scope, so the 60 s poll's rebuild of the page shows the same choices, the text being
  * typed and the focus; the grid's sort is kept by the shared grid renderer. Every value from the read is drawn as
  * text. The page says so when the window reaches past the history the store keeps, and when the row limit cut the list.
+ *
+ * Under the head, one line says what SQL Agent is doing now, from the read's own Agent fields (a named server's
+ * agent_running / agent_status_desc, or the fleet's agents_total / agents_running / agents_not_running; an empty answer carries them under hints): stopped in
+ * red, running, unknown when no recent snapshot backs it, or a plain "No SQL Agent service" for a server without one, with an
+ * "n of m servers" roll-up across the fleet.
  */
 
 import { VIZ } from "../panels.js";
@@ -144,6 +149,47 @@ export function limitNote(data) {
   return "Showing the newest " + shown + " runs; more matched. Raise the row limit or narrow the filters to see the rest.";
 }
 
+/** The description the tool serves for a server whose collector found no SQL Agent service (DarlingJobReader.NoAgentServiceDescription). */
+const NO_AGENT_SERVICE = "no SQL Agent service found";
+
+/**
+ * The Agent line for an answer, or null when the answer carries no Agent state. `src` is the answer (or an empty
+ * answer's hints); `serverName` is the server the page asked for, used when the answer does not name one. Returns
+ * { level: "stopped" | "running" | "unknown" | "none", text }. A server with no SQL Agent service is not a stopped one:
+ * it reads "none", drawn as a plain line, and never turns the roll-up red.
+ */
+export function agentLine(src, serverName) {
+  if (!src || typeof src !== "object") return null;
+  let total;
+  let running;
+  let notRunning;
+  if (typeof src.agents_total === "number") {
+    total = src.agents_total;
+    running = typeof src.agents_running === "number" ? src.agents_running : 0;
+    notRunning = Array.isArray(src.agents_not_running) ? src.agents_not_running : [];
+  } else if ("agent_running" in src) {
+    total = 1;
+    running = src.agent_running === true ? 1 : 0;
+    notRunning = src.agent_running === true ? [] : [{ server: src.server || serverName || "", agent_running: src.agent_running, agent_status_desc: src.agent_status_desc }];
+  } else return null;
+  if (total === 0) return null;
+  const noService = notRunning.filter((a) => a.agent_running == null && a.agent_status_desc === NO_AGENT_SERVICE).map((a) => a.server || "");
+  const stopped = notRunning.filter((a) => a.agent_running === false).map((a) => a.server || "");
+  const unknown = notRunning.filter((a) => a.agent_running !== false && !(a.agent_running == null && a.agent_status_desc === NO_AGENT_SERVICE)).map((a) => a.server || "");
+  const level = stopped.length ? "stopped" : unknown.length ? "unknown" : noService.length === total ? "none" : "running";
+  if (total === 1) {
+    if (level === "stopped") return { level, text: "SQL Agent is stopped" + (stopped[0] ? " on " + stopped[0] : "") };
+    if (level === "unknown") return { level, text: "Agent status unknown (no recent snapshot)" };
+    if (level === "none") return { level, text: "No SQL Agent service" + (noService[0] ? " on " + noService[0] : "") };
+    return { level, text: "SQL Agent running" };
+  }
+  let text = "Agent running on " + running + " of " + total + " servers";
+  if (stopped.length) text += "; stopped on " + stopped.join(", ");
+  if (unknown.length) text += "; status unknown on " + unknown.join(", ");
+  if (noService.length) text += "; no SQL Agent service on " + noService.join(", ");
+  return { level, text };
+}
+
 export function renderJobHistory(main) {
   if (pageAbort) pageAbort.abort();
   if (loadAbort) loadAbort.abort();
@@ -199,6 +245,12 @@ export function renderJobHistory(main) {
   });
   const jobLabel = el("label", { class: "range-control" }, [el("span", { text: "Job" }), job]);
 
+  const agentSlot = el("div", { class: "agent-line-slot" });
+  const showAgent = (src) => {
+    const line = agentLine(src, state.server);
+    mount(agentSlot, line ? el("div", { class: "agent-line agent-" + line.level, role: "status", text: line.text }) : []);
+  };
+
   mount(main, [
     el("div", { class: "page-head" }, [
       el("h2", { text: "Job History" }),
@@ -210,6 +262,7 @@ export function renderJobHistory(main) {
       category.label,
       limit.label,
     ]),
+    agentSlot,
     body,
   ]);
   if (state.jobFocused && typeof job.focus === "function") {
@@ -226,9 +279,13 @@ export function renderJobHistory(main) {
       const res = await readToolWithinKeptHistory("get_job_history", readParams(), signal);
       if (ticket !== loadSeq) return;
       if (res.kind === "aborted" || res.kind === "auth") return;
-      if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+      if (res.kind === "error") {
+        showAgent(null);
+        return mount(body, readErrorStrip(res.message));
+      }
       const data = res.data || {};
       const kept = keptWindowStrip(res);
+      showAgent(res.kind === "empty" ? res.hints : data);
       if (res.kind === "empty") {
         return mount(body, [kept, noticeFor(retainedNote(res.hints)), emptyStrip(res.message)]);
       }

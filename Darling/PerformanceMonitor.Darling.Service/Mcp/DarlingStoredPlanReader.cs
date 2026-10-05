@@ -116,6 +116,38 @@ internal static class DarlingStoredPlanReader
         """;
 
     /// <summary>
+    /// The stored estimated execution plan for one Active Queries snapshot row, keyed by its natural key
+    /// (server, collection_time, session_id, request_id). BYTE-EQUAL to the Viewer's
+    /// <c>ViewerDataService.QuerySnapshotEstimatedPlanSql</c> (a test pins the equality), so the desktop and
+    /// the web fetch the same row the same way. <c>COALESCE(request_id, 0)</c> matches a row collected with
+    /// no request_id, which the grids carry as 0. $1 server_id, $2 collection_time (naive UTC,
+    /// microsecond-exact), $3 session_id, $4 request_id.
+    /// </summary>
+    public const string QuerySnapshotPlanSql = """
+        SELECT query_plan
+        FROM query_snapshots
+        WHERE server_id = $1
+        AND   collection_time = $2
+        AND   session_id = $3
+        AND   COALESCE(request_id, 0) = $4
+        AND   query_plan IS NOT NULL
+        LIMIT 1
+        """;
+
+    /// <summary>The live/actual plan twin of <see cref="QuerySnapshotPlanSql"/>; byte-equal to the Viewer's
+    /// <c>ViewerDataService.QuerySnapshotLivePlanSql</c>.</summary>
+    public const string QuerySnapshotLivePlanSql = """
+        SELECT live_query_plan
+        FROM query_snapshots
+        WHERE server_id = $1
+        AND   collection_time = $2
+        AND   session_id = $3
+        AND   COALESCE(request_id, 0) = $4
+        AND   live_query_plan IS NOT NULL
+        LIMIT 1
+        """;
+
+    /// <summary>
     /// The Query Store plan for ONE plan_id as it is stored since #2210: the fact rows carry no plan text (the
     /// collector ships a NULL placeholder), and a plan lives ONCE in <c>query_plan_dim</c>, reached through
     /// <c>collect.query_store_plan_map</c> on its primary key (server_id, database_name, plan_id). Two index
@@ -387,6 +419,27 @@ internal static class DarlingStoredPlanReader
         }
 
         return planIds;
+    }
+
+    /// <summary>
+    /// The stored plan for one Active Queries snapshot row (<see cref="QuerySnapshotPlanSql"/> /
+    /// <see cref="QuerySnapshotLivePlanSql"/>), or null when that request captured none.
+    /// <paramref name="collectionTimeUtc"/> must be the row's collection_time exactly — naive UTC, with the
+    /// microseconds the store keeps — and is relabelled <c>Unspecified</c> here so Npgsql binds it as a
+    /// <c>timestamp</c> and not a <c>timestamptz</c> (the #1969 trap).
+    /// </summary>
+    public static async Task<string?> GetQuerySnapshotPlanXmlAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime collectionTimeUtc, int sessionId, int requestId, bool live,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(live ? QuerySnapshotLivePlanSql : QuerySnapshotPlanSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = sessionId });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = requestId });
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is string s ? s : null;
     }
 
     /// <summary>
