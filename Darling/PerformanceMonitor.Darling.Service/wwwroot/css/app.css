@@ -611,6 +611,14 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .chart-legend .item.drillable { cursor: pointer; border-radius: var(--radius-sm); }
 .chart-legend .item.drillable:hover { color: var(--fg); }
 .chart-legend .item.drillable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chart-legend .item.switchable { cursor: pointer; border-radius: var(--radius-sm); user-select: none; }
+.chart-legend .item.switchable:hover { color: var(--fg); }
+.chart-legend .item.switchable:focus-visible, .chart-legend .item [role="button"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chart-legend .item .swatch[role="button"] { cursor: pointer; }
+/* A hidden series stays in the legend, struck through with a hollow swatch, so it reads as hidden and not as absent. */
+.chart-legend .item.legend-off { opacity: 0.55; text-decoration: line-through; }
+.chart-legend .item.legend-off .swatch { background: transparent !important; box-shadow: inset 0 0 0 1px var(--dim); }
+.chart-legend .legend-show-all { margin-left: auto; }
 
 /* The transient drill-down chip above a drilled panel (#1563 D6): the pinned filter(s), a jump to the server page
    (server dimension), and a clear that pops back. View-state only — nothing is persisted. */
