@@ -306,6 +306,26 @@ public sealed class DarlingHostBindingTests
         => Assert.Equal(expected, DarlingHostBinding.IsRemoteAddressAllowed(
             IPAddress.Parse(remote), CidrAllowList.Parse("10.8.0.0/16,2001:db8::/32")));
 
+    /* ---- IsAllowedHost's third argument: the ONE extra name each host admits (#4220 web, #5288 MCP) ---- */
+
+    [Theory]
+    [InlineData("monitor.example.com", "monitor.example.com", true)]
+    [InlineData("Monitor.EXAMPLE.com", "monitor.example.com", true)]          // case-insensitive, both ways
+    [InlineData("monitor.example.com", "MONITOR.Example.com", true)]
+    [InlineData("b\u00FCcher.example", "b\u00FCcher.example", true)]          // the decoded form HttpRequest.Host hands the guard
+    [InlineData("xn--bcher-kva.example", "b\u00FCcher.example", false)]       // compared AS GIVEN: each host converts its name first
+    [InlineData("evil.com", "monitor.example.com", false)]
+    [InlineData("monitor.example.com.evil.com", "monitor.example.com", false)] // exact, not a suffix or prefix match
+    [InlineData("monitor.example.com:5153", "monitor.example.com", false)]     // the caller splits the port off first
+    [InlineData("monitor.example.com", null, false)]                           // no extra name: unchanged
+    [InlineData("monitor.example.com", "", false)]
+    [InlineData("", "monitor.example.com", true)]                              // no Host at all is the guard's own rule (HTTP/1.0), not this name's
+    [InlineData(null, "monitor.example.com", true)]
+    [InlineData("localhost", "monitor.example.com", true)]                     // the guard's own list is untouched
+    [InlineData("192.168.1.205", "monitor.example.com", true)]
+    public void IsAllowedHost_ExtraName_IsAnExactCaseInsensitiveCompareOfWhatItIsGiven(string? host, string? extraAllowedHost, bool expected)
+        => Assert.Equal(expected, DarlingHostBinding.IsAllowedHost(host, IPAddress.Parse("192.168.1.205"), extraAllowedHost));
+
     /* ---- FixedTimeTokenEquals: only an exact match; empty/null never authorizes ---- */
 
     [Theory]

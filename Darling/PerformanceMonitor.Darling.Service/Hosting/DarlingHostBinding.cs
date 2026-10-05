@@ -219,13 +219,18 @@ internal static class DarlingHostBinding
     /// this forwarder keeps it reachable where the rest of the two hosts' bind/auth helpers live, so neither
     /// host reaches past this class. Pass <paramref name="networkListenIp"/> = null in loopback-only mode.
     ///
-    /// <para><paramref name="extraAllowedHost"/> (#4220) admits ONE more exact Host value beside
-    /// <see cref="HostHeaderGuard"/>'s own list — the web host passes <c>web.publicBaseUrl</c>'s host, since
-    /// that value is operator-configured (darling.json on this box), not attacker-reachable, and is exactly
-    /// the standard <c>AllowedHosts</c> pattern: a DNS rebind needs a hostname the ATTACKER chooses, and this
-    /// admits only the one the OPERATOR chose. Defaults to null so every existing 2-arg caller (the MCP hosts)
-    /// is byte-for-byte unchanged — <see cref="HostHeaderGuard"/>'s own default stays exactly as it was.
-    /// Compared case-insensitively, with no port (the caller already split that off).</para>
+    /// <para><paramref name="extraAllowedHost"/> admits ONE more exact Host value beside
+    /// <see cref="HostHeaderGuard"/>'s own list. BOTH Darling hosts pass one: the web host passes
+    /// <c>web.publicBaseUrl</c>'s host (#4220) and the MCP host passes <c>mcp.network.hostName</c> (#5288, in
+    /// network mode only; null otherwise). Each value is operator-configured (darling.json on this box), not
+    /// attacker-reachable, and is exactly the standard <c>AllowedHosts</c> pattern: a DNS rebind needs a
+    /// hostname the ATTACKER chooses, and this admits only the one the OPERATOR chose. Defaults to null, so a
+    /// caller with no name is byte-for-byte unchanged and <see cref="HostHeaderGuard"/>'s own default stays
+    /// exactly as it was. Compared case-insensitively, with no port (the caller already split that off), and
+    /// compared AS GIVEN. The <paramref name="host"/> a host hands in is <c>HttpRequest.Host.Host</c>, which
+    /// ASP.NET Core has already DECODED (a punycode <c>xn--bcher-kva.example</c> arrives as
+    /// <c>b&#252;cher.example</c>), so each host converts its configured name once, with
+    /// <c>HostString.FromUriComponent(...).Host</c>, before it passes it here (#5288).</para>
     /// </summary>
     internal static bool IsAllowedHost(string? host, IPAddress? networkListenIp, string? extraAllowedHost = null)
         => HostHeaderGuard.IsAllowedHost(host, networkListenIp)

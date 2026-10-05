@@ -385,6 +385,11 @@ internal static class DarlingListenerTls
     ///
     /// <para>An IP literal as the host name (a <c>publicBaseUrl</c> of <c>http://10.0.0.5:5153</c>) is the IP
     /// check's business and is ignored here, as it always was: a dNSName SAN cannot carry it.</para>
+    ///
+    /// <para>A certificate carries its dNSName SANs in ASCII (punycode, <c>xn--bcher-kva.example</c>), and a
+    /// <c>publicBaseUrl</c> host can be written in Unicode (<c>b&#252;cher.example</c>), so the name is mapped with
+    /// <c>IdnMapping.GetAscii</c> before it is matched (#5288) and a matching SAN no longer warns falsely. Only
+    /// the match uses the ASCII form: every warning text names the host as it was given.</para>
     /// </summary>
     /// <param name="labels">The listener's words.</param>
     /// <param name="certificate">The loaded leaf.</param>
@@ -412,7 +417,7 @@ internal static class DarlingListenerTls
         }
 
         var ipNamed = !wildcard && DarlingManagedPostgres.CertificateSanCoversIp(certificate, listenIp);
-        var nameNamed = dnsName is not null && SanCoversDnsName(certificate, dnsName);
+        var nameNamed = dnsName is not null && SanCoversDnsName(certificate, ToAsciiForSanMatch(dnsName));
         if (ipNamed || nameNamed)
         {
             return null;
@@ -537,6 +542,31 @@ internal static class DarlingListenerTls
 
         var unbracketed = trimmed.Length > 2 && trimmed[0] == '[' && trimmed[^1] == ']' ? trimmed[1..^1] : trimmed;
         return IPAddress.TryParse(unbracketed, out _) ? null : trimmed;
+    }
+
+    /// <summary>
+    /// The ASCII (punycode) form of <paramref name="dnsName"/>, which is what a certificate's dNSName SAN carries
+    /// (#5288): <c>b&#252;cher.example</c> becomes <c>xn--bcher-kva.example</c>. A name that is already ASCII is
+    /// returned untouched, case included, so every ASCII comparison is exactly what it was before. A name the
+    /// mapping refuses (an empty label, a label over 63 characters once encoded, a lone surrogate) is returned
+    /// as given: it can only fail to match, and the warning says so; the mapping's exception never reaches
+    /// start-up.
+    /// </summary>
+    private static string ToAsciiForSanMatch(string dnsName)
+    {
+        if (System.Text.Ascii.IsValid(dnsName))
+        {
+            return dnsName;
+        }
+
+        try
+        {
+            return new IdnMapping().GetAscii(dnsName);
+        }
+        catch (ArgumentException)
+        {
+            return dnsName;
+        }
     }
 
     private static string TrimTrailingDot(string value)

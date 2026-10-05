@@ -412,6 +412,95 @@ public sealed class DarlingListenerTlsTests
         }
     }
 
+    /* ---- #5288 (wave 4): a certificate carries its dNSName SANs in ASCII, so the host name is matched in ASCII ---- */
+
+    /// <summary>A <c>publicBaseUrl</c> host can be written in Unicode, but the certificate's SAN is the punycode
+    /// form, so the Unicode spelling must name the SAN. The IP SAN is absent on purpose: only the name can
+    /// silence the warning, on a specific listen and on a wildcard one.</summary>
+    [Theory]
+    [InlineData("b\u00FCcher.example")]       // Unicode, as a publicBaseUrl can be written
+    [InlineData("B\u00DCCHER.Example")]       // upper case folds
+    [InlineData("b\u00FCcher.example.")]      // one trailing dot
+    [InlineData("xn--bcher-kva.example")]     // already ASCII, so untouched
+    [InlineData("XN--BCHER-KVA.Example")]
+    public void SanCheck_PunycodeSan_NamesTheUnicodeSpellingOfTheHostName_SoNoWarningIsRaised(string hostName)
+    {
+        using var punycodeSan = Make("p", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30), dns: new[] { "xn--bcher-kva.example" });
+
+        Assert.Null(DarlingListenerTls.SanWarning(ListenerTlsLabels.Web, punycodeSan, Listen, Port, hostName));
+        Assert.Null(DarlingListenerTls.SanWarning(ListenerTlsLabels.Web, punycodeSan, IPAddress.Any, Port, hostName));
+    }
+
+    /// <summary>The mapping is of the whole name, so a one-label wildcard in punycode still names a Unicode
+    /// subdomain, and still stands for exactly one label.</summary>
+    [Fact]
+    public void SanCheck_PunycodeWildcardSan_NamesAUnicodeSubdomain_OfOneLabelOnly()
+    {
+        using var wildcard = Make("w", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30), dns: new[] { "*.xn--bcher-kva.example" });
+
+        Assert.Null(DarlingListenerTls.SanWarning(ListenerTlsLabels.Web, wildcard, Listen, Port, "www.b\u00FCcher.example"));
+        Assert.NotNull(DarlingListenerTls.SanWarning(ListenerTlsLabels.Web, wildcard, Listen, Port, "a.www.b\u00FCcher.example"));
+        Assert.NotNull(DarlingListenerTls.SanWarning(ListenerTlsLabels.Web, wildcard, Listen, Port, "b\u00FCcher.example"));
+    }
+
+    /// <summary>A different IDN name is still a mismatch: the mapping widens nothing. The warning is today's
+    /// text, with the host named as it was given.</summary>
+    [Fact]
+    public void SanCheck_NonMatchingIdnHostName_StillWarns_NamingTheHostAsGiven()
+    {
+        using var other = Make("o", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30), dns: new[] { "xn--mnchen-3ya.example" });
+
+        var text = DarlingListenerTls.SanWarning(ListenerTlsLabels.Web, other, Listen, Port, "b\u00FCcher.example");
+
+        Assert.NotNull(text);
+        Assert.Contains("carries neither an iPAddress SAN for 192.168.1.205 nor a dNSName SAN for b\u00FCcher.example", text, StringComparison.Ordinal);
+        Assert.Contains("accepts loopback, that literal IP and b\u00FCcher.example in the Host header", text, StringComparison.Ordinal);
+
+        // The wording is the ASCII-name wording, word for word, and the wildcard-listen text is untouched too.
+        var asciiText = DarlingListenerTls.SanWarning(ListenerTlsLabels.Web, other, Listen, Port, "bucher.example");
+        Assert.Equal(asciiText!.Replace("bucher.example", "b\u00FCcher.example", StringComparison.Ordinal), text);
+        var wildcardText = DarlingListenerTls.SanWarning(ListenerTlsLabels.Mcp, other, IPAddress.Any, Port, "b\u00FCcher.example");
+        Assert.StartsWith("MCP server TLS certificate carries no dNSName SAN for b\u00FCcher.example", wildcardText, StringComparison.Ordinal);
+    }
+
+    /// <summary>A name the mapping refuses keeps its raw form: it warns like any other mismatch, and the
+    /// mapping's exception never reaches start-up.</summary>
+    [Fact]
+    public void SanCheck_UnmappableIdnHostName_KeepsTheRawName_AndWarnsWithoutThrowing()
+    {
+        using var punycodeSan = Make("p", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30), dns: new[] { "xn--bcher-kva.example" });
+
+        foreach (var hostName in new[]
+        {
+            "b\u00FCcher..example",                            // an empty label
+            new string('\u00FC', 64) + ".example",            // a label over 63 characters once encoded
+            "\uD800.example",                                 // a lone surrogate
+        })
+        {
+            var text = DarlingListenerTls.SanWarning(ListenerTlsLabels.Web, punycodeSan, Listen, Port, hostName);
+
+            Assert.NotNull(text);
+            Assert.Contains($"nor a dNSName SAN for {hostName} ", text, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The same through <c>Resolve</c>: a Unicode host name against a punycode SAN logs no Warning.</summary>
+    [Fact]
+    public void SanCheck_UnicodeHostNameThroughResolve_AgainstAPunycodeSan_LogsNoWarning()
+    {
+        using var temp = new TempDir();
+        using var cert = Make("r", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), dns: new[] { "xn--bcher-kva.example" });
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(
+            log, new WebTlsCertificateState(), ListenerTlsLabels.Web, WritePfx(temp, cert), Listen, Port, "b\u00FCcher.example");
+
+        using (outcome.Certificate!.Value)
+        {
+            Assert.Empty(log.At(LogLevel.Warning));
+        }
+    }
+
     /* ---- F11: the start line's sentence about loopback ---- */
 
     [Theory]
