@@ -178,7 +178,11 @@ public sealed class PayloadDigestPassThroughLiveTests
 
     private static async Task<NpgsqlConnection> OpenMigratedStoreAsync(string connectionString, CancellationToken ct)
     {
-        var connection = new NpgsqlConnection(connectionString);
+        /* Production names the dimension tables bare (PayloadDimensions.QueryPlanDimTable is "query_plan_dim") and
+           resolves them through the data source's search_path (DarlingManagedPostgres.BuildConnectionString sets
+           NpgsqlConnectionStringBuilder.SearchPath). Open the same way, so the bare names below resolve as they do live. */
+        var builder = new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = PgSchemaGenerator.SearchPath };
+        var connection = new NpgsqlConnection(builder.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         return connection;
