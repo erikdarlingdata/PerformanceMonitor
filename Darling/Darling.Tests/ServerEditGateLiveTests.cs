@@ -30,9 +30,10 @@ namespace Darling.Tests;
 /// <summary>
 /// The #5240 edit routes through the REAL web pipeline (<c>DarlingWebHostService.ConfigurePipeline</c>, as
 /// <see cref="DarlingWebHostGateLiveTests"/> does), with session cookies minted under a key the test chose: an
-/// anonymous caller is 401, a read-only sign-in is 403 on the unsafe edit method and may still read, an editing
-/// sign-in reaches the route, and only PATCH is routed on the edit path. The store pool is never opened: every request
-/// that reaches the route is one the route refuses before it touches the store.
+/// anonymous caller is 401, a read-only sign-in is 403 on the unsafe edit method and on the by-id admin read (the
+/// host's group gate lets that GET through, so the route refuses it itself), an editing sign-in reaches the route, and
+/// only PATCH is routed on the edit path. The store pool is never opened: every request that reaches the route is
+/// one the route refuses before it touches the store.
 /// </summary>
 public sealed class ServerEditGateLiveTests
 {
@@ -107,6 +108,15 @@ public sealed class ServerEditGateLiveTests
         Assert.Equal(StatusCodes.Status403Forbidden, status);
         Assert.Contains("read-only", body, StringComparison.Ordinal);
         Assert.DoesNotContain("Zq9", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AReadOnlySignIn_IsRefused403_OnTheByIdAdminRead_BeforeTheStore()
+    {
+        using var server = await BuildServer();
+        var (status, body) = await SendAsync(server, "GET", "/api/admin/servers/41", Cookie("bob", WebOidcRole.Viewer));
+        Assert.Equal(StatusCodes.Status403Forbidden, status);
+        Assert.Contains("read-only", body, StringComparison.Ordinal);
     }
 
     [Fact]
