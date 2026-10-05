@@ -130,6 +130,15 @@ internal static class WebDataStartNote
         ["get_pg_wait_trend"] = "pg_wait_sampling",
         ["get_pg_io_trend"] = "pg_io_stats",
         ["get_pg_plans"] = "pg_plan_capture",
+
+        /* The SQL Server event reads (#4966). Each lists EVENTS by the event's own time, so a row can predate the collection
+           that stored it and the notice follows the event-time rule (EventTimeByRead). Blocked process reports and the Default
+           Trace are newest first under a row cap (CappedByRead); the long query page is the slowest runs, ranked by duration,
+           so its cap names no reach; memory pressure has no cap. */
+        ["get_blocked_process_xml"] = "blocked_process_reports",
+        ["get_long_query_completions"] = "long_query_completions",
+        ["get_memory_pressure_events"] = MemoryPressureEventsTable,
+        ["get_default_trace_events"] = "default_trace_events",
     };
 
     /// <summary>
@@ -138,6 +147,13 @@ internal static class WebDataStartNote
     /// it with <see cref="DataWindowFloor.Source.ForCollectionLog"/>: its edge is the log's own fixed horizon.
     /// </summary>
     internal const string CollectionLogTable = "collection_log";
+
+    /// <summary>
+    /// The name <see cref="TableByRead"/> gives the memory pressure events. <see cref="DataWindowFloor.Source.TryForCollectorTable"/>
+    /// refuses it (its index leads with <c>sample_time</c>, not the prefix time column), so <see cref="TryGetSource"/> answers it with
+    /// <see cref="DataWindowFloor.Source.ForMemoryPressureEvents"/>.
+    /// </summary>
+    internal const string MemoryPressureEventsTable = "memory_pressure_events";
 
     /// <summary>
     /// The listed reads whose rows are SPARSE, probed on their collector's own logged runs instead of on the table (#4966). A
@@ -186,6 +202,12 @@ internal static class WebDataStartNote
         if (string.Equals(table, CollectionLogTable, StringComparison.Ordinal))
         {
             source = DataWindowFloor.Source.ForCollectionLog();
+            return true;
+        }
+
+        if (string.Equals(table, MemoryPressureEventsTable, StringComparison.Ordinal))
+        {
+            source = DataWindowFloor.Source.ForMemoryPressureEvents();
             return true;
         }
 
@@ -254,6 +276,13 @@ internal static class WebDataStartNote
         ["get_pg_wait_trend"] = "empty",
         ["get_pg_io_trend"] = "empty",
         ["get_pg_plans"] = "empty",
+
+        /* The SQL Server event reads (#4966) answer empty when the window held no event; unavailable-style words do not exist
+           on them, and not_collected (no such trace on this engine) stays out. */
+        ["get_blocked_process_xml"] = "empty",
+        ["get_long_query_completions"] = "empty",
+        ["get_memory_pressure_events"] = "empty",
+        ["get_default_trace_events"] = "empty",
     };
 
     /// <summary>
@@ -291,6 +320,55 @@ internal static class WebDataStartNote
         "get_collection_log",
         "get_pg_server_config_changes",
         "get_plan_corrections",
+    };
+
+    /// <summary>
+    /// How to find the earliest event a listed event read shows (#4966): a top-level field that already holds the page's
+    /// minimum (<paramref name="Field"/>), or the minimum of <paramref name="TimeField"/> over the rows under
+    /// <paramref name="RowsKey"/>. The coverage rule then follows <see cref="ViewerEventDataStart.Of"/>, the rule the desktop
+    /// viewer applies: an event carries its own time, and a server's first collection stores history from before it, so the
+    /// notice names the earlier of the coverage start and the earliest event shown.
+    /// </summary>
+    internal sealed record EventTimeSpec(string? Field, string? RowsKey, string? TimeField);
+
+    /// <summary>The event reads and where each answers its earliest event shown. Memory pressure rows are stamped
+    /// <c>sample_time</c>; the others <c>event_time</c>.</summary>
+    internal static readonly IReadOnlyDictionary<string, EventTimeSpec> EventTimeByRead = new Dictionary<string, EventTimeSpec>(StringComparer.Ordinal)
+    {
+        ["get_blocked_process_xml"] = new("oldest_returned_event_time", null, null),
+        ["get_long_query_completions"] = new("oldest_returned_event_time", null, null),
+        ["get_memory_pressure_events"] = new(null, "events", "sample_time"),
+        ["get_default_trace_events"] = new(null, "events", "event_time"),
+    };
+
+    /// <summary>
+    /// How a capped list says it was cut and where its shown rows end (#4966). The cap signal is <c>truncated: true</c>
+    /// (<paramref name="TotalKey"/> null), or a total (<paramref name="TotalKey"/>) greater than the count shown
+    /// (<paramref name="ShownKey"/>). The oldest row shown is <paramref name="OldestField"/>, or the minimum of
+    /// <paramref name="TimeField"/> over the rows under <paramref name="RowsKey"/>. <paramref name="NewestFirstOrderWord"/>, when
+    /// set, is the only <c>order</c> word the page may carry: any other means the page is ranked by something other than
+    /// time, so its oldest row names no reach and the coverage rule applies.
+    /// </summary>
+    internal sealed record CappedReadSpec(
+        string? TotalKey, string? ShownKey, string? OldestField, string? RowsKey, string? TimeField, string? NewestFirstOrderWord);
+
+    /// <summary>The listed reads that list rows newest first under a row cap, each with its spec. The four
+    /// <see cref="NewestFirstCappedReads"/> read <c>collection_time</c>; blocked process reports and the Default Trace
+    /// list events by their own time.</summary>
+    internal static readonly IReadOnlyDictionary<string, CappedReadSpec> CappedByRead = new Dictionary<string, CappedReadSpec>(StringComparer.Ordinal)
+    {
+        ["get_waiting_tasks"] = new(null, null, "oldest_returned_collection_time", null, null, McpHelpers.CollectionLogOrderNewestFirst),
+        ["get_collection_log"] = new(null, null, "oldest_returned_collection_time", null, null, McpHelpers.CollectionLogOrderNewestFirst),
+        ["get_plan_corrections"] = new(null, null, "oldest_returned_collection_time", null, null, McpHelpers.CollectionLogOrderNewestFirst),
+
+        /* The changes page names no oldest-returned field: its rows are the changes, newest first, each stamped changed_at. */
+        [PgConfigChangesRead] = new(null, null, null, "changes", "changed_at", McpHelpers.CollectionLogOrderNewestFirst),
+
+        /* Event reads (#4966). Blocked process reports: truncated + oldest_returned_event_time, order word event_time_desc. The
+           Default Trace has no flag and no oldest field: it is cut when total_events exceeds shown, and its oldest row is the
+           minimum event_time. */
+        ["get_blocked_process_xml"] = new(null, null, "oldest_returned_event_time", null, null, null),
+        ["get_default_trace_events"] = new("total_events", "shown", null, "events", "event_time", null),
     };
 
     /// <summary>
@@ -400,7 +478,7 @@ internal static class WebDataStartNote
            the store's coverage cannot move, so the note names that row. The answer carries it, so no probe: a store
            that covers the whole range still gets the note, and a store that does not names the same row, never an
            earlier one the grid does not show. */
-        if (NewestFirstCappedReads.Contains(tool) && TryReadCappedStart(tool, payload, out var oldestShown, out var oldestText))
+        if (CappedByRead.TryGetValue(tool, out var cappedSpec) && TryReadCappedStart(cappedSpec, payload, out var oldestShown, out var oldestText))
         {
             if (ValidateWindowFor(tool, hours, asOf, out var cappedEnd) is not null)
             {
@@ -444,15 +522,25 @@ internal static class WebDataStartNote
             var windowStart = windowEnd.AddHours(-hours);
             var dataStart = await DataWindowFloor.GetAsync(
                 postgres, [source], [resolved.ServerName], windowStart, windowEnd, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
-            if (!RawWindowFloor.IsTruncated(dataStart, windowStart))
+
+            /* An event read follows the event-time rule (ViewerEventDataStart.Of): the earlier of the coverage start and the
+               earliest event the page shows, or that event alone when the probe found no coverage but rows exist. Any other
+               read keeps the coverage start, and a probe with no start says nothing. */
+            var start = dataStart;
+            if (EventTimeByRead.TryGetValue(tool, out var eventTime))
+            {
+                start = ViewerEventDataStart.Of(dataStart, ReadEarliestEvent(payload, eventTime.Field, eventTime.RowsKey, eventTime.TimeField));
+            }
+
+            if (!RawWindowFloor.IsTruncated(start, windowStart))
             {
                 return result;
             }
 
             payload["window_truncated"] = true;
-            payload["effective_start"] = dataStart!.Value.ToString("o", CultureInfo.InvariantCulture);
-            payload["truncation_note"] = ComposeStoreAvailability.BuildDataStartNotice(dataStart.Value, windowStart, windowEnd);
-            AddInstants(payload, DataStartField, dataStart.Value, windowStart, windowEnd);
+            payload["effective_start"] = start!.Value.ToString("o", CultureInfo.InvariantCulture);
+            payload["truncation_note"] = ComposeStoreAvailability.BuildDataStartNotice(start.Value, windowStart, windowEnd);
+            AddInstants(payload, DataStartField, start.Value, windowStart, windowEnd);
             return payload.ToJsonString();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -515,19 +603,17 @@ internal static class WebDataStartNote
         DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
 
     /// <summary>
-    /// Whether a newest-first list's answer says its row cap cut it (<c>truncated: true</c>), and the time of the
-    /// oldest row it returned (<c>oldest_returned_collection_time</c>, as the tool wrote it, and read as UTC: the
-    /// store's times carry no zone). False for an answer that did not hit its cap, or that names no readable time:
-    /// those take the coverage rule.
+    /// Whether a newest-first list's answer says its row cap cut it (<see cref="CappedReadSpec"/>: <c>truncated: true</c>, or a
+    /// total greater than the count shown), and the time of the oldest row it returned, as the tool wrote it and read as UTC (the
+    /// store's times carry no zone). False for an answer that did not hit its cap, that was ranked by something other than time, or
+    /// that names no readable time: those take the coverage rule.
     /// </summary>
-    private static bool TryReadCappedStart(string tool, JsonObject payload, out DateTime oldestShownUtc, out string oldestText)
+    private static bool TryReadCappedStart(CappedReadSpec spec, JsonObject payload, out DateTime oldestShownUtc, out string oldestText)
     {
         oldestShownUtc = default;
         oldestText = string.Empty;
 
-        if (payload["truncated"] is not JsonValue cap
-            || !cap.TryGetValue<bool>(out var hitCap)
-            || !hitCap)
+        if (!HitCap(spec, payload))
         {
             return false;
         }
@@ -535,28 +621,17 @@ internal static class WebDataStartNote
         /* A read that can rank its page by something other than time says which order it answered in: a page ranked
            slowest first (get_collection_log with a duration floor) is a sample of the whole window, so its oldest row
            names no reach and the coverage rule applies. A page with no order field is the time-ordered one. */
-        if (payload["order"] is JsonValue order
+        if (spec.NewestFirstOrderWord is not null
+            && payload["order"] is JsonValue order
             && order.TryGetValue<string>(out var orderText)
-            && !string.Equals(orderText, McpHelpers.CollectionLogOrderNewestFirst, StringComparison.Ordinal))
+            && !string.Equals(orderText, spec.NewestFirstOrderWord, StringComparison.Ordinal))
         {
             return false;
         }
 
-        string? text;
-        if (string.Equals(tool, PgConfigChangesRead, StringComparison.Ordinal))
-        {
-            /* The changes page names no oldest-returned field: its rows are the changes, newest first, each stamped
-               changed_at, so the oldest row it returned is the earliest of those. */
-            text = OldestChangeTime(payload);
-        }
-        else
-        {
-            text = payload["oldest_returned_collection_time"] is JsonValue oldest && oldest.TryGetValue<string>(out var read) ? read : null;
-        }
-
+        var text = EarliestTimeText(payload, spec.OldestField, spec.RowsKey, spec.TimeField);
         if (text is null
-            || !DateTime.TryParse(
-                text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out oldestShownUtc))
+            || !TryParseUtc(text, out oldestShownUtc))
         {
             return false;
         }
@@ -564,6 +639,55 @@ internal static class WebDataStartNote
         oldestText = text;
         return true;
     }
+
+    private static bool HitCap(CappedReadSpec spec, JsonObject payload)
+    {
+        if (spec.TotalKey is null)
+        {
+            return payload["truncated"] is JsonValue cap && cap.TryGetValue<bool>(out var hit) && hit;
+        }
+
+        return payload[spec.TotalKey] is JsonValue total && total.TryGetValue<long>(out var all)
+            && payload[spec.ShownKey!] is JsonValue shown && shown.TryGetValue<long>(out var count)
+            && all > count;
+    }
+
+    private static bool TryParseUtc(string text, out DateTime utc) =>
+        DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out utc);
+
+    /* The earliest event time an answer shows, as the text the tool wrote: the top-level field when one is named and readable,
+       else the earliest time field over the rows. Null when nothing readable is there. */
+    private static string? EarliestTimeText(JsonObject payload, string? field, string? rowsKey, string? timeField)
+    {
+        if (field is not null)
+        {
+            return payload[field] is JsonValue v && v.TryGetValue<string>(out var read) ? read : null;
+        }
+
+        if (rowsKey is null || timeField is null || payload[rowsKey] is not JsonArray rows)
+        {
+            return null;
+        }
+
+        string? oldestText = null;
+        DateTime oldest = default;
+        foreach (var row in rows)
+        {
+            if (row?[timeField] is JsonValue value
+                && value.TryGetValue<string>(out var text)
+                && TryParseUtc(text, out var at)
+                && (oldestText is null || at < oldest))
+            {
+                oldestText = text;
+                oldest = at;
+            }
+        }
+
+        return oldestText;
+    }
+
+    private static DateTime? ReadEarliestEvent(JsonObject payload, string? field, string? rowsKey, string? timeField) =>
+        EarliestTimeText(payload, field, rowsKey, timeField) is string text && TryParseUtc(text, out var at) ? at : null;
 
     /// <summary>The PostgreSQL configuration changes read: a newest-first list of changes under <c>limit</c>, whose answer
     /// says it was cut (<c>truncated</c>) but carries its rows' times only on the rows (<c>changes[].changed_at</c>).</summary>
@@ -579,31 +703,4 @@ internal static class WebDataStartNote
         && payload["status"] is JsonValue word
         && word.TryGetValue<string>(out var status)
         && string.Equals(status, expected, StringComparison.Ordinal);
-
-    /* The earliest changed_at on the page, as the tool wrote it; null when no row carries a readable one. Compared as
-       instants (the store's times carry no zone, and are read as UTC), and returned as the text of the earliest. */
-    private static string? OldestChangeTime(JsonObject payload)
-    {
-        if (payload["changes"] is not JsonArray changes)
-        {
-            return null;
-        }
-
-        string? oldestText = null;
-        DateTime oldest = default;
-        foreach (var change in changes)
-        {
-            if (change?["changed_at"] is JsonValue value
-                && value.TryGetValue<string>(out var text)
-                && DateTime.TryParse(
-                    text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at)
-                && (oldestText is null || at < oldest))
-            {
-                oldestText = text;
-                oldest = at;
-            }
-        }
-
-        return oldestText;
-    }
 }
