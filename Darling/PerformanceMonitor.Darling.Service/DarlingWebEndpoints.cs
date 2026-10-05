@@ -1165,10 +1165,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
 
         /* The edit form's read (#5240): the editable NON-secret values plus modified_at, an opaque string. Web-only
-           (no MCP tool), behind the same gates as every GET route. It cannot say whether a secret is stored: the
-           viewer role cannot even evaluate encrypted_password. */
+           (no MCP tool). It cannot say whether a secret is stored: the viewer role cannot even evaluate
+           encrypted_password. The host's group gate lets every GET through for a read-only seat, so the route
+           checks the edit right itself. */
         app.MapGet("/api/admin/servers/{id:int}", async (HttpContext context, int id) =>
         {
+            /* The form's read pre-fills username and the TLS posture, which the Manage Servers list
+               (DarlingAdminServersReader) withholds from every seat. Only a seat that can submit the edit may read it. */
+            if (!DarlingWebSeat.FromContext(context).CanEdit)
+            {
+                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+            }
+
             var stopwatch = Stopwatch.StartNew();
             DarlingMcpServerAdminTools.ServerEditRow? row;
             try

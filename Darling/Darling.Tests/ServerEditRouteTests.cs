@@ -640,13 +640,34 @@ public sealed class ServerEditRouteTests
         Assert.DoesNotContain("db.internal.example", rig.Log.Joined, StringComparison.Ordinal);
     }
 
+    /// <summary>The host's group gate lets every GET through for a read-only seat, so the route's own edit-right check
+    /// is the only thing between that seat and the form's pre-fill (username, TLS posture). The gate on or off, the
+    /// seat gets 403 and the read never reaches the store.</summary>
     [Fact]
-    public async Task TheAdminRead_IsReadableByAReadOnlySeat_ThroughTheHostWriteGate()
+    public async Task TheAdminRead_IsRefused403ForAReadOnlySeat_AndNeverReachesTheStore_WithOrWithoutTheHostWriteGate()
     {
-        await using var rig = await StartAsync(useWriteGate: true, read: id => Task.FromResult<DarlingMcpServerAdminTools.ServerEditRow?>(Row(id)));
-        var (status, _) = await SendAsync(rig, HttpMethod.Get, "/api/admin/servers/41", seat: "viewer");
-        Assert.Equal(HttpStatusCode.OK, status);
-        var (post, _) = await SendAsync(rig, HttpMethod.Post, "/api/admin/servers/41", "{}", seat: "viewer");
-        Assert.NotEqual(HttpStatusCode.OK, post);
+        foreach (var gate in new[] { false, true })
+        {
+            var reads = 0;
+            await using var rig = await StartAsync(useWriteGate: gate, read: id =>
+            {
+                Interlocked.Increment(ref reads);
+                return Task.FromResult<DarlingMcpServerAdminTools.ServerEditRow?>(Row(id));
+            });
+            var (status, body) = await SendAsync(rig, HttpMethod.Get, "/api/admin/servers/41", seat: "viewer");
+            Assert.Equal(HttpStatusCode.Forbidden, status);
+            Assert.Contains("read-only", body, StringComparison.Ordinal);
+            Assert.DoesNotContain("monitor", body, StringComparison.Ordinal);
+            Assert.Equal(0, Volatile.Read(ref reads));
+
+            var (post, _) = await SendAsync(rig, HttpMethod.Post, "/api/admin/servers/41", "{}", seat: "viewer");
+            Assert.NotEqual(HttpStatusCode.OK, post);
+            Assert.Equal(0, Volatile.Read(ref reads));
+
+            /* The same rig still serves an editing seat: the refusal is the seat's, not the route's. */
+            var (editing, _) = await SendAsync(rig, HttpMethod.Get, "/api/admin/servers/41");
+            Assert.Equal(HttpStatusCode.OK, editing);
+            Assert.Equal(1, Volatile.Read(ref reads));
+        }
     }
 }
