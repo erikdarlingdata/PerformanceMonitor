@@ -343,6 +343,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
         ("get_pg_autovacuum_health", "pg_autovacuum_stats", null, ["tables_with_pending_maintenance"], ["no_pending_maintenance"], "DarlingMcpPgAutovacuumTools.cs"),
         ("get_pg_replication_slots", "pg_replication_slot_stats", null, ["slots_present"], ["no_slots"], "DarlingMcpPgSlotTools.cs"),
         ("get_pg_write_stats", "pg_write_stats", null, [], ["empty"], "DarlingMcpPgServerStateTools.cs"),
+        ("get_pg_index_usage", "pg_index_usage_stats", "empty", ["index_usage"], ["unavailable"], "DarlingMcpPgIndexUsageTools.cs"),
     ];
 
     /* Each read is listed over its raw relation, served by the web mirror, drawn by the page, and admitted for exactly the word
