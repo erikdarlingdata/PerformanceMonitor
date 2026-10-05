@@ -45,6 +45,7 @@ import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } 
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
+import { downloadText } from "../grid-tools.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -73,6 +74,36 @@ function xmlDisclosure(text) {
   return disclosure("XML capture (" + String(text).length.toLocaleString() + " chars)", el("pre", { class: "code" }, [text]), {
     max: 60,
   });
+}
+
+/** "20260105_143007" from an ISO stamp (its UTC digits), for a download's file name; "unknown" when there is none. */
+function fileStamp(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/.exec(String(iso ?? ""));
+  return m ? m[1] + m[2] + m[3] + "_" + m[4] + m[5] + m[6] : "unknown";
+}
+
+/**
+ * A Save XML button: downloads `text` as `fileName`. The rows already carry the XML, so there is no fetch and nothing in
+ * flight. Disabled, with the reason on hover, when there is no XML or the read cut it short (a saved cut graph would not
+ * open as a graph).
+ */
+function saveXmlButton(text, fileName, mime, truncated) {
+  const none = text == null || text === "";
+  const btn = el("button", { class: "btn small", type: "button", text: "Save XML" });
+  if (none || truncated) {
+    btn.disabled = true;
+    btn.setAttribute("disabled", "");
+    btn.setAttribute("title", none ? "No XML was captured for this row." : "The read cut this XML short, so it is not saved. Narrow the time range to this row to get the whole document.");
+    return btn;
+  }
+  btn.addEventListener("click", () => {
+    try {
+      downloadText(fileName, [text], mime);
+    } catch (e) {
+      btn.setAttribute("title", "Save failed: " + (e && e.message ? e.message : "the browser refused the download."));
+    }
+  });
+  return btn;
 }
 
 /**
@@ -1063,7 +1094,9 @@ export const SERVER_TABS = [
         ctx.label,
         "No blocking events in this window.",
         2,
-        "separately_monitored_note"
+        "separately_monitored_note",
+        null,
+        BLOCKING_GROUPS
       ),
       table(
         "Deadlocks",
@@ -3170,18 +3203,38 @@ const ACTIVE_COLUMNS = [
   { key: "query_hash", label: "Query Hash" },
 ];
 
+/* The desktop Blocked Process Reports grid's columns, order and headers, for every field get_blocking returns. Object is
+   the web's own extra. */
+/* Blocking column groups: the report, the pair and the wait are always shown; the sessions' status and isolation, the blocked
+   transaction and the logins, hosts and apps follow the desktop order in three toggles, with the first two on at first. */
+const BLOCKING_GROUPS = { groups: ["Status and isolation", "Transaction", "Sessions"], defaultGroups: ["Status and isolation", "Transaction"] };
+
 const BLOCKING_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
+  { key: "event_time", label: "Event Time", format: "time" },
   { key: "blocked_sql_text", label: "Blocked SQL", render: (r) => codeDisclosure(r.blocked_sql_text) },
   { key: "blocking_sql_text", label: "Blocking SQL", render: (r) => codeDisclosure(r.blocking_sql_text) },
+  { key: "source", label: "Source" },
   { key: "database_name", label: "Database" },
-  { key: "blocked_spid", label: "Blocked", format: "int" },
-  { key: "blocking_spid", label: "Blocker", format: "int" },
-  { key: "wait_time_ms", label: "Wait", format: "ms" },
-  { key: "lock_mode", label: "Mode" },
+  { key: "blocked_spid", label: "Blocked SPID", format: "int" },
+  { key: "blocking_spid", label: "Blocking SPID", format: "int" },
+  { key: "wait_time_ms", label: "Wait Time", format: "ms" },
+  { key: "wait_resource", label: "Wait Resource", wrap: true },
+  { key: "lock_mode", label: "Lock Mode" },
+  { key: "blocked_status", label: "Blocked Status", group: "Status and isolation" },
+  { key: "blocking_status", label: "Blocking Status", group: "Status and isolation" },
+  { key: "blocked_isolation_level", label: "Blocked Isolation", group: "Status and isolation" },
+  { key: "blocking_isolation_level", label: "Blocking Isolation", group: "Status and isolation" },
+  { key: "blocked_transaction_name", label: "Blocked Tran", group: "Transaction" },
+  { key: "blocked_priority", label: "Blocked Priority", format: "int", group: "Transaction" },
+  { key: "blocked_transaction_count", label: "Blocked Tran Count", format: "int", group: "Transaction" },
+  { key: "blocked_log_used", label: "Blocked Log Used", format: "int", group: "Transaction" },
+  { key: "blocked_login_name", label: "Blocked Login", group: "Sessions" },
+  { key: "blocked_host_name", label: "Blocked Host", group: "Sessions" },
+  { key: "blocked_client_app", label: "Blocked App", wrap: true, group: "Sessions" },
+  { key: "blocking_login_name", label: "Blocking Login", group: "Sessions" },
+  { key: "blocking_host_name", label: "Blocking Host", group: "Sessions" },
+  { key: "blocking_client_app", label: "Blocking App", wrap: true, group: "Sessions" },
   { key: "contentious_object", label: "Object" },
-  { key: "blocked_client_app", label: "Blocked App" },
-  { key: "blocking_client_app", label: "Blocking App" },
 ];
 
 /* Stays local: this page renders the deadlock text through a codeDisclosure and orders the columns differently from the catalog. */
@@ -3253,17 +3306,33 @@ function deadlockXmlColumns(server) {
   return [
     { key: "deadlock_time", label: "Deadlock Time", format: "time" },
     { key: "victim_process_id", label: "Victim" },
+    {
+      key: "deadlock_graph_xml_save",
+      label: "XML",
+      sortable: false,
+      csv: false,
+      render: (r) =>
+        saveXmlButton(r.deadlock_graph_xml, "deadlock_" + fileStamp(r.deadlock_time) + ".xdl", "application/xml;charset=utf-8", r.deadlock_graph_xml_truncated === true),
+    },
     { key: "processes", label: "Processes", sortable: false, render: (r) => deadlockProcessesCell(server, r) },
     { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
   ];
 }
 
+/* The desktop Blocked Process Reports columns get_blocked_process_xml returns, under the desktop's headers. */
 const BPR_COLUMNS = [
-  { key: "event_time", label: "Time", format: "time" },
+  { key: "event_time", label: "Event Time", format: "time" },
+  {
+    key: "blocked_process_report_xml_save",
+    label: "XML",
+    sortable: false,
+    csv: false,
+    render: (r) => saveXmlButton(r.blocked_process_report_xml, "blocked_process_" + fileStamp(r.event_time) + ".xml", "application/xml;charset=utf-8", false),
+  },
   { key: "database_name", label: "Database" },
-  { key: "blocked_spid", label: "Blocked", format: "int" },
-  { key: "blocking_spid", label: "Blocker", format: "int" },
-  { key: "wait_time_ms", label: "Wait", format: "ms" },
+  { key: "blocked_spid", label: "Blocked SPID", format: "int" },
+  { key: "blocking_spid", label: "Blocking SPID", format: "int" },
+  { key: "wait_time_ms", label: "Wait Time", format: "ms" },
   { key: "blocked_process_report_xml", label: "Report", render: (r) => xmlDisclosure(r.blocked_process_report_xml) },
 ];
 
