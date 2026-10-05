@@ -178,6 +178,7 @@ internal static class DarlingAdminServersReader
 
         return new AdminServerRow
         {
+            server_id = r.ServerId,
             server_name = serverName,
             display_name = displayName,
             engine = engineKind,
@@ -208,9 +209,14 @@ internal static class DarlingAdminServersReader
     internal static string CostLabel(decimal monthlyCostUsd) =>
         Math.Round(monthlyCostUsd, 0, MidpointRounding.AwayFromZero).ToString("$#,##0", CultureInfo.InvariantCulture);
 
-    /// <summary>One grid row. Field names are the grid's column keys.</summary>
+    /// <summary>One grid row. Field names are the grid's column keys, except <see cref="server_id"/>.</summary>
     internal sealed class AdminServerRow
     {
+        /// <summary>The configured server's id (<c>config_monitored_servers.server_id</c>), the handle the web's Edit action
+        /// sends to the by-id read and the edit route (#5240). It is not a grid column and is not a credential: both routes
+        /// check that the sign-in may edit before they look at the id.</summary>
+        public int server_id { get; init; }
+
         public string server_name { get; init; } = "";
         public string display_name { get; init; } = "";
         public string engine { get; init; } = "";

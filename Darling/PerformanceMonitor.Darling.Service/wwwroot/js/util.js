@@ -610,6 +610,48 @@ export async function apiSend(method, path, body) {
   return classifyResponse(resp);
 }
 
+/**
+ * Send a MUTATING request and hand back what the server said, the HTTP status and the parsed body both, for a caller
+ * that branches on the status AND the body's status word (#5240: the Admin page's server edit answers a stale token
+ * and a taken address with the same 409 and tells them apart by the word; apiSend drops a non-2xx body, so it cannot).
+ * It is the transport Manage Tags' write always had, lifted here with its behaviour unchanged:
+ *   { status, body }                    - the answer. `body` is the parsed JSON, or null when the text is not JSON (an
+ *                                         empty body included). A 400, 404, 409, 429, 500 and the rest come back this way.
+ *   { status: 0, body: null, message }  - no answer at all (a network error); `message` is "Network error: ..."
+ *   { status, body, expired: true }     - the session is gone: a 401, or a 2xx whose body is not a JSON object (a sign-in
+ *                                         page in front of the API, or an empty body). The shell has been told once
+ *                                         (reportSessionExpired, with the house message and "/", never the body's own
+ *                                         login), so the caller drops what it has open and shows no success. This is
+ *                                         stricter than apiGet, which reads an empty 2xx as data.
+ * Like apiSend it ALWAYS declares Content-Type: application/json, which the server demands of a mutation (a 415
+ * otherwise; it is what forces a CORS preflight on a cross-origin write), and it counts as no in-flight read.
+ * An undefined body sends none.
+ */
+export async function apiWrite(method, path, body) {
+  let resp;
+  try {
+    resp = await fetch(path, {
+      method,
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) {
+    return { status: 0, body: null, message: "Network error: " + (e && e.message ? e.message : String(e)) };
+  }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(await resp.text());
+  } catch {
+    parsed = null;
+  }
+  const succeeded = resp.status >= 200 && resp.status < 300;
+  if (resp.status === 401 || (succeeded && (parsed === null || typeof parsed !== "object"))) {
+    reportSessionExpired("Your session has expired. Sign in again.", "/");
+    return { status: resp.status, body: parsed, expired: true };
+  }
+  return { status: resp.status, body: parsed };
+}
+
 /** #4666: a READ that has to travel as a POST (the composed-panel run, /api/compose/run). Counted in inFlightReads
     exactly like apiGet, so the poll's overlap guard (#4191) waits it out and the refresh back-off measures the render
     that contains it. Mutations (saves, deletes, alert validate/test) keep using apiSend, uncounted. */
