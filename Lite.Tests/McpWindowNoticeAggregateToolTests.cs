@@ -305,13 +305,14 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     }
 
     /// <summary>
-    /// One notice, from the EARLIER of the two coverages, whichever collector is earlier. Both start inside the window, three
-    /// days and two days in, in both orders: the floor is the three-day one.
+    /// One notice, from the LATER of the two series' floors, whichever collector is later: blocking and deadlocks are separate
+    /// series in one answer, and the series that began later has an empty head that would read as "none happened". Both start
+    /// inside the window, three days and two days in, in both orders: the notice is at the two-day one.
     /// </summary>
     [Theory]
     [InlineData(-3, -2)]
     [InlineData(-2, -3)]
-    public async Task BlockingStats_TheEarlierOfTheTwoCoverages_Wins(int blockedProcessDays, int deadlockDays)
+    public async Task BlockingStats_TheLaterOfTheTwoSeriesFloors_Wins(int blockedProcessDays, int deadlockDays)
     {
         await _duckDb.InitializeAsync();
         await SeedRunsAsync("blocked_process_report", Anchor.AddDays(blockedProcessDays), Anchor, everyMinutes: 30);
@@ -320,23 +321,78 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
 
         var root = Root(await BlockingAsync());
 
-        AssertTruncatedAt(root, Anchor.AddDays(Math.Min(blockedProcessDays, deadlockDays)), "blocked_process_report and deadlocks");
+        AssertTruncatedAt(root, Anchor.AddDays(Math.Max(blockedProcessDays, deadlockDays)), "blocked_process_report and deadlocks");
     }
 
-    /// <summary>One collector covers the window from before it, the other started late: covered, not cut, in both orders.</summary>
+    /// <summary>
+    /// One series covers the window from before it and the other began inside it: the notice names the later start, in both
+    /// orders. An uncovered deadlock half beside covered blocking reads as "no deadlocks" otherwise, and the reverse.
+    /// </summary>
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task BlockingStats_OneSourceCoveringFromBeforeTheWindow_MakesTheWindowCovered(bool deadlocksCoverFirst)
+    public async Task BlockingStats_OneSeriesCoveredFromBeforeTheWindow_TheOtherStartingInside_NoticeIsAtTheLaterStart(bool deadlocksCoverFirst)
     {
         await _duckDb.InitializeAsync();
         var early = deadlocksCoverFirst ? "deadlocks" : "blocked_process_report";
         var late = deadlocksCoverFirst ? "blocked_process_report" : "deadlocks";
+        var lateStart = Anchor.AddDays(-2);
         await SeedRunsAsync(early, WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
-        await SeedRunsAsync(late, Anchor.AddDays(-2), Anchor, everyMinutes: 30);
+        await SeedRunsAsync(late, lateStart, Anchor, everyMinutes: 30);
         await SeedBprAsync(Anchor.AddDays(-1));
 
-        AssertCovered(Root(await BlockingAsync()), WindowStart);
+        AssertTruncatedAt(Root(await BlockingAsync()), lateStart, "blocked_process_report and deadlocks");
+    }
+
+    /// <summary>Deadlock rows and no blocking rows: a data answer from the second series alone, with that series' floor.</summary>
+    [Fact]
+    public async Task BlockingStats_DeadlockRowsOnly_IsADataAnswer_WithTheDeadlockFloor()
+    {
+        await _duckDb.InitializeAsync();
+        var deadlockStart = Anchor.AddDays(-2);
+        await SeedRunsAsync("blocked_process_report", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
+        await SeedRunsAsync("deadlocks", deadlockStart, Anchor, everyMinutes: 30);
+        await SeedDeadlockAsync(Anchor.AddDays(-1));
+
+        var root = Root(await BlockingAsync());
+
+        Assert.False(root.TryGetProperty("status", out _));
+        Assert.Equal(0, root.GetProperty("blocking_duration").GetArrayLength());
+        Assert.Equal(1, root.GetProperty("deadlock_severity").GetArrayLength());
+        AssertTruncatedAt(root, deadlockStart, "blocked_process_report and deadlocks");
+    }
+
+    /// <summary>
+    /// Inside the blocking series the EARLIER source wins: the XE reports start three days in and the DMV snapshots one day in,
+    /// the deadlocks are covered, so the blocking floor (and the notice) is the XE start. The reverse order is the DMV test below.
+    /// </summary>
+    [Fact]
+    public async Task BlockingStats_TheXeReportsStartingEarly_TheDmvSnapshotsLate_BlockingFloorIsTheXeStart()
+    {
+        await _duckDb.InitializeAsync();
+        var xeStart = Anchor.AddDays(-3);
+        await SeedRunsAsync("blocked_process_report", xeStart, Anchor, everyMinutes: 30);
+        await SeedRunsAsync("dmv_blocking_snapshot", Anchor.AddDays(-1), Anchor, everyMinutes: 30);
+        await SeedRunsAsync("deadlocks", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
+        await SeedBprAsync(Anchor.AddHours(-20));
+
+        AssertTruncatedAt(Root(await BlockingAsync()), xeStart, "blocked_process_report and deadlocks");
+    }
+
+    /// <summary>Both series covered from before the window, with rows in each: no notice.</summary>
+    [Fact]
+    public async Task BlockingStats_BothSeriesCoveredFromBeforeTheWindow_HaveNoNotice()
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRunsAsync("blocked_process_report", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
+        await SeedRunsAsync("deadlocks", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
+        await SeedBprAsync(Anchor.AddDays(-1));
+        await SeedDeadlockAsync(Anchor.AddDays(-1));
+
+        var root = Root(await BlockingAsync());
+
+        Assert.Equal(1, root.GetProperty("deadlock_severity").GetArrayLength());
+        AssertCovered(root, WindowStart);
     }
 
     /// <summary>The DMV blocking snapshots are the report grid's also-covered source: a server with no XE session is covered by them.</summary>
@@ -346,7 +402,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
         await _duckDb.InitializeAsync();
         await SeedRunsAsync("dmv_blocking_snapshot", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedRunsAsync("blocked_process_report", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
-        await SeedRunsAsync("deadlocks", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
+        await SeedRunsAsync("deadlocks", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedDmvAsync(Anchor.AddDays(-1));
 
         AssertCovered(Root(await BlockingAsync()), WindowStart);
@@ -452,6 +508,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
         Assert.False(root.TryGetProperty("truncation_note", out _));
         Assert.True(root.TryGetProperty("retention_horizon", out _));
         Assert.True(root.TryGetProperty("days_before_horizon", out _));
+        Assert.True(root.GetProperty("days").GetArrayLength() >= 1);
         foreach (var day in root.GetProperty("days").EnumerateArray())
         {
             Assert.True(day.TryGetProperty("data_state", out var state) && !string.IsNullOrEmpty(state.GetString()));
@@ -572,6 +629,14 @@ VALUES ($1, $2, $3, $4, $5, 10, 1000, 100, 5, 500, 50)",
 INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms)
 VALUES ($1, $2, $3, $4, $2, 4000)",
         _nextId++, Naive(at), _serverId, ServerName);
+
+    private Task SeedDeadlockAsync(DateTime at) => ExecuteAsync(@"
+INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml)
+VALUES ($1, $2, $3, $4, $2, $5)",
+        _nextId++, Naive(at), _serverId, ServerName,
+        "<deadlock><victim-list><victimProcess id=\"p1\"/></victim-list><process-list>"
+        + "<process id=\"p1\" spid=\"55\" waittime=\"1000\"><inputbuf>x</inputbuf></process>"
+        + "<process id=\"p2\" spid=\"66\" waittime=\"3000\"><inputbuf>x</inputbuf></process></process-list></deadlock>");
 
     private Task SeedDmvAsync(DateTime at) => ExecuteAsync(@"
 INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, monitor_loop, event_time, wait_time_ms)

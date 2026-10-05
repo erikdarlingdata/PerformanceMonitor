@@ -1297,21 +1297,24 @@ public sealed class McpHealthTools
     }
 
     /// <summary>
-    /// #4966: the one window notice of <c>get_blocking_stats</c>, which reads two collectors: the blocked process reports
-    /// (with the always-on DMV blocking snapshots beside them, the grid's own also-covered rule, so a server with no XE
-    /// session is covered by the DMV collector) and the deadlocks. The floor is the EARLIER of the two coverages
-    /// (<see cref="LocalDataService.EarlierCoverageFloor"/>, a null giving way to the other), the rule the Blocked Process
-    /// Reports grid uses for its two sources: a start the older collector covers is not a cut, whichever series the reader
-    /// looks at. Each probe reads the column its series windows on (<c>event_time</c>, <c>deadlock_time</c>), so no row a
-    /// bucket stands for is older than the floor and the event-time form is not needed. A data answer over a window of 90
-    /// minutes or less starts no probe (neither is started); an empty answer always probes both.
+    /// #4966: the one window notice of <c>get_blocking_stats</c>, which reads two SEPARATE series in one answer: blocking
+    /// (the blocked process reports, with the always-on DMV blocking snapshots beside them) and deadlocks. Two rules, each
+    /// for what it joins. Inside the blocking series the floor is the EARLIER of the XE reports and the DMV snapshots
+    /// (<see cref="LocalDataService.EarlierCoverageFloor"/>, the grid's own also-covered rule): they measure the same thing,
+    /// so either one covering the window covers it. Between the two series the notice comes from the LATER floor
+    /// (<see cref="LocalDataService.LaterCoverageFloor"/>): they measure different things, and a series whose collector
+    /// started inside the window has an empty head that reads as "none happened" beside the other series' data, so the
+    /// other series being covered must not hide it. A null probe answer gives way to the other series' floor. Each probe
+    /// reads the column its series windows on (<c>event_time</c>, <c>deadlock_time</c>), so no row a bucket stands for is
+    /// older than its floor. A data answer over a window of 90 minutes or less starts no probe; an empty answer always
+    /// probes both.
     /// </summary>
     private static Task<McpQueryTools.McpWindowNotice> BlockingStatsWindowNoticeAsync(
         LocalDataService dataService, int serverId, int hours, DateTime windowEnd, bool emptyAnswer = false)
     {
         var requestedStart = windowEnd.AddHours(-hours);
         return McpQueryTools.WindowNoticeAsync(
-            async () => LocalDataService.EarlierCoverageFloor(
+            async () => LocalDataService.LaterCoverageFloor(
                 await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, serverId, requestedStart, windowEnd),
                 await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.Deadlocks, serverId, requestedStart, windowEnd)),
             requestedStart, windowEnd, "blocked_process_report and deadlocks", emptyAnswer: emptyAnswer);
@@ -1374,7 +1377,7 @@ public sealed class McpHealthTools
                 server = resolved.ServerName,
                 hours_back = hours,
                 /* #4966: where this server's blocking data starts for the window, always present (false and null when the
-                   store covered it). ONE notice for the two series, from the earlier of the two collectors' coverage. No
+                   store covered it). ONE notice for the two series, from the later of the two series' floors. No
                    effective_hours_back, as on the other window-floor payloads. */
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
