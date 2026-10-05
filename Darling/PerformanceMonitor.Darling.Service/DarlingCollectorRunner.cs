@@ -2910,8 +2910,22 @@ public sealed class DarlingCollectorRunner
             /* #5132: the target's own session id, resolved right after the open and BEFORE any reader
                exists on this connection. SQL Server's property is 0 under MARS at every point, so the id
                comes from a lookup cached per physical connection (one SELECT @@SPID per new connection,
-               none on pool reuse); see TargetSessionIdCache. Best-effort: null on any failure. */
-            context.TargetSessionId = await TargetSessionIdCache.Shared.ResolveAsync(targetConnection, _logger, cancellationToken);
+               none on pool reuse); see TargetSessionIdCache. Best-effort: null on any failure.
+
+               The lookup is TIMED into sqlMs (no open-phase column covers this point: ServerScopeOpenMs
+               and PerItemOpenMs time only the reader opens). It stays OUTSIDE PerItemWallClockBudget on
+               purpose; the lookup's own 5 s CommandTimeout bounds it. */
+            var sessionIdWatch = Stopwatch.StartNew();
+            Guid sessionIdKey;
+            try
+            {
+                (context.TargetSessionId, sessionIdKey) =
+                    await TargetSessionIdCache.Shared.ResolveAsync(targetConnection, _logger, cancellationToken);
+            }
+            finally
+            {
+                sqlMs += sessionIdWatch.ElapsedMilliseconds;
+            }
 
             var enumerationPlan = definition.BuildEnumerationQuery(context);
             if (enumerationPlan is not null)
@@ -3440,6 +3454,15 @@ public sealed class DarlingCollectorRunner
                     }
 
                     using var reader = opened;
+
+                    /* A transparent reconnect during the open gives a new physical connection (new
+                       ClientConnectionId, new session); the id resolved at open then belongs to the old
+                       one. Property comparison only. */
+                    if (targetConnection is SqlConnection openedSql
+                        && TargetSessionIdCache.Shared.DiscardIfReplaced(sessionIdKey, openedSql.ClientConnectionId))
+                    {
+                        context.TargetSessionId = null;
+                    }
 
                     var drainWatch = Stopwatch.StartNew();
 

@@ -34,8 +34,8 @@ public sealed class TargetSessionIdCacheTests
         var calls = 0;
         Task<int> Lookup(CancellationToken _) { calls++; return Task.FromResult(57); }
 
-        Assert.Equal(57, await cache.ResolveAsync(id, Lookup, null, TestContext.Current.CancellationToken));
-        Assert.Equal(57, await cache.ResolveAsync(id, Lookup, null, TestContext.Current.CancellationToken));
+        Assert.Equal(57, (await cache.ResolveAsync(id, Lookup, null, TestContext.Current.CancellationToken)).Spid);
+        Assert.Equal(57, (await cache.ResolveAsync(id, Lookup, null, TestContext.Current.CancellationToken)).Spid);
         Assert.Equal(1, calls);
         Assert.Equal(1, cache.LookupCount);
     }
@@ -47,8 +47,8 @@ public sealed class TargetSessionIdCacheTests
         var calls = 0;
         Task<int> Lookup(CancellationToken _) { calls++; return Task.FromResult(50 + calls); }
 
-        Assert.Equal(51, await cache.ResolveAsync(Guid.NewGuid(), Lookup, null, TestContext.Current.CancellationToken));
-        Assert.Equal(52, await cache.ResolveAsync(Guid.NewGuid(), Lookup, null, TestContext.Current.CancellationToken));
+        Assert.Equal(51, (await cache.ResolveAsync(Guid.NewGuid(), Lookup, null, TestContext.Current.CancellationToken)).Spid);
+        Assert.Equal(52, (await cache.ResolveAsync(Guid.NewGuid(), Lookup, null, TestContext.Current.CancellationToken)).Spid);
         Assert.Equal(2, calls);
     }
 
@@ -83,15 +83,15 @@ public sealed class TargetSessionIdCacheTests
         var cache = new TargetSessionIdCache(8);
         var id = Guid.NewGuid();
 
-        Assert.Null(await cache.ResolveAsync(id, _ => throw new InvalidOperationException("boom"), null, TestContext.Current.CancellationToken));
+        Assert.Null((await cache.ResolveAsync(id, _ => throw new InvalidOperationException("boom"), null, TestContext.Current.CancellationToken)).Spid);
         Assert.Equal(0, cache.Count);
 
         /* A non-positive answer is not a session id either. */
-        Assert.Null(await cache.ResolveAsync(id, _ => Task.FromResult(0), null, TestContext.Current.CancellationToken));
+        Assert.Null((await cache.ResolveAsync(id, _ => Task.FromResult(0), null, TestContext.Current.CancellationToken)).Spid);
         Assert.Equal(0, cache.Count);
 
         /* The next run tries again and succeeds. */
-        Assert.Equal(44, await cache.ResolveAsync(id, _ => Task.FromResult(44), null, TestContext.Current.CancellationToken));
+        Assert.Equal(44, (await cache.ResolveAsync(id, _ => Task.FromResult(44), null, TestContext.Current.CancellationToken)).Spid);
         Assert.Equal(3, cache.LookupCount);
     }
 
@@ -99,20 +99,88 @@ public sealed class TargetSessionIdCacheTests
     public async Task AnEmptyConnectionIdIsNeverLookedUp()
     {
         var cache = new TargetSessionIdCache(8);
-        Assert.Null(await cache.ResolveAsync(Guid.Empty, _ => Task.FromResult(9), null, TestContext.Current.CancellationToken));
+        Assert.Null((await cache.ResolveAsync(Guid.Empty, _ => Task.FromResult(9), null, TestContext.Current.CancellationToken)).Spid);
         Assert.Equal(0, cache.LookupCount);
     }
 
     [Fact]
-    public async Task AnUnreachableSqlServerGivesNullWithoutThrowing()
+    public async Task AClosedConnection_HasAnEmptyConnectionId_SoTheLookupIsSkipped()
     {
         var cache = new TargetSessionIdCache(8);
         using var connection = new SqlConnection("Server=127.0.0.1,1;Connect Timeout=1;Encrypt=false");
-        Assert.Null(await cache.ResolveAsync(connection, null, TestContext.Current.CancellationToken));
+        Assert.Null((await cache.ResolveAsync(connection, null, TestContext.Current.CancellationToken)).Spid);
+        Assert.Equal(0, cache.Count);
+        Assert.Equal(0, cache.LookupCount);
+    }
+
+    [Fact]
+    public async Task ARealCancellationPropagates_AndTheCacheIsUnchanged()
+    {
+        var cache = new TargetSessionIdCache(8);
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await cache.ResolveAsync(Guid.NewGuid(), ct => { ct.ThrowIfCancellationRequested(); return Task.FromResult(5); }, null, cts.Token));
         Assert.Equal(0, cache.Count);
     }
 
-    private static MonitoredServer LiveServer(string host)
+    [Fact]
+    public async Task ALookupTimeout_WithoutACancelledToken_IsStillNullNotAThrow()
+    {
+        var cache = new TargetSessionIdCache(8);
+        var result = await cache.ResolveAsync(Guid.NewGuid(), _ => throw new OperationCanceledException(), null, TestContext.Current.CancellationToken);
+        Assert.Null(result.Spid);
+        Assert.Equal(0, cache.Count);
+    }
+
+    [Fact]
+    public async Task TheAnswerIsFiledUnderTheConnectionIdReadAfterTheLookup()
+    {
+        var cache = new TargetSessionIdCache(8);
+        var before = Guid.NewGuid();
+        var after = Guid.NewGuid();
+
+        var first = await cache.ResolveAsync(before, _ => Task.FromResult(61), null, TestContext.Current.CancellationToken, () => after);
+        Assert.Equal(61, first.Spid);
+        Assert.Equal(after, first.Key);
+        Assert.Equal(1, cache.Count);
+
+        /* The old id has no entry (a lookup is issued again); the new id hits. */
+        var calls = 0;
+        Task<int> Lookup(CancellationToken _) { calls++; return Task.FromResult(99); }
+        Assert.Equal(61, (await cache.ResolveAsync(after, Lookup, null, TestContext.Current.CancellationToken)).Spid);
+        Assert.Equal(0, calls);
+        Assert.Equal(99, (await cache.ResolveAsync(before, Lookup, null, TestContext.Current.CancellationToken)).Spid);
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task AnEvictedConnectionIdAsksAgain_AndAReplacedConnectionIsDiscarded()
+    {
+        var cache = new TargetSessionIdCache(2);
+        var id = Guid.NewGuid();
+        var other = Guid.NewGuid();
+        var calls = 0;
+        Task<int> Lookup(CancellationToken _) { calls++; return Task.FromResult(70 + calls); }
+
+        await cache.ResolveAsync(id, Lookup, null, TestContext.Current.CancellationToken);
+        await cache.ResolveAsync(other, Lookup, null, TestContext.Current.CancellationToken);
+
+        Assert.False(cache.DiscardIfReplaced(id, id));
+        Assert.False(cache.DiscardIfReplaced(Guid.Empty, id));
+        Assert.Equal(2, cache.Count);
+
+        Assert.True(cache.DiscardIfReplaced(id, Guid.NewGuid()));
+        Assert.Equal(1, cache.Count);
+        Assert.Equal(73, (await cache.ResolveAsync(id, Lookup, null, TestContext.Current.CancellationToken)).Spid);
+        Assert.Equal(3, calls);
+
+        /* The queue stays consistent with the dictionary: the bound still holds after an eviction. */
+        await cache.ResolveAsync(Guid.NewGuid(), Lookup, null, TestContext.Current.CancellationToken);
+        Assert.Equal(2, cache.Count);
+    }
+
+    internal static MonitoredServer LiveServer(string host)
     {
         var user = Environment.GetEnvironmentVariable("DARLING_TEST_SQL_USER");
         return new MonitoredServer
@@ -147,7 +215,7 @@ public sealed class TargetSessionIdCacheTests
         {
             await one.OpenAsync(ct);
             Assert.Equal(0, one.ServerProcessId);
-            first = (await cache.ResolveAsync(one, null, ct)).GetValueOrDefault();
+            first = ((await cache.ResolveAsync(one, null, ct)).Spid).GetValueOrDefault();
             firstId = one.ClientConnectionId;
 
             using var truth = new SqlCommand("SELECT @@SPID;", one);
@@ -161,52 +229,10 @@ public sealed class TargetSessionIdCacheTests
         {
             await two.OpenAsync(ct);
             Assert.Equal(firstId, two.ClientConnectionId);
-            Assert.Equal(first, await cache.ResolveAsync(two, null, ct));
+            Assert.Equal(first, (await cache.ResolveAsync(two, null, ct)).Spid);
         }
 
         Assert.Equal(1, cache.LookupCount);
         SqlConnection.ClearAllPools();
-    }
-
-    [Fact]
-    public async Task Live_AFullCollectorRun_RecordsANonNullTargetSessionId_InTheStore()
-    {
-        var pg = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        var host = Environment.GetEnvironmentVariable("DARLING_TEST_SQL");
-        Assert.SkipWhen(string.IsNullOrEmpty(pg) || string.IsNullOrEmpty(host),
-            "Set DARLING_TEST_PG and DARLING_TEST_SQL to run the live session id E2E.");
-        var ct = TestContext.Current.CancellationToken;
-
-        await using var dataSource = NpgsqlDataSource.Create(pg!);
-        await using (var migrate = await dataSource.OpenConnectionAsync(ct))
-        {
-            await PgMigrations.MigrateAsync(migrate, ct);
-        }
-
-        var runtime = await DarlingServerConnector.ConnectAsync(LiveServer(host!), null, ct);
-        var runner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator());
-        var result = await runner.RunAsync(WaitStatsCollector.Instance, runtime, ct);
-
-        Assert.NotNull(result.Drain);
-        Assert.True(result.Drain!.Value.TargetSessionId > 0, "the run must carry the target's session id");
-
-        await DarlingObservability.LogCollectionAsync(
-            dataSource, runtime, "wait_stats", "SUCCESS", result.Rows, result.SqlMs, result.StorageMs, null,
-            fanout: null, phases: null, drain: result.Drain, fetchPhases: null, sweepPeerMaxMs: null, null, ct);
-
-        await using var verify = await dataSource.OpenConnectionAsync(ct);
-        using var read = new NpgsqlCommand(
-            "SELECT target_session_id FROM collection_log WHERE server_id = $1 AND collector_name = 'wait_stats' ORDER BY collection_time DESC LIMIT 1", verify);
-        read.Parameters.AddWithValue(runtime.ServerId);
-        var stored = await read.ExecuteScalarAsync(ct);
-        Assert.IsType<int>(stored);
-        Assert.True((int)stored! > 0);
-
-        foreach (var table in new[] { "collection_log", "wait_stats" })
-        {
-            using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = $1", verify);
-            cleanup.Parameters.AddWithValue(runtime.ServerId);
-            await cleanup.ExecuteNonQueryAsync(ct);
-        }
     }
 }

@@ -75,21 +75,22 @@ internal sealed class TargetSessionIdCache
 
     /// <summary>
     /// The session id for an OPEN connection, before any reader exists on it (a second command on a MARS
-    /// connection is fine, but the lookup belongs ahead of the collector's own work). Null when unknown.
+    /// connection is fine, but the lookup belongs ahead of the collector's own work), with the
+    /// <c>ClientConnectionId</c> the answer is filed under. Spid is null when unknown.
     /// </summary>
-    internal async Task<int?> ResolveAsync(DbConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    internal async Task<(int? Spid, Guid Key)> ResolveAsync(DbConnection connection, ILogger? logger, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
         switch (connection)
         {
             case NpgsqlConnection npgsql:
-                return npgsql.ProcessID > 0 ? npgsql.ProcessID : null;
+                return (npgsql.ProcessID > 0 ? npgsql.ProcessID : null, Guid.Empty);
 
             case SqlConnection sql:
                 if (sql.ServerProcessId > 0)
                 {
-                    return sql.ServerProcessId;
+                    return (sql.ServerProcessId, sql.ClientConnectionId);
                 }
 
                 return await ResolveAsync(
@@ -101,32 +102,81 @@ internal sealed class TargetSessionIdCache
                         return Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture);
                     },
                     logger,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    () => sql.ClientConnectionId).ConfigureAwait(false);
 
             default:
-                return null;
+                return (null, Guid.Empty);
         }
     }
 
     /// <summary>
-    /// The cache core: a hit returns without calling <paramref name="lookup"/>; a miss calls it once and
-    /// stores a positive answer. A throw or a non-positive answer yields null and stores nothing.
+    /// Forgets one physical connection's answer, for a connection that turned out to have been replaced
+    /// after it was resolved.
     /// </summary>
-    internal async Task<int?> ResolveAsync(
-        Guid connectionId, Func<CancellationToken, Task<int>> lookup, ILogger? logger, CancellationToken cancellationToken)
+    internal void Evict(Guid connectionId)
+    {
+        lock (_gate)
+        {
+            if (_byConnection.Remove(connectionId))
+            {
+                var kept = new Queue<Guid>();
+                foreach (var queued in _order)
+                {
+                    if (queued != connectionId)
+                    {
+                        kept.Enqueue(queued);
+                    }
+                }
+
+                _order.Clear();
+                foreach (var queued in kept)
+                {
+                    _order.Enqueue(queued);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// True, after evicting <paramref name="keyAtOpen"/>, when the connection's current id differs from the
+    /// one the session id was resolved under: SqlClient replaced the physical connection (idle connection
+    /// resiliency) and the session id belongs to the old one. A property comparison, no round trip.
+    /// </summary>
+    internal bool DiscardIfReplaced(Guid keyAtOpen, Guid currentKey)
+    {
+        if (keyAtOpen == Guid.Empty || keyAtOpen == currentKey)
+        {
+            return false;
+        }
+
+        Evict(keyAtOpen);
+        return true;
+    }
+
+    /// <summary>
+    /// The cache core: a hit returns without calling <paramref name="lookup"/>; a miss calls it once and
+    /// stores a positive answer under the id <paramref name="keyAfterLookup"/> reports once the lookup has
+    /// run (the id the connection carries NOW, since a transparent reconnect during the command gives the
+    /// answer to the new physical connection), defaulting to <paramref name="connectionId"/>. A throw or a
+    /// non-positive answer yields a null Spid and stores nothing. A real cancellation propagates.
+    /// </summary>
+    internal async Task<(int? Spid, Guid Key)> ResolveAsync(
+        Guid connectionId, Func<CancellationToken, Task<int>> lookup, ILogger? logger, CancellationToken cancellationToken,
+        Func<Guid>? keyAfterLookup = null)
     {
         ArgumentNullException.ThrowIfNull(lookup);
 
         if (connectionId == Guid.Empty)
         {
-            return null;
+            return (null, Guid.Empty);
         }
 
         lock (_gate)
         {
             if (_byConnection.TryGetValue(connectionId, out var cached))
             {
-                return cached;
+                return (cached, connectionId);
             }
         }
 
@@ -134,16 +184,17 @@ internal sealed class TargetSessionIdCache
         {
             Interlocked.Increment(ref _lookups);
             var spid = await lookup(cancellationToken).ConfigureAwait(false);
-            if (spid <= 0)
+            var key = keyAfterLookup?.Invoke() ?? connectionId;
+            if (spid <= 0 || key == Guid.Empty)
             {
-                return null;
+                return (null, key);
             }
 
             lock (_gate)
             {
-                if (_byConnection.TryAdd(connectionId, spid))
+                if (_byConnection.TryAdd(key, spid))
                 {
-                    _order.Enqueue(connectionId);
+                    _order.Enqueue(key);
                     while (_byConnection.Count > _capacity && _order.TryDequeue(out var oldest))
                     {
                         _byConnection.Remove(oldest);
@@ -151,12 +202,12 @@ internal sealed class TargetSessionIdCache
                 }
             }
 
-            return spid;
+            return (spid, key);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             logger?.LogDebug(ex, "Target session id lookup failed; the run records none (#5132)");
-            return null;
+            return (null, connectionId);
         }
     }
 }

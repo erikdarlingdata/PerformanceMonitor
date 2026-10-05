@@ -248,17 +248,28 @@ public class CollectionLogDrainForensicsStoreTests
         var runner = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
 
         const string openCall = "await targetConnection.OpenAsync(cancellationToken);";
-        const string captureCall = "context.TargetSessionId = await TargetSessionIdCache.Shared.ResolveAsync(targetConnection";
-        const string firstReader = "ExecuteReaderAsync(cancellationToken)";
-
+        const string captureCall = "await TargetSessionIdCache.Shared.ResolveAsync(targetConnection";
         var open = runner.IndexOf(openCall, StringComparison.Ordinal);
         var capture = runner.IndexOf(captureCall, StringComparison.Ordinal);
-        var reader = runner.IndexOf(firstReader, open, StringComparison.Ordinal);
 
         Assert.True(open >= 0, "the server-scoped open call moved; re-anchor this pin");
         Assert.True(capture > open, "the session-id lookup must follow the open");
-        Assert.True(capture < reader, "the session-id lookup must precede the first reader on the connection");
+
+        /* BOTH reader call sites on the connection come after the capture: the enumerated path's list
+           reader and the plain path's reader. */
+        foreach (var readerCall in new[] { "ExecuteReaderAsync(cancellationToken)", "opened = await command.ExecuteReaderAsync(itemToken)" })
+        {
+            var reader = runner.IndexOf(readerCall, open, StringComparison.Ordinal);
+            Assert.True(reader > 0, $"the reader call '{readerCall}' moved; re-anchor this pin");
+            Assert.True(capture < reader, $"the session-id lookup must precede '{readerCall}'");
+        }
+
         Assert.Equal(capture, runner.LastIndexOf(captureCall, StringComparison.Ordinal));
+
+        /* The reconnect check sits right after the plain path's first reader, never before it. */
+        var plainReader = runner.IndexOf("opened = await command.ExecuteReaderAsync(itemToken)", StringComparison.Ordinal);
+        var discard = runner.IndexOf("TargetSessionIdCache.Shared.DiscardIfReplaced(", StringComparison.Ordinal);
+        Assert.True(discard > plainReader && plainReader > 0, "the replaced-connection check must follow the first reader's open");
     }
 
     /// <summary>
