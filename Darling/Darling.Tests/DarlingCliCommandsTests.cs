@@ -42,6 +42,36 @@ public sealed class DarlingCliCommandsTests
     }
 
     [Fact]
+    public void PlanFirewallRules_Lists_CarryCanonicalScope()
+    {
+        /* #5288: an allowFrom LIST reaches the plan as the parser's canonical text (trimmed, host bits masked,
+           duplicates dropped, comma-joined), and the builder turns it into one quoted literal per range. */
+        var config = new DarlingConfig();
+        config.Postgres!.Managed = true;
+        config.Mcp.Enabled = true;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = " 10.8.0.0/16 , 192.168.1.5/24,10.8.0.0/16", Token = "t" };
+        config.Web.Enabled = true;
+        config.Web.Network = new WebNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.77/24,10.8.0.0/16", Token = "t" };
+
+        var plans = DarlingCliCommands.PlanFirewallRules(config);
+        var mcp = Assert.Single(plans, p => p.Surface == "MCP");
+        var web = Assert.Single(plans, p => p.Surface == "web dashboard");
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Open, mcp.Action);
+        Assert.Equal("10.8.0.0/16,192.168.1.0/24", mcp.Cidr);
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Open, web.Action);
+        Assert.Equal("192.168.1.0/24,10.8.0.0/16", web.Cidr);
+        Assert.Contains("-RemoteAddress '10.8.0.0/16','192.168.1.0/24' |",
+            DarlingManagedPostgres.BuildFirewallEnableCommand(mcp.RuleName, mcp.Port, mcp.Cidr!), StringComparison.Ordinal);
+
+        /* One wrong-family entry: the resolver refuses the whole list, so nothing opens and no scope is forwarded. */
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "10.8.0.0/16,2001:db8::/32", Token = "t" };
+        var refused = Assert.Single(DarlingCliCommands.PlanFirewallRules(config), p => p.Surface == "MCP");
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, refused.Action);
+        Assert.Null(refused.Cidr);
+        Assert.Contains("CIDR list", refused.Note, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FormatProbeLine_Success_ShowsVersionEditionAndMsdb()
     {
         var probe = new ConnectionProbeResult(
@@ -989,6 +1019,84 @@ public sealed class DarlingConfigureNetworkTests
 
             /* The next-steps handoff includes the browser login hint — the one step Web does differently. */
             Assert.Contains("http://192.168.1.205:5153/?token=", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #5288: the wizard takes a comma list, writes ONE canonical JSON string (never an array: an older service
+    /// refuses to start on one), and builds the firewall hint from the same canonical text, so the rule the
+    /// operator is told to run carries the scope the service enforces (not the typed spaces and host bits).
+    /// </summary>
+    [Theory]
+    [InlineData("2", "mcp")]
+    [InlineData("3", "web")]
+    public async Task ConfigureNetwork_TwoRanges_WritesOneCanonicalString_AndTheFirewallHintCarriesBoth(string choice, string surface)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard generates a DPAPI-protected token.");
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-list-");
+        try
+        {
+            var configPath = CopySampleTo(root.FullName);
+            var input = Script(choice, "192.168.1.205", " 10.8.0.0/16 , 192.168.1.5/24", "n");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(configPath, input, output, error, CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            var written = await File.ReadAllTextAsync(configPath);
+            Assert.Contains("\"allowFrom\": \"10.8.0.0/16,192.168.1.0/24\"", written, StringComparison.Ordinal);
+            using (var doc = JsonDocument.Parse(written, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true }))
+            {
+                Assert.Equal(JsonValueKind.String, doc.RootElement.GetProperty(surface).GetProperty("network").GetProperty("allowFrom").ValueKind);
+            }
+
+            var config = DarlingConfig.Parse(written);
+            if (surface == "mcp")
+            {
+                Assert.Equal(Host.McpBindMode.NetworkAndLoopback, Host.ResolveMcpBind(config.Mcp, managed: true).Mode);
+            }
+            else
+            {
+                Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, WebHost.ResolveWebBind(config.Web, managed: true).Mode);
+            }
+
+            Assert.Contains("-RemoteAddress '10.8.0.0/16','192.168.1.0/24' | Out-Null", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConfigureNetwork_Mcp_ListWithABadEntry_RePromptsWithTheListAwareText()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard generates a DPAPI-protected token.");
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-listbad-");
+        try
+        {
+            var configPath = CopySampleTo(root.FullName);
+
+            /* The first list has a bad entry, so the resolver refuses it and the wizard asks listen + allowFrom again. */
+            var input = Script("2", "192.168.1.205", "10.8.0.0/16,bogus", "192.168.1.205", "10.8.0.0/16,192.168.1.0/24", "n");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(configPath, input, output, error, CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            var text = output.ToString();
+            Assert.Contains("not a valid CIDR list", text, StringComparison.Ordinal);
+            Assert.Contains("masked, not refused", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("host bits zeroed", text, StringComparison.Ordinal);
+            Assert.Contains("\"allowFrom\": \"10.8.0.0/16,192.168.1.0/24\"", await File.ReadAllTextAsync(configPath), StringComparison.Ordinal);
         }
         finally
         {

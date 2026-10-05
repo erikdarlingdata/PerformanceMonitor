@@ -5807,10 +5807,45 @@ public sealed class DarlingManagedPostgres
         => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
 
     /// <summary>Idempotent-named enable command (remove-by-name then add) — the exact scoped command the docs
-    /// lead with (D1). Pure + testable.</summary>
+    /// lead with (D1). Pure + testable.
+    ///
+    /// <para>#5288: <paramref name="remoteCidr"/> is ONE CIDR, or the CANONICAL comma-joined list
+    /// (<c>CidrAllowList.ToString()</c>, the text <c>FirewallRulePlan.Cidr</c> and both hosts carry). Each
+    /// element is single-quoted on its own and the elements are joined by <c>,</c> with no spaces — PowerShell's
+    /// array syntax, which <c>-RemoteAddress</c> takes: <c>-RemoteAddress '10.8.0.0/16','192.168.1.5/32'</c>.
+    /// ONE CIDR is byte-for-byte what it was before the list existed: <c>-RemoteAddress '192.168.1.0/24'</c>.
+    /// An EMPTY element (a blank value, a doubled comma, a trailing comma) throws
+    /// <see cref="ArgumentException"/> instead of emitting <c>''</c>: a rule scoped by a quietly dropped entry
+    /// is the wrong way to find a typo. This stays a pure quoter — the split is on the already-canonical text
+    /// and does no parsing and no trimming (<see cref="Hosting.CidrAllowList"/> owns those) — so a hostile
+    /// value is still one single-quoted literal per element (#1646).</para></summary>
     internal static string BuildFirewallEnableCommand(string ruleName, int port, string remoteCidr)
         => $"Remove-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -ErrorAction SilentlyContinue; " +
-           $"New-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {SingleQuotedPowerShell(remoteCidr)} | Out-Null";
+           $"New-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {QuotedRemoteAddressList(remoteCidr)} | Out-Null";
+
+    /// <summary>#5288: the <c>-RemoteAddress</c> value for <see cref="BuildFirewallEnableCommand"/> — every
+    /// comma-separated element through <see cref="SingleQuotedPowerShell"/>, joined by <c>,</c>. Throws
+    /// <see cref="ArgumentException"/> on an empty (or whitespace-only) element rather than emitting <c>''</c>.</summary>
+    private static string QuotedRemoteAddressList(string remoteCidr)
+    {
+        ArgumentNullException.ThrowIfNull(remoteCidr);
+
+        var elements = remoteCidr.Split(',');
+        for (var i = 0; i < elements.Length; i++)
+        {
+            if (string.IsNullOrWhiteSpace(elements[i]))
+            {
+                throw new ArgumentException(
+                    "The firewall -RemoteAddress list has an empty element (a blank value, a doubled comma or a " +
+                    "trailing comma); refusing to emit an empty -RemoteAddress.",
+                    nameof(remoteCidr));
+            }
+
+            elements[i] = SingleQuotedPowerShell(elements[i]);
+        }
+
+        return string.Join(",", elements);
+    }
 
     /// <summary>
     /// Idempotent-named disable command (remove-by-name). Pure + testable.
