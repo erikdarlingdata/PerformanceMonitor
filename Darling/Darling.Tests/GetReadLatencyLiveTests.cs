@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -196,6 +197,72 @@ public sealed class GetReadLatencyLiveTests
                 Assert.Equal(1, read.GetProperty("gate_failures").GetInt64());
                 Assert.Equal(0, read.GetProperty("timeouts").GetInt64());
             }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task ThousandRoutesAtLimit1000_FitTheResponseBudget_InTheTotalOrder_AndSayHowManyWereLeftOut()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the get_read_latency budget pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        try
+        {
+            /* 1,000 distinct routes, all with the same 50 ms p95. The first 100 carry two samples and the rest
+               one, so the total order is: count desc (the first 100), then route ordinal within each group. */
+            var accumulator = new ReadLatencyAccumulator();
+            for (var i = 0; i < 1000; i++)
+            {
+                var route = $"route_{i:D4}";
+                accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.Ok, 50);
+                if (i < 100)
+                {
+                    accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.Ok, 50);
+                }
+            }
+
+            await accumulator.FlushAsync(connection, DateTime.UtcNow.AddHours(-1), logger: null, ct);
+
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var json = await DarlingMcpReadLatencyTools.GetReadLatency(postgres, hours: 48, limit: 1000, cancellationToken: ct);
+
+            var bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+            Assert.True(bytes <= McpResponseBudget.DefaultBytes, $"response was {bytes} bytes, over the {McpResponseBudget.DefaultBytes}-byte budget");
+
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            var reads = root.GetProperty("reads").EnumerateArray().ToArray();
+
+            Assert.True(root.GetProperty("truncated").GetBoolean());
+            Assert.Equal(1000, root.GetProperty("reads_total").GetInt32());
+            Assert.Equal(reads.Length, root.GetProperty("reads_returned").GetInt32());
+            Assert.InRange(reads.Length, 100, 999);
+
+            /* Greedy fill: the budget is nearly used (one more ~230-byte row would not have fit). */
+            Assert.True(bytes > McpResponseBudget.DefaultBytes - 400, $"only {bytes} bytes used; the page stopped early");
+
+            var expected = Enumerable.Range(0, 1000)
+                .OrderBy(i => i < 100 ? 0 : 1)
+                .ThenBy(i => $"route_{i:D4}", StringComparer.Ordinal)
+                .Take(reads.Length)
+                .Select(i => $"route_{i:D4}")
+                .ToArray();
+            Assert.Equal(expected, reads.Select(r => r.GetProperty("route").GetString()).ToArray());
 
             bodySucceeded = true;
         }
