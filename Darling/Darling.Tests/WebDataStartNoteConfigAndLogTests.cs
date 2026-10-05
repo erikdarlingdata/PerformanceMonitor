@@ -265,6 +265,15 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             "get_long_query_completions" => [("DarlingMcpLongQueryTools.cs", "GetLongQueryCompletions")],
             "get_memory_pressure_events" => [("DarlingMcpMemoryGrantTools.cs", "GetMemoryPressureEvents")],
             "get_default_trace_events" => [("DarlingMcpDefaultTraceTools.cs", "GetDefaultTraceEvents")],
+            "get_health_parser_system_health" => [("DarlingMcpHealthParserTools.cs", "GetSystemHealth")],
+            "get_health_parser_severe_errors" => [("DarlingMcpHealthParserTools.cs", "GetSevereErrors")],
+            "get_health_parser_io_issues" => [("DarlingMcpHealthParserTools.cs", "GetIOIssues")],
+            "get_health_parser_scheduler_issues" => [("DarlingMcpHealthParserTools.cs", "GetSchedulerIssues")],
+            "get_health_parser_memory_conditions" => [("DarlingMcpHealthParserTools.cs", "GetMemoryConditions")],
+            "get_health_parser_cpu_tasks" => [("DarlingMcpHealthParserTools.cs", "GetCPUTasks")],
+            "get_health_parser_memory_broker" => [("DarlingMcpHealthParserTools.cs", "GetMemoryBroker")],
+            "get_health_parser_memory_node_oom" => [("DarlingMcpHealthParserTools.cs", "GetMemoryNodeOOM")],
+            "get_health_parser_significant_waits" => [("DarlingMcpHealthParserTools.cs", "GetSignificantWaits")],
             _ => throw new ArgumentOutOfRangeException(nameof(read), read, "a listed read this test does not know"),
         };
 
@@ -283,9 +292,10 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             var body = Body(read);
             if (WebDataStartNote.NothingFoundStatusByRead.TryGetValue(read, out var word))
             {
-                /* The three SQL Server histories answer through the one NoChanges helper, whose word is empty. */
+                /* The three SQL Server histories answer through the one NoChanges helper, whose word is empty; the nine system_health
+                   reads through EmptyAsync, whose rungs all answer empty or unavailable. */
                 var answersIt = body.Contains("\"" + word + "\"", StringComparison.Ordinal)
-                    || (word == "empty" && body.Contains("NoChanges(", StringComparison.Ordinal));
+                    || (word == "empty" && (body.Contains("NoChanges(", StringComparison.Ordinal) || body.Contains("EmptyAsync(", StringComparison.Ordinal)));
                 Assert.True(answersIt, read + " is admitted for " + word + " but its tool never answers it");
             }
             else
