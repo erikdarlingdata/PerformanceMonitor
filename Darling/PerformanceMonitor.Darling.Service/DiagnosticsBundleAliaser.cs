@@ -592,9 +592,11 @@ internal sealed class BundleAliaser
         return leaks;
     }
 
-    private static bool TokenIsAliasText(string token) =>
-        new[] { "server", "host", "db", "domain", "login", "role", "ip" }.Any(p => (p + "-").Contains(token, StringComparison.OrdinalIgnoreCase))
-        || Regex.IsMatch(token, @"^(server|host|db|domain|login|role|ip)-\d+$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static bool TokenIsAliasText(string token)
+    {
+        return Regex.IsMatch(token, @"^(server|host|db|domain|login|role|ip)-\d+$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1))
+            || new[] { "server", "host", "db", "domain", "login", "role", "ip" }.Any(p => (p + "-").Contains(token, StringComparison.OrdinalIgnoreCase));
+    }
 
     private static BundleLeak Locate(List<(string Path, string Text)> values, string needle, string cls)
     {

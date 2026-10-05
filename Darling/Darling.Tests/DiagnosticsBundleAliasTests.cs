@@ -141,12 +141,12 @@ public sealed class DiagnosticsBundleAliasTests
     public void Verifier_CatchesAGluedName_AndForcesTheNoBoundaryPass()
     {
         var a = new BundleAliaser();
-        a.AddName(AliasKind.Server, "zetanode-07");
-        var root = (JsonObject)a.AliasTree(JsonNode.Parse("""{"sections":{"x":{"msg":"zetanode-07x failed"}}}"""))!;
-        Assert.Contains("zetanode-07x", root.ToJsonString(), StringComparison.Ordinal);
+        a.AddName(AliasKind.Server, "zeta-07");
+        var root = (JsonObject)a.AliasTree(JsonNode.Parse("""{"sections":{"x":{"msg":"zeta-07x failed"}}}"""))!;
+        Assert.Contains("zeta-07x", root.ToJsonString(), StringComparison.Ordinal);
         var (leaks, text) = a.Finish(root, DiagnosticsBundle.WriteOptions);
         Assert.Empty(leaks);
-        Assert.DoesNotContain("zetanode", text!, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("zeta-07", text!, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
