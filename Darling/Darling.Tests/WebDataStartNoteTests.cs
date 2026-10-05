@@ -165,6 +165,19 @@ public sealed class WebDataStartNoteTests
         }
     }
 
+    /// <summary>Index usage is listed over the table its tool reads (#4966), so the page draws the web's own note and the tool's UTC
+    /// keys are stripped on every return. Its nothing-found word is <c>empty</c> (collection ran, every index under the size floor);
+    /// <c>unavailable</c>, the word for one snapshot or none, is not admitted.</summary>
+    [Fact]
+    public void IndexUsage_IsListedOverItsTable_AndOnlyItsEmptyWordIsNothingFound()
+    {
+        Assert.Equal("pg_index_usage_stats", WebDataStartNote.TableByRead["get_pg_index_usage"]);
+        Assert.DoesNotContain("get_pg_index_usage", WebDataStartNote.CollectorRunsByRead.Keys);
+        Assert.True(WebDataStartNote.TryGetReadSource("get_pg_index_usage", out var source));
+        Assert.Equal("pg_index_usage_stats", source.Relation);
+        Assert.Equal("empty", WebDataStartNote.NothingFoundStatusByRead["get_pg_index_usage"]);
+    }
+
     [Fact]
     public async Task AChartRead_HasTheToolsWindowFloorKeysStripped_AndGetsNoNote_WithoutAskingTheStore()
     {
@@ -622,6 +635,7 @@ public sealed class WebDataStartNoteTests
     [InlineData("io", "get_pg_write_stats", "Checkpoints and WAL")]
     [InlineData("vacuum", "get_pg_xmin_horizon", "Horizon Holders")]
     [InlineData("vacuum", "get_pg_wraparound_risk", "Per-Database Headroom")]
+    [InlineData("storage", "get_pg_index_usage", "Index Usage|By Index")]
     [InlineData("overview", "get_pg_xmin_horizon", "")]
     [InlineData("overview", "get_pg_wraparound_risk", "")]
     public void EveryPanelOfAPostgresWindowRead_DrawsTheNote_TheStatTilesBesideTheirGrids(string tab, string read, string panels)
