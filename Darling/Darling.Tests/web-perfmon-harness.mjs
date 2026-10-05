@@ -99,6 +99,9 @@ try {
     fs.mkdirSync(path.dirname(path.join(scratch, rel)), { recursive: true });
     fs.copyFileSync(from, path.join(scratch, rel));
   }
+  /* #5246: the Graph cell of the Deadlock Graphs grid. */
+  fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
+  fs.copyFileSync(path.join(jsDir, "pages", "deadlock-graph.js"), path.join(scratch, "pages", "deadlock-graph.js"));
   fs.copyFileSync(path.join(jsDir, "charts.js"), path.join(scratch, "charts-real.js"));
   fs.writeFileSync(
     path.join(scratch, "charts.js"),

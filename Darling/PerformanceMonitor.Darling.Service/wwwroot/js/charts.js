@@ -13,7 +13,7 @@
  *
  * NOTE (air-gap): SVG_NS is the W3C XML *namespace identifier* required by createElementNS — it is never
  * dereferenced over the network. The self-containment test (DarlingWebSelfContainmentTests) allowlists exactly
- * this string; keep it as the single occurrence in wwwroot.
+ * this string. pages/deadlock-graph.js keeps its own copy for the same reason (it does not import this file).
  */
 
 import { el, mount, parseUtc, axisTime, emptyStrip } from "./util.js";
