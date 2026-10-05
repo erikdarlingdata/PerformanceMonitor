@@ -220,7 +220,9 @@ public sealed class McpToolsListBudgetTests
        is under 160 characters. */
     // Both additions above together (edit_server #5240 plus the three raw-plan reads #5228), as McpToolsListBudgetTests measured the tree
     // merged with dev c1679bcdd: 188,119 -> 191,056 (= 188,119 + 1,052 + 1,885), 173 -> 177 tools. The ceiling now covers all 177 served tools.
-    private const int TotalCeilingBytes = 191_056;
+    /* #5236: get_blocking_plan_xml and get_deadlock_plan_xml (the Blocking and Deadlocks grids' plan reads), measured on this tree:
+       191,056 -> 192,755 (+1,699), 177 -> 179 tools. Each head is under 160 characters. */
+    private const int TotalCeilingBytes = 192_755;
 
 
 

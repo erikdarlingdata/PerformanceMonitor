@@ -25,13 +25,13 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingBlockingReaderServerClockTests
 {
-    /* The XE select is 35 columns wide: event_time first, the six server-local stamps at 25..30. */
+    /* The XE select is 37 columns wide: event_time first, the six server-local stamps at 25..30, and the two plan flags last (35, 36; #5236). */
     private static readonly int[] XeStamps = [25, 26, 27, 28, 29, 30];
 
     /* The DMV select is 20 columns wide: event_time first, the two server-local stamps last. */
     private static readonly int[] DmvStamps = [18, 19];
 
-    private static DataTable XeTable() => Table(35, [0, .. XeStamps]);
+    private static DataTable XeTable() => Table(37, [0, .. XeStamps]);
 
     private static DataTable DmvTable() => Table(20, [0, .. DmvStamps]);
 
@@ -98,6 +98,46 @@ public sealed class DarlingBlockingReaderServerClockTests
 
         Assert.Equal(Naive(year, month, day, expectedUtcHour, 1), row.BlockedLastTranStartedUtc);
         Assert.Equal(Naive(year, month, day, expectedUtcHour, 11), row.BlockingLastTranStartedUtc);
+    }
+
+    /// <summary>
+    /// #5236: the two plan-presence flags are the XE select's LAST columns (ordinals 35 and 36, blocked then blocking) and map to
+    /// <c>HasBlockedPlan</c> / <c>HasBlockingPlan</c>. A NULL flag reads false, and a DMV-snapshot row (its select has no such
+    /// columns) leaves both false.
+    /// </summary>
+    [Fact]
+    public void MapXeRow_ReadsThePlanFlags_AtOrdinals35And36()
+    {
+        static DataTable Flags(params (int Ordinal, object Value)[] flags)
+        {
+            var table = Table(35, [0, .. XeStamps]);
+            table.Columns.Add("c35", typeof(bool));
+            table.Columns.Add("c36", typeof(bool));
+            AddRow(table, [(0, Naive(2026, 11, 2, 15)), .. flags]);
+            return table;
+        }
+
+        var both = ReadXe(Flags((35, true), (36, true)), Eastern());
+        Assert.True(both.HasBlockedPlan);
+        Assert.True(both.HasBlockingPlan);
+
+        var blockedOnly = ReadXe(Flags((35, true), (36, false)), Eastern());
+        Assert.True(blockedOnly.HasBlockedPlan);
+        Assert.False(blockedOnly.HasBlockingPlan);
+
+        var blockingOnly = ReadXe(Flags((35, false), (36, true)), Eastern());
+        Assert.False(blockingOnly.HasBlockedPlan);
+        Assert.True(blockingOnly.HasBlockingPlan);
+
+        var nulls = ReadXe(Flags(), Eastern());
+        Assert.False(nulls.HasBlockedPlan);
+        Assert.False(nulls.HasBlockingPlan);
+
+        var dmvTable = DmvTable();
+        AddRow(dmvTable, (0, Naive(2026, 3, 9, 15)));
+        var dmv = ReadDmv(dmvTable, Eastern());
+        Assert.False(dmv.HasBlockedPlan);
+        Assert.False(dmv.HasBlockingPlan);
     }
 
     [Fact]

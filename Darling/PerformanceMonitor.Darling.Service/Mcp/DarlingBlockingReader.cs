@@ -126,6 +126,14 @@ internal static class DarlingBlockingReader
         public DateTime? BlockingLastBatchCompletedUtc { get; set; }
         public int BlockedPriority { get; set; }
         public int BlockingPriority { get; set; }
+
+        /// <summary>Whether this report carries a stored plan for the BLOCKED process (#5236). The store answers it
+        /// with <c>IS NOT NULL AND &lt;&gt; ''</c>, the presence predicate the plan read (<c>BlockedPlanSql</c>) uses, so a
+        /// flagged row cannot come back "no plan". False on a DMV-snapshot row, which never has one.</summary>
+        public bool HasBlockedPlan { get; set; }
+
+        /// <summary>The same for the BLOCKING process's plan (#5236).</summary>
+        public bool HasBlockingPlan { get; set; }
     }
 
     /// <summary>One deadlock event — the shared alert-row fields (victim id/SQL, graph XML, the parsed
@@ -138,6 +146,10 @@ internal static class DarlingBlockingReader
         /// <summary>The database the deadlock was captured for. On an Azure SQL Database <c>master</c>
         /// target this is the user database whose deadlock it is.</summary>
         public string? DatabaseName { get; set; }
+
+        /// <summary>Whether this deadlock carries a stored plan for its victim (#5236), by the presence predicate
+        /// <c>DeadlockVictimPlanSql</c> reads with (<c>IS NOT NULL AND &lt;&gt; ''</c>).</summary>
+        public bool HasVictimPlan { get; set; }
     }
 
     /* ─────────────────────────── blocked-process reports (XE + DMV fallback) ─────────────────────────── */
@@ -182,7 +194,12 @@ internal static class DarlingBlockingReader
     /// report's own <c>event_time</c> (when it happened), as the viewer grid and Lite do; $5 is the
     /// <see cref="EventWindowFloor"/> for $2 — a partition-column bound with NO upper limit, so an event
     /// collected late (after an outage) still lists. Private so the
-    /// executable statements stay the two public consts the tests pin.</summary>
+    /// executable statements stay the two public consts the tests pin.
+    ///
+    /// <para>The last two columns (#5236) are the plan-presence flags, computed in SQL from the two plan columns so the
+    /// plan text itself is never fetched for a list. They use the predicate <c>IS NOT NULL AND &lt;&gt; ''</c>, the same one
+    /// <see cref="DarlingStoredPlanReader.BlockedPlanSql"/> and <see cref="DarlingStoredPlanReader.BlockingPlanSql"/> read with,
+    /// so a row flagged here is a row those reads can answer. <c>&lt;&gt; ''</c> compares lengths and does not detoast.</para></summary>
     private const string BlockedProcessReportsBody = """
         SELECT
             event_time,
@@ -219,7 +236,9 @@ internal static class DarlingBlockingReader
             blocked_priority,
             blocking_priority,
             blocked_process_report_xml,
-            contentious_object
+            contentious_object,
+            (blocked_query_plan_xml IS NOT NULL AND blocked_query_plan_xml <> '') AS has_blocked_plan,
+            (blocking_query_plan_xml IS NOT NULL AND blocking_query_plan_xml <> '') AS has_blocking_plan
         FROM blocked_process_reports
         WHERE server_id = $1
         AND   event_time >= $2
@@ -351,8 +370,8 @@ internal static class DarlingBlockingReader
     }
 
     /// <summary>Maps one row of <see cref="BlockedProcessReportsSql"/> / <see cref="BlockedProcessReportsWithXmlSql"/>
-    /// (35 columns, in the SELECT's order). One mapper for both, so the with-XML variant cannot drift a column
-    /// from the unfiltered one.</summary>
+    /// (37 columns, in the SELECT's order; the last two are the plan flags, #5236). One mapper for both, so the with-XML
+    /// variant cannot drift a column from the unfiltered one.</summary>
     internal static BlockedProcessReadRow MapXeRow(DbDataReader reader, ServerClock clock)
     {
         return new BlockedProcessReadRow
@@ -392,6 +411,8 @@ internal static class DarlingBlockingReader
             BlockingPriority = reader.IsDBNull(32) ? 0 : reader.GetInt32(32),
             BlockedProcessReportXml = reader.IsDBNull(33) ? "" : reader.GetString(33),
             ContentiousObject = reader.IsDBNull(34) ? "" : reader.GetString(34),
+            HasBlockedPlan = !reader.IsDBNull(35) && reader.GetBoolean(35),
+            HasBlockingPlan = !reader.IsDBNull(36) && reader.GetBoolean(36),
         };
     }
 
@@ -453,7 +474,9 @@ internal static class DarlingBlockingReader
         """;
 
     /// <summary>Windows on <c>deadlock_time</c> (when the deadlock happened); $5 is the
-    /// <see cref="EventWindowFloor"/> for $2, with no upper bound so a late-collected deadlock still lists.</summary>
+    /// <see cref="EventWindowFloor"/> for $2, with no upper bound so a late-collected deadlock still lists. The last
+    /// column (#5236) is the victim-plan flag, by <see cref="DarlingStoredPlanReader.DeadlockVictimPlanSql"/>'s own
+    /// presence predicate, so the plan text is never fetched for a list.</summary>
     private const string RecentDeadlocksBody = """
         SELECT
             collection_time,
@@ -461,7 +484,8 @@ internal static class DarlingBlockingReader
             victim_process_id,
             victim_sql_text,
             deadlock_graph_xml,
-            database_name
+            database_name,
+            (victim_query_plan_xml IS NOT NULL AND victim_query_plan_xml <> '') AS has_victim_plan
         FROM deadlocks
         WHERE server_id = $1
         AND   deadlock_time >= $2
@@ -492,6 +516,7 @@ internal static class DarlingBlockingReader
                 VictimSqlText = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 DeadlockGraphXml = reader.IsDBNull(4) ? "" : reader.GetString(4),
                 DatabaseName = reader.IsDBNull(5) ? null : reader.GetString(5),
+                HasVictimPlan = !reader.IsDBNull(6) && reader.GetBoolean(6),
             });
         }
 

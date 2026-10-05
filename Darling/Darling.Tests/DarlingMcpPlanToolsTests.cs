@@ -56,11 +56,13 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
         "get_plan_xml"
     };
 
-    /// <summary>The Darling-only raw-plan reads behind the web grids' plan buttons (#5228): one per row key shape.
+    /// <summary>The Darling-only raw-plan reads behind the web grids' plan buttons (#5228, #5236): one per row key shape.
     /// Lite's cross-app inventory pin lists them as Darling-only.</summary>
     private static readonly string[] RowPlanToolSurface =
     {
         "get_active_query_plan_xml",
+        "get_blocking_plan_xml",
+        "get_deadlock_plan_xml",
         "get_procedure_plan_xml",
         "get_query_store_plan_xml"
     };
@@ -74,7 +76,7 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_IsTheFiveSharedPlanTools_PlusTheThreeRowPlanReads()
+    public void ToolSurface_IsTheFiveSharedPlanTools_PlusTheFiveRowPlanReads()
     {
         var toolMethods = ToolMethods();
 
@@ -420,6 +422,11 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
         Assert.Equal(new[] { "database_name", "query_id" }, RequiredOf(tools["get_query_store_plan_xml"]));
         Assert.Equal(new[] { "sql_handle" }, RequiredOf(tools["get_procedure_plan_xml"]));
         Assert.Equal(new[] { "collection_time", "session_id" }, RequiredOf(tools["get_active_query_plan_xml"]));
+
+        /* #5236: the blocking read requires the row's event_time and both spids (the ecids and side are optional); the deadlock
+           read requires its two stamps (the victim is the optional tiebreak). */
+        Assert.Equal(new[] { "event_time", "blocked_spid", "blocking_spid" }, RequiredOf(tools["get_blocking_plan_xml"]));
+        Assert.Equal(new[] { "collection_time", "deadlock_time" }, RequiredOf(tools["get_deadlock_plan_xml"]));
     }
 
     [Fact]
@@ -433,6 +440,54 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
         Assert.Equal(new[] { "collection_time", "session_id", "server_name", "request_id", "live" }, active.Select(x => x.Name).ToArray());
         Assert.True(Optional(active, "request_id"));
         Assert.True(Optional(active, "live"));
+
+        /* #5236: the two orders, key first, then the server, then the optional refinements. */
+        var blocking = McpParams("get_blocking_plan_xml");
+        Assert.Equal(
+            new[] { "event_time", "blocked_spid", "blocking_spid", "server_name", "blocked_ecid", "blocking_ecid", "side" },
+            blocking.Select(x => x.Name).ToArray());
+        Assert.False(Optional(blocking, "event_time"));
+        Assert.False(Optional(blocking, "blocked_spid"));
+        Assert.False(Optional(blocking, "blocking_spid"));
+        Assert.True(Optional(blocking, "blocked_ecid"));
+        Assert.True(Optional(blocking, "blocking_ecid"));
+        Assert.True(Optional(blocking, "side"));
+        var deadlock = McpParams("get_deadlock_plan_xml");
+        Assert.Equal(
+            new[] { "collection_time", "deadlock_time", "server_name", "victim_process_id" },
+            deadlock.Select(x => x.Name).ToArray());
+        Assert.False(Optional(deadlock, "collection_time"));
+        Assert.False(Optional(deadlock, "deadlock_time"));
+        Assert.True(Optional(deadlock, "victim_process_id"));
+    }
+
+    /// <summary>
+    /// #5236: the blocking and deadlock reads refuse a side that is neither blocked nor blocking, and a stamp that is not an ISO 8601
+    /// round-trip form (a bare date), BEFORE touching the store (the data source is never used on these paths). The refusal names the
+    /// parameter and the source read, so a caller can fix the right one.
+    /// </summary>
+    [Fact]
+    public async Task BlockingPlanRead_RefusesAnUnknownSide_AndAnUnparseableEventTime()
+    {
+        const string good = "2026-03-04T05:06:07.1234560";
+
+        var side = await DarlingMcpPlanTools.GetBlockingPlanXml(null!, good, 51, 52, side: "sideways");
+        Assert.Equal("invalid", System.Text.Json.JsonDocument.Parse(side).RootElement.GetProperty("status").GetString());
+        Assert.Contains("side", side, StringComparison.Ordinal);
+        Assert.Contains("Expected blocked or blocking.", side, StringComparison.Ordinal);
+
+        var bareDate = await DarlingMcpPlanTools.GetBlockingPlanXml(null!, "2026-03-04", 51, 52);
+        Assert.Equal("invalid", System.Text.Json.JsonDocument.Parse(bareDate).RootElement.GetProperty("status").GetString());
+        Assert.Contains("event_time", bareDate, StringComparison.Ordinal);
+        Assert.Contains("get_blocking", bareDate, StringComparison.Ordinal);
+
+        var collection = await DarlingMcpPlanTools.GetDeadlockPlanXml(null!, "not-a-time", good);
+        Assert.Contains("collection_time", collection, StringComparison.Ordinal);
+        Assert.Contains("get_deadlocks", collection, StringComparison.Ordinal);
+
+        var deadlockTime = await DarlingMcpPlanTools.GetDeadlockPlanXml(null!, good, "3/4/2026");
+        Assert.Equal("invalid", System.Text.Json.JsonDocument.Parse(deadlockTime).RootElement.GetProperty("status").GetString());
+        Assert.Contains("deadlock_time", deadlockTime, StringComparison.Ordinal);
     }
 
     [Fact]

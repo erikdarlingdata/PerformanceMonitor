@@ -755,8 +755,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                analyze_query_store_plan / analyze_plan_xml / get_plan_xml) — the same names the
                Dashboard and Lite expose, fetching the collectors' STORED plan XML from Postgres
                (no live monitored-server hit) and running the SHARED PlanAnalysis engine — plus the
-               three raw-plan reads behind the web grids' plan buttons (#5228: get_query_store_plan_xml /
-               get_procedure_plan_xml / get_active_query_plan_xml), which are Darling-only. */
+               five raw-plan reads behind the web grids' plan buttons (#5228: get_query_store_plan_xml /
+               get_procedure_plan_xml / get_active_query_plan_xml; #5236: get_blocking_plan_xml /
+               get_deadlock_plan_xml), which are Darling-only. */
             .WithGeminiCompatibleTools<DarlingMcpPlanTools>()
             /* The core data-read tools (resource metrics, query performance, discovery/health —
                get_cpu_utilization / get_wait_stats / get_wait_trend / get_memory_stats /

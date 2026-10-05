@@ -4182,6 +4182,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_store_plan_xml"] = R(CatPlans, "The stored Query Store plan XML for a query (requires database_name, query_id).", PReqText("database_name"), PReqInt("query_id"), PServer(), PInt("plan_id")),
             ["get_procedure_plan_xml"] = R(CatPlans, "The stored plan XML for a procedure (requires sql_handle).", PReqText("sql_handle"), PServer()),
             ["get_active_query_plan_xml"] = R(CatPlans, "The plan captured with one Active Queries row (requires collection_time, session_id).", PReqText("collection_time"), PReqInt("session_id"), PServer(), PInt("request_id", 0), PBool("live", false)),
+            /* #5236: the Blocking and Deadlocks grids' plan reads, the same point-read shape: no window (no PHours/PAsOf). */
+            ["get_blocking_plan_xml"] = R(CatPlans, "The plan stored with one Blocking row (requires event_time, blocked_spid, blocking_spid); side=blocking for the blocker's plan.", PReqText("event_time"), PReqInt("blocked_spid"), PReqInt("blocking_spid"), PServer(), PInt("blocked_ecid", 0), PInt("blocking_ecid", 0), PTextDefault("side", "blocked")),
+            ["get_deadlock_plan_xml"] = R(CatPlans, "The victim's plan stored with one Deadlocks row (requires collection_time, deadlock_time).", PReqText("collection_time"), PReqText("deadlock_time"), PServer(), PText("victim_process_id")),
 
             /* ── default trace (DarlingMcpDefaultTraceTools) ── */
             ["get_default_trace_events"] = R(CatDefaultTrace, "Default-trace events (file growth, DDL, security).", PServer(), PHours(24), PLimit(100), PAsOf()),
@@ -5165,6 +5168,31 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : First(c, "live") is { } liveText && !bool.TryParse(liveText, out _) ? UnparseableParam("live", "Expected true or false.")
                 : WrapPlanXmlAsync(DarlingMcpPlanTools.GetActiveQueryPlanXml(pg, snapTime, snapSession.Value, Server(c), snapRequest ?? 0, QueryBool(c, "live", false), c.RequestAborted),
                     PlanIdentity(("collection_time", snapTime), ("session_id", snapSession), ("request_id", snapRequest ?? 0), ("live", QueryBool(c, "live", false)))),
+
+            /* #5236: the Blocking and Deadlocks grids' plan reads, bound by the same rule: a key that is present but
+               unreadable is REFUSED, never defaulted. Both times are the row's strings and are matched for equality, so
+               they are checked against the tool's own parse here and sent on untouched. An omitted ecid is 0, as the grid
+               carries it, and an omitted side is the blocked side; the tool owns the refusal of any other side, so the web
+               and MCP surfaces cannot disagree about what one means. The identity echoes the side as the tool read it. */
+            ["get_blocking_plan_xml"] = (c, pg, an) => !RequireText(c, "event_time", out var blockEventTime)
+                ? MissingParam("event_time")
+                : !OptionalInt(c, "blocked_spid", out var blockedSpid) ? UnparseableParam("blocked_spid")
+                : blockedSpid is null ? MissingParam("blocked_spid")
+                : !OptionalInt(c, "blocking_spid", out var blockingSpid) ? UnparseableParam("blocking_spid")
+                : blockingSpid is null ? MissingParam("blocking_spid")
+                : !OptionalInt(c, "blocked_ecid", out var blockedEcid) ? UnparseableParam("blocked_ecid")
+                : !OptionalInt(c, "blocking_ecid", out var blockingEcid) ? UnparseableParam("blocking_ecid")
+                : !DarlingMcpPlanTools.TryParseCollectionTime(blockEventTime, out _) ? UnparseableParam("event_time", "Expected the event_time exactly as get_blocking returned it (ISO 8601).")
+                : WrapPlanXmlAsync(DarlingMcpPlanTools.GetBlockingPlanXml(pg, blockEventTime, blockedSpid.Value, blockingSpid.Value, Server(c), blockedEcid ?? 0, blockingEcid ?? 0, Str(c, "side"), c.RequestAborted),
+                    PlanIdentity(("event_time", blockEventTime), ("blocked_spid", blockedSpid), ("blocked_ecid", blockedEcid ?? 0), ("blocking_spid", blockingSpid), ("blocking_ecid", blockingEcid ?? 0),
+                        ("side", string.Equals(Str(c, "side"), "blocking", StringComparison.OrdinalIgnoreCase) ? "blocking" : "blocked"))),
+            ["get_deadlock_plan_xml"] = (c, pg, an) => !RequireText(c, "collection_time", out var deadlockCollection)
+                ? MissingParam("collection_time")
+                : !RequireText(c, "deadlock_time", out var deadlockTime) ? MissingParam("deadlock_time")
+                : !DarlingMcpPlanTools.TryParseCollectionTime(deadlockCollection, out _) ? UnparseableParam("collection_time", "Expected the collection_time exactly as get_deadlocks returned it (ISO 8601).")
+                : !DarlingMcpPlanTools.TryParseCollectionTime(deadlockTime, out _) ? UnparseableParam("deadlock_time", "Expected the deadlock_time exactly as get_deadlocks returned it (ISO 8601).")
+                : WrapPlanXmlAsync(DarlingMcpPlanTools.GetDeadlockPlanXml(pg, deadlockCollection, deadlockTime, Server(c), Str(c, "victim_process_id"), c.RequestAborted),
+                    PlanIdentity(("collection_time", deadlockCollection), ("deadlock_time", deadlockTime), ("victim_process_id", Str(c, "victim_process_id")))),
 
             /* ── default trace ── */
             ["get_default_trace_events"] = (c, pg, an) => DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(pg, Server(c), Hours(c, 24), Rows(c, "limit", 100), as_of: AsOf(c), cancellationToken: c.RequestAborted),

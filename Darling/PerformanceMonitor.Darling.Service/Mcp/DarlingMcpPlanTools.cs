@@ -344,6 +344,94 @@ public sealed class DarlingMcpPlanTools
         }
     }
 
+    /* The two values side takes on get_blocking_plan_xml (#5236). */
+    private const string BlockedSide = "blocked";
+    private const string BlockingSide = "blocking";
+
+    [McpServerTool(Name = "get_blocking_plan_xml"), Description(
+        "Returns the raw showplan XML stored with one get_blocking row (event_time + both spids); side=blocking gives the blocker's plan. Truncated at 500KB.")]
+    public static async Task<string> GetBlockingPlanXml(
+        NpgsqlDataSource postgres,
+        [Description("The row's event_time, exactly as get_blocking returned it.")] string event_time,
+        [Description("The row's blocked_spid.")] int blocked_spid,
+        [Description("The row's blocking_spid.")] int blocking_spid,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("The row's blocked_ecid; omit for 0.")] int blocked_ecid = 0,
+        [Description("The row's blocking_ecid; omit for 0.")] int blocking_ecid = 0,
+        [Description("blocked (default) for the blocked session's plan; blocking for the blocker's.")] string? side = BlockedSide,
+        CancellationToken cancellationToken = default)
+    {
+        /* #5236: an absent side is the default, and only a value that is neither side is refused — the plan of the
+           wrong process is worse than none, so it is never guessed. */
+        var blockingSide = string.Equals(side, BlockingSide, StringComparison.OrdinalIgnoreCase);
+        if (!blockingSide && !string.IsNullOrEmpty(side) && !string.Equals(side, BlockedSide, StringComparison.OrdinalIgnoreCase))
+            return McpHelpers.Refusal("side", "Expected blocked or blocking.");
+
+        /* The same exact-instant parse as get_active_query_plan_xml: event_time is the XE timestamp as get_blocking
+           printed it ("o", naive UTC, microseconds kept), and the store compares it for equality. */
+        if (!TryParseCollectionTime(event_time, out var eventTimeUtc))
+            return McpHelpers.Refusal("event_time", "Expected the event_time exactly as get_blocking returned it (ISO 8601, UTC).");
+
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        if (error != null) return error;
+
+        try
+        {
+            var xml = await DarlingStoredPlanReader.GetBlockingPlanXmlAsync(
+                postgres, resolved.ServerId, eventTimeUtc, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, blockingSide, cancellationToken);
+            if (string.IsNullOrEmpty(xml))
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken)
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No stored {(blockingSide ? BlockingSide : BlockedSide)} plan found for blocked_spid {blocked_spid} and blocking_spid {blocking_spid} at event_time '{event_time}'. " +
+                        "The collector captures these plans best-effort, only while the statement is still in the plan cache, so many reports have none.");
+
+            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_blocking_plan_xml", ex);
+        }
+    }
+
+    [McpServerTool(Name = "get_deadlock_plan_xml"), Description(
+        "Returns the raw showplan XML stored for the victim of one get_deadlocks row (collection_time + deadlock_time). Truncated at 500KB.")]
+    public static async Task<string> GetDeadlockPlanXml(
+        NpgsqlDataSource postgres,
+        [Description("The row's collection_time, exactly as get_deadlocks returned it.")] string collection_time,
+        [Description("The row's deadlock_time, exactly as get_deadlocks returned it.")] string deadlock_time,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("The row's victim_process_id; picks the right deadlock when two share both times.")] string? victim_process_id = null,
+        CancellationToken cancellationToken = default)
+    {
+        /* Both stamps are the row's own and compared for equality, so each is parsed as an exact instant, never rounded. */
+        if (!TryParseCollectionTime(collection_time, out var collectionTimeUtc))
+            return McpHelpers.Refusal("collection_time", "Expected the collection_time exactly as get_deadlocks returned it (ISO 8601, UTC).");
+        if (!TryParseCollectionTime(deadlock_time, out var deadlockTimeUtc))
+            return McpHelpers.Refusal("deadlock_time", "Expected the deadlock_time exactly as get_deadlocks returned it (ISO 8601, UTC).");
+
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        if (error != null) return error;
+
+        try
+        {
+            var xml = await DarlingStoredPlanReader.GetDeadlockVictimPlanXmlAsync(
+                postgres, resolved.ServerId, collectionTimeUtc, deadlockTimeUtc, victim_process_id, cancellationToken);
+            if (string.IsNullOrEmpty(xml))
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks", cancellationToken)
+                    ?? McpHelpers.Status(
+                        "unavailable",
+                        $"No stored victim plan found for the deadlock at deadlock_time '{deadlock_time}' (collection_time '{collection_time}'). " +
+                        "The collector captures the victim's plan best-effort, only while the statement is still in the plan cache, so many deadlocks have none.");
+
+            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_deadlock_plan_xml", ex);
+        }
+    }
+
     /// <summary>" in database 'X'" when a database was supplied, else empty — keeps the miss message honest
     /// about the coarse-vs-fine key the caller actually used.</summary>
     private static string DbSuffix(string? databaseName) =>

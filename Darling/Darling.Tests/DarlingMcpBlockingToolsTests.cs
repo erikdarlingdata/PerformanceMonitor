@@ -444,6 +444,58 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         foreach (var tool in BlockingToolSurface)
             Assert.Empty(DarlingMcpSchemaAssert.RequiredOf(tools[tool]));
     }
+
+    /// <summary>
+    /// #5236 W6: a list flag and the point read it feeds test presence with the SAME predicate, <c>IS NOT NULL AND &lt;&gt; ''</c>
+    /// (the house pattern the report-XML read uses). A flag that tested only <c>IS NOT NULL</c> would draw a button for an
+    /// empty-string plan, and the read behind it would answer "unavailable".
+    /// </summary>
+    [Fact]
+    public void TheListFlags_UseThePointReadsPresencePredicate()
+    {
+        var flagReads = new (string Sql, string Column)[]
+        {
+            (DarlingBlockingReader.BlockedProcessReportsSql, "blocked_query_plan_xml"),
+            (DarlingBlockingReader.BlockedProcessReportsSql, "blocking_query_plan_xml"),
+            (DarlingBlockingReader.BlockedProcessReportsWithXmlSql, "blocked_query_plan_xml"),
+            (DarlingBlockingReader.BlockedProcessReportsWithXmlSql, "blocking_query_plan_xml"),
+            (DarlingBlockingReader.RecentDeadlocksSql, "victim_query_plan_xml"),
+            (DarlingBlockingReader.RecentDeadlocksWithGraphSql, "victim_query_plan_xml"),
+        };
+        foreach (var (sql, column) in flagReads)
+        {
+            Assert.Contains($"({column} IS NOT NULL AND {column} <> '')", sql, StringComparison.Ordinal);
+        }
+
+        var pointReads = new (string Sql, string Column)[]
+        {
+            (DarlingStoredPlanReader.BlockedPlanSql, "blocked_query_plan_xml"),
+            (DarlingStoredPlanReader.BlockingPlanSql, "blocking_query_plan_xml"),
+            (DarlingStoredPlanReader.DeadlockVictimPlanSql, "victim_query_plan_xml"),
+        };
+        foreach (var (sql, column) in pointReads)
+        {
+            Assert.Contains($"AND   {column} IS NOT NULL", sql, StringComparison.Ordinal);
+            Assert.Contains($"AND   {column} <> ''", sql, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>#5236: the blocked and the blocking plan reads are one statement over two columns, so a change to the key, the
+    /// floor or the copy order cannot reach one side and miss the other.</summary>
+    [Fact]
+    public void TheTwoBlockingPlanSqls_DifferOnlyInTheColumn()
+    {
+        Assert.NotEqual(DarlingStoredPlanReader.BlockedPlanSql, DarlingStoredPlanReader.BlockingPlanSql);
+        Assert.Equal(
+            DarlingStoredPlanReader.BlockingPlanSql,
+            DarlingStoredPlanReader.BlockedPlanSql.Replace("blocked_query_plan_xml", "blocking_query_plan_xml", StringComparison.Ordinal));
+
+        /* The key is the row's own, the floor is the partition bound, and the copy taken is the EARLIEST one with a plan. */
+        Assert.Contains("AND   event_time = $2", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
+        Assert.Contains("AND   collection_time >= $7", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY collection_time, blocked_report_id", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("DESC", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>

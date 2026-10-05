@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -255,10 +256,15 @@ public sealed class DarlingMcpBlockingTools
                 blocked_priority = r.BlockedPriority,
                 blocking_priority = r.BlockingPriority,
                 has_report_xml = r.HasReportXml,
+                /* #5236: which of the row's two stored plans exist, for the web grid's plan buttons (the XML itself is
+                   get_blocking_plan_xml's, on demand). Written only when true: a false is a null here and the per-row strip
+                   below drops it, so a row with no plan carries neither key. */
+                has_blocked_plan = r.HasBlockedPlan ? true : (bool?)null,
+                has_blocking_plan = r.HasBlockingPlan ? true : (bool?)null,
                 dedup_key = keys[i]
             });
 
-            var json = JsonSerializer.Serialize(new
+            var json = WithoutNullPlanFlags(new
             {
                 server = resolved.ServerName,
                 /* The span REQUESTED. Kept under its shipped name, and no longer the only span on the page. */
@@ -296,7 +302,7 @@ public sealed class DarlingMcpBlockingTools
                 events = result,
                 separately_monitored_note = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote,
                 separately_monitored_databases = separate
-            }, McpHelpers.JsonOptions);
+            }, "events", "has_blocked_plan", "has_blocking_plan");
 
             /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
             return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
@@ -421,10 +427,13 @@ public sealed class DarlingMcpBlockingTools
                 victim_sql_text = McpHelpers.Truncate(r.VictimSqlText, 2000),
                 process_summary = r.ProcessSummary,
                 has_deadlock_xml = r.HasDeadlockXml,
+                /* #5236: whether the victim's plan is stored, for the web grid's plan button (the XML is
+                   get_deadlock_plan_xml's). Written only when true, as get_blocking's plan flags are. */
+                has_victim_plan = r.HasVictimPlan ? true : (bool?)null,
                 dedup_key = keys[i]
             });
 
-            var json = JsonSerializer.Serialize(new
+            var json = WithoutNullPlanFlags(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -449,7 +458,7 @@ public sealed class DarlingMcpBlockingTools
                 deadlocks = result,
                 separately_monitored_note = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote,
                 separately_monitored_databases = separate
-            }, McpHelpers.JsonOptions);
+            }, "deadlocks", "has_victim_plan");
 
             /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
             return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
@@ -458,6 +467,31 @@ public sealed class DarlingMcpBlockingTools
         {
             return McpHelpers.FormatError("get_deadlocks", ex);
         }
+    }
+
+    /// <summary>
+    /// Serializes a list payload with <see cref="McpHelpers.JsonOptions"/> and drops the named plan-flag keys from
+    /// every row of <paramref name="rowsKey"/> where they are null (#5236). <c>JsonOptions</c> writes a null as null, so a
+    /// flag carried as <c>b ? true : (bool?)null</c> would put <c>"has_x": null</c> on every row without this: the
+    /// strip is what makes "written only when true" so. It is per row and per named key on purpose, never a global
+    /// null strip: <c>dedup_key</c>, <c>rows_examined</c> and <c>scan_truncated</c> are null on purpose, and callers read
+    /// them as such.
+    /// </summary>
+    private static string WithoutNullPlanFlags(object payload, string rowsKey, params string[] flagKeys)
+    {
+        var node = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
+        if (node[rowsKey] is JsonArray rows)
+        {
+            foreach (var row in rows.OfType<JsonObject>())
+            {
+                foreach (var key in flagKeys)
+                {
+                    if (row[key] is null) row.Remove(key);
+                }
+            }
+        }
+
+        return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
     /// <summary>

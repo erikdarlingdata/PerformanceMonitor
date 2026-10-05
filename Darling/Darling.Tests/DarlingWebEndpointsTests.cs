@@ -287,6 +287,19 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("get_procedure_plan_xml", "sql_handle=0x", "sql_handle")]
     [InlineData("get_procedure_plan_xml", "sql_handle=0x03%27%3BDROP", "sql_handle")]
     [InlineData("get_procedure_plan_xml", "", "sql_handle")]
+    [InlineData("get_blocking_plan_xml", "blocked_spid=1&blocking_spid=2", "event_time")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocking_spid=2", "blocked_spid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1", "blocking_spid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=abc&blocking_spid=2", "blocked_spid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1&blocking_spid=2&blocked_ecid=x", "blocked_ecid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1&blocking_spid=2&blocking_ecid=x", "blocking_ecid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04&blocked_spid=1&blocking_spid=2", "event_time")]
+    [InlineData("get_blocking_plan_xml", "event_time=not-a-time&blocked_spid=1&blocking_spid=2", "event_time")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1&blocking_spid=2&side=sideways", "side")]
+    [InlineData("get_deadlock_plan_xml", "deadlock_time=2026-03-04T05:06:07.1234560Z", "collection_time")]
+    [InlineData("get_deadlock_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z", "deadlock_time")]
+    [InlineData("get_deadlock_plan_xml", "collection_time=2026-03-04&deadlock_time=2026-03-04T05:06:07.1234560Z", "collection_time")]
+    [InlineData("get_deadlock_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z&deadlock_time=3/4/2026", "deadlock_time")]
     public async Task TheRowPlanReads_RefuseAMissingOrUnparseableKey_BeforeTheStore(string tool, string query, string key)
     {
         var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
