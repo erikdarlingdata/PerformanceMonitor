@@ -44,7 +44,7 @@ public sealed class EffectiveStartUtcTests
     /// </summary>
     [Theory]
     [InlineData("DarlingMcpConfigHistoryTools.cs", 3)]
-    [InlineData("DarlingMcpDataTools.cs", 6)]
+    [InlineData("DarlingMcpDataTools.cs", 7)]
     [InlineData("DarlingMcpLatchSpinlockTools.cs", 2)]
     [InlineData("DarlingMcpQueryStoreClutterTools.cs", 1)]
     [InlineData("DarlingMcpSessionTools.cs", 2)]
@@ -59,6 +59,8 @@ public sealed class EffectiveStartUtcTests
     [InlineData("DarlingMcpPgSessionStatesTools.cs", 2)]
     [InlineData("DarlingMcpPgReplicationStatsTools.cs", 1)]
     [InlineData("DarlingMcpPgXminTools.cs", 1)]
+    [InlineData("DarlingMcpPgDeadlockTools.cs", 1)]
+    [InlineData("DarlingMcpPgLogEventTools.cs", 1)]
     [InlineData("DarlingMcpQueryHeatmapTools.cs", 1)]
     [InlineData("DarlingMcpQueryStoreRegressionTools.cs", 1)]
     [InlineData("DarlingMcpPgWaitTools.cs", 1)]
