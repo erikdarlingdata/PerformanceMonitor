@@ -12,7 +12,8 @@
  * filters and groups what the shell read (fleet-groups.js holds the rules the Fleet page shares).
  *
  * The search term is module state, not persisted: the 60 s repaint and a route change rebuild the list, never
- * the search box, and the box re-reads the term. Whether the list is grouped and which groups are collapsed
+ * the search box, and the box re-reads the term. Typing repaints through the callback app.js hands to
+ * initSidebarSearch (its paintSidebar), so the active row is read from the CURRENT route, never a cached one. Whether the list is grouped and which groups are collapsed
  * persist per browser through viewer-local.js (ids and booleans only, never a name).
  */
 
@@ -28,12 +29,14 @@ const INDENT_REM = 0.75; // per group depth
 const BASE_PAD_REM = 1.25; // .server-item's own left padding
 
 let searchTerm = "";
-let lastList = null; // { container, fleet, activeParam } from the last paint, so typing repaints without a refetch
 
 const byName = (a, b) => a.display_name.localeCompare(b.display_name);
 
-/** Builds the search box and the group-by-tag toggle into `host`. Called once at start-up. */
-export function initSidebarSearch(host) {
+/**
+ * Builds the search box and the group-by-tag toggle into `host`. Called once at start-up. `repaint` is the app's
+ * sidebar paint (it reads the last fleet and the current route fresh and calls paintServerList).
+ */
+export function initSidebarSearch(host, repaint) {
   if (!host) return;
   const input = el("input", {
     class: "search-input sidebar-search-input",
@@ -44,7 +47,7 @@ export function initSidebarSearch(host) {
   input.value = searchTerm;
   input.addEventListener("input", () => {
     searchTerm = input.value;
-    repaint();
+    if (repaint) repaint();
   });
   const grouped = el("input", { type: "checkbox", "aria-label": "Group servers by tag" });
   grouped.checked = isSidebarGrouped();
@@ -52,10 +55,6 @@ export function initSidebarSearch(host) {
     setSidebarGrouped(grouped.checked); // repaints through the local-state listener
   });
   mount(host, [input, el("label", { class: "group-control sidebar-group-control" }, [grouped, el("span", { text: "Group by tag" })])]);
-}
-
-function repaint() {
-  if (lastList) paintServerList(lastList.container, lastList.fleet, lastList.activeParam);
 }
 
 /** The current search text, for the status the page shows and for tests. */
@@ -96,7 +95,8 @@ function groupHeader(g) {
     [
       el("span", { class: "sidebar-group-chevron", text: g.collapsed ? "\u25B8" : "\u25BE" }),
       el("span", { class: "sidebar-group-name", text: g.name }),
-      el("span", { class: "sidebar-group-count", text: g.count ? "(" + g.count + ")" : "" }),
+      // a collapsed header says how many servers it hides: its whole subtree, counting a multi-tag server once
+      el("span", { class: "sidebar-group-count", text: (g.collapsed ? g.subtreeCount : g.count) ? "(" + (g.collapsed ? g.subtreeCount : g.count) + ")" : "" }),
     ]
   );
   return header;
@@ -107,7 +107,7 @@ function groupHeader(g) {
  * current route (null when the route is not a server page).
  */
 export function paintServerList(container, fleet, activeParam) {
-  lastList = { container, fleet, activeParam };
+  const refocus = focusedGroupId(container);
   const grouped = isSidebarGrouped();
   const model = sidebarRows(fleet.cards || [], fleet.tags || [], {
     term: searchTerm,
@@ -124,4 +124,21 @@ export function paintServerList(container, fleet, activeParam) {
     container,
     model.rows.map((r) => (r.kind === "group" ? groupHeader(r) : serverItem(r.card, r.depth, activeParam, grouped)))
   );
+  restoreGroupFocus(container, refocus);
+}
+
+/* A repaint replaces every row, which destroys the element a keyboard user just activated. When that was a group
+   header, put focus back on the same group's new header so Enter/Space can toggle it again without tabbing down
+   from the top. (The favourite star keeps its dev behaviour: the same server can sit under several groups, so
+   there is no single row to hand focus back to.) */
+function focusedGroupId(container) {
+  const f = document.activeElement;
+  if (!f || !f.dataset || f.dataset.group == null) return null;
+  return Array.from(container.children).includes(f) ? f.dataset.group : null;
+}
+
+function restoreGroupFocus(container, id) {
+  if (id == null) return;
+  const header = Array.from(container.children).find((n) => n.dataset && n.dataset.group === id);
+  if (header) header.focus();
 }

@@ -110,6 +110,8 @@ public sealed class SidebarSearchGroupTests
         if (!TryRun("paint", out var r)) return;
 
         Assert.Equal(AllFive, Strings(r.GetProperty("flat")));
+        Assert.True(r.GetProperty("inputFirst").GetBoolean());
+        Assert.True(r.GetProperty("inputFirstAfterRepaints").GetBoolean()); // the search box element survives every repaint (focus and caret)
         Assert.Equal(new[] { "Alpha", "Bravo" }, Strings(r.GetProperty("typed")));
 
         // The 60 s poll hands a fresh payload (here in another order) to the same list; the term is still applied.
@@ -128,6 +130,64 @@ public sealed class SidebarSearchGroupTests
         Assert.Equal(new[] { "G:East", "G:West", "S:Bravo", "S:Echo", "G:Untagged", "S:Delta" }, Strings(r.GetProperty("afterCollapse")));
         Assert.Equal(new[] { "1" }, Strings(r.GetProperty("storedAfterCollapse").GetProperty("collapsedGroups")));
         Assert.DoesNotContain("East", r.GetProperty("storedText").GetString());
+    }
+
+    [Fact]
+    public void TypingAfterARouteChange_PaintsTheCurrentRoutesServerAsActive_NotTheOneOfTheLastFullPaint()
+    {
+        if (!TryRun("activeRoute", out var r)) return;
+
+        Assert.Equal(new[] { "Alpha" }, Strings(r.GetProperty("before")));
+        Assert.Equal(new[] { "Echo" }, Strings(r.GetProperty("afterTyping")));
+    }
+
+    [Fact]
+    public void ASearch_IgnoresCollapsedGroups_SoAMatchIsNeverHidden_AndClearingItRestoresTheCollapsedView()
+    {
+        if (!TryRun("searchOpensCollapsed", out var r)) return;
+
+        // East is collapsed (Prod, with Alpha, sits under it).
+        Assert.Equal(new[] { "G:East", "G:West", "S:Bravo", "S:Echo", "G:Untagged", "S:Delta" }, Strings(r.GetProperty("collapsed")));
+
+        // The term "alpha" shows Alpha even though East is collapsed; the stored choice is untouched.
+        Assert.Equal(new[] { "G:East", "G:Prod", "S:Alpha" }, Strings(r.GetProperty("searching")));
+        Assert.Equal(new[] { "1" }, Strings(r.GetProperty("storedWhileSearching")));
+
+        // A blank term is not a search; clearing it brings the collapsed view back.
+        Assert.Equal(Strings(r.GetProperty("collapsed")), Strings(r.GetProperty("blankTerm")));
+        Assert.Equal(Strings(r.GetProperty("collapsed")), Strings(r.GetProperty("cleared")));
+
+        // The shared helper: with no term the collapse still applies (the Fleet page's rule is unchanged).
+        Assert.Equal(
+            new[] { "G:East(1,c)@0", "G:West(2)@0", "S:Bravo@1", "S:Echo@1", "G:Untagged(1)@0", "S:Delta@1" },
+            Strings(r.GetProperty("helperNoTerm")));
+        Assert.Equal(new[] { "G:East(0)@0", "G:Prod(1)@1", "S:Alpha@2" }, Strings(r.GetProperty("helperTerm")));
+    }
+
+    [Fact]
+    public void AfterAHeaderToggle_FocusReturnsToTheSameGroupsHeader_AndASearchBoxKeepsItsOwnFocus()
+    {
+        if (!TryRun("headerFocus", out var r)) return;
+
+        Assert.True(r.GetProperty("replaced").GetBoolean()); // the repaint did build a new element
+        Assert.True(r.GetProperty("focusIsSameGroup").GetBoolean());
+        Assert.Equal("false", r.GetProperty("collapsed").GetString());
+        Assert.True(r.GetProperty("secondToggle").GetBoolean());
+        Assert.True(r.GetProperty("searchKeepsFocus").GetBoolean());
+    }
+
+    [Fact]
+    public void ACollapsedHeader_ShowsItsSubtreesDistinctServerCount_AnExpandedOneItsDirectCount()
+    {
+        if (!TryRun("collapsedCount", out var r)) return;
+
+        // East holds Charlie directly; Prod under it holds Alpha and Bravo.
+        Assert.Equal(new[] { "1", "3" }, Strings(r.GetProperty("eastExpanded")));
+        Assert.Equal(new[] { "1", "3" }, Strings(r.GetProperty("eastCollapsed")));
+        // A parent with no servers of its own; a server in both children counts once.
+        Assert.Equal(new[] { "0", "2" }, Strings(r.GetProperty("parentOnly")));
+        Assert.Equal("East (3)", r.GetProperty("collapsedHeader").GetString());
+        Assert.Equal("East (1)", r.GetProperty("expandedHeader").GetString());
     }
 
     [Fact]
@@ -181,6 +241,8 @@ public sealed class SidebarSearchGroupTests
         Assert.Contains("from \"./fleet-groups.js\"", sidebar, StringComparison.Ordinal);
         Assert.DoesNotContain("function cardMatches(", sidebar, StringComparison.Ordinal);
         Assert.Contains("paintServerList(serverList,", app, StringComparison.Ordinal);
+        Assert.Contains("initSidebarSearch(document.getElementById(\"server-search\"), paintSidebar);", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("activeParam }", sidebar, StringComparison.Ordinal); // no cached active param
         Assert.DoesNotContain("darling.fleet.", sidebar, StringComparison.Ordinal);
         Assert.DoesNotContain("innerHTML", sidebar, StringComparison.Ordinal);
     }

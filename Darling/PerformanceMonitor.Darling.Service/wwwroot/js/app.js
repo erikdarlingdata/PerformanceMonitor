@@ -705,7 +705,7 @@ function start() {
   initAutoRefreshToggle();
   initPageRefreshControl();
   initSidebarCollapse(document.getElementById("app"), document.getElementById("sidebar-collapse"));
-  initSidebarSearch(document.getElementById("server-search"));
+  initSidebarSearch(document.getElementById("server-search"), paintSidebar);
   initSeverityColorSettings(document.getElementById("viewer-settings"));
   onLocalChange(paintSidebar);
 

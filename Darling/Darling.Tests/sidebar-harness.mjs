@@ -31,6 +31,7 @@ class FakeNode {
     return child;
   }
   setAttribute(name, value) { this.attrs[name] = String(value); }
+  focus() { globalThis.document.activeElement = this; }
   addEventListener(type, fn) { (this.handlers[type] ||= []).push(fn); }
   set textContent(value) { this.children = []; this.text = String(value); }
   get textContent() { return (this.text || "") + this.children.map((c) => c.textContent).join(""); }
@@ -38,6 +39,7 @@ class FakeNode {
 
 globalThis.Node = FakeNode;
 globalThis.document = {
+  activeElement: null,
   createElement: (tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
 };
@@ -108,13 +110,16 @@ try {
   } else if (scenario === "paint") {
     const host = new FakeNode("div");
     const list = new FakeNode("div");
-    side.initSidebarSearch(host);
+    // app.js's paintSidebar: the last fleet and the CURRENT route, read fresh; it is also what typing calls
+    const paintSidebar = () => side.paintServerList(list, fleet, null);
+    side.initSidebarSearch(host, paintSidebar);
     // app.js repaints the sidebar on every viewer-local change (onLocalChange(paintSidebar)); this mirrors it
-    local.onChange(() => side.paintServerList(list, fleet, null));
+    local.onChange(paintSidebar);
     const input = all(host, (n) => n.tag === "input" && n.attrs.type === "search")[0];
     const toggle = all(host, (n) => n.tag === "input" && n.attrs.type === "checkbox")[0];
     side.paintServerList(list, fleet, null);
     out.flat = names(list);
+    out.inputFirst = host.children[0] === input;
     input.value = "Prod";
     fire(input, "input");
     out.typed = names(list);
@@ -130,6 +135,7 @@ try {
     input.value = "";
     fire(input, "input");
     out.cleared = names(list);
+    out.inputFirstAfterRepaints = host.children[0] === input && all(host, (n) => n.attrs.type === "search")[0] === input;
     // grouped view through the toggle
     toggle.checked = true;
     fire(toggle, "change");
@@ -141,6 +147,96 @@ try {
     out.afterCollapse = lines(list);
     out.storedAfterCollapse = JSON.parse(data["darling.local.sidebar.v1"]);
     out.storedText = data["darling.local.sidebar.v1"];
+  } else if (scenario === "activeRoute") {
+    // M1: a route change only toggles classes on the existing rows (app.js updateServerActive); typing afterwards
+    // must still paint the CURRENT route's server as active, not the one of the last full paint.
+    const host = new FakeNode("div");
+    const list = new FakeNode("div");
+    let route = "alpha-host.example.test";
+    const paintSidebar = () => side.paintServerList(list, fleet, route);
+    side.initSidebarSearch(host, paintSidebar);
+    const input = all(host, (n) => n.tag === "input" && n.attrs.type === "search")[0];
+    paintSidebar();
+    out.before = all(list, (n) => /\bactive\b/.test(n.className)).map((n) => n.dataset.display);
+    route = "echo-host.example.test"; // the route changed; no repaint
+    input.value = "o";
+    fire(input, "input");
+    out.afterTyping = all(list, (n) => /\bactive\b/.test(n.className)).map((n) => n.dataset.display);
+    out.rows = names(list);
+  } else if (scenario === "searchOpensCollapsed") {
+    // M2: a collapsed group never hides a match while a term is typed; the stored choice is untouched
+    const host = new FakeNode("div");
+    const list = new FakeNode("div");
+    const paintSidebar = () => side.paintServerList(list, fleet, null);
+    side.initSidebarSearch(host, paintSidebar);
+    local.onChange(paintSidebar);
+    const input = all(host, (n) => n.tag === "input" && n.attrs.type === "search")[0];
+    const toggle = all(host, (n) => n.tag === "input" && n.attrs.type === "checkbox")[0];
+    toggle.checked = true;
+    fire(toggle, "change");
+    local.toggleSidebarGroup(1); // East collapsed (Prod is under it, Alpha is in Prod)
+    out.collapsed = lines(list);
+    out.collapsedHeaders = headers(list);
+    input.value = "alpha";
+    fire(input, "input");
+    out.searching = lines(list);
+    out.searchingHeaders = headers(list);
+    out.storedWhileSearching = JSON.parse(data["darling.local.sidebar.v1"]).collapsedGroups;
+    input.value = "  ";
+    fire(input, "input");
+    out.blankTerm = lines(list); // whitespace only is not a search: East is collapsed again
+    input.value = "";
+    fire(input, "input");
+    out.cleared = lines(list);
+    out.clearedHeaders = headers(list);
+    // the pure helper: the default (no term) keeps the collapse, a term opens it
+    out.helperNoTerm = shape(rowsFor("", true, { isCollapsed: (id) => id === 1 }));
+    out.helperTerm = shape(rowsFor("alpha", true, { isCollapsed: (id) => id === 1 }));
+  } else if (scenario === "headerFocus") {
+    // L1: Enter on a group header toggles it and the repainted header of the same group keeps keyboard focus
+    const host = new FakeNode("div");
+    const list = new FakeNode("div");
+    const paintSidebar = () => side.paintServerList(list, fleet, null);
+    side.initSidebarSearch(host, paintSidebar);
+    local.onChange(paintSidebar);
+    local.setSidebarGrouped(true);
+    const headerFor = (id) => all(list, (n) => n.className === "sidebar-group-header" && n.dataset.group === id)[0];
+    const west = headerFor("3");
+    west.focus();
+    fire(west, "keydown", { key: "Enter", preventDefault() {} });
+    const after = headerFor("3");
+    out.replaced = after !== west;
+    out.focusIsSameGroup = document.activeElement === after && after.dataset.group === "3";
+    out.collapsed = after.attrs["aria-expanded"];
+    fire(after, "keydown", { key: " ", preventDefault() {} });
+    out.secondToggle = document.activeElement === headerFor("3") && headerFor("3").attrs["aria-expanded"] === "true";
+    // focus elsewhere (the search box) is not stolen by a repaint
+    const input = all(host, (n) => n.tag === "input" && n.attrs.type === "search")[0];
+    input.focus();
+    fire(input, "input");
+    out.searchKeepsFocus = document.activeElement === input;
+  } else if (scenario === "collapsedCount") {
+    // N1: a collapsed header shows its SUBTREE count (distinct servers); an expanded one keeps the direct count
+    const plain = rowsFor("", true);
+    const collapsed = rowsFor("", true, { isCollapsed: (id) => id === 1 });
+    const pick = (m, name) => m.rows.find((r) => r.kind === "group" && r.name === name);
+    out.eastExpanded = [pick(plain, "East").count, pick(plain, "East").subtreeCount];
+    out.eastCollapsed = [pick(collapsed, "East").count, pick(collapsed, "East").subtreeCount];
+    // a multi-tag server under two children of one parent counts once in the parent
+    const f2 = [tag(1, "P", null, 0), tag(2, "A", 1, 0), tag(3, "B", 1, 1)];
+    const c2 = [card(1, "One", "one", [{ id: 2, name: "A" }, { id: 3, name: "B" }]), card(2, "Two", "two", [{ id: 3, name: "B" }])];
+    const m2 = groups.sidebarRows(c2, f2, { term: "", grouped: true, sortFn: byName, isFavorite: () => false, isCollapsed: (id) => id === 1 });
+    out.parentOnly = [m2.rows[0].count, m2.rows[0].subtreeCount];
+    // painted text
+    const list = new FakeNode("div");
+    side.paintServerList(list, { cards, tags: forest }, null); // flat: no headers
+    local.setSidebarGrouped(true);
+    local.toggleSidebarGroup(1);
+    side.paintServerList(list, { cards, tags: forest }, null);
+    out.collapsedHeader = headers(list)[0];
+    local.toggleSidebarGroup(1);
+    side.paintServerList(list, { cards, tags: forest }, null);
+    out.expandedHeader = headers(list)[0];
   } else if (scenario === "roundTrip") {
     local.setSidebarGrouped(true);
     local.toggleSidebarGroup(2);

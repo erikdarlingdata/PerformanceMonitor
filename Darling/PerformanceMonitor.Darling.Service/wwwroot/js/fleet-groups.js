@@ -75,10 +75,14 @@ export function cardMatches(c, q) {
  *   sortFn      the card order (the sidebar passes favourites-first by display name)
  *   isFavorite  (card) => bool
  *   isCollapsed (id) => bool, id being a tag id or the fixed ids "favourites" and "untagged"
- * Rows are { kind: "server", card, depth } and { kind: "group", id, name, depth, count, collapsed, hasChildren }.
+ * Rows are { kind: "server", card, depth } and
+ * { kind: "group", id, name, depth, count, subtreeCount, collapsed, hasChildren }: `count` is the group's own
+ * servers, `subtreeCount` the DISTINCT servers in the group and everything under it (what a collapsed header hides).
  * A group appears only when it or one of its descendants holds a matching server, so an unused tag never takes a
  * line in a narrow list. A server in several tags is listed under each. Collapsing a group hides its whole
- * subtree. `empty` is true when the term left nothing to show.
+ * subtree, except while the (trimmed) term is non-empty: a search ignores collapse state so a group holding a
+ * match is never shown closed over it (the stored state is the caller's and is untouched). `empty` is true when
+ * the term left nothing to show.
  */
 export function sidebarRows(cards, forest, opts) {
   const matched = cards.filter((c) => cardMatches(c, opts.term));
@@ -99,13 +103,16 @@ export function sidebarRows(cards, forest, opts) {
     for (let j = i + 1; j < groups.length && groups[j].depth > groups[i].depth; j++) if (keep[j]) keep[i] = true;
   }
 
+  const searching = (opts.term || "").trim() !== "";
   const rows = [];
   let hideBelow = Infinity;
   groups.forEach((g, i) => {
     if (!keep[i] || g.depth > hideBelow) return;
     hideBelow = Infinity;
-    const collapsed = opts.isCollapsed(g.id);
-    rows.push({ kind: "group", id: g.id, name: g.name, depth: g.depth, count: g.cards.length, collapsed, hasChildren: g.hasChildren });
+    const collapsed = !searching && opts.isCollapsed(g.id);
+    const subtree = new Set(g.cards.map((c) => c.server_id));
+    for (let j = i + 1; j < groups.length && groups[j].depth > g.depth; j++) for (const c of groups[j].cards) subtree.add(c.server_id);
+    rows.push({ kind: "group", id: g.id, name: g.name, depth: g.depth, count: g.cards.length, subtreeCount: subtree.size, collapsed, hasChildren: g.hasChildren });
     if (collapsed) {
       hideBelow = g.depth;
       return;
