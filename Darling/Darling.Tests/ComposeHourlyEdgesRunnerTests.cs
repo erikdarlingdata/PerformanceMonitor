@@ -190,6 +190,38 @@ public class ComposeHourlyEdgesRunnerTests
     }
 
     [Fact]
+    public void TheModuleMapWatermark_IsReadOnlyForAModuleJoinPanelWhoseGuardPassed_InTheSnapshotsOwnTransaction()
+    {
+        var code = Web();
+        var at = code.IndexOf("private static async Task<HourlyEdgesSnapshot?> BeginHourlyEdgesSnapshotAsync(", StringComparison.Ordinal);
+        Assert.True(at > 0);
+        var end = code.IndexOf("private static async Task<DateTime?> ReadModuleMapWatermarkInSnapshotAsync(", at, StringComparison.Ordinal);
+        Assert.True(end > at);
+        var begin = code[at..end];
+
+        Assert.Contains("bool readModuleMapWatermark", begin, StringComparison.Ordinal);
+        Assert.Contains("verdict is not null && readModuleMapWatermark", begin, StringComparison.Ordinal);
+        Assert.Contains("ReadModuleMapWatermarkInSnapshotAsync(connection, cancellationToken)", begin, StringComparison.Ordinal);
+        Assert.Contains("hourlyEdgesCandidate, serverScope, candidateComposedSeconds.Value, plan!.UsesModuleJoin, cancellationToken", code, StringComparison.Ordinal);
+        Assert.Contains("ModuleMapThrough: snapshot?.ModuleMapThrough", code, StringComparison.Ordinal);
+
+        var read = code[end..code.IndexOf("private static async Task ExecuteSnapshotStatementAsync(", end, StringComparison.Ordinal)];
+        var save = read.IndexOf("HourlyEdgesModuleMapSavepointSql", StringComparison.Ordinal);
+        var watermark = read.IndexOf("DarlingModuleMap.ReadWatermarkAsync(connection, cancellationToken)", StringComparison.Ordinal);
+        var rollback = read.IndexOf("HourlyEdgesModuleMapRollbackSql", StringComparison.Ordinal);
+        Assert.True(save >= 0 && watermark > save && rollback > watermark, "savepoint, then the watermark read, then the rollback to the savepoint");
+    }
+
+    [Fact]
+    public void ThePanelRunPath_IsTheOnlyPlaceTheWatermarkIsRead_SoTheWebRouteAndTheMcpToolShareIt()
+    {
+        var tool = Source("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpCustomViewTools.cs");
+        Assert.Contains("DarlingWebEndpoints.RunComposedPanelAsync(", tool, StringComparison.Ordinal);
+        Assert.DoesNotContain("ReadWatermarkAsync", tool, StringComparison.Ordinal);
+        Assert.DoesNotContain("ModuleMapThrough", Source("Darling", "PerformanceMonitor.Darling.Service", "CustomAlertEvaluator.cs"), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CustomAlerts_NeverSetAVerdict()
     {
         Assert.DoesNotContain("HourlyEdges", Source("Darling", "PerformanceMonitor.Darling.Service", "CustomAlertEvaluator.cs"), StringComparison.Ordinal);

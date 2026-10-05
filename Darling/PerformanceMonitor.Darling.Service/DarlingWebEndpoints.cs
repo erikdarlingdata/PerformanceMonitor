@@ -2066,7 +2066,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             candidateComposedSeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);
             try
             {
-                hourlyEdgesSnapshot = await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate, serverScope, candidateComposedSeconds.Value, cancellationToken);
+                hourlyEdgesSnapshot = await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate, serverScope, candidateComposedSeconds.Value, plan!.UsesModuleJoin, cancellationToken);
             }
             catch (PostgresException ex)
             {
@@ -2085,7 +2085,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -2442,6 +2442,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static string HourlyEdgesGuardTimeoutSql(int guardSeconds) =>
         string.Create(CultureInfo.InvariantCulture, $"SET LOCAL statement_timeout = '{guardSeconds}s'");
 
+    /// <summary>#4605: a savepoint around the module map watermark read, so a fault in that read (the map's state table missing, say)
+    /// is undone and the panel statement still runs on the same connection and snapshot.</summary>
+    private const string HourlyEdgesModuleMapSavepointSql = "SAVEPOINT hourly_edges_module_map";
+
+    /// <summary>#4605: undoes the watermark read's savepoint, whether the read succeeded or failed.</summary>
+    private const string HourlyEdgesModuleMapRollbackSql = "ROLLBACK TO SAVEPOINT hourly_edges_module_map";
+
     /// <summary>#4605: puts the role's <c>statement_timeout</c> (the compose deadline) back for the panel statement. <c>DEFAULT</c> is
     /// the value the session started with, which for the compose role is the operator's configured deadline, so the panel
     /// keeps exactly the timeout it has today. Still <c>LOCAL</c>, so nothing outlives the transaction.</summary>
@@ -2455,16 +2462,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         private readonly NpgsqlTransaction _transaction;
         private bool _disposed;
 
-        public HourlyEdgesSnapshot(NpgsqlConnection connection, NpgsqlTransaction transaction, ComposeHourlyEdgesVerdict? verdict)
+        public HourlyEdgesSnapshot(NpgsqlConnection connection, NpgsqlTransaction transaction, ComposeHourlyEdgesVerdict? verdict, DateTime? moduleMapThrough = null)
         {
             Connection = connection;
             _transaction = transaction;
             Verdict = verdict;
+            ModuleMapThrough = moduleMapThrough;
         }
 
         public NpgsqlConnection Connection { get; }
 
         public ComposeHourlyEdgesVerdict? Verdict { get; }
+
+        /// <summary>The module map's watermark, read in this snapshot, or null when the panel does not join modules, the
+        /// guard did not pass, or the map has no watermark.</summary>
+        public DateTime? ModuleMapThrough { get; }
 
         public async ValueTask DisposeAsync()
         {
@@ -2499,10 +2511,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>Opens the run's connection, begins the snapshot transaction and runs the count guard in it. A failed OPEN throws
     /// <see cref="ComposeStoreOpenException"/> to the caller. A fault after the open (the begin, the read-only step, a guard
     /// rollback that itself failed) returns null and the panel opens a fresh connection and reads raw; a guard fault that was
-    /// undone cleanly returns a snapshot whose verdict is null and the panel reads raw on it. A cancellation propagates.</summary>
+    /// undone cleanly returns a snapshot whose verdict is null and the panel reads raw on it. A cancellation propagates.
+    /// When the panel joins modules and the guard passed, the module map's watermark is read in the same transaction, so the
+    /// watermark and the panel statement see one snapshot.</summary>
     private static async Task<HourlyEdgesSnapshot?> BeginHourlyEdgesSnapshotAsync(
         NpgsqlDataSource postgres, ComposeHourlyEdgesCandidate candidate, IReadOnlyList<string>? serverScope, int composedSeconds,
-        System.Threading.CancellationToken cancellationToken)
+        bool readModuleMapWatermark, System.Threading.CancellationToken cancellationToken)
     {
         /* The open is outside the try on purpose: a store that cannot be reached throws ComposeStoreOpenException to the caller, who
            answers it the way it answers the panel's own failed open. Opening again here would cost a second open timeout. */
@@ -2513,7 +2527,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
             await ExecuteSnapshotStatementAsync(connection, HourlyEdgesReadOnlySql, McpCommandDeadlines.ReadSeconds, cancellationToken);
             var verdict = await ResolveHourlyEdgesVerdictAsync(connection, candidate, serverScope, composedSeconds, cancellationToken);
-            return new HourlyEdgesSnapshot(connection, transaction, verdict);
+            var moduleMapThrough = verdict is not null && readModuleMapWatermark
+                ? await ReadModuleMapWatermarkInSnapshotAsync(connection, cancellationToken)
+                : null;
+            return new HourlyEdgesSnapshot(connection, transaction, verdict, moduleMapThrough);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2538,6 +2555,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             throw;
         }
+    }
+
+    /// <summary>Reads the module map's watermark on the snapshot connection. The read swallows its own faults and returns null, but
+    /// a failed statement aborts the transaction, so the read runs under a savepoint that is always rolled back to: a fault is
+    /// undone and the panel reads without the map, and a clean read loses nothing. A rollback that itself fails is rethrown to
+    /// the snapshot begin, which abandons the snapshot.</summary>
+    private static async Task<DateTime?> ReadModuleMapWatermarkInSnapshotAsync(NpgsqlConnection connection, System.Threading.CancellationToken cancellationToken)
+    {
+        await ExecuteSnapshotStatementAsync(connection, HourlyEdgesModuleMapSavepointSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        var watermark = await DarlingModuleMap.ReadWatermarkAsync(connection, cancellationToken);
+        await ExecuteSnapshotStatementAsync(connection, HourlyEdgesModuleMapRollbackSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        return watermark;
     }
 
     private static async Task ExecuteSnapshotStatementAsync(
