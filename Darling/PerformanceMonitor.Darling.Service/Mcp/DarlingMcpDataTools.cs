@@ -2873,6 +2873,7 @@ public sealed class DarlingMcpDataTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -2924,16 +2925,26 @@ public sealed class DarlingMcpDataTools
                 return everRan
                     ? McpHelpers.Status(
                         "empty",
-                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours_back} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.")
+                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours_back} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.",
+                        (await BlockingStatsNoticeAsync(postgres, resolved.ServerName, start, end, null, null, emptyAnswer: true, logger, cancellationToken)).AsHints())
                     : McpHelpers.Status(
                         "unavailable",
                         $"The blocking collectors have NEVER run successfully for {resolved.ServerName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
             }
 
-            return JsonSerializer.Serialize(new
+            /* #4966: one notice for two separate series; see BlockingStatsNoticeAsync. */
+            var notice = await BlockingStatsNoticeAsync(
+                postgres, resolved.ServerName, start, end,
+                blocking.Count == 0 ? null : blocking.Min(b => b.Time), deadlocks.Count == 0 ? null : deadlocks.Min(d => d.Time),
+                emptyAnswer: false, logger, cancellationToken);
+
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back = hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 /*
                     Severity, not counts. get_blocking_trend already answers how OFTEN; ten one-second
                     blocks and one ten-minute block share a count and are different problems.
@@ -2956,10 +2967,39 @@ public sealed class DarlingMcpDataTools
                     avg_wait_ms = Math.Round(d.AvgWaitMs, 0),
                 }),
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_blocking_stats", ex);
         }
     }
+
+    /// <summary>
+    /// The window-floor notice of get_blocking_stats (#4966). The answer is two SEPARATE series, so each has its own floor and the
+    /// notice names the LATER of them (the answer is only as complete as its least-covered series; a series with no floor gives way to
+    /// the other). The blocking floor is the earlier of the XE blocked process reports' and the DMV snapshots' coverage, which stand in
+    /// for each other; the deadlock floor is the deadlocks' coverage. Both series window on event time while the probes read
+    /// <c>collection_time</c>, and a first run of a collector can store events from before itself, so each floor also takes the
+    /// earlier of itself and that series' oldest bucket (<paramref name="oldestBlocking"/>, <paramref name="oldestDeadlock"/>), before
+    /// the later is taken.
+    /// </summary>
+    private static Task<McpWindowNotice> BlockingStatsNoticeAsync(
+        NpgsqlDataSource postgres, string serverName, DateTime start, DateTime end, DateTime? oldestBlocking, DateTime? oldestDeadlock,
+        bool emptyAnswer, ILogger? logger, CancellationToken cancellationToken) =>
+        DarlingMcpWindowNotice.ReadAsync(
+            async () =>
+            {
+                var blocking = DarlingMcpWindowNotice.Earlier(
+                    await DarlingMcpWindowNotice.Probe(postgres, BlockingStatsBlockingSources, serverName, start, end, cancellationToken), oldestBlocking);
+                var deadlock = DarlingMcpWindowNotice.Earlier(
+                    await DarlingMcpWindowNotice.Probe(postgres, "deadlocks", serverName, start, end, cancellationToken), oldestDeadlock);
+                return DarlingMcpWindowNotice.Later(blocking, deadlock);
+            },
+            start, end, "blocked_process_reports, dmv_blocking_snapshots and deadlocks", emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
+
+    private static readonly DataWindowFloor.Source[] BlockingStatsBlockingSources =
+        [DataWindowFloor.Source.ForCollectorTable("blocked_process_reports"), DataWindowFloor.Source.ForCollectorTable("dmv_blocking_snapshots")];
 }

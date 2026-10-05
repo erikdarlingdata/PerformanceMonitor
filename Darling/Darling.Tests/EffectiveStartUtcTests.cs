@@ -44,7 +44,7 @@ public sealed class EffectiveStartUtcTests
     /// </summary>
     [Theory]
     [InlineData("DarlingMcpConfigHistoryTools.cs", 3)]
-    [InlineData("DarlingMcpDataTools.cs", 5)]
+    [InlineData("DarlingMcpDataTools.cs", 6)]
     [InlineData("DarlingMcpQueryStoreClutterTools.cs", 1)]
     [InlineData("DarlingMcpSessionTools.cs", 2)]
     [InlineData("DarlingMcpMemoryGrantTools.cs", 1)]
