@@ -235,7 +235,7 @@ internal static class WebDataStartNote
         "config_changes",
         "blocking_sampled", "cycles_only", "database_activity", "session_states", "io_activity",
         "database_trend", "query_duration_trend", "wait_trend", "io_trend",
-        "holder_present", "tables_with_pending_maintenance", "slots_present",
+        "holder_present", "tables_with_pending_maintenance", "slots_present", "index_usage",
     };
 
     /// <summary>
