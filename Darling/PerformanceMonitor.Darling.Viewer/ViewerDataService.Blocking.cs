@@ -302,6 +302,13 @@ public sealed partial class ViewerDataService
         return answers.Where(a => a is not null).Min();
     }
 
+    /// <summary>
+    /// Where the Blocking charts' data starts for the window (#5098). Stub: the two-source probe.
+    /// </summary>
+    public Task<DateTime?> GetBlockingChartDataStartAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default) =>
+        GetBlockedProcessReportsDataStartAsync(serverId, startUtc, endUtc, cancellationToken);
+
     /// <summary>Maps the full 37-column blocked-process-report read into the widened grid row.</summary>
     private async Task<List<ViewerBlockedProcessRow>> ReadBlockedProcessRowsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
