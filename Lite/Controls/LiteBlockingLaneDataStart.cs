@@ -56,9 +56,10 @@ internal static class LiteBlockingLaneDataStart
     /// </summary>
     internal static async Task ShowAsync(
         TextBlock banner, Func<QueryWindowRelation, Task<DateTime?>> floorOf, DateTime startUtc, DateTime endUtc,
-        IEnumerable<TrendPoint> blockingBars, IEnumerable<TrendPoint> deadlockBars, TimeZoneInfo zone)
+        IEnumerable<TrendPoint> blockingBars, IEnumerable<TrendPoint> deadlockBars, TimeZoneInfo zone,
+        Func<Task<bool>>? blockingReadTookXe = null, Func<Task<DateTime?>>? xeOnlyBlockingFloorOf = null)
     {
-        var start = await StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars);
+        var start = await StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars, blockingReadTookXe, xeOnlyBlockingFloorOf);
         ServerTab.ApplyWindowFloorToBanner(banner, start, startUtc, zone);
     }
 
@@ -69,7 +70,8 @@ internal static class LiteBlockingLaneDataStart
     /// </summary>
     internal static async Task<DateTime?> StartAsync(
         Func<QueryWindowRelation, Task<DateTime?>> floorOf, DateTime startUtc, DateTime endUtc,
-        IEnumerable<TrendPoint> blockingBars, IEnumerable<TrendPoint> deadlockBars)
+        IEnumerable<TrendPoint> blockingBars, IEnumerable<TrendPoint> deadlockBars,
+        Func<Task<bool>>? blockingReadTookXe = null, Func<Task<DateTime?>>? xeOnlyBlockingFloorOf = null)
     {
         if (!McpQueryTools.CanWindowBeTruncated(startUtc, endUtc))
         {
@@ -77,7 +79,7 @@ internal static class LiteBlockingLaneDataStart
         }
 
         /* The shared floor-or-null wrapper is not used here: it turns a throw into null, and null here would read as "no collector run". */
-        var blockingProbe = Probe(floorOf, QueryWindowRelation.BlockedProcessReports);
+        var blockingProbe = ProbeBlockingAsync(floorOf, blockingReadTookXe, xeOnlyBlockingFloorOf);
         var deadlockProbe = Probe(floorOf, QueryWindowRelation.Deadlocks);
 
         return await ChooseAsync(blockingProbe, deadlockProbe, blockingBars, deadlockBars);
@@ -101,6 +103,30 @@ internal static class LiteBlockingLaneDataStart
     /// <summary>The later of two series' starts; the one that answered when only one did; null when neither did.</summary>
     internal static DateTime? Later(DateTime? blocking, DateTime? deadlock) =>
         blocking.HasValue && deadlock.HasValue ? (blocking.Value >= deadlock.Value ? blocking : deadlock) : blocking ?? deadlock;
+
+    /// <summary>
+    /// #5098: when the blocking read drew the XE reports (<paramref name="blockingReadTookXe"/> true), the start is the XE collector's
+    /// alone (<paramref name="xeOnlyBlockingFloorOf"/>): a DMV that covers the window must not hide where the XE data starts. A check that
+    /// throws falls back to the two-source probe (today's); a throw from the probe itself fails the series as before.
+    /// </summary>
+    private static async Task<DateTime?> ProbeBlockingAsync(
+        Func<QueryWindowRelation, Task<DateTime?>> floorOf, Func<Task<bool>>? blockingReadTookXe, Func<Task<DateTime?>>? xeOnlyBlockingFloorOf)
+    {
+        var fromXe = false;
+        if (blockingReadTookXe is not null && xeOnlyBlockingFloorOf is not null)
+        {
+            try
+            {
+                fromXe = await blockingReadTookXe();
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn("CorrelatedLanes", $"Overview blocking chart: the blocked-process-report source check failed, so the note probes both sources: {ex.Message}");
+            }
+        }
+
+        return await (fromXe ? xeOnlyBlockingFloorOf!() : floorOf(QueryWindowRelation.BlockedProcessReports));
+    }
 
     private static Task<DateTime?> Probe(Func<QueryWindowRelation, Task<DateTime?>> floorOf, QueryWindowRelation relation)
     {

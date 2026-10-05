@@ -295,7 +295,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -305,7 +305,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            the same process (six test classes call MapAll, and xUnit runs classes in parallel) took the samples
            of a server built before it. Production calls MapAll once, so nothing changes there. A caller with
            no accumulator (a test that maps the routes directly) records nothing. */
-        var readLatencyRecorder = new ReadLatencyRecorder(readLatency, logger);
+        var readLatencyRecorder = new ReadLatencyRecorder(readLatency, logger, slowReads);
 
         /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
@@ -377,6 +377,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var stopwatch = Stopwatch.StartNew();
                 string result;
                 using var readScope = ReadScope.Open(logger);
+                readScope.Scope.CaptureStatements = true;
                 try
                 {
                     /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
@@ -416,7 +417,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        routing this through FormatError first would make ToHttpResult's classifier re-derive
                        from text what this catch already knows structurally, and log it a second time. */
                     DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
-                    RecordWebReadLatency(readLatencyRecorder, name, ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback), stopwatch.ElapsedMilliseconds);
+                    var thrownOutcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback);
+                    RecordWebReadLatency(readLatencyRecorder, name, thrownOutcome, stopwatch.ElapsedMilliseconds);
+                    OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, SlowReadLog.ErrorClassOf(ex));
                     return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
                 }
 
@@ -428,7 +431,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
                     ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
                     : ReadOutcome.Ok;
-                RecordWebReadLatency(readLatencyRecorder, name, ReadScope.Resolve(webOutcome, readScope.Fallback), stopwatch.ElapsedMilliseconds);
+                var resolvedOutcome = ReadScope.Resolve(webOutcome, readScope.Fallback);
+                RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds);
+                OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
+                    resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
 
                 return ToHttpResult(result, "/api/read/" + name, logger, stopwatch.ElapsedMilliseconds);
             });
@@ -1806,8 +1812,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
         using var readScope = ReadScope.Open(readLatency?.Logger);
+        readScope.Scope.CaptureStatements = true;
         var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc);
-        RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken, readScope.Fallback);
+        RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken, readScope.Fallback, readScope.Scope);
         return outcome;
     }
 
@@ -1832,14 +1839,68 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
     }
 
-    private static void RecordComposeLatency(ReadLatencyRecorder? recorder, JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken, ReadFallback? noted = null)
+    /// <summary>The query string as slow-read arguments. A key name is caller text: only plain identifier characters
+    /// ([A-Za-z0-9_.-]) are stored, capped at 64; any other key is dropped and counted under <c>_dropped_keys</c>.</summary>
+    internal static JsonObject WebQueryArguments(IEnumerable<KeyValuePair<string, string?>> query)
+    {
+        var arguments = new JsonObject();
+        var droppedKeys = 0;
+        foreach (var (key, value) in query)
+        {
+            if (!key.All(c => c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_' or '.' or '-'))
+            {
+                droppedKeys++;
+                continue;
+            }
+
+            arguments[key.Length > 64 ? key[..64] : key] = value;
+        }
+
+        if (droppedKeys > 0)
+        {
+            arguments["_dropped_keys"] = droppedKeys;
+        }
+
+        return arguments;
+    }
+
+    /// <summary>The composed-panel route label: <c>compose:</c> plus the panel's source when the catalog knows it,
+    /// else <c>compose:unknown</c>, held to 120 characters.</summary>
+    internal static string ComposeRouteLabel(JsonObject body)
+    {
+        var route = body["panel"] is JsonObject panel && panel["source"] is JsonValue sourceValue
+            && sourceValue.TryGetValue<string>(out var source) && MeasureCatalog.IsKnownSource(source)
+            ? "compose:" + source
+            : ComposeUnknownRouteLabel;
+        return route.Length > 120 ? route[..120] : route;
+    }
+
+    /// <summary>Offers a slow or failed <c>/api/read/*</c> call to the slow-read record (#5097): the query string, as sent,
+    /// becomes the arguments. Never throws into the request.</summary>
+    private static void OfferWebSlowRead(ReadLatencyRecorder recorder, ReadScope scope, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, string? errorClass)
+    {
+        if (recorder.SlowReads is null || !recorder.SlowReads.ShouldRecord(outcome, elapsedMs))
+        {
+            return;
+        }
+
+        try
+        {
+            var arguments = WebQueryArguments(context.Request.Query.Select(q => new KeyValuePair<string, string?>(q.Key, q.Value.Count > 0 ? q.Value[0] : null)));
+
+            recorder.SlowReads.Offer(scope, ReadSurface.Web, name, outcome, elapsedMs, arguments, errorClass, recorder.Logger);
+        }
+        catch (Exception ex)
+        {
+            recorder.Logger?.LogDebug(ex, "Slow-read recording failed for /api/read/{Route}.", name);
+        }
+    }
+
+    private static void RecordComposeLatency(ReadLatencyRecorder? recorder, JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken, ReadFallback? noted = null, ReadScope? scope = null)
     {
         try
         {
-            var measureKey = body["panel"] is JsonObject panel && panel["source"] is JsonValue sourceValue
-                && sourceValue.TryGetValue<string>(out var source) && !string.IsNullOrEmpty(source)
-                ? "compose:" + source
-                : ComposeUnknownRouteLabel;
+            var measureKey = ComposeRouteLabel(body);
 
             /* Payload => Ok. outcome.Fault carries the real PostgresException for a store fault the panel
                author could not have caused -- classified the same way the web loop classifies any exception.
@@ -1862,7 +1923,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                                 ? ReadOutcome.Cancelled
                                 : ReadOutcome.Error;
 
-            recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, ReadScope.Resolve(readOutcome, noted), elapsedMs);
+            var resolved = ReadScope.Resolve(readOutcome, noted);
+            recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, resolved, elapsedMs);
+
+            /* #5097: a slow or failed run also becomes a slow-read row. The panel body is the arguments. */
+            if (scope is not null && recorder?.SlowReads is { } slowReads && slowReads.ShouldRecord(resolved, elapsedMs))
+            {
+                var errorClass = outcome.Fault is not null ? SlowReadLog.ErrorClassOf(outcome.Fault)
+                    : outcome.AuthorSqlState is { Length: > 0 } sqlState ? sqlState
+                    : resolved == ReadOutcome.Error ? "compose_error" : null;
+                slowReads.Offer(scope, ReadSurface.Compose, measureKey, resolved, elapsedMs, body.DeepClone() as JsonObject, errorClass, recorder.Logger);
+            }
         }
         catch (Exception ex)
         {
@@ -2020,6 +2091,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             return ComposeRunOutcome.BadRequest(compileError);
         }
+
+        ReadScope.NoteSource(
+            queryStoreWideEligible ? ReadScope.SourceIntervalTable : snapshot?.Verdict is not null ? ReadScope.SourceHourlyEdges : ReadScope.SourceRaw);
 
         try
         {
@@ -3542,7 +3616,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_long_query_completions"] = R(CatData, "Completed long-running queries captured by the XE trace.", PServer(), PHours(24), PLimit(30), PAsOf()),
             ["get_server_properties"] = R(CatData, "Server properties/inventory for a server.", PServer()),
             ["get_tempdb_trend"] = R(CatData, "tempdb space usage over time.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
-            ["get_top_procedures_by_cpu"] = R(CatData, "Top stored procedures by CPU.", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf()),
+            ["get_top_procedures_by_cpu"] = R(CatData, "Top stored procedures by CPU.", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf(), PTextDefault("detail", "summary")),
             ["get_top_queries_by_cpu"] = R(CatData, "Top queries by CPU, optionally parallel-only / min-DOP.", PServer(), PHours(24), PTop(20), PText("database_name"), PBool("parallel_only", false), PInt("min_dop", 0), PAsOf(), PTextDefault("detail", "summary")),
             ["get_pg_top_queries"] = R(CatData, "Top PostgreSQL query shapes by total execution time (Aurora targets).", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_plans"] = R(CatData, "Captured PostgreSQL execution plans, grouped by shape. Plans are redacted at collection.", PServer(), PHours(24), PLimit(10), PText("query_id"), PAsOf()),
@@ -3610,6 +3684,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_collector_cost"] = R(CatOverview, "The monitoring tool's OWN per-collector cost on the monitored servers (self-monitoring) - which of our collectors is the most expensive to run. Pass collector_name for that one collector's daily trend instead of the ranked list.", PInt("days_back", 7), PText("collector_name")),
             ["get_collector_stall_probes"] = R(CatOverview, "The out-of-band server-wide wait samples taken while one of OUR collectors was stalled mid-read - what the monitored instance was doing inside the window the sequential sweep records nothing in. Carries the outcome census beside the samples, deliberately unbanded.", PServer(), PInt("days_back", 7), PLimit(DarlingMcpStallProbeTools.DefaultLimit)),
             ["get_oversized_plan_backlog"] = R(CatOverview, "The cached plans this tool measured as too large to capture inline, and what the out-of-band sweep has done about each one: per server the three verdict buckets (pending/captured/expired, a strict partition), the attempt figures on still-pending rows, the newest capture and expiry instants, and observed_bytes min/median/max, with the per-collector census beside them. Takes no window - a worklist updated in place, not a series. Pass server_name with include_rows for the claim keys.", PServer(), PBool("include_rows", false), PLimit(DarlingMcpOversizedPlanBacklogTools.DefaultLimit)),
+            ["get_slow_reads"] = R(CatOverview, "The monitoring tool's OWN slow or failed reads, newest first - each with the arguments it was asked with, the source that answered and its slowest statements. Recorded when a read took 5 seconds or more or ended in a timeout, error or limit. Optional server, surface (web/compose/mcp) and route filter.", PHours(DarlingMcpSlowReadTools.DefaultHours), PServer(), PText("surface"), PText("route"), PLimit(DarlingMcpSlowReadTools.DefaultLimit)),
             ["get_read_latency"] = R(CatOverview, "The monitoring tool's OWN read-latency history (self-monitoring) - which of the web dashboard's or MCP server's own reads is really slow, and how often it times out. p50/p95/p99 are bucket upper-bound estimates, per (surface, route), sorted p95 desc. Optional surface (web/compose/mcp) and route filter. fallbacks and gate_failures count reads that fell back to raw.", PHours(DarlingMcpReadLatencyTools.DefaultHours), PText("surface"), PText("route"), PLimit(DarlingMcpReadLatencyTools.DefaultLimit)),
 
             /* ── latch / spinlock (DarlingMcpLatchSpinlockTools) ── */
@@ -4443,7 +4518,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
-            ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", cancellationToken: c.RequestAborted),
             ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", cancellationToken: c.RequestAborted),
             ["get_pg_top_queries"] = (c, pg, an) => DarlingMcpPgStatementTools.GetPgTopQueries(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* query_id arrives as TEXT and is passed through as text (#2548): a queryid that made a
@@ -4551,6 +4626,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name"), c.RequestAborted),
             ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),
+            ["get_slow_reads"] = (c, pg, an) => DarlingMcpSlowReadTools.GetSlowReads(pg, Hours(c, DarlingMcpSlowReadTools.DefaultHours), Server(c), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpSlowReadTools.DefaultLimit), false, c.RequestAborted),
             ["get_read_latency"] = (c, pg, an) => DarlingMcpReadLatencyTools.GetReadLatency(pg, Hours(c, DarlingMcpReadLatencyTools.DefaultHours), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpReadLatencyTools.DefaultLimit), c.RequestAborted),
 
             /* ── latch / spinlock ── */

@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Alerting;
@@ -872,6 +873,44 @@ public sealed class DarlingMcpDataTools
         return node;
     }
 
+    /// <summary>The row, plus (detail='full', raw tier) the desktop Top Procedures grid's remaining columns. A field the
+    /// store has no value for is left out, not written as null. The two timestamps are UTC instants, converted from the
+    /// monitored server's clock at the read.</summary>
+    private static JsonObject WithProcedureDetail(object row, DarlingDataReader.TopProcedureDetail? d, long executions, long spills, bool full)
+    {
+        var node = JsonSerializer.SerializeToNode(row, McpHelpers.JsonOptions)!.AsObject();
+        if (!full || d is null)
+        {
+            return node;
+        }
+
+        void Put(string name, JsonNode? value)
+        {
+            if (value is not null)
+            {
+                node[name] = value;
+            }
+        }
+
+        var times = new
+        {
+            last_execution_time = d.LastExecutionTime?.ToString("o"),
+            cached_time = d.CachedTime?.ToString("o"),
+        };
+        Put("last_execution_time", times.last_execution_time);
+        Put("cached_time", times.cached_time);
+        Put("avg_spills", executions > 0 ? (double)spills / executions : null);
+        Put("min_logical_reads", d.MinLogicalReads);
+        Put("max_logical_reads", d.MaxLogicalReads);
+        Put("min_physical_reads", d.MinPhysicalReads);
+        Put("max_physical_reads", d.MaxPhysicalReads);
+        Put("min_logical_writes", d.MinLogicalWrites);
+        Put("max_logical_writes", d.MaxLogicalWrites);
+        Put("min_spills", d.MinSpills);
+        Put("max_spills", d.MaxSpills);
+        return node;
+    }
+
     [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note). Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopProceduresByCpu(
         NpgsqlDataSource postgres,
@@ -880,10 +919,17 @@ public sealed class DarlingMcpDataTools
         [Description("Number of top procedures. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("'summary' (default) or 'full': full adds the remaining desktop columns (times, read/write/spill extremes), omitting nulls.")] string detail = "summary",
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
+
+        var full = string.Equals(detail, "full", StringComparison.OrdinalIgnoreCase);
+        if (!full && !string.Equals(detail, "summary", StringComparison.OrdinalIgnoreCase))
+        {
+            return McpHelpers.Refusal("detail", $"detail must be 'summary' or 'full' (got '{detail}').");
+        }
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
@@ -924,6 +970,12 @@ public sealed class DarlingMcpDataTools
                 precisionNote = "hourly-rollup rows: object_type, sql_handle, plan_handle, reads/writes/physical reads/spills and min/max cpu/elapsed are null — "
                     + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
                     + " " + HourlyWindowEdges.Note(requestedStart, floor, now, routed.HourlyCeiling);
+                if (full)
+                {
+                    precisionNote += " detail=full was asked, but the hourly rollup does not carry the detail fields (last_execution_time, cached_time, "
+                        + "min and max logical reads, physical reads, writes and spills, avg_spills); they are not in these rows. "
+                        + "A window the raw tier still holds returns them.";
+                }
             }
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
@@ -943,7 +995,7 @@ public sealed class DarlingMcpDataTools
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
                 properties?.EngineEdition, properties?.CpuCount ?? 0, properties?.VcoreCount);
 
-            var result = rows.Select(r => new
+            var result = rows.Select(r => (object)WithProcedureDetail(new
             {
                 database_name = r.DatabaseName,
                 full_name = string.IsNullOrEmpty(r.SchemaName) ? r.ObjectName : $"{r.SchemaName}.{r.ObjectName}",
@@ -970,7 +1022,7 @@ public sealed class DarlingMcpDataTools
                 total_logical_writes = hourly ? (long?)null : r.TotalLogicalWrites,
                 total_physical_reads = hourly ? (long?)null : r.TotalPhysicalReads,
                 total_spills = hourly ? (long?)null : r.TotalSpills
-            });
+            }, r.Detail, r.TotalExecutions, r.TotalSpills, full));
 
             return JsonSerializer.Serialize(new
             {
@@ -2214,6 +2266,7 @@ public sealed class DarlingMcpDataTools
             full_text.
         */
         [Description("Return each run's error_message in full instead of a preview. Default false.")] bool full_text = false,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         /* #4199: server_name OMITTED, blank, or "*" means the WHOLE FLEET rather than "auto-select the
@@ -2299,6 +2352,17 @@ public sealed class DarlingMcpDataTools
             var truncated = rows.Count > effectiveLimit;
             if (truncated) rows = rows.Take(effectiveLimit).ToList();
 
+            /* #4966: where the LOG's coverage of the window starts, in the three keys every window-floor tool writes. The probe reads
+               the log whole (DataWindowFloor.Source.ForCollectionLog) and ignores collector_name, min_duration_ms and status ON
+               PURPOSE: the notice says where the log starts for this server, not where one filter's matches do, and a quiet collector
+               inside a covered window is the filtered answer's own sentence. An answer with rows over a window of 90 minutes or less
+               needs no probe; an empty one is always probed. The fleet form carries no notice (no one server's start exists for it),
+               and neither do the unavailable answer or the fleet-maintenance sentinel (not a registered server). */
+            var rowCount = rows.Count;
+            Task<McpWindowNotice> ReadNoticeAsync() => DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, DataWindowFloor.Source.ForCollectionLog(), resolved.ServerName, start, end, cancellationToken),
+                start, end, "collection_log", emptyAnswer: rowCount == 0, logger: logger, cancellationToken: cancellationToken);
+
             var filtered = !string.IsNullOrWhiteSpace(collector_name)
                 || min_duration_ms is not null
                 || !string.IsNullOrWhiteSpace(status);
@@ -2351,16 +2415,18 @@ public sealed class DarlingMcpDataTools
                         $"No collector runs have EVER been recorded for {resolved.ServerName}. This is not an empty window — collection has not run at all for this server. Check that the service is running and that the server is enabled for collection; get_collection_health will be equally empty until it does.");
                 }
 
+                var emptyNotice = await ReadNoticeAsync();
+
                 if (filtered)
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.ServerName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.");
+                        $"No collector runs on {resolved.ServerName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.", emptyNotice.AsHints());
                 }
 
                 return McpHelpers.Status(
                     "empty",
-                    $"No collector runs recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.");
+                    $"No collector runs recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.", emptyNotice.AsHints());
             }
 
             var result = rows.Select(r => new
@@ -2485,12 +2551,18 @@ public sealed class DarlingMcpDataTools
                 },
             });
 
-            return JsonSerializer.Serialize(new
+            var notice = await ReadNoticeAsync();
+            var payload = new
             {
                 server = resolved.ServerName,
                 /* The span REQUESTED. Kept under its shipped name, and no longer the only span reported --
                    see the two timestamps below. */
                 hours_back = hours_back,
+                /* #4966: the window floor, right after hours_back. No effective_hours_back: this payload carries a page `truncated`, and
+                   the census holds that key apart from the window floor, so the reach is the instant. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 run_count = rows.Count,
                 /* Observed by the over-fetch above, not inferred from the row count. */
                 truncated,
@@ -2553,7 +2625,9 @@ public sealed class DarlingMcpDataTools
                 */
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
                 runs = result,
-            }, McpHelpers.JsonOptions);
+            };
+            var json = JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

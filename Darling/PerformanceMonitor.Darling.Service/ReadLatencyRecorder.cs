@@ -26,10 +26,19 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed class ReadLatencyRecorder
 {
     public ReadLatencyRecorder(ReadLatencyAccumulator? readLatency, ILogger? logger)
+        : this(readLatency, logger, null)
+    {
+    }
+
+    internal ReadLatencyRecorder(ReadLatencyAccumulator? readLatency, ILogger? logger, SlowReadLog? slowReads)
     {
         Accumulator = readLatency;
         Logger = logger;
+        SlowReads = slowReads;
     }
+
+    /// <summary>Where a slow or failed read is offered (#5097); null records none.</summary>
+    internal SlowReadLog? SlowReads { get; }
 
     /// <summary>Where a sample goes; null records nothing.</summary>
     internal ReadLatencyAccumulator? Accumulator { get; }

@@ -702,6 +702,22 @@ export const READ_FIELDS = {
       ],
     },
   },
+  get_slow_reads: {
+    table: {
+      rowsKey: "reads",
+      emptyText: "No slow reads were recorded.",
+      columns: [
+        { key: "read_time", label: "Time", format: "time" },
+        { key: "surface", label: "Surface" },
+        { key: "route", label: "Route" },
+        { key: "outcome", label: "Outcome" },
+        { key: "total_ms", label: "Total", format: "ms" },
+        { key: "source", label: "Source" },
+        { key: "server_name", label: "Server" },
+        { key: "statement_summary", label: "Statements", wrap: true },
+      ],
+    },
+  },
   get_collector_stall_probes: {
     table: {
       rowsKey: "probes",

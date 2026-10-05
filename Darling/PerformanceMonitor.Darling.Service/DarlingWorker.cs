@@ -1307,8 +1307,12 @@ LIMIT 1";
        recorded by either side is drained by this worker's hourly flush. */
     private readonly ReadLatencyAccumulator _readLatency;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency)
+    /* #5097: the slow-read record's queue; its one writer runs from the startup path once the store is migrated. */
+    private readonly SlowReadLog? _slowReads;
+
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null)
     {
+        _slowReads = slowReads;
         _logger = logger;
         _loggerFactory = loggerFactory;
         _mcpState = mcpState;
@@ -2494,6 +2498,9 @@ LIMIT 1";
            gated on TimescaleDB — the scrub works the same on plain PostgreSQL, it just has fewer chunks to
            reason about. Drained with the other background startup work below. */
         var settingScrub = RunPgSettingScrubAsync(postgres, stoppingToken);
+
+        /* #5097: the slow-read writer, drained at shutdown. Failure-isolated inside; it never ends before shutdown. */
+        var slowReadWriter = _slowReads is null ? Task.CompletedTask : _slowReads.RunAsync(postgres, _logger, stoppingToken);
 
         /* #4348: the one-time scrub of collected statement text (collect.pg_statement_text,
            collect.pg_blocking_edges) an older build stored before the shared sensitive-statement filter
@@ -3857,6 +3864,16 @@ LIMIT 1";
         try
         {
             await settingScrub;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
+        /* And the slow-read writer (#5097): a record still queued at shutdown is dropped. */
+        try
+        {
+            await slowReadWriter;
         }
         catch (OperationCanceledException)
         {

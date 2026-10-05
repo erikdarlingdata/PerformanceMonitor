@@ -12,8 +12,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service;
+using System.Linq;
 using Xunit;
 
 namespace Darling.Tests;
@@ -592,4 +595,121 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", FilterServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", FilterServerId);
     }
+
+    /* #4966: the window-floor notice on the one-server form. The probe reads the log's own coverage and ignores the collector,
+       status and duration filters on purpose: it says where the LOG starts, not where one filter's matches do. */
+    private const string WindowCollector = "wait_stats";
+
+    private static string WindowName(string window) => "collection-log-window-" + window;
+
+    private static Task<string> CallWindowAsync(NpgsqlDataSource ds, string window, int hours, DateTime end, int? limit = null, string? collector = null) =>
+        DarlingMcpDataTools.GetCollectionLog(ds, WindowName(window), hours, limit, as_of: WebDataStartNote.FormatWindowEnd(end), collector_name: collector);
+
+    private static Task RunWindowAsync(string window, Func<NpgsqlConnection, NpgsqlDataSource, DateTime, Task> body) =>
+        WindowFloorLiveHarness.RunAsync(ConnectionString, [WindowCollector], [WindowName(window)], [], body);
+
+    private static Task SeedWindowAsync(NpgsqlConnection c, string window, DateTime created, DateTime? runsFrom, int step, DateTime end) =>
+        WindowFloorLiveHarness.SeedServerAsync(c, WindowName(window), created, WindowCollector, runsFrom, step, end, [], TestContext.Current.CancellationToken);
+
+    [Fact]
+    public async Task ARunsAnswer_ForAServerAddedTwoDaysAgo_NamesWhereCoverageStarts_AndAPagedPageKeepsTheTwoFlagsApart_AgainstDevPostgres() =>
+        await RunWindowAsync("added", async (c, ds, end) =>
+        {
+            var added = end.AddDays(-2);
+            await SeedWindowAsync(c, "added", added, added, 30, end);
+
+            /* limit 5 pages the answer: truncated is the PAGE's, window_truncated the store's, and neither moves the other. */
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "added", 168, end, limit: 5));
+
+            Assert.True(root.GetProperty("truncated").GetBoolean());
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(added), root.GetProperty("effective_start").GetString());
+            Assert.EndsWith("Z", root.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
+            Assert.Equal(DarlingMcpWindowNotice.Build(added, end.AddHours(-168), "collection_log").TruncationNote, root.GetProperty("truncation_note").GetString());
+            Assert.False(root.TryGetProperty("effective_hours_back", out _));
+
+            var names = root.EnumerateObject().Select(p => p.Name).ToList();
+            Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(names.IndexOf("hours_back") + 1).Take(3));
+        });
+
+    [Fact]
+    public async Task ARunsAnswer_WhoseFirstRunComesLate_IsCovered_AgainstDevPostgres() =>
+        await RunWindowAsync("quiet", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "quiet", end.AddDays(-30), end.AddDays(-8), 60, end);
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "quiet", 168, end, limit: 5));
+
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+            var effective = DateTime.Parse(root.GetProperty("effective_start").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+            Assert.InRange((effective - end.AddHours(-168)).TotalSeconds, 0, 120);
+        });
+
+    [Fact]
+    public async Task AnEmptyWindow_PastCoverage_CarriesHints_AndTheProbeIgnoresTheFilters_AgainstDevPostgres() =>
+        await RunWindowAsync("empty", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "empty", end.AddDays(-2), end.AddDays(-2), 30, end);
+
+            /* A quiet hour before the server was registered: the server has collected, but not in this window. */
+            var past = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "empty", 1, end.AddDays(-5)));
+            Assert.Equal("empty", past.GetProperty("status").GetString());
+            var hints = past.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+            Assert.Contains("no collection of collection_log", hints.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+
+            /* A filter that matches nothing: the probe does not apply it, so the hour the log covers is covered. */
+            var filtered = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "empty", 1, end, collector: "no_such_collector"));
+            Assert.Equal("empty", filtered.GetProperty("status").GetString());
+            Assert.False(filtered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(end.AddHours(-1)), filtered.GetProperty("hints").GetProperty("effective_start").GetString());
+        });
+
+    [Fact]
+    public async Task AServerThatNeverCollected_StaysBare_AgainstDevPostgres() =>
+        await RunWindowAsync("never", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "never", end.AddDays(-2), null, 30, end);
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "never", 168, end));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            Assert.False(root.TryGetProperty("hints", out _));
+        });
+
+    [Fact]
+    public async Task AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres() =>
+        await RunWindowAsync("short", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "short", end.AddDays(-30), end.AddDays(-2), 30, end);
+            var calls = 0;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => { calls++; return Task.FromResult<DateTime?>(null); };
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "short", 1, end, limit: 5));
+
+            Assert.Equal(0, calls);
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+            Assert.True(root.GetProperty("run_count").GetInt32() > 0);
+        });
+
+    [Fact]
+    public async Task AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres() =>
+        await RunWindowAsync("probefail", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "probefail", end.AddDays(-2), end.AddDays(-2), 30, end);
+            DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "probefail", 168, end, limit: 5));
+            Assert.False(root.TryGetProperty("status", out _));
+            Assert.True(root.GetProperty("run_count").GetInt32() > 0);
+            Assert.False(root.TryGetProperty("effective_start", out _));
+            Assert.False(root.TryGetProperty("window_truncated", out _));
+            Assert.False(root.TryGetProperty("truncation_note", out _));
+
+            var empty = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "probefail", 1, end.AddDays(-5)));
+            Assert.Equal("empty", empty.GetProperty("status").GetString());
+            Assert.False(empty.TryGetProperty("hints", out _));
+        });
 }
