@@ -122,11 +122,12 @@ internal static class DarlingJobReader
             reader.IsDBNull(10) ? null : reader.GetDecimal(10));
 
     /// <summary>
-    /// The newest <c>agent_status</c> row of every enabled server that has one, or of the one server asked for ($1;
-    /// NULL for every server). A per-server <c>LATERAL</c> reads one row off the (server_id, collection_time) index, so
-    /// the cost is one index probe per server rather than a walk of the table's retained history. A server with no row
-    /// (a PostgreSQL target, or an Agent collector that has not run) is simply absent. <c>next_scheduled_run</c> is the
-    /// server's own wall clock; <see cref="ReadLatestAgentStatesAsync"/> converts it to UTC.
+    /// The newest <c>agent_status</c> row AT OR BEFORE the anchor ($2, naive UTC) of every enabled server that has one, or
+    /// of the one server asked for ($1; NULL for every server). A per-server <c>LATERAL</c> reads one row off the
+    /// (server_id, collection_time) index, so the cost is one index probe per server rather than a walk of the table's
+    /// retained history. A server with no row at or before the anchor (a PostgreSQL target, or an Agent collector that had
+    /// not run by then) is simply absent. <c>next_scheduled_run</c> is the server's own wall clock;
+    /// <see cref="ReadLatestAgentStatesAsync"/> converts it to UTC.
     /// </summary>
     public const string LatestAgentStatusSql = """
         SELECT
@@ -142,6 +143,7 @@ internal static class DarlingJobReader
             SELECT x.agent_running, x.agent_status_desc, x.next_scheduled_run, x.collection_time
             FROM agent_status AS x
             WHERE x.server_id = s.server_id
+            AND   x.collection_time <= $2
             ORDER BY x.collection_time DESC
             LIMIT 1
         ) AS a
@@ -199,15 +201,16 @@ internal static class DarlingJobReader
     /// <summary>
     /// Turns a stored snapshot into the state served. A snapshot is judged only while it is fresh, against the alert's live
     /// window (<paramref name="staleWindow"/>, from <see cref="ReadStaleWindowAsync"/>) and with the comparison the "Agent
-    /// Not Running" self-alert uses: an older one says nothing about the Agent now, so it reads as unknown with no next run,
-    /// never as the last value seen. A fresh row of <c>agent_running = false</c> with no description is the collector's
+    /// Not Running" self-alert uses: an older one says nothing about the Agent at the anchor (<paramref name="anchorUtc"/>,
+    /// the window's end: now, or the <c>as_of</c> asked for), so it reads as unknown with no next run, never as the last
+    /// value seen. A fresh row of <c>agent_running = false</c> with no description is the collector's
     /// "no Agent service row" answer, which reads as <see cref="NoAgentServiceDescription"/> with no running flag: that
     /// server has no Agent to stop, and the alert stays silent for it on purpose.
     /// </summary>
     internal static AgentState ResolveAgentState(
-        string server, bool? running, string? statusDesc, DateTime? nextRunUtc, DateTime capturedAtUtc, DateTime nowUtc, TimeSpan staleWindow)
+        string server, bool? running, string? statusDesc, DateTime? nextRunUtc, DateTime capturedAtUtc, DateTime anchorUtc, TimeSpan staleWindow)
     {
-        if (nowUtc - capturedAtUtc >= staleWindow)
+        if (anchorUtc - capturedAtUtc >= staleWindow)
             return new AgentState(server, null, AgentUnknownDescription, null, capturedAtUtc);
         if (running == false && statusDesc is null)
             return new AgentState(server, null, NoAgentServiceDescription, null, capturedAtUtc);
@@ -217,10 +220,12 @@ internal static class DarlingJobReader
     /// <summary>A fault a test arms for the current async flow, thrown ahead of the Agent read to prove the runs survive it.</summary>
     internal static readonly System.Threading.AsyncLocal<Exception?> AgentReadFaultForTests = new();
 
-    /// <summary>The latest Agent state of one server (<paramref name="serverId"/>) or of every enabled server that has a
-    /// snapshot, ordered by name. <paramref name="nowUtc"/> is the instant the snapshots are judged against.</summary>
+    /// <summary>The Agent state of one server (<paramref name="serverId"/>) or of every enabled server that has a snapshot,
+    /// ordered by name, as of <paramref name="anchorUtc"/> (UTC): each server's newest snapshot at or before that instant,
+    /// judged against it, so a snapshot collected after the anchor is never read. A server with no snapshot at or before the
+    /// anchor is absent.</summary>
     public static async Task<List<AgentState>> ReadLatestAgentStatesAsync(
-        NpgsqlDataSource postgres, int? serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int? serverId, DateTime anchorUtc, CancellationToken cancellationToken = default)
     {
         if (AgentReadFaultForTests.Value is { } fault) throw fault;
         var staleWindow = await ReadStaleWindowAsync(postgres, cancellationToken);
@@ -229,6 +234,9 @@ internal static class DarlingJobReader
         await using var command = postgres.CreateCommand(LatestAgentStatusSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = (object?)serverId ?? DBNull.Value });
+        /* collection_time is naive UTC (timestamp, no zone), so the anchor is bound as a naive instant: a Kind=Utc DateTime bound
+           to a timestamp parameter would be shifted by the server's zone, silently. */
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(anchorUtc, DateTimeKind.Unspecified) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -239,7 +247,7 @@ internal static class DarlingJobReader
                 reader.IsDBNull(3) ? null : reader.GetString(3),
                 reader.IsDBNull(4) ? null : DarlingServerClocksReader.ClockFor(clocks, id).ToUtc(reader.GetDateTime(4)),
                 DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc),
-                nowUtc,
+                anchorUtc,
                 staleWindow));
         }
 

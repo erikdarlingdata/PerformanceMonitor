@@ -494,11 +494,17 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         }
     }
 
+    /* The snapshot's age is its age at the anchor these tests read (AsOf), not at the clock: the tool reads the Agent as of the
+       window's end (#5242), so a seed hung off the clock would sit after a past as_of and never be read. */
     private static Task SeedAgentAsync(NpgsqlConnection c, CancellationToken ct, int serverId, string serverName, bool? running, string? desc, TimeSpan age, DateTime? nextLocal = null) =>
+        SeedAgentAtAsync(c, ct, serverId, serverName, running, desc, AsOf - age, nextLocal);
+
+    /* The same insert at an absolute instant (naive UTC, as the collector stores it). */
+    private static Task SeedAgentAtAsync(NpgsqlConnection c, CancellationToken ct, int serverId, string serverName, bool? running, string? desc, DateTime capturedUtc, DateTime? nextLocal = null) =>
         DarlingMcpTestData.ExecAsync(c, ct,
             @"INSERT INTO agent_status (collection_id, collection_time, server_id, server_name, agent_running, agent_status_desc, agent_startup_desc, next_scheduled_run)
               VALUES ($1,$2,$3,$4,$5,$6,'Automatic',$7)",
-            CollectionIdGenerator.Next(), DateTime.SpecifyKind(DateTime.UtcNow - age, DateTimeKind.Unspecified), serverId, serverName,
+            CollectionIdGenerator.Next(), DateTime.SpecifyKind(capturedUtc, DateTimeKind.Unspecified), serverId, serverName,
             (object?)running ?? DBNull.Value, (object?)desc ?? DBNull.Value, (object?)nextLocal ?? DBNull.Value);
 
     [Fact]
@@ -555,7 +561,7 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
             await SeedAsync(c, ct);
             await SetStaleMinutesAsync(c, ct, 30);
             var stale = DarlingSelfAlertEvaluator.StaleWindow + TimeSpan.FromMinutes(5);
-            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", stale, DateTime.UtcNow.AddHours(1));
+            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", stale, AsOf.AddHours(1));
             await SeedAgentAsync(c, ct, ServerB, NameB, true, "Running", stale);
 
             foreach (var name in new[] { NameA, NameB })
@@ -640,9 +646,9 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         try
         {
             await SeedAsync(c, ct);
-            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", TimeSpan.FromMinutes(45), DateTime.UtcNow.AddHours(1));
+            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", TimeSpan.FromMinutes(45), AsOf.AddHours(1));
 
-            /* The shipped 30 minutes: a 45-minute-old row says nothing about the Agent now. */
+            /* The shipped 30 minutes: a 45-minute-old row says nothing about the Agent at the anchor. */
             await SetStaleMinutesAsync(c, ct, 30);
             var thirty = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, as_of: AsOfText, cancellationToken: ct)).RootElement;
             Assert.Equal(JsonValueKind.Null, thirty.GetProperty("agent_running").ValueKind);
@@ -731,6 +737,151 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         finally
         {
             DarlingJobReader.AgentReadFaultForTests.Value = null;
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    /* #5242: the Agent state follows the window's end. The row read is the newest snapshot at or before the anchor, judged
+       against the anchor, so a past as_of answers "what was the Agent doing then" and leaves out what was collected after it.
+       These cases hang their times off one instant each test fixes (whole seconds, so the stored microseconds round-trip
+       exactly) rather than off the clock at the moment of the call. */
+    private static DateTime FixedNow()
+    {
+        var now = DateTime.UtcNow;
+        return new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+    }
+
+    private static string AsOfOf(DateTime utc) => utc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+
+    private static string CapturedOf(DateTime utc) => utc.ToString("o", CultureInfo.InvariantCulture);
+
+    /* An answer with no run in its window carries the Agent state under hints (the seeded runs are all in March, so a
+       window that ends near now is empty). */
+    private static JsonElement HintsOf(string body)
+    {
+        var root = JsonDocument.Parse(body).RootElement;
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        return root.GetProperty("hints");
+    }
+
+    [Fact]
+    public async Task ANamedServer_ReadsItsAgentAsOfTheAnchor_NotItsNewestSnapshot()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            await SetStaleMinutesAsync(c, ct, 30);
+            /* Alpha's Agent was stopped 20 minutes ago and has been running again since 2 minutes ago. */
+            var now = FixedNow();
+            var stoppedAt = now.AddMinutes(-20);
+            var runningAt = now.AddMinutes(-2);
+            await SeedAgentAtAsync(c, ct, ServerA, NameA, false, "Stopped", stoppedAt, now.AddHours(1));
+            await SeedAgentAtAsync(c, ct, ServerA, NameA, true, "Running", runningAt, now.AddHours(2));
+
+            /* An anchor between the two reads the older snapshot: stopped, stamped with the older capture time. */
+            var then = HintsOf(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, as_of: AsOfOf(now.AddMinutes(-10)), cancellationToken: ct));
+            Assert.False(then.GetProperty("agent_running").GetBoolean());
+            Assert.Equal("Stopped", then.GetProperty("agent_status_desc").GetString());
+            Assert.Equal(CapturedOf(stoppedAt), then.GetProperty("captured_at").GetString());
+
+            /* No as_of is the window ending now: the newer snapshot, running. */
+            var current = HintsOf(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, cancellationToken: ct));
+            Assert.True(current.GetProperty("agent_running").GetBoolean());
+            Assert.Equal("Running", current.GetProperty("agent_status_desc").GetString());
+            Assert.Equal(CapturedOf(runningAt), current.GetProperty("captured_at").GetString());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
+    public async Task AnAnchorBeforeEverySnapshot_ReadsUnknown_AndTheFleetLeavesTheServerOut()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            await SetStaleMinutesAsync(c, ct, 30);
+            /* Both servers' only snapshots are 2 minutes old, so an as_of in March has nothing at or before it. */
+            var now = FixedNow();
+            await SeedAgentAtAsync(c, ct, ServerA, NameA, false, "Stopped", now.AddMinutes(-2), now.AddHours(1));
+            await SeedAgentAtAsync(c, ct, ServerB, NameB, true, "Running", now.AddMinutes(-2));
+
+            /* A named server reads unknown, with no capture time: there is no snapshot to name. */
+            var named = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.Equal(4, named.GetProperty("runs").GetArrayLength());
+            Assert.Equal(JsonValueKind.Null, named.GetProperty("agent_running").ValueKind);
+            Assert.Equal("unknown (no recent status)", named.GetProperty("agent_status_desc").GetString());
+            Assert.Equal(JsonValueKind.Null, named.GetProperty("next_run").ValueKind);
+            Assert.Equal(JsonValueKind.Null, named.GetProperty("captured_at").ValueKind);
+
+            /* The fleet counts servers that have a snapshot at or before the anchor: these two are not listed, as unknown or at all. */
+            var fleetThen = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.DoesNotContain("jobhist-", fleetThen.GetProperty("agents_not_running").ToString(), StringComparison.Ordinal);
+            var fleetNow = HintsOf(await DarlingMcpJobTools.GetJobHistory(postgres, cancellationToken: ct));
+            Assert.True(fleetNow.GetProperty("agents_total").GetInt32() - fleetThen.GetProperty("agents_total").GetInt32() >= 2,
+                "the two seeded servers are counted now and not at the March anchor");
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
+    public async Task TheFleetCountsAServerByItsAgentAsOfTheAnchor()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            await SetStaleMinutesAsync(c, ct, 30);
+            /* Alpha was stopped 20 minutes ago and has been running since 2 minutes ago. Bravo's only snapshot is 2 minutes old. */
+            var now = FixedNow();
+            var stoppedAt = now.AddMinutes(-20);
+            await SeedAgentAtAsync(c, ct, ServerA, NameA, false, "Stopped", stoppedAt);
+            await SeedAgentAtAsync(c, ct, ServerA, NameA, true, "Running", now.AddMinutes(-2));
+            await SeedAgentAtAsync(c, ct, ServerB, NameB, true, "Running", now.AddMinutes(-2));
+
+            /* An anchor between Alpha's two snapshots counts Alpha as not running, with the older capture time. Bravo has no
+               snapshot yet at the anchor, so it is left out of the counts rather than listed as unknown. */
+            var then = HintsOf(await DarlingMcpJobTools.GetJobHistory(postgres, as_of: AsOfOf(now.AddMinutes(-10)), cancellationToken: ct));
+            var notRunningThen = then.GetProperty("agents_not_running").EnumerateArray()
+                .Where(a => a.GetProperty("server").GetString()!.StartsWith("jobhist-", StringComparison.Ordinal)).ToList();
+            Assert.Equal(new[] { NameA }, notRunningThen.Select(a => a.GetProperty("server").GetString()!).ToArray());
+            Assert.Equal(JsonValueKind.False, notRunningThen[0].GetProperty("agent_running").ValueKind);
+            Assert.Equal("Stopped", notRunningThen[0].GetProperty("agent_status_desc").GetString());
+            Assert.Equal(CapturedOf(stoppedAt), notRunningThen[0].GetProperty("captured_at").GetString());
+
+            /* Now both are running: neither is listed, and the two running Agents are counted. */
+            var current = HintsOf(await DarlingMcpJobTools.GetJobHistory(postgres, cancellationToken: ct));
+            Assert.DoesNotContain("jobhist-", current.GetProperty("agents_not_running").ToString(), StringComparison.Ordinal);
+            Assert.True(current.GetProperty("agents_running").GetInt32() - then.GetProperty("agents_running").GetInt32() >= 2,
+                "Alpha and Bravo are running now; at the anchor Alpha was stopped and Bravo had no snapshot");
+            ok = true;
+        }
+        finally
+        {
             await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
         }
     }
