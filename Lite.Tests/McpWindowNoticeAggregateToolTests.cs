@@ -30,7 +30,7 @@ namespace PerformanceMonitorLite.Tests;
 /// coverage (with the DMV blocking snapshots beside it) and the deadlocks'. <c>get_daily_summary_range</c> writes no keys,
 /// because every row it returns carries its own data state and the store's retention horizon (pinned at the end). Every window
 /// is anchored at a fixed <c>as_of</c>, never the clock. Own <see cref="DuckDbInitializer"/> per test, like
-/// <see cref="McpWindowNoticeSystemHealthToolTests"/>.
+/// <see cref="McpWindowNoticeConfigAndLogToolTests"/>.
 /// </summary>
 public sealed class McpWindowNoticeAggregateToolTests : IDisposable
 {

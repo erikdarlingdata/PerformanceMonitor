@@ -115,7 +115,7 @@ public sealed class EffectiveStartUtcTests
     /// <c>empty</c> answers that carry the same notice under hints (<c>get_collection_log</c> has two: the filtered one and the quiet window).
     /// None of them uses the event-time form: their probes read the column the rows are stamped on.
     /// <para>#4966 adds the three Lite aggregate tools to the same pin: <c>get_default_trace_events</c> (one write, one hints),
-    /// <c>get_wait_stats</c> (one write, no hints: its no-rows answer is <c>unavailable</c> and stays bare) and
+    /// <c>get_wait_stats</c> (a second write beside <c>get_waiting_tasks</c>'s, and no new hints: its no-rows answer is <c>unavailable</c> and stays bare) and
     /// <c>get_blocking_stats</c> in McpHealthTools.cs (one write for its two series, one hints on its empty answer).</para>
     /// </summary>
     [Theory]
@@ -124,7 +124,7 @@ public sealed class EffectiveStartUtcTests
     [InlineData("McpPlanCorrectionTools.cs", 1, 1)]
     [InlineData("McpMemoryTools.cs", 1, 1)]
     [InlineData("McpDefaultTraceTools.cs", 1, 1)]
-    [InlineData("McpWaitTools.cs", 1, 0)]
+    [InlineData("McpWaitTools.cs", 2, 0)]
     public void EveryLiteConfigAndLogWindowFloorWrite_ComesFromTheSharedNotice(string file, int expectedWrites, int expectedHints)
     {
         var source = RepoFile.ReadRepoFile("Lite", "Mcp", file);
