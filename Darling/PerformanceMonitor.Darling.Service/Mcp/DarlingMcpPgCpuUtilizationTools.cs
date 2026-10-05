@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -50,8 +51,9 @@ public sealed class DarlingMcpPgCpuUtilizationTools
         [Description("Hours of history. Default 4.")] int hours_back = 4,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetPgCpuUtilization(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgCpuMaxPoints), cancellationToken);
+        GetPgCpuUtilization(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgCpuMaxPoints), logger, cancellationToken);
 
     /// <summary>
     /// get_pg_cpu_utilization under an explicit <paramref name="budget"/> (#4193): the MCP tool passes its own,
@@ -59,7 +61,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
     /// </summary>
     internal static async Task<string> GetPgCpuUtilization(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
-        CancellationToken cancellationToken = default)
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -80,17 +82,34 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                 /* Not-collected first: a self-hosted target has no route at all (see
                    PgCpuUtilizationCollector's doc comment), so that is the likelier and more actionable
                    answer than a bare "no data in window". */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_cpu_utilization", cancellationToken)
-                    ?? McpHelpers.Status(
-                        "empty",
-                        $"No CPU utilization data for {resolved.ServerName} in the last {hours_back} hour(s).");
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_cpu_utilization", cancellationToken);
+                if (notCollected is not null)
+                {
+                    return notCollected;
+                }
+
+                /* #4966: the empty answer carries the window floor under hints. Samples are windowed on collection_time, the
+                   probe's own column; the web does not list this read, so the collector table is the source. */
+                var emptyNotice = await DarlingMcpPgWindow.ReadAsync(
+                postgres, "get_pg_cpu_utilization", resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, emptyAnswer: true, logger, cancellationToken);
+                return McpHelpers.Status(
+                    "empty",
+                    $"No CPU utilization data for {resolved.ServerName} in the last {hours_back} hour(s).",
+                    emptyNotice.AsHints());
             }
 
-            return JsonSerializer.Serialize(new
+            var notice = await DarlingMcpPgWindow.ReadAsync(
+                postgres, "get_pg_cpu_utilization", resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, emptyAnswer: false, logger, cancellationToken);
+            return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+            /* #4966: the window floor, right after hours_back. */
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
+
                 bucket = TrendBuckets.Word(bucketMinutes),
                 bucket_minutes = bucketMinutes,
                 aggregate_note = TrendBuckets.LevelNote(bucketMinutes, bucket_minutes is not null, budget.AutoPoints, firstAtWindowStart: false),
@@ -123,7 +142,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                     configured_memory_bytes = p.Memory?.ConfiguredBytes,
                     memory_samples_in_bucket = p.MemorySamples,
                 }),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

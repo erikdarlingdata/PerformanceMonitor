@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -34,6 +35,7 @@ public sealed class DarlingMcpPgStatementTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum query shapes to return, heaviest first. Default 20. Bounds the page: read truncated to know whether more exist; shares stay of the whole window regardless.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -86,7 +88,11 @@ public sealed class DarlingMcpPgStatementTools
 
             var evictions = await DarlingPgStatementReader.GetEvictionInfoAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
-            return BuildTopQueriesJson(resolved.ServerName, hours_back, page, limit, evictions);
+            /* #4966: where the store's coverage of the window starts, probed on the source the web's note probes. Decided after the
+               not-collected branch above, which carries no notice. */
+            var notice = await DarlingMcpPgWindow.ReadAsync(
+                postgres, "get_pg_top_queries", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
+            return BuildTopQueriesJson(resolved.ServerName, hours_back, page, limit, evictions, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -142,8 +148,10 @@ public sealed class DarlingMcpPgStatementTools
         int hoursBack,
         DarlingPgStatementReader.PgTopQueriesPage page,
         int limit,
-        DarlingPgStatementReader.PgEvictionInfo? evictionInfo = null)
+        DarlingPgStatementReader.PgEvictionInfo? evictionInfo = null,
+        McpWindowNotice? windowNotice = null)
     {
+        var notice = windowNotice ?? McpWindowNotice.Unavailable;
         var truncated = page.Rows.Count > limit;
         var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
 
@@ -205,10 +213,14 @@ public sealed class DarlingMcpPgStatementTools
         })
         .ToList();
 
-        return JsonSerializer.Serialize(new
+        return DarlingMcpPgWindow.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,
+            /* #4966: the window floor, right after hours_back. */
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
             /* #3541 A3 dialect: the page described as a page. No time bounds — the rows are per-shape
                aggregates over the whole window, so there is no page reach to report, only a cap. */
             queries_returned = result.Count,
@@ -232,7 +244,7 @@ public sealed class DarlingMcpPgStatementTools
                  + "(truncated = false). returned_exec_time_ms is what the rows returned add up to.",
             evictions = BuildEvictions(evictionInfo),
             queries = result,
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>
