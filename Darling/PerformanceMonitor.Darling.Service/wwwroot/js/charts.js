@@ -76,8 +76,18 @@ function svg(tag, attrs) {
  *                domain, byte-for-byte. Data times stay naive-UTC-parsed and tick labels stay browser-local.
  */
 export function renderLineChart(spec) {
-  const { points, xKey, series, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2 = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
+  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
   const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
+  const { hiddenKeys = null, onLegend = null } = spec;
+  /* Legend hide/isolate: a hidden series is dropped from everything below (the y-domain, the stack, the drawn
+     marks, the hover tooltip and the CSV) so the axis rescales to what is visible. The legend still lists it,
+     marked off, so it can be brought back. Hiding every series is never honoured: the chart keeps all of them. */
+  const hiddenSet = new Set(hiddenKeys || []);
+  const visibleSeries = allSeries.filter((s) => !hiddenSet.has(s.key));
+  const series2 = series2Spec && !hiddenSet.has(series2Spec.key) ? series2Spec : null;
+  const anyVisible = visibleSeries.length > 0 || series2 !== null;
+  const series = anyVisible ? visibleSeries : allSeries;
+  const legendHidden = anyVisible ? hiddenSet : new Set();
   const stacked = mode === "stacked";
   const stackedBar = mode === "stacked-bar";
   /* Both stacked modes share the cumulative pre-pass, the sum-based y-domain, and the hover-at-stack-top dots. */
@@ -151,7 +161,11 @@ export function renderLineChart(spec) {
         if (v < dataMin) dataMin = v;
       }
     }
-    if (dataMax === -Infinity) return el("div", { class: "chart" }, [emptyStrip("No numeric values to chart.")]);
+    if (dataMax === -Infinity) {
+      /* With a series hidden the legend must stay on screen to bring it back, so draw an empty axis instead. */
+      if (legendHidden.size === 0) return el("div", { class: "chart" }, [emptyStrip("No numeric values to chart.")]);
+      dataMax = 1;
+    }
     dataMin = Math.min(0, dataMin);
   }
   if (dataMax === dataMin) dataMax = dataMin + 1;
@@ -427,7 +441,7 @@ export function renderLineChart(spec) {
   const chart = el("div", { class: "chart" }, [root]);
   const tooltip = el("div", { class: "chart-tooltip" });
   chart.appendChild(tooltip);
-  chart.appendChild(buildLegend(series2 ? series.concat([{ label: series2.label, color: series2.color }]) : series, onSelect));
+  chart.appendChild(buildLegend(series2Spec ? allSeries.concat([{ key: series2Spec.key, label: series2Spec.label, color: series2Spec.color }]) : allSeries, onSelect, legendHidden, onLegend));
   if (annotationKey.length) chart.appendChild(buildAnnotationLegend(annotationKey));
 
   /* Brush-zoom (#1606): pointerdown + setPointerCapture on the overlay (capture keeps the drag alive across
@@ -821,24 +835,74 @@ function thresholdLine(x1, y1, x2, y2, lx, ly, anchor, text) {
 }
 
 /** The series key below a time chart. onSelect (design D6): a grouped series' entry becomes an activatable (mouse +
- *  keyboard) control that calls onSelect(series.drill) to re-run the panel filtered to that series' group value. */
-function buildLegend(series, onSelect) {
-  return el(
-    "div",
-    { class: "chart-legend" },
-    series.map((s) => {
-      const drillable = !!(onSelect && s.drill);
-      const props = { class: drillable ? "item drillable" : "item" };
-      if (drillable) {
-        props.onActivate = () => onSelect(s.drill);
-        props.title = "Filter to " + s.label;
-      }
-      return el("span", props, [
-        el("span", { class: "swatch", style: "background:" + normalizeColor(s.color) }),
-        el("span", { text: s.label }),
-      ]);
-    })
-  );
+ *  keyboard) control that calls onSelect(series.drill) to re-run the panel filtered to that series' group value.
+ *  onLegend (#5247): when given, a click on an entry (on a drillable entry, its swatch) hides or shows that series,
+ *  a double-click or Shift+click isolates it (double-click on the isolated one shows all), and a hidden entry is
+ *  marked off (struck through, hollow swatch, aria-pressed=false). While anything is hidden a "Show all" button
+ *  follows the entries. onLegend(action, key) takes "toggle" | "isolate" | "all". */
+function buildLegend(series, onSelect, hidden, onLegend) {
+  const hiddenSet = hidden || new Set();
+  const items = series.map((s) => {
+    const drillable = !!(onSelect && s.drill);
+    const switchable = !!(onLegend && s.key != null);
+    const off = switchable && hiddenSet.has(s.key);
+    const props = { class: "item" + (drillable ? " drillable" : "") + (switchable ? " switchable" : "") + (off ? " legend-off" : "") };
+    const swatch = el("span", { class: "swatch", style: "background:" + normalizeColor(s.color) });
+    const label = el("span", { text: s.label });
+    if (drillable) {
+      label.addEventListener("click", () => onSelect(s.drill));
+      props.title = "Filter to " + s.label;
+    }
+    const hit = drillable ? null : "item";
+    const wire = (node) => {
+      node.setAttribute("role", "button");
+      node.setAttribute("tabindex", "0");
+      node.setAttribute("aria-pressed", off ? "false" : "true");
+      node.setAttribute("title", (off ? "Show " : "Hide ") + s.label + " (double-click: show only this one)");
+      node.addEventListener("click", (e) => onLegend(e && e.shiftKey ? "isolate" : "toggle", s.key));
+      node.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onLegend(e.shiftKey ? "isolate" : "toggle", s.key);
+        }
+      });
+      node.addEventListener("dblclick", () => onLegend("isolate", s.key));
+    };
+    const node = el("span", props, [swatch, label]);
+    if (switchable) wire(hit ? node : swatch);
+    else if (drillable) {
+      node.setAttribute("role", "button");
+      node.setAttribute("tabindex", "0");
+      node.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect(s.drill);
+        }
+      });
+    }
+    return node;
+  });
+  if (onLegend && hiddenSet.size > 0) {
+    const all = el("button", { class: "btn small legend-show-all", type: "button", text: "Show all (" + hiddenSet.size + " hidden)" });
+    all.addEventListener("click", () => onLegend("all", null));
+    items.push(all);
+  }
+  return el("div", { class: "chart-legend" }, items);
+}
+
+/** The hidden-series keys after a legend action (#5247). "toggle" flips one series but never hides the last visible
+ *  one; "isolate" leaves only that series visible, or shows all when it already is the only one; "all" shows all. */
+export function nextHiddenKeys(allKeys, hiddenKeys, action, key) {
+  const hidden = new Set((hiddenKeys || []).filter((k) => allKeys.includes(k)));
+  if (action === "all") return [];
+  if (!allKeys.includes(key)) return [...hidden];
+  if (action === "isolate") {
+    const alone = allKeys.every((k) => (k === key) !== hidden.has(k));
+    return alone ? [] : allKeys.filter((k) => k !== key);
+  }
+  if (hidden.has(key)) hidden.delete(key);
+  else if (allKeys.length - hidden.size > 1) hidden.add(key);
+  return [...hidden];
 }
 
 /** The event-annotation key below a time chart (design D5): one entry per active source (its marker color + a count
@@ -1220,6 +1284,28 @@ function attachChartMenu(chart, root, opts, rows) {
    every chart at its full domain. Bounded by the charts of the servers visited in one session. */
 const chartZooms = new Map();
 
+/* Hidden legend series per chart (#5247), held like the zoom: keyed by chart id, valid for one scope (server + tab +
+   range). A rebuild of the same chart under the same scope redraws with the same series hidden; another server, tab
+   or range is a different scope and starts with everything shown. */
+const chartHiddenSeries = new Map();
+
+/** The hidden series keys held for chart `id` under `scope` (a different scope clears the entry). */
+export function getChartHidden(id, scope) {
+  const h = chartHiddenSeries.get(id);
+  if (!h) return [];
+  if (h.scope !== scope) {
+    chartHiddenSeries.delete(id);
+    return [];
+  }
+  return h.keys;
+}
+
+/** Hold the hidden series keys for chart `id` under `scope`; an empty list clears the entry. */
+export function setChartHidden(id, scope, keys) {
+  if (!keys || !keys.length) chartHiddenSeries.delete(id);
+  else chartHiddenSeries.set(id, { scope, keys: [...keys] });
+}
+
 /** The scope a chart's zoom is held under: the page address (server + tab, or the FinOps tab) plus the page's
  *  preset range in hours. A different server, tab or range is a different scope, so its charts start unzoomed. */
 export function chartZoomScope(hours) {
@@ -1296,6 +1382,7 @@ export function zoomChip(zoom, onZoomChange) {
  */
 export function zoomableLineChart(spec, id, scope) {
   const host = el("div", { class: "zoomable-chart" });
+  const allKeys = (spec.series || []).map((s) => s.key).concat(spec.series2 ? [spec.series2.key] : []);
   const draw = () => {
     const { spec: shown, zoomed } = applyChartZoom(spec, getChartZoom(id, scope));
     /* A held zoom that no longer holds a loaded point (the span aged out of the window) is dropped, not kept dormant. */
@@ -1305,6 +1392,11 @@ export function zoomableLineChart(spec, id, scope) {
       zoomed,
       menuKey: id + "|" + scope,
       exportPoints: spec.points,
+      hiddenKeys: getChartHidden(id, scope),
+      onLegend: (action, key) => {
+        setChartHidden(id, scope, nextHiddenKeys(allKeys, getChartHidden(id, scope), action, key));
+        draw();
+      },
       onResetZoom: () => {
         setChartZoom(id, scope, null, null);
         draw();
