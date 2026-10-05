@@ -282,8 +282,9 @@ VALUES ($1, $2, $3, $4, 'work_mem', $5, NULL, 'Resource Usage / Memory', 'user',
             _ => "DarlingMcpPgServerStateTools.cs",
         };
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
-        /* Every notice read of the tool names its read and the web's table for it, and none builds its own source. */
-        Assert.Contains($"\"{tool}\", \"{TableOf(tool)}\"", source, StringComparison.Ordinal);
+        /* Every notice read of the tool names its read (the helper resolves the web's source and table from it), and none builds its own source. */
+        Assert.Contains($"postgres, \"{tool}\",", source, StringComparison.Ordinal);
+        Assert.Equal(TableOf(tool), DarlingMcpWindowNotice.TableFor(tool));
         Assert.DoesNotContain("ForCollectorTable(", source, StringComparison.Ordinal);
         Assert.Contains(tool, WebDataStartNote.TableByRead.Keys);
         Assert.DoesNotContain(tool, WebDataStartNote.CollectorRunsByRead.Keys);
