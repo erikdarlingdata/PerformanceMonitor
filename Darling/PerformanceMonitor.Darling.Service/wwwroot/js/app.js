@@ -56,6 +56,7 @@ import { renderAlertEditor } from "./alert-editor.js";
 import { getSession, listViews } from "./views-api.js";
 import { renderMuteRules } from "./pages/mute-rules.js";
 import { renderManageTags } from "./pages/manage-tags.js";
+import { renderJobHistory } from "./pages/job-history.js";
 
 /* The shell (sidebar, view list, AG nav) refreshes every POLL_MS; the page re-renders on its own interval. */
 const POLL_MS = 60000;
@@ -115,6 +116,7 @@ function currentRoute() {
     return { name: "muteRules", query: q >= 0 ? h.slice(q + 1) : "" };
   }
   if (h === "#/manage-tags") return { name: "manageTags" };
+  if (h === "#/job-history" || h === "#/job-history/") return { name: "jobHistory" };
   return { name: "fleet" };
 }
 
@@ -187,6 +189,7 @@ function route(opts) {
   else if (r.name === "notebookEditor") renderNotebookEditor(main, r.id, r.template);
   else if (r.name === "muteRules") renderMuteRules(main, r.query);
   else if (r.name === "manageTags") renderManageTags(main);
+  else if (r.name === "jobHistory") renderJobHistory(main);
   else renderFleet(main);
 }
 
@@ -203,6 +206,7 @@ function navKeyFor(r) {
   if (r.name === "alertRules" || r.name === "alertEditor") return "alert-rules";
   if (r.name === "muteRules") return "mute-rules";
   if (r.name === "manageTags") return "manage-tags";
+  if (r.name === "jobHistory") return "job-history";
   return r.name;
 }
 
