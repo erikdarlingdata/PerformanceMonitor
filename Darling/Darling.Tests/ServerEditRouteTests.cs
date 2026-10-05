@@ -110,7 +110,7 @@ public sealed class ServerEditRouteTests
     }
 
     private static async Task<(HttpStatusCode Status, string Body)> SendAsync(
-        Rig rig, HttpMethod method, string path, string? body = null, string mediaType = "application/json", string? seat = null)
+        Rig rig, HttpMethod method, string path, string? body = null, string mediaType = "application/json", string? seat = null, string? principal = null)
     {
         var ct = TestContext.Current.CancellationToken;
         using var request = new HttpRequestMessage(method, path);
@@ -124,12 +124,31 @@ public sealed class ServerEditRouteTests
             request.Headers.Add("X-Seat", seat);
         }
 
+        if (principal is not null)
+        {
+            request.Headers.Add("X-Principal", Uri.EscapeDataString(principal));
+        }
+
         using var response = await rig.Client.SendAsync(request, ct);
         return (response.StatusCode, await response.Content.ReadAsStringAsync(ct));
     }
 
-    private static Task<(HttpStatusCode Status, string Body)> PatchAsync(Rig rig, string body, int id = 41, string mediaType = "application/json", string? seat = null) =>
-        SendAsync(rig, HttpMethod.Patch, "/api/servers/" + id, body, mediaType, seat);
+    private static Task<(HttpStatusCode Status, string Body)> PatchAsync(
+        Rig rig, string body, int id = 41, string mediaType = "application/json", string? seat = null, string? principal = null) =>
+        SendAsync(rig, HttpMethod.Patch, "/api/servers/" + id, body, mediaType, seat, principal);
+
+    /// <summary>Waits for a captured log line that contains <paramref name="fragment"/>. A late audit line is written by
+    /// a thread-pool continuation after the 503 was answered, so a test waits for it and never asserts the instant it
+    /// releases the core.</summary>
+    private static async Task WaitForLogLineAsync(Rig rig, string fragment)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!rig.Log.Lines.Any(l => l.Contains(fragment, StringComparison.Ordinal)))
+        {
+            Assert.True(DateTime.UtcNow < deadline, $"no log line contained \"{fragment}\"; the log held: {rig.Log.Joined}");
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
+    }
 
     private static Task<(HttpStatusCode Status, string Body)> PostAddAsync(Rig rig) =>
         SendAsync(rig, HttpMethod.Post, "/api/servers", "[{\"host\":\"sql01\"}]");
@@ -334,11 +353,84 @@ public sealed class ServerEditRouteTests
     public void RedactEditAnswer_RemovesTheSecretInItsRawAndJsonEscapedSpelling()
     {
         const string secret = "p\"w\\d";
-        var answer = "{\"message\":\"bad " + System.Text.Json.JsonSerializer.Serialize(secret)[1..^1] + " and " + secret + "\"}";
+        /* Serialized the way the core writes it: on the wire the secret's quote and backslash are escaped, so the text
+           holds only the escaped spelling and the redaction has to work on the parsed value. */
+        var escaped = System.Text.Json.JsonSerializer.Serialize(secret)[1..^1];
+        var answer = new JsonObject { ["status"] = "connection_failed", ["message"] = "bad " + secret + " and again " + secret }.ToJsonString();
+        Assert.Contains(escaped, answer, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, answer, StringComparison.Ordinal);
+
         var redacted = DarlingWebEndpoints.RedactEditAnswer(answer, new[] { secret });
         Assert.DoesNotContain(secret, redacted, StringComparison.Ordinal);
-        Assert.DoesNotContain("p\\\"w\\\\d", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain(escaped, redacted, StringComparison.Ordinal);
+        var envelope = JsonNode.Parse(redacted)!.AsObject();
+        Assert.Equal("bad [redacted] and again [redacted]", envelope["message"]!.GetValue<string>());
+        Assert.Equal("connection_failed", envelope["status"]!.GetValue<string>());
         Assert.Equal(answer, DarlingWebEndpoints.RedactEditAnswer(answer, Array.Empty<string>()));
+    }
+
+    /// <summary>The whole-text replace this pins against turned a secret that spelled a key, a number or an engine word
+    /// into a hole in the answer's structure, so a committed edit read as a failure and its audit line was dropped.</summary>
+    [Theory]
+    [InlineData("41")]
+    [InlineData("true")]
+    [InlineData("false")]
+    [InlineData("postgres")]
+    [InlineData("status")]
+    [InlineData("updated")]
+    [InlineData("sql01")]
+    [InlineData("current")]
+    public void RedactEditAnswer_NeverRewritesAStructuredField_WhateverTheSecretSpells(string secret)
+    {
+        var stored = "{\"status\":\"conflict\",\"message\":\"The server changed since it was read.\",\"current\":{\"engine\":\"postgres\","
+            + "\"username\":\"postgres\",\"host\":\"sql01\",\"display_name\":\"Orders\",\"server_id\":41,\"trust_server_certificate\":true,\"read_only_intent\":false}}";
+        foreach (var answer in new[] { UpdatedAnswer, stored })
+        {
+            var redacted = DarlingWebEndpoints.RedactEditAnswer(answer, new[] { secret });
+            Assert.True(
+                JsonNode.DeepEquals(JsonNode.Parse(answer), JsonNode.Parse(redacted)),
+                $"a secret spelled \"{secret}\" rewrote a structured field: {redacted}");
+        }
+    }
+
+    [Fact]
+    public void RedactEditAnswer_ReplacesAnAnswerThatDoesNotParse_WithAFixedBody_AndRedactsAnythingThatIsNotAnObject()
+    {
+        var broken = DarlingWebEndpoints.RedactEditAnswer("{\"status\":\"updated\" " + FakeSecret + " ", new[] { FakeSecret });
+        Assert.DoesNotContain(FakeSecret, broken, StringComparison.Ordinal);
+        Assert.Equal("error", JsonNode.Parse(broken)!["status"]!.GetValue<string>());
+
+        Assert.Equal("[\"x [redacted] y\"]", DarlingWebEndpoints.RedactEditAnswer("[\"x " + FakeSecret + " y\"]", new[] { FakeSecret }));
+    }
+
+    [Theory]
+    [InlineData("41")]
+    [InlineData("true")]
+    [InlineData("updated")]
+    [InlineData("sql01")]
+    public async Task ASecretThatSpellsAStructuredValue_LeavesACommittedEditsAnswerIntact_AndItsAuditLineWritten(string secret)
+    {
+        await using var rig = await StartAsync();
+        var (status, body) = await PatchAsync(rig, Changes("\"display_name\":\"Orders\",\"password\":\"" + secret + "\""));
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse(UpdatedAnswer), JsonNode.Parse(body)), $"the answer was rewritten: {body}");
+        Assert.Equal(41, JsonNode.Parse(body)!["server_id"]!.GetValue<int>());
+        var line = Assert.Single(rig.Log.Lines, l => l.StartsWith("Information: Server edited by", StringComparison.Ordinal));
+        Assert.Contains("Server edited by alice: id 41, fields display_name,monthly_cost_usd", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AConflict_ForAPostgresTargetWhoseSecretIsTheEngineWord_StillCarriesTheStoredValues()
+    {
+        var conflict = "{\"status\":\"conflict\",\"message\":\"The server changed since it was read.\",\"current\":{\"engine\":\"postgres\","
+            + "\"username\":\"postgres\",\"host\":\"db01\",\"display_name\":\"postgres\",\"modified_at\":\"" + Token + "\"}}";
+        await using var rig = await StartAsync(edit: (_, _) => Task.FromResult(conflict));
+        var (status, body) = await PatchAsync(rig, Changes("\"host\":\"db02\",\"password\":\"postgres\""));
+        Assert.Equal(HttpStatusCode.Conflict, status);
+        var current = JsonNode.Parse(body)!["current"]!.AsObject();
+        Assert.Equal("postgres", current["engine"]!.GetValue<string>());
+        Assert.Equal("postgres", current["username"]!.GetValue<string>());
+        Assert.Equal("db01", current["host"]!.GetValue<string>());
     }
 
     [Fact]
@@ -555,7 +647,7 @@ public sealed class ServerEditRouteTests
             edit: (_, _) => Interlocked.Increment(ref calls) == 1 ? hang.Task : Task.FromResult(UpdatedAnswer),
             editTimeout: TimeSpan.FromMilliseconds(200));
 
-        var (status, body) = await PatchAsync(rig, Changes("\"password\":\"" + FakeSecret + "\""));
+        var (status, body) = await PatchAsync(rig, Changes("\"password\":\"" + FakeSecret + "\""), principal: "dana");
         Assert.Equal(HttpStatusCode.ServiceUnavailable, status);
         Assert.Equal(DarlingWebEndpoints.ServerEditTimedOutText, JsonNode.Parse(body)!["error"]!.GetValue<string>());
         AssertNoSecret(rig, body);
@@ -563,8 +655,16 @@ public sealed class ServerEditRouteTests
         Assert.Equal(HttpStatusCode.TooManyRequests, (await PatchAsync(rig, Changes())).Status);
         Assert.Equal(HttpStatusCode.TooManyRequests, (await PostAddAsync(rig)).Status);
         Assert.Equal(1, Volatile.Read(ref calls));
+        Assert.DoesNotContain(rig.Log.Lines, l => l.Contains("Server edited by", StringComparison.Ordinal));
 
+        /* The client was told 503, but the core commits when it finishes: its audit line is written then, once, for the
+           principal who sent the edit (not whoever sends the next one). */
         hang.SetResult(UpdatedAnswer);
+        await WaitForLogLineAsync(rig, "Server edited by");
+        var late = Assert.Single(rig.Log.Lines, l => l.Contains("Server edited by", StringComparison.Ordinal));
+        Assert.Contains("Server edited by dana: id 41, fields display_name,monthly_cost_usd", late, StringComparison.Ordinal);
+        AssertNoSecret(rig, body);
+
         var accepted = HttpStatusCode.TooManyRequests;
         for (var i = 0; i < 100 && accepted == HttpStatusCode.TooManyRequests; i++)
         {
@@ -576,6 +676,8 @@ public sealed class ServerEditRouteTests
         }
 
         Assert.Equal(HttpStatusCode.OK, accepted);
+        Assert.Single(rig.Log.Lines, l => l.Contains("Server edited by dana", StringComparison.Ordinal));
+        Assert.Single(rig.Log.Lines, l => l.Contains("Server edited by alice", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -640,13 +742,34 @@ public sealed class ServerEditRouteTests
         Assert.DoesNotContain("db.internal.example", rig.Log.Joined, StringComparison.Ordinal);
     }
 
+    /// <summary>The host's group gate lets every GET through for a read-only seat, so the route's own edit-right check
+    /// is the only thing between that seat and the form's pre-fill (username, TLS posture). The gate on or off, the
+    /// seat gets 403 and the read never reaches the store.</summary>
     [Fact]
-    public async Task TheAdminRead_IsReadableByAReadOnlySeat_ThroughTheHostWriteGate()
+    public async Task TheAdminRead_IsRefused403ForAReadOnlySeat_AndNeverReachesTheStore_WithOrWithoutTheHostWriteGate()
     {
-        await using var rig = await StartAsync(useWriteGate: true, read: id => Task.FromResult<DarlingMcpServerAdminTools.ServerEditRow?>(Row(id)));
-        var (status, _) = await SendAsync(rig, HttpMethod.Get, "/api/admin/servers/41", seat: "viewer");
-        Assert.Equal(HttpStatusCode.OK, status);
-        var (post, _) = await SendAsync(rig, HttpMethod.Post, "/api/admin/servers/41", "{}", seat: "viewer");
-        Assert.NotEqual(HttpStatusCode.OK, post);
+        foreach (var gate in new[] { false, true })
+        {
+            var reads = 0;
+            await using var rig = await StartAsync(useWriteGate: gate, read: id =>
+            {
+                Interlocked.Increment(ref reads);
+                return Task.FromResult<DarlingMcpServerAdminTools.ServerEditRow?>(Row(id));
+            });
+            var (status, body) = await SendAsync(rig, HttpMethod.Get, "/api/admin/servers/41", seat: "viewer");
+            Assert.Equal(HttpStatusCode.Forbidden, status);
+            Assert.Contains("read-only", body, StringComparison.Ordinal);
+            Assert.DoesNotContain("monitor", body, StringComparison.Ordinal);
+            Assert.Equal(0, Volatile.Read(ref reads));
+
+            var (post, _) = await SendAsync(rig, HttpMethod.Post, "/api/admin/servers/41", "{}", seat: "viewer");
+            Assert.NotEqual(HttpStatusCode.OK, post);
+            Assert.Equal(0, Volatile.Read(ref reads));
+
+            /* The same rig still serves an editing seat: the refusal is the seat's, not the route's. */
+            var (editing, _) = await SendAsync(rig, HttpMethod.Get, "/api/admin/servers/41");
+            Assert.Equal(HttpStatusCode.OK, editing);
+            Assert.Equal(1, Volatile.Read(ref reads));
+        }
     }
 }
