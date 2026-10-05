@@ -9,7 +9,7 @@
 /*
  * The desktop viewer's per-machine conveniences (#4843), kept per BROWSER in localStorage: favourite servers,
  * alert acknowledgements, the alert-count badge that respects them, the per-severity colours and the collapsed
- * sidebar. Nothing here reaches the store: like the desktop's own per-PC files, a favourite or an acknowledgement
+ * sidebar and the sidebar's tag grouping. Nothing here reaches the store: like the desktop's own per-PC files, a favourite or an acknowledgement
  * does not follow a user to another browser or machine, and an acknowledgement quiets only this browser's badge
  * (alert delivery is untouched).
  *
@@ -47,6 +47,8 @@ let favorites = new Set();
 let acks = new Map(); // server_id -> epoch ms of the acknowledgement
 let colors = {}; // severity -> "#rrggbb" (only valid choices)
 let sidebarCollapsed = false;
+let sidebarGrouped = false;
+let sidebarGroups = new Set(); // collapsed sidebar groups: tag ids, plus the fixed ids "favourites" and "untagged"
 let attention = new Map(); // server_id -> { count, critical, latestMs } from the last alert read
 const listeners = new Set();
 
@@ -71,6 +73,13 @@ function writeJson(key, value) {
 
 function isServerId(n) {
   return Number.isSafeInteger(n) && n > 0;
+}
+
+/** The fixed sidebar group ids that are not tags. */
+const FIXED_GROUPS = ["favourites", "untagged"];
+
+function isGroupId(g) {
+  return isServerId(g) || FIXED_GROUPS.includes(g);
 }
 
 /** Re-reads every value from storage (the page load, and the tests' stand-in for a rebuilt page). */
@@ -98,6 +107,8 @@ export function reload() {
 
   const s = readJson(KEY_SIDEBAR);
   sidebarCollapsed = !!(s && s.collapsed === true);
+  sidebarGrouped = !!(s && s.grouped === true);
+  sidebarGroups = new Set(s && Array.isArray(s.collapsedGroups) ? s.collapsedGroups.filter(isGroupId).slice(0, MAX_IDS) : []);
 }
 
 /** Test seam: replaces the Storage and re-reads. */
@@ -268,7 +279,37 @@ export function isSidebarCollapsed() {
 
 export function setSidebarCollapsed(collapsed) {
   sidebarCollapsed = collapsed === true;
-  writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed });
+  writeSidebar();
+  changed();
+}
+
+/** One writer for the sidebar key, so a change to one field never drops the others. */
+function writeSidebar() {
+  writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, grouped: sidebarGrouped, collapsedGroups: [...sidebarGroups] });
+}
+
+/** Whether the sidebar lists servers grouped by tag (false: the flat list). */
+export function isSidebarGrouped() {
+  return sidebarGrouped;
+}
+
+export function setSidebarGrouped(grouped) {
+  sidebarGrouped = grouped === true;
+  writeSidebar();
+  changed();
+}
+
+/** Whether a sidebar group (a tag id, "favourites" or "untagged") is collapsed. */
+export function isSidebarGroupCollapsed(id) {
+  return sidebarGroups.has(id);
+}
+
+/** Collapses or expands one sidebar group; an id that is neither a tag id nor a fixed group id is ignored. */
+export function toggleSidebarGroup(id) {
+  if (!isGroupId(id)) return;
+  if (sidebarGroups.has(id)) sidebarGroups.delete(id);
+  else if (sidebarGroups.size < MAX_IDS) sidebarGroups.add(id);
+  writeSidebar();
   changed();
 }
 
