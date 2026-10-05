@@ -114,6 +114,59 @@ public sealed class ReadScopeTests
     }
 
     [Fact]
+    public void ALedgerUncoveredNote_ResolvesToFallbackRaw_ReplacesOnlyOk_AndLogsNothingAtAnyLevel()
+    {
+        Assert.Equal(ReadOutcome.FallbackRaw, ReadScope.Resolve(ReadOutcome.Ok, ReadFallback.LedgerUncovered));
+        foreach (var bigger in new[] { ReadOutcome.Timeout, ReadOutcome.Cancelled, ReadOutcome.Error, ReadOutcome.Limit })
+        {
+            Assert.Equal(bigger, ReadScope.Resolve(bigger, ReadFallback.LedgerUncovered));
+        }
+
+        var logger = new CapturingTestLogger();
+        using var scope = ReadScope.Open(logger);
+        ReadScope.Note(ReadFallback.LedgerUncovered);
+
+        Assert.Equal(ReadFallback.LedgerUncovered, scope.Fallback);
+        Assert.Empty(logger.Lines);
+    }
+
+    [Fact]
+    public void TheReasonsRank_GateFailedThenFallbackRaw_ThenLedgerUncovered_InAnyOrder_ThroughBothKindsOfNote()
+    {
+        /* weakest first: the held reason is whichever of the two noted ranks higher, and an equal one stays itself */
+        var weakestFirst = new[] { ReadFallback.LedgerUncovered, ReadFallback.FallbackRaw, ReadFallback.GateFailed };
+        for (var first = 0; first < weakestFirst.Length; first++)
+        {
+            for (var second = 0; second < weakestFirst.Length; second++)
+            {
+                foreach (var firstQuiet in new[] { true, false })
+                {
+                    foreach (var secondQuiet in new[] { true, false })
+                    {
+                        using var scope = ReadScope.Open(null);
+                        NoteEither(weakestFirst[first], firstQuiet);
+                        NoteEither(weakestFirst[second], secondQuiet);
+
+                        Assert.Equal(weakestFirst[Math.Max(first, second)], scope.Fallback);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void NoteEither(ReadFallback kind, bool quiet)
+    {
+        if (quiet)
+        {
+            ReadScope.Note(kind);
+        }
+        else
+        {
+            ReadScope.NoteFallback(kind, "rank test", null);
+        }
+    }
+
+    [Fact]
     public void ANoteWithNoLog_RecordsTheFallback_AndWritesNothing()
     {
         var logger = new CapturingTestLogger();

@@ -367,7 +367,7 @@ public sealed class ComposeHourlyRawEdgesModuleMapLiveTests
     /// <summary>Runs the panel at the store's anchor. By default the window is the explicit pair; with
     /// <paramref name="relativeWindow"/> the body carries <c>hours = 24</c> instead, and the runner computes the same window
     /// itself (end = the anchor, start = 24 h before it). A scope puts the server name in the body's <c>server</c> field.</summary>
-    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(Store store, string panelJson, string? scope = null, bool relativeWindow = false)
+    private static async Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(Store store, string panelJson, string? scope = null, bool relativeWindow = false)
     {
         var body = new JsonObject { ["panel"] = JsonNode.Parse(panelJson) };
         if (relativeWindow)
@@ -385,7 +385,12 @@ public sealed class ComposeHourlyRawEdgesModuleMapLiveTests
             body["server"] = scope;
         }
 
-        return DarlingWebEndpoints.RunComposedPanelAsync(store.DataSource, body, store.Ct, nowUtc: store.Anchor);
+        /* #4605: the count guard reads the hour ledger, and these facts plant raw rows with direct INSERTs that write none. Right
+           before the panel runs, play the writer: recount the ledger from raw over every hour the facts plant into, and move
+           counted_since below them (the V164 rung sets it to the next wall-clock hour, after this fixed past anchor). A row a fact
+           planted AFTER its refresh is then in the ledger and not in the rollup, as the writer would leave it, so the guard fails. */
+        await store.SeedLedgerAsync();
+        return await DarlingWebEndpoints.RunComposedPanelAsync(store.DataSource, body, store.Ct, nowUtc: store.Anchor);
     }
 
     /// <summary>One non-restart row per hour in [h1, h2), on the anchor group, so the successor has a bucket at h1 and a
@@ -536,6 +541,10 @@ VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $8, 1, 300)", store.Connection);
             read.Parameters.AddWithValue(handle);
             return await read.ExecuteScalarAsync(Ct) as string;
         }
+
+        /// <summary>Makes the hour ledger what the collector's writer would have made it for the hours the facts plant into
+        /// (<see cref="QueryStatsLedgerSeed.SeedAsync"/>). The scratch database is dropped whole, so the ledger needs no cleanup.</summary>
+        public Task SeedLedgerAsync() => QueryStatsLedgerSeed.SeedAsync(Connection, Layout.H1.AddDays(-2), Layout.H2.AddDays(2), Ct);
 
         public async ValueTask DisposeAsync()
         {
