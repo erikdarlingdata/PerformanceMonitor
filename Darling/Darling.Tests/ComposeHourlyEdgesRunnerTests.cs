@@ -190,6 +190,43 @@ public class ComposeHourlyEdgesRunnerTests
     }
 
     [Fact]
+    public void AnUncoveredLedger_IsNotedQuietlyAsLedgerUncovered_AfterTheTimeoutRestore_AndBeforeThePassTest()
+    {
+        var body = Resolver();
+        var restore = body.IndexOf("HourlyEdgesRestoreTimeoutSql, McpCommandDeadlines", StringComparison.Ordinal);
+        var uncovered = body.IndexOf("if (mismatches == IntervalRollupCountGuard.UncoveredResult)", StringComparison.Ordinal);
+        var pass = body.IndexOf("return mismatches == 0", StringComparison.Ordinal);
+        Assert.True(restore > 0 && uncovered > restore && pass > uncovered, "restore, then the uncovered branch, then the pass test");
+
+        var branch = body[uncovered..pass];
+        Assert.Contains("ReadScope.Note(ReadFallback.LedgerUncovered);", branch, StringComparison.Ordinal);
+        Assert.Contains("return null;", branch, StringComparison.Ordinal);
+        Assert.DoesNotContain("GateFailed", branch, StringComparison.Ordinal);
+        Assert.DoesNotContain("NoteFallback", branch, StringComparison.Ordinal);
+        Assert.DoesNotContain("Warn", branch, StringComparison.Ordinal);
+
+        /* The runner's constant is the guard's own literal, so the two cannot drift apart. */
+        Assert.Equal(-1L, PerformanceMonitor.Darling.Storage.IntervalRollupCountGuard.UncoveredResult);
+        Assert.Contains("ELSE -1 END", PerformanceMonitor.Darling.Storage.IntervalRollupCountGuard.QueryStatsSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AStoreBeforeTheLedger_FaultsInTheSavepoint_AndIsNotedQuietlyAsGateFailed_WhileEveryOtherFaultStillWarns()
+    {
+        var body = Resolver();
+        var catchAt = body.IndexOf("catch (Exception ex) when (ex is not OperationCanceledException)", StringComparison.Ordinal);
+        Assert.True(catchAt > 0);
+        var tail = body[catchAt..];
+
+        var quietGuard = tail.IndexOf("if (ex is PostgresException { SqlState: PostgresErrorCodes.UndefinedTable })", StringComparison.Ordinal);
+        var quiet = tail.IndexOf("ReadScope.Note(ReadFallback.GateFailed);", StringComparison.Ordinal);
+        var loud = tail.IndexOf("ReadScope.NoteFallback(ReadFallback.GateFailed, \"#4605 compose hourly-edges count guard\", ex);", StringComparison.Ordinal);
+        var rollback = tail.IndexOf("HourlyEdgesRollbackToSavepointSql", StringComparison.Ordinal);
+        Assert.True(quietGuard >= 0 && quiet > quietGuard && loud > quiet && rollback > loud,
+            "an undefined table (no ledger) notes without a log line; any other fault warns; both then roll back to the savepoint");
+    }
+
+    [Fact]
     public void TheModuleMapWatermark_IsReadOnlyForAModuleJoinPanelWhoseGuardPassed_InTheSnapshotsOwnTransaction()
     {
         var code = Web();

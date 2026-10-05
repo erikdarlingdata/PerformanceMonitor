@@ -16,8 +16,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// rollup's <c>sum(sample_count)</c>. Counting raw is a scan of millions of rows and runs past any panel deadline. The
 /// ledger moves that count to write time: the collector adds each batch's count in the same transaction as its COPY,
 /// so under one read snapshot the ledger, raw and the rollup agree, and the guard reads one small row per (server,
-/// hour) instead of every raw row. This class and the V164 rung are the storage half; the writer in the collector's
-/// COPY, the guard's read of the ledger, the census pin on writers and the retention prune are the later lanes of #4605.
+/// hour) instead of every raw row. This class and the V164 rung are the storage half; the guard's read of the ledger is
+/// <see cref="IntervalRollupCountGuard"/>, and the writer in the collector's COPY, the census pin on writers and the
+/// retention prune are the other lanes of #4605.
 ///
 /// <para><b>What is counted.</b> Exactly the population the rollup counts: rows whose <c>sample_interval_seconds</c> is
 /// not 0. A restart row (0, a delta that was not knowable) is not counted, and a row with a NULL interval (written

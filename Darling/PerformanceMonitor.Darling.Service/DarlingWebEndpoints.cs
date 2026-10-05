@@ -3008,7 +3008,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// #4605: runs <see cref="IntervalRollupCountGuard.QueryStatsSql"/> on the run's snapshot connection and returns the verdict
     /// the compiler needs to take the hourly-plus-raw-edges route, or null. The guard runs under its own 15 s
     /// <c>statement_timeout</c>, which is put back to the compose deadline before the panel statement. Only a count of 0 is a
-    /// pass; any other count, any fault and any timeout return null, and the panel reads raw. The guard's <c>$3</c> is bound
+    /// pass; any other count, a ledger that does not cover the window (<see cref="IntervalRollupCountGuard.UncoveredResult"/>, noted as
+    /// <see cref="ReadFallback.LedgerUncovered"/> with no log line), any fault and any timeout return null, and the panel reads raw.
+    /// A store before V164 has no ledger table: that fault is noted quietly (no Warning). The guard's <c>$3</c> is bound
     /// from <see cref="ComposeSourceRouter.NormalizeServerScope"/> alone, and the verdict carries that same scope, so a verdict
     /// proven for one scope never serves another. A failed guard is undone to its savepoint so the transaction stays usable
     /// for the raw panel statement. If that undo itself fails, the failure is rethrown and the snapshot is abandoned.
@@ -3039,13 +3041,33 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             await ExecuteSnapshotStatementAsync(connection, HourlyEdgesRestoreTimeoutSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
 
+            /* The hour ledger does not cover the window yet (its counted_since is after the window start, or its state row is missing).
+               That is an expected state, not a fault and not a mismatch: nothing is logged, the scope notes the reason so the read shows
+               as a fallback in get_read_latency, and the panel reads raw on this same transaction (#4605). */
+            if (mismatches == IntervalRollupCountGuard.UncoveredResult)
+            {
+                ReadScope.Note(ReadFallback.LedgerUncovered);
+                return null;
+            }
+
             return mismatches == 0
                 ? new ComposeHourlyEdgesVerdict(candidate.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc, scope)
                 : null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ReadScope.NoteFallback(ReadFallback.GateFailed, "#4605 compose hourly-edges count guard", ex);
+            if (ex is PostgresException { SqlState: PostgresErrorCodes.UndefinedTable })
+            {
+                /* A store before V164 has no ledger table, so the guard cannot plan: the same quiet note as an uncovered window, with no
+                   Warning per panel run for a state the store's migration ends. It is still a failed gate (gate_failures in get_read_latency)
+                   and it is undone to the savepoint below like any other guard fault. */
+                ReadScope.Note(ReadFallback.GateFailed);
+            }
+            else
+            {
+                ReadScope.NoteFallback(ReadFallback.GateFailed, "#4605 compose hourly-edges count guard", ex);
+            }
+
             try
             {
                 await ExecuteSnapshotStatementAsync(connection, HourlyEdgesRollbackToSavepointSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
