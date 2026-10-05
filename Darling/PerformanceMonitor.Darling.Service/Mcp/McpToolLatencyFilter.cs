@@ -122,7 +122,7 @@ public sealed class McpToolLatencyFilter
     private void OfferSlow(ReadScope scope, string toolName, ReadOutcome outcome, long elapsedMs,
         ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request, string? errorClass)
     {
-        if (_slowReads is null || !SlowReadLog.ShouldRecord(outcome, elapsedMs))
+        if (_slowReads is null || !_slowReads.ShouldRecord(outcome, elapsedMs))
         {
             return;
         }

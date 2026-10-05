@@ -539,7 +539,8 @@ CREATE TABLE IF NOT EXISTS collect.slow_reads
     statements jsonb NOT NULL,
     statement_count integer NOT NULL,
     statements_truncated boolean NOT NULL,
-    error_class text
+    error_class text,
+    row_count bigint
 );
 
 /* Newest-first read and the retention sweep are both by time; the id breaks ties in the read's total order. */

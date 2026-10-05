@@ -39,7 +39,8 @@ internal static class DarlingSlowReadReader
         JsonArray Statements,
         int StatementCount,
         bool StatementsTruncated,
-        string? ErrorClass);
+        string? ErrorClass,
+        long? RowCount = null);
 
     internal sealed record SummaryRow(string Surface, string Route, string Outcome, long Count);
 
@@ -104,7 +105,7 @@ ORDER BY count(*) DESC, r.surface, r.route, r.outcome";
         var readsSql = $@"
 SELECT r.slow_read_id, r.read_time, r.surface, r.route, r.outcome, r.total_ms, r.server_id, s.server_name,
        r.window_start, r.window_end, r.arguments::text, r.arguments_truncated, r.source, r.source_reason,
-       r.statements::text, r.statement_count, r.statements_truncated, r.error_class
+       r.statements::text, r.statement_count, r.statements_truncated, r.error_class, r.row_count
 FROM collect.slow_reads AS r
 LEFT JOIN servers AS s ON s.server_id = r.server_id
 WHERE {where}
@@ -149,7 +150,8 @@ LIMIT {limit.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
                     JsonNode.Parse(reader.GetString(14)) as JsonArray ?? new JsonArray(),
                     reader.GetInt32(15),
                     reader.GetBoolean(16),
-                    reader.IsDBNull(17) ? null : reader.GetString(17)));
+                    reader.IsDBNull(17) ? null : reader.GetString(17),
+                    reader.IsDBNull(18) ? null : reader.GetInt64(18)));
             }
         }
 

@@ -62,6 +62,7 @@ public sealed class SlowReadsRungTests
         var sql = Statements();
 
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.slow_reads\n", sql, StringComparison.Ordinal);
+        Assert.Contains("    error_class text,\n    row_count bigint\n);", sql, StringComparison.Ordinal);
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_slow_reads_time\n    ON collect.slow_reads(read_time, slow_read_id);", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("create_hypertable", sql, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("CHECK", sql, StringComparison.Ordinal);

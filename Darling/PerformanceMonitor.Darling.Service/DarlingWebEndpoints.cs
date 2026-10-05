@@ -1843,7 +1843,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// becomes the arguments. Never throws into the request.</summary>
     private static void OfferWebSlowRead(ReadLatencyRecorder recorder, ReadScope scope, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, string? errorClass)
     {
-        if (recorder.SlowReads is null || !SlowReadLog.ShouldRecord(outcome, elapsedMs))
+        if (recorder.SlowReads is null || !recorder.SlowReads.ShouldRecord(outcome, elapsedMs))
         {
             return;
         }
@@ -1898,7 +1898,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, resolved, elapsedMs);
 
             /* #5097: a slow or failed run also becomes a slow-read row. The panel body is the arguments. */
-            if (scope is not null && recorder?.SlowReads is { } slowReads && SlowReadLog.ShouldRecord(resolved, elapsedMs))
+            if (scope is not null && recorder?.SlowReads is { } slowReads && slowReads.ShouldRecord(resolved, elapsedMs))
             {
                 var errorClass = outcome.Fault is not null ? SlowReadLog.ErrorClassOf(outcome.Fault)
                     : outcome.AuthorSqlState is { Length: > 0 } sqlState ? sqlState

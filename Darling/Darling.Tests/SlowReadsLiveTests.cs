@@ -129,8 +129,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
         await RegisterServerAsync(connection, ct);
 
         var bodySucceeded = false;
-        var priorThreshold = SlowReadLog.ThresholdMs;
-        var log = new SlowReadLog();
+        var log = new SlowReadLog(0);
         using var writerStop = new CancellationTokenSource();
         Task? writer = null;
         TestServer? server = null;
@@ -138,7 +137,6 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
         {
             /* Program.cs registers the process listener; a test host does not. */
             ReadStatementCapture.Register();
-            SlowReadLog.ThresholdMs = 0;
             writer = log.RunAsync(postgres, null, writerStop.Token);
             server = await BuildServerAsync(postgres, log);
 
@@ -168,6 +166,14 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
             Assert.NotEmpty(statements);
             Assert.All(statements, s => Assert.True((double)s!["ms"]! >= 0));
             Assert.True((int)read["statement_count"]! >= statements.Count);
+            var storedStatements = statements.ToJsonString();
+            foreach (var leak in new[] { "Host=", "Username=", "Password=" })
+            {
+                Assert.DoesNotContain(leak, storedStatements, StringComparison.Ordinal);
+            }
+
+            Assert.NotNull(read["rows"]);
+            Assert.True((long)read["rows"]! >= 0);
             Assert.EndsWith("Z", (string)read["read_time"]!, StringComparison.Ordinal);
             Assert.NotNull(read["window_start"]);
 
@@ -175,7 +181,6 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
         }
         finally
         {
-            SlowReadLog.ThresholdMs = priorThreshold;
             server?.Dispose();
             writerStop.Cancel();
             if (writer is not null)
@@ -215,7 +220,7 @@ VALUES (TIMESTAMP '2026-08-01 00:00:00', 'mcp', 'ancient', 'timeout', 9000, '{}'
                 await seed.ExecuteNonQueryAsync(ct);
             }
 
-            await SlowReadLog.StoreAsync(postgres, Record(now, "newest"), null);
+            await new SlowReadLog().StoreAsync(postgres, Record(now, "newest"), null);
 
             await using var count = new NpgsqlCommand("SELECT count(*) FROM collect.slow_reads", connection);
             Assert.Equal((long)SlowReadLog.RowCap, await count.ExecuteScalarAsync(ct));

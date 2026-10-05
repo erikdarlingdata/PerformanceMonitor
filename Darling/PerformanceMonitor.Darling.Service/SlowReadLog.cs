@@ -39,7 +39,8 @@ internal sealed record SlowReadRecord(
     string StatementsJson,
     int StatementCount,
     bool StatementsTruncated,
-    string? ErrorClass);
+    string? ErrorClass,
+    long? RowCount = null);
 
 /// <summary>
 /// The slow-read record's write path (#5097). The three recorders (the MCP tool filter, the <c>/api/read/*</c> loop
@@ -51,8 +52,20 @@ internal sealed record SlowReadRecord(
 /// </summary>
 public sealed class SlowReadLog
 {
-    /// <summary>A read at or over this many milliseconds is recorded whatever its outcome. A test lowers it; nothing else writes it.</summary>
-    internal static int ThresholdMs = 5_000;
+    /// <summary>The default for a read at or over this many milliseconds, which is recorded whatever its outcome.</summary>
+    internal const int DefaultThresholdMs = 5_000;
+
+    /// <summary>The age and row-cap purge runs at most this often...</summary>
+    internal static readonly TimeSpan PurgeInterval = TimeSpan.FromSeconds(60);
+
+    /// <summary>...or after this many inserts, whichever comes first.</summary>
+    internal const int PurgeEveryInserts = 100;
+
+    internal const int MaxStringLength = 128;
+    internal const int MaxDepth = 8;
+    internal const int MaxArrayElements = 50;
+    internal const string OmittedMarker = "[omitted]";
+    internal const string RedactedMarker = "[redacted]";
 
     internal const int Capacity = 256;
     internal const int RetentionDays = 30;
@@ -63,8 +76,8 @@ public sealed class SlowReadLog
     internal const string InsertSql = @"
 INSERT INTO collect.slow_reads
 (read_time, surface, route, outcome, total_ms, server_id, window_start, window_end, arguments, arguments_truncated,
- source, source_reason, statements, statement_count, statements_truncated, error_class)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16);";
+ source, source_reason, statements, statement_count, statements_truncated, error_class, row_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17);";
 
     internal const string PurgeSql = @"
 DELETE FROM collect.slow_reads WHERE read_time < $1;";
@@ -78,13 +91,24 @@ WHERE slow_read_id IN
 );";
 
     private static readonly string[] s_secretFragments =
-        { "password", "secret", "token", "credential", "webhook", "connection_string", "api_key", "apikey", "auth" };
+    {
+        "password", "passwd", "pwd", "secret", "token", "apikey", "api_key", "key", "credential", "webhook",
+        "connectionstring", "connection_string", "auth",
+    };
 
     private readonly Channel<SlowReadRecord> _channel;
     private long _dropped;
+    private DateTime _lastPurgeUtc = DateTime.MinValue;
+    private int _insertsSincePurge;
 
     public SlowReadLog()
+        : this(DefaultThresholdMs)
     {
+    }
+
+    internal SlowReadLog(int thresholdMs)
+    {
+        ThresholdMs = thresholdMs;
         _channel = Channel.CreateBounded<SlowReadRecord>(
             new BoundedChannelOptions(Capacity)
             {
@@ -94,6 +118,9 @@ WHERE slow_read_id IN
             },
             _ => Interlocked.Increment(ref _dropped));
     }
+
+    /// <summary>A read at or over this many milliseconds is recorded whatever its outcome.</summary>
+    internal int ThresholdMs { get; }
 
     /// <summary>Records dropped because the channel was full.</summary>
     internal long Dropped => Interlocked.Read(ref _dropped);
@@ -111,7 +138,7 @@ WHERE slow_read_id IN
 
     /// <summary>The recording rule: over the threshold, or ended in a timeout, error or limit. A cancelled read and
     /// the fallbacks are recorded only when they are also over the threshold; their counts live in read_latency.</summary>
-    internal static bool ShouldRecord(ReadOutcome outcome, long totalMs) =>
+    internal bool ShouldRecord(ReadOutcome outcome, long totalMs) =>
         totalMs >= ThresholdMs || outcome is ReadOutcome.Timeout or ReadOutcome.Error or ReadOutcome.Limit;
 
     /// <summary>Decides, builds and enqueues one record. Never throws.</summary>
@@ -171,12 +198,14 @@ WHERE slow_read_id IN
             statements.ToJsonString(),
             scope.StatementTotal,
             statementsTruncated,
-            errorClass);
+            errorClass,
+            scope.Rows);
     }
 
-    /// <summary>The arguments as stored: the server name replaced by its id, secret-looking keys blanked, the window
-    /// (hours / hours_back ending at as_of or the read's start) lifted into start and end, and the whole object held to
-    /// <see cref="MaxArgumentsBytes"/> (else a truncated object naming the keys and the flag set).</summary>
+    /// <summary>The arguments as stored, one policy for every surface: the server name replaced by its id, the window
+    /// (hours / hours_back ending at as_of or the read's start) lifted into start and end, every value passed through
+    /// <see cref="Scrub"/>, and the whole object held to <see cref="MaxArgumentsBytes"/> (else a truncated object
+    /// naming the keys and the flag set).</summary>
     internal static (string Json, bool Truncated, DateTime? WindowStart, DateTime? WindowEnd) NormaliseArguments(
         JsonObject? arguments, int? serverId, DateTime startedUtc)
     {
@@ -193,10 +222,7 @@ WHERE slow_read_id IN
                     continue;
                 }
 
-                var lowered = key.ToLowerInvariant();
-                normal[key] = s_secretFragments.Any(f => lowered.Contains(f, StringComparison.Ordinal))
-                    ? JsonValue.Create("[redacted]")
-                    : value?.DeepClone();
+                normal[key] = IsSecretKey(key) ? JsonValue.Create(RedactedMarker) : Scrub(value, 1);
             }
 
             var hours = NumberOf(arguments, "hours") ?? NumberOf(arguments, "hours_back");
@@ -225,6 +251,115 @@ WHERE slow_read_id IN
         }
 
         return (new JsonObject { ["truncated"] = true, ["keys"] = names }.ToJsonString(), true, Unspecified(windowStart), Unspecified(windowEnd));
+    }
+
+    /// <summary>True when a key's lower-cased name carries a secret fragment.</summary>
+    internal static bool IsSecretKey(string key)
+    {
+        var lowered = key.ToLowerInvariant();
+        foreach (var fragment in s_secretFragments)
+        {
+            if (lowered.Contains(fragment, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The one argument policy for the MCP, web and compose surfaces. Numbers, booleans and nulls are kept. A string is
+    /// kept only when it is at most <see cref="MaxStringLength"/> characters and does not parse as a JSON object or
+    /// array; anything else becomes <see cref="OmittedMarker"/>, so a JSON-bearing argument (a server batch, a settings
+    /// document) never reaches the table. Objects and arrays are walked to <see cref="MaxDepth"/> levels (deeper is
+    /// omitted) and <see cref="MaxArrayElements"/> elements; a key naming a secret is redacted at any depth.
+    /// </summary>
+    internal static JsonNode? Scrub(JsonNode? node, int depth)
+    {
+        switch (node)
+        {
+            case null:
+                return null;
+            case JsonObject obj:
+            {
+                if (depth > MaxDepth)
+                {
+                    return JsonValue.Create(OmittedMarker);
+                }
+
+                var copy = new JsonObject();
+                foreach (var (key, value) in obj)
+                {
+                    copy[key] = IsSecretKey(key) ? JsonValue.Create(RedactedMarker) : Scrub(value, depth + 1);
+                }
+
+                return copy;
+            }
+
+            case JsonArray array:
+            {
+                if (depth > MaxDepth)
+                {
+                    return JsonValue.Create(OmittedMarker);
+                }
+
+                var copy = new JsonArray();
+                var taken = 0;
+                foreach (var item in array)
+                {
+                    if (taken == MaxArrayElements)
+                    {
+                        copy.Add(JsonValue.Create("[omitted " + (array.Count - MaxArrayElements).ToString(CultureInfo.InvariantCulture) + " more]"));
+                        break;
+                    }
+
+                    copy.Add(Scrub(item, depth + 1));
+                    taken++;
+                }
+
+                return copy;
+            }
+
+            case JsonValue value:
+            {
+                if (value.TryGetValue<string>(out var text))
+                {
+                    return KeepString(text) ? JsonValue.Create(text) : JsonValue.Create(OmittedMarker);
+                }
+
+                return value.DeepClone();
+            }
+
+            default:
+                return JsonValue.Create(OmittedMarker);
+        }
+    }
+
+    private static bool KeepString(string text)
+    {
+        if (text.Length > MaxStringLength)
+        {
+            return false;
+        }
+
+        var trimmed = text.AsSpan().TrimStart();
+        if (trimmed.Length > 0 && (trimmed[0] == '{' || trimmed[0] == '['))
+        {
+            try
+            {
+                if (JsonNode.Parse(text) is JsonObject or JsonArray)
+                {
+                    return false;
+                }
+            }
+            catch (JsonException)
+            {
+                /* Not JSON: a short plain string. */
+            }
+        }
+
+        return true;
     }
 
     private static DateTime? Unspecified(DateTime? value)
@@ -308,8 +443,25 @@ WHERE slow_read_id IN
         }
     }
 
-    /// <summary>Inserts one record, then purges by age and by row cap. A failure is logged at Debug and goes no further.</summary>
-    internal static async Task StoreAsync(NpgsqlDataSource postgres, SlowReadRecord record, ILogger? logger)
+    /// <summary>Whether this insert should be followed by the purge: the first one, then one per
+    /// <see cref="PurgeInterval"/> or <see cref="PurgeEveryInserts"/> inserts, whichever comes first. The one writer
+    /// calls it, so it takes no lock.</summary>
+    internal bool PurgeDue(DateTime nowUtc)
+    {
+        _insertsSincePurge++;
+        if (_insertsSincePurge < PurgeEveryInserts && nowUtc - _lastPurgeUtc < PurgeInterval)
+        {
+            return false;
+        }
+
+        _insertsSincePurge = 0;
+        _lastPurgeUtc = nowUtc;
+        return true;
+    }
+
+    /// <summary>Inserts one record, then purges by age and by row cap when the purge is due. A failure is logged at
+    /// Debug and goes no further.</summary>
+    internal async Task StoreAsync(NpgsqlDataSource postgres, SlowReadRecord record, ILogger? logger)
     {
         try
         {
@@ -334,7 +486,13 @@ WHERE slow_read_id IN
                 insert.Parameters.AddWithValue(record.StatementCount);
                 insert.Parameters.AddWithValue(record.StatementsTruncated);
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)record.ErrorClass ?? DBNull.Value });
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)record.RowCount ?? DBNull.Value });
                 await insert.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+
+            if (!PurgeDue(DateTime.UtcNow))
+            {
+                return;
             }
 
             await using (var purge = new NpgsqlCommand(PurgeSql, connection))

@@ -48,13 +48,15 @@ public sealed class DarlingMcpSlowReadTools
         + "surface (web dashboard, composed panel, MCP tool) when the read took 5 seconds or more, or ended in a timeout, "
         + "error or limit. A cancelled read or a fallback is recorded only when it was also slow; their counts live in "
         + "get_read_latency. Each row carries surface, route, outcome, total_ms, the server it named (server_name, null for "
-        + "a store-wide read), the arguments as sent (the server replaced by its id, a window lifted into window_start and "
-        + "window_end, 4,096 bytes at most), the source that answered (raw, interval_table, hourly_edges) with its reason "
+        + "a store-wide read), the arguments (short scalars only: numbers, booleans and strings of 128 characters or fewer; "
+        + "any longer string or JSON-bearing string is shown as [omitted], and a key naming a secret is [redacted] at any "
+        + "depth; the server replaced by its id, a window lifted into window_start and window_end, 4,096 bytes at most), the source that answered (raw, interval_table, hourly_edges) with its reason "
         + "where the read noted one, error_class (a type name or SQLSTATE, never message text), and statements: the "
         + "slowest 5 by ms, with statements_omitted saying how many more were left out; full_detail=true returns all stored "
         + "statements in the order they ran (50 at most, statements_truncated says more ran). A statement's ms runs until "
-        + "its reader CLOSES, so it includes row streaming and the caller's time between rows, not only server time; rows "
-        + "is filled only by the reads that count them and is null elsewhere. A statement label is the product's own SQL "
+        + "its reader CLOSES, so it includes row streaming and the caller's time between rows, not only server time; a "
+        + "statement's rows stays null (the driver reports no returned-row count). The read's own rows is recorded only by "
+        + "reads that count them, as get_query_store_top does, and is null otherwise. A statement label is the product's own SQL "
         + "text with a short hash; parameter values are never stored. summary counts reads per (surface, route, outcome) "
         + "over the window and the filters, so it covers more than the page. reads is newest first, then newest id; the "
         + "page is capped at limit rows or the ~32 KB response budget, whichever cuts first, and truncated says either "
@@ -182,6 +184,7 @@ public sealed class DarlingMcpSlowReadTools
             source = r.Source,
             source_reason = r.SourceReason,
             error_class = r.ErrorClass,
+            rows = r.RowCount,
             statement_count = r.StatementCount,
             statements_truncated = r.StatementsTruncated,
             statements_omitted = omitted,

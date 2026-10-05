@@ -36,18 +36,19 @@ public sealed class SlowReadLogTests
     [Fact]
     public void AReadIsRecorded_OverTheThreshold_OrOnATimeoutErrorOrLimit_AndNotOtherwise()
     {
-        Assert.Equal(5_000, SlowReadLog.ThresholdMs);
+        var log = new SlowReadLog();
+        Assert.Equal(5_000, log.ThresholdMs);
 
-        Assert.True(SlowReadLog.ShouldRecord(ReadOutcome.Ok, 5_000));
-        Assert.False(SlowReadLog.ShouldRecord(ReadOutcome.Ok, 4_999));
-        Assert.True(SlowReadLog.ShouldRecord(ReadOutcome.Timeout, 10));
-        Assert.True(SlowReadLog.ShouldRecord(ReadOutcome.Error, 10));
-        Assert.True(SlowReadLog.ShouldRecord(ReadOutcome.Limit, 10));
-        Assert.False(SlowReadLog.ShouldRecord(ReadOutcome.Cancelled, 10));
-        Assert.False(SlowReadLog.ShouldRecord(ReadOutcome.FallbackRaw, 10));
-        Assert.False(SlowReadLog.ShouldRecord(ReadOutcome.GateFailed, 10));
-        Assert.True(SlowReadLog.ShouldRecord(ReadOutcome.Cancelled, 6_000));
-        Assert.True(SlowReadLog.ShouldRecord(ReadOutcome.FallbackRaw, 6_000));
+        Assert.True(log.ShouldRecord(ReadOutcome.Ok, 5_000));
+        Assert.False(log.ShouldRecord(ReadOutcome.Ok, 4_999));
+        Assert.True(log.ShouldRecord(ReadOutcome.Timeout, 10));
+        Assert.True(log.ShouldRecord(ReadOutcome.Error, 10));
+        Assert.True(log.ShouldRecord(ReadOutcome.Limit, 10));
+        Assert.False(log.ShouldRecord(ReadOutcome.Cancelled, 10));
+        Assert.False(log.ShouldRecord(ReadOutcome.FallbackRaw, 10));
+        Assert.False(log.ShouldRecord(ReadOutcome.GateFailed, 10));
+        Assert.True(log.ShouldRecord(ReadOutcome.Cancelled, 6_000));
+        Assert.True(log.ShouldRecord(ReadOutcome.FallbackRaw, 6_000));
     }
 
     [Fact]
@@ -97,7 +98,12 @@ public sealed class SlowReadLogTests
     [Fact]
     public void Arguments_OverFourKilobytes_AreReplacedByATruncatedObject()
     {
-        var arguments = new JsonObject { ["query"] = new string('x', 6_000), ["top"] = 5 };
+        /* Strings over 128 characters are omitted, so the size bound is reached by many short keys. */
+        var arguments = new JsonObject { ["top"] = 5 };
+        for (var i = 0; i < 300; i++)
+        {
+            arguments["query_" + i.ToString("D3", System.Globalization.CultureInfo.InvariantCulture)] = new string('x', 100);
+        }
 
         var (json, truncated, _, _) = SlowReadLog.NormaliseArguments(arguments, null, DateTime.UtcNow);
 
@@ -105,7 +111,7 @@ public sealed class SlowReadLogTests
         Assert.True(Encoding.UTF8.GetByteCount(json) <= SlowReadLog.MaxArgumentsBytes);
         var parsed = JsonNode.Parse(json)!.AsObject();
         Assert.True((bool)parsed["truncated"]!);
-        Assert.Contains("query", parsed["keys"]!.AsArray().Select(k => (string)k!));
+        Assert.Contains("query_000", parsed["keys"]!.AsArray().Select(k => (string)k!));
     }
 
     [Fact]
@@ -148,6 +154,196 @@ public sealed class SlowReadLogTests
     {
         Assert.Equal("InvalidOperationException", SlowReadLog.ErrorClassOf(new InvalidOperationException("secret text")));
         Assert.Equal("57014", SlowReadLog.ErrorClassOf(new PostgresException("canceling statement", "ERROR", "ERROR", "57014")));
+    }
+
+    private static JsonObject Stored(JsonObject arguments, out string json)
+    {
+        (json, _, _, _) = SlowReadLog.NormaliseArguments(arguments, null, DateTime.UtcNow);
+        return JsonNode.Parse(json)!.AsObject();
+    }
+
+    [Fact]
+    public void AServerBatchArgument_CarryingAPassword_IsNeverStored()
+    {
+        var arguments = new JsonObject
+        {
+            ["servers_json"] = "[{\"server_name\":\"x\",\"password\":\"Hunter2!\"}]",
+        };
+
+        var stored = Stored(arguments, out var json);
+
+        Assert.DoesNotContain("Hunter2!", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("password\":\"", json, StringComparison.Ordinal);
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["servers_json"]!);
+    }
+
+    [Fact]
+    public void ASettingsJsonArgument_CarryingAWebhookSecret_IsOmitted()
+    {
+        var arguments = new JsonObject
+        {
+            ["settings_json"] = "{\"smtp\":{\"notes\":\"x\"},\"hook\":\"https://hooks.example.test/T000/B000/s3cr3tvalue\"}",
+        };
+
+        var stored = Stored(arguments, out var json);
+
+        Assert.DoesNotContain("s3cr3tvalue", json, StringComparison.Ordinal);
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["settings_json"]!);
+    }
+
+    [Fact]
+    public void ANestedSecretKey_InAComposeBody_IsRedactedAtAnyDepth()
+    {
+        var body = JsonNode.Parse("{\"panel\":{\"options\":{\"api_key\":\"abc123\",\"top\":5}},\"list\":[{\"Password\":\"p\"}]}")!.AsObject();
+
+        var stored = Stored(body, out var json);
+
+        Assert.DoesNotContain("abc123", json, StringComparison.Ordinal);
+        Assert.Equal(SlowReadLog.RedactedMarker, (string)stored["panel"]!["options"]!["api_key"]!);
+        Assert.Equal(5, (int)stored["panel"]!["options"]!["top"]!);
+        Assert.Equal(SlowReadLog.RedactedMarker, (string)stored["list"]![0]!["Password"]!);
+    }
+
+    [Fact]
+    public void AWebQueryString_RedactsTheToken_AndKeepsTheScalars()
+    {
+        var query = new JsonObject { ["token"] = "abc", ["hours_back"] = "48" };
+
+        var stored = Stored(query, out _);
+
+        Assert.Equal(SlowReadLog.RedactedMarker, (string)stored["token"]!);
+        Assert.Equal("48", (string)stored["hours_back"]!);
+    }
+
+    [Fact]
+    public void NumbersBooleansAndShortStrings_AreKept()
+    {
+        var stored = Stored(new JsonObject { ["hours_back"] = 48, ["top"] = 20, ["flag"] = true, ["view"] = "waits" }, out _);
+
+        Assert.Equal(48, (int)stored["hours_back"]!);
+        Assert.Equal(20, (int)stored["top"]!);
+        Assert.True((bool)stored["flag"]!);
+        Assert.Equal("waits", (string)stored["view"]!);
+    }
+
+    [Fact]
+    public void AnyNonJsonString_OfMoreThan128Characters_IsOmitted_AndExactly128IsKept()
+    {
+        var stored = Stored(new JsonObject { ["long"] = new string('a', 129), ["edge"] = new string('b', 128) }, out _);
+
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["long"]!);
+        Assert.Equal(128, ((string)stored["edge"]!).Length);
+    }
+
+    [Fact]
+    public void AShortJsonObjectOrArrayString_IsOmitted_AndAShortNonJsonBracketStringIsKept()
+    {
+        var stored = Stored(new JsonObject { ["a"] = "{\"k\":1}", ["b"] = "[1,2]", ["c"] = "[not json", ["d"] = "{also not" }, out _);
+
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["a"]!);
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["b"]!);
+        Assert.Equal("[not json", (string)stored["c"]!);
+        Assert.Equal("{also not", (string)stored["d"]!);
+    }
+
+    [Fact]
+    public void Nesting_StopsAtDepthEight_AndAnArrayAtFiftyElements()
+    {
+        JsonNode inner = new JsonObject { ["leaf"] = 1 };
+        for (var i = 0; i < 10; i++)
+        {
+            inner = new JsonObject { ["n"] = inner };
+        }
+
+        var many = new JsonArray();
+        for (var i = 0; i < 60; i++)
+        {
+            many.Add(i);
+        }
+
+        var stored = Stored(new JsonObject { ["deep"] = inner, ["many"] = many }, out var json);
+
+        Assert.Contains("\"[omitted]\"", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("leaf", json, StringComparison.Ordinal);
+        var array = stored["many"]!.AsArray();
+        Assert.Equal(51, array.Count);
+        Assert.Equal("[omitted 10 more]", (string)array[50]!);
+    }
+
+    [Theory]
+    [InlineData("password")]
+    [InlineData("passwd")]
+    [InlineData("pwd")]
+    [InlineData("client_secret")]
+    [InlineData("access_token")]
+    [InlineData("apikey")]
+    [InlineData("api_key")]
+    [InlineData("license_key")]
+    [InlineData("credential")]
+    [InlineData("connectionstring")]
+    [InlineData("connection_string")]
+    [InlineData("authorization")]
+    public void EverySecretFragment_IsRedacted(string key)
+    {
+        var stored = Stored(new JsonObject { [key] = "v", ["x"] = new JsonObject { [key.ToUpperInvariant()] = "v" } }, out _);
+
+        Assert.Equal(SlowReadLog.RedactedMarker, (string)stored[key]!);
+        Assert.Equal(SlowReadLog.RedactedMarker, (string)stored["x"]![key.ToUpperInvariant()]!);
+    }
+
+    [Fact]
+    public void TheStatementCapture_ReadsOnlyTheQueryTextAndReturnedRowsTags()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "ReadStatementCapture.cs");
+        var tagKeys = System.Text.RegularExpressions.Regex.Matches(source, "\"(db\\.[A-Za-z0-9_.]+)\"")
+            .Select(m => m.Groups[1].Value).Distinct().OrderBy(k => k, StringComparer.Ordinal).ToArray();
+
+        Assert.Equal(new[] { "db.query.text", "db.response.returned_rows" }, tagKeys);
+        Assert.DoesNotContain("data_source", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ABuiltRecord_CarriesTheRowCountTheReadNoted()
+    {
+        using var opened = ReadScope.Open(null);
+        ReadScope.NoteRows(1234);
+
+        var record = SlowReadLog.Build(opened.Scope, ReadSurface.Mcp, "r", ReadOutcome.Ok, 9_000, null, null, DateTime.UtcNow);
+        Assert.Equal(1234L, record.RowCount);
+
+        using var none = ReadScope.Open(null);
+        Assert.Null(SlowReadLog.Build(none.Scope, ReadSurface.Mcp, "r", ReadOutcome.Ok, 9_000, null, null, DateTime.UtcNow).RowCount);
+    }
+
+    [Fact]
+    public void ThePurge_RunsFirst_ThenAtMostOncePerMinuteOrPerHundredInserts()
+    {
+        var log = new SlowReadLog();
+        var t0 = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.True(log.PurgeDue(t0));
+        for (var i = 0; i < 50; i++)
+        {
+            Assert.False(log.PurgeDue(t0.AddSeconds(1)));
+        }
+
+        Assert.True(log.PurgeDue(t0.AddSeconds(61)), "a minute on");
+        for (var i = 1; i < SlowReadLog.PurgeEveryInserts; i++)
+        {
+            Assert.False(log.PurgeDue(t0.AddSeconds(62)));
+        }
+
+        Assert.True(log.PurgeDue(t0.AddSeconds(62)), "the hundredth insert");
+    }
+
+    [Fact]
+    public void TheThreshold_IsInjectedPerInstance()
+    {
+        var instant = new SlowReadLog(0);
+        var normal = new SlowReadLog();
+
+        Assert.True(instant.ShouldRecord(ReadOutcome.Ok, 0));
+        Assert.False(normal.ShouldRecord(ReadOutcome.Ok, 0));
     }
 
     private static DarlingSlowReadReader.SlowReadRow Row(long id, int statements)
@@ -206,7 +402,7 @@ public sealed class SlowReadLogTests
         log.Offer(scope, ReadSurface.Mcp, "r", ReadOutcome.Error, 1, null, "X", null);
         Assert.True(log.TryRead(out var record));
 
-        await SlowReadLog.StoreAsync(dead, record!, null);
+        await log.StoreAsync(dead, record!, null);
     }
 
     private const int McpResponseBudgetBytes = 32 * 1024;
