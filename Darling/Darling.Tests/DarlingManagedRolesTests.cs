@@ -80,6 +80,28 @@ public sealed class DarlingManagedRolesTests
             ViewerGrantsOnMonitoredServers(sql + "\nGRANT SELECT (server_id, name, host) ON config.config_monitored_servers TO viewer;"));
     }
 
+    /// <summary>
+    /// A store that is not managed is told to RE-RUN <c>Darling/tools/provision-roles.sql</c>, so that script is the grant it
+    /// gets, and nothing tied it to the managed batch's: the edit grant (#5240) in the script is the same column-level
+    /// statement the batch carries, preceded by the same REVOKE, and never a table-level UPDATE. Comment lines are dropped
+    /// first, so a statement quoted in prose cannot satisfy the pin.
+    /// </summary>
+    [Fact]
+    public void TheByoScript_CarriesTheSameColumnLevelEditGrant_AsTheManagedBatch()
+    {
+        var byo = Regex.Replace(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"), @"(?m)^\s*--.*$", "");
+
+        Assert.Contains(EditGrant, byo, StringComparison.Ordinal);
+        Assert.DoesNotContain("GRANT UPDATE ON config.config_monitored_servers TO viewer", byo, StringComparison.Ordinal);
+
+        /* The REVOKE comes first, as in the batch: it resets viewer to exactly the listed columns on every run, and strips a
+           table-level UPDATE granted by hand. After the grant it would strip the very columns just granted. */
+        var revokeAt = byo.IndexOf(EditRevoke, StringComparison.Ordinal);
+        Assert.True(revokeAt >= 0, "provision-roles.sql no longer REVOKEs viewer's UPDATE on config_monitored_servers before the column grant");
+        Assert.True(revokeAt < byo.IndexOf(EditGrant, StringComparison.Ordinal), "provision-roles.sql must REVOKE UPDATE before the column-level edit grant");
+        Assert.Single(Regex.Matches(byo, @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));
+    }
+
     [Fact]
     public void BuildProvisioningSql_CreatesRolesIdempotently_LoginNoSuperuser()
     {
