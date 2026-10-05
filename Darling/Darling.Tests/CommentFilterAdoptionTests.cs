@@ -83,7 +83,7 @@ public sealed class CommentFilterAdoptionTests
     /// name a new entry.
     ///
     /// <para>Four kinds live here and they are not the same kind. Eight <b>collect</b> a doc-comment run,
-    /// where the prefix is what defines the run. One reads a <b>stated, measured</b> bound off a named file.
+    /// where the prefix is what defines the run. Two read a <b>stated, measured</b> bound off a named file each.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
     /// </summary>
@@ -173,6 +173,17 @@ public sealed class CommentFilterAdoptionTests
             + "The window it cuts (the outer SELECT through FROM differenced) holds no comment today, so the "
             + "/* and * arms are inert; a comment added there whose continuation line contains ' AS ' would "
             + "over-count the select list and fail the 19 pin loudly.",
+
+        ["Darling.Tests/DarlingWebTlsTests.cs"] =
+            "STATED BOUND, and asking for the walker would BREAK it. NoMessage_SpellsTheWebSectionOutright hunts a "
+            + "string LITERAL that spells the web section outright, and the walker blanks literal text, so adopting "
+            + "it would blank the very thing the scan reads and pass for the wrong reason. The filter drops the lines "
+            + "whose trimmed text starts with // (a /// line starts with it too), then reports a line that carries a "
+            + "double quote ahead of the name. Stated bound: ONLY whole-line // comments are skipped, so a /* */ "
+            + "block-comment line, or a trailing // comment, that has a quote ahead of the name reads as a literal "
+            + "and is reported - a spurious red, the loud direction, because the scan can only over-report. "
+            + "Measurement-dependent, not permanent: the two files it reads (DarlingWebTls.cs and DarlingConfig.cs) "
+            + "name the web setting on whole-line // and /// comments only today.",
 
         ["Darling.Tests/PgTargetMeasuredLineageTests.cs"] =
             "COLLECTS a doc run. CommentBlockAbove walks upward from a named constant through the contiguous "
@@ -280,7 +291,7 @@ public sealed class CommentFilterAdoptionTests
     private static readonly (string Label, string Claim)[] s_kinds =
     {
         ("COLLECTS", "collect a doc-comment run"),
-        ("STATED BOUND", "reads a stated, measured bound"),
+        ("STATED BOUND", "read a stated, measured bound"),
         ("NOT C#", "filters SQL"),
         ("DEMONSTRATES", "demonstrates the shape"),
     };
