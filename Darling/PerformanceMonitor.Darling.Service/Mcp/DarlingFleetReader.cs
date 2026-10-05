@@ -85,8 +85,8 @@ internal static class DarlingFleetReader
     /// <para>The <c>is_silenced</c> column (#2031) is the SQL mirror of the Viewer's
     /// <c>ViewerDataService.IsWholeServerSilence</c> predicate — an enabled, unexpired mute rule scoped to the
     /// server (matched on the store server id when the rule carries one, else — a legacy rule — case-insensitively on the
-    /// same COALESCE(display, storage) name the card shows) with NO narrowing pattern on any other field. Display-only: the
-    /// web seat has no silence action; this exists so a dataless-quiet server and a silenced one stop looking
+    /// same COALESCE(display, storage) name the card shows) with NO narrowing pattern on any other field. The
+    /// column is read-only; the fleet page's Silence / Unsilence button writes the rule it reads back. It exists so a dataless-quiet server and a silenced one stop looking
     /// identical on the fleet cards and to <c>get_fleet_overview</c>.</para> $ none.</summary>
     public const string FleetServersSql = @"
 SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.server_name, s.sql_engine_edition, s.engine_kind,
@@ -2188,8 +2188,8 @@ public sealed class FleetServerCard
     [JsonPropertyName("is_azure_mi")] public bool IsAzureManagedInstance { get; init; }
 
     /// <summary>True when a whole-server alert silence (an enabled, unexpired mute rule scoped to this server
-    /// with no narrowing pattern) is active (#2031) — display-only, so a silenced server stops looking like a
-    /// healthy-quiet one. The web seat has no silence action; silencing stays with the Viewer/MCP.</summary>
+    /// with no narrowing pattern) is active (#2031) — so a silenced server stops looking like a
+    /// healthy-quiet one. The fleet page's Silence / Unsilence button writes the rule.</summary>
     [JsonPropertyName("is_silenced")] public bool IsSilenced { get; init; }
 
     /// <summary>The server's tags for the read-only fleet pills (#2020) — id, name, and stored <c>#RRGGBB</c>

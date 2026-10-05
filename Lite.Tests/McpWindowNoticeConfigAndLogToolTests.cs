@@ -13,6 +13,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -44,6 +45,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     private readonly int _serverId;
     private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private readonly PendingSeedSession _seed;
     private readonly ServerManager _serverManager;
     private long _nextId = 1;
 
@@ -63,6 +65,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         _tempDir = Path.Combine(Path.GetTempPath(), "McpWindowNoticeConfigLog_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(Path.Combine(_tempDir, "config"));
         _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        _seed = new PendingSeedSession(_duckDb);
 
         _serverManager = new ServerManager(Path.Combine(_tempDir, "config"));
         var server = new ServerConnection { ServerName = ServerName, DisplayName = ServerName };
@@ -72,6 +75,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
 
     public void Dispose()
     {
+        _seed.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort cleanup */ }
     }
@@ -83,7 +87,11 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
 
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
-    private LocalDataService Service() => new(_duckDb);
+    private LocalDataService Service()
+    {
+        _seed.Flush();
+        return new(_duckDb);
+    }
 
     /* ───────────────────────── per-tool wiring ───────────────────────── */
 
@@ -385,6 +393,41 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         Assert.Contains("matched", message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4966: an empty collection log over a window the store holds none of says so (no start to name), keeping its
+    /// first sentence; the filtered empty is exempt and keeps its own words whether the window is cut or not.
+    /// </summary>
+    [Fact]
+    public async Task CollectionLog_AnEmptyWindow_NothingHeld_SaysNothingWasRead_AndTheFilteredEmptyKeepsItsWords()
+    {
+        await _duckDb.InitializeAsync();
+        /* Runs exist, all older than the window: the server HAS collected, and the window holds none. */
+        await SeedLogRunsAsync("wait_stats", Anchor.AddDays(-30), Anchor.AddDays(-20), everyMinutes: 60);
+
+        var cut = Root(await McpHealthTools.GetCollectionLog(Service(), _serverManager, ServerName, 24, as_of: AsOf));
+
+        Assert.Equal("empty", cut.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, cut.GetProperty("hints").GetProperty("effective_start").ValueKind);
+        Assert.Equal($"No collector runs recorded for {ServerName} in the last 24 hour(s). {McpHelpers.CutWindowNothingReadMessage}", cut.GetProperty("message").GetString());
+
+        /* The same cut window, filtered: not the cut sentence, the filtered one with its echo and advice. */
+        var cutFiltered = Root(await McpHealthTools.GetCollectionLog(
+            Service(), _serverManager, ServerName, 24, as_of: AsOf, collector_name: "no_such_collector"));
+        var cutFilteredMessage = cutFiltered.GetProperty("message").GetString()!;
+        Assert.True(cutFiltered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+        Assert.Contains("no_such_collector", cutFilteredMessage, StringComparison.Ordinal);
+        Assert.Contains("says nothing about the window as a whole", cutFilteredMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("Nothing was read", cutFilteredMessage, StringComparison.Ordinal);
+
+        /* A window the log covers (runs reach back past its start): the filtered empty keeps its sentence there too. */
+        await SeedLogRunsAsync("wait_stats", Anchor.AddDays(-3), Anchor, everyMinutes: 30);
+        var covered = Root(await McpHealthTools.GetCollectionLog(
+            Service(), _serverManager, ServerName, 24, as_of: AsOf, collector_name: "no_such_collector"));
+
+        Assert.False(covered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+        Assert.Contains("says nothing about the window as a whole", covered.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
     /// <summary>A snapshot before the window with NO run in the window proves nothing was read: not covered.</summary>
     [Theory]
     [InlineData(Tool.ServerConfig)]
@@ -566,20 +609,9 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
 
     /* ───────────────────────── seeding ───────────────────────── */
 
-    private async Task ExecuteAsync(string sql, params object?[] values)
-    {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
-        using var readLock = _duckDb.AcquireReadLock();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = sql;
-        foreach (var value in values)
-        {
-            cmd.Parameters.Add(new DuckDBParameter { Value = value ?? DBNull.Value });
-        }
-
-        await cmd.ExecuteNonQueryAsync();
-    }
+    /* #5208: every seed statement joins one open transaction (PendingSeedSession) instead of committing on its own;
+       Service() commits it before anything reads, so the code under test sees the same rows in the same order. */
+    private Task ExecuteAsync(string sql, params object?[] values) => _seed.ExecuteAsync(sql, values);
 
     private Task SeedServerConfigAsync(DateTime captureTime, long value) => ExecuteAsync(@"
 INSERT INTO server_config (config_id, capture_time, server_id, server_name, configuration_name, value_configured, value_in_use, is_dynamic, is_advanced)

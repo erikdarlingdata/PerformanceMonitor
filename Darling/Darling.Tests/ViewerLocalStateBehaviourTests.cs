@@ -159,11 +159,14 @@ public sealed class ViewerLocalStateBehaviourTests
     {
         var app = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "app.js");
         var fleet = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "fleet.js");
+        var sidebar = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "sidebar.js");
         var ui = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "viewer-local-ui.js");
         var local = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "viewer-local.js");
         var theme = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "theme.css");
 
-        Assert.Contains("favoritesFirst", app);
+        Assert.Contains("favoritesFirst", sidebar);
+        Assert.Contains("alertBadge(c.server_id)", sidebar);
+        Assert.Contains("paintServerList(serverList,", app);
         Assert.Contains("refreshAttention(readTool)", app);
         Assert.Contains("initSidebarCollapse", app);
         Assert.Contains("favoritesFirst(SORTS[fleetSort]", fleet);

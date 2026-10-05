@@ -44,7 +44,7 @@ export function el(tag, props = {}, children = []) {
  * activate it exactly like a click. Used by the clickable-div affordances (fleet cards, band rows, sidebar
  * servers) so they get a keyboard path + a :focus-visible ring without becoming real <button>s (a11y).
  */
-function makeActivatable(node, handler) {
+export function makeActivatable(node, handler) {
   node.setAttribute("role", "button");
   node.setAttribute("tabindex", "0");
   node.addEventListener("click", handler);
@@ -756,7 +756,7 @@ export function setActiveRange(range) {
 /* The windowed reads that take no `as_of` (the catalog's `hours` without an `as_of`): they keep answering "the last N
    hours ending now", and say so. Every other windowed read takes `as_of`. WebServerPageRangeTests pins this list
    against the read catalog. */
-const READS_WITHOUT_AS_OF = new Set(["get_fleet_overview", "get_read_latency", "get_slow_reads", "get_finops"]);
+const READS_WITHOUT_AS_OF = new Set(["get_fleet_overview", "get_read_latency", "get_slow_reads", "get_finops", "get_store_query_history"]);
 
 /* The row fields that stamp one sample, event or run at an instant. A list under a read's answer whose rows carry one of
    these is cut to the exact range. Fields that say when something last happened (last_execution_time and its kin, and

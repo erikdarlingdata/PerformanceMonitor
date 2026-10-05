@@ -38,8 +38,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// per-database override editor), <c>config.server_tags</c> and <c>config.server_tag_map</c> (#5085, the
 /// server-tag endpoints) and <c>config.config_mute_rules</c> (#3450, the dedicated mute-rule
 /// endpoints — plus the two <c>config_service</c> beacon columns its bump trigger writes as the caller), and
-/// the single <c>dismissed</c> column of <c>config.config_alert_log</c> (#4843, the web Alert History dismiss).
-/// All non-secret tables; over the web, editing is gated server-side by the host's auth + the seat model
+/// the single <c>dismissed</c> column of <c>config.config_alert_log</c> (#4843, the web Alert History dismiss),
+/// and INSERT (never UPDATE or DELETE) on <c>config.config_monitored_servers</c> (#4843, the web add-server route,
+/// which runs the <c>add_servers</c> core; the <c>encrypted_password</c> column stays SELECT-carved, so the web host
+/// can write a password blob and never read one back).
+/// Every table is non-secret-keyed; over the web, editing is gated server-side by the host's auth + the seat model
 /// (an OIDC viewer seat is refused every write) — these grants are only the floor beneath that gate. A
 /// locked-down deployment points the Viewer at this role, and its WPF surfaces still read as "look but
 /// don't touch": the read-only probe discriminates on a privilege this role never gets
@@ -400,7 +403,7 @@ public static class DarlingManagedRoles
                 : "re-asserted for " + DescribeReassert(reassert));
 
         logger.LogInformation(
-            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon + the config_alert_log dismissed column + server_tags, server_tag_map); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers) + tag servers (server_tags, server_tag_map)) — the Viewer, the web dashboard and the MCP host no longer connect as the superuser");
+            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon + the config_alert_log dismissed column + server_tags, server_tag_map + INSERT on config_monitored_servers); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers) + tag servers (server_tags, server_tag_map)) — the Viewer, the web dashboard and the MCP host no longer connect as the superuser");
 
         /* CLAMPED, not raw: the batch above wrote the clamped form, so returning the raw read would hand the
            caller a baseline that differs from what the roles actually carry (a stored 0 provisions '15s').
@@ -1045,6 +1048,19 @@ GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {viewer};
 --    stay disabled. A server removal also clears that server's server_tag_map rows, which needs the DELETE here.
 GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {viewer};
+-- #4843: the web dashboard's add-server route (POST /api/servers) runs the SAME add_servers core the MCP tool runs, as
+--    viewer, so viewer gets the INSERT that core issues on config_monitored_servers and NOTHING else on it: no UPDATE,
+--    because the core never updates a row, and no DELETE, because no web route removes a server yet.
+--    The credential column stays out of reach in both directions that matter here. encrypted_password is still
+--    SELECT-carved from viewer (section 6), so viewer can WRITE a password blob and never READ one back; and the
+--    cores need no carved read to write: the INSERT names no RETURNING, its ON CONFLICT (server_id) DO NOTHING arbiter
+--    reads only server_id, and the dedupe and by-id lookups SELECT the five non-secret identity columns viewer
+--    already holds. The BEACON is covered by the two-column config_service grant above: the write fires
+--    trg_bump_monitored_servers -> config_bump_version (SECURITY INVOKER), which UPDATEs config_service.config_version
+--    AS viewer. The seat model, not this grant, decides who may call the route (a read-only seat is refused every
+--    unsafe method); the grant is only the floor beneath that gate. The WPF Viewer's read-only probe is unchanged: it
+--    discriminates on config_alert_log UPDATE (ViewerDataService.ReadOnlyProbeSql), which this grant does not touch.
+GRANT INSERT ON {config}.config_monitored_servers TO {viewer};
 -- #3314: the DELIVERY cooldown -- the sole throttle on a Slack/Teams/PagerDuty/webhook post -- is the one
 -- alert-engine knob stored on config_notification rather than config_alert_settings, so update_alert_settings
 -- spans two tables and needs a write here. This DOES widen mcp into a table holding bearer secrets (the SMTP

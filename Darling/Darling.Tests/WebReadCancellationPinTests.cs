@@ -53,14 +53,14 @@ public sealed class WebReadCancellationPinTests
     /// <summary>
     /// An <see cref="HttpContext"/> whose request is already aborted, carrying query values for the few
     /// required text parameters (<c>get_query_trend</c>'s <c>query_hash</c> / <c>database_name</c>, and
-    /// <c>get_wait_trend</c>'s <c>wait_type</c>) so a dispatch entry with a synchronous "is this parameter
+    /// <c>get_wait_trend</c>'s <c>wait_type</c>, <c>get_alert_details</c>'s alert key) so a dispatch entry with a synchronous "is this parameter
     /// present" gate still reaches its store call instead of returning a missing-parameter envelope with
     /// nothing cancelled.
     /// </summary>
     private static HttpContext CancelledRequest()
     {
         var context = new DefaultHttpContext();
-        context.Request.QueryString = new QueryString("?query_hash=deadbeef&database_name=probe&counter_name=x&wait_type=CXPACKET&metric=total_waits");
+        context.Request.QueryString = new QueryString("?query_hash=deadbeef&database_name=probe&counter_name=x&wait_type=CXPACKET&metric=total_waits&server_id=1&metric_name=x&alert_time=2026-01-01T00:00:00Z");
         context.RequestAborted = new CancellationToken(canceled: true);
         return context;
     }

@@ -88,6 +88,15 @@ public static class DarlingWebEndpoints
         set => s_testOnlyExtraDispatchEntry.Value = value;
     }
 
+    /// <summary>Reads served on <c>/api/read/*</c> that are NOT an MCP tool (#5241): the web page's own keyed reads.
+    /// <c>get_alert_details</c> returns one alert's advice when its row is opened, so the Alert History poll does not
+    /// carry every row's advice. They are the only dispatch keys with no <c>[McpServerTool]</c> behind them; the
+    /// parity test adds exactly this set to the tool catalog.</summary>
+    internal static readonly IReadOnlySet<string> WebOnlyReadNames = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_alert_details",
+    };
+
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
     /// makes a live monitored-server connection; <c>mute_analysis_finding</c> writes; the <c>analyze_*_plan</c> family
     /// is the compute-heavy plan-analysis phase-2 work; the Custom Views tools (#1599) are served by their OWN
@@ -444,6 +453,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCustomAlerts(app, postgres, logger);
         MapMuteRules(app, postgres, logger);
         MapServerTags(app, postgres, logger);
+        MapAdminServers(app, postgres);
+        MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
@@ -984,6 +995,404 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
     }
 
+    /// <summary>How long one <c>POST /api/servers</c> request may hold the one-at-a-time slot.</summary>
+    internal static readonly TimeSpan ServerAddSlotTimeout = TimeSpan.FromSeconds(120);
+
+    internal const string ServerAddTimedOutText = "Adding servers took too long; check the server list before retrying. If every later add is refused as busy, restart the service.";
+
+    /// <summary>The most servers one <c>POST /api/servers</c> request may carry.</summary>
+    internal const int MaxServersPerAddRequest = 20;
+
+    /// <summary>The most request-body bytes the add route reads before it answers 400 (twenty entries are a few KB).</summary>
+    internal const int MaxServerAddBodyBytes = 64 * 1024;
+
+    /// <summary>What a redacted secret is replaced with in any text the add route puts on the wire or in a log.</summary>
+    private const string RedactedSecret = "[redacted]";
+
+    /// <summary>
+    /// <c>POST /api/servers</c>: adds monitored servers (the web twin of the MCP <c>add_servers</c> tool). The body
+    /// is the same JSON ARRAY of server objects the tool takes, and the route hands it to the SAME core
+    /// (<see cref="DarlingMcpServerAdminTools.AddServersAsync(NpgsqlDataSource, string, DarlingMcpServerAdminTools.ServerProbe, CancellationToken)"/>),
+    /// so the web surface accepts exactly what the tool accepts, probes the server from the service before saving,
+    /// and answers with the core's own <c>{requested, added, skipped, collided, failed, results}</c> envelope. The
+    /// core's whole-request refusal (<c>{"status":"invalid"}</c>) is a 400; every other envelope is a 200, with
+    /// each entry's outcome in <c>results</c>.
+    ///
+    /// <para><b>Gates.</b> A read-only seat is refused by the host's group-level write gate
+    /// (<see cref="DarlingWebSeat.IsRequestAllowed"/>) and again here, because this is the one route that carries a
+    /// credential. <c>application/json</c> is required (415 otherwise, the CSRF defense the mute routes use). At most
+    /// <see cref="MaxServersPerAddRequest"/> servers per request (400 above that). One add runs at a time per host
+    /// process: a second request that arrives while one is running answers 429, because each entry is probed over
+    /// the network and a caller must not be able to queue unbounded probes from the service. The write runs on the
+    /// host's <c>viewer</c> pool, whose <c>INSERT</c> on <c>config_monitored_servers</c> is the floor beneath the
+    /// seat gate; <c>encrypted_password</c> stays SELECT-carved from it.</para>
+    ///
+    /// <para><b>Credentials.</b> A password or client secret travels only in the request body. The route never echoes
+    /// the body, never logs it, and every 400 it composes is a fixed sentence (a parse failure names no part of the
+    /// body, because a JSON parser's message can quote the character it stopped at). Any submitted secret that
+    /// appears in the core's answer is replaced with <see cref="RedactedSecret"/> before it is written, as a
+    /// backstop: the core's answers carry none today. The core's caught-exception envelope never reaches the wire
+    /// either: it answers through <see cref="ServerErrorResult"/>'s fixed body, like every other write route.</para>
+    ///
+    /// <para><b>Audit.</b> Who added a server is not stored on the row, so one Information line per added server is
+    /// the record: the editor principal, the server name and the auth mode, never the secret.</para>
+    /// </summary>
+    internal static void MapServers(
+        WebApplication app, NpgsqlDataSource postgres, ILogger logger,
+        Func<string, Task<string>>? addServers = null,
+        TimeSpan? addTimeout = null)
+    {
+        var slotTimeout = addTimeout ?? ServerAddSlotTimeout;
+
+        /* One gate per host: MapAll runs once per process. */
+        var addInFlight = new SemaphoreSlim(1, 1);
+
+        /* The seam a test stands a stub probe or a held add in through; production runs the core itself. */
+        addServers ??= body => DarlingMcpServerAdminTools.AddServers(postgres, body);
+
+        app.MapPost("/api/servers", async (HttpContext context) =>
+        {
+            if (!DarlingWebSeat.FromContext(context).CanEdit)
+            {
+                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+            }
+
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            string body;
+            try
+            {
+                body = await ReadBoundedBodyAsync(context, MaxServerAddBodyBytes);
+            }
+            catch (InvalidDataException)
+            {
+                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+            }
+
+            if (!TryReadServerAddBody(body, out var entries, out var refusal))
+            {
+                return ErrorResult(refusal!, StatusCodes.Status400BadRequest);
+            }
+
+            if (!addInFlight.Wait(0))
+            {
+                return ErrorResult("A server add is already running. Wait for it to finish, then try again.", StatusCodes.Status429TooManyRequests);
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+
+            /* Two exits can free the slot: this handler, when the add finished inside the wait, and the
+               add's own continuation, when it outlives the wait. They run on different threads and either
+               may be first, so both go through one object that frees the slot at most once. */
+            var slot = new SingleReleaseSlot(addInFlight);
+
+            /* The core takes no request token, like the tool: a client that disconnects mid-batch must not
+               leave the entries after it unattempted while the ones before it are already saved and unaudited. */
+            Task<string> running;
+            try
+            {
+                running = addServers(body);
+            }
+            catch (Exception ex)
+            {
+                /* addServers threw before returning a task: nothing is running, so free the slot here. Only the
+                   exception TYPE is logged: its message could quote a value the request carried. EVERY synchronous
+                   throw is caught, cancellation included: the slot is no longer released in a finally, so a type
+                   that escaped this catch would hold it for the life of the process and answer 429 forever. */
+                slot.Release();
+                return ServerErrorResult(
+                    $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
+            }
+
+            /* The slot is freed by the add itself, once, when it finishes (completed or faulted) - never by
+               the wait's timeout, so an add that outlives the timeout still holds the slot. */
+            _ = running.ContinueWith(_ => slot.Release(), TaskScheduler.Default);
+
+            string result;
+            try
+            {
+                result = await running.WaitAsync(slotTimeout);
+            }
+            catch (TimeoutException)
+            {
+                _ = running.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                logger.LogWarning("POST /api/servers: the add did not finish within {Seconds} s; the slot stays held until it does", (int)slotTimeout.TotalSeconds);
+                return ErrorResult(ServerAddTimedOutText, StatusCodes.Status503ServiceUnavailable);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* The core catches its own faults, so this is a backstop; only the TYPE is logged. */
+                return ServerErrorResult(
+                    $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
+            }
+            finally
+            {
+                /* An add that finished inside the wait frees the slot here, before any response is produced,
+                   so a client that posts again the moment it reads this answer finds the slot free rather than
+                   racing the continuation above. An add still running (the timeout path) keeps it: only its
+                   own continuation frees it. */
+                if (running.IsCompleted)
+                {
+                    slot.Release();
+                }
+            }
+
+            var secrets = SubmittedSecrets(entries);
+
+            if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
+            {
+                return ServerErrorResult(RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets), "/api/servers", logger, stopwatch.ElapsedMilliseconds);
+            }
+
+            var answer = RedactAddAnswer(result, secrets);
+            LogServerAddFailures(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, answer);
+            LogServerAdds(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, entries, answer);
+            return Results.Text(answer, "application/json", statusCode: MuteRuleEnvelopeStatus(answer));
+        });
+    }
+
+    /// <summary>
+    /// Frees one acquired slot of a one-slot gate at most once, however many exits call <see cref="Release"/> and in
+    /// whatever order. A plain second <c>Release</c> is not harmless: if another add has already taken the slot in
+    /// between, the extra release frees the slot that add holds, and a third add runs beside it.
+    /// </summary>
+    internal sealed class SingleReleaseSlot
+    {
+        private readonly SemaphoreSlim gate;
+        private int held = 1;
+
+        internal SingleReleaseSlot(SemaphoreSlim gate)
+        {
+            this.gate = gate;
+        }
+
+        /// <summary>Frees the slot on the first call; every later call does nothing.</summary>
+        internal void Release()
+        {
+            if (Interlocked.Exchange(ref held, 0) == 1)
+            {
+                gate.Release();
+            }
+        }
+    }
+
+    /// <summary>
+    /// PURE: parses the add body into its entries. False with a fixed, caller-facing <paramref name="refusal"/>
+    /// when the body is not a JSON array of 1 to <see cref="MaxServersPerAddRequest"/> objects. The refusal names
+    /// no part of the body.
+    /// </summary>
+    internal static bool TryReadServerAddBody(string body, out List<JsonObject> entries, out string? refusal)
+    {
+        entries = new List<JsonObject>();
+        refusal = null;
+
+        JsonNode? root;
+        try
+        {
+            root = JsonNode.Parse(body);
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException)
+        {
+            refusal = "Request body is not valid JSON.";
+            return false;
+        }
+
+        if (root is not JsonArray array)
+        {
+            refusal = "Request body must be a JSON array of server objects.";
+            return false;
+        }
+
+        if (array.Count == 0)
+        {
+            refusal = "Request body must hold at least one server object.";
+            return false;
+        }
+
+        if (array.Count > MaxServersPerAddRequest)
+        {
+            refusal = $"A request may add at most {MaxServersPerAddRequest} servers; send the rest in another request.";
+            return false;
+        }
+
+        foreach (var element in array)
+        {
+            if (element is not JsonObject entry)
+            {
+                refusal = "Every entry must be a JSON object.";
+                return false;
+            }
+
+            try
+            {
+                /* A duplicate property name throws ArgumentException on the first enumeration; force it here so it
+                   answers 400, like the dismiss route. */
+                _ = entry.Count;
+            }
+            catch (ArgumentException)
+            {
+                refusal = "An entry has a duplicate field.";
+                return false;
+            }
+
+            entries.Add(entry);
+        }
+
+        return true;
+    }
+
+    /// <summary>The non-empty <c>password</c> values the request carried (a SQL password or a service-principal client secret).</summary>
+    private static List<string> SubmittedSecrets(List<JsonObject> entries)
+    {
+        var secrets = new List<string>();
+        foreach (var entry in entries)
+        {
+            if (TryGetString(entry, "password") is { Length: > 0 } secret)
+            {
+                secrets.Add(secret);
+            }
+        }
+
+        return secrets;
+    }
+
+    /// <summary>PURE: <paramref name="text"/> with every occurrence of every secret replaced.</summary>
+    internal static string RedactSecrets(string text, IReadOnlyList<string> secrets)
+    {
+        foreach (var secret in secrets)
+        {
+            text = text.Replace(secret, RedactedSecret, StringComparison.Ordinal);
+        }
+
+        return text;
+    }
+
+    /// <summary>The core's envelope with any submitted secret removed from its free-text fields (<c>detail</c>,
+    /// <c>message</c>, <c>server</c>). The envelope keeps its shape; an envelope that does not parse is replaced
+    /// by a fixed refusal rather than passed through unredacted.</summary>
+    internal static string RedactAddAnswer(string answer, IReadOnlyList<string> secrets)
+    {
+        if (secrets.Count == 0)
+        {
+            return answer;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(answer) is not JsonObject envelope)
+            {
+                return RedactSecrets(answer, secrets);
+            }
+
+            RedactField(envelope, "message", secrets);
+            if (envelope["results"] is JsonArray results)
+            {
+                foreach (var row in results.OfType<JsonObject>())
+                {
+                    RedactField(row, "detail", secrets);
+                    RedactField(row, "server", secrets);
+                }
+            }
+
+            return envelope.ToJsonString();
+        }
+        catch (JsonException)
+        {
+            return "{\"status\":\"error\",\"message\":\"The answer could not be read.\"}";
+        }
+    }
+
+    private static void RedactField(JsonObject node, string key, IReadOnlyList<string> secrets)
+    {
+        if (node[key] is JsonValue value && value.TryGetValue<string>(out var text))
+        {
+            node[key] = RedactSecrets(text, secrets);
+        }
+    }
+
+    /// <summary>The auth mode an add entry names, in the words the tool documents; absent means Windows.</summary>
+    private static string AuthModeOf(JsonObject entry) => TryGetString(entry, "auth")?.Trim().ToLowerInvariant() switch
+    {
+        null or "" or "windows" => "Windows",
+        "sql" => "SQL",
+        "serviceprincipal" => "ServicePrincipal",
+        "managedidentity" => "ManagedIdentity",
+        _ => "other",
+    };
+
+    /// <summary>One Information line per failed row with the core's full detail (secrets already redacted), so the
+    /// operator keeps what the web answer no longer shows.</summary>
+    private static void LogServerAddFailures(ILogger logger, string principal, string answer)
+    {
+        try
+        {
+            if (JsonNode.Parse(answer) is JsonObject envelope && envelope["results"] is JsonArray results)
+            {
+                foreach (var row in results.OfType<JsonObject>())
+                {
+                    var status = TryGetString(row, "status");
+                    if (status != DarlingMcpServerAdminTools.AddStatus.ConnectionFailed && status != DarlingMcpServerAdminTools.AddStatus.NotSaved)
+                    {
+                        continue;
+                    }
+
+                    logger.LogInformation(
+                        "Server add failed for {Principal}: {Server}, {Status}: {Detail}",
+                        DarlingHttpRefusalLog.Sanitize(principal, 256),
+                        DarlingHttpRefusalLog.Sanitize(TryGetString(row, "server") ?? "", 256),
+                        status,
+                        DarlingHttpRefusalLog.Sanitize(TryGetString(row, "detail") ?? "", 1024));
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            /* An unreadable answer has no rows to log. */
+        }
+    }
+
+    /// <summary>One Information line per server this request ADDED: who, which server and its auth mode. Request
+    /// text is sanitized before it reaches the log; the secret is never read here.</summary>
+    private static void LogServerAdds(ILogger logger, string principal, List<JsonObject> entries, string answer)
+    {
+        var authByName = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var entry in entries)
+        {
+            var host = TryGetString(entry, "host")?.Trim();
+            var name = TryGetString(entry, "display_name") is { Length: > 0 } displayName ? displayName.Trim() : host;
+            if (!string.IsNullOrEmpty(name))
+            {
+                authByName.TryAdd(name, AuthModeOf(entry));
+            }
+        }
+
+        try
+        {
+            if (JsonNode.Parse(answer) is JsonObject { } envelope && envelope["results"] is JsonArray results)
+            {
+                foreach (var row in results.OfType<JsonObject>())
+                {
+                    if (TryGetString(row, "status") != DarlingMcpServerAdminTools.AddStatus.Added)
+                    {
+                        continue;
+                    }
+
+                    var server = TryGetString(row, "server") ?? "";
+                    logger.LogInformation(
+                        "Server added by {Principal}: {Server}, auth {AuthMode}",
+                        DarlingHttpRefusalLog.Sanitize(principal, 256), DarlingHttpRefusalLog.Sanitize(server, 256), authByName.GetValueOrDefault(server, "other"));
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            /* The answer was written by the core; an unreadable one has no added rows to audit. */
+        }
+    }
+
     /// <summary>The most alert keys one dismiss request may carry.</summary>
     internal const int MaxDismissKeys = 1000;
 
@@ -1166,6 +1575,24 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         return System.Text.Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+    }
+
+    /// <summary>
+    /// <c>GET /api/admin/servers</c> (#5239): the Admin page's Manage Servers grid - every configured server,
+    /// enabled or disabled, with its authentication mode, monthly cost and added time (see
+    /// <see cref="DarlingAdminServersReader"/>). It is a web-only route: <c>list_servers</c> keeps its
+    /// enabled-only answer for every other consumer, and a route here adds nothing to the MCP <c>tools/list</c>.
+    /// The gate is the one every web route sits behind (the sign-in gate, then the seat's method gate, which
+    /// lets a read-only seat make a GET); the read runs on the viewer-role pool, whose column grant on
+    /// <c>config_monitored_servers</c> leaves out the credential columns, and the statement names none of them.
+    /// </summary>
+    internal static void MapAdminServers(WebApplication app, NpgsqlDataSource postgres)
+    {
+        app.MapGet(DarlingAdminServersReader.Route, async (HttpContext context) =>
+        {
+            var rows = await DarlingAdminServersReader.ReadAsync(postgres, context.RequestAborted);
+            return Results.Text(DarlingAdminServersReader.Render(rows, DateTime.UtcNow), "application/json");
+        });
     }
 
     /// <summary>
@@ -2200,7 +2627,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>#4617: named so the MCP read census (<see cref="Darling.Tests.McpReadCommandTimeoutTests"/>)
     /// recognises the <c>NpgsqlCommand(string, connection)</c> construction below as a store read rather
     /// than an unrecognised receiver.</summary>
-    private const string QueryStoreWideSchemaVersionSql = "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version";
+    internal const string QueryStoreWideSchemaVersionSql = "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version";
 
     /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
     private const string QueryStoreWideServerIdsSql =
@@ -3600,6 +4027,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── alerts / mute rules (DarlingMcpAlertTools) ── */
             ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid).", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false)),
             ["get_alert_settings"] = R(CatAlerts, "The current alert-settings configuration."),
+            /* #5241: a web-only read (no MCP tool behind it, see WebOnlyReadNames): one alert's advice and fix script,
+               fetched when its Analysis row is first expanded. The key is the page's own row identity. */
+            ["get_alert_details"] = R(CatAlerts, "One fired alert's advice: the heading, fields, advice text and fix script the desktop's Alert Detail shows (never the Apply payload), found by server_id, metric_name and alert_time exactly as get_alert_history reports them. An alert with no advice, or no match, answers an empty details list.", new CatalogParam("server_id", TypeInt, true, null), PReqText("metric_name"), PReqText("alert_time")),
             ["get_mute_rules"] = R(CatAlerts, "The alert mute rules (enabled-only by default).", PBool("enabled_only", true)),
             /* #3598: a read the web host's viewer role can serve — the tool selects only the non-secret carve
                (route_id, metric_match, the GENERATED configured_channels presence column, smtp_recipients,
@@ -3708,6 +4138,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_ag_health"] = R(CatOverview, "Availability Group topology: replicas and per-database secondary state.", PServer(), PLimit(DarlingMcpAgTools.DefaultGroupLimit)),
             ["get_store_metrics"] = R(CatOverview, "The monitoring store's own size/compression/growth (self-metrics): a summary by default, object_kind to list one kind, an exact object_name for one object's daily series.", PInt("days_back", 30), PText("object_kind"), PText("object_name"), PLimit(DarlingMcpStoreMetricsTools.DefaultLimit)),
             ["get_store_log"] = R(CatOverview, "What the monitoring store's OWN PostgreSQL server log recorded - a per-class census with the capture denominator beside it, not the lines. Deliberately unbanded.", PHours(24), PLimit(DarlingMcpStoreLogTools.DefaultRetainedLimit), PAsOf()),
+            ["get_store_query_history"] = R(CatOverview, "The monitoring store's OWN SQL statements hour by hour (pg_stat_statements deltas the service snapshots every hour): the top statements over the window by time spent, or one statement's hourly series with query_id.", PText("query_id"), PText("role"), PHours(DarlingMcpStoreQueryHistoryTools.DefaultHours), PTop(DarlingMcpStoreQueryHistoryTools.DefaultTop)),
             ["get_store_query_stats"] = R(CatOverview, "The monitoring store's OWN SQL statements ranked by server-side cost (pg_stat_statements), split by the role that ran them (on a managed store: the web viewer, MCP tools, the Darling Viewer, or the service itself).", PText("role"), PText("order_by"), PTop(DarlingMcpStoreQueryStatsTools.DefaultTop), PBool("full_text", false)),
             ["get_store_host"] = R(CatOverview, "The monitoring store's own HOST profile: platform/RAM/data volume, PostgreSQL/TimescaleDB facts, and a verdict per sizing-relevant setting against what this host would derive today - is the store sized right. No parameters; a snapshot."),
             ["get_collector_cost"] = R(CatOverview, "The monitoring tool's OWN per-collector cost on the monitored servers (self-monitoring) - which of our collectors is the most expensive to run. Pass collector_name for that one collector's daily trend instead of the ranked list.", PInt("days_back", 7), PText("collector_name")),
@@ -4451,6 +4882,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── alerts / mute rules ── */
             ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false), cancellationToken: c.RequestAborted),
+            ["get_alert_details"] = (c, pg, an) => First(c, "server_id") is null ? MissingParam("server_id")
+                : !RequireText(c, "metric_name", out var detailsMetric) ? MissingParam("metric_name")
+                : !RequireText(c, "alert_time", out var detailsTime) ? MissingParam("alert_time")
+                : int.TryParse(First(c, "server_id"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var detailsServerId)
+                    ? DarlingMcpAlertTools.GetAlertDetails(pg, detailsServerId, detailsMetric, detailsTime, c.RequestAborted)
+                    : DarlingMcpAlertTools.GetAlertDetails(pg, 0, "", detailsTime, c.RequestAborted),
             ["get_alert_settings"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertSettings(pg, c.RequestAborted),
             ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true), c.RequestAborted),
             ["get_notification_routes"] = (c, pg, an) => DarlingMcpAlertTools.GetNotificationRoutes(pg, c.RequestAborted),
@@ -4485,7 +4922,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
             ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
 
             /* ── automatic plan correction (#2028) ── */
@@ -4524,7 +4961,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* #3960: the core trends a page charts take the CHART budget and bind bucket_minutes, as the trends
                below do (#3897). */
             ["get_cpu_utilization"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_file_io_stats"] = (c, pg, an) => DarlingMcpDataTools.GetFileIoStats(pg, Server(c), c.RequestAborted),
             ["get_memory_clerks"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryClerks(pg, Server(c), c.RequestAborted),
@@ -4545,7 +4982,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
             ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c), c.RequestAborted),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", cancellationToken: c.RequestAborted),
             ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", cancellationToken: c.RequestAborted),
@@ -4563,7 +5000,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_pg_io_stats"] = (c, pg, an) => DarlingMcpPgIoTools.GetPgIoStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_wait_stats"] = (c, pg, an) => DarlingMcpPgWaitTools.GetPgWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_cpu_utilization"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_pg_wait_sampling"] = (c, pg, an) => DarlingMcpPgWaitSamplingTools.GetPgWaitSampling(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_kernel_stats"] = (c, pg, an) => DarlingMcpPgKernelStatsTools.GetPgKernelStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -4581,13 +5018,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_pg_log_events"] = (c, pg, an) => DarlingMcpPgLogEventTools.GetPgLogEvents(pg, Server(c), Hours(c, 24), Str(c, "family"), Str(c, "min_severity"), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_wait_trend"] = (c, pg, an) => DarlingMcpPgTrendTools.GetPgWaitTrend(pg, Server(c), Str(c, "wait_event"), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpPgTrendTools.GetPgQueryDurationTrend(pg, Server(c), Str(c, "queryid"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpPgTrendTools.GetPgQueryDurationTrend(pg, Server(c), Str(c, "queryid"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_pg_io_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpPgTrendTools.GetPgIoTrend(pg, Server(c), Str(c, "backend_type"), Str(c, "context"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpPgTrendTools.GetPgIoTrend(pg, Server(c), Str(c, "backend_type"), Str(c, "context"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_pg_database_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpPgTrendTools.GetPgDatabaseTrend(pg, Server(c), Str(c, "database"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpPgTrendTools.GetPgDatabaseTrend(pg, Server(c), Str(c, "database"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_pg_replication_stats"] = (c, pg, an) => DarlingMcpPgReplicationStatsTools.GetPgReplicationStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_blocking"] = (c, pg, an) => DarlingMcpPgBlockingTools.GetPgBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -4598,7 +5035,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_wait_stats"] = (c, pg, an) => DarlingMcpDataTools.GetWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_wait_trend"] = (c, pg, an) => RequireText(c, "wait_type", out var waitType)
                 ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                    ? DarlingMcpDataTools.GetWaitTrend(pg, waitType, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                    ? DarlingMcpDataTools.GetWaitTrend(pg, waitType, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("wait_type"),
             ["get_wait_types"] = (c, pg, an) => DarlingMcpDataTools.GetWaitTypes(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -4609,26 +5046,26 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                should read — and bind bucket_minutes, refusing a value that is not a number rather than quietly
                sizing the points itself (the OptionalDouble rule). */
             ["get_file_io_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetFileIoTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "database_name"), TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpTrendTools.GetFileIoTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "database_name"), TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_memory_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetMemoryTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpTrendTools.GetMemoryTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_server_trend"] = (c, pg, an) => RequireText(c, "metric", out var serverTrendMetric)
                 ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                    ? DarlingMcpServerTrendTools.GetServerTrend(pg, serverTrendMetric, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "clerk_types"), Str(c, "names"), TrendBudget.Chart, c.RequestAborted)
+                    ? DarlingMcpServerTrendTools.GetServerTrend(pg, serverTrendMetric, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "clerk_types"), Str(c, "names"), TrendBudget.Chart, cancellationToken: c.RequestAborted)
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("metric"),
             ["get_perfmon_trend"] = (c, pg, an) => RequireText(c, "counter_name", out var counter)
                 ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                    ? DarlingMcpTrendTools.GetPerfmonTrend(pg, counter, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                    ? DarlingMcpTrendTools.GetPerfmonTrend(pg, counter, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("counter_name"),
             ["get_procedure_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                ? DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_query_store_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_query_trend"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
@@ -4645,6 +5082,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c), Rows(c, "limit", DarlingMcpAgTools.DefaultGroupLimit), c.RequestAborted),
             ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), c.RequestAborted),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), c.RequestAborted),
+            ["get_store_query_history"] = (c, pg, an) => DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(pg, Str(c, "query_id"), Str(c, "role"), Hours(c, DarlingMcpStoreQueryHistoryTools.DefaultHours), Rows(c, "top", DarlingMcpStoreQueryHistoryTools.DefaultTop), logger: logger, cancellationToken: c.RequestAborted),
             ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false), c.RequestAborted),
             /* #4214 part 2: postgresConfig rides by closure (this method's own doc comment), the same way
                logger does for get_sweep_reports two screens up. StoreHostProfileCache.Shared as a direct

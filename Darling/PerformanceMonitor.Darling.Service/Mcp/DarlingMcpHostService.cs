@@ -811,6 +811,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                Lite has no managed PostgreSQL store to profile. */
             .WithGeminiCompatibleTools<DarlingMcpStoreHostTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreQueryStatsTools>()
+            .WithGeminiCompatibleTools<DarlingMcpStoreQueryHistoryTools>()
             .WithGeminiCompatibleTools<DarlingMcpCollectorCostTools>()
             /* #2880 get_collector_stall_probes - the out-of-band server-wide wait samples taken
                while one of OUR collectors was stalled mid-read. Darling-only: the arm is installed by

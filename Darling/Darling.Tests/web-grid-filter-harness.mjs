@@ -168,6 +168,60 @@ const scenarios = {
     button(w2, "grid-filter-clear").click();
     out.afterBoxClear = shown(w2);
   },
+  operators() {
+    const ocols = [
+      { key: "name", label: "Name" },
+      { key: "cpu", label: "CPU", format: "int" },
+      { key: "pct", label: "Pct", format: "pct" },
+      { key: "seen", label: "Seen", format: "time" },
+    ];
+    const orows = [
+      { name: "alpha", cpu: 1000, pct: 12.5, seen: "2026-01-02T03:04:05Z" },
+      { name: "beta", cpu: 950, pct: 0, seen: null },
+      { name: "gamma", cpu: 0, pct: null, seen: "2026-01-03T00:00:00Z" },
+      { name: "", cpu: null, pct: 99, seen: "" },
+      { name: "-", cpu: 90, pct: 100, seen: "2026-01-04T00:00:00Z" },
+    ];
+    let n = 0;
+    const g = () => { globalThis.location = { hash: "#/server/a/ops" + n++ }; return build({ columns: ocols, groups: undefined, defaultGroups: undefined }, orows); };
+    const pick = (w, i, op, text) => { open(w, i); const sel = all(w).find((x) => x.className === "grid-filter-op"); sel.value = op; sel.fire("change"); if (text !== undefined) type(w, text); return shown(w); };
+    const names = (w) => tbodyOf(w).children.filter((t) => t.style.display !== "none").map((t) => t.children[0].textContent);
+    const run = (i, op, text) => { const w = g(); pick(w, i, op, text); return names(w); };
+    out.cpuOps = all(((w) => { open(w, 1); return w; })(g())).find((x) => x.className === "grid-filter-op").children.map((o) => o.textContent);
+    out.nameOps = all(((w) => { open(w, 0); return w; })(g())).find((x) => x.className === "grid-filter-op").children.map((o) => o.textContent);
+    out.timeOps = all(((w) => { open(w, 3); return w; })(g())).find((x) => x.className === "grid-filter-op").children.map((o) => o.textContent);
+    out.defaultContains = (() => { const w = g(); open(w, 1); type(w, "1,0"); return names(w); })();
+    out.noPick = (() => { const w = g(); open(w, 0); return !!all(w).find((x) => x.className === "grid-filter-input"); })();
+    out.gt900 = run(1, "gt", "900");
+    out.gt1000 = run(1, "gt", "1,000");
+    out.gte1000 = run(1, "gte", "1000");
+    out.lt950 = run(1, "lt", "950");
+    out.lte950 = run(1, "lte", "950");
+    out.eq1000 = run(1, "equals", "1000");
+    out.ne1000 = run(1, "notEquals", "1000");
+    out.pctGt50 = run(2, "gt", "50%");
+    out.textGtNotNumber = run(1, "gt", "abc");
+    out.eqAlpha = run(0, "equals", "ALPHA");
+    out.eqList = run(0, "equals", "alpha, beta");
+    out.neList = run(0, "notEquals", "alpha, beta");
+    out.starts = run(0, "startsWith", "AL");
+    out.ends = run(0, "endsWith", "ta");
+    out.nameEmpty = run(0, "isEmpty");
+    out.nameNotEmpty = run(0, "isNotEmpty");
+    out.cpuEmpty = run(1, "isEmpty");
+    out.cpuNotEmpty = run(1, "isNotEmpty");
+    out.pctEmpty = run(2, "isEmpty");
+    out.seenEmpty = run(3, "isEmpty");
+    out.seenNotEmpty = run(3, "isNotEmpty");
+    const w = g(); pick(w, 1, "gt", "900");
+    out.chip = chips(w);
+    const w2 = (globalThis.location = { hash: globalThis.location.hash }, build({ columns: ocols, groups: undefined, defaultGroups: undefined }, orows));
+    out.rebuilt = names(w2);
+    out.rebuiltOp = all(w2).find((x) => x.className === "grid-filter-op").value;
+    const w3 = g(); pick(w3, 1, "isEmpty");
+    out.emptyChip = chips(w3);
+    out.emptyBoxHidden = all(w3).find((x) => x.className === "grid-filter-input").style.display;
+  },
   plain() {
     globalThis.location = { hash: "#/server/a/plain" };
     const w = build({ filter: false });

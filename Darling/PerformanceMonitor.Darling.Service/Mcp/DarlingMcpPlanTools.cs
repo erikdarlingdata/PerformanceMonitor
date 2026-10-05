@@ -143,15 +143,19 @@ public sealed class DarlingMcpPlanTools
 
         try
         {
-            var xml = await DarlingStoredPlanReader.GetQueryStorePlanTextAsync(
-                postgres, resolved.ServerId, database_name, query_id, plan_id, cancellationToken);
+            var read = await DarlingStoredPlanReader.ResolveQueryStorePlanAsync(
+                postgres, resolved.ServerId, database_name, query_id, plan_id, cancellationToken: cancellationToken);
+            var xml = read?.PlanXml;
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}. The plan may not have been collected yet, the database's Query Store may be off or its capture mode may exclude this query, or the plan has been purged.");
 
-            var identifier = plan_id is null ? $"{database_name}:{query_id}" : $"{database_name}:{query_id}:{plan_id}";
+            /* #5257: the identifier always names the plan that was analysed. Without a plan_id the read picks the
+               newest plan that has content, which is not necessarily the newest plan the query ran under (a plan
+               not yet fetched is skipped), so the caller needs the plan_id to tell. */
+            var identifier = $"{database_name}:{query_id}:{read!.PlanId}";
             // #4530/#4597: one store read per call so rule 38 can see the server's edition/MAXDOP, and the
             // Server Context card can see cost threshold/max memory/database.
             var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, database_name, cancellationToken);
