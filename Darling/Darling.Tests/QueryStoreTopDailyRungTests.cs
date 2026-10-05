@@ -37,7 +37,7 @@ public sealed class QueryStoreTopDailyRungTests
 
     private const string Built = "query_store_top_daily_built";
 
-    /// <summary>This rung's sentinel; the ordinal is a fact of the probe's shape, and it is the probe's last.</summary>
+    /// <summary>This rung's sentinel; the ordinal is a fact of the probe's shape. A newer rung's sentinel follows it.</summary>
     private const int ProbeOrdinal = 136;
 
     private const string SkipText = "Set DARLING_TEST_PG to a Postgres connection string to run the daily summary tables' live pins (each mints its own scratch database).";
@@ -93,13 +93,14 @@ public sealed class QueryStoreTopDailyRungTests
             || m.Sql.Contains("CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide\r\n", StringComparison.Ordinal)).Sql;
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder_AndIsTheTopRung()
+    public void TheRungIsRegisteredInADenseLadder_AtVersion161()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal(RungName, Rung.Name);
         Assert.Equal(161, Rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, Rung.Version);
+        /* No longer the top rung: V162 (the slow-read record) landed above it. */
+        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
@@ -214,34 +215,34 @@ public sealed class QueryStoreTopDailyRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheTableAsItsLastArm_AndMapsFullyMigratedToTheTopRung()
+    public void TheProbeCarriesTheTableAsAnArm_AndMapsItsRungOnce()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = $"to_regclass('collect.{Daily}') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.LastIndexOf("EXISTS", StringComparison.Ordinal) < probe.IndexOf(arm, StringComparison.Ordinal),
-            "the new arm is the probe's last EXISTS, so it reads at the next ordinal");
+        Assert.True(probe.IndexOf(arm, StringComparison.Ordinal) < probe.IndexOf("collect.slow_reads", StringComparison.Ordinal),
+            "the newer rung's sentinel follows this one");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        Assert.True(ProbeOrdinal < arity - 1, "a newer rung's sentinel follows this one");
         Assert.Equal("hasQueryStoreTopDaily", method.GetParameters()[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
+        var all = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(Rung.Version, (int)method.Invoke(null, all)!);
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var behind = (object[])all.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(Rung.Version - 1, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasQueryStoreTopDaily)", StringComparison.Ordinal);
+        var nextArm = viewer.IndexOf("if (hasSlowReads)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasCollectorRunAt)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "no sentinel arm: a fully-migrated store would map one rung short");
+        Assert.True(nextArm >= 0 && nextArm < thisArm, "the newer rung's arm sits above this one's");
         Assert.True(thisArm < previousArm, "this arm sits above the previous rung's, so a current store maps one rung short");
         Assert.Contains($"return {Rung.Version};", viewer[thisArm..previousArm], StringComparison.Ordinal);
 

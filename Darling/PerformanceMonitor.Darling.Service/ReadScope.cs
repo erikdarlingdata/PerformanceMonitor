@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 
@@ -43,7 +45,102 @@ internal sealed class ReadScope
     private readonly object _gate = new();
     private ReadFallback? _fallback;
 
-    private ReadScope(ILogger? logger) => Logger = logger;
+    /// <summary>The most statements one scope keeps; later ones are counted in <see cref="StatementsDropped"/>.</summary>
+    internal const int MaxStatements = 64;
+
+    /// <summary>The fixed vocabulary <see cref="NoteSource"/> accepts.</summary>
+    internal const string SourceRaw = "raw";
+    internal const string SourceIntervalTable = "interval_table";
+    internal const string SourceHourlyEdges = "hourly_edges";
+
+    private readonly ConcurrentQueue<StatementTiming> _statements = new();
+    private int _statementCount;
+    private int _statementsDropped;
+    private string? _source;
+    private string? _sourceReason;
+    private long _rows = -1;
+    private int _serverId = -1;
+
+    private ReadScope(ILogger? logger)
+    {
+        Logger = logger;
+        StartedUtc = DateTime.UtcNow;
+    }
+
+    /// <summary>When the scope opened.</summary>
+    internal DateTime StartedUtc { get; }
+
+    /// <summary>True when the recorder wants per-statement timings: the process-wide Npgsql listener samples
+    /// commands only inside a scope with this set.</summary>
+    internal bool CaptureStatements { get; set; }
+
+    /// <summary>Statements that arrived after the queue held <see cref="MaxStatements"/>.</summary>
+    internal int StatementsDropped => Volatile.Read(ref _statementsDropped);
+
+    /// <summary>The source a reader noted (<c>raw</c>, <c>interval_table</c>, <c>hourly_edges</c>), or null.</summary>
+    internal string? Source { get { lock (_gate) { return _source; } } }
+
+    /// <summary>The short reason noted with <see cref="Source"/>, or null.</summary>
+    internal string? SourceReason { get { lock (_gate) { return _sourceReason; } } }
+
+    /// <summary>The row count a reader noted, or null.</summary>
+    internal long? Rows { get { var r = Interlocked.Read(ref _rows); return r < 0 ? null : r; } }
+
+    /// <summary>The monitored server id the read resolved, or null for a store-wide or fleet read.</summary>
+    internal int? ServerId { get { var id = Volatile.Read(ref _serverId); return id < 0 ? null : id; } }
+
+    /// <summary>Notes the server a read resolved. Ignored outside a scope; the first one noted stays.</summary>
+    internal static void NoteServer(int serverId)
+    {
+        if (s_current.Value is { } scope && serverId >= 0)
+        {
+            Interlocked.CompareExchange(ref scope._serverId, serverId, -1);
+        }
+    }
+
+    /// <summary>Notes which source answered. Ignored outside a scope or for a name outside the fixed vocabulary.</summary>
+    internal static void NoteSource(string source, string? reason = null)
+    {
+        var scope = s_current.Value;
+        if (scope is null || (source != SourceRaw && source != SourceIntervalTable && source != SourceHourlyEdges))
+        {
+            return;
+        }
+
+        lock (scope._gate)
+        {
+            scope._source = source;
+            scope._sourceReason = reason is { Length: > 64 } ? reason[..64] : reason;
+        }
+    }
+
+    /// <summary>Notes the row count the read returned. Ignored outside a scope.</summary>
+    internal static void NoteRows(long n)
+    {
+        if (s_current.Value is { } scope)
+        {
+            Interlocked.Exchange(ref scope._rows, Math.Max(0, n));
+        }
+    }
+
+    /// <summary>Appends one statement timing; past <see cref="MaxStatements"/> it is only counted.</summary>
+    internal void AddStatement(string? sql, double durationMs, long? rows)
+    {
+        var ordinal = Interlocked.Increment(ref _statementCount);
+        if (ordinal > MaxStatements)
+        {
+            Interlocked.Increment(ref _statementsDropped);
+            return;
+        }
+
+        _statements.Enqueue(new StatementTiming(ordinal, StatementLabel.Label(sql), StatementLabel.Hash(sql), durationMs, rows));
+    }
+
+    /// <summary>Every statement the scope saw, including the ones past <see cref="MaxStatements"/> that were only counted.</summary>
+    internal int StatementTotal => Volatile.Read(ref _statementCount);
+
+    /// <summary>The captured statements in arrival order (for tests).</summary>
+    internal IReadOnlyList<StatementTiming> Snapshot() => _statements.ToArray();
 
     /// <summary>The scope the calling async flow runs inside, or null outside any recorder.</summary>
     internal static ReadScope? Current => s_current.Value;

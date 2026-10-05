@@ -247,7 +247,17 @@ internal static class DarlingDataReader
     public sealed record TopProcedureRow(
         string DatabaseName, string SchemaName, string ObjectName, string ObjectType, string SqlHandle, string PlanHandle,
         long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long TotalLogicalReads, long TotalLogicalWrites,
-        long TotalPhysicalReads, long TotalSpills, long MinCpuUs, long MaxCpuUs, long MinElapsedUs, long MaxElapsedUs);
+        long TotalPhysicalReads, long TotalSpills, long MinCpuUs, long MaxCpuUs, long MinElapsedUs, long MaxElapsedUs,
+        /* The desktop grid's remaining columns; null on the hourly tier, which does not carry them. */
+        TopProcedureDetail? Detail = null);
+
+    /// <summary>The per-group extremes and times the desktop Top Procedures grid shows beyond the core ranking
+    /// columns. Every field is null when the store has no value. <c>LastExecutionTime</c> and <c>CachedTime</c>
+    /// are naive UTC, converted from the monitored server's clock at the read.</summary>
+    public sealed record TopProcedureDetail(
+        DateTime? LastExecutionTime, DateTime? CachedTime,
+        long? MinLogicalReads, long? MaxLogicalReads, long? MinPhysicalReads, long? MaxPhysicalReads,
+        long? MinLogicalWrites, long? MaxLogicalWrites, long? MinSpills, long? MaxSpills);
 
     /// <summary>
     /// One Query Store (database, query_id, plan_id, query_hash, replica_role) group's interval averages.
@@ -1742,7 +1752,17 @@ internal static class DarlingDataReader
             MIN(min_worker_time) AS min_worker_time,
             MAX(max_worker_time) AS max_worker_time,
             MIN(min_elapsed_time) AS min_elapsed_time,
-            MAX(max_elapsed_time) AS max_elapsed_time
+            MAX(max_elapsed_time) AS max_elapsed_time,
+            MAX(last_execution_time) AS last_execution_time,
+            MAX(cached_time) AS cached_time,
+            MIN(min_logical_reads) AS min_logical_reads,
+            MAX(max_logical_reads) AS max_logical_reads,
+            MIN(min_physical_reads) AS min_physical_reads,
+            MAX(max_physical_reads) AS max_physical_reads,
+            MIN(min_logical_writes) AS min_logical_writes,
+            MAX(max_logical_writes) AS max_logical_writes,
+            MIN(min_spills) AS min_spills,
+            MAX(max_spills) AS max_spills
         FROM procedure_stats
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -1846,6 +1866,9 @@ internal static class DarlingDataReader
         }
 
         var rows = new List<TopProcedureRow>();
+        /* The two detail timestamps are stored on the monitored server's own clock; they are converted to naive
+           UTC per row through the server's clock, as every other server-local column on the MCP surface is. */
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var command = postgres.CreateCommand(TopProceduresSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
@@ -1871,10 +1894,23 @@ internal static class DarlingDataReader
                 reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
                 reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
                 reader.IsDBNull(15) ? 0 : reader.GetInt64(15),
-                reader.IsDBNull(16) ? 0 : reader.GetInt64(16)));
+                reader.IsDBNull(16) ? 0 : reader.GetInt64(16),
+                ReadTopProcedureDetail(reader, 17, clock)));
         }
 
         return new TopProceduresReadResult(rows, RetentionTier.Raw);
+    }
+
+    /// <summary>The detail columns of <see cref="TopProceduresSql"/>, ten consecutive fields from
+    /// <paramref name="first"/>: two timestamps (converted to naive UTC through <paramref name="clock"/>) and eight
+    /// integer extremes.</summary>
+    private static TopProcedureDetail ReadTopProcedureDetail(NpgsqlDataReader reader, int first, ServerClock clock)
+    {
+        DateTime? Time(int i) => DarlingServerClockReader.ToUtc(clock, reader, first + i);
+        long? Long(int i) => reader.IsDBNull(first + i) ? null : Convert.ToInt64(reader.GetValue(first + i), CultureInfo.InvariantCulture);
+        return new TopProcedureDetail(
+            Time(0), Time(1),
+            Long(2), Long(3), Long(4), Long(5), Long(6), Long(7), Long(8), Long(9));
     }
 
     /// <summary>
@@ -2429,6 +2465,8 @@ internal static class DarlingDataReader
                 postgres, serverId, startUtc, endUtc, top, databaseName, executionType, moduleName, cancellationToken);
             if (table is var (tableRows, tablePlan, dailyDays, dailySpan))
             {
+                ReadScope.NoteSource(ReadScope.SourceIntervalTable);
+                ReadScope.NoteRows(tableRows.Count);
                 return new QueryStoreTopRead(tableRows, tablePlan, dailyDays, dailySpan);
             }
         }
@@ -2447,6 +2485,8 @@ internal static class DarlingDataReader
             rows.Add(ReadQueryStoreTopRow(reader));
         }
 
+        ReadScope.NoteSource(ReadScope.SourceRaw);
+        ReadScope.NoteRows(rows.Count);
         return new QueryStoreTopRead(rows, null);
     }
 
