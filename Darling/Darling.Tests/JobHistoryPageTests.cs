@@ -195,4 +195,42 @@ public sealed class JobHistoryPageTests
         Assert.Contains("Showing the newest 2 runs; more matched.", text);
         Assert.Equal(0, run.GetProperty("quiet").GetProperty("noticeCount").GetInt32());
     }
+
+    [Fact]
+    public void ARebuildInPlaceKeepsTheTypedTextFocusAndCaretWithOneRead()
+    {
+        var inPlace = Run().GetProperty("inPlace");
+        Assert.Single(inPlace.GetProperty("calls").EnumerateArray());
+        Assert.Equal("Other", inPlace.GetProperty("job").GetString());
+        Assert.True(inPlace.GetProperty("focused").GetBoolean());
+        Assert.Equal("2,3", string.Join(",", inPlace.GetProperty("caret").EnumerateArray().Select(x => x.GetInt32())));
+    }
+
+    [Fact]
+    public void AnEmptyAnswersWindowFactsAreReadFromItsHints()
+    {
+        var empty = Run().GetProperty("emptyPartial");
+        Assert.Equal(1, empty.GetProperty("noticeCount").GetInt32());
+        Assert.Contains("partial window: the store keeps job history from ", empty.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void RowsAreColouredLikeTheDesktopGridAndTheCountIsShown()
+    {
+        var coloured = Run().GetProperty("coloured");
+        Assert.Equal("sev-Critical,sev-Warning,band-Offline,sev-Warning,", string.Join(",", Strings(coloured.GetProperty("rowClasses"))));
+        Assert.Contains("5 runs shown", coloured.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void TheServerChoicesListSqlServerTargetsOnly()
+    {
+        Assert.Equal(",srv-a,srv-b", string.Join(",", Strings(Run().GetProperty("first").GetProperty("servers"))));
+    }
+
+    [Fact]
+    public void TheRunTimeColumnIsAnInstantFieldSoACustomRangeTrimsTheGrid()
+    {
+        Assert.Matches("INSTANT_FIELDS = \\[[^\\]]*\"run_time\"", Wwwroot("js", "util.js"));
+    }
 }

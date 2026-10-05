@@ -56,7 +56,7 @@ export const JOB_HISTORY_COLUMNS = [
 
 /* The filter state, kept across the 60 s rebuild. `jobDraft` is the job text as typed, applied on Enter or when
    the box loses focus; `job` is the text the last read used. */
-const state = { server: "", hours: 24, status: "", category: "", limit: 100, job: "", jobDraft: "", jobFocused: false };
+const state = { server: "", hours: 24, status: "", category: "", limit: 100, job: "", jobDraft: "", jobFocused: false, jobCaret: null };
 /* The categories seen in any answer, so the Category choices survive a filter that narrows the next answer. */
 const seenCategories = new Set();
 /* The server choices from the last list_servers read, so the rebuild paints its select at once. */
@@ -70,6 +70,20 @@ function serverRows(data) {
   if (Array.isArray(data)) return data;
   if (data && Array.isArray(data.servers)) return data.servers;
   return [];
+}
+
+/* Agent history exists only on SQL Server targets; a server whose engine is not stamped yet stays on offer. */
+function isSqlServerTarget(r) {
+  return !/postgres/i.test(String(r && r.engine_kind ? r.engine_kind : ""));
+}
+
+/** The row class for the desktop grid's colour coding: failed and long-running red/amber, retry amber, canceled grey. */
+export function runRowClass(r) {
+  if (!r) return "";
+  if (r.status === "Failed") return "sev-Critical";
+  if (r.is_long_running === true || r.status === "Retry") return "sev-Warning";
+  if (r.status === "Canceled") return "band-Offline";
+  return "";
 }
 
 function select(label, options, value, onPick) {
@@ -162,6 +176,7 @@ export function renderJobHistory(main) {
   job.value = state.jobDraft;
   job.addEventListener("input", () => {
     state.jobDraft = job.value;
+    state.jobCaret = [job.selectionStart, job.selectionEnd];
   });
   job.addEventListener("focus", () => {
     state.jobFocused = true;
@@ -170,9 +185,14 @@ export function renderJobHistory(main) {
     state.jobDraft = job.value;
     if (state.jobDraft.trim() !== state.job) reload();
   };
+  /* The rebuild removes this box, and the browser fires blur DURING the removal while the box is still connected,
+     so the check waits a turn: a removed box neither clears the focus nor reads again. */
   job.addEventListener("blur", () => {
-    state.jobFocused = false;
-    apply();
+    setTimeout(() => {
+      if (!job.isConnected) return;
+      state.jobFocused = false;
+      apply();
+    }, 0);
   });
   job.addEventListener("keydown", (e) => {
     if (e.key === "Enter") apply();
@@ -192,7 +212,10 @@ export function renderJobHistory(main) {
     ]),
     body,
   ]);
-  if (state.jobFocused && typeof job.focus === "function") job.focus();
+  if (state.jobFocused && typeof job.focus === "function") {
+    job.focus();
+    if (state.jobCaret && typeof job.setSelectionRange === "function") job.setSelectionRange(state.jobCaret[0], state.jobCaret[1]);
+  }
 
   async function load() {
     const ticket = ++loadSeq;
@@ -207,7 +230,7 @@ export function renderJobHistory(main) {
       const data = res.data || {};
       const kept = keptWindowStrip(res);
       if (res.kind === "empty") {
-        return mount(body, [kept, noticeFor(retainedNote(data)), emptyStrip(res.message)]);
+        return mount(body, [kept, noticeFor(retainedNote(res.hints)), emptyStrip(res.message)]);
       }
       for (const r of data.runs || []) if (r.category) seenCategories.add(r.category);
       fill(category.sel, categoryOptions(), state.category);
@@ -215,7 +238,8 @@ export function renderJobHistory(main) {
         kept,
         noticeFor(retainedNote(data)),
         noticeFor(limitNote(data)),
-        VIZ.table(data, { id: "job-history", rowsKey: "runs", columns: JOB_HISTORY_COLUMNS, emptyText: "No job runs matched in the requested time range." }),
+        el("div", { class: "muted", text: (data.runs || []).length + " runs shown" }),
+        VIZ.table(data, { id: "job-history", rowsKey: "runs", columns: JOB_HISTORY_COLUMNS, rowClass: runRowClass, emptyText: "No job runs matched in the requested time range." }),
       ]);
     } catch (e) {
       if (ticket === loadSeq && e?.name !== "AbortError") mount(body, errorStrip("Could not render job history: " + (e && e.message ? e.message : String(e))));
@@ -226,7 +250,7 @@ export function renderJobHistory(main) {
   (async () => {
     const res = await readTool("list_servers", {}, controller.signal);
     if (mine !== pageSeq || res.kind !== "data") return;
-    knownServers = serverRows(res.data);
+    knownServers = serverRows(res.data).filter(isSqlServerTarget);
     fill(server.sel, serverOptions(), state.server);
   })();
   load();

@@ -27,13 +27,41 @@ class FakeNode {
     return this.children[0] || null;
   }
   appendChild(child) {
+    child.parent = this;
     this.children.push(child);
     return child;
   }
+  // Like the browser, a removed subtree that holds the focused box fires blur DURING the removal, while it is still attached.
   removeChild(child) {
     const i = this.children.indexOf(child);
-    if (i >= 0) this.children.splice(i, 1);
+    if (i < 0) return child;
+    const focused = [];
+    const find = (n) => {
+      if (n.focused && n.handlers.blur) focused.push(n);
+      n.children.forEach(find);
+    };
+    find(child);
+    for (const n of focused) {
+      n.focused = false;
+      n.handlers.blur();
+    }
+    this.children.splice(i, 1);
+    child.parent = null;
     return child;
+  }
+  get isConnected() {
+    let n = this;
+    while (n.parent) n = n.parent;
+    return n.isRoot === true;
+  }
+  get selectionStart() {
+    return this.caret ? this.caret[0] : this.value.length;
+  }
+  get selectionEnd() {
+    return this.caret ? this.caret[1] : this.value.length;
+  }
+  setSelectionRange(a, b) {
+    this.caret = [a, b];
   }
   setAttribute(name, value) {
     this.attrs[name] = String(value);
@@ -68,7 +96,7 @@ globalThis.document = {
 
 const fetches = [];
 let historyBody = "{}";
-const serversBody = JSON.stringify({ servers: [{ server_name: "srv-a", display_name: "Server A" }, { server_name: "srv-b" }] });
+const serversBody = JSON.stringify({ servers: [{ server_name: "srv-a", display_name: "Server A", engine_kind: "sqlserver" }, { server_name: "srv-b" }, { server_name: "pg-c", engine_kind: "postgres" }, { server_name: "pg-d", engine_kind: "aurora-postgres" }] });
 globalThis.fetch = async (url, init) => {
   fetches.push({ url: String(url), signal: init && init.signal ? true : false });
   const body = String(url).includes("/api/read/list_servers") ? serversBody : historyBody;
@@ -108,6 +136,7 @@ try {
   historyBody = JSON.stringify(run);
 
   const main = new FakeNode("div");
+  main.isRoot = true;
   const out = {};
   const snapshot = (root) => ({
     calls: historyCalls(),
@@ -141,6 +170,7 @@ try {
   // The poll rebuilds the page: the same choices, the typed text and the focus come back.
   fetches.length = 0;
   const again = new FakeNode("div");
+  again.isRoot = true;
   renderJobHistory(again);
   await settle();
   out.rebuilt = snapshot(again);
@@ -157,15 +187,49 @@ try {
   await settle();
   out.fleet = snapshot(again);
 
+  // The poll rebuilds the page INTO THE SAME container while text is being typed: the old box leaves (the browser fires
+  // blur during that removal), and the new box takes back the text, the focus and the caret, with one read.
+  fetches.length = 0;
+  const typing = byLabel(again, "Job name");
+  typing.value = "Other";
+  typing.caret = [2, 3];
+  typing.handlers.input();
+  typing.handlers.focus();
+  typing.focused = true;
+  renderJobHistory(again);
+  await settle();
+  const inPlace = byLabel(again, "Job name");
+  out.inPlace = { calls: historyCalls(), job: inPlace.value, focused: inPlace.focused, caret: inPlace.caret || null };
+
   // The notices.
   historyBody = JSON.stringify({ ...run, truncated: true, window_truncated: true, effective_start: "2026-03-01T08:00:00Z" });
   const noticed = new FakeNode("div");
+  noticed.isRoot = true;
   renderJobHistory(noticed);
   await settle();
   out.notices = { text: noticed.textContent, noticeCount: all(noticed, "div").filter((d) => d.className === "strip notice").length };
 
+  // An empty answer carries its window facts under hints.
+  historyBody = JSON.stringify({ status: "empty", message: "No job runs matched in the requested time range.", hints: { effective_start: "2026-03-01T08:00:00Z", window_truncated: true } });
+  const emptyPartial = new FakeNode("div");
+  emptyPartial.isRoot = true;
+  renderJobHistory(emptyPartial);
+  await settle();
+  out.emptyPartial = { text: emptyPartial.textContent, noticeCount: all(emptyPartial, "div").filter((d) => d.className === "strip notice").length };
+
+  // Row colours, the runs-shown line, and the server choices (SQL Server targets only).
+  historyBody = JSON.stringify({ ...run, runs: [
+    { ...run.runs[0], status: "Failed" }, { ...run.runs[1], status: "Retry" }, { ...run.runs[1], status: "Canceled" },
+    { ...run.runs[1], status: "Succeeded", is_long_running: true }, { ...run.runs[1], status: "Succeeded", is_long_running: false } ] });
+  const coloured = new FakeNode("div");
+  coloured.isRoot = true;
+  renderJobHistory(coloured);
+  await settle();
+  out.coloured = { rowClasses: all(coloured, "tbody").flatMap((t) => t.children.map((tr) => tr.attrs.class || tr.className || "")), text: coloured.textContent };
+
   historyBody = JSON.stringify({ ...run, truncated: false, window_truncated: false });
   const quiet = new FakeNode("div");
+  quiet.isRoot = true;
   renderJobHistory(quiet);
   await settle();
   out.quiet = { noticeCount: all(quiet, "div").filter((d) => d.className === "strip notice").length };
