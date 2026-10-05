@@ -473,12 +473,26 @@ GROUP BY f.queryid";
     /// The notice from the history's OWN start (the earliest capture that read the extension, over all time), not a collector
     /// table's probe. A failed read answers <see cref="McpWindowNotice.Unavailable"/>: it costs the keys, never the answer.
     /// </summary>
+    private static readonly AsyncLocal<bool> s_failEarliestRead = new();
+
+    /// <summary>A test's switch that makes the earliest-capture read fail, per async flow.</summary>
+    internal static bool TestOnlyFailEarliestRead
+    {
+        get => s_failEarliestRead.Value;
+        set => s_failEarliestRead.Value = value;
+    }
+
     private static async Task<McpWindowNotice> ReadNoticeAsync(
         NpgsqlDataSource postgres, DateTime windowStart, bool emptyAnswer, ILogger? logger, CancellationToken ct)
     {
         try
         {
             DateTime? floor;
+            if (s_failEarliestRead.Value)
+            {
+                throw new InvalidOperationException("test-only: the earliest-capture read failed");
+            }
+
             await using (var command = postgres.CreateCommand(EarliestCaptureSql))
             {
                 command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
