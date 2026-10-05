@@ -387,8 +387,9 @@
     //   "encryptedToken": "<output of --encrypt-password>",  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
     //
     //   // OPTIONAL: the one DNS name clients use to reach MCP (no scheme, port or wildcard). The anti-DNS-rebind
-    //   // Host guard admits "listen", localhost and exactly this name, and no others. Set it to the name on
-    //   // the certificate below, so a client that connects by name is not answered with a 400.
+    //   // Host guard admits "listen", localhost, this name and loopback addresses (and any IP address when listen
+    //   // is 0.0.0.0 or ::), and no other name. The name is admitted only while MCP is exposed. Set it to the
+    //   // name on the certificate below, so a client that connects by name is not answered with a 400.
     //   "hostName": "darling.example.com",
     //
     //   // OPTIONAL TLS (#5288) -- omit the whole block for plain HTTP. Give ONE form, never both. It is the MCP
