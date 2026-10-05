@@ -9,13 +9,13 @@
 using System;
 using System.Collections.Generic;
 
-namespace PerformanceMonitor.Darling.Viewer;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Where an EVENT surface says its data starts (#4966). Blocked process reports, deadlocks and the other grids that
 /// list events filter on the event's own time, and a server's first collection stores the server's event history, so
 /// a row can carry an event time from before the server was added. The shared probe
-/// (<see cref="PerformanceMonitor.Darling.Storage.DataWindowFloor"/>) answers where the collector's COVERAGE starts:
+/// (<see cref="DataWindowFloor"/>) answers where the collector's COVERAGE starts:
 /// the later of the server's first collection and the table's retention edge. A notice that named only that would name
 /// a time later than the earliest row the grid shows, and read as a cut where history reaches further back.
 ///
@@ -35,7 +35,7 @@ public static class ViewerEventDataStart
     /// (<paramref name="coverageStartUtc"/> null: the range ends before the server's first collection, or the collector never
     /// ran in it), yet the grid can still list history, because an event carries its own time and a server's first collection
     /// stores the events that came before it: the notice names the earliest event shown, and the notice's own check
-    /// (<see cref="PerformanceMonitor.Darling.Storage.RawWindowFloor.IsTruncated"/>) raises it only when that comes later than
+    /// (<see cref="RawWindowFloor.IsTruncated"/>) raises it only when that comes later than
     /// the range's start by more than the slack. Or it FAILED (<paramref name="probeFailed"/>): the store could not vouch
     /// for anything, so the notice names nothing, and the grid's own first row does not stand in for the coverage.</para>
     ///

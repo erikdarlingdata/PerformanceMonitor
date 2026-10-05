@@ -11,6 +11,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
