@@ -7,7 +7,7 @@
  */
 
 /* FinOps "Storage Growth" tab, from get_finops (view storage_growth). Three levels held as state in the tab: databases
-   (the default), objects (a click on a database: its fastest-growing tables with a 30-day size heatmap) and indexes (a
+   (the default), objects (a click on a database: its fastest-growing tables with a size heatmap over the 7, 30 or 90 day window) and indexes (a
    click on a table: its indexes and their usage). Back returns one level; the breadcrumb names the path. Nothing goes
    in the URL. The heatmap is a matrix table; each cell's shade class comes from the service's band and the browser
    computes nothing. */

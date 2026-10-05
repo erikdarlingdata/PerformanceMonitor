@@ -56,7 +56,7 @@ public sealed class FinOpsStorageGrowthViewTests
     {
         var tail = McpToolGuideTests.Served("get_finops").Tail;
         Assert.NotNull(tail);
-        foreach (var fact in new[] { "24 (the default) means 30 days", "from 7 to 90", "at most 12 objects", "is refused above 20", "up to 50 rows", "up to 30 rows", "[mb, band]", "log1p(mb)", "not UTC", "object_name without database_name" })
+        foreach (var fact in new[] { "24 (the default) means 30 days", "from 7 to 90", "at most 12 objects", "is refused above 20", "up to 50 rows", "up to 30 rows", "[mb, band]", "log1p(mb)", "not UTC", "object_name without database_name", "limit below 20, or a window over 30 days (at most 12 objects)", "understated when the store holds less history than the window" })
             Assert.Contains(fact, tail, StringComparison.Ordinal);
     }
 
@@ -191,12 +191,13 @@ public sealed class FinOpsStorageGrowthViewTests
     public void NinetyDayWindow_AtItsObjectCap_SerialisesUnder32768Bytes_AndTwentyObjectsWouldNot()
     {
         var cap = DarlingMcpFinOpsTools.StorageGrowthObjectCap(90);
-        var atCap = LongWindowObjectsBytes(cap, 90);
-        var atTwenty = LongWindowObjectsBytes(DarlingMcpFinOpsTools.MaxStorageGrowthObjects, 90);
-        Console.WriteLine($"storage_growth 90-day objects worst case bytes: {cap} objects {atCap}, 20 objects {atTwenty}");
+        /* A 90-day window spans up to 91 UTC dates (date_trunc over [now-90d, now]), so the worst case is 91 day columns. */
+        var atCap = LongWindowObjectsBytes(cap, 91);
+        var atTwenty = LongWindowObjectsBytes(DarlingMcpFinOpsTools.MaxStorageGrowthObjects, 91);
+        Console.WriteLine($"storage_growth 91-day-column objects worst case bytes: {cap} objects {atCap}, 20 objects {atTwenty}");
         Assert.Equal(12, cap);
-        Assert.True(atCap <= 32768, $"90 days x {cap} objects is {atCap}");
-        Assert.True(atTwenty > 32768, $"90 days x 20 objects is {atTwenty}, so the cap is not needed");
+        Assert.True(atCap <= 32768, $"91 day columns x {cap} objects is {atCap}");
+        Assert.True(atTwenty > 32768, $"91 day columns x 20 objects is {atTwenty}, so the cap is not needed");
     }
 
     [Theory]
@@ -536,6 +537,11 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         Assert.Equal(90, objects.GetProperty("window_days").GetInt32());
         Assert.Equal(30, objects.GetProperty("days").GetArrayLength());
         Assert.Equal(4, objects.GetProperty("rows").GetArrayLength());
+        /* Documented, not corrected: the rate is growth over the window divided by the window's days, so 30 days of history read at 90 days
+           reports a third of the real rate (290 MB / 90, not 290 MB / 30). */
+        var bigRow = objects.GetProperty("rows").EnumerateArray().Single(o => o.GetProperty("object_name").GetString() == "dbo.Big");
+        Assert.Equal(290m, bigRow.GetProperty("growth_mb").GetDecimal());
+        Assert.Equal(Math.Round(290m / 90m, 2), bigRow.GetProperty("daily_growth_rate_mb").GetDecimal());
         Assert.Equal(2160, quarter.RootElement.GetProperty("hours_back").GetInt32());
         /* The indexes level takes the same window. */
         using var indexes = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 2160, 10, "Alpha", object_name: "dbo.Big", cancellationToken: ct));
@@ -548,7 +554,7 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
-        foreach (var view in new[] { "utilization", "index_analysis", "high_impact", "database_resources", "application_connections", "optimization" })
+        foreach (var view in DarlingMcpFinOpsTools.Views.Where(v => v != DarlingMcpFinOpsTools.StorageGrowthView))
         {
             var refused = await DarlingMcpFinOpsTools.GetFinOps(ds, view, ServerName, 2160, 10, cancellationToken: ct);
             Assert.True(McpHelpers.IsRefusalEnvelope(refused), $"{view}: {refused}");
