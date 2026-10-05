@@ -1071,6 +1071,85 @@ ORDER BY bucket";
     }
 
     /// <summary>
+    /// #5098: the earliest XE blocked process report in the window, with the SAME predicate and database filter as
+    /// <see cref="HasBlockedProcessReportsInWindowAsync"/>. Null when there is none. Opens its own connection.
+    /// </summary>
+    public async Task<DateTime?> GetEarliestBlockedProcessReportInWindowAsync(int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        command.CommandText = "SELECT MIN(ev.event_time) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + " AS ev";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+
+        return await command.ExecuteScalarAsync() is DateTime first ? first : null;
+    }
+
+    /// <summary>
+    /// #5098: the blocked process threshold's history over the window, the same three outputs as the Darling viewer's
+    /// <c>BlockedProcessThresholdOnSql</c>: on at the window's start (the newest snapshot at or before it is above zero), the
+    /// earliest snapshot inside (start, end] that is above zero, and whether any snapshot in or before the window was zero.
+    /// <c>capture_time</c> is UTC, like every Lite store column. No snapshots reads as (false, null, false), which
+    /// <see cref="PerformanceMonitor.Common.BlockingThresholdCoverage.Combine"/> leaves unchanged. Opens its own connection.
+    /// </summary>
+    public async Task<(bool OnAtWindowStart, DateTime? FirstOnInWindow, bool SawZeroSnapshot)> GetBlockedProcessThresholdOnAsync(int serverId, DateTime startUtc, DateTime endUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+WITH before AS (
+    SELECT c.value_in_use
+    FROM v_server_config AS c
+    WHERE c.server_id = $1 AND c.configuration_name = 'blocked process threshold (s)' AND c.capture_time <= $2
+    ORDER BY c.capture_time DESC
+    LIMIT 1),
+inside AS (
+    SELECT c.capture_time, c.value_in_use
+    FROM v_server_config AS c
+    WHERE c.server_id = $1 AND c.configuration_name = 'blocked process threshold (s)' AND c.capture_time > $2 AND c.capture_time <= $3)
+SELECT
+    COALESCE((SELECT b.value_in_use > 0 FROM before AS b), FALSE),
+    (SELECT MIN(i.capture_time) FROM inside AS i WHERE i.value_in_use > 0),
+    EXISTS (SELECT 1 FROM before AS b WHERE b.value_in_use = 0) OR EXISTS (SELECT 1 FROM inside AS i WHERE i.value_in_use = 0)";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+
+        using var reader = await command.ExecuteReaderAsync();
+        await reader.ReadAsync();
+        return (reader.GetBoolean(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1), reader.GetBoolean(2));
+    }
+
+    /// <summary>
+    /// #5098: where the XE blocked process report data starts: the collector's coverage floor (<paramref name="collectorFloorOf"/>,
+    /// the <c>includeAlsoCovered: false</c> probe), the earliest report, and the threshold's history, through
+    /// <see cref="PerformanceMonitor.Common.BlockingThresholdCoverage.Combine"/> (the rule the Darling viewer uses). The three reads run
+    /// one after the other, each on its own connection; a throw from any of them is the caller's, so a failed probe costs only the note.
+    /// </summary>
+    public static async Task<DateTime?> CombineBlockingXeStartAsync(
+        Func<Task<DateTime?>> collectorFloorOf, Func<Task<DateTime?>> earliestReportOf,
+        Func<Task<(bool OnAtWindowStart, DateTime? FirstOnInWindow, bool SawZeroSnapshot)>> thresholdOf)
+    {
+        var collector = await collectorFloorOf();
+        var report = await earliestReportOf();
+        var threshold = await thresholdOf();
+        return PerformanceMonitor.Common.BlockingThresholdCoverage.Combine(
+            collector, report, threshold.OnAtWindowStart, threshold.FirstOnInWindow, threshold.SawZeroSnapshot);
+    }
+
+    /// <summary>#5098: the Blocking tab's XE start for a window: <see cref="CombineBlockingXeStartAsync"/> over this store.</summary>
+    public Task<DateTime?> GetBlockingXeDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null) =>
+        CombineBlockingXeStartAsync(
+            () => GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, serverId, startUtc, endUtc, includeAlsoCovered: false),
+            () => GetEarliestBlockedProcessReportInWindowAsync(serverId, startUtc, endUtc, databaseNames),
+            () => GetBlockedProcessThresholdOnAsync(serverId, startUtc, endUtc));
+
+    /// <summary>
     /// Gets blocking incident trend (count of distinct blocking events per time bucket).
     /// Uses blocked_process_reports from Extended Events for more reliable detection.
     /// Falls back to blocking_snapshots if no XE data available.
