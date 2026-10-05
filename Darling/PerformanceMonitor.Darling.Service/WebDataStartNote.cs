@@ -145,6 +145,12 @@ internal static class WebDataStartNote
         ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
         ["get_pg_replication_slots"] = "pg_replication_slot_stats",
         ["get_pg_write_stats"] = "pg_write_stats",
+
+        /* The PostgreSQL index usage read (#4966). scans_in_window is the difference between an index's first and last sample in the
+           window, off a collector that runs DAILY, so a short history gives a small difference and an index can look unused only
+           because it has been watched briefly. Both panels of its fanout (the totals and the per-index grid) show window figures, so
+           the page draws the web's own note and the tool's UTC keys are stripped. */
+        ["get_pg_index_usage"] = "pg_index_usage_stats",
     };
 
     /// <summary>
@@ -287,6 +293,10 @@ internal static class WebDataStartNote
            and found nothing". Wraparound answers unavailable, autovacuum no_pending_maintenance and slots no_slots without asking the log
            whether the collector ran, and write stats empty for a window too short to difference: none of them is admitted. */
         ["get_pg_xmin_horizon"] = "no_holder",
+
+        /* Index usage (#4966): empty means collection ran and every index is under the size floor, a looked-and-found-nothing answer.
+           Its unavailable (one snapshot, or none in the window) says nothing was read, and is not admitted. */
+        ["get_pg_index_usage"] = "empty",
     };
 
     /// <summary>

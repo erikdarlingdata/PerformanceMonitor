@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -30,6 +31,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgServerStateTools
 {
+    /// <summary>The collector table get_pg_write_stats reads, named in its window notice (#4966).</summary>
+    private const string WriteStatsTable = "pg_write_stats";
+
     /// <summary>
     /// The major that removed <c>buffers_backend</c> and <c>buffers_backend_fsync</c> from
     /// <c>pg_stat_bgwriter</c> (#2653). They moved nowhere in that view - the fact lives in
@@ -476,6 +480,7 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -486,8 +491,9 @@ public sealed class DarlingMcpPgServerStateTools
 
         try
         {
+            var requestedStart = windowEnd.AddHours(-hours_back);
             var row = await DarlingPgWriteStatsReader.GetPgWriteStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, cancellationToken);
+                postgres, resolved.ServerId, requestedStart, windowEnd, cancellationToken);
 
             if (row is null)
             {
@@ -498,8 +504,18 @@ public sealed class DarlingMcpPgServerStateTools
                         $"No checkpoint or WAL activity recorded for {resolved.ServerName} in the last "
                         + $"{hours_back} hour(s). These are differenced across snapshots, so a single "
                         + "collection has nothing to difference against and the window fills on the "
-                        + "second one.");
+                        + "second one.",
+                        /* #4966: the window keys ride on an empty answer under hints, from the coverage probe; not_collected (above) stays bare. */
+                        (await DarlingMcpWindowNotice.ReadAsync(
+                            () => DarlingMcpWindowNotice.Probe(postgres, WriteStatsTable, resolved.ServerName, requestedStart, windowEnd, cancellationToken),
+                            requestedStart, windowEnd, WriteStatsTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
             }
+
+            /* #4966: ONE row whose every figure is a first-to-last difference, so the span it covers IS the row's own first sample
+               (window_start) to its last. The keys are derived from that span, with no coverage probe: a first sample more than the
+               slack after the asked start reads as a cut window, as the web's own note for this tile reads it. */
+            var notice = DarlingMcpWindowNotice.Build(
+                row.WindowStartUtc, requestedStart, WriteStatsTable, "The figures cover only effective_start to window_end.");
 
             var timed = row.CheckpointsTimed ?? 0;
             var requested = row.CheckpointsRequested ?? 0;
@@ -526,6 +542,9 @@ public sealed class DarlingMcpPgServerStateTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 window_start = row.WindowStartUtc,
                 window_end = row.WindowEndUtc,
                 checkpoints_timed = row.CheckpointsTimed,

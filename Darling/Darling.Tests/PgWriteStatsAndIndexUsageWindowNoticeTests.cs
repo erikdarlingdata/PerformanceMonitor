@@ -204,8 +204,18 @@ VALUES ($1,$2,$3,$4,'db1','public','t1','ix_t1',$5, 0,0,0,0, 10485760, 20971520,
         var source = RepoFile.ReadRepoFileLf(System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgIndexTools.cs"));
         var at = source.IndexOf("Name = \"" + tool + "\"", StringComparison.Ordinal);
         Assert.True(at > 0, tool + " is not in DarlingMcpPgIndexTools.cs");
-        var next = source.IndexOf("[McpServerTool(", at + 10, StringComparison.Ordinal);
-        var body = next < 0 ? source[at..] : source[at..next];
+        /* The comment that explains the omission sits just above the attribute; the next tool's own comment sits above ITS attribute. */
+        var begin = source.LastIndexOf("/* #4966", at, StringComparison.Ordinal);
+        Assert.True(begin > 0 && at - begin < 1200, tool + " has no comment saying why it carries no window notice");
+        var nextAttribute = source.IndexOf("[McpServerTool(", at + 10, StringComparison.Ordinal);
+        var end = nextAttribute < 0 ? source.Length : nextAttribute;
+        var nextComment = source.LastIndexOf("/* #4966", end, StringComparison.Ordinal);
+        if (nextComment > at)
+        {
+            end = nextComment;
+        }
+
+        var body = source[begin..end];
 
         Assert.DoesNotContain("window_truncated", body, StringComparison.Ordinal);
         Assert.DoesNotContain("effective_start", body, StringComparison.Ordinal);
