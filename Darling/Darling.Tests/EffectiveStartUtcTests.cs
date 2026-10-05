@@ -136,6 +136,31 @@ public sealed class EffectiveStartUtcTests
     }
 
     /// <summary>
+    /// #4966: the nine Lite <c>get_health_parser_*</c> tools write <c>effective_start</c> from the shared notice
+    /// (<c>McpQueryTools.WindowNoticeAsync</c> -> <c>WindowNotice</c>, which prints through
+    /// <see cref="McpHelpers.FormatEffectiveStart(DateTime)"/>), never from a bare <c>ToString("o")</c> of the store's naive floor.
+    /// Each data answer writes the key once, from <c>notice.EffectiveStart</c>. The <c>empty</c> answers are built in one place,
+    /// the empty ladder's three <c>empty</c> rungs, which each pass the same notice under hints; the <c>unavailable</c> rung passes none.
+    /// The event-time form is not used: the probe reads <c>event_time</c>, the column the reads window on.
+    /// </summary>
+    [Fact]
+    public void EveryLiteHealthParserWindowFloorWrite_ComesFromTheSharedNotice()
+    {
+        var source = RepoFile.ReadRepoFile("Lite", "Mcp", "McpHealthParserTools.cs");
+        var writes = source
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("effective_start = ", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(9, writes.Count);
+        Assert.All(writes, line => Assert.Equal("effective_start = notice.EffectiveStart,", line));
+        Assert.Equal(3, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)").Count);
+        /* A call, not the doc comment that explains why there is none. */
+        Assert.DoesNotContain("EventWindowNoticeAsync(", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #4966, #5015: where a page's rows stop and start (<c>oldest_returned_*</c> and <c>newest_returned_*</c>: collection,
     /// event, deadlock and alert time) describe the window the page covers, so every tool that carries them prints them the
     /// same way as <c>effective_start</c>: UTC, with the Z, through the shared formatter, in both apps. The sweep reads
