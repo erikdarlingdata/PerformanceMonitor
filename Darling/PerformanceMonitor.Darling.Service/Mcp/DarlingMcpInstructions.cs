@@ -71,9 +71,11 @@ internal static class DarlingMcpInstructions
 
         Every tool FAILURE — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{"status":"error","message":"Error during <tool_name>: <what went wrong>","hints":{"operation":"<tool_name>"}}`. It is the fifth `status` word and the only one that is not an answer about the data: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema. A REFUSAL — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{"status":"invalid","message":"<what was refused, and what is accepted>","hints":{"parameter":"<parameter_name>"}}`. The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there. Six `status` words, then: four kinds of nothing, one failure (`error`: retry or report), one refusal (`invalid`: correct the call).
 
-        ### PostgreSQL waits come from one of three instruments
+        `window_truncated` true: the window starts before the store's data, not a cut page (`effective_start`, `truncation_note`).
 
-        A PostgreSQL target's wait history comes from exactly ONE instrument: Aurora native > the `pg_wait_sampling` extension > the service-side sampler. Aurora gets `engine_cumulative`; others read `get_pg_wait_sampling`'s `instrument`: `extension_sampled` (10 ms profiler) or `service_sampled` (no extension; once-a-second poll) — a FLOOR, not parity, but better than none.
+        ### PostgreSQL wait instruments
+
+        Waits come from ONE instrument: Aurora native > the `pg_wait_sampling` extension > the service-side sampler. Aurora gets `engine_cumulative`; others read `get_pg_wait_sampling`'s `instrument`: `extension_sampled` or `service_sampled` — a FLOOR, not parity.
 
         ### Asking about a PAST window
 

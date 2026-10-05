@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -147,6 +148,77 @@ internal static class DarlingStoredPlanReader
         """;
 
     /// <summary>
+    /// The Query Store plan for ONE plan_id as it is stored since #2210: the fact rows carry no plan text (the
+    /// collector ships a NULL placeholder), and a plan lives ONCE in <c>query_plan_dim</c>, reached through
+    /// <c>collect.query_store_plan_map</c> on its primary key (server_id, database_name, plan_id). Two index
+    /// lookups, no fact-table scan: a plan_id belongs to exactly one query_id in its database, so the fact
+    /// table adds nothing once the plan_id is known.
+    /// <para>
+    /// The dimension join is a LEFT join on purpose, so the read distinguishes the two ways of coming back
+    /// empty. NO row means the map has never heard of the plan (a pre-cutover plan, or one not yet fetched),
+    /// and the caller falls back to the inline column. A row whose columns are NULL means the map knows the
+    /// plan and has nothing to show: a NULL digest is the content-less marker for a plan the engine could
+    /// not persist, and a digest whose dimension row the dimension GC removed reads the same. That plan is
+    /// absent, and the inline column is not asked, because a post-cutover plan has nothing there.
+    /// </para>
+    /// The dimension row carries text, gzip bytes or (for the oldest rows) text only, so both columns come
+    /// back and the C# side resolves text-else-gz. $1 server_id, $2 database_name, $3 plan_id.
+    /// </summary>
+    public const string QueryStorePlanViaMapSql = """
+        SELECT d.query_plan_xml, d.query_plan_gz
+        FROM collect.query_store_plan_map AS m
+        LEFT JOIN query_plan_dim AS d
+          ON d.digest = m.digest
+        WHERE m.server_id = $1
+        AND   m.database_name = $2
+        AND   m.plan_id = $3
+        """;
+
+    /// <summary>
+    /// The plan_ids a query ran under in the last <see cref="UnpinnedLookbackDays"/> days, newest first (ties
+    /// broken by plan_id so the answer is deterministic). Used when the caller gave no plan_id: each candidate
+    /// is then resolved through <see cref="QueryStorePlanViaMapSql"/>. The time bound is what keeps this off
+    /// the cold history: <c>collection_time</c> is the hypertable's partitioning column, so chunk pruning keeps
+    /// the read on the newest chunks, and <c>idx_query_store_stats_server_db_query_plan_time</c> (server_id,
+    /// database_name, query_id, plan_id, collection_time) answers it there. That index covers the uncompressed
+    /// chunks only (a compressed chunk keeps an empty index shell, see PgTableTuning), so an unbounded read
+    /// would decompress every batch of the server. $1 server_id, $2 database_name, $3 query_id, $4 the
+    /// lower bound on collection_time.
+    /// </summary>
+    public const string QueryStorePlanCandidatesSql = """
+        SELECT plan_id, MAX(collection_time) AS last_collected
+        FROM query_store_stats
+        WHERE server_id = $1
+        AND   database_name = $2
+        AND   query_id = $3
+        AND   collection_time >= $4
+        AND   plan_id IS NOT NULL
+        GROUP BY plan_id
+        ORDER BY last_collected DESC, plan_id DESC
+        """;
+
+    /// <summary>
+    /// The same candidates with no time bound. Run ONCE, and only when the bounded pass resolved nothing: a
+    /// query that has not run in <see cref="UnpinnedLookbackDays"/> days still has a plan worth showing, and
+    /// this is the old behaviour for it. $1 server_id, $2 database_name, $3 query_id.
+    /// </summary>
+    public const string QueryStorePlanCandidatesUnboundedSql = """
+        SELECT plan_id, MAX(collection_time) AS last_collected
+        FROM query_store_stats
+        WHERE server_id = $1
+        AND   database_name = $2
+        AND   query_id = $3
+        AND   plan_id IS NOT NULL
+        GROUP BY plan_id
+        ORDER BY last_collected DESC, plan_id DESC
+        """;
+
+    /// <summary>
+    /// How far back the unpinned Query Store plan read looks before it gives up on the newest chunks.
+    /// </summary>
+    public const int UnpinnedLookbackDays = 7;
+
+    /// <summary>
     /// The stored execution plan XML for a query (query_stats), or null when no plan was captured for the
     /// key. Read as text — no length cap (the collector stored the whole plan; the MCP tool truncates for
     /// transport).
@@ -222,21 +294,131 @@ internal static class DarlingStoredPlanReader
     }
 
     /// <summary>
-    /// The stored Query Store execution plan for a query (query_store_stats.query_plan_text — Query Store
-    /// already stores plans as ShowPlanXML text), or null when no plan text was captured for the key.
+    /// The stored Query Store execution plan for a query, or null when none was captured for the key. See
+    /// <see cref="ResolveQueryStorePlanAsync"/> for how the plan is found; this keeps only the text.
     /// </summary>
     public static async Task<string?> GetQueryStorePlanTextAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, long? planId,
+        DateTime? asOf = null, CancellationToken cancellationToken = default)
+    {
+        var read = await ResolveQueryStorePlanAsync(postgres, serverId, databaseName, queryId, planId, asOf, cancellationToken);
+        return read?.PlanXml;
+    }
+
+    /// <summary>
+    /// The stored Query Store plan for a query and the plan_id it belongs to, or null when none was captured.
+    /// Since #2210 a plan is stored once in <c>query_plan_dim</c> and reached through
+    /// <c>collect.query_store_plan_map</c> (<see cref="QueryStorePlanViaMapSql"/>); rows written before that
+    /// carry the text inline on <c>query_store_stats.query_plan_text</c> (<see cref="QueryStorePlanTextSql"/>).
+    /// <para>
+    /// <b>Pinned</b> (a plan_id is given): the map is read by its primary key. The inline column is read ONLY
+    /// when the map has no row for that plan_id. A map row without content (a NULL-digest marker, or a digest
+    /// whose dimension row is gone) is absent, with no second look.
+    /// </para>
+    /// <para>
+    /// <b>Unpinned</b>: the plan_ids the query ran under in the last <see cref="UnpinnedLookbackDays"/> days
+    /// (counted back from <paramref name="asOf"/>, default now), newest first, each resolved as above until one
+    /// has content. Only if nothing resolves inside the bound does ONE unbounded pass run, for a query that
+    /// has not run for longer than that. The bound is what keeps the read on the newest hypertable chunks; see
+    /// <see cref="QueryStorePlanCandidatesSql"/>.
+    /// </para>
+    /// </summary>
+    public static async Task<QueryStorePlanRead?> ResolveQueryStorePlanAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, long? planId,
+        DateTime? asOf = null, CancellationToken cancellationToken = default)
+    {
+        databaseName ??= "";
+
+        if (planId is long pinned)
+        {
+            var plan = await ReadQueryStorePlanByIdAsync(postgres, serverId, databaseName, queryId, pinned, cancellationToken);
+            return plan is null ? null : new QueryStorePlanRead(plan, pinned);
+        }
+
+        var since = DateTime.SpecifyKind((asOf ?? DateTime.UtcNow).AddDays(-UnpinnedLookbackDays), DateTimeKind.Unspecified);
+        var tried = new HashSet<long>();
+        foreach (var candidate in await ReadCandidatePlanIdsAsync(postgres, QueryStorePlanCandidatesSql, serverId, databaseName, queryId, since, cancellationToken))
+        {
+            tried.Add(candidate);
+            var plan = await ReadQueryStorePlanByIdAsync(postgres, serverId, databaseName, queryId, candidate, cancellationToken);
+            if (plan is not null)
+            {
+                return new QueryStorePlanRead(plan, candidate);
+            }
+        }
+
+        foreach (var candidate in await ReadCandidatePlanIdsAsync(postgres, QueryStorePlanCandidatesUnboundedSql, serverId, databaseName, queryId, since: null, cancellationToken))
+        {
+            if (!tried.Add(candidate))
+            {
+                continue;
+            }
+
+            var plan = await ReadQueryStorePlanByIdAsync(postgres, serverId, databaseName, queryId, candidate, cancellationToken);
+            if (plan is not null)
+            {
+                return new QueryStorePlanRead(plan, candidate);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// One plan_id's plan: the map by its primary key, then (only when the map has no row) the inline column.
+    /// </summary>
+    public static async Task<string?> ReadQueryStorePlanByIdAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, long planId,
         CancellationToken cancellationToken = default)
     {
+        await using (var viaMap = postgres.CreateCommand(QueryStorePlanViaMapSql))
+        {
+            viaMap.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            viaMap.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            viaMap.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
+            viaMap.Parameters.Add(new NpgsqlParameter<long> { TypedValue = planId });
+            await using var reader = await viaMap.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                /* The map knows this plan_id: whatever it holds is the answer, including nothing. */
+                return PayloadDimensions.ResolveContent(
+                    reader.IsDBNull(0) ? null : reader.GetString(0),
+                    reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
+            }
+        }
+
         await using var command = postgres.CreateCommand(QueryStorePlanTextSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)planId ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = planId });
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is string s ? s : null;
+    }
+
+    private static async Task<List<long>> ReadCandidatePlanIdsAsync(
+        NpgsqlDataSource postgres, string sql, int serverId, string databaseName, long queryId, DateTime? since,
+        CancellationToken cancellationToken)
+    {
+        var planIds = new List<long>();
+        await using var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });
+        if (since is DateTime bound)
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = bound });
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            planIds.Add(reader.GetInt64(0));
+        }
+
+        return planIds;
     }
 
     /// <summary>
@@ -288,3 +470,6 @@ internal static class DarlingStoredPlanReader
             reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
     }
 }
+
+/// <summary>A Query Store plan and the plan_id it was stored under.</summary>
+internal sealed record QueryStorePlanRead(string PlanXml, long PlanId);
