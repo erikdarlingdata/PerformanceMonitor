@@ -87,16 +87,22 @@ internal sealed class BundleAliaser
         ["user_name"] = AliasKind.Login,
         ["client_addr"] = AliasKind.Ip,
         ["role_name"] = AliasKind.Role,
+        ["role"] = AliasKind.Role,
     };
 
     private static readonly HashSet<string> s_kept = new(KeptNames, StringComparer.OrdinalIgnoreCase);
 
     private const string Octet = @"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)";
     private const string Ipv4 = Octet + @"(?:\." + Octet + "){3}";
+    /* An IPv4 address written inside an IPv6 one (::ffff:10.20.30.40, 64:ff9b::10.20.30.40, 0:0:0:0:0:ffff:10.20.30.40).
+       It is tried before the plain IPv6 branches, which would otherwise stop at the first octet. */
+    private const string Ipv6WithIpv4 = @"(?:[0-9a-f]{0,4}:){2,7}" + Ipv4;
     private const string Ipv6 = @"(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,7}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,5})?|::(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4}";
 
     private readonly Dictionary<string, string> _aliasByToken = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<AliasKind, int> _counts = new();
+    private readonly Dictionary<AliasKind, int> _ordinals = new();
+    private readonly HashSet<string> _domainTokens = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<int, string> _aliasByServerId = new();
     private readonly List<string> _secrets = new();
     private readonly HashSet<string> _secretSet = new(StringComparer.Ordinal);
@@ -117,7 +123,7 @@ internal sealed class BundleAliaser
     {
         /* A secret equal to one of the kept product words (a lab password of "darling", say) cannot be removed from
            product text without destroying it, so it is not tracked. Documented limitation. */
-        if (!string.IsNullOrEmpty(secret) && !IsKept(secret) && _secretSet.Add(secret))
+        if (!string.IsNullOrWhiteSpace(secret) && !IsKept(secret) && _secretSet.Add(secret))
         {
             _secrets.Add(secret);
         }
@@ -171,7 +177,7 @@ internal sealed class BundleAliaser
             return;
         }
 
-        var name = raw.Trim().Trim('[', ']', '"', '\'', ' ');
+        var name = StripProtocol(raw.Trim().Trim('[', ']', '"', '\'', ' '));
         if (name.Length < TokenMinimumLength)
         {
             return;
@@ -226,6 +232,69 @@ internal sealed class BundleAliaser
         }
     }
 
+    /// <summary>Registers a DNS domain whole (an e-mail domain, a URL's registrable suffix) with no first-label split.</summary>
+    internal void AddDomain(string? raw)
+    {
+        var name = raw?.Trim().Trim('[', ']', '"', '\'', ' ', '.', '>', '<');
+        if (!string.IsNullOrEmpty(name) && name.Length >= TokenMinimumLength)
+        {
+            AliasOf(name, AliasKind.Domain);
+        }
+    }
+
+    private static readonly Regex s_protocolPrefix = new(@"^(?:tcp|np|lpc|admin):", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    /// <summary>
+    /// SQL Server connection spellings carry a protocol prefix (<c>tcp:host,1433</c>, <c>np:\\host\pipe\sql\query</c>,
+    /// <c>lpc:host</c>, <c>admin:host</c>). The prefix is dropped, and a named-pipe path is reduced to its host.
+    /// </summary>
+    private static string StripProtocol(string name)
+    {
+        var stripped = s_protocolPrefix.Replace(name, string.Empty, 1).Trim();
+
+        /* "admin:5432" is a host called admin with a port, not a protocol prefix. */
+        if (stripped.Length == name.Length || stripped.All(char.IsDigit))
+        {
+            return name;
+        }
+
+        if (stripped.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            var rest = stripped.TrimStart('\\');
+            var end = rest.IndexOf('\\', StringComparison.Ordinal);
+            return end < 0 ? rest : rest[..end];
+        }
+
+        return stripped;
+    }
+
+    /* A quoted WORD\word is a Windows account (domain and login): 'CORP\svc_darling' in a SQL Server 18456 message. */
+    private static readonly Regex s_quotedAccount = new(
+        @"(?<q>['""])(?<d>[A-Za-z0-9_.\-]{2,64})\\(?<l>[A-Za-z0-9_.$\-]{2,64})\k<q>",
+        RegexOptions.CultureInvariant, TimeSpan.FromSeconds(2));
+
+    /// <summary>Adds both halves of every quoted <c>WORD\word</c> in <paramref name="text"/>: the domain, and the login.</summary>
+    private void RegisterQuotedAccounts(string text)
+    {
+        if (text.IndexOf('\\', StringComparison.Ordinal) < 0)
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (Match m in s_quotedAccount.Matches(text))
+            {
+                AddName(AliasKind.Domain, m.Groups["d"].Value);
+                AddName(AliasKind.Login, m.Groups["l"].Value);
+            }
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            /* A pathological text adds no names here; the verifier still scans for every name already known. */
+        }
+    }
+
     /// <summary>Adds each comma-separated name in <paramref name="list"/> (a connection string's <c>Host</c> may hold several).</summary>
     internal void AddNameList(AliasKind kind, string? list)
     {
@@ -248,6 +317,9 @@ internal sealed class BundleAliaser
     {
         switch (node)
         {
+            case JsonValue plain when plain.TryGetValue<string>(out var plainText):
+                RegisterQuotedAccounts(plainText);
+                break;
             case JsonObject obj:
                 foreach (var (key, value) in obj)
                 {
@@ -286,13 +358,37 @@ internal sealed class BundleAliaser
         var redacted = text;
         foreach (var secret in _secrets)
         {
-            redacted = redacted.Replace(secret, SecretTextGuard.RedactedMarker, StringComparison.Ordinal);
+            redacted = ReplaceSecret(redacted, secret);
         }
 
         redacted = SecretTextGuard.RedactText(redacted);
+        RegisterQuotedAccounts(redacted);
         try
         {
             return Scanner().Replace(redacted, Evaluate);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return SecretTextGuard.RedactedMarker;
+        }
+    }
+
+    /// <summary>
+    /// A secret of <see cref="VerifyMinimumLength"/> characters or more is replaced wherever it occurs; a shorter one is
+    /// replaced only as a whole word, so a two-character secret does not shred ordinary words.
+    /// </summary>
+    private static string ReplaceSecret(string text, string secret)
+    {
+        if (secret.Length >= VerifyMinimumLength)
+        {
+            return text.Replace(secret, SecretTextGuard.RedactedMarker, StringComparison.Ordinal);
+        }
+
+        try
+        {
+            return Regex.Replace(
+                text, "(?<![A-Za-z0-9_])" + Regex.Escape(secret) + "(?![A-Za-z0-9_])", SecretTextGuard.RedactedMarker,
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(2));
         }
         catch (RegexMatchTimeoutException)
         {
@@ -466,7 +562,7 @@ internal sealed class BundleAliaser
             return known;
         }
 
-        var alias = NextAlias(kind);
+        var alias = NextAlias(kind, token);
         return Map(token, alias);
     }
 
@@ -476,17 +572,35 @@ internal sealed class BundleAliaser
         {
             _aliasByToken[token] = alias;
             _tokenOrder.Add(token);
+            if (alias.StartsWith("domain-", StringComparison.Ordinal))
+            {
+                _domainTokens.Add(token);
+            }
+
             _scan = null;
         }
 
         return alias;
     }
 
-    private string NextAlias(AliasKind kind)
+    /// <summary>
+    /// The next ordinal alias of a kind. An ordinal whose text equals a real name (a server called <c>server-1</c>, or
+    /// <paramref name="avoid"/>, the token about to take the alias) is skipped, so an alias never reads as a real name.
+    /// </summary>
+    private string NextAlias(AliasKind kind, string? avoid = null)
     {
-        _counts.TryGetValue(kind, out var n);
-        _counts[kind] = ++n;
-        return Prefix(kind) + "-" + n.ToString(CultureInfo.InvariantCulture);
+        _ordinals.TryGetValue(kind, out var n);
+        string alias;
+        do
+        {
+            alias = Prefix(kind) + "-" + (++n).ToString(CultureInfo.InvariantCulture);
+        }
+        while (_aliasByToken.ContainsKey(alias) || string.Equals(alias, avoid, StringComparison.OrdinalIgnoreCase));
+
+        _ordinals[kind] = n;
+        _counts.TryGetValue(kind, out var issued);
+        _counts[kind] = issued + 1;
+        return alias;
     }
 
     private static string Prefix(AliasKind kind) => kind switch
@@ -505,7 +619,26 @@ internal sealed class BundleAliaser
         var ip = match.Groups["ip"];
         if (ip.Success)
         {
-            return _aliasByToken.TryGetValue(ip.Value, out var known) ? known : AliasOf(ip.Value, AliasKind.Ip);
+            if (_aliasByToken.TryGetValue(ip.Value, out var known))
+            {
+                return known;
+            }
+
+            /* An IPv4 address written inside an IPv6 one shares the alias of the plain IPv4 address. */
+            var lastColon = ip.Value.LastIndexOf(':');
+            if (lastColon >= 0 && ip.Value.IndexOf('.', StringComparison.Ordinal) > lastColon)
+            {
+                return Map(ip.Value, AliasOf(ip.Value[(lastColon + 1)..], AliasKind.Ip));
+            }
+
+            return AliasOf(ip.Value, AliasKind.Ip);
+        }
+
+        var dotted = match.Groups["dn"];
+        if (dotted.Success)
+        {
+            AddName(AliasKind.Host, dotted.Value);
+            return _aliasByToken.TryGetValue(dotted.Value, out var hostAlias) ? hostAlias : AliasOf(dotted.Value, AliasKind.Host);
         }
 
         return _aliasByToken.TryGetValue(match.Groups["tok"].Value, out var alias) ? alias : match.Value;
@@ -520,7 +653,10 @@ internal sealed class BundleAliaser
 
         var tokens = _aliasByToken.Keys.OrderByDescending(t => t.Length).ThenBy(t => t, StringComparer.Ordinal).Select(Regex.Escape).ToList();
         var alternation = tokens.Count == 0 ? "(?!)" : string.Join('|', tokens);
-        var pattern = "(?<![A-Za-z0-9_])(?:(?<tok>" + alternation + ")|(?<ip>" + Ipv4 + "|" + Ipv6 + "))(?![A-Za-z0-9_])";
+        /* A dotted name under a known domain (sql02.example.test when example.test is a domain) is a host nobody registered. */
+        var domains = _domainTokens.OrderByDescending(t => t.Length).ThenBy(t => t, StringComparer.Ordinal).Select(Regex.Escape).ToList();
+        var dotted = domains.Count == 0 ? "(?!)" : @"[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*\.(?:" + string.Join('|', domains) + ")";
+        var pattern = "(?<![A-Za-z0-9_])(?:(?<tok>" + alternation + ")|(?<dn>" + dotted + ")|(?<ip>" + Ipv6WithIpv4 + "|" + Ipv4 + "|" + Ipv6 + "))(?![A-Za-z0-9_])";
         _scan = new Regex(
             pattern,
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | (tokens.Count > 20 ? RegexOptions.Compiled : RegexOptions.None),
@@ -572,18 +708,17 @@ internal sealed class BundleAliaser
             }
         }
 
+        var minted = new HashSet<string>(_aliasByToken.Values, StringComparer.OrdinalIgnoreCase);
         foreach (var token in _aliasByToken.Keys)
         {
-            if (!Verifiable(token) || TokenIsAliasText(token))
+            if (!Verifiable(token) || TokenIsAliasText(token, minted))
             {
                 continue;
             }
 
-            /* A token that is also one of the bundle's own keys is checked in the values only: keys are the product's
-               vocabulary and are never rewritten. Every other token is checked in the serialized bytes as well. */
-            var inKeys = keys.Any(k => k.Contains(token, StringComparison.OrdinalIgnoreCase));
-            if (unescaped.Contains(token, StringComparison.OrdinalIgnoreCase)
-                || (!inKeys && serialized.Contains(token, StringComparison.OrdinalIgnoreCase)))
+            /* A token that occurs ONLY as a JSON key (exactly "token" followed by a colon, in every occurrence) is the
+               product's own vocabulary: keys are never rewritten. Any other occurrence in the bytes is a leak. */
+            if (unescaped.Contains(token, StringComparison.OrdinalIgnoreCase) || OccursOutsideKeys(serialized, token))
             {
                 leaks.Add(Locate(values, token, "name"));
             }
@@ -592,10 +727,39 @@ internal sealed class BundleAliaser
         return leaks;
     }
 
-    private static bool TokenIsAliasText(string token)
+    /// <summary>True when <paramref name="token"/> occurs in <paramref name="serialized"/> anywhere other than as a whole JSON key.</summary>
+    private static bool OccursOutsideKeys(string serialized, string token)
     {
-        return Regex.IsMatch(token, @"^(server|host|db|domain|login|role|ip)-\d+$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1))
-            || new[] { "server", "host", "db", "domain", "login", "role", "ip" }.Any(p => (p + "-").Contains(token, StringComparison.OrdinalIgnoreCase));
+        var at = 0;
+        while ((at = serialized.IndexOf(token, at, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            var end = at + token.Length;
+            var quoted = at > 0 && serialized[at - 1] == '"' && end < serialized.Length && serialized[end] == '"';
+            var next = end + 1;
+            while (quoted && next < serialized.Length && char.IsWhiteSpace(serialized[next]))
+            {
+                next++;
+            }
+
+            if (!(quoted && next < serialized.Length && serialized[next] == ':'))
+            {
+                return true;
+            }
+
+            at = end;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True for text the alias generator itself mints (<c>server-3</c>, <c>ip-1</c>): a token that is exactly one of the
+    /// aliases handed out. A real name that merely looks like an alias, and was never handed out, is still verified.
+    /// </summary>
+    private static bool TokenIsAliasText(string token, HashSet<string> minted)
+    {
+        return minted.Contains(token)
+            && Regex.IsMatch(token, @"^(server|host|db|domain|login|role|ip|tag)-\d+$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
     }
 
     private static BundleLeak Locate(List<(string Path, string Text)> values, string needle, string cls)
@@ -630,9 +794,10 @@ internal sealed class BundleAliaser
         Collect(root, string.Empty, values, keys);
         var unescaped = string.Join('\n', values.Select(v => v.Text));
         var hits = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var minted = new HashSet<string>(_aliasByToken.Values, StringComparer.OrdinalIgnoreCase);
         foreach (var token in _aliasByToken.Keys)
         {
-            if (Verifiable(token) && !TokenIsAliasText(token) && unescaped.Contains(token, StringComparison.OrdinalIgnoreCase))
+            if (Verifiable(token) && !TokenIsAliasText(token, minted) && unescaped.Contains(token, StringComparison.OrdinalIgnoreCase))
             {
                 hits.Add(token);
             }
