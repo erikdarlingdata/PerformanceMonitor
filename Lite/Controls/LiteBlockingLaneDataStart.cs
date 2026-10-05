@@ -115,7 +115,8 @@ internal static class LiteBlockingLaneDataStart
     /// <summary>
     /// #5098: when the blocking read drew the XE reports (<paramref name="blockingReadTookXe"/> true), the start is the XE collector's
     /// alone (<paramref name="xeOnlyBlockingFloorOf"/>): a DMV that covers the window must not hide where the XE data starts. A check that
-    /// throws falls back to the two-source probe (today's); a throw from the probe itself fails the series as before.
+    /// throws falls back to the two-source probe (today's); a throw from the threshold read falls back to #5159's answer; a throw from the
+    /// probe itself fails the series as before.
     /// </summary>
     private static async Task<DateTime?> ProbeBlockingAsync(
         Func<QueryWindowRelation, Task<DateTime?>> floorOf, Func<Task<bool>>? blockingReadTookXe, Func<Task<DateTime?>>? xeOnlyBlockingFloorOf,
@@ -138,10 +139,28 @@ internal static class LiteBlockingLaneDataStart
         {
             /* #5098: the XE start is the collector's floor, the earliest report and the threshold's history, combined by the shared rule. */
             return await LocalDataService.CombineBlockingXeStartAsync(
-                xeOnlyBlockingFloorOf!, earliestReportOf, async () => (await thresholdOf()).AsTuple());
+                xeOnlyBlockingFloorOf!, earliestReportOf, () => ThresholdOrNoneAsync(thresholdOf));
         }
 
         return await (fromXe ? xeOnlyBlockingFloorOf!() : floorOf(QueryWindowRelation.BlockedProcessReports));
+    }
+
+    /// <summary>
+    /// The threshold's history, or "no snapshots" when the read throws: the shared rule then returns the XE-only floor combined with the
+    /// earliest report (#5159's answer), so a failed threshold read costs only the threshold's refinement, not the whole blocking series.
+    /// </summary>
+    internal static async Task<(bool OnAtWindowStart, DateTime? FirstOnInWindow, bool SawZeroSnapshot)> ThresholdOrNoneAsync(
+        Func<Task<BlockedProcessThreshold>> thresholdOf)
+    {
+        try
+        {
+            return (await thresholdOf()).AsTuple();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("CorrelatedLanes", $"Overview blocking chart: the blocked process threshold read failed, so the note keeps the collector's start: {ex.Message}");
+            return default;
+        }
     }
 
     private static Task<DateTime?> Probe(Func<QueryWindowRelation, Task<DateTime?>> floorOf, QueryWindowRelation relation)

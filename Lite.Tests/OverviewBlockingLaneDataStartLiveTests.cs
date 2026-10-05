@@ -169,6 +169,28 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
         Assert.Equal(string.Empty, text);
     }
 
+    /// <summary>#5098: a threshold read that throws costs only the refinement: the blocking series still answers with the XE floor combined with the earliest report.</summary>
+    [Fact]
+    public async Task AThrowingThresholdRead_KeepsTheXeOnlyAnswer_NotAFailedSeries()
+    {
+        await _duckDb.InitializeAsync();
+        var from = End.AddDays(-3);
+        await SeedLogRunsAsync(QueryWindowRelation.BlockedProcessReports, from, End);
+        await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
+        await SeedXeReportAsync(from.AddHours(2));
+        var service = new LocalDataService(_duckDb);
+        var startUtc = End.AddDays(-7);
+
+        var start = await LiteBlockingLaneDataStart.StartAsync(
+            relation => service.GetQueryWindowFloorAsync(relation, ServerId, startUtc, End), startUtc, End, [], [],
+            () => service.HasBlockedProcessReportsInWindowAsync(ServerId, startUtc, End),
+            () => service.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, ServerId, startUtc, End, includeAlsoCovered: false),
+            earliestReportOf: () => service.GetEarliestBlockedProcessReportInWindowAsync(ServerId, startUtc, End),
+            thresholdOf: () => Task.FromException<LiteBlockingLaneDataStart.BlockedProcessThreshold>(new InvalidOperationException("threshold read failed")));
+
+        Assert.Equal(from, start);
+    }
+
     private Task<(bool Visible, string Text)> LaneNoteWithSourceCheckAsync(DateTime startUtc, DateTime endUtc)
     {
         var service = new LocalDataService(_duckDb);
