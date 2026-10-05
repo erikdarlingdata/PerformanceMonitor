@@ -13,10 +13,10 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
-using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -76,12 +76,12 @@ public sealed class DarlingMcpPgPredicateTools
                     return bare;
                 }
 
-            /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
-               Rows are windowed on collection_time over [start, now], the probe's column. A data answer over 90 minutes or less starts
-               no probe; a failed probe costs the notice, never the rows. */
-            var emptyStart = windowEnd.AddHours(-hours_back);
-            var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_predicate_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+                /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+                   Rows are windowed on collection_time over [start, now], the probe's column. A data answer over 90 minutes or less starts
+                   no probe; a failed probe costs the notice, never the rows. */
+                var emptyStart = windowEnd.AddHours(-hours_back);
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_predicate_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
                 return McpHelpers.Status(
                         "empty",

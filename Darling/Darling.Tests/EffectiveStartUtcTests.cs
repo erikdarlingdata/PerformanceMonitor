@@ -55,7 +55,7 @@ public sealed class EffectiveStartUtcTests
     [InlineData("DarlingMcpPgPlanTools.cs", 1)]
     [InlineData("DarlingMcpPgCpuUtilizationTools.cs", 1)]
     [InlineData("DarlingMcpPgBlockingTools.cs", 2)]
-    [InlineData("DarlingMcpPgSessionStatesTools.cs", 1)]
+    [InlineData("DarlingMcpPgSessionStatesTools.cs", 2)]
     [InlineData("DarlingMcpPgReplicationStatsTools.cs", 1)]
     [InlineData("DarlingMcpPgXminTools.cs", 1)]
     [InlineData("DarlingMcpQueryHeatmapTools.cs", 1)]

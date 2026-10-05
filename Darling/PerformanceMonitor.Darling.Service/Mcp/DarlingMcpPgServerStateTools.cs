@@ -14,11 +14,11 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
-using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -424,12 +424,12 @@ public sealed class DarlingMcpPgServerStateTools
                     return bare;
                 }
 
-            /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
-               Rows are windowed on the probe's time column over [start, now]. A data answer over 90 minutes or less starts no probe;
-               a failed probe costs the notice, never the rows. */
-            var emptyStart = windowEnd.AddHours(-hours_back);
-            var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_lock_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+                /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+                   Rows are windowed on the probe's time column over [start, now]. A data answer over 90 minutes or less starts no probe;
+                   a failed probe costs the notice, never the rows. */
+                var emptyStart = windowEnd.AddHours(-hours_back);
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_lock_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
                 return McpHelpers.Status(
                         "empty",
@@ -858,12 +858,12 @@ public sealed class DarlingMcpPgServerStateTools
                     return bare;
                 }
 
-            /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
-               Rows are windowed on the probe's time column over [start, now]. A data answer over 90 minutes or less starts no probe;
-               a failed probe costs the notice, never the rows. */
-            var emptyStart = windowEnd.AddHours(-hours_back);
-            var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_server_config_changes", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+                /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+                   Rows are windowed on the probe's time column over [start, now]. A data answer over 90 minutes or less starts no probe;
+                   a failed probe costs the notice, never the rows. */
+                var emptyStart = windowEnd.AddHours(-hours_back);
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_server_config_changes", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
                 return McpHelpers.Status(
                         "no_changes",

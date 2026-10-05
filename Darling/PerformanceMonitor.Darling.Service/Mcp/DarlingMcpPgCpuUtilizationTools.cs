@@ -105,10 +105,10 @@ public sealed class DarlingMcpPgCpuUtilizationTools
             {
                 server = resolved.ServerName,
                 hours_back,
-            /* #4966: the window floor, right after hours_back. */
-            effective_start = notice.EffectiveStart,
-            window_truncated = notice.WindowTruncated,
-            truncation_note = notice.TruncationNote,
+                /* #4966: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
 
                 bucket = TrendBuckets.Word(bucketMinutes),
                 bucket_minutes = bucketMinutes,
