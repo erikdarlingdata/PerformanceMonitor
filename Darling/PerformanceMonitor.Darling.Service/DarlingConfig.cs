@@ -239,8 +239,10 @@ public sealed class DarlingConfig
     /// <see cref="ProcedureStatsPlanCycleInterval"/> still decides which runs may render: an <c>on</c> run between
     /// captures sends digests for recognized plans and renders nothing.</para>
     ///
-    /// <para>A file-only knob like <see cref="QueryStatsDeferredPlanFetch"/>, read live, with no schema rung. Only
-    /// meaningful while <see cref="CapturePlans"/> is on; Azure SQL Database keeps <c>off</c>.</para>
+    /// <para>A file-only knob like <see cref="QueryStatsDeferredPlanFetch"/>: an edit takes effect on the next restart,
+    /// and it needs no schema rung. Because it cannot change while the service runs, the plan cache starts empty under
+    /// whichever mode the service started in, so nothing needs clearing on a change. Only meaningful while
+    /// <see cref="CapturePlans"/> is on; Azure SQL Database keeps <c>off</c>.</para>
     /// </summary>
     [JsonPropertyName("procedureStatsDeferredPlanFetch")]
     public string ProcedureStatsDeferredPlanFetch { get; set; } = "off";

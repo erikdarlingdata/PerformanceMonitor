@@ -28,7 +28,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 internal static class ProcedureStatsPlanReuse
 {
-    /// <summary>The most module plans one run renders in the second query, taken in row order. Today's inline capture renders at most as many.</summary>
+    /// <summary>
+    /// The most module plans one run renders in the second query, taken in row order. Today's inline capture renders at
+    /// most as many. This is a guard only: the main query is already <c>TOP (150)</c>, so at most 150 rows can miss and
+    /// <c>deferred_over_cap = 0</c> is what to expect. A zero there is not evidence that anything was tested.
+    /// </summary>
     internal const int MaxMissesPerRun = 150;
 
     /// <summary>
