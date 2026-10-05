@@ -85,6 +85,14 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         /// </summary>
         public long? QueryPlanXmlBytes { get; set; }
 
+        /// <summary>
+        /// #5158: the digest the host's store already holds for this row's plan, set by a host that defers
+        /// the plan fetch and recognizes the plan from an earlier commit. When set, the writer stores the
+        /// digest instead of the content (<see cref="ICollectorRowWriter.PayloadOrDigest"/>). Null by
+        /// default, so a row writes its <see cref="QueryPlanXml"/> as it always has.
+        /// </summary>
+        public string? KnownPlanDigest { get; set; }
+
         public long PlanGenerationNum { get; set; }
 
         /// <summary>
@@ -290,6 +298,132 @@ OUTER APPLY
         qs.statement_end_offset
     ) AS tqp";
 
+    /// <summary>
+    /// One statement plan the host wants rendered by <see cref="BuildPlanFetchQuery"/>: the same
+    /// <c>plan_handle</c> and statement offsets <see cref="PlanApplyFragment"/> hands to
+    /// <c>sys.dm_exec_text_query_plan</c>.
+    /// </summary>
+    public readonly record struct PlanFetchKey(byte[] PlanHandle, int StartOffset, int EndOffset);
+
+    /// <summary>
+    /// #5158: the second target query for a host that sets <see cref="CollectorContext.DeferPlanXmlFetch"/>.
+    /// The main query ships no plan, and this renders plan XML for only the keys the host does not yet
+    /// have committed. Row <c>ord</c> is the key's position in <paramref name="keys"/>, so the host maps a
+    /// result back to its row without reading the handle back.
+    ///
+    /// WHY A SECOND QUERY AND NOT A NOT EXISTS IN THE MAIN ONE. The inline form renders and ships about 200
+    /// plans every run whether or not the store already holds them: on one large store that was 54 GB/h
+    /// rendered and 29 GB/h shipped against 1.1 GB/h of distinct plans (47x), and it is why the slowest
+    /// runs are bound by draining plan text. A NOT EXISTS over the TVF inside the main query does not defer
+    /// it: #1959 found the optimizer does not reliably hold the TVF back until after the filter, and the
+    /// monitored server cannot take a table-valued parameter or a temp type from us either. The host's own
+    /// commits already say which plans are in the store, so it filters first and sends the survivors here.
+    ///
+    /// The handles are inlined as hex literals, rendered host-side from bytes the same way
+    /// <c>QueryStoreCollector</c> inlines its id list: nothing in the text is operator input. The cap CASE,
+    /// the bytes column and the comment on both are the inline fragment's, unchanged: a plan over the cap
+    /// reports its size and a NULL plan, and a handle that aged out between the two queries returns no
+    /// plan and no size, which is the pairing the inline form produces for the same case.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The host captures no plans, or <paramref name="keys"/> is empty.</exception>
+    public static CollectorQuery BuildPlanFetchQuery(CollectorContext context, IReadOnlyList<PlanFetchKey> keys)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (!context.CapturePlanXml)
+        {
+            throw new InvalidOperationException(
+                "A plan fetch needs CapturePlanXml: a host that captures no plans must not issue one.");
+        }
+
+        /* An empty key list means nothing is missing, the steady state in which NO target query should run.
+           `VALUES ()` is a syntax error anyway, and returning a no-op query would hide the caller's missing skip. */
+        if (keys is null || keys.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "The plan fetch key list must be non-empty; an empty list means no fetch should be issued at all.");
+        }
+
+        var values = new System.Text.StringBuilder();
+        for (var ord = 0; ord < keys.Count; ord++)
+        {
+            var key = keys[ord];
+            /* plan_handle is varbinary(64). A null or empty handle would render `0x`, which is not a
+               usable literal, and anything longer than 64 bytes is not a plan handle. */
+            if (key.PlanHandle is null || key.PlanHandle.Length == 0 || key.PlanHandle.Length > 64)
+            {
+                throw new InvalidOperationException(
+                    "Plan fetch key " + ord.ToString(CultureInfo.InvariantCulture)
+                    + " has no valid plan_handle; it must be 1 to 64 bytes.");
+            }
+
+            if (ord > 0)
+            {
+                values.Append(",\n        ");
+            }
+
+            values
+                .Append('(')
+                .Append(ord.ToString(CultureInfo.InvariantCulture))
+                .Append(", 0x").Append(Convert.ToHexString(key.PlanHandle))
+                .Append(", ").Append(key.StartOffset.ToString(CultureInfo.InvariantCulture))
+                .Append(", ").Append(key.EndOffset.ToString(CultureInfo.InvariantCulture))
+                .Append(')');
+        }
+
+        /* The cap CASE and the bytes column mirror PlanSelectFragment exactly (same constant), and
+           tqp.query_plan is read twice there for the same reason: one materialized OUTER APPLY column. */
+        var text = @"SELECT
+    k.ord,
+    query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > " + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + @" THEN NULL ELSE tqp.query_plan END,
+    query_plan_xml_bytes = DATALENGTH(tqp.query_plan)
+FROM
+(
+    VALUES
+        " + values + @"
+) AS k (ord, plan_handle, s, e)
+OUTER APPLY
+    sys.dm_exec_text_query_plan
+    (
+        k.plan_handle,
+        k.s,
+        k.e
+    ) AS tqp
+OPTION(RECOMPILE);";
+
+        return new CollectorQuery(text);
+    }
+
+    /// <summary>
+    /// Reads <see cref="BuildPlanFetchQuery"/>'s result into <c>ord</c> -> (plan, size). A key whose plan
+    /// aged out maps to (null, null); a plan over the cap maps to (null, size).
+    /// </summary>
+    public static async ValueTask<Dictionary<int, (string? PlanXml, long? Bytes)>> ReadPlanFetchAsync(
+        DbDataReader reader, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+
+        var results = new Dictionary<int, (string? PlanXml, long? Bytes)>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var ord = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
+            /* Convert, not GetInt64: the same DATALENGTH-width reasoning as the inline read of this column. */
+            results[ord] = (
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(2) ? null : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture));
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// True when the main query carries the plan columns itself: the host captures plans and has not
+    /// deferred the fetch to <see cref="BuildPlanFetchQuery"/> (#5158). One definition for the query text
+    /// and the read, so the ordinals cannot disagree with the SELECT.
+    /// </summary>
+    private static bool InlinePlanCapture(CollectorContext context) =>
+        context.CapturePlanXml && !context.DeferPlanXmlFetch;
+
     public override string Name => "query_stats";
 
     public override string TargetTable => "query_stats";
@@ -317,8 +451,9 @@ OUTER APPLY
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-        var planSelect = context.CapturePlanXml ? PlanSelectFragment : "";
-        var planApply = context.CapturePlanXml ? PlanApplyFragment : "";
+        var inlinePlan = InlinePlanCapture(context);
+        var planSelect = inlinePlan ? PlanSelectFragment : "";
+        var planApply = inlinePlan ? PlanApplyFragment : "";
 
         if (context.Target.IsAzureSqlDb)
         {
@@ -412,6 +547,7 @@ OUTER APPLY
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        var inlinePlan = InlinePlanCapture(context);
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -467,13 +603,14 @@ OUTER APPLY
                    capture modes and its ordinal is fixed. That pushes the plan XML to 44. */
                 CompileAgeSeconds = reader.IsDBNull(43) ? null : reader.GetInt32(43),
                 /* query_plan_xml is the trailing column present only when CapturePlanXml spliced it
-                   into the SELECT (ordinal 44); the short-circuit skips it entirely when off. */
-                QueryPlanXml = context.CapturePlanXml && !reader.IsDBNull(44) ? reader.GetString(44) : null,
+                   into the SELECT (ordinal 44); the short-circuit skips it entirely when off, and also when
+                   the host defers the plan fetch (#5158), which leaves the main query without it. */
+                QueryPlanXml = inlinePlan && !reader.IsDBNull(44) ? reader.GetString(44) : null,
                 /* #3392: the plan's measured size rides the same splice at ordinal 45, so the same
                    short-circuit covers it. Convert rather than GetInt64: DATALENGTH's return type widens to
                    bigint only for the max types, and a provider that hands back an Int32 here would throw
                    on a strict accessor — the min_dop/max_dop idiom above, for the same reason. */
-                QueryPlanXmlBytes = context.CapturePlanXml && !reader.IsDBNull(45)
+                QueryPlanXmlBytes = inlinePlan && !reader.IsDBNull(45)
                     ? Convert.ToInt64(reader.GetValue(45), CultureInfo.InvariantCulture)
                     : null,
             });
@@ -640,7 +777,7 @@ OUTER APPLY
             .Value(row.MinSpills)
             .Value(row.MaxSpills)
             .Value(row.QueryText)
-            .Value(row.QueryPlanXml)           /* null unless CapturePlanXml captured it (Darling) */
+            .PayloadOrDigest(row.QueryPlanXml, row.KnownPlanDigest) /* null unless CapturePlanXml captured it (Darling); #5158: or the digest of a plan the store holds */
             .Value(row.SqlHandle)
             .Value(row.PlanHandle)
             .Value(deltaExecCount)

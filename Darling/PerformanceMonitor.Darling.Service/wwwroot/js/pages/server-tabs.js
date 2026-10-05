@@ -1020,6 +1020,7 @@ export const SERVER_TABS = [
         emptyText: "No CPU samples in this window.",
       }),
       stat("Scheduler Pressure", "get_cpu_scheduler_pressure", { server }, SCHEDULER_STATS, SNAPSHOT, 2),
+      serverTrendPanel(server, ctx, "cpu_scheduler"),
       /* #4231: `noteKey` (#3278) carries `truncation_note` — raw query_stats/procedure_stats are dropped at
          4 days once the rollups are armed, and a window asking further back than that silently served less
          than it asked for. Null when the floor did not bite, the same as every other noteKey panel. */
@@ -1061,6 +1062,8 @@ export const SERVER_TABS = [
         span: 2,
         emptyText: "No memory samples in this window.",
       }),
+      memoryClerksTrendPanel(server, ctx),
+      serverTrendPanel(server, ctx, "plan_cache"),
       table(
         "Memory Clerks",
         "get_memory_clerks",
@@ -1435,7 +1438,10 @@ export const SERVER_TABS = [
         ctx.label,
         "No Query Store rows in this window.",
         2,
-        "truncation_note"
+        "truncation_note",
+        /* #5094: when whole days came from the daily summary the answer says so (`approximate`), and its note is
+           drawn above the grid as text, so the totals are not read as exact. Null (no line) on an exact answer. */
+        ["approximation_note"]
       ),
       /* #2484: the Query Store Regressions tab -- the only tab in the per-server page that was entirely
          unreachable from a browser rather than merely reduced. Built with table(), not an object literal:
@@ -3607,6 +3613,166 @@ export function pressureEventBuckets(events, win) {
     .sort((a, b) => a - b)
     .map((h) => ({ time: new Date(h).toISOString().slice(0, 19), ...(counts.get(h) || { sql_medium: 0, sql_severe: 0, os_medium: 0, os_severe: 0 }) }));
   return { points, drawn };
+}
+
+/**
+ * The instance trends get_server_trend serves as one line per field (#5117): the CPU tab's scheduler pressure and the
+ * Memory tab's plan cache. The desktop's CPU Scheduler chart plots the runnable, blocked and queued task counts under a
+ * "Task Count" axis; its Plan Cache chart plots single-use and multi-use plan cache size under "Plan Cache Size (MB)".
+ * Both are levels the read averages per bucket, so the unit is the read's own.
+ */
+const SERVER_TRENDS = {
+  cpu_scheduler: {
+    title: "CPU Scheduler",
+    metric: "cpu_scheduler",
+    unit: "tasks",
+    series: [
+      { key: "runnable_tasks", label: "Runnable Tasks" },
+      { key: "blocked_tasks", label: "Blocked Tasks" },
+      { key: "queued_requests", label: "Queued Requests" },
+    ],
+    emptyText: "No CPU scheduler samples in this window.",
+  },
+  plan_cache: {
+    title: "Plan Cache",
+    metric: "plan_cache",
+    unit: "MB",
+    series: [
+      { key: "single_use_mb", label: "Single-Use" },
+      { key: "multi_use_mb", label: "Multi-Use" },
+    ],
+    emptyText: "No plan cache samples in this window.",
+  },
+};
+
+/** A get_server_trend line panel for `kind` (a key of SERVER_TRENDS), over the page's range and its `as_of`. */
+export function serverTrendPanel(server, ctx, kind) {
+  const spec = SERVER_TRENDS[kind];
+  const { panel, body } = panelShell(spec.title + " Trend", ctx.label);
+  (async () => {
+    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal);
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message || spec.emptyText)]);
+    const points = res.data.trend || [];
+    if (!points.length) return mount(body, [keptWindowStrip(res), emptyStrip(spec.emptyText)]);
+    /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+    const notes = discontinuityNotes(res.data);
+    mount(body, [
+      keptWindowStrip(res),
+      notes.length ? noticeStrip(notes.join(" ")) : null,
+      zoomableLineChart({
+        points,
+        xKey: "time",
+        series: spec.series.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
+        formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+        unit: spec.unit,
+        ...windowFromHours(res.keptHours || ctx.hours),
+      }, "server-trend|" + server + "|" + spec.metric, chartZoomScope(ctx.hours)),
+      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? el("div", { class: "mp-metric-note", text: res.data.aggregate_note }) : null,
+    ]);
+  })();
+  return panel;
+}
+
+/** The most clerk types get_server_trend takes in one read (its own cap), and how many the desktop checks to begin with. */
+const MAX_CLERKS_CHARTED = 10;
+const DEFAULT_CLERKS_CHECKED = 5;
+
+/**
+ * Memory Clerks trend with a clerk-type selector, the web twin of the desktop's clerk picker. The options are the clerks
+ * of the latest snapshot (get_memory_clerks, heaviest first); the first time a server is shown the heaviest five are
+ * checked, as the desktop does. The checked set and search text live in multi-picker.js's module state keyed by server (the first show and the Top clerks button both check the heaviest five),
+ * so the 60 s rebuild keeps them.
+ */
+export function memoryClerksTrendPanel(server, ctx) {
+  const { panel, body } = panelShell("Memory Clerks Trend", ctx.label + ", with a trend for the clerks you check");
+  (async () => {
+    const res = await readToolWithinKeptHistory("get_memory_clerks", { server }, ctx && ctx.signal);
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
+    const options = (res.data.clerks || []).map((c) => c.clerk_type);
+    if (!options.length) return mount(body, emptyStrip("No memory clerks in the latest snapshot — the clerk collector may not have run yet."));
+
+    const key = "clerks|" + server;
+    const chartSlot = el("div", {}, [loadingStrip()]);
+    const picker = multiPicker({
+      key,
+      label: "Clerks",
+      options,
+      max: MAX_CLERKS_CHARTED,
+      noun: "clerk",
+      defaultsLabel: "Top clerks",
+      defaults: (o) => o.slice(0, DEFAULT_CLERKS_CHECKED),
+      onChange: (checked) => drawClerkTrends(chartSlot, server, ctx, checked),
+    });
+    mount(body, [picker.node, chartSlot]);
+    drawClerkTrends(chartSlot, server, ctx, picker.checked());
+    picker.restoreFocus();
+  })();
+  return panel;
+}
+
+/* The newest clerk draw's AbortController per server: a new draw aborts the previous one's read. */
+const clerkDraws = new Map();
+
+export async function drawClerkTrends(slot, server, ctx, checked) {
+  const clerkTypes = checked.slice(0, MAX_CLERKS_CHARTED);
+  const previous = clerkDraws.get(server);
+  if (previous) previous.abort();
+  const mine = new AbortController();
+  clerkDraws.set(server, mine);
+  if (!clerkTypes.length) {
+    mount(slot, emptyStrip("Check at least one clerk to chart its trend."));
+    return;
+  }
+  mount(slot, loadingStrip());
+  const signal = ctx && ctx.signal && typeof AbortSignal !== "undefined" && AbortSignal.any ? AbortSignal.any([mine.signal, ctx.signal]) : mine.signal;
+  const trend = await readToolWithinKeptHistory(
+    "get_server_trend",
+    { server, metric: "memory_clerks", hours: ctx.hours, clerk_types: clerkTypes.join(",") },
+    signal
+  );
+  if (clerkDraws.get(server) !== mine || mine.signal.aborted) return;
+
+  if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
+  const missingOf = (data) => (data && Array.isArray(data.missing_clerk_types) ? data.missing_clerk_types : []);
+  const missingStrip = (data) => (missingOf(data).length ? noticeStrip("No samples in this window for: " + missingOf(data).join(", ") + ".") : null);
+  if (trend.kind === "empty") {
+    /* The empty envelope carries its lists under hints; the server's sentence points at them as JSON paths a
+       reader cannot open, so they are shown as text. */
+    const hints = trend.hints || {};
+    const heaviest = Array.isArray(hints.heaviest_clerk_types) ? hints.heaviest_clerk_types : [];
+    return mount(slot, [
+      keptWindowStrip(trend),
+      missingStrip(hints),
+      emptyStrip(trend.message || "No clerk samples in this window."),
+      heaviest.length ? el("div", { class: "mp-metric-note", text: "Heaviest clerks in this window: " + heaviest.join(", ") + "." }) : null,
+    ]);
+  }
+
+  const drawn = (trend.data.series || []).map((s, i) => ({
+    key: "c" + i,
+    label: s.clerk_type,
+    rows: s.trend || [],
+    color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length],
+  }));
+  if (!drawn.length) return mount(slot, [keptWindowStrip(trend), missingStrip(trend.data), emptyStrip("No clerk samples in this window.")]);
+  /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+  const notes = discontinuityNotes(trend.data);
+  mount(slot, [
+    keptWindowStrip(trend),
+    notes.length ? noticeStrip(notes.join(" ")) : null,
+    missingStrip(trend.data),
+    zoomableLineChart({
+      points: mergeSeriesRows(drawn, "time", "memory_mb"),
+      xKey: "time",
+      series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
+      formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+      unit: "MB",
+      ...windowFromHours(trend.keptHours || ctx.hours),
+    }, "clerk-trend|" + server, chartZoomScope(ctx.hours)),
+    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? el("div", { class: "mp-metric-note", text: trend.data.aggregate_note }) : null,
+  ]);
 }
 
 /**

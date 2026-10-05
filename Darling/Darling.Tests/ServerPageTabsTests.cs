@@ -128,6 +128,18 @@ public sealed class ServerPageTabsTests
     /// the one thing here that is impossible to verify by eye.</para>
     /// </summary>
     [Fact]
+    public void TheQueryStoreTopGrid_DrawsTheApproximationNote_AsAFurtherNote()
+    {
+        var js = ServerTabsJs;
+        var at = js.IndexOf("\"get_query_store_top\",", StringComparison.Ordinal);
+        Assert.True(at >= 0);
+        var end = js.IndexOf("\n      ),", at, StringComparison.Ordinal);
+        var call = js[at..end];
+        Assert.Contains("\"truncation_note\",", call, StringComparison.Ordinal);
+        Assert.Contains("[\"approximation_note\"]", call, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void EveryReadTheServerPageNames_ExistsInTheDispatch()
     {
         var dispatch = DarlingWebEndpoints.BuildReadDispatch().Keys.ToHashSet(StringComparer.Ordinal);
