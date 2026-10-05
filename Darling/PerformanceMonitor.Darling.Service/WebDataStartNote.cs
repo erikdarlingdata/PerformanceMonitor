@@ -133,6 +133,19 @@ internal static class WebDataStartNote
         ["get_pg_io_trend"] = "pg_io_stats",
         ["get_pg_plans"] = "pg_plan_capture",
 
+        /* The nine system_health reads (#4966): each parses events out of the one system_health_events table, so each follows the
+           event-time rule (EventTimeByRead) and the capped rule (CappedByRead). Their empty answers carry the window-floor keys
+           under hints, which the page does not read, so the web's own note is what an empty System Events panel shows. */
+        ["get_health_parser_system_health"] = "system_health_events",
+        ["get_health_parser_severe_errors"] = "system_health_events",
+        ["get_health_parser_io_issues"] = "system_health_events",
+        ["get_health_parser_scheduler_issues"] = "system_health_events",
+        ["get_health_parser_memory_conditions"] = "system_health_events",
+        ["get_health_parser_cpu_tasks"] = "system_health_events",
+        ["get_health_parser_memory_broker"] = "system_health_events",
+        ["get_health_parser_memory_node_oom"] = "system_health_events",
+        ["get_health_parser_significant_waits"] = "system_health_events",
+
         /* The SQL Server event reads (#4966). Each lists EVENTS by the event's own time, so a row can predate the collection
            that stored it and the notice follows the event-time rule (EventTimeByRead). Blocked process reports and the Default
            Trace are newest first under a row cap (CappedByRead); the long query page is the slowest runs, ranked by duration,
@@ -311,6 +324,18 @@ internal static class WebDataStartNote
         ["get_memory_pressure_events"] = "empty",
         ["get_default_trace_events"] = "empty",
 
+        /* The nine system_health reads (#4966) answer empty when the window held no qualifying event (a gated read also counts what it
+           filtered out under events_in_window). unavailable with source_observed:false says nothing was captured, and is not admitted. */
+        ["get_health_parser_system_health"] = "empty",
+        ["get_health_parser_severe_errors"] = "empty",
+        ["get_health_parser_io_issues"] = "empty",
+        ["get_health_parser_scheduler_issues"] = "empty",
+        ["get_health_parser_memory_conditions"] = "empty",
+        ["get_health_parser_cpu_tasks"] = "empty",
+        ["get_health_parser_memory_broker"] = "empty",
+        ["get_health_parser_memory_node_oom"] = "empty",
+        ["get_health_parser_significant_waits"] = "empty",
+
         /* The horizon read answers no_holder only when the collector captured in the window and recorded none (it answers
            unavailable when no capture is logged), so it is the one of the vacuum, horizon, slot and write reads that says "looked
            and found nothing". Wraparound answers unavailable, autovacuum no_pending_maintenance and slots no_slots without asking the log
@@ -377,6 +402,17 @@ internal static class WebDataStartNote
         ["get_long_query_completions"] = new("oldest_returned_event_time", null, null, PageIsRanked: true),
         ["get_memory_pressure_events"] = new(null, "events", "sample_time"),
         ["get_default_trace_events"] = new(null, "events", "event_time"),
+
+        /* The nine system_health reads (#4966): rows under their own key, each stamped event_time. */
+        ["get_health_parser_system_health"] = new(null, "entries", "event_time"),
+        ["get_health_parser_severe_errors"] = new(null, "errors", "event_time"),
+        ["get_health_parser_io_issues"] = new(null, "issues", "event_time"),
+        ["get_health_parser_scheduler_issues"] = new(null, "issues", "event_time"),
+        ["get_health_parser_memory_conditions"] = new(null, "events", "event_time"),
+        ["get_health_parser_cpu_tasks"] = new(null, "events", "event_time"),
+        ["get_health_parser_memory_broker"] = new(null, "events", "event_time"),
+        ["get_health_parser_memory_node_oom"] = new(null, "events", "event_time"),
+        ["get_health_parser_significant_waits"] = new(null, "waits", "event_time"),
     };
 
     /// <summary>
@@ -407,6 +443,18 @@ internal static class WebDataStartNote
            minimum event_time. */
         ["get_blocked_process_xml"] = new(null, null, "oldest_returned_event_time", null, null, null),
         ["get_default_trace_events"] = new("total_events", "shown", null, "events", "event_time", null),
+
+        /* The nine system_health reads (#4966): newest first, cut by the limit. Each answers its count of qualifying events beside
+           shown and no oldest field, so the oldest row shown is the minimum event_time. */
+        ["get_health_parser_system_health"] = new("total_entries", "shown", null, "entries", "event_time", null),
+        ["get_health_parser_severe_errors"] = new("error_count", "shown", null, "errors", "event_time", null),
+        ["get_health_parser_io_issues"] = new("issue_count", "shown", null, "issues", "event_time", null),
+        ["get_health_parser_scheduler_issues"] = new("issue_count", "shown", null, "issues", "event_time", null),
+        ["get_health_parser_memory_conditions"] = new("event_count", "shown", null, "events", "event_time", null),
+        ["get_health_parser_cpu_tasks"] = new("event_count", "shown", null, "events", "event_time", null),
+        ["get_health_parser_memory_broker"] = new("event_count", "shown", null, "events", "event_time", null),
+        ["get_health_parser_memory_node_oom"] = new("event_count", "shown", null, "events", "event_time", null),
+        ["get_health_parser_significant_waits"] = new("wait_count", "shown", null, "waits", "event_time", null),
     };
 
     /// <summary>

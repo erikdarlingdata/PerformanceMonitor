@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -388,6 +389,41 @@ public sealed class WebDataStartNoteLiveTests
         }
     }
 
+    /// <summary>Two of the nine system_health reads over one seeded <c>system_health_events</c> table (a server per read, every row the
+    /// read's own event type): history reaching back before coverage names the earliest event; history reaching the window's start
+    /// gives no note.</summary>
+    [Theory]
+    [InlineData(-496730, 2.0, true)]
+    [InlineData(-496740, 5.5, false)]
+    public async Task TheSystemHealthReads_FollowTheEventTimeRule_AgainstDevPostgres(int serverId, double shiftDays, bool expectNote)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+
+        var reads = new[] { ("get_health_parser_severe_errors", SystemHealthParser.ErrorReportedEvent, "error_reported.xml"), ("get_health_parser_system_health", SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_system.xml") };
+        for (var i = 0; i < reads.Length; i++)
+        {
+            var (read, eventType, fixture) = reads[i];
+            var name = "web-data-start-health-" + (expectNote ? "before-" : "reaches-") + i;
+            await store.SeedTableAsync("system_health_events", serverId - 100 * (i + 1), name, added, added, ct, eventColumn: "event_time", eventShift: TimeSpan.FromDays(shiftDays));
+            await store.GiveHealthRowsTheirXmlAsync(serverId - 100 * (i + 1), eventType, fixture, ct);
+
+            var answer = await store.AskHealthReadAsync(read, name, 168, ct);
+            if (!expectNote)
+            {
+                Assert.NotEqual(true, answer["window_truncated"]?.GetValue<bool>());
+                Assert.Null(answer["data_start_utc"]);
+                continue;
+            }
+
+            Assert.True(answer["window_truncated"]?.GetValue<bool>(), read + " gives a note");
+            var earliestEvent = added.AddDays(-2);
+            Assert.True(Math.Abs((ParseUtc(answer["effective_start"]) - earliestEvent).TotalSeconds) < 1, read + " names the earliest event");
+            Assert.StartsWith("partial window:", answer["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
+        }
+    }
+
     /* The Blocked Process Reports read counts only rows that carry a report; the stand-in seed leaves that column null. */
     private static string? ExtraSet(string table) => table == "blocked_process_reports" ? "blocked_process_report_xml = '<blocked-process-report/>'" : null;
 
@@ -567,6 +603,36 @@ ORDER BY ordinal_position", connection))
                 "get_memory_pressure_events" => await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(DataSource, server, hours, null, null, cancellationToken: ct),
                 "get_default_trace_events" => await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(DataSource, server, hours, 100, null, cancellationToken: ct),
                 _ => throw new ArgumentOutOfRangeException(nameof(read), read, "not an event read"),
+            };
+            var answered = await WebDataStartNote.AddAsync(DataSource, read, server, hours, null, payload, null, ct);
+            return Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        }
+
+        /// <summary>The stand-in seed leaves each row's event type and XML blank: make every row one event of this type, stamped with
+        /// the row's own event time as a real capture has it.</summary>
+        public async Task GiveHealthRowsTheirXmlAsync(int serverId, string eventType, string fixture, CancellationToken ct)
+        {
+            var xml = await System.IO.File.ReadAllTextAsync(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "SystemHealth", fixture), ct);
+            await using var connection = await DataSource.OpenConnectionAsync(ct);
+            await using var update = new NpgsqlCommand(@"
+UPDATE collect.system_health_events
+SET event_type = $2,
+    event_xml = regexp_replace($3, 'timestamp=""[^""]*""', 'timestamp=""' || to_char(event_time, 'YYYY-MM-DD""T""HH24:MI:SS.MS') || 'Z""')
+WHERE server_id = $1", connection);
+            update.Parameters.AddWithValue(serverId);
+            update.Parameters.AddWithValue(eventType);
+            update.Parameters.AddWithValue(xml);
+            await update.ExecuteNonQueryAsync(ct);
+        }
+
+        /// <summary>The tool's own payload for a system_health read, then the data-start note.</summary>
+        public async Task<JsonObject> AskHealthReadAsync(string read, string server, int hours, CancellationToken ct)
+        {
+            var payload = read switch
+            {
+                "get_health_parser_severe_errors" => await DarlingMcpHealthParserTools.GetSevereErrors(DataSource, server, hours, 100, null, cancellationToken: ct),
+                "get_health_parser_system_health" => await DarlingMcpHealthParserTools.GetSystemHealth(DataSource, server, hours, 100, null, cancellationToken: ct),
+                _ => throw new ArgumentOutOfRangeException(nameof(read), read, "not a seeded system_health read"),
             };
             var answered = await WebDataStartNote.AddAsync(DataSource, read, server, hours, null, payload, null, ct);
             return Assert.IsType<JsonObject>(JsonNode.Parse(answered));
