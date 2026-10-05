@@ -93,7 +93,14 @@ public sealed class DiagnosticsBundleSecretTests
                 .Select(p => t.Name + "." + p.Name))
             .Where(n => !known.Contains(n))
             .ToList();
-        Assert.True(unclassified.Count == 0, "Classify these in DiagnosticsBundle.ConfigShapeProjected or ConfigShapeExcluded: " + string.Join(", ", unclassified));
+        Assert.True(unclassified.Count == 0, "Classify these in DiagnosticsBundle.ConfigShapeProjected (a scalar that identifies nothing, such as a flag or a number) or ConfigShapeExcluded (anything that holds a name, host, path, URL or secret, with a reason): " + string.Join(", ", unclassified));
+    }
+
+    [Fact]
+    public void ConfigShape_ProjectsTheDeferredPlanFetchFlag()
+    {
+        Assert.True(DiagnosticsBundle.BuildConfigShape(new DarlingConfig())["query_stats_deferred_plan_fetch"]!.GetValue<bool>());
+        Assert.False(DiagnosticsBundle.BuildConfigShape(new DarlingConfig { QueryStatsDeferredPlanFetch = false })["query_stats_deferred_plan_fetch"]!.GetValue<bool>());
     }
 
     [Fact]
