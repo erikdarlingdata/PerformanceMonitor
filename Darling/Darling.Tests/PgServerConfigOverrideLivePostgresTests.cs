@@ -288,7 +288,7 @@ public sealed class PgServerConfigOverrideLivePostgresTests
 
             var bareRoot = JsonDocument.Parse(bare).RootElement;
             Assert.Equal(
-                new[] { "server", "hours_back", "status", "change_count", "truncated", "note", "changes" },
+                new[] { "server", "hours_back", "effective_start", "window_truncated", "truncation_note", "status", "change_count", "truncated", "note", "changes" },
                 bareRoot.EnumerateObject().Select(p => p.Name).ToArray());
             var only = Assert.Single(bareRoot.GetProperty("changes").EnumerateArray().ToList());
             Assert.Equal(
