@@ -346,7 +346,9 @@ public sealed class HostHeaderGuardTests
         // networkMode is final by the decision: no assignment to it follows.
         Assert.DoesNotMatch(@"\bnetworkMode\s*=[^=]", source[(build + decision.Index)..]);
 
-        // The raw value is normalized in one place, the helper.
+        // The raw value is normalized in one place: that one call sits inside the host's NormalizedHostName wrapper,
+        // which the Host guard's name (ResolveAllowedHostName) and the certificate's name check both read. A second
+        // McpNetworkConfig.NormalizeHostName call anywhere in the host could make the two disagree.
         var normalizeCalls = System.Text.RegularExpressions.Regex.Matches(source, @"McpNetworkConfig\.NormalizeHostName\(").Count;
         Assert.Equal(1, normalizeCalls);
 

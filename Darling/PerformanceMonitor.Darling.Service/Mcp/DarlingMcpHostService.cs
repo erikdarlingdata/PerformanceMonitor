@@ -1304,7 +1304,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 logger.LogWarning(
                     "mcp.network.hostName '{HostName}' is not a bare DNS name (no scheme, port, path, wildcard or IP address; "
-                    + "a non-ASCII name must be a valid internationalized domain name). Ignoring it: the Host-header guard "
+                    + "a non-ASCII name must be a valid internationalized domain name, and an xn-- label must decode). "
+                    + "Ignoring it: the Host-header guard "
                     + "admits no name beyond the ones it always admits. Write the name alone, e.g. mcp.corp.example.",
                     DarlingHttpRefusalLog.Sanitize(configuredHostName));
             }
@@ -1349,8 +1350,23 @@ public sealed class DarlingMcpHostService : BackgroundService
         /* #5288: HttpRequest.Host hands the guard the DECODED form of a Host header (HostString.FromUriComponent
            turns a punycode xn-- name into Unicode), so a client that sends xn--bcher-kva.example is seen as the
            Unicode name. The configured name goes through the same conversion before the guard compares it, so
-           both sides are in the form the framework gives the middleware; an ASCII name comes out unchanged. */
-        var admittedHostName = allowedHostName is null ? null : HostString.FromUriComponent(allowedHostName).Host;
+           both sides are in the form the framework gives the middleware; an ASCII name comes out unchanged. A
+           malformed punycode label (xn--a) makes the conversion throw ArgumentException; the raw value is kept
+           then, so start-up never fails on it. McpNetworkConfig.NormalizeHostName already refuses such a name, so
+           the production caller never reaches the catch; this method admits whatever it is given, and the web
+           host's web.publicBaseUrl name takes the same block. */
+        var admittedHostName = allowedHostName;
+        if (allowedHostName is not null)
+        {
+            try
+            {
+                admittedHostName = HostString.FromUriComponent(allowedHostName).Host;
+            }
+            catch (ArgumentException)
+            {
+                /* Keep the raw value, as above. */
+            }
+        }
 
         /* DNS-rebinding guard (#1648) — the FIRST middleware, in BOTH modes, mirroring the web host's
            #1576 fix. The loopback bind is tokenless by design (the network gates below install only in

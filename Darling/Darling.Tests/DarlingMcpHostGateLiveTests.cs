@@ -56,7 +56,8 @@ public sealed class DarlingMcpHostGateLiveTests
     /// the singletons the tool classes require (a data source the gates never open, since none of them touch
     /// Postgres — a request is refused or reaches tools/list before any tool body runs).
     /// </summary>
-    private static async Task<TestServer> BuildServer(bool networkMode, string? hostName = null, ILogger? logger = null)
+    private static async Task<TestServer> BuildServer(
+        bool networkMode, string? hostName = null, ILogger? logger = null, string? rawAllowedHostName = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -88,7 +89,9 @@ public sealed class DarlingMcpHostGateLiveTests
             // #5288: the configured name is decided exactly as TryStartServerAsync decides it, through
             // ResolveAllowedHostName from the FINAL mode, so loopback mode never admits it. Passing the name here
             // unconditionally would hide the very rule that HostName_AdmittedInNetworkMode_RefusedInLoopbackMode_OtherNamesStill400 pins.
-            allowedHostName: DarlingMcpHostService.ResolveAllowedHostName(
+            // rawAllowedHostName is the one exception, for the test that hands ConfigurePipeline a name the resolver
+            // would never pass it (a malformed punycode label): the pipeline itself must survive that.
+            allowedHostName: rawAllowedHostName ?? DarlingMcpHostService.ResolveAllowedHostName(
                 hostName, networkMode, logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance));
 
         await app.StartAsync();
@@ -284,6 +287,8 @@ public sealed class DarlingMcpHostGateLiveTests
     [InlineData("10.9.9.9", "10.9.9.9")]
     [InlineData("mcp.corp.example..", "mcp.corp.example")]
     [InlineData("b\u00FCcher..example", "xn--bcher-kva.example")]
+    [InlineData("xn--a", "evil.com")]
+    [InlineData("mcp.xn--a.example", "evil.com")]
     public async Task HostName_SetButRefused_IsNotAdmitted_AndLogsOneWarning(string refusedValue, string hostAClientWouldSend)
     {
         var logger = new CapturingTestLogger();
@@ -299,6 +304,31 @@ public sealed class DarlingMcpHostGateLiveTests
 
         var (listenIp, _) = await ToolsListAsync(server, "/", ListenIp, InCidrRemote, bearer: Token);
         Assert.Equal(StatusCodes.Status200OK, listenIp);
+    }
+
+    /// <summary>
+    /// #5288: <c>ConfigurePipeline</c> admits whatever name it is given, so it must not fail start-up for a malformed
+    /// punycode label (<c>xn--a</c> decodes to nothing and makes <c>HostString.FromUriComponent</c> throw
+    /// <c>ArgumentException</c>), even though <c>McpNetworkConfig.NormalizeHostName</c> already refuses such a name
+    /// before production reaches this method. Called directly, with the raw name, so this fails the moment the
+    /// pipeline's own conversion loses its catch. The conversion falls back to the raw value: the pipeline still
+    /// builds, still refuses a foreign Host, and still admits the names it always admits.
+    /// </summary>
+    [Theory]
+    [InlineData("xn--a")]
+    [InlineData("mcp.xn--a.example")]
+    public async Task MalformedPunycodeAllowedHostName_PassedStraightToConfigurePipeline_DoesNotFailStartUp(string rawAllowedHostName)
+    {
+        using var server = await BuildServer(networkMode: true, rawAllowedHostName: rawAllowedHostName);
+
+        var foreign = await SendRaw(server, "/", "evil.com", InCidrRemote, bearer: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, foreign.Response.StatusCode);
+
+        foreach (var host in new[] { ListenIp, "localhost" })
+        {
+            var (status, body) = await ToolsListAsync(server, "/", host, InCidrRemote, bearer: Token);
+            Assert.True(status == StatusCodes.Status200OK, $"Host '{host}': expected 200, got {status}: {body}");
+        }
     }
 
     /// <summary>Network mode, the right token, an in-CIDR remote: a tools/list on <c>/</c> succeeds — proof

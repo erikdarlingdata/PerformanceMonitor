@@ -520,6 +520,43 @@ public sealed class DarlingConfigTests
     public void NormalizeHostName_RefusesAnInvalidInternationalizedName(string raw)
         => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
 
+    [Theory]
+    [InlineData("xn--a")]                // decodes to a control character, which IDNA disallows
+    [InlineData("mcp.xn--a.example")]    // the same label inside a longer name
+    [InlineData("MCP.XN--A.Example")]    // the prefix is not case sensitive
+    public void NormalizeHostName_RefusesAnXnLabelThatDoesNotDecode(string raw)
+        /* #5288: an ASCII name made of letters and a hyphen is a DNS name to Uri.CheckHostName, so "xn--a" used to be
+           kept. The MCP host then decodes it with HostString.FromUriComponent, which throws ArgumentException for a
+           label that does not decode, and MCP failed to start. Refused here, the host logs its one "set but refused"
+           Warning and admits nothing (fail closed). */
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("xn--bcher-kva.example")]
+    [InlineData("mcp.xn--bcher-kva.example")]
+    [InlineData("xn--e1afmkfd.example")]
+    public void NormalizeHostName_KeepsAnXnNameThatDecodes_AsWritten(string raw)
+        /* The decode is a check, not a rewrite (#5288): a punycode name that decodes is returned exactly as written,
+           not decoded to Unicode and not folded to lower case. */
+        => Assert.Equal(raw, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("mcp.corp.example")]
+    [InlineData("MCP.Corp.Example.")]
+    [InlineData("bücher.example")]
+    [InlineData("xn--bcher-kva.example")]
+    [InlineData("a-xn--b.example")]      // "xn--" inside a label is not an ACE prefix: nothing to decode
+    public void NormalizeHostName_AnyNameItKeeps_IsOneHostStringFromUriComponentAccepts(string raw)
+    {
+        /* The invariant the MCP host leans on (#5288): whatever NormalizeHostName returns converts without throwing,
+           so the Host guard's name never makes start-up fail. */
+        var name = McpNetworkConfig.NormalizeHostName(raw);
+
+        Assert.NotNull(name);
+        var converted = Record.Exception(() => { _ = Microsoft.AspNetCore.Http.HostString.FromUriComponent(name); });
+        Assert.Null(converted);
+    }
+
     [Fact]
     public void NormalizeHostName_RefusesALoneSurrogate_AndALabelTooLongOnceEncoded()
     {

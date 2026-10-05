@@ -1353,7 +1353,8 @@ public sealed class McpNetworkConfig
     /// <see cref="Tls"/> set it is also the name the certificate should carry as a dNSName SAN, and the host
     /// warns (never refuses) when it does not. A value that is set but is not a bare DNS name is ignored with one
     /// Warning at start. A name written in Unicode is admitted as the ASCII (punycode) name a client sends in
-    /// its Host header. Unlike <c>web.publicBaseUrl</c> (admitted in both modes) this is a bare host rather than
+    /// its Host header; a punycode (<c>xn--</c>) label that does not decode, such as <c>xn--a</c>, is refused the
+    /// same way. Unlike <c>web.publicBaseUrl</c> (admitted in both modes) this is a bare host rather than
     /// a URL, because MCP has no link builder: a scheme, port and path would be unused fields that could
     /// disagree with the listener. File-only and restart-only.
     /// </summary>
@@ -1394,6 +1395,10 @@ public sealed class McpNetworkConfig
     /// address (the guard admits the listen IP by itself, and a fullwidth <c>10.1.2.3</c> maps to one), a port
     /// (<c>host:5152</c>), a scheme or path (<c>https://host/</c>), a wildcard (<c>*.corp.example</c>) and
     /// anything with whitespace inside are refused: null.</item>
+    /// <item>A name with an <c>xn--</c> label must decode: <c>IdnMapping.GetUnicode</c> must not throw for it. The
+    /// MCP host decodes the name the same way before the Host-header guard compares it, and a malformed label
+    /// (<c>xn--a</c>) is a valid DNS name to <c>Uri.CheckHostName</c> yet makes that decode throw, so it is refused
+    /// here: null. The name itself is never rewritten, so a name that decodes keeps its case and its spelling.</item>
     /// </list>
     ///
     /// <para>An ASCII name keeps its case as written, because the Host-header guard compares ignoring case. A
@@ -1449,7 +1454,31 @@ public sealed class McpNetworkConfig
             }
         }
 
-        return Uri.CheckHostName(name) == UriHostNameType.Dns ? name : null;
+        if (Uri.CheckHostName(name) != UriHostNameType.Dns)
+        {
+            return null;
+        }
+
+        /* #5288: the MCP host runs this name through HostString.FromUriComponent (it decodes every xn-- label with
+           IdnMapping.GetUnicode) so the guard compares it in the form the framework gives the middleware. A
+           malformed label such as "xn--a" is ASCII letters and a hyphen, so it passes the DNS test above, then makes
+           that decode throw ArgumentException, which stopped MCP from starting. A name the framework cannot decode
+           could never equal a decoded Host anyway: it is refused here, so the host logs its one "set but refused"
+           Warning and admits nothing for it (fail closed). Only the check runs, on the ASCII form: the result is
+           dropped, so the name keeps its case and its spelling. A name with no xn-- label is never decoded. */
+        if (name.Contains("xn--", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                _ = new System.Globalization.IdnMapping().GetUnicode(name);
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        return name;
     }
 
     /// <summary>
