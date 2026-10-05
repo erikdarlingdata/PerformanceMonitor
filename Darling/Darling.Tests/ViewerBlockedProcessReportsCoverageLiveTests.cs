@@ -46,6 +46,8 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
     private const int XeMidwayServerId = -499805;
     private const int ChartsDmvOnlyServerId = -499806;
     private const int XeWholeWindowServerId = -499807;
+    private const int XeHistoryServerId = -499808;
+    private const int XeRunsBeforeWindowServerId = -499809;
     private const string XeCollector = "blocked_process_report";
     private const string DmvCollector = "dmv_blocking_snapshot";
 
@@ -191,6 +193,47 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
         Assert.False(RawWindowFloor.IsTruncated(chartsProbe, store.Start));
     }
 
+    /* An XE report carries its own event time, which can come before the collector's first run (the first collection stores
+       history): the charts' probe names the earlier of the two, as the grid does. */
+    [Fact]
+    public async Task TheChartsProbe_NamesTheEarliestReport_WhereItComesBeforeTheXeCollectorsFirstRun_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(XeHistoryServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(XeHistoryServerId, XeCollector, store.End.AddDays(-3), store.End, ct);
+        await store.InsertXeReportsAsync(XeHistoryServerId, store.End.AddDays(-5), store.End, store.End.AddDays(-3), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(XeHistoryServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.Equal(store.End.AddDays(-5), chartsProbe);
+    }
+
+    /* The shared run-log probe (DataWindowFloor.Source.ForCollectorRuns) for an XE collector whose runs reach back before the
+       window answers covered: at or before the window's start. For runs that begin midway it answers the server's registration
+       instead, which is why the charts' probe reads the collector's first run itself. */
+    [Fact]
+    public async Task TheSharedRunLogProbe_ForXeRunsBeforeTheWindow_ReadsCovered_AndForRunsMidway_ReadsTheRegistration_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(XeRunsBeforeWindowServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(XeRunsBeforeWindowServerId, XeCollector, store.End.AddDays(-20), store.End, ct);
+        await store.AddServerAsync(XeMidwayServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(XeMidwayServerId, XeCollector, store.End.AddDays(-3), store.End, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(store.ConnectionString);
+        var source = DataWindowFloor.Source.ForCollectorRuns(XeCollector);
+        var before = await DataWindowFloor.GetForServerAsync(dataSource, source, XeRunsBeforeWindowServerId, store.Start, store.End, 30, ct);
+        var midway = await DataWindowFloor.GetForServerAsync(dataSource, source, XeMidwayServerId, store.Start, store.End, 30, ct);
+
+        Assert.NotNull(before);
+        Assert.False(RawWindowFloor.IsTruncated(before, store.Start));
+        Assert.Equal(store.End.AddDays(-40), midway);
+    }
+
     private static string Since(DateTime utc) =>
         "Showing since " + utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
@@ -206,6 +249,8 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
         }
 
         public ViewerDataService Viewer { get; }
+
+        public string ConnectionString => _scratch.ConnectionString;
 
         /// <summary>The end of the 7-day range every test reads, to the minute.</summary>
         public DateTime End { get; }
