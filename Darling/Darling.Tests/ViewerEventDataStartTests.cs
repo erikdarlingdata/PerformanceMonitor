@@ -410,8 +410,10 @@ public sealed class ViewerEventDataStartTests : IDisposable
         /* The blocked process reports read goes through the call that also reports a source read that filled its cap. */
         Assert.Equal(2, Matches(tabs, @"_dataService\.ReadRecentBlockedProcessReportsAsync\("));
         Assert.Equal(0, Matches(tabs, @"_dataService\.GetRecentBlockedProcessReportsAsync\("));
-        /* Two grid tab loads, plus one probe each for the Trends and the Stats cases of LoadBlockingAsync (the charts' own notes). */
-        Assert.Equal(4, Matches(tabs, @"_dataService\.GetBlockedProcessReportsDataStartAsync\("));
+        /* The grid's own probe: its tab load and its slicer drag, and nothing else. */
+        Assert.Equal(2, Matches(tabs, @"_dataService\.GetBlockedProcessReportsDataStartAsync\("));
+        /* The charts' probe: one each for the Trends and the Stats cases of LoadBlockingAsync (the charts' own notes). */
+        Assert.Equal(2, Matches(tabs, @"_dataService\.GetBlockingChartDataStartAsync\("));
         Assert.Equal(2, Matches(tabs, @"_dataService\.GetRecentDeadlocksAsync\("));
         Assert.Equal(4, Matches(tabs, @"_dataService\.GetDeadlocksDataStartAsync\("));
 

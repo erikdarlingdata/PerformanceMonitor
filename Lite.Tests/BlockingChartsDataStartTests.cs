@@ -183,6 +183,101 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
         Assert.Equal(SinceText(pointAt), text);
     }
 
+    private static readonly DateTime FixedEnd = new(2026, 9, 20, 12, 0, 0, DateTimeKind.Unspecified);
+
+    private Task SeedDmvRowAsync(DateTime at) => ExecAsync(@"
+INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, event_time, server_id, server_name, database_name, monitor_loop, wait_time_ms)
+VALUES ($1, $2, $2, $3, $4, 'db1', 1, 100)", _nextId++, Naive(at), ServerId, ServerName);
+
+    /// <summary>The tab's note for the blocking charts, as the step runs it: the source check, then the probe with its flag.</summary>
+    private async Task<(bool Visible, string Text)> BlockingNoteAsync(DateTime? earliestDrawn, DateTime startUtc, DateTime endUtc)
+    {
+        var service = new LocalDataService(_duckDb);
+        var fromXe = await service.HasBlockedProcessReportsInWindowAsync(ServerId, startUtc, endUtc);
+        var floor = await service.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, ServerId, startUtc, endUtc, includeAlsoCovered: !fromXe);
+        floor = ServerTab.EarlierOfFloorAndRowShown(floor, earliestDrawn);
+        return OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock();
+            ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
+            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text);
+        });
+    }
+
+    /// <summary>#5098: the DMV covers the whole window and the XE collector began mid-window; the read drew the XE rows, so the note names the XE start.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task DmvCoversTheWindow_XeStartsMidway_NamesTheXeStart(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        var xeFrom = FixedEnd.AddDays(-3);
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
+        await ExecAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT $1 + row_number() OVER (), $2, $3, 'dmv_blocking_snapshot', g.t, 12, 'SUCCESS', 0
+FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)", _nextId, ServerId, ServerName, FixedEnd.AddDays(-9), FixedEnd);
+        _nextId += 100000;
+        await ExecAsync("DELETE FROM collection_log WHERE collector_name = 'blocked_process_report' AND collection_time < $1", xeFrom);
+        await SeedDmvRowAsync(FixedEnd.AddDays(-6));
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, xeFrom.AddHours(2));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, xeFrom.AddHours(2)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.True(visible);
+        Assert.Equal(SinceText(xeFrom), text);
+    }
+
+    /// <summary>#5098: no XE row in the window, so the read drew the DMV rows and the note is as before (the DMV covers the window: quiet).</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task DmvOnly_NoteIsAsBefore(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await ExecAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT $1 + row_number() OVER (), $2, $3, 'dmv_blocking_snapshot', g.t, 12, 'SUCCESS', 0
+FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)", _nextId, ServerId, ServerName, FixedEnd.AddDays(-9), FixedEnd);
+        _nextId += 100000;
+        await SeedDmvRowAsync(FixedEnd.AddDays(-6));
+
+        Assert.False(await new LocalDataService(_duckDb).HasBlockedProcessReportsInWindowAsync(ServerId, FixedEnd.AddDays(-7), FixedEnd));
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-6)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>#5098: the XE collector covers the whole window: no note, with or without the DMV beside it.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task XeCoversTheWindow_ShowsNoNote(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-7).AddHours(5));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-7).AddHours(5)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>#5098: the source check honors the database filter like the reads do.</summary>
+    [Fact]
+    public async Task SourceCheck_HonorsTheDatabaseFilter()
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-1));
+        var service = new LocalDataService(_duckDb);
+        var window = (FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.True(await service.HasBlockedProcessReportsInWindowAsync(ServerId, window.Item1, window.Item2));
+        Assert.False(await service.HasBlockedProcessReportsInWindowAsync(ServerId, window.Item1, window.Item2, ["no_such_db"]));
+    }
+
     /// <summary>A zero bucket is the chart's baseline, not a point drawn: the trend helper ignores it.</summary>
     [Fact]
     public void ZeroBuckets_AreNotPointsDrawn()
@@ -207,6 +302,43 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
         {
             Assert.Contains($"x:Name=\"{name}\"", xaml, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// Wiring pin: the Trends read and the Stats read take the database filter, so the XE source check the note runs must take the same one.
+    /// All four refresh calls hand the tab's <c>SelectedDatabaseFilter</c> to their step, each step hands its <c>databaseNames</c> to
+    /// <c>BlockingReadTookXeAsync(start, end, databaseNames)</c>, and that check hands it on to the source query.
+    /// </summary>
+    [Fact]
+    public void TheNoteSteps_ReceiveTheDatabaseFilter_AndHandItToTheXeSourceCheck()
+    {
+        var refresh = File.ReadAllText(ControlsFile("ServerTab.Refresh.cs")).ReplaceLineEndings("\n");
+        foreach (var call in new[] { "await RefreshBlockingTrendsBannersAsync(", "await RefreshBlockingStatsBannersAsync(" })
+        {
+            var at = 0;
+            var seen = 0;
+            while ((at = refresh.IndexOf(call, at, StringComparison.Ordinal)) >= 0)
+            {
+                var line = refresh[at..refresh.IndexOf('\n', at)];
+                Assert.EndsWith("hoursBack, fromDate, toDate, SelectedDatabaseFilter);", line, StringComparison.Ordinal);
+                seen++;
+                at += call.Length;
+            }
+
+            Assert.Equal(2, seen);
+        }
+
+        var src = File.ReadAllText(ControlsFile("ServerTab.BlockingChartsDataStart.cs")).Replace("\r\n", "\n");
+        foreach (var step in new[] { "RefreshBlockingTrendsBannersAsync", "RefreshBlockingStatsBannersAsync" })
+        {
+            var start = src.IndexOf($"private async System.Threading.Tasks.Task {step}(", StringComparison.Ordinal);
+            Assert.True(start >= 0, $"{step} is missing");
+            var body = src[start..src.IndexOf("\n    }\n", start, StringComparison.Ordinal)];
+            Assert.Contains("IReadOnlyList<string>? databaseNames = null)", body, StringComparison.Ordinal);
+            Assert.Contains("await BlockingReadTookXeAsync(start, end, databaseNames);", body, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("_dataService.HasBlockedProcessReportsInWindowAsync(_serverId, start, end, databaseNames)", src, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -246,9 +378,9 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
     /// <summary>The wiring: each step calls each note with its relation, banner and drawn-point argument.</summary>
     [Theory]
     [InlineData("RefreshBlockingTrendsBannersAsync", "WaitStats", "LockWaitTrendTruncationBanner", "")]
-    [InlineData("RefreshBlockingTrendsBannersAsync", "BlockedProcessReports", "BlockingTrendTruncationBanner", ", EarliestBlockingTrendPointDrawn(blocking)")]
+    [InlineData("RefreshBlockingTrendsBannersAsync", "BlockedProcessReports", "BlockingTrendTruncationBanner", ", EarliestBlockingTrendPointDrawn(blocking), includeAlsoCovered: !blockingFromXe")]
     [InlineData("RefreshBlockingTrendsBannersAsync", "Deadlocks", "DeadlockTrendTruncationBanner", ", EarliestBlockingTrendPointDrawn(deadlocks)")]
-    [InlineData("RefreshBlockingStatsBannersAsync", "BlockedProcessReports", "BlockingStatsBlockingTruncationBanner", ", EarliestBlockingStatsPointDrawn(durationStats)")]
+    [InlineData("RefreshBlockingStatsBannersAsync", "BlockedProcessReports", "BlockingStatsBlockingTruncationBanner", ", EarliestBlockingStatsPointDrawn(durationStats), includeAlsoCovered: !blockingFromXe")]
     [InlineData("RefreshBlockingStatsBannersAsync", "Deadlocks", "BlockingStatsDeadlockTruncationBanner", ", EarliestDeadlockStatsPointDrawn(deadlockSeverity)")]
     public void BlockingBannerSteps_CallEachNote_WithItsRelation(string step, string relation, string banner, string drawn)
     {
