@@ -33,14 +33,17 @@ permissions:
 # upload-artifact step in this workflow is gated to the release event (the SignPath signing
 # path) or to failure() (darling-pg diagnostics), except the per-run Lite timing uploads
 # (#5208), and exactly ONE thing reads a previous run's artifacts: the Lite shard packer
-# (#5208). The gate job picks, once per run, the newest SUCCESSFUL push run on dev that still
-# has lite-tests-timing artifacts, and every Lite shard downloads that one run's timings to
-# balance its cut by duration. A cancelled run is not a successful run, so a cancelled push
-# run is never read; with no such run, or with timings that are missing, corrupt or stale,
-# the cut is the plain class-name hash, so cancelling can cost shard balance but never a test
-# class or a verdict. No other download-artifact, gh run download or workflow_run consumer
-# exists (CrossAppGuardCiGateTests pins both halves), nightly.yml builds its own tree from
-# its own checkout, and a release compiles fresh on the release event. The accepted
+# (#5208). The gate job picks, once per run, the newest successful push run on dev (of the 30
+# newest successful dev runs) whose lite-tests-timing artifacts ALL have more than two days of
+# retention left, and pins that run and its exact artifact set; every Lite shard downloads that
+# set and fails if it gets anything else. A cancelled run is not a successful run, so a
+# cancelled push run is never read. With no such run the cut is the plain class-name hash, and
+# timings the packer cannot use (none readable, all zero, or covering under 80% of this commit's
+# classes) send every shard to that same hash. So cancelling can cost shard balance but never a
+# test class or a verdict. No other cross-run consumer (a download-artifact with run-id, a gh
+# run download, or a workflow_run trigger) exists (CrossAppGuardCiGateTests pins both halves),
+# nightly.yml builds its own tree from its own checkout, and a release compiles fresh on the
+# release event. The accepted
 # trade: push builds are diff-scoped, so a
 # cancelled run's areas are not re-verified until the next change touches them — the
 # nightly and the all-areas dev->main release PR are the backstops. Release and
