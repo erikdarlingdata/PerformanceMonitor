@@ -229,7 +229,7 @@ public sealed class DiagnosticsBundleHardeningTests
         }
     }
 
-    /* ── H5, M1, M2 ── */
+    /* ── fleet tags, engine keys, alias-then-cut ── */
 
     [Fact]
     public void FleetOverview_TagsBecomeACount_WithNoNames()
@@ -320,7 +320,7 @@ public sealed class DiagnosticsBundleHardeningTests
         Assert.DoesNotContain("gamma", text!, StringComparison.OrdinalIgnoreCase);
     }
 
-    /* ── M5, H3 ── */
+    /* ── notification identifiers and service accounts ── */
 
     [Fact]
     public void NotificationIdentifiers_AreSeeded_AndWebhookUrlsAreSecrets()
@@ -372,7 +372,7 @@ public sealed class DiagnosticsBundleHardeningTests
         }
     }
 
-    /* ── L1: the secret floor ── */
+    /* ── the secret length floor ── */
 
     [Fact]
     public void ConfigSecrets_OfAnyLength_AreTracked()
