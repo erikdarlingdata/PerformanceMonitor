@@ -63,7 +63,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// because the certificate names the LAN address and that surface never leaves the machine; on a wildcard listen
 /// there is ONE listener and it serves HTTPS to loopback too. A certificate that cannot be used (unreadable,
 /// invalid, expired, not yet valid) degrades to loopback-only with a Critical line, as an unreadable token does,
-/// never to plain HTTP on the LAN. The certificate's expiry reaches the worker's alert sweep through
+/// never to plain HTTP on the LAN. Unlike an unreadable token, a refused certificate leaves the token resolved,
+/// so the loopback-only server it degrades to keeps the bearer-token gate (and has no CIDR check: only the
+/// loopback binds exist). The certificate's expiry reaches the worker's alert sweep through
 /// <see cref="McpTlsCertificateState"/>. Like the rest of <c>mcp.network</c>, the block is read once at start
 /// and a change takes a service restart.</para>
 ///
@@ -683,7 +685,14 @@ public sealed class DarlingMcpHostService : BackgroundService
                ResolveAllowedHostName and is not admitted (fail closed). */
             var allowedHostName = ResolveAllowedHostName(config.Mcp.Network?.HostName, networkMode, _logger);
 
-            ConfigurePipeline(_app, networkMode, networkListenIp, allowedCidr, bearerToken, allowedHostName);
+            /* #5288: a start that was asked to expose and fell back to loopback-only AFTER its token resolved (the
+               TLS block above refused) keeps the token gate on the loopback server, because the operator's config
+               said every client presents it. bearerToken is only ever assigned inside the network branch, once the
+               token resolved, so "not network mode, token set" is exactly that state. A start with no network block
+               and a start whose token could not be resolved both leave it empty, and stay tokenless as before. */
+            var requireTokenWhenLoopbackOnly = !networkMode && bearerToken.Length > 0;
+
+            ConfigurePipeline(_app, networkMode, networkListenIp, allowedCidr, bearerToken, allowedHostName, requireTokenWhenLoopbackOnly);
 
             /* #2389: name the authority for each half of what is being started. enabled/port come from
                whichever plane the supervisor resolved; listen/allowFrom/token are always darling.json. */
@@ -701,6 +710,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                 _logger.LogInformation(
                     "Starting MCP server on http://localhost:{Port} (loopback only) — enabled/port from {Origin}",
                     effectivePort, origin);
+                if (requireTokenWhenLoopbackOnly)
+                {
+                    _logger.LogInformation(
+                        "The MCP loopback listener still requires the mcp.network token: the network block is configured, so local clients present it too.");
+                }
             }
 
             /* #2479 item 6: the network block is read ONCE and held for the process lifetime by design.
@@ -1318,7 +1332,8 @@ public sealed class DarlingMcpHostService : BackgroundService
 
     /// <summary>
     /// Everything AFTER <c>builder.Build()</c>: the Host-allowlist/DNS-rebinding guard (both modes), the
-    /// network-mode bearer-token + CIDR middleware, then <c>MapMcp()</c> and <c>MapMcp("/core")</c>.
+    /// network-mode CIDR check, the bearer token (network mode, and a loopback-only server that kept it, see
+    /// <paramref name="requireTokenWhenLoopbackOnly"/>), then <c>MapMcp()</c> and <c>MapMcp("/core")</c>.
     /// Extracted (#4128) so a live-HTTP test can build the SAME pipeline against a <c>TestServer</c> instead
     /// of a second, hand-copied one that could silently drift from production. The production call site
     /// passes exactly these values, in exactly this order — see <c>TryStartServerAsync</c>. Instance method,
@@ -1330,6 +1345,13 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// whatever it is given, so the caller owns the rule: <see cref="ResolveAllowedHostName"/> returns null in
     /// loopback-only and degraded modes (review F2), and a test builds this pipeline through it for the same
     /// reason it builds it through this method. Optional, so a caller with no name is unchanged.</para>
+    ///
+    /// <para><paramref name="requireTokenWhenLoopbackOnly"/> (#5288) keeps the bearer-token gate on a loopback-only
+    /// server, with no CIDR check beside it. The host passes true when network mode was configured and its token
+    /// resolved, and the start then fell back to loopback-only (a refused TLS certificate): the operator's config
+    /// said every client presents the token, so a lapsed certificate does not leave the local listener open. A
+    /// loopback-only server that never had a network block, or whose token could not be resolved, passes false and
+    /// stays tokenless as before. Optional, so every other caller is unchanged.</para>
     /// </summary>
     internal void ConfigurePipeline(
         WebApplication app,
@@ -1337,7 +1359,8 @@ public sealed class DarlingMcpHostService : BackgroundService
         IPAddress? networkListenIp,
         CidrAllowList allowedCidr,
         string bearerToken,
-        string? allowedHostName = null)
+        string? allowedHostName = null,
+        bool requireTokenWhenLoopbackOnly = false)
     {
         /* #2479 item 5: every gate below used to refuse silently, so "is my token wrong or my CIDR
            wrong" was answerable only from the client, which sees one opaque status code. One log per
@@ -1370,7 +1393,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* DNS-rebinding guard (#1648) — the FIRST middleware, in BOTH modes, mirroring the web host's
            #1576 fix. The loopback bind is tokenless by design (the network gates below install only in
-           network mode), so a browser ON this host that loads attacker content could be rebound to
+           network mode, plus the token on a degraded one), so a browser ON this host that loads attacker content could be rebound to
            127.0.0.1:5152 and reach the MCP surface same-origin — and that surface is no longer read-only
            (custom-view CRUD, add_servers/remove_server, alert-config writes). The application/json content
            type does NOT save us: under a rebind the browser treats the request as same-origin, so no CORS
@@ -1401,16 +1424,43 @@ public sealed class DarlingMcpHostService : BackgroundService
             await next(context);
         });
 
-        /* Access-control middleware — installed ONLY in network mode (Round-4 #6). The default/degraded
-           loopback-only server stays byte-for-byte today's tokenless local MCP, so existing local clients
-           keep working. Both run BEFORE MapMcp (D3-b: "first ... before any handler/handshake"): the
-           unconditional constant-time bearer token FIRST (NO loopback exemption — in exposed mode even a
-           local client must present the token; that IS the loopback guard against SSRF/sandboxed sockets),
-           then the in-app CIDR check (loopback-exempt so the loopback bind's local clients are not 403'd,
-           Round-4 #2 — it bounds WHO can route to the port, independent of the best-effort firewall). */
+        /* Access-control middleware (Round-4 #6). Both run BEFORE MapMcp (D3-b: "first ... before any
+           handler/handshake"), in this order (#5288):
+
+             1. the in-app CIDR check, in NETWORK mode only. It is loopback-exempt so the loopback bind's local
+                clients are not 403'd (Round-4 #2), and it bounds WHO can route to the port, independent of the
+                best-effort firewall. An address outside allowFrom is answered 403 here, whatever token it sends.
+             2. the unconditional constant-time bearer token (NO loopback exemption: in exposed mode even a local
+                client must present the token; that IS the loopback guard against SSRF/sandboxed sockets). It is
+                installed in network mode, and also on a loopback-only server that network mode fell back to after
+                its token resolved (requireTokenWhenLoopbackOnly): the operator's config said every client presents
+                the token, so a refused certificate does not turn the local listener into a tokenless one.
+
+           A loopback-only server with no network block stays byte-for-byte today's tokenless local MCP, so
+           existing local clients keep working. */
         if (networkMode)
         {
             var cidr = allowedCidr;
+
+            app.Use(async (context, next) =>
+            {
+                if (!IsRemoteAddressAllowed(context.Connection.RemoteIpAddress, cidr))
+                {
+                    refusals.Report(
+                        _logger, "MCP", DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden,
+                        context.Connection.RemoteIpAddress,
+                        $"its address is outside mcp.network.allowFrom ({cidr})",
+                        DateTime.UtcNow);
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    return;
+                }
+
+                await next(context);
+            });
+        }
+
+        if (networkMode || requireTokenWhenLoopbackOnly)
+        {
             var token = bearerToken;
 
             app.Use(async (context, next) =>
@@ -1449,29 +1499,13 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                 await next(context);
             });
-
-            app.Use(async (context, next) =>
-            {
-                if (!IsRemoteAddressAllowed(context.Connection.RemoteIpAddress, cidr))
-                {
-                    refusals.Report(
-                        _logger, "MCP", DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden,
-                        context.Connection.RemoteIpAddress,
-                        $"its address is outside mcp.network.allowFrom ({cidr})",
-                        DateTime.UtcNow);
-                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                    return;
-                }
-
-                await next(context);
-            });
         }
 
         app.MapMcp();
 
         /* #3898 D7: /core, the same endpoint narrowed to DarlingCoreToolProfile's closure via
            ConfigureSessionOptions above. Mapped on the SAME _app after the SAME middleware (the Host-header
-           guard, and in network mode the bearer-token and CIDR checks) — nothing about this route is
+           guard, and in network mode the CIDR check and the bearer token) — nothing about this route is
            exempt from any gate above. / is unchanged and keeps serving every tool, for good. */
         app.MapMcp("/core");
     }

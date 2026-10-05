@@ -54,7 +54,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>Browser auth (network mode only):</b> in network mode EVERY request authenticates, loopback
 /// included — the MCP host's exposed-mode loopback-token SSRF guard, now mirrored here (#1649). Loopback is
 /// exempt from the CIDR test only (127.0.0.1 is not in a LAN CIDR), never from the credential. A
-/// loopback-only dashboard registers no auth middleware at all and remains tokenless. A request needs either a valid session
+/// loopback-only dashboard registers no auth middleware at all and remains tokenless, except one that network mode
+/// fell back to after its token resolved (a refused TLS certificate): that one keeps this same token-to-cookie gate,
+/// because the operator's config said every client presents the token. A request needs either a valid session
 /// cookie or a valid <c>?token=</c> (constant-time), which is exchanged for an HMAC-signed HttpOnly
 /// SameSite=Strict cookie and 302-redirected to strip the token from the URL; out-of-CIDR is 403; no
 /// cookie/token gets a minimal inline login form. The cookie signing key is a per-process 32-byte RNG value,
@@ -695,7 +697,16 @@ public sealed class DarlingWebHostService : BackgroundService
             /* #4214 part 2 / round-1 review Low 3: trimmed copy, not config.Postgres itself — see the
                matching comment at DarlingMcpHostService.cs's AddSingleton(PostgresConfig) registration. */
             var storeHostPostgresConfig = new PostgresConfig { Managed = config.Postgres.Managed, DataDirectory = config.Postgres.DataDirectory };
-            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer);
+
+            /* #5288: a start that was asked to expose and fell back to loopback-only AFTER its token resolved (the
+               TLS block above refused) keeps the token-to-cookie gate on the loopback server, because the operator's
+               config said every client presents the token. accessToken is only ever assigned inside the network
+               branch, once the token resolved, so "not network mode, token set" is exactly that state. A start with
+               no network block and a start whose token could not be resolved both leave it empty, and stay
+               tokenless as before. */
+            var requireTokenWhenLoopbackOnly = !networkMode && accessToken.Length > 0;
+
+            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -724,6 +735,11 @@ public sealed class DarlingWebHostService : BackgroundService
                 _logger.LogInformation(
                     "Starting web dashboard on http://localhost:{Port} (loopback only) — enabled/port from {Origin}",
                     effectivePort, origin);
+                if (requireTokenWhenLoopbackOnly)
+                {
+                    _logger.LogInformation(
+                        "The web dashboard loopback listener still requires the web.network token: the network block is configured, so local browsers and clients present it too.");
+                }
             }
 
             /* #2479 item 6: the network block is read ONCE and held for the process lifetime by design.
@@ -787,9 +803,10 @@ public sealed class DarlingWebHostService : BackgroundService
         => DarlingHostBinding.IsAllowedHost(host, networkListenIp, extraAllowedHost);
 
     /// <summary>
-    /// PURE route-auth decision. This method is only ever reached in NETWORK mode — the caller registers the
-    /// auth middleware inside <c>if (networkMode)</c> — so a loopback-only dashboard is unaffected by every
-    /// rule here and stays tokenless.
+    /// PURE route-auth decision. This method is only ever reached in NETWORK mode, or on the loopback-only server
+    /// that network mode fell back to after its token resolved (#5288) — the caller registers the auth middleware
+    /// only for those — so a loopback-only dashboard with no network block is unaffected by every rule here and
+    /// stays tokenless.
     ///
     /// <para>Loopback skips the CIDR check (127.0.0.1 is not in a LAN CIDR, so testing it there would 403 the
     /// operator's own browser) but still needs a session cookie or a valid <c>?token=</c>, exactly like any
@@ -902,6 +919,13 @@ public sealed class DarlingWebHostService : BackgroundService
     /// passes the raw host (<c>Uri.Host</c>, in whichever spelling the operator wrote); the guard converts its own
     /// copy once to the decoded form <c>HttpRequest.Host</c> gives the middleware, so a punycode and a Unicode
     /// spelling both admit the punycode Host a browser sends.</param>
+    /// <param name="requireTokenWhenLoopbackOnly">#5288: keeps the token-to-cookie gate on a loopback-only server. The
+    /// host passes true when network mode was configured and its token resolved, and the start then fell back to
+    /// loopback-only (a refused TLS certificate): the operator's config said every client presents the token, so a
+    /// lapsed certificate does not leave the local listener open. A loopback-only server that never had a network
+    /// block, or whose token could not be resolved, passes false and registers no auth middleware, as before. The
+    /// CIDR check inside the gate is a no-op for loopback, the only peers such a server has. Optional, so every
+    /// other caller is unchanged.</param>
     internal void ConfigurePipeline(
         WebApplication app,
         NpgsqlDataSource postgres,
@@ -912,7 +936,8 @@ public sealed class DarlingWebHostService : BackgroundService
         DarlingWebOidcClient? oidcClient,
         string? publicBaseUrlHost = null,
         PostgresConfig? postgresConfig = null,
-        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null,
+        bool requireTokenWhenLoopbackOnly = false)
     {
         /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
            because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
@@ -925,7 +950,8 @@ public sealed class DarlingWebHostService : BackgroundService
            middleware runs on EVERY request (both modes) as the DNS-rebinding guard — it must stay FIRST after
            compression, ahead of the #4276 backstop too (see HostHeaderGuardTests, #1648): that guard is the
            fix for a previously-exploited hole, and a handler ahead of it would itself be new unauthenticated
-           surface on the tokenless loopback bind. Then (network mode only) the auth middleware, then the
+           surface on the tokenless loopback bind. Then (network mode, or the token-keeping degraded loopback-only
+           server, see requireTokenWhenLoopbackOnly) the auth middleware, then the
            #4276 failure backstop, then the no-store stamp on /api/* responses, then DarlingWebEndpoints.MapAll
            -> UseDefaultFiles -> UseStaticFiles. WebApplication auto-inserts UseRouting at the head and
            UseEndpoints at the tail, so the static-file middleware sits behind these gates and serves the SPA
@@ -980,7 +1006,12 @@ public sealed class DarlingWebHostService : BackgroundService
             await next(context);
         });
 
-        if (networkMode)
+        /* The auth gate installs in network mode and, on a loopback-only server that network mode fell back to
+           after its token resolved (requireTokenWhenLoopbackOnly, #5288), too: the token-to-cookie gate is the
+           one credential check this host has, and the CIDR test inside it exempts loopback, so on a server that
+           only binds loopback it is the token that gates. A loopback-only server with no network block still
+           registers nothing here. */
+        if (networkMode || requireTokenWhenLoopbackOnly)
         {
             var cidr = allowedCidr;
             var token = accessToken;
