@@ -303,6 +303,33 @@ public sealed class WebChartAtTimeBehaviourTests
     }
 
     [Fact]
+    public void LineAndFanout_HandTheServerAndTheChartsItemOver_UnlessAPanelOptsOut()
+    {
+        // Most server-tab charts reach the menu through these two: line() (CPU, Memory, Blocking Events, Deadlocks, Lock Waits,
+        // tempdb) and fanout() (Current Waits, Blocking and Deadlock Severity, Query Duration, System Health). The nine direct
+        // zoomableLineChart calls are counted above; without this, deleting either hand-off passes every other case.
+        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        Assert.Single(Regex.Matches(tabs, @"atTime: opts\.atTime === false \|\| !params \|\| !params\.server \? null : \{ server: params\.server, item: opts\.atTimeItem \|\| ""queries"" \}"));
+        Assert.Single(Regex.Matches(tabs, @"atTime: spec\.atTime === false \|\| !params \|\| !params\.server \? null : \{ server: params\.server, item: spec\.atTimeItem \|\| ""queries"" \}"));
+    }
+
+    [Fact]
+    public void EveryLineOnThePostgresRegistry_OptsOut_BecauseThatPageHasNoQueriesOrBlockingTab()
+    {
+        // The items open the SQL Server Queries and Blocking tabs. The PostgreSQL page has neither, so its one line chart (the
+        // Amazon Aurora CPU panel) passes atTime: false, and no PostgreSQL fanout draws a line.
+        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var pgStart = tabs.IndexOf("export const POSTGRES_TABS = [", StringComparison.Ordinal);
+        Assert.True(pgStart > 0, "the PostgreSQL tab registry moved");
+        var pg = tabs[pgStart..tabs.IndexOf("\n];", pgStart, StringComparison.Ordinal)];
+        var calls = Regex.Matches(pg, @"(?<![\w.])line\(");
+        Assert.True(calls.Count > 0, "the PostgreSQL registry draws no line() chart any more, so this pin has nothing to check");
+        foreach (Match call in calls)
+            Assert.Contains("atTime: false,", Balanced(pg, call.Index + "line".Length));
+        Assert.DoesNotContain("viz: \"line\"", pg);
+    }
+
+    [Fact]
     public void TheBlockingAndDeadlockCharts_NameTheirOwnItem_AndNoOtherChartDoes()
     {
         // The desktop gives Blocking Events, Lock Waits and the blocking severity chart "Show Blocking at This Time", and the
