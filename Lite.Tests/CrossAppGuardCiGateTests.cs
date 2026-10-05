@@ -2880,6 +2880,12 @@ public class CrossAppGuardCiGateTests
         Assert.DoesNotContain("% 4", run, StringComparison.Ordinal);
         Assert.Contains("($hash[0] % $shards) -eq ${{ matrix.shard }}", run, StringComparison.Ordinal);
 
+        /* The download is tried three times, and every try starts from an EMPTY folder: gh extracts each file
+           create-exclusive, so a file a partial try left would make tries 2 and 3 fail too. The native-command
+           error preference is off before the first try, so a failed gh call reaches the retry instead of throwing
+           out of the step. */
+        Assert.Matches(@"\$PSNativeCommandUseErrorActionPreference = \$false\s+\$downloaded = \$false\s+foreach \(\$attempt in 1\.\.3\) \{\s+(?:#[^\r\n]*\s+)*Remove-Item -Recurse -Force -Path \$timingDir -ErrorAction SilentlyContinue\s+New-Item -ItemType Directory -Force -Path \$timingDir \| Out-Null\s+gh run download ", run);
+
         /* A shard that cannot get the pinned timings, or whose packer or reconcile fails, FAILS: it never falls
            back to the hash alone. The only fallbacks are the pin being empty (every shard reads the same empty
            output) and the packer's own, which every shard reaches from the same files. */

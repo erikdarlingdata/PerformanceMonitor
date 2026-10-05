@@ -2054,8 +2054,12 @@ jobs:
                   $classesFile = Join-Path $planDir 'classes.txt'
                   Set-Content -Path $classesFile -Value $classes -Encoding utf8NoBOM
 
+                  $PSNativeCommandUseErrorActionPreference = $false
                   $downloaded = $false
                   foreach ($attempt in 1..3) {
+                      # Start every try from an empty folder: gh will not overwrite a file that a partial try left.
+                      Remove-Item -Recurse -Force -Path $timingDir -ErrorAction SilentlyContinue
+                      New-Item -ItemType Directory -Force -Path $timingDir | Out-Null
                       gh run download $env:LITE_TIMING_RUN --pattern 'lite-tests-timing-*' --dir $timingDir
                       if ($LASTEXITCODE -eq 0) { $downloaded = $true; break }
                       Write-Host "timing download attempt $attempt of 3 failed with exit code $LASTEXITCODE"
