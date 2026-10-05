@@ -1015,18 +1015,23 @@ public sealed class McpHealthTools
                         $"No collector runs have EVER been recorded for {resolved.ServerName}. This is not an empty window — collection has not run at all for this server. Check that collection is running and that the server is enabled; get_collection_health will be equally empty until it does.");
                 }
 
+                var emptyNotice = await NoticeAsync(emptyAnswer: true);
+
                 if (filtered)
                 {
                     return McpHelpers.Status(
                         "empty",
                         $"No collector runs on {resolved.ServerName} in the last {hours} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.",
-                        (await NoticeAsync(emptyAnswer: true)).AsHints());
+                        emptyNotice.AsHints());
                 }
 
                 return McpHelpers.Status(
                     "empty",
-                    $"No collector runs recorded for {resolved.ServerName} in the last {hours} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.",
-                    (await NoticeAsync(emptyAnswer: true)).AsHints());
+                    McpHelpers.QuietUnlessCut(
+                        emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                        factual: $"No collector runs recorded for {resolved.ServerName} in the last {hours} hour(s)",
+                        coveredClaim: ". This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs."),
+                    emptyNotice.AsHints());
             }
 
             var notice = await NoticeAsync(emptyAnswer: false);
@@ -1360,11 +1365,17 @@ public sealed class McpHealthTools
                 var everRan =
                     await dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId)
                     || await dataService.HasAnyDeadlockCollectorRunAsync(resolved.ServerId);
+                var emptyNotice = everRan
+                    ? await BlockingStatsWindowNoticeAsync(dataService, resolved.ServerId, hours, windowEnd, emptyAnswer: true)
+                    : default;
                 return everRan
                     ? McpHelpers.Status(
                         "empty",
-                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.",
-                        (await BlockingStatsWindowNoticeAsync(dataService, resolved.ServerId, hours, windowEnd, emptyAnswer: true)).AsHints())
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                            factual: $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours} hour(s)",
+                            coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
+                        emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",
                         $"The blocking collectors have NEVER run successfully for {resolved.ServerName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
