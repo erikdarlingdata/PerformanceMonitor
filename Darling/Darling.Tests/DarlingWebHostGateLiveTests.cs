@@ -22,6 +22,7 @@ using Npgsql;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -231,6 +232,67 @@ public sealed class DarlingWebHostGateLiveTests
         var ctx = await Send(server, "/", "evil.com", InCidrRemote, token: Token);
 
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>#5288 (#4220): an internationalized <c>web.publicBaseUrl</c> host is admitted for the Host a
+    /// browser sends. A browser always sends the punycode (<c>xn--</c>) form of the name, ASP.NET Core hands the
+    /// guard the DECODED form of that header (<c>b&#252;cher.example</c>), and <c>TriageLink.TryGetHost</c> returns
+    /// <c>Uri.Host</c>, which keeps whichever spelling the operator wrote in the URL. Both spellings of the URL
+    /// must therefore admit the one Host the browser sends, with or without a port. The URL goes through
+    /// <c>TriageLink.TryGetHost</c> here exactly as <c>TryStartServerAsync</c> does before it hands the host to
+    /// <c>ConfigurePipeline</c>.</summary>
+    [Theory]
+    [InlineData("https://xn--bcher-kva.example/", "xn--bcher-kva.example")]
+    [InlineData("https://b\u00FCcher.example/", "xn--bcher-kva.example")]
+    [InlineData("https://xn--bcher-kva.example:5153/", "xn--bcher-kva.example:5153")]
+    [InlineData("https://b\u00FCcher.example:5153/", "xn--bcher-kva.example:5153")]
+    public async Task NetworkMode_IdnPublicBaseUrlHost_IsAdmitted_ForThePunycodeHostABrowserSends(string publicBaseUrl, string hostHeader)
+    {
+        var publicBaseUrlHost = TriageLink.TryGetHost(publicBaseUrl);
+        Assert.NotNull(publicBaseUrlHost);
+
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: publicBaseUrlHost);
+        var ctx = await Send(server, "/", hostHeader, InCidrRemote, token: Token);
+
+        Assert.True(
+            ctx.Response.StatusCode != StatusCodes.Status400BadRequest,
+            $"web.publicBaseUrl '{publicBaseUrl}' (host '{publicBaseUrlHost}') refused its own Host '{hostHeader}' with {ctx.Response.StatusCode}");
+    }
+
+    /// <summary>The IDN admission names exactly ONE host: another punycode name (<c>m&#252;nchen.example</c>), a
+    /// plain foreign name and the name with its non-ASCII letter dropped all still get 400.</summary>
+    [Theory]
+    [InlineData("xn--mnchen-3ya.example")]
+    [InlineData("evil.com")]
+    [InlineData("bcher.example")]
+    public async Task NetworkMode_IdnPublicBaseUrlHost_StillRefusesEveryOtherHost(string hostHeader)
+    {
+        var publicBaseUrlHost = TriageLink.TryGetHost("https://xn--bcher-kva.example/");
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: publicBaseUrlHost);
+        var ctx = await Send(server, "/", hostHeader, InCidrRemote, token: Token);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>#5288: a malformed punycode label in <c>web.publicBaseUrl</c> (<c>xn--a</c> decodes to nothing)
+    /// must not fail start-up. The conversion that puts the name in the form the guard compares falls back to
+    /// the raw value, so the pipeline still builds, still refuses a foreign Host and still admits a loopback
+    /// one.</summary>
+    [Theory]
+    [InlineData("https://xn--a/")]
+    [InlineData("https://xn--bcher-kva-.example/")]
+    public async Task NetworkMode_MalformedPunycodePublicBaseUrlHost_DoesNotFailStartUp_AndAdmitsNothingExtra(string publicBaseUrl)
+    {
+        var publicBaseUrlHost = TriageLink.TryGetHost(publicBaseUrl);
+        Assert.NotNull(publicBaseUrlHost);
+
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: publicBaseUrlHost);
+
+        var foreign = await Send(server, "/", "evil.com", InCidrRemote, token: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, foreign.Response.StatusCode);
+
+        var loopback = await Send(server, "/", "localhost", InCidrRemote, token: Token);
+        Assert.NotEqual(StatusCodes.Status400BadRequest, loopback.Response.StatusCode);
     }
 
     /// <summary>The same rebinding guard runs in LOOPBACK mode too (#1576 fixed a loopback-only gap): a

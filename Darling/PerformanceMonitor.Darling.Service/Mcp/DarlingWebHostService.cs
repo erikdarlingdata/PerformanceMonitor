@@ -898,7 +898,10 @@ public sealed class DarlingWebHostService : BackgroundService
     /// </summary>
     /// <param name="publicBaseUrlHost">#4220: <c>web.publicBaseUrl</c>'s host, or null when unset/unparseable
     /// — the one extra Host value the DNS-rebinding guard admits beside the loopback names and
-    /// <paramref name="networkListenIp"/>. See <see cref="DarlingHostBinding.IsAllowedHost"/>.</param>
+    /// <paramref name="networkListenIp"/>. See <see cref="DarlingHostBinding.IsAllowedHost"/>. #5288: the caller
+    /// passes the raw host (<c>Uri.Host</c>, in whichever spelling the operator wrote); the guard converts its own
+    /// copy once to the decoded form <c>HttpRequest.Host</c> gives the middleware, so a punycode and a Unicode
+    /// spelling both admit the punycode Host a browser sends.</param>
     internal void ConfigurePipeline(
         WebApplication app,
         NpgsqlDataSource postgres,
@@ -929,6 +932,27 @@ public sealed class DarlingWebHostService : BackgroundService
            for non-API paths. */
         app.UseResponseCompression();
 
+        /* #5288, #4220: HttpRequest.Host hands the guard below the DECODED form of a Host header
+           (HostString.FromUriComponent turns a punycode xn-- name into Unicode), and a browser always sends
+           punycode. So a web.publicBaseUrl written in punycode (https://xn--bcher-kva.example/) was refused for
+           its own Host: its raw name could never equal the decoded one. The name goes through the same
+           conversion once, here, so both sides are in the form the framework gives the middleware; a Unicode
+           name and an ASCII one come out unchanged. Only the guard's copy changes: the link builder and the TLS
+           name check keep the raw host. A malformed punycode label (xn--a) makes the conversion throw
+           ArgumentException; the raw value is kept then, so start-up never fails on it. */
+        var admittedHostName = publicBaseUrlHost;
+        if (publicBaseUrlHost is not null)
+        {
+            try
+            {
+                admittedHostName = HostString.FromUriComponent(publicBaseUrlHost).Host;
+            }
+            catch (ArgumentException)
+            {
+                /* Keep the raw value, as above. */
+            }
+        }
+
         /* DNS-rebinding guard — runs in BOTH modes (the #1576 fix: it previously guarded network mode only,
            leaving the tokenless loopback write path reachable cross-origin via a DNS rebind). The loopback
            surface is tokenless, so a browser ON the host that loads attacker content could be rebound to
@@ -941,7 +965,7 @@ public sealed class DarlingWebHostService : BackgroundService
            DarlingHostBinding.IsAllowedHost. */
         app.Use(async (context, next) =>
         {
-            if (!IsAllowedHost(context.Request.Host.Host, networkListenIp, publicBaseUrlHost))
+            if (!IsAllowedHost(context.Request.Host.Host, networkListenIp, admittedHostName))
             {
                 refusals.Report(
                     _logger, "Web dashboard", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
