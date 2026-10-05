@@ -154,6 +154,110 @@ const scenarios = {
     out.filledNew = pre(c2) !== null;
     out.keys = viewer.openPlanKeys();
   },
+  async kinds() {
+    planReply(XML);
+    const snap = { collection_time: "2026-03-04T05:06:07.1234560", session_id: 57, request_id: 3, has_query_plan: true, has_live_query_plan: true };
+    const cols = viewer.activePlanColumns("srv-a");
+    out.activeKeys = cols.map((c) => c.key);
+    out.activeLabels = cols.map((c) => c.label);
+    out.activeHide = cols.every((c) => c.hideWhenEmpty === true && c.sortable === false && c.csv === false);
+    const est = cols[0].render(snap);
+    est.byText("Plan").click();
+    await flush();
+    let u = params();
+    out.activePath = u.pathname;
+    out.activeQuery = Object.fromEntries(u.searchParams);
+    const live = cols[1].render({ ...snap, request_id: null });
+    live.byText("Live plan").click();
+    await flush();
+    u = params();
+    out.liveQuery = Object.fromEntries(u.searchParams);
+    out.noFlagCell = cols[0].render({ ...snap, has_query_plan: undefined }).textContent;
+    out.noLiveFlagCell = cols[1].render({ ...snap, has_live_query_plan: undefined }).textContent;
+
+    const qs = viewer.queryStorePlanColumn("srv-a");
+    out.qsKey = qs.key;
+    const qsCell = qs.render({ database_name: "Orders", query_id: 42, plan_id: 7 });
+    qsCell.byText("Plan").click();
+    await flush();
+    u = params();
+    out.qsPath = u.pathname;
+    out.qsQuery = Object.fromEntries(u.searchParams);
+    const qsNoPlanId = qs.render({ database_name: "Orders", query_id: 42, plan_id: null });
+    qsNoPlanId.byText("Plan").click();
+    await flush();
+    out.qsNoPlanIdQuery = Object.fromEntries(params().searchParams);
+    out.qsNoKey = qs.render({ database_name: "Orders", query_id: null }).textContent;
+
+    const pc = viewer.procedurePlanColumn("srv-a");
+    out.procKey = pc.key;
+    out.procHide = pc.hideWhenEmpty === true;
+    const pCell = pc.render({ sql_handle: "0x0300050011223344" });
+    pCell.byText("Plan").click();
+    await flush();
+    u = params();
+    out.procPath = u.pathname;
+    out.procQuery = Object.fromEntries(u.searchParams);
+    out.procNoHandle = pc.render({ sql_handle: null }).textContent;
+
+    out.keys = viewer.openPlanKeys();
+    out.keysUnique = new Set(out.keys).size === out.keys.length;
+  },
+  async kindsDoNotShareAPanel() {
+    planReply(XML);
+    /* Two different sources whose key parts look alike must each own a panel. */
+    const a = viewer.planSourceCell("srv-a", { kind: "procedure", sql_handle: "42" });
+    const b = viewer.planSourceCell("srv-a", { kind: "query_store", database_name: "42", query_id: 1, plan_id: null });
+    a.byText("Plan").click();
+    out.aOpen = a.byText("Hide plan") !== null;
+    out.bOpenAfterA = b.byText("Hide plan") !== null;
+    await flush();
+    const est = viewer.planSourceCell("srv-a", { kind: "active_snapshot", collection_time: "T", session_id: 1, request_id: 0, live: false });
+    const live = viewer.planSourceCell("srv-a", { kind: "active_snapshot", collection_time: "T", session_id: 1, request_id: 0, live: true });
+    est.byText("Plan").click();
+    out.liveOpenAfterEst = live.byText("Hide plan") !== null;
+    await flush();
+    out.keys = viewer.openPlanKeys();
+    out.hashKey = (() => { viewer.resetPlanViewer(); viewer.openStoredPlan("srv-a", "0xABC", "Orders"); return viewer.openPlanKeys()[0]; })();
+  },
+  async stems() {
+    planReply(XML);
+    const cells = [
+      viewer.planSourceCell("s", { kind: "active_snapshot", collection_time: "2026-03-04T05:06:07.1234560", session_id: 57, request_id: 0, live: true }),
+      viewer.planSourceCell("s", { kind: "query_store", database_name: "Orders", query_id: 42, plan_id: 7 }),
+      viewer.planSourceCell("s", { kind: "procedure", sql_handle: "0x03000500AA" }),
+    ];
+    out.names = [];
+    for (const c of cells) {
+      c.byText("Plan").click();
+      await flush();
+      c.byText("Download .sqlplan").click();
+      out.names.push(downloads[downloads.length - 1].name);
+    }
+  },
+  async rebuildKinds() {
+    planReply(XML);
+    const src = { kind: "query_store", database_name: "Orders", query_id: 42, plan_id: 7 };
+    const first = viewer.planSourceCell("srv-a", src);
+    first.byText("Plan").click();
+    await flush();
+    const before = fetches.length;
+    const second = viewer.planSourceCell("srv-a", src);
+    out.open = second.byText("Hide plan") !== null;
+    out.showsPlan = pre(second) !== null;
+    out.refetched = fetches.length - before;
+  },
+  async noPlanKind() {
+    reply = { status: 200, body: JSON.stringify({ status: "unavailable", message: "No stored Query Store plan found for query_id 42 in database 'Orders'." }) };
+    const c = viewer.planSourceCell("srv-a", { kind: "query_store", database_name: "Orders", query_id: 42, plan_id: null });
+    c.byText("Plan").click();
+    await flush();
+    out.text = c.textContent;
+    out.hasPre = pre(c) !== null;
+  },
+  async nullSource() {
+    out.cell = viewer.planSourceCell("srv-a", null).textContent;
+  },
 };
 await scenarios[process.argv[3]]();
 console.log(JSON.stringify(out));

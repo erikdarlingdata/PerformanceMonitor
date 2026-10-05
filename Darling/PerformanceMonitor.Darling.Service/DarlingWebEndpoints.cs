@@ -4915,7 +4915,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         => WrapPlanXml(await read, identity);
 
     /// <summary>The identity a plan answer echoes back: the key the caller read by, in the order given.</summary>
-    private static IReadOnlyDictionary<string, object?> PlanIdentity(params (string Key, object? Value)[] pairs)
+    private static Dictionary<string, object?> PlanIdentity(params (string Key, object? Value)[] pairs)
     {
         var identity = new Dictionary<string, object?>(pairs.Length, StringComparer.Ordinal);
         foreach (var (key, value) in pairs) identity[key] = value;

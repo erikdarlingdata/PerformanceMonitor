@@ -229,6 +229,17 @@ public sealed class CrossAppMcpToolInventoryPinTests
            shrinks. */
         "get_oversized_plan_backlog",
 
+        /* #5228: the raw-plan reads behind the web grids' plan buttons - get_query_store_plan_xml,
+           get_procedure_plan_xml and get_active_query_plan_xml. Darling-ONLY by architecture, the get_plan_xml
+           reason (#4871): Lite keeps no Query Store or procedure plan text to hand back (its plan tools answer
+           not_collected, PlanToolsNotKeptTests), and its Active Queries plan is fetched by the desktop grid
+           itself rather than over MCP. The /api/read mirror of these three is the web seat's, which Lite has
+           none of. If Lite ever serves stored plans over MCP, port these and delete the entries; the ratchet
+           only shrinks. */
+        "get_query_store_plan_xml",
+        "get_procedure_plan_xml",
+        "get_active_query_plan_xml",
+
         /* #3797: the Query Store clutter view (get_query_store_clutter) - per database the query_store
            collector's read cost off collection_log's fan-out rollup, plan churn off the raw query_store_stats
            plan identities, and the query_store_health options row; per server the non-sleep QDS_* wait deltas

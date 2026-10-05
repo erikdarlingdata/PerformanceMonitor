@@ -109,7 +109,7 @@ public sealed class WebTopProceduresColumnsTests
     {
         var js = Tab();
         Assert.Equal(2, Regex.Matches(js,
-            @"""get_top_procedures_by_cpu"",\s*\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \},\s*""procedures"",\s*TOP_PROC_COLUMNS,").Count);
+            @"""get_top_procedures_by_cpu"",\s*\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \},\s*""procedures"",\s*\[\.\.\.TOP_PROC_COLUMNS, procedurePlanColumn\(server\)\],").Count);
         Assert.Equal(2, Regex.Matches(js, @"""truncation_note"",\s*null,\s*TOP_PROC_GROUPS\s*\)").Count);
     }
 
