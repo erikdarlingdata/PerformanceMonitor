@@ -4314,7 +4314,8 @@ public sealed class DarlingCollectorRunner
 
     /// <summary>
     /// ONE attempt at the batch: the binary COPY, and for the diverting collectors the transaction that
-    /// wraps it and its dimension flush. Separate from <see cref="WriteBatchAsync"/> so the importer and
+    /// wraps it and its dimension flush (for query_stats, also the hour ledger's count, #4605, which commits
+    /// with the rows or not at all). Separate from <see cref="WriteBatchAsync"/> so the importer and
     /// the transaction are both disposed before the re-attempt runs — a retry that fired while the failed
     /// attempt's transaction was still in scope would re-enter with an aborted transaction on the
     /// connection and fail on 25P02 rather than on anything to do with the store.
@@ -4355,6 +4356,23 @@ public sealed class DarlingCollectorRunner
             writer.UseDimensions(diversionPlan, dimensions);
         }
 
+        /* #4605: a query_stats batch also adds its non-restart row count (rows written with a sample_interval_seconds
+           other than 0, a NULL included) to the hourly ledger, in the COPY's own transaction below. The count is the
+           writer's tally of the value it sends into that column, taken at the exact write and never re-derived. The
+           writer is built per attempt, so the tally starts from zero on every attempt and a failed attempt's rows
+           cannot be counted twice by the re-attempt. All rows of the batch carry the one storedCollectionTime below,
+           so a batch is one hour and one upsert.
+
+           The batch is a ledger batch by the table this COPY writes, not by the definition's CLR type: a definition
+           aimed at query_stats that is not the catalog's QueryStatsCollector (a one-off import or backfill) is counted
+           too, or fails loudly. IntervalPayloadIndex throws for a definition without the column, and the tally check
+           before the COPY completes catches any other overload. */
+        var ledgerBatch = string.Equals(definition.TargetTable, QueryStatsCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);
+        if (ledgerBatch)
+        {
+            writer.CountNonZeroAt(QueryStatsHourLedgerWriter.IntervalPayloadIndex(definition));
+        }
+
         /* #3953: a Query Store batch also maintains the latest-snapshot-per-interval table, in the COPY's own
            transaction behind a savepoint (QueryStoreIntervalLatest). Its two wider reads, the coverage row's
            creation and the hourly gap check, run HERE, before the transaction, so nothing inside it reads raw
@@ -4387,9 +4405,11 @@ public sealed class DarlingCollectorRunner
         var fenceSucceeded = false;
         try
         {
-            /* Only the diverting collectors and Query Store (#3953) need a transaction; everything else keeps the
-               pre-#1767 single-COPY commit and pays nothing. */
-            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null
+            /* Only the diverting collectors, Query Store (#3953) and the ledger's query_stats batches (#4605) need a
+               transaction; everything else keeps the pre-#1767 single-COPY commit and pays nothing. query_stats diverts
+               its text and plans today, so the ledger term does not add a transaction; it is named so that the ledger
+               upsert can never be left without the transaction its atomicity with the COPY depends on. */
+            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch
                 ? await pgConnection.BeginTransactionAsync(cancellationToken)
                 : null;
 
@@ -4465,6 +4485,14 @@ public sealed class DarlingCollectorRunner
                         rowsWritten++;
                     }
 
+                    /* #4605: every row must have written the interval as an integer for the tally to be the batch's
+                       count. A definition that moved the column to another overload would leave rows untallied, and an
+                       undercounted ledger is silent: fail the batch here instead, before the COPY completes. */
+                    if (ledgerBatch)
+                    {
+                        QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites);
+                    }
+
                     await importer.CompleteAsync(cancellationToken);
                 }
             }
@@ -4524,6 +4552,19 @@ public sealed class DarlingCollectorRunner
                     {
                         absentProcedureCache.Evict(absentDigests);
                     }
+                }
+
+                /* #4605: the batch's count joins the hourly ledger on THIS transaction, after the COPY and the dimension
+                   flush and before the commit, so raw and the ledger commit together or not at all. No savepoint and no
+                   catch, deliberately: a fault here throws out of the batch, the transaction rolls back and the batch's
+                   rows are not stored, because rows the ledger never counted would make it smaller than the rollup. It
+                   sits in the unstamped region (#3095), so it is never re-attempted; the collector's next cycle is the
+                   retry. A count of 0 (a batch of restart rows only) writes nothing: the rollup has no row for that hour. */
+                if (ledgerBatch)
+                {
+                    await QueryStatsHourLedgerWriter.AddBatchAsync(
+                        pgConnection, transaction, server.ServerId, server.StorageName, storedCollectionTime,
+                        writer.NonZeroCounted, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
                 }
 
                 /* #3953: after the COPY and the dimension flush, in the unstamped region (#3095): a fault here is not
