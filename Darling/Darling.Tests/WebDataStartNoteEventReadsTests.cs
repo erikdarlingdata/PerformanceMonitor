@@ -89,12 +89,18 @@ public sealed class WebDataStartNoteEventReadsTests
         Assert.Contains("? dataStart", source, StringComparison.Ordinal);
     }
 
-    /// <summary>The capped set is exactly the six reads: the four that read <c>collection_time</c> and the two event reads.</summary>
+    /// <summary>The capped set is exactly the twenty reads (#4966): the four that read <c>collection_time</c>, the two SQL Server event reads,
+    /// the nine system_health reads, and the five Blocking, Deadlocks and PostgreSQL event log reads.</summary>
     [Fact]
-    public void CappedByRead_IsExactlyTheSixCappedReads()
+    public void CappedByRead_IsExactlyTheTwentyCappedReads()
     {
         Assert.Equal(
-            ["get_blocked_process_xml", "get_collection_log", "get_default_trace_events", "get_pg_server_config_changes", "get_plan_corrections", "get_waiting_tasks"],
+            [
+                "get_blocked_process_xml", "get_blocking", "get_collection_log", "get_deadlock_detail", "get_deadlocks",
+                "get_default_trace_events", "get_health_parser_cpu_tasks", "get_health_parser_io_issues", "get_health_parser_memory_broker", "get_health_parser_memory_conditions",
+                "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues", "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
+                "get_pg_deadlocks", "get_pg_log_events", "get_pg_server_config_changes", "get_plan_corrections", "get_waiting_tasks",
+            ],
             WebDataStartNote.CappedByRead.Keys.Order(StringComparer.Ordinal).ToArray());
         foreach (var read in WebDataStartNote.NewestFirstCappedReads)
         {
@@ -118,6 +124,72 @@ public sealed class WebDataStartNoteEventReadsTests
         var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
         Assert.True(answer["window_truncated"]?.GetValue<bool>());
         Assert.Equal("2026-01-02T12:30:00.0000000Z", answer["effective_start"]?.GetValue<string>());
+    }
+
+    /// <summary>The nine system_health reads: tool, the rows key, the count key beside <c>shown</c>.</summary>
+    public static TheoryData<string, string, string> HealthReads => new()
+    {
+        { "get_health_parser_system_health", "entries", "total_entries" },
+        { "get_health_parser_severe_errors", "errors", "error_count" },
+        { "get_health_parser_io_issues", "issues", "issue_count" },
+        { "get_health_parser_scheduler_issues", "issues", "issue_count" },
+        { "get_health_parser_memory_conditions", "events", "event_count" },
+        { "get_health_parser_cpu_tasks", "events", "event_count" },
+        { "get_health_parser_memory_broker", "events", "event_count" },
+        { "get_health_parser_memory_node_oom", "events", "event_count" },
+        { "get_health_parser_significant_waits", "waits", "wait_count" },
+    };
+
+    /// <summary>Each system_health read is listed against its table, answers <c>empty</c> as nothing found (never <c>unavailable</c>), and
+    /// a page cut by its cap names its oldest event without asking the store; the same page uncut asks the store (#4966).</summary>
+    [Theory]
+    [MemberData(nameof(HealthReads))]
+    public async Task ASystemHealthRead_IsListed_AndACappedPageNamesItsOldestEvent_WithoutAskingTheStore(string read, string rowsKey, string countKey)
+    {
+        Assert.Equal("system_health_events", WebDataStartNote.TableByRead[read]);
+        Assert.Equal("empty", WebDataStartNote.NothingFoundStatusByRead[read]);
+        Assert.Equal(rowsKey, WebDataStartNote.EventTimeByRead[read].RowsKey);
+        Assert.Equal("event_time", WebDataStartNote.EventTimeByRead[read].TimeField);
+        Assert.Equal(countKey, WebDataStartNote.CappedByRead[read].TotalKey);
+
+        await using var store = NeverConnects();
+        string Page(int total) => "{\"server\":\"sql01\",\"hours_back\":48,\"" + countKey + "\":" + total + ",\"shown\":2,\"" + rowsKey + "\":["
+            + "{\"event_time\":\"2026-01-02T18:00:00.0000000Z\"},{\"event_time\":\"2026-01-02T12:30:00.0000000Z\"}]}";
+
+        var answered = await WebDataStartNote.AddAsync(store, read, "sql01", 48, WindowEnd, Page(250), null, Cancelled);
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        Assert.True(answer["window_truncated"]?.GetValue<bool>());
+        Assert.Equal("2026-01-02T12:30:00.0000000Z", answer["effective_start"]?.GetValue<string>());
+        Assert.StartsWith("2026-01-02T12:30:00", answer["oldest_shown_utc"]?.GetValue<string>(), StringComparison.Ordinal);
+
+        /* The tool's own keys on a data answer are stripped, so its window_truncated:false cannot hide the web's note. */
+        var withTool = Page(250).Replace("\"hours_back\":48", "\"hours_back\":48,\"window_truncated\":false,\"effective_start\":\"x\"", StringComparison.Ordinal);
+        var stripped = Assert.IsType<JsonObject>(JsonNode.Parse(await WebDataStartNote.AddAsync(store, read, "sql01", 48, WindowEnd, withTool, null, Cancelled)));
+        Assert.True(stripped["window_truncated"]?.GetValue<bool>());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => WebDataStartNote.AddAsync(store, read, "sql01", 48, WindowEnd, Page(2), null, Cancelled));
+
+        /* The empty answer carries its keys under hints; the web's own note goes through the store, like a row answer. */
+        const string empty = "{\"status\":\"empty\",\"source_observed\":true,\"hints\":{\"window_truncated\":false}}";
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => WebDataStartNote.AddAsync(store, read, "sql01", 48, WindowEnd, empty, null, Cancelled));
+        const string unavailable = "{\"status\":\"unavailable\",\"source_observed\":false}";
+        Assert.Equal(unavailable, await WebDataStartNote.AddAsync(store, read, "sql01", 48, WindowEnd, unavailable, null, Cancelled));
+    }
+
+    /// <summary>The system_health CPU line shares its read with the Entries table, and a chart draws no note: the page's note helper
+    /// returns null for any viz other than a table or a stat, so the listed read adds no strip above the line (#4966).</summary>
+    [Fact]
+    public void TheSystemHealthCpuLine_IsAChart_AndTheNoteHelperDrawsNothingForACharts()
+    {
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var line = tabs.IndexOf("title: \"system_health CPU\"", StringComparison.Ordinal);
+        Assert.True(line > 0);
+        Assert.Contains("viz: \"line\"", tabs.AsSpan(line, 200).ToString(), StringComparison.Ordinal);
+
+        var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js");
+        Assert.Contains("(desc.viz !== \"table\" && desc.viz !== \"stat\")) return null;", util, StringComparison.Ordinal);
     }
 
     /// <summary>The four reads' premises, in the tools' source: the payload fields the rules read.</summary>
