@@ -397,6 +397,53 @@ END;";
         Assert.Equal(0, log.CountAtLevel(LogLevel.Warning));
     });
 
+    /// <summary>Every stored column of the scratch modules' rows as JSON, minus the ones that differ by nature between two runs.</summary>
+    private static async Task<Dictionary<long, (string Object, string Json)>> StoredColumnsAsync(Rig rig, CancellationToken ct)
+    {
+        await using var connection = await rig.Store.OpenConnectionAsync(ct);
+        using var command = new NpgsqlCommand(
+            "SELECT collection_id, object_name, (to_jsonb(p) - 'collection_id' - 'collection_time')::text "
+            + "FROM procedure_stats p WHERE p.server_id = $1 AND p.database_name = $2 AND p.object_name LIKE 'pm\\_%'", connection);
+        command.Parameters.AddWithValue(rig.Server.ServerId);
+        command.Parameters.AddWithValue(rig.Database);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var rows = new Dictionary<long, (string, string)>();
+        while (await reader.ReadAsync(ct))
+        {
+            rows[reader.GetInt64(0)] = (reader.GetString(1), reader.GetString(2));
+        }
+
+        return rows;
+    }
+
+    [Fact]
+    public Task Shadow_StoresExactlyTheColumnsOffStores_ForTheSameProcedures() => WithRigAsync("pm5158p-equal", async (rig, _, ct) =>
+    {
+        /* One cycle in off, then one in shadow, each from a fresh runner (so each has an empty cache and a fresh delta
+           baseline), over procedures nothing runs in between. */
+        var offRunner = NewRunner(rig.Store, "off");
+        await offRunner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        var offRows = await StoredColumnsAsync(rig, ct);
+        Assert.True(offRows.Count >= 4, "four scratch procedures in the off cycle");
+
+        var shadowRunner = NewRunner(rig.Store, "shadow");
+        var shadowRun = await shadowRunner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        Assert.True(Measured(shadowRun, "deferred_miss") >= 4, "the shadow cycle ran in shadow");
+        var shadowRows = (await StoredColumnsAsync(rig, ct)).Where(r => !offRows.ContainsKey(r.Key)).Select(r => r.Value).ToList();
+        Assert.Equal(offRows.Count, shadowRows.Count);
+
+        /* Only collection_id and collection_time differ by nature between two cycles (dropped in the query). Every other
+           column, the plan, its digest and its size included, must be equal object by object. */
+        var offByObject = offRows.Values.ToDictionary(v => v.Object, v => v.Json, StringComparer.Ordinal);
+        foreach (var (name, json) in shadowRows)
+        {
+            Assert.True(offByObject.TryGetValue(name, out var offJson), "shadow stored a row off did not: " + name);
+            Assert.Equal(offJson, json);
+        }
+
+        Assert.All(shadowRows, row => Assert.Contains("\"query_plan_xml_bytes\"", row.Json, StringComparison.Ordinal));
+    });
+
     [Fact]
     public Task Shadow_WhenAStaleEntryIsForcedIntoTheCache_CountsAFalseHit_AndWarnsWithTheKeyOnly() => WithRigAsync("pm5158p-false", async (rig, _, ct) =>
     {
