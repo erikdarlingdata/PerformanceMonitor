@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -277,6 +278,35 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
 
             var today = await TodaysReadAsync(connection, read.Table!.Value.ReadStart, End, db, outcome, module, ct);
             Assert.Equal(today, Format(read.Rows));
+        });
+    }
+
+    [Fact]
+    public async Task AFaultReadingTheBuiltDays_AfterTheGateChoseTheTable_NotesFallbackRaw_AndAnswersFromRaw()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            await ExecAsync(connection, "DROP TABLE collect.query_store_top_daily_built", ct);
+            await ExecAsync(connection, @"
+INSERT INTO collect.query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
+    execution_type_desc, first_execution_time, module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us,
+    max_duration_us, max_cpu_time_us, replica_role, runtime_stats_interval_id, interval_start_time_utc)
+SELECT 1, TIMESTAMP '2026-01-10 00:30:00' + (i * interval '1 hour'), 1, 'srv1', 'db0', 100 + i, 1000 + i,
+    'Regular', TIMESTAMP '2026-01-10 00:00:00' + (i * interval '1 hour'), 'mod', md5('q' || i), 10 + i, 500 + i, 300, 900, 700, 'PRIMARY', 77 + i,
+    TIMESTAMP '2026-01-10 00:00:00' + (i * interval '1 hour')
+FROM generate_series(0, 9) AS i", ct);
+            var start = End.AddHours(-168);
+            var logger = new CapturingTestLogger();
+            using var scope = ReadScope.Open(logger);
+
+            var read = await RouteAsync(source, start, End, null, null, null, ct);
+
+            Assert.Null(read.Table);
+            Assert.Equal(0, read.DailyDaysUsed);
+            Assert.Equal(ReadFallback.FallbackRaw, scope.Fallback);
+            var raw = Format((await RunSqlAsync(connection, DarlingDataReader.QueryStoreTopSql, start, End, null, null, null, null, ct)).Select(ToRow));
+            Assert.NotEmpty(raw);
+            Assert.Equal(raw, Format(read.Rows));
         });
     }
 
