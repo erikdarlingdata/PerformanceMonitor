@@ -188,7 +188,7 @@ public sealed class DarlingMcpDefaultTraceToolsSurfaceAndSqlTests
 /// miss.
 /// </summary>
 [Collection("live-postgres")]
-public sealed class DarlingMcpDefaultTraceToolsLivePostgresTests
+public sealed partial class DarlingMcpDefaultTraceToolsLivePostgresTests
 {
     private const string ServerName = "darling-mcp-deftrace-e2e";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);

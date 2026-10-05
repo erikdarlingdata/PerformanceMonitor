@@ -202,6 +202,12 @@ public sealed class McpHealthTools
             /* The anchor is also the clock the still-forming day's window clamps against (#3525 review). */
             var rows = await dataService.GetDailySummaryRangeAsync(resolved.ServerId, fromDate, toDate, asOfUtc: windowEnd);
 
+            /* #4966: NO data-start notice, deliberately. Every row below carries its own data state and the store's retention
+               horizon (data_state, data_note, retention_horizon, days_before_horizon): a day before the horizon says purged or
+               past_horizon with health_band NoData, never Healthy, and a day the spine does not hold is absent, which the tool's
+               contract names as a collection gap, not a quiet day (the description, and the empty answer below, which says the
+               range lies outside what the store holds). The desktop viewer's Daily Summary says the same through the same two
+               fields (DataState, RetentionHorizon), so there is no start left for a notice to add. */
             if (rows.Count == 0)
             {
                 /*
@@ -1290,6 +1296,30 @@ public sealed class McpHealthTools
         }
     }
 
+    /// <summary>
+    /// #4966: the one window notice of <c>get_blocking_stats</c>, which reads two SEPARATE series in one answer: blocking
+    /// (the blocked process reports, with the always-on DMV blocking snapshots beside them) and deadlocks. Two rules, each
+    /// for what it joins. Inside the blocking series the floor is the EARLIER of the XE reports and the DMV snapshots
+    /// (<see cref="LocalDataService.EarlierCoverageFloor"/>, the grid's own also-covered rule): they measure the same thing,
+    /// so either one covering the window covers it. Between the two series the notice comes from the LATER floor
+    /// (<see cref="LocalDataService.LaterCoverageFloor"/>): they measure different things, and a series whose collector
+    /// started inside the window has an empty head that reads as "none happened" beside the other series' data, so the
+    /// other series being covered must not hide it. A null probe answer gives way to the other series' floor. Each probe
+    /// reads the column its series windows on (<c>event_time</c>, <c>deadlock_time</c>), so no row a bucket stands for is
+    /// older than its floor. A data answer over a window of 90 minutes or less starts no probe; an empty answer always
+    /// probes both.
+    /// </summary>
+    private static Task<McpQueryTools.McpWindowNotice> BlockingStatsWindowNoticeAsync(
+        LocalDataService dataService, int serverId, int hours, DateTime windowEnd, bool emptyAnswer = false)
+    {
+        var requestedStart = windowEnd.AddHours(-hours);
+        return McpQueryTools.WindowNoticeAsync(
+            async () => LocalDataService.LaterCoverageFloor(
+                await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, serverId, requestedStart, windowEnd),
+                await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.Deadlocks, serverId, requestedStart, windowEnd)),
+            requestedStart, windowEnd, "blocked_process_report and deadlocks", emptyAnswer: emptyAnswer);
+    }
+
     [McpServerTool(Name = "get_blocking_stats"), Description("Gets blocking SEVERITY over time for a server: per-minute blocking duration (event count, total, max and average wait) and per-minute deadlock severity (victim count plus total, max and average wait across every process in the graphs). Incident counts say how OFTEN; this says how BAD. Ten one-second blocks and one ten-minute block are the same count and are not the same problem.")]
     public static async Task<string> GetBlockingStats(
         LocalDataService dataService,
@@ -1333,16 +1363,25 @@ public sealed class McpHealthTools
                 return everRan
                     ? McpHelpers.Status(
                         "empty",
-                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.")
+                        $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.",
+                        (await BlockingStatsWindowNoticeAsync(dataService, resolved.ServerId, hours, windowEnd, emptyAnswer: true)).AsHints())
                     : McpHelpers.Status(
                         "unavailable",
                         $"The blocking collectors have NEVER run successfully for {resolved.ServerName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
             }
 
+            var notice = await BlockingStatsWindowNoticeAsync(dataService, resolved.ServerId, hours, windowEnd);
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back = hours,
+                /* #4966: where this server's blocking data starts for the window, always present (false and null when the
+                   store covered it). ONE notice for the two series, from the later of the two series' floors. No
+                   effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 blocking_duration = blocking.Select(b => new
                 {
                     time = b.Time.ToString("o"),
