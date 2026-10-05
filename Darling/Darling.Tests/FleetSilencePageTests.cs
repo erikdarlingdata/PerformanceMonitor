@@ -23,8 +23,10 @@ public sealed class FleetSilencePageTests
     {
         var fleet = Fleet();
         Assert.Contains("import { createRule, deleteRule } from \"./mute-rules.js\";", fleet);
-        Assert.Contains("await createRule(silenceBody(card))", fleet);
-        Assert.Contains("await deleteRule(r.id)", fleet);
+        Assert.Contains("createRule(silenceBody(card))", fleet);
+        Assert.Contains("await withTimeout(createRule(", fleet);
+        Assert.Contains("deleteRule(r.id)", fleet);
+        Assert.Contains("await withTimeout(deleteRule(", fleet);
         Assert.Contains("readTool(\"get_mute_rules\", { enabled_only: false })", fleet);
 
         var rules = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "mute-rules.js").ReplaceLineEndings("\n");
