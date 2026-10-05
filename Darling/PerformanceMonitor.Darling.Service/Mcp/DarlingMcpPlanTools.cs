@@ -243,7 +243,7 @@ public sealed class DarlingMcpPlanTools
         try
         {
             var xml = await DarlingStoredPlanReader.GetQueryStorePlanTextAsync(
-                postgres, resolved.ServerId, database_name, query_id, plan_id, cancellationToken);
+                postgres, resolved.ServerId, database_name, query_id, plan_id, cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     ?? McpHelpers.Status(
