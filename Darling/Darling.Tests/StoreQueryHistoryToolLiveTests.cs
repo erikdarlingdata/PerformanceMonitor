@@ -333,4 +333,175 @@ public sealed class StoreQueryHistoryToolLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
         }
     }
+
+    [Fact]
+    public async Task TheRecentAndEarlierMeans_SplitTheNewestQuarter_AndAreNullUnderFourHours()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
+        try
+        {
+            for (var h = 8; h >= 1; h--)
+            {
+                await Capture(source, h + 0.5, "ok", ct);
+            }
+
+            /* Statement 1: eight hours; the newest two (25% of 8) cost 50 ms/call, the six before cost 10 ms/call. */
+            for (var h = 8; h >= 3; h--)
+            {
+                await Row(source, h + 0.5, 1, 10, 100, None, ct);
+            }
+
+            await Row(source, 2.5, 1, 10, 500, None, ct);
+            await Row(source, 1.5, 1, 10, 500, None, ct);
+            /* Statement 2: three hours, too few to split. */
+            for (var h = 3; h >= 1; h--)
+            {
+                await Row(source, h + 0.5, 2, 1, 1, None, ct);
+            }
+
+            var root = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, cancellationToken: ct)).RootElement;
+            var rows = root.GetProperty("statements").EnumerateArray().ToArray();
+            var one = rows.First(r => r.GetProperty("query_id").GetString() == "1");
+            Assert.Equal(50d, one.GetProperty("recent_mean_ms").GetDouble());
+            Assert.Equal(10d, one.GetProperty("earlier_mean_ms").GetDouble());
+            var two = rows.First(r => r.GetProperty("query_id").GetString() == "2");
+            Assert.Equal(JsonValueKind.Null, two.GetProperty("recent_mean_ms").ValueKind);
+            Assert.Equal(JsonValueKind.Null, two.GetProperty("earlier_mean_ms").ValueKind);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AFirstSeenHour_IsCounted_ButNeverFakesASlowdown_AndTheFlagsAreCountedPerStatement()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
+        try
+        {
+            for (var h = 8; h >= 1; h--)
+            {
+                await Capture(source, h + 0.5, "ok", ct);
+            }
+
+            /* Steady 10 ms/call for seven hours; the first hour is a first_seen upper bound that credits a lifetime at 1000 ms/call. */
+            await Row(source, 8.5, 7, 10, 10000, "true, false, false", ct);
+            for (var h = 7; h >= 3; h--)
+            {
+                await Row(source, h + 0.5, 7, 10, 100, h == 5 ? "false, true, false" : None, ct);
+            }
+
+            await Row(source, 2.5, 7, 10, 100, "false, false, true", ct);
+            await Row(source, 1.5, 7, 10, 100, None, ct);
+
+            var root = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, cancellationToken: ct)).RootElement;
+            var s7 = root.GetProperty("statements").EnumerateArray().First(r => r.GetProperty("query_id").GetString() == "7");
+            Assert.Equal(1, s7.GetProperty("first_seen_hours").GetInt32());
+            Assert.Equal(1, s7.GetProperty("restarted_hours").GetInt32());
+            Assert.Equal(1, s7.GetProperty("reset_hours").GetInt32());
+            Assert.Equal(8, s7.GetProperty("hours_present").GetInt32());
+            Assert.Equal(10d, s7.GetProperty("recent_mean_ms").GetDouble());
+            Assert.Equal(10d, s7.GetProperty("earlier_mean_ms").GetDouble());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task TheRoleFilter_KeepsOnlyThatRolesRows_InBothModes()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
+        try
+        {
+            await Capture(source, 1.5, "ok", ct);
+            await Row(source, 1.5, 5, 1, 10, None, ct, role: "owner");
+            await Row(source, 1.5, 5, 3, 30, None, ct, role: "viewer");
+
+            var ranked = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, role: "viewer", cancellationToken: ct)).RootElement;
+            var only = Assert.Single(ranked.GetProperty("statements").EnumerateArray());
+            Assert.Equal("viewer", only.GetProperty("role").GetString());
+            Assert.Equal(3L, only.GetProperty("calls").GetInt64());
+
+            var series = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, query_id: "5", role: "owner", cancellationToken: ct)).RootElement;
+            var row = Assert.Single(series.GetProperty("series").EnumerateArray());
+            Assert.Equal(1L, row.GetProperty("calls").GetInt64());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AStoreWhoseCapturesAllCouldNotReadTheExtension_AnswersPrecondition_WithTheReason()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
+        try
+        {
+            await Capture(source, 2.5, "precondition", ct);
+            await Capture(source, 1.5, "precondition", ct);
+
+            var json = await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, cancellationToken: ct);
+            Assert.StartsWith("{\"status\":\"precondition\"", json, StringComparison.Ordinal);
+            Assert.Contains("could not read pg_stat_statements", json, StringComparison.Ordinal);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AnUnusableReaderNow_StillAnswersTheHistory_WithTextUnavailable_AndATextNote()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
+        try
+        {
+            await Capture(source, 1.5, "ok", ct);
+            await Row(source, 1.5, 11, 2, 20, None, ct);
+
+            /* A scratch database has no pg_stat_statements loaded, so the reader is not usable now. */
+            var ranked = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, cancellationToken: ct)).RootElement;
+            Assert.Equal("ranked", ranked.GetProperty("mode").GetString());
+            var note = ranked.GetProperty("text_note").GetString();
+            Assert.False(string.IsNullOrEmpty(note));
+            Assert.Equal("text unavailable", ranked.GetProperty("statements")[0].GetProperty("query").GetString());
+
+            var series = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, query_id: "11", cancellationToken: ct)).RootElement;
+            Assert.Equal("text unavailable", series.GetProperty("query").GetString());
+            Assert.Equal(note, series.GetProperty("text_note").GetString());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
 }

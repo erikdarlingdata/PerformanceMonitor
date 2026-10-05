@@ -48,6 +48,9 @@ public sealed class DarlingMcpStoreQueryHistoryTools
     /// <summary>The share of a statement's hours (the newest) that the "recent" mean covers.</summary>
     public const double RecentShare = 0.25;
 
+    /// <summary>The fewest hours (first_seen hours not counted) a statement needs for the recent and earlier means to be given.</summary>
+    public const int MinHoursForSplit = 4;
+
     private const string Table = "store_statement_history";
 
     /// <summary>The coverage start: the earliest capture that read the extension, over all time, not only the window.</summary>
@@ -84,14 +87,16 @@ WITH h AS
     SELECT {DarlingMcpStoreQueryStatsTools.RoleKeySql} AS role_key,
            f.queryid, f.capture_time, f.delta_calls, f.delta_total_exec_ms, f.delta_rows,
            f.delta_shared_blks_hit, f.delta_shared_blks_read, f.delta_temp_blks_written, f.max_exec_ms,
-           row_number() OVER (PARTITION BY f.role_name, f.queryid ORDER BY f.capture_time DESC) AS newest_rank,
-           count(*) OVER (PARTITION BY f.role_name, f.queryid) AS hours_present
+           f.first_seen, f.entry_restarted, f.reset_in_interval,
+           /* The recent-vs-earlier split ranks only the hours that are NOT first_seen: a first_seen hour can credit a statement's whole earlier life as one hour. */
+           row_number() OVER (PARTITION BY f.role_name, f.queryid, f.first_seen ORDER BY f.capture_time DESC) AS newest_rank,
+           count(*) OVER (PARTITION BY f.role_name, f.queryid, f.first_seen) AS split_count
     FROM collect.store_statement_history AS f
     WHERE f.capture_time >= $1
 ),
 w AS
 (
-    SELECT h.*, h.newest_rank <= ceil(h.hours_present * {RecentShare.ToString(CultureInfo.InvariantCulture)}) AS recent
+    SELECT h.*, (NOT h.first_seen AND h.newest_rank <= ceil(h.split_count * {RecentShare.ToString(CultureInfo.InvariantCulture)})) AS recent
     FROM h
     WHERE $2::text IS NULL OR h.role_key = $2
 )
@@ -107,8 +112,12 @@ SELECT w.role_key,
        count(*)::integer AS hours_present,
        sum(w.delta_calls) FILTER (WHERE w.recent)::bigint AS recent_calls,
        sum(w.delta_total_exec_ms) FILTER (WHERE w.recent)::double precision AS recent_total_ms,
-       sum(w.delta_calls) FILTER (WHERE NOT w.recent)::bigint AS earlier_calls,
-       sum(w.delta_total_exec_ms) FILTER (WHERE NOT w.recent)::double precision AS earlier_total_ms
+       sum(w.delta_calls) FILTER (WHERE NOT w.recent AND NOT w.first_seen)::bigint AS earlier_calls,
+       sum(w.delta_total_exec_ms) FILTER (WHERE NOT w.recent AND NOT w.first_seen)::double precision AS earlier_total_ms,
+       (count(*) FILTER (WHERE w.first_seen))::integer AS first_seen_hours,
+       (count(*) FILTER (WHERE w.entry_restarted))::integer AS restarted_hours,
+       (count(*) FILTER (WHERE w.reset_in_interval))::integer AS reset_hours,
+       (count(*) FILTER (WHERE NOT w.first_seen))::integer AS split_hours
 FROM w
 GROUP BY w.role_key, w.queryid
 ORDER BY 4 DESC, w.queryid, w.role_key
@@ -136,11 +145,15 @@ AND   ($2::text IS NULL OR ({DarlingMcpStoreQueryStatsTools.RoleKeySql}) = $2)
 ORDER BY f.capture_time, 2";
 
     /// <summary>The live text for some query ids. <c>$1</c> the ids.</summary>
+    /* max(query) GROUP BY queryid assumes a queryid carries the same text under every role (the same normalized statement); if two roles ever disagreed, one text is shown. */
     public const string TextSql = @"
 SELECT f.queryid, max(f.query)
 FROM " + PgSchemaGenerator.ConfigSchema + "." + StoreStatementStats.FunctionName + @"() AS f
 WHERE f.queryid = ANY($1)
 GROUP BY f.queryid";
+
+    /// <summary>What a statement's text reads when the reader is not usable now: the history is answered, only the text is withheld.</summary>
+    public const string TextUnavailable = "text unavailable";
 
     /// <summary>What a statement's text reads when the extension no longer holds it.</summary>
     public const string TextGone = "text no longer in pg_stat_statements";
@@ -150,7 +163,7 @@ GROUP BY f.queryid";
         "monitored server's queries. No server_name. Without query_id: top statements over hours_back by time " +
         "spent, each with calls, mean ms and the newest quarter of its hours vs the rest. With query_id: that " +
         "statement's hourly series, oldest first. Gated: status precondition before the first snapshot. " +
-        "<<GUIDE>> Reads collect.store_statement_history: once an hour the service records each statement's CHANGE in calls, total time, rows and blocks since the last snapshot (the 100 that spent the most time), so a statement's mean ms per call can be read hour by hour across a store restart, a pg_stat_statements_reset() or the nightly upgrade. get_store_query_stats answers what is expensive since the counters were last reset; this answers what changed and when. Without query_id: statements ranks by total time over hours_back, with calls, mean_ms (total/calls), the mean in the newest quarter of the hours the statement appears in (recent_mean_ms) against the earlier hours (earlier_mean_ms), and hours_present; truncated says more statements exist than top. With query_id (a string, as get_store_query_stats prints it): series, one row per hour, oldest first, with interval_seconds, calls, mean_ms, total_ms, rows, shared block hits and reads, temp blocks written, max_exec_ms and three flags: first_seen (the statement's first hour in the counters; can be an upper bound, so its figures may include earlier life), entry_restarted (the extension evicted and re-admitted the entry, so the hour is a lower bound) and reset_in_interval (the counters were reset inside the hour). max_exec_ms is the extension's cumulative maximum, not the hour's. captures says how many snapshots the window holds, how many were a fresh baseline (rebaselined: no history written for that hour), how many could not read the extension (precondition), the evictions in the window (dealloc_delta_total) and the hours whose cap hid statements (capped_hours): an hour with no row may be an hour not captured. role is owner, admin, viewer or mcp; the text is the live normalized text, or says it is gone. effective_start, window_truncated and truncation_note say where the history starts relative to hours_back. History is kept 90 days and taken hourly. Answers status precondition, with the remedy, when the store predates the history, holds no snapshot yet, or its reader is not usable. No server_name: the store is the subject.")]
+        "<<GUIDE>> Reads collect.store_statement_history: once an hour the service records each statement's CHANGE in calls, total time, rows and blocks since the last snapshot (the 100 that spent the most time), so a statement's mean ms per call can be read hour by hour across a store restart, a pg_stat_statements_reset() or the nightly upgrade. get_store_query_stats answers what is expensive since the counters were last reset; this answers what changed and when. Without query_id: statements ranks by total time over hours_back, with calls, mean_ms (total/calls), the mean in the newest quarter of the hours the statement appears in (recent_mean_ms) against the earlier hours (earlier_mean_ms), and hours_present; truncated says more statements exist than top. With query_id (a string, as get_store_query_stats prints it): series, one row per hour, oldest first, with interval_seconds, calls, mean_ms, total_ms, rows, shared block hits and reads, temp blocks written, max_exec_ms and three flags: first_seen (the statement's first hour in the counters; can be an upper bound, so its figures may include earlier life), entry_restarted (the extension evicted and re-admitted the entry, so the hour is a lower bound) and reset_in_interval (the counters were reset inside the hour). max_exec_ms is the extension's cumulative maximum, not the hour's. captures says how many snapshots the window holds, how many were a fresh baseline (rebaselined: no history written for that hour), how many could not read the extension (precondition), the evictions in the window (dealloc_delta_total) and the hours whose cap hid statements (capped_hours): an hour with no row may be an hour not captured. role is owner, admin, viewer or mcp; the text is the live normalized text, or says it is gone. In ranked mode first_seen_hours, restarted_hours and reset_hours count the flagged hours behind each statement's figures (calls and total_ms include them; restarted hours are lower bounds); first_seen hours are left out of recent_mean_ms and earlier_mean_ms, which are null under 4 other hours. effective_start, window_truncated and truncation_note say where the history starts relative to hours_back. History is kept 90 days and taken hourly. Answers status precondition, with the remedy, when the store predates the history, holds no snapshot yet, or when every snapshot so far could not read the extension. When history exists but the reader is not usable now, the history is still answered and only the text is withheld: query reads 'text unavailable' and text_note says why. No server_name: the store is the subject.")]
     public static async Task<string> GetStoreQueryHistory(
         NpgsqlDataSource postgres,
         [Description("One statement's id, as get_store_query_stats prints it. Omit to rank the statements.")] string? query_id = null,
@@ -166,6 +179,7 @@ GROUP BY f.queryid";
             return invalidTop;
         }
 
+        /* Checked here, not by McpHelpers.ValidateHoursBack: the shared validator caps at 7 days and this history reaches back 90. */
         if (hours_back <= 0 || hours_back > MaxHours)
         {
             return McpHelpers.Refusal("hours_back",
@@ -228,6 +242,7 @@ GROUP BY f.queryid";
                     role = roleKey,
                     query_id = id.ToString(CultureInfo.InvariantCulture),
                     query = ShownQuery(text, id, gate.TextUsable),
+                    text_note = gate.TextNote,
                     hours_returned = series.Count,
                     captures = CapturesShape(captures),
                     series = series.Select(s => new
@@ -270,6 +285,7 @@ GROUP BY f.queryid";
                 truncation_note = rankedNotice.TruncationNote,
                 role = roleKey,
                 top,
+                text_note = gate.TextNote,
                 statements_returned = page.Count,
                 truncated,
                 captures = CapturesShape(captures),
@@ -281,9 +297,12 @@ GROUP BY f.queryid";
                     calls = s.Calls,
                     total_ms = Round(s.TotalMs),
                     mean_ms = Mean(s.TotalMs, s.Calls),
-                    recent_mean_ms = Mean(s.RecentTotalMs, s.RecentCalls),
-                    earlier_mean_ms = Mean(s.EarlierTotalMs, s.EarlierCalls),
+                    recent_mean_ms = s.SplitHours < MinHoursForSplit ? null : Mean(s.RecentTotalMs, s.RecentCalls),
+                    earlier_mean_ms = s.SplitHours < MinHoursForSplit ? null : Mean(s.EarlierTotalMs, s.EarlierCalls),
                     hours_present = s.HoursPresent,
+                    first_seen_hours = s.FirstSeenHours,
+                    restarted_hours = s.RestartedHours,
+                    reset_hours = s.ResetHours,
                     rows = s.Rows,
                     shared_blks_hit = s.BlksHit,
                     shared_blks_read = s.BlksRead,
@@ -308,7 +327,7 @@ GROUP BY f.queryid";
     {
         if (!textUsable)
         {
-            return TextGone;
+            return TextUnavailable;
         }
 
         return texts is not null && texts.TryGetValue(id, out var text) && text.Length > 0
@@ -330,15 +349,15 @@ GROUP BY f.queryid";
         capped_hours = c.CappedHours,
     };
 
-    /// <summary>The state of the rung: a message when the read cannot go ahead, and whether the live text can be joined.</summary>
-    private static async Task<(string? Message, bool TextUsable)> PreconditionAsync(NpgsqlDataSource postgres, CancellationToken ct)
+    /// <summary>The state of the rung: a message when the read cannot go ahead, whether the live text can be joined, and why not when it cannot.</summary>
+    private static async Task<(string? Message, bool TextUsable, string? TextNote)> PreconditionAsync(NpgsqlDataSource postgres, CancellationToken ct)
     {
         await using (var shape = postgres.CreateCommand(ShapeSql))
         {
             shape.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             if (!(bool)(await shape.ExecuteScalarAsync(ct))!)
             {
-                return ("This store has no statement history yet: it predates the history table (migration V163). The service migrates the store at its next start; the first snapshot is taken within an hour after that.", false);
+                return ("This store has no statement history yet: it predates the history table (migration V163). The service migrates the store at its next start; the first snapshot is taken within an hour after that.", false, null);
             }
         }
 
@@ -369,15 +388,15 @@ GROUP BY f.queryid";
 
         if (all == 0)
         {
-            return ("No statement snapshot has been taken yet: the first one is taken within an hour of the service starting.", false);
+            return ("No statement snapshot has been taken yet: the first one is taken within an hour of the service starting.", false, null);
         }
 
         if (readCaptures == 0)
         {
-            return ("Every snapshot so far could not read pg_stat_statements, so no history exists. " + (reason ?? "The service records the reason in its log; the reader functions or the loaded library are missing for its login."), false);
+            return ("Every snapshot so far could not read pg_stat_statements, so no history exists. " + (reason ?? "The service records the reason in its log; the reader functions or the loaded library are missing for its login."), false, null);
         }
 
-        return (null, reason is null);
+        return (null, reason is null, reason);
     }
 
     private static async Task<CaptureSummary> ReadCapturesAsync(NpgsqlDataSource postgres, DateTime windowStart, CancellationToken ct)
@@ -445,7 +464,11 @@ GROUP BY f.queryid";
                 reader.IsDBNull(10) ? null : reader.GetInt64(10),
                 reader.IsDBNull(11) ? null : reader.GetDouble(11),
                 reader.IsDBNull(12) ? null : reader.GetInt64(12),
-                reader.IsDBNull(13) ? null : reader.GetDouble(13)));
+                reader.IsDBNull(13) ? null : reader.GetDouble(13),
+                reader.GetInt32(14),
+                reader.GetInt32(15),
+                reader.GetInt32(16),
+                reader.GetInt32(17)));
         }
 
         return rows;
@@ -501,7 +524,7 @@ GROUP BY f.queryid";
             }
 
             return DarlingMcpWindowNotice.Build(
-                floor, windowStart, Table, "History is kept 90 days and taken hourly.", emptyAnswer);
+                floor, windowStart, Table, "History is kept 90 days and taken hourly.", emptyAnswer, storeSubject: true);
         }
         catch (Exception ex) when (!(ex is OperationCanceledException && ct.IsCancellationRequested))
         {
@@ -530,5 +553,6 @@ GROUP BY f.queryid";
 
     private sealed record RankedRow(
         string Role, long QueryId, long Calls, double TotalMs, long Rows, long BlksHit, long BlksRead, long TempWritten,
-        double? MaxMs, int HoursPresent, long? RecentCalls, double? RecentTotalMs, long? EarlierCalls, double? EarlierTotalMs);
+        double? MaxMs, int HoursPresent, long? RecentCalls, double? RecentTotalMs, long? EarlierCalls, double? EarlierTotalMs,
+        int FirstSeenHours, int RestartedHours, int ResetHours, int SplitHours);
 }
