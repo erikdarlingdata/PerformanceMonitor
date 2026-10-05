@@ -39,8 +39,8 @@
  * touches innerHTML.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText } from "../util.js";
-import { renderPanel, VIZ } from "../panels.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText } from "../util.js";
+import { renderPanel, setPanelSignal, getPanelSignal, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { READ_FIELDS } from "../read-fields.js";
@@ -1871,7 +1871,11 @@ export const SERVER_TABS = [
             if (!row || !row.collector) return;
             tr.style.cursor = "pointer";
             tr.setAttribute("title", "Show the runs of " + row.collector + " in the Collection Log below");
-            tr.addEventListener("click", () => pickCollector(server, row.collector));
+            /* Enter/Space as well as a click; a click that ends a text selection inside the row is the user copying, not picking. */
+            makeActivatable(tr, (e) => {
+              if (e && e.type === "click" && selectionInside(tr)) return;
+              pickCollector(server, row.collector);
+            });
           },
         },
         {
@@ -4479,6 +4483,14 @@ const collectionLogRedraw = new Map();
 /* The desktop viewer shows a collector's last 7 days. */
 const COLLECTOR_HISTORY_HOURS = 168;
 
+/* One AbortController per server for the Collection Log slot: a new draw aborts the previous 168-hour read. */
+const collectionLogDraws = new Map();
+
+function selectionInside(node) {
+  const sel = typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
+  return !!sel && !sel.isCollapsed && String(sel).length > 0 && !!sel.anchorNode && node.contains(sel.anchorNode);
+}
+
 function pickCollector(server, collector) {
   collectorPick.set(server, collector);
   const redraw = collectionLogRedraw.get(server);
@@ -4489,18 +4501,24 @@ function collectionLogPanel(server, ctx) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
   const draw = () => {
+    const previous = collectionLogDraws.get(server);
+    if (previous) previous.abort();
+    const mine = new AbortController();
+    collectionLogDraws.set(server, mine);
+    const outer = getPanelSignal();
+    if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
     const picked = collectorPick.get(server);
     const params = picked ? { server, hours: COLLECTOR_HISTORY_HOURS, limit: 200, collector_name: picked } : { server, hours: ctx.hours, limit: 200 };
     const chip = picked
       ? el(
           "button",
-          { class: "chip span-2", type: "button", title: "Show every collector again", onClick: () => { collectorPick.delete(server); draw(); } },
+          { class: "chip", type: "button", title: "Show every collector again", onClick: () => { collectorPick.delete(server); draw(); } },
           ["collector " + picked + " \u00d7"]
         )
       : null;
-    mount(slot, [
-      chip,
-      table(
+    if (chip) Object.assign(chip.style, { gridColumn: "1 / -1", justifySelf: "start" });
+    setPanelSignal(mine.signal);
+    const logPanel = table(
         "Collection Log",
         "get_collection_log",
         params,
@@ -4508,8 +4526,9 @@ function collectionLogPanel(server, ctx) {
         COLLECTION_LOG_COLUMNS,
         picked ? "runs of " + picked + ", newest first, over the last 7 days" : "individual runs, newest first, over the selected window",
         picked ? "No runs of " + picked + " in the last 7 days." : "No collector runs in the selected window."
-      ),
-    ]);
+    );
+    setPanelSignal(outer);
+    mount(slot, [chip, logPanel]);
   };
   collectionLogRedraw.set(server, draw);
   draw();

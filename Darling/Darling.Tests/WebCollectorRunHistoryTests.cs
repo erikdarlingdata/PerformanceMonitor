@@ -97,4 +97,38 @@ public sealed class WebCollectorRunHistoryTests
         Assert.False(cleared[0].TryGetProperty("collector_name", out _));
         Assert.Equal("24", cleared[0].GetProperty("hours").GetString());
     }
+
+    [Fact]
+    public void ASecondPick_AbortsTheFirstRead_AndTheNewestStaysLive()
+    {
+        var picks = RunHarness().GetProperty("pickSignals");
+
+        Assert.Equal(2, picks.GetArrayLength());
+        Assert.Equal("query_store", picks[0].GetProperty("collector").GetString());
+        Assert.True(picks[0].GetProperty("aborted").GetBoolean());
+        Assert.Equal("wait_stats", picks[1].GetProperty("collector").GetString());
+        Assert.False(picks[1].GetProperty("aborted").GetBoolean());
+    }
+
+    [Fact]
+    public void EnterOnAFocusedRow_PicksIt_AndASelectionClickDoesNot()
+    {
+        var r = RunHarness();
+
+        Assert.Equal("query_store", Assert.Single(r.GetProperty("enterPick").EnumerateArray()).GetString());
+        Assert.True(r.GetProperty("prevented").GetBoolean());
+        Assert.Equal("button", r.GetProperty("rowRole")[0].GetString());
+        Assert.Equal("0", r.GetProperty("rowRole")[1].GetString());
+        Assert.Equal(0, r.GetProperty("selectionReads").GetInt32());
+    }
+
+    [Fact]
+    public void TheChip_SpansTheFullRow()
+    {
+        var chip = RunHarness().GetProperty("chipStyle")[0];
+
+        Assert.Equal("1 / -1", chip[0].GetString());
+        Assert.Equal("start", chip[1].GetString());
+        Assert.DoesNotContain("span-2", chip[2].GetString());
+    }
 }

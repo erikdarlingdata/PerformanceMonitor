@@ -60,6 +60,11 @@ export function setPanelSignal(signal) {
   panelSignal = signal;
 }
 
+/** The signal the next renderPanel() would capture, so a caller can swap its own in for one panel and put this back (#5227). */
+export function getPanelSignal() {
+  return panelSignal;
+}
+
 /**
  * Build a panel node. It returns immediately with a loading strip and fills itself once the fetch resolves,
  * mapping the API response kinds (data / empty envelope / error / aborted / auth) to the right UI.

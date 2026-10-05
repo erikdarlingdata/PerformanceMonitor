@@ -24,6 +24,9 @@ class FakeNode {
   get firstChild() {
     return this.children[0] || null;
   }
+  contains(n) {
+    return n === this || this.children.some((c) => c.contains(n));
+  }
   appendChild(child) {
     this.children.push(child);
     return child;
@@ -61,9 +64,11 @@ globalThis.document = {
 const fetches = [];
 const healthBody = { collectors: [{ collector: "wait_stats", status: "HEALTHY", total_runs: 5 }, { collector: "query_store", status: "HEALTHY", total_runs: 7 }], sweep_pressure: {} };
 const healthHangs = false;
-globalThis.fetch = async (url) => {
+const logSignals = [];
+globalThis.fetch = async (url, opts) => {
   const u = new URL(String(url), "http://viewer.test");
   fetches.push(u.pathname.replace("/api/read/", "") + "?" + u.searchParams.toString());
+  if (u.pathname.endsWith("/get_collection_log") && opts && opts.signal) logSignals.push({ collector: u.searchParams.get("collector_name"), signal: opts.signal });
   if (healthHangs && u.pathname.endsWith("/get_collection_health")) return new Promise(() => {});
   const body = u.pathname.endsWith("/get_collection_health") ? healthBody : {};
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
@@ -111,6 +116,29 @@ try {
   await settle();
   const afterClick = logReads();
   const chipAfterClick = chips(panels).map((c) => c.textContent);
+  // a second pick aborts the first read; the new one stays live
+  const other = row(panels, "wait_stats");
+  logSignals.length = 0;
+  globalThis.window = { getSelection: () => ({ isCollapsed: true, toString: () => "" }) };
+  for (const h of (r && r.handlers.click) || []) h({ type: "click" });
+  await settle();
+  for (const h of (other && other.handlers.click) || []) h({ type: "click" });
+  await settle();
+  const pickSignals = logSignals.map((x) => ({ collector: x.collector, aborted: x.signal.aborted }));
+  // a click that ends a text selection inside the row picks nothing
+  logSignals.length = 0;
+  globalThis.window = { getSelection: () => ({ isCollapsed: false, anchorNode: r, toString: () => "query" }) };
+  for (const h of (r && r.handlers.click) || []) h({ type: "click" });
+  await settle();
+  const selectionReads = logSignals.length;
+  // Enter on a focused row picks it (the keydown path of makeActivatable)
+  globalThis.window = { getSelection: () => ({ isCollapsed: true, toString: () => "" }) };
+  let prevented = false;
+  for (const h of (r && r.handlers.keydown) || []) h({ key: "Enter", preventDefault: () => { prevented = true; } });
+  await settle();
+  const enterPick = logSignals.map((x) => x.collector);
+  const rowRole = r ? [r.getAttribute("role"), r.getAttribute("tabindex")] : [];
+  const chipStyle = chips(panels).map((c) => [c.style.gridColumn, c.style.justifySelf, c.className]);
   // a rebuild (the 60 s poll) keeps the pick
   const rebuilt = await build();
   const afterRebuild = logReads();
@@ -121,7 +149,7 @@ try {
   for (const h of (chip && chip.handlers.click) || []) h({});
   await settle();
   const afterClear = logReads();
-  console.log(JSON.stringify({ before, clickable, afterClick, chipAfterClick, afterRebuild, rebuildChips, afterClear }));
+  console.log(JSON.stringify({ before, clickable, afterClick, chipAfterClick, afterRebuild, rebuildChips, afterClear, pickSignals, selectionReads, enterPick, prevented, rowRole, chipStyle }));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
