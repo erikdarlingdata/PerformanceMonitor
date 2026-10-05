@@ -33,6 +33,7 @@ class FakeNode {
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   fire(t, e = {}) { for (const fn of this.listeners[t] || []) fn({ preventDefault() {}, ...e }); }
   querySelector(sel) { const [a, b] = sel.split(" "); const first = this.all(a)[0] || null; return b && first ? first.all(b)[0] || null : first; }
+  querySelectorAll(tag) { return this.all(tag); }
   all(tag, acc = []) { for (const c of this.children) { if (c.tag === tag) acc.push(c); c.all(tag, acc); } return acc; }
 }
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
@@ -83,7 +84,7 @@ try {
   const checkbox = (main) => main.all("input").find((i) => i.attrs.type === "checkbox");
   const pick = async (sel, value) => { sel.value = String(value); sel.fire("change"); await new Promise((r) => setTimeout(r, 20)); };
   const bodyRows = (main) => { const t = main.all("table")[0]; return t ? t.children[1].children : []; };
-  const metrics = (main) => bodyRows(main).map((tr) => tr.children[2].textContent);
+  const metrics = (main) => bodyRows(main).map((tr) => tr.children[3].textContent);
   const settle = () => new Promise((r) => setTimeout(r, 20));
   const out = {};
 

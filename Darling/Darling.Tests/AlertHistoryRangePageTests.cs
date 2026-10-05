@@ -56,11 +56,10 @@ public sealed class AlertHistoryRangePageTests
     }
 
     [Fact]
-    public void TheChoicesLiveAtModuleScopeAndAreNotAddedToTheDesktopWritePath()
+    public void TheChoicesLiveAtModuleScopeAndTheDismissRouteIsNotTheDesktopOne()
     {
         var page = Page();
         Assert.Contains("\nconst choices = {", page);
-        Assert.DoesNotContain("Dismiss Selected", page);
         Assert.DoesNotContain("/api/alerts/dismiss", page);
     }
 

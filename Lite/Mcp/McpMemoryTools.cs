@@ -219,13 +219,29 @@ public sealed class McpMemoryTools
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_pressure_events")
-                    ?? McpHelpers.Status("empty", "No memory pressure events found in the requested time range.");
+                    ?? McpHelpers.Status("empty", "No memory pressure events found in the requested time range.",
+                        (await McpQueryTools.WindowNoticeAsync(
+                            () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.MemoryPressureEvents, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
+                            windowEnd.AddHours(-hours_back), windowEnd, "memory_pressure_events", emptyAnswer: true)).AsHints());
             }
+
+            /* #4966: where this server's memory_pressure_events data starts for the window. The list is windowed on sample_time,
+               the ring-buffer event's own time, which can sit before the first run that stored it, and the probe reads that same
+               column beside the collector's runs (QueryWindowRelationTimeColumn), so the oldest event shown can never be older
+               than the probe's floor: the plain notice, not the event-time form. */
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var notice = await McpQueryTools.WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.MemoryPressureEvents, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "memory_pressure_events");
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: always present (false and null when the store covered the window). No effective_hours_back, as on the other window-floor payloads. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 events = rows.Select(r => new
                 {
                     sample_time = r.SampleTime.ToString("o"),

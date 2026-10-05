@@ -1102,7 +1102,7 @@ public static class StoreLogClassifier
     /// through <see cref="PgPlanLogParser.FromBlock"/> (the redaction the monitored-target plan route uses, not a
     /// second one: <c>Query Text</c> and <c>Query Parameters</c> removed, quoted literals and condition numbers
     /// masked). Its MESSAGE is <c>plan &lt;hash&gt; &lt;top node&gt; queryid=&lt;id or ?&gt;</c>, so one plan
-    /// (with its estimates) is one row however often it ran, and the id is the statement's, when the plan carries one
+    /// shape is one row however often it ran (the kept sample carries one capture's own estimates), and the id is the statement's, when the plan carries one
     /// (<c>auto_explain.log_verbose</c> with <c>compute_query_id</c>). The kept ENTRY is the first line and the
     /// compact redacted JSON on one tab-led line. A plan that does not parse whole (text, YAML or XML format, a
     /// cut by the entry cap or a read boundary, bad JSON, or a body the reader throws on) keeps only its first line
@@ -1110,7 +1110,7 @@ public static class StoreLogClassifier
     /// <see cref="MaxSampleLength"/> keeps the same message and a <see cref="PlanTooLargeMarker"/> sample in place of
     /// the JSON:
     /// raw plan text is never kept. Every line under the plan that is not tab-led (a field such as CONTEXT) is
-    /// dropped. Idempotent: the kept JSON re-parses to the same hash. False when the first line is not a plan head.
+    /// dropped. Idempotent: the kept JSON re-parses to the same shape hash. False when the first line is not a plan head.
     /// </summary>
     internal static bool TrySanitizePlan(string message, string rawText, out string sanitizedMessage, out string sanitizedRaw)
     {
