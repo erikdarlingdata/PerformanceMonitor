@@ -45,6 +45,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     private readonly int _serverId;
     private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private readonly PendingSeedSession _seed;
     private readonly ServerManager _serverManager;
     private long _nextId = 1;
 
@@ -64,6 +65,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         _tempDir = Path.Combine(Path.GetTempPath(), "McpWindowNoticeConfigLog_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(Path.Combine(_tempDir, "config"));
         _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        _seed = new PendingSeedSession(_duckDb);
 
         _serverManager = new ServerManager(Path.Combine(_tempDir, "config"));
         var server = new ServerConnection { ServerName = ServerName, DisplayName = ServerName };
@@ -73,6 +75,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
 
     public void Dispose()
     {
+        _seed.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort cleanup */ }
     }
@@ -84,7 +87,11 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
 
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
-    private LocalDataService Service() => new(_duckDb);
+    private LocalDataService Service()
+    {
+        _seed.Flush();
+        return new(_duckDb);
+    }
 
     /* ───────────────────────── per-tool wiring ───────────────────────── */
 
@@ -616,20 +623,9 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
 
     /* ───────────────────────── seeding ───────────────────────── */
 
-    private async Task ExecuteAsync(string sql, params object?[] values)
-    {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
-        using var readLock = _duckDb.AcquireReadLock();
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = sql;
-        foreach (var value in values)
-        {
-            cmd.Parameters.Add(new DuckDBParameter { Value = value ?? DBNull.Value });
-        }
-
-        await cmd.ExecuteNonQueryAsync();
-    }
+    /* #5208: every seed statement joins one open transaction (PendingSeedSession) instead of committing on its own;
+       Service() commits it before anything reads, so the code under test sees the same rows in the same order. */
+    private Task ExecuteAsync(string sql, params object?[] values) => _seed.ExecuteAsync(sql, values);
 
     private Task SeedServerConfigAsync(DateTime captureTime, long value) => ExecuteAsync(@"
 INSERT INTO server_config (config_id, capture_time, server_id, server_name, configuration_name, value_configured, value_in_use, is_dynamic, is_advanced)

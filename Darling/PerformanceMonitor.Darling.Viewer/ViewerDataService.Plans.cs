@@ -107,12 +107,59 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// The stored Query Store execution plan for a grid row, or null when no plan text was captured for
-    /// that (database, query_id, plan_id). Query Store already stores plans as ShowPlanXML text.
+    /// The Query Store plan for ONE plan_id as it is stored since #2210: the fact rows carry no plan text (the
+    /// collector ships a NULL placeholder), and a plan lives ONCE in <c>query_plan_dim</c>, reached through
+    /// <c>collect.query_store_plan_map</c> on its primary key (server_id, database_name, plan_id). Two index
+    /// lookups, no fact-table scan: a plan_id belongs to exactly one query_id in its database, so the fact
+    /// table adds nothing once the plan_id is known.
+    /// <para>
+    /// The dimension join is a LEFT join on purpose, so the read distinguishes the two ways of coming back
+    /// empty. NO row means the map has never heard of the plan (a pre-cutover plan, or one not yet fetched),
+    /// and the caller falls back to the inline column. A row whose columns are NULL means the map knows the
+    /// plan and has nothing to show: a NULL digest is the content-less marker for a plan the engine could
+    /// not persist, and a digest whose dimension row the dimension GC removed reads the same. That plan is
+    /// absent, and the inline column is not asked, because a post-cutover plan has nothing there.
+    /// </para>
+    /// The dimension row carries text, gzip bytes or (for the oldest rows) text only, so both columns come
+    /// back and the C# side resolves text-else-gz. $1 server_id, $2 database_name, $3 plan_id.
+    /// </summary>
+    public const string QueryStorePlanViaMapSql = """
+        SELECT d.query_plan_xml, d.query_plan_gz
+        FROM collect.query_store_plan_map AS m
+        LEFT JOIN query_plan_dim AS d
+          ON d.digest = m.digest
+        WHERE m.server_id = $1
+        AND   m.database_name = $2
+        AND   m.plan_id = $3
+        """;
+
+    /// <summary>
+    /// The stored Query Store execution plan for a grid row, or null when none was captured for that
+    /// (database, query_id, plan_id). Since #2210 the plan lives in <c>query_plan_dim</c> behind
+    /// <c>collect.query_store_plan_map</c> (<see cref="QueryStorePlanViaMapSql"/>), read by the map's primary
+    /// key. Rows written before that carry the text inline (<see cref="QueryStorePlanTextSql"/>), and that
+    /// column is read ONLY when the map has no row for the plan_id: a map row without content (a NULL-digest
+    /// marker, or a digest whose dimension row is gone) is absent, with no second look.
     /// </summary>
     public async Task<string?> GetQueryStorePlanTextAsync(
         int serverId, string databaseName, long queryId, long planId, CancellationToken cancellationToken = default)
     {
+        await using (var viaMap = _dataSource.CreateCommand(QueryStorePlanViaMapSql))
+        {
+            viaMap.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            viaMap.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            viaMap.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
+            viaMap.Parameters.Add(new NpgsqlParameter<long> { TypedValue = planId });
+            await using var reader = await viaMap.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                /* The map knows this plan_id: whatever it holds is the answer, including nothing. */
+                return PayloadDimensions.ResolveContent(
+                    reader.IsDBNull(0) ? null : reader.GetString(0),
+                    reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
+            }
+        }
+
         await using var command = _dataSource.CreateCommand(QueryStorePlanTextSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });

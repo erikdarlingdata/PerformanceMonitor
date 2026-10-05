@@ -86,7 +86,12 @@ try {
       "export const zoomChip = stub;\n" +
       "export const renderBarChart = stub;\n" +
       "export const renderPieChart = stub;\n" +
-      "export const renderScatterChart = stub;\n"
+      "export const renderScatterChart = stub;\n" +
+      /* The legend-isolate state compose.js reads and writes (#5247). The notice tests never click a legend, so nothing is hidden. */
+      "export const getChartHidden = () => [];\n" +
+      "export const setChartHidden = () => {};\n" +
+      "export const nextHiddenKeys = () => [];\n" +
+      "export const chartZoomScope = (hours) => '|' + String(hours);\n"
   );
   fs.writeFileSync(path.join(scratch, "panels.js"), "export function navigateServer() {}\nexport function gridTable() { return document.createElement(\"div\"); }\n");
   fs.writeFileSync(path.join(scratch, "views-api.js"), "export async function getCatalog() { return { compose: {} }; }\n");
