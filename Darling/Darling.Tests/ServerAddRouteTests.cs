@@ -349,7 +349,7 @@ public sealed class ServerAddRouteTests
         JsonNode.Parse(body)!["results"]![0]!["detail"]!.GetValue<string>();
 
     [Theory]
-    [InlineData("Could not connect: Connection refused 10.1.2.3:1433", DarlingWebEndpoints.ServerAddConnectText)]
+    [InlineData("Could not connect: Connection refused by the target host", DarlingWebEndpoints.ServerAddConnectText)]
     [InlineData("Could not connect: Connection timed out", DarlingWebEndpoints.ServerAddConnectText)]
     [InlineData("Could not connect: The SSL connection could not be established", DarlingWebEndpoints.ServerAddConnectText)]
     [InlineData("Could not connect to the server.", DarlingWebEndpoints.ServerAddConnectText)]
