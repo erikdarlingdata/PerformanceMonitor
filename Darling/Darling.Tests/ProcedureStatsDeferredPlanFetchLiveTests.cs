@@ -71,10 +71,13 @@ END;";
         public async ValueTask DisposeAsync() => await Store.DisposeAsync();
     }
 
-    private static async Task<Rig> StartAsync(string name, CancellationToken ct)
+    /// <summary>
+    /// Builds the rig on the scratch database <paramref name="database"/>. The caller picks the name and owns the drop (#5158),
+    /// because a throw after the CREATE below never returns a rig, so only the caller's own teardown can find the database.
+    /// </summary>
+    private static async Task<Rig> StartAsync(string name, string database, CancellationToken ct)
     {
         var (pg, sqlHost, user, password) = Env();
-        var database = "pm5158p_" + Guid.NewGuid().ToString("N")[..10];
 
         await using (var admin = new SqlConnection(Connect(sqlHost, user, password, "master")))
         {
@@ -119,18 +122,27 @@ END;";
         };
 
         var store = NpgsqlDataSource.Create(pg);
-        await using (var migrate = await store.OpenConnectionAsync(ct))
+        try
         {
-            await PgMigrations.MigrateAsync(migrate, ct);
-        }
+            await using (var migrate = await store.OpenConnectionAsync(ct))
+            {
+                await PgMigrations.MigrateAsync(migrate, ct);
+            }
 
-        return new Rig
+            return new Rig
+            {
+                Store = store,
+                Server = await DarlingServerConnector.ConnectAsync(config, null, ct),
+                Database = database,
+                PgConnectionString = pg,
+            };
+        }
+        catch
         {
-            Store = store,
-            Server = await DarlingServerConnector.ConnectAsync(config, null, ct),
-            Database = database,
-            PgConnectionString = pg,
-        };
+            // No rig reaches the caller, so nothing else would dispose this store and its pooled connection.
+            await store.DisposeAsync();
+            throw;
+        }
     }
 
     private static string Connect(string host, string? user, string? password, string database)
@@ -176,16 +188,19 @@ END;";
         }
     }
 
-    /// <summary>Drops the scratch database on the monitored side. A drop failure surfaces only when the body succeeded.</summary>
-    private static async Task DropScratchDatabaseAsync(Rig rig, bool bodySucceeded)
+    /// <summary>
+    /// Drops the scratch database on the monitored side, and skips one that was never created (setup can throw before or at
+    /// the CREATE). A drop failure surfaces only when the body succeeded.
+    /// </summary>
+    private static async Task DropScratchDatabaseAsync(string database, bool bodySucceeded)
     {
         try
         {
             var (_, sqlHost, user, password) = Env();
             await using var admin = new SqlConnection(Connect(sqlHost, user, password, "master"));
             await admin.OpenAsync(CancellationToken.None);
-            await Exec(admin, "IF DB_ID(N'" + rig.Database + "') IS NOT NULL BEGIN ALTER DATABASE [" + rig.Database
-                + "] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [" + rig.Database + "]; END;", CancellationToken.None);
+            await Exec(admin, "IF DB_ID(N'" + database + "') IS NOT NULL BEGIN ALTER DATABASE [" + database
+                + "] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [" + database + "]; END;", CancellationToken.None);
         }
         catch when (!bodySucceeded)
         {
@@ -243,18 +258,31 @@ END;";
     {
         var ct = TestContext.Current.CancellationToken;
         var (_, sqlHost, user, password) = Env();
-        await using var rig = await StartAsync(name, ct);
+
+        /* #5158: the scratch name exists before anything is created and the try opens before the CREATE, so a throw anywhere
+           in setup (the create, the seeding, the store migration, the connector) still reaches this finally and drops the
+           database. The drop skips a database that was never created, and the PostgreSQL rows exist only once a rig does. */
+        var database = "pm5158p_" + Guid.NewGuid().ToString("N")[..10];
+        Rig? rig = null;
         var ok = false;
         try
         {
-            await body(rig, Connect(sqlHost, user, password, rig.Database), ct);
+            rig = await StartAsync(name, database, ct);
+            await body(rig, Connect(sqlHost, user, password, database), ct);
             ok = true;
         }
         finally
         {
-            await DropScratchDatabaseAsync(rig, ok);
-            await LiveStoreCleanup.RunAsync(rig.PgConnectionString, ok, async (cleanup, cleanupCt) =>
-                await DeleteStoredRowsAsync(cleanup, rig.Server.ServerId, cleanupCt));
+            // The rig (and its store) is disposed last, as its await using did before; a null rig has nothing to dispose.
+            await using (rig)
+            {
+                await DropScratchDatabaseAsync(database, ok);
+                if (rig is not null)
+                {
+                    await LiveStoreCleanup.RunAsync(rig.PgConnectionString, ok, async (cleanup, cleanupCt) =>
+                        await DeleteStoredRowsAsync(cleanup, rig.Server.ServerId, cleanupCt));
+                }
+            }
         }
     }
 
