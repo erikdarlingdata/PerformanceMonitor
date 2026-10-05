@@ -19,8 +19,9 @@
 --              config.database_state_expected (the per-database override editor, #1986), and on
 --              config.config_mute_rules (the web dashboard's dedicated mute-rule endpoints, #3450 -- plus the
 --              two config_service beacon columns their bump trigger writes as the caller), and the single
---              dismissed column of config.config_alert_log (the web Alert History dismiss, #4843). All non-secret
---              tables; over the web every write is gated server-side by the host's auth + seat model -- these
+--              dismissed column of config.config_alert_log (the web Alert History dismiss, #4843), and INSERT
+--              on config.config_monitored_servers (the web add-server route, #4843; its credential column
+--              stays SELECT-carved). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
 --              grants are only the floor beneath that gate. All other write actions degrade gracefully. The
 --              web dashboard's identity, and a locked-down Viewer's (postgres.connectAs = "viewer").
 --   mcp     -- the MCP server's identity: viewer's reads (the same secret-column carve), plus the MCP tools'
@@ -321,6 +322,12 @@ GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;
 --     probe still discriminates on config_alert_log UPDATE, so a connectAs = "viewer" Viewer stays read-only.
 GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;
+
+-- #4843: the web dashboard's add-server route runs the add_servers core as viewer, so viewer gets INSERT on
+--     config_monitored_servers (never UPDATE or DELETE: the core never updates a row and no web route removes one). The
+--     credential column stays SELECT-carved from viewer, so it can write a password blob and never read one back;
+--     the write's bump trigger is served by the two config_service beacon columns granted above.
+GRANT INSERT ON config.config_monitored_servers TO viewer;
 
 -- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as viewer) and the MCP rule
 --     tools (as mcp) create, edit and delete config.custom_alert_rules -- non-secret rule JSON, the same
