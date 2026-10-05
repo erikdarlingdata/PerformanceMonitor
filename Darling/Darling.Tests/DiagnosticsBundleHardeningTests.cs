@@ -244,7 +244,7 @@ public sealed class DiagnosticsBundleHardeningTests
         aliaser.AddName(AliasKind.Host, "sql01.contoso-corp.example.test");
         var t = DateTime.Now;
         var cut = DiagnosticsBundleServiceLog.MaxEntryChars;
-        var message = new string('x', cut - 10) + " sql01.contoso-corp.example.test failed";
+        var message = new string('x', cut - 17) + " sql01.contoso-corp.example.test failed";
         var log = $"{t:yyyy-MM-dd HH:mm:ss.fff} [ERROR] [Cat] {message}";
         var entries = DiagnosticsBundleServiceLog.Parse(log, false, t.AddHours(-1), DiagnosticsBundleServiceLog.AliasInputChars);
         var section = new JsonObject
@@ -259,6 +259,29 @@ public sealed class DiagnosticsBundleHardeningTests
         Assert.DoesNotContain("contoso", text!, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("sql01", text!, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("host-1", text!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ServiceLogRead_KeepsEnoughTextForTheAliasPass_ThroughTheRealReadPath()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-bundle-cutread-");
+        try
+        {
+            var message = new string('x', DiagnosticsBundleServiceLog.MaxEntryChars - 17) + " sql01.contoso-corp.example.test failed";
+            WriteLog(root, message);
+            var read = DiagnosticsBundleServiceLog.Read(Path.Combine(root.FullName, "logs"), "--log-dir", DateTime.Now.AddHours(-1));
+            var aliaser = new BundleAliaser();
+            aliaser.AddName(AliasKind.Host, "sql01.contoso-corp.example.test");
+            var sections = new[] { new BundleSection("service_log", read, false, DiagnosticsBundleRunner.CapServiceLogMessages) };
+            var (text, leaks, _) = DiagnosticsBundle.Assemble(sections, aliaser, DiagnosticsBundle.BuildManifest(1, "fleet", 0));
+            Assert.Empty(leaks);
+            Assert.DoesNotContain("contoso", text!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("sql01", text!, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
     }
 
     [Fact]
