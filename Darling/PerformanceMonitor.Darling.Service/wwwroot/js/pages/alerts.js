@@ -26,6 +26,7 @@
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
          ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
+import { copyText } from "../grid-tools.js";
 import { mutePrefillParams } from "../mute-context.js";
 import { getSession } from "../views-api.js";
 
@@ -218,20 +219,60 @@ function detailCell(a) {
   const node = disclosure(summary, placeholder, { max: 120 });
 
   let built = false;
-  node.addEventListener("toggle", () => {
+  node.addEventListener("toggle", async () => {
     if (built || !node.open) return;
     built = true;
+    /* #5241: an Analysis alert's advice and fix script are fetched here, on the first open, for this one row - not
+     * carried by the 60 s list read for every row. Loading strip while it loads; an error or an empty answer falls
+     * back to the detail_text rendering. Any other alert has no advice beyond detail_text and makes no request. */
+    if (isAnalysisAlert(a)) {
+      mount(placeholder, [loadingStrip()]);
+      const items = await alertAdvice(a);
+      mount(placeholder, detailBody(a, items));
+      return;
+    }
     mount(placeholder, detailBody(a));
   });
   return node;
 }
 
+/* The advice fetched for an opened Analysis row (#5241), by alertKey, for the page's lifetime: the 60 s poll rebuilds
+ * the grid's nodes, and a row an operator already opened must not ask again. An answer (advice, or none) is kept; a
+ * failed read is not, so opening the row again after a transient error asks again. */
+const adviceCache = new Map();
+
+function isAnalysisAlert(a) {
+  return typeof a.metric_name === "string" && a.metric_name.startsWith("Analysis:");
+}
+
+function alertAdvice(a) {
+  const key = alertKey(a);
+  if (!adviceCache.has(key)) {
+    const pending = readTool("get_alert_details", { server_id: a.server_id, metric_name: a.metric_name, alert_time: a.alert_time })
+      .then((res) => {
+        if (res.kind === "data") return Array.isArray(res.data?.details) && res.data.details.length > 0 ? res.data.details : null;
+        if (res.kind === "empty") return null;
+        adviceCache.delete(key);
+        return null;
+      }, () => { adviceCache.delete(key); return null; });
+    adviceCache.set(key, pending);
+  }
+  return adviceCache.get(key);
+}
+
 /* The expansion body: unchanged shape from the pre-#4194 eager version (see detailCell above), just built lazily. */
-function detailBody(a) {
+function detailBody(a, details) {
   const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
-  const fields = hasDetail ? parseDetailFields(a.detail_text) : null;
+  /* #5241: an Analysis row's stored context holds advice; opening the row fetches it (detailCell) as `details`: the
+   * structured items the desktop's Alert Detail window shows - heading, labelled fields, the advice prose and
+   * the fix script. They replace the parsed detail_text, which is the same headings and fields without the prose.
+   * A row without them (not an Analysis alert, no advice, a failed fetch) keeps the detail_text rendering below. */
+  const items = Array.isArray(details) && details.length > 0 ? details : null;
+  const fields = !items && hasDetail ? parseDetailFields(a.detail_text) : null;
   const body = [];
-  if (fields) {
+  if (items) {
+    for (const item of items) body.push(...detailItem(item));
+  } else if (fields) {
     body.push(el("div", { class: "detail-fields" }, fields.map(fieldRow)));
   } else if (hasDetail) {
     body.push(el("div", { class: "detail-raw", text: a.detail_text }));
@@ -240,6 +281,32 @@ function detailBody(a) {
     body.push(el("div", { class: "detail-fields detail-error" }, [fieldRow(["Delivery error", a.send_error])]));
   }
   return body;
+}
+
+/* One structured detail item (#5241): its heading and labelled fields in the same grid the parsed detail_text uses,
+ * then its body - advice prose as a paragraph, a fix script as a <pre> with a Copy button (the Recommendations tab's
+ * pattern, analysis-findings.js). Advise-only: the read never carries the desktop's Apply payload, and nothing here
+ * runs a script. Every value reaches the DOM through el()'s text path (R4). */
+function detailItem(item) {
+  const nodes = [];
+  const rows = [];
+  if (item.heading) rows.push(fieldRow([null, item.heading]));
+  for (const f of Array.isArray(item.fields) ? item.fields : []) rows.push(fieldRow([f.label, f.value]));
+  if (rows.length > 0) nodes.push(el("div", { class: "detail-fields" }, rows));
+  const text = item.body == null ? "" : String(item.body);
+  if (text.trim().length === 0) return nodes;
+  if (item.is_code_block) {
+    const copy = el("button", { class: "btn small", type: "button", text: "Copy" });
+    copy.addEventListener("click", async () => {
+      const ok = await copyText(text);
+      copy.textContent = ok ? "Copied" : "Copy failed";
+    });
+    nodes.push(el("pre", { class: "reco-fix", text }));
+    nodes.push(el("div", { class: "reco-actions" }, [copy]));
+  } else {
+    nodes.push(el("p", { class: "detail-advice", text }));
+  }
+  return nodes;
 }
 
 /* One parsed pair -> a grid row of the two-column .detail-fields grid. A section heading (no label) is its own

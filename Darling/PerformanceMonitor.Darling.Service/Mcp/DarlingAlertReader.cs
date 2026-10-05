@@ -167,6 +167,35 @@ AND   dismissed = TRUE";
         return rows;
     }
 
+    /// <summary>The stored context of ONE alert, by the page's own row identity (#5241): $1 server_id, $2 metric_name
+    /// (exact), $3 alert_time (naive UTC). <c>config_alert_log</c> has no surrogate key, and the
+    /// <c>(server_id, metric_name, alert_time)</c> index serves this. Dismissed rows are included: a row the operator
+    /// hid from the grid is still a row whose advice they may have open. One row; the key is not unique in the
+    /// schema, and any match carries the same advice.</summary>
+    public const string AlertContextByKeySql = @"
+SELECT context_json
+FROM config_alert_log
+WHERE server_id = $1
+AND   metric_name = $2
+AND   alert_time = $3
+ORDER BY alert_time
+LIMIT 1";
+
+    /// <summary>The <c>context_json</c> of the alert with this identity, or null when there is no such row or it
+    /// stored no context (#5241).</summary>
+    public static async Task<string?> GetAlertContextJsonAsync(
+        NpgsqlDataSource postgres, int serverId, string metricName, DateTime alertTimeUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(AlertContextByKeySql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddText(command, metricName);
+        DarlingMcpReadParameters.AddTimestamp(command, alertTimeUtc);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) ? reader.GetString(0) : null;
+    }
+
     /// <summary>One <see cref="AlertHistoryReadRow"/> from a reader positioned on a row of
     /// <see cref="AlertHistorySelectColumns"/> (both the page read and the first-row-after reads use it, so the
     /// two can never disagree about a column).</summary>
