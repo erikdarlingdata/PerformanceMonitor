@@ -214,16 +214,20 @@ export function keptWindowStrip(res) {
  * The notice for a grid whose table starts covering the server after the window does (#4966): the response says so with
  * `window_truncated: true` and a `truncation_note` naming where the data starts (in the browser's zone by the time a
  * read reaches here: readTool composes it with windowNoteText). Null for any other response,
- * which is every window the table covered, a quiet start included. `desc` is the panel's descriptor: a grid draws the
- * note, a chart does not (its time axis already spans the asked range and shows the empty span), and a grid that names
- * `truncation_note` as its own note (the Queries tab's grids, #4231) draws it there, not twice. The note is text,
- * never markup (R4).
+ * which is every window the table covered, a quiet start included. `desc` is the panel's descriptor: a grid or a stat
+ * tile draws the note, a chart does not (its time axis already spans the asked range and shows the empty span), and a grid that names
+ * `truncation_note` as its own note (the Queries tab's grids, #4231) draws it there, not twice. A stat is safe to draw: a tile over a
+ * snapshot read that takes no `hours` never gets the fields from the server. A panel over the NEWEST snapshot of a read that also
+ * serves a window (the `grants` half of the memory reads, Automatic Tuning) sets `windowNote: false`, because its rows are a moment,
+ * not the window. A read that measures its own floor in a nested block (the Query Store clutter read's `window`) names it in
+ * `floorKey`, and the fields are read from there instead of from the top level. The note is text, never markup (R4).
  */
 export function windowFloorStrip(data, desc) {
-  if (!desc || desc.viz !== "table") return null;
+  if (!desc || desc.windowNote === false || (desc.viz !== "table" && desc.viz !== "stat")) return null;
   if (desc.noteKey === "truncation_note" || (desc.moreNoteKeys || []).includes("truncation_note")) return null;
-  if (!data || data.window_truncated !== true) return null;
-  const note = data.truncation_note;
+  const source = desc.floorKey ? getPath(data, desc.floorKey) : data;
+  if (!source || source.window_truncated !== true) return null;
+  const note = source.truncation_note;
   return typeof note === "string" && note.trim() ? noticeStrip(note) : null;
 }
 
@@ -478,8 +482,9 @@ export function buildQuery(params) {
    the poll loop (app.js refresh()) can tell whether the page it is about to re-render has already settled
    before firing a whole new set of the same reads on top of it. apiSendRead (a read that must travel as a POST,
    the composed-panel run) IS counted, so a slow panel holds the poll off and the refresh back-off measures it.
-   apiGetFleet and apiSend are deliberately NOT counted here — the fleet read is the one request every caller
-   already shares regardless of render (#3895), and a mutation is not a "page read" a poll tick should wait out. */
+   apiGetFleet IS counted too (each caller counts its own wait on the shared request), so a render whose reads are
+   fleet reads is timed for as long as it ran. apiSend is deliberately NOT counted: a mutation is not a "page read"
+   a poll tick should wait out. */
 let inFlightReads = 0;
 
 /** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
@@ -529,15 +534,20 @@ let fleetRequest = null;
  * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
  */
 export async function apiGetFleet() {
-  if (!fleetRequest) {
-    fleetRequest = fetchBody("/api/fleet").finally(() => {
-      fleetRequest = null;
-    });
-  }
+  inFlightReads++;
+  try {
+    if (!fleetRequest) {
+      fleetRequest = fetchBody("/api/fleet").finally(() => {
+        fleetRequest = null;
+      });
+    }
 
-  const shared = await fleetRequest;
-  if (shared.transportError) return { kind: "error", message: shared.transportError };
-  return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    const shared = await fleetRequest;
+    if (shared.transportError) return { kind: "error", message: shared.transportError };
+    return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+  } finally {
+    inFlightReads--;
+  }
 }
 
 /** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a

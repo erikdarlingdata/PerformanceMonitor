@@ -45,8 +45,8 @@ const ALERT_COLUMNS = [
   { key: "current_value", label: "Value", format: "num1" },
   { key: "threshold_value", label: "Threshold", format: "num1" },
   { key: "status", label: "Status", render: (a) => statusCell(a) },
-  { key: "detail_text", label: "Detail", render: (a) => detailCell(a) },
-  { key: "triage", label: "Triage", render: (a) => triageCell(a) },
+  { key: "detail_text", label: "Detail", render: (a) => detailCell(a), copyValue: (a) => detailFullText(a) },
+  { key: "triage", label: "Triage", csv: false, render: (a) => triageCell(a) },
 ];
 
 /* The Mute column exists only for a seat whose session reports can_edit (the server enforces the write gate;
@@ -55,7 +55,7 @@ const ALERT_COLUMNS = [
    database / wait / job / query dimensions from the detail text (js/mute-context.js); the display name in
    server_name is never what a rule matches. "Mute similar" leaves the server blank (this metric anywhere). */
 let canMute = false;
-const MUTE_COLUMN = { key: "mute", label: "Mute", render: (a) => muteCell(a) };
+const MUTE_COLUMN = { key: "mute", label: "Mute", csv: false, render: (a) => muteCell(a) };
 function alertColumns() {
   return canMute ? ALERT_COLUMNS.concat([MUTE_COLUMN]) : ALERT_COLUMNS;
 }
@@ -159,6 +159,12 @@ function statusCell(a) {
  * on both open and close - `built` skips the close firing and any open after the first). The placeholder is a
  * bare, unstyled div so the eventual body's markup - div.detail-fields, div.detail-fields.detail-error - lands
  * exactly as it did before this change; only the disc-body -> placeholder -> body nesting is one level deeper. */
+/* The whole detail as plain text, for Copy and the CSV: the stored detail, then the delivery error on its own line. */
+function detailFullText(a) {
+  const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
+  return [hasDetail ? String(a.detail_text) : null, a.send_error ? "Delivery error: " + a.send_error : null].filter((x) => x != null).join("\n");
+}
+
 function detailCell(a) {
   const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
   if (!hasDetail && !a.send_error) return el("span", { class: "muted", text: "—" });
@@ -248,7 +254,7 @@ function alertKey(a) {
  * single-row page and lifting the <tr> back out - reuses the shared renderer's formatting/severity classes
  * without duplicating them, and without vizTable itself having to know about incremental refresh. */
 function alertRowNode(row) {
-  const wrap = VIZ.table({ alerts: [row] }, { rowsKey: "alerts", columns: alertColumns() });
+  const wrap = VIZ.table({ alerts: [row] }, { rowsKey: "alerts", columns: alertColumns(), tools: false });
   return markDismissed(wrap.querySelector("tbody tr"), row);
 }
 

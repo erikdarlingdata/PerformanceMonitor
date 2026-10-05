@@ -90,31 +90,7 @@ public sealed partial class ViewerDataService
     /// that merged nothing at its one collection's own raw time (ruling item 3), matching
     /// <see cref="ViewerDataService.GetCpuUtilizationAsync"/>.</para>
     /// </summary>
-    public static readonly string CpuSchedulerTrendSql = $"""
-        WITH raw AS
-        (
-            SELECT
-                collection_time,
-                collection_id,
-                total_runnable_tasks_count,
-                total_blocked_task_count,
-                total_queued_request_count
-            FROM v_cpu_scheduler_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-        )
-        SELECT
-            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
-            AVG(COALESCE(total_runnable_tasks_count, 0)) AS total_runnable_tasks_count,
-            AVG(COALESCE(total_blocked_task_count, 0)) AS total_blocked_task_count,
-            AVG(COALESCE(total_queued_request_count, 0)) AS total_queued_request_count,
-            MIN(collection_time) AS first_collection_time,
-            COUNT(*) AS collection_count
-        FROM raw
-        GROUP BY 1
-        ORDER BY 1
-        """;
+    public static readonly string CpuSchedulerTrendSql = ServerTrendSql.CpuScheduler;
 
     /// <summary>
     /// The CPU Scheduler latest-snapshot read: the single most recent cpu_scheduler_stats row in the

@@ -316,6 +316,12 @@ GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
 --     privilege only, so it stays false for viewer. mcp gets none: no MCP tool dismisses an alert.
 GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;
 
+-- #5085: the web dashboard's /api/server-tags endpoints run as viewer, so viewer gets the same two single-table
+--     writes (the seat model decides who may call them; these grants are only the floor). The WPF Viewer's read-only
+--     probe still discriminates on config_alert_log UPDATE, so a connectAs = "viewer" Viewer stays read-only.
+GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;
+GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;
+
 -- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as viewer) and the MCP rule
 --     tools (as mcp) create, edit and delete config.custom_alert_rules -- non-secret rule JSON, the same
 --     single-table floor as 3b. Created by V116, so re-run this script after upgrading past it.

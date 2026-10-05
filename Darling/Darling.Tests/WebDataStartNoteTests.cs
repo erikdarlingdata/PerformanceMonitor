@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -41,6 +42,14 @@ public sealed class WebDataStartNoteTests
         "{\"server\":\"sql01\",\"hours_back\":48,\"tasks_returned\":30,\"truncated\":true,"
         + "\"oldest_returned_collection_time\":\"2026-01-02T12:30:00.0000000\",\"newest_returned_collection_time\":\"2026-01-03T00:00:00.0000000\","
         + "\"order\":\"collection_time_desc\",\"tasks\":[{\"wait_type\":\"LCK_M_X\"}]}";
+
+    /// <summary>What <c>get_plan_corrections</c> answers when the window held more than its row cap: the newest
+    /// recommendations, the page's limit, and the fields that say so (the tool writes the oldest time through
+    /// <c>McpHelpers.FormatEffectiveStart</c>, so it ends in a Z).</summary>
+    private const string CappedCorrections =
+        "{\"server\":\"sql01\",\"hours_back\":48,\"recommendations_returned\":25,\"truncated\":true,"
+        + "\"oldest_returned_collection_time\":\"2026-01-02T12:30:00.0000000Z\",\"newest_returned_collection_time\":\"2026-01-03T00:00:00.0000000Z\","
+        + "\"order\":\"collection_time_desc\",\"automatic_tuning\":[],\"recommendations\":[{\"database_name\":\"db1\"}]}";
 
     private const string WindowEnd = "2026-01-03T00:00:00Z";
 
@@ -105,7 +114,7 @@ public sealed class WebDataStartNoteTests
         Assert.Same(Rows, await Run("get_waiting_tasks", "sql01", 0, Rows));
 
         // An envelope that keeps its own message (unavailable, not_collected), an error, text that is not an object, and a tool that
-        // already reports its own floor. The empty envelope is not here any more (#4966): it says the read looked and found nothing,
+        // already reports its own floor (not on the listed reads any more: see below). The empty envelope is not here any more (#4966): it says the read looked and found nothing,
         // so it reaches the store like rows do (WebDataStartNoteConfigAndLogTests holds that, read by read).
         const string Empty = "{\"status\":\"unavailable\",\"message\":\"No waiting tasks in this window.\"}";
         const string NotCollected = "{\"status\":\"not_collected\",\"message\":\"This engine has no waiting tasks.\"}";
@@ -118,7 +127,11 @@ public sealed class WebDataStartNoteTests
         Assert.Same(Failed, await Run("get_waiting_tasks", "sql01", 168, Failed));
         Assert.Same("[1,2]", await Run("get_waiting_tasks", "sql01", 168, "[1,2]"));
         Assert.Same("not json", await Run("get_waiting_tasks", "sql01", 168, "not json"));
-        Assert.Same(Own, await Run("get_waiting_tasks", "sql01", 168, Own));
+        /* A tool's own window-floor keys on a LISTED read no longer end the web's decision (#4966: get_waiting_tasks writes them
+           itself): they are stripped and the note is decided as if they were absent, so this answer reaches the store like rows do.
+           A read outside the list is untouched whatever it carries. */
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Run("get_waiting_tasks", "sql01", 168, Own));
+        Assert.Same(Own, await Run("get_query_store_top", "sql01", 168, Own));
     }
 
     /// <summary>
@@ -156,6 +169,101 @@ public sealed class WebDataStartNoteTests
     }
 
     /// <summary>
+    /// #4966: the tool writes its own <c>effective_start</c>, <c>window_truncated</c> and <c>truncation_note</c> after
+    /// <c>hours_back</c> (the MCP dialect, in UTC). On a listed read the web still decides its note itself: a capped
+    /// <c>get_waiting_tasks</c> payload that carries the tool's <c>window_truncated: false</c> gets the web's capped
+    /// note, byte for byte what the same payload without the tool's keys gets.
+    /// </summary>
+    [Fact]
+    public async Task ACappedWaitingTasksRead_ThatCarriesTheToolsOwnWindowKeys_StillGetsTheWebsCappedNote()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var withKeys = CappedTasks.Replace(
+            "\"hours_back\":48,",
+            "\"hours_back\":48,\"effective_start\":\"2026-01-01T00:00:00.0000000Z\",\"window_truncated\":false,\"truncation_note\":null,",
+            StringComparison.Ordinal);
+        Assert.NotEqual(CappedTasks, withKeys);
+
+        var plain = await WebDataStartNote.AddAsync(null!, "get_waiting_tasks", "sql01", 48, WindowEnd, CappedTasks, null, ct);
+        var answered = await WebDataStartNote.AddAsync(null!, "get_waiting_tasks", "sql01", 48, WindowEnd, withKeys, null, ct);
+
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        Assert.True(answer["window_truncated"]?.GetValue<bool>());
+        Assert.Equal("2026-01-02T12:30:00.0000000", answer["effective_start"]?.GetValue<string>());
+        Assert.StartsWith("partial window: this grid shows only the newest rows, back to 2026-01-02 12:30 UTC", answer["truncation_note"]?.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Equal("2026-01-02T12:30:00.0000000Z", answer["oldest_shown_utc"]?.GetValue<string>());
+        Assert.Equal(1, answer.Count(p => p.Key == "window_truncated"));
+
+        /* The same fields the plain payload got, with the same values (key order aside: the tool's keys sit earlier). */
+        var plainAnswer = Assert.IsType<JsonObject>(JsonNode.Parse(plain));
+        foreach (var (key, value) in plainAnswer)
+        {
+            Assert.Equal(value?.ToJsonString(), answer[key]?.ToJsonString());
+        }
+    }
+
+    /// <summary>
+    /// #4966: the active-queries panel is not in <see cref="WebDataStartNote.TableByRead"/>, so the page draws the tool's
+    /// own <c>truncation_note</c> as it comes, through <c>windowFloorStrip</c> (a grid only, and only when
+    /// <c>window_truncated</c> is true). That is safe without a page change: the note names no instant, so the page
+    /// has no UTC time to convert and nothing in it mixes two clocks; <c>windowNoteText</c> hands a sentence with no
+    /// matching instant back as sent.
+    /// </summary>
+    [Fact]
+    public void AToolsOwnTruncationNote_OnAPanelOutsideTheList_NamesNoInstant_AndThePageDrawsItOnlyForATruncatedGrid()
+    {
+        Assert.DoesNotContain("get_active_queries", WebDataStartNote.TableByRead.Keys);
+        var notices = new[]
+        {
+            DarlingMcpWindowNotice.Build(null, Utc(2026, 1, 1), "query_snapshots", emptyAnswer: true).TruncationNote!,
+            DarlingMcpWindowNotice.Build(Utc(2026, 1, 3), Utc(2026, 1, 1), "query_snapshots").TruncationNote!,
+        };
+        foreach (var note in notices)
+        {
+            Assert.DoesNotMatch(@"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}", note);
+        }
+
+        var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js").ReplaceLineEndings("\n");
+        Assert.Contains("if (!desc || desc.viz !== \"table\") return null;", util, StringComparison.Ordinal);
+        Assert.Contains("if (!data || data.window_truncated !== true) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("return sent;\n}", util, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4966: the query heatmap and the Query Store regressions panels are grids (<c>table()</c> descriptors, no
+    /// <c>noteKey</c>) and neither read is in <see cref="WebDataStartNote.TableByRead"/>, so the page draws the tool's own
+    /// <c>truncation_note</c> above each, through <c>windowFloorStrip</c>, when the answer says <c>window_truncated: true</c>.
+    /// It is the MCP sentence as sent: it names no instant (the regressions tail says "effective_start" and "baseline_end"
+    /// as field names), so nothing in it mixes the server's UTC with the browser's zone. An <c>empty</c> envelope keeps the
+    /// note under <c>hints</c>, which the page does not read, so it draws none there. No page change is needed.
+    /// </summary>
+    [Theory]
+    [InlineData("get_query_heatmap", "Query Heatmap", "query_stats", false)]
+    [InlineData("get_query_store_regressions", "Query Store Regressions", "query_store_stats", true)]
+    public void TheHeatmapAndRegressionsPanels_DrawTheToolsOwnTruncationNote_AsSent(string read, string title, string table, bool baselineTail)
+    {
+        Assert.DoesNotContain(read, WebDataStartNote.TableByRead.Keys);
+
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js").ReplaceLineEndings("\n");
+        var open = tabs.IndexOf("table(\n        \"" + title + "\",\n        \"" + read + "\",", StringComparison.Ordinal);
+        Assert.True(open >= 0, read + " is no longer a table() panel on a server tab");
+        var call = tabs[open..tabs.IndexOf("\n      ),", open, StringComparison.Ordinal)];
+        Assert.DoesNotContain("truncation_note", call, StringComparison.Ordinal);
+
+        var note = DarlingMcpWindowNotice.Build(
+            Utc(2026, 1, 3), Utc(2026, 1, 1), table,
+            baselineTail ? "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end." : null).TruncationNote!;
+        Assert.DoesNotMatch(@"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}", note);
+        Assert.Contains("this server's raw " + table + " retains", note, StringComparison.Ordinal);
+        Assert.Equal(baselineTail, note.EndsWith("baseline_end.", StringComparison.Ordinal));
+
+        var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js").ReplaceLineEndings("\n");
+        Assert.Contains("if (!desc || desc.viz !== \"table\") return null;", util, StringComparison.Ordinal);
+        Assert.Contains("if (!data || data.window_truncated !== true) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("return sent;\n}", util, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The capped rule is for the one list ordered by time. A read that did not hit its cap, a capped answer with no
     /// usable oldest row, and every other listed read, whose cap keeps the top rows of an aggregate over the whole
     /// window (or of a list ranked by something other than time, <c>get_pg_predicate_stats</c>), stay on the
@@ -180,6 +288,14 @@ public sealed class WebDataStartNoteTests
         Assert.Same(NoOldest, await Run("get_waiting_tasks", NoOldest));
         Assert.Same(BadOldest, await Run("get_waiting_tasks", BadOldest));
 
+        // The plan corrections page is newest first too: a capped one names its oldest row, with no look at the store.
+        var corrections = await Run("get_plan_corrections", CappedCorrections);
+        var named = Assert.IsType<JsonObject>(JsonNode.Parse(corrections));
+        Assert.True(named["window_truncated"]?.GetValue<bool>());
+        Assert.Equal("2026-01-02T12:30:00.0000000Z", named["effective_start"]?.GetValue<string>());
+        Assert.StartsWith("2026-01-02T12:30:00", named["oldest_shown_utc"]?.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Null(named["data_start_utc"]);
+
         // Every listed read the cap does not cut (the capped list names its own), with the same cap fields on its answer.
         foreach (var read in WebDataStartNote.TableByRead.Keys.Where(k => !WebDataStartNote.NewestFirstCappedReads.Contains(k)))
         {
@@ -190,12 +306,13 @@ public sealed class WebDataStartNoteTests
     /// <summary>The capped rule's premises, in the source: each list is a read ordered by time, newest first, and
     /// the tool answers the two fields the rule reads (the live tests run the real tool). The collection log and the
     /// PostgreSQL configuration changes join the waiting tasks (#4966): <c>WebDataStartNoteConfigAndLogTests</c> pins
-    /// theirs.</summary>
+    /// theirs. The plan corrections read is the fourth: its reader orders by <c>collection_time DESC</c> and its tool
+    /// writes the same two fields and the same order word.</summary>
     [Fact]
-    public void TheCappedRule_IsThreeReadsOrderedByTime_WhoseToolsAnswerTheFieldsItReads()
+    public void TheCappedRule_IsFourReadsOrderedByTime_WhoseToolsAnswerTheFieldsItReads()
     {
         Assert.Equal(
-            ["get_collection_log", "get_pg_server_config_changes", "get_waiting_tasks"],
+            ["get_collection_log", "get_pg_server_config_changes", "get_plan_corrections", "get_waiting_tasks"],
             WebDataStartNote.NewestFirstCappedReads.Order(StringComparer.Ordinal).ToArray());
         foreach (var read in WebDataStartNote.NewestFirstCappedReads)
         {
@@ -210,6 +327,58 @@ public sealed class WebDataStartNoteTests
         Assert.Contains("truncated,", body, StringComparison.Ordinal);
         /* #4966: the field is written through the shared formatter (UTC, with the Z); the rule reads it as UTC with or without one. */
         Assert.Contains("oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime))", body, StringComparison.Ordinal);
+
+        Assert.Contains("ORDER BY collection_time DESC", PerformanceMonitor.Darling.Service.Mcp.DarlingPlanCorrectionReader.PlanCorrectionsSql, StringComparison.Ordinal);
+        var corrections = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPlanCorrectionTools.cs");
+        var correctionsTool = corrections.IndexOf("public static async Task<string> GetPlanCorrections(", StringComparison.Ordinal);
+        Assert.True(correctionsTool > 0);
+        var correctionsBody = corrections[correctionsTool..];
+        Assert.Contains("var truncated = rows.Count > limit;", correctionsBody, StringComparison.Ordinal);
+        Assert.Contains("oldest_returned_collection_time = page.Count == 0 ? null : McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime))", correctionsBody, StringComparison.Ordinal);
+        Assert.Contains("order = \"collection_time_desc\"", correctionsBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The three SQL Server snapshot-table reads added with the page mechanism (#4966): each is served by the web mirror,
+    /// asked a window by the page, and read over the table named here (the rows are stamped with the collection time).
+    /// None answers a "nothing found" word but plan corrections: the memory reads say <c>unavailable</c> when the window
+    /// held no snapshot (and <c>not_collected</c> where the engine has none), which keep their own message.
+    /// </summary>
+    [Fact]
+    public async Task TheMemoryGrantAndPlanCorrectionReads_AreListed_OverTheirSnapshotTables_AndKeepTheirEnvelopes()
+    {
+        (string Read, string Table)[] added =
+        [
+            ("get_memory_grants", "memory_grant_stats"),
+            ("get_resource_semaphore", "memory_grant_stats"),
+            ("get_plan_corrections", "plan_correction"),
+        ];
+        var dispatch = DarlingWebEndpoints.BuildReadDispatch();
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        await using var store = NeverConnects();
+
+        foreach (var (read, table) in added)
+        {
+            Assert.Equal(table, WebDataStartNote.TableByRead[read]);
+            Assert.True(dispatch.ContainsKey(read), read + " is not a read the web mirror serves");
+            Assert.True(WebDataStartNote.TryGetSource(table, out var source), read + " names " + table + ", which the probe cannot read");
+            Assert.Equal(table, source.Relation);
+            Assert.Contains("\"" + read + "\"", tabs, StringComparison.Ordinal);
+
+            // The control: rows reach the store.
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => WebDataStartNote.AddAsync(store, read, "sql01", 168, null, Rows, null, Cancelled));
+
+            foreach (var status in new[] { "unavailable", "not_collected", "invalid" })
+            {
+                var envelope = "{\"status\":\"" + status + "\",\"message\":\"" + status + "\"}";
+                Assert.Same(envelope, await WebDataStartNote.AddAsync(store, read, "sql01", 168, null, envelope, null, Cancelled));
+            }
+        }
+
+        Assert.DoesNotContain("get_memory_grants", WebDataStartNote.NothingFoundStatusByRead.Keys);
+        Assert.DoesNotContain("get_resource_semaphore", WebDataStartNote.NothingFoundStatusByRead.Keys);
+        Assert.Equal("empty", WebDataStartNote.NothingFoundStatusByRead["get_plan_corrections"]);
+        Assert.DoesNotContain("get_active_queries", WebDataStartNote.TableByRead.Keys);
     }
 
     [Fact]
@@ -295,6 +464,111 @@ public sealed class WebDataStartNoteTests
         Assert.StartsWith("partial window:", Assert.Single(Strings(r, "notices")), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void AStatTile_OverAWindowedRead_DrawsTheNote_LikeAGrid()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorStatDraws", out var r)) return;
+
+        Assert.StartsWith("partial window:", Assert.Single(Strings(r, "notices")), StringComparison.Ordinal);
+        Assert.Empty(Strings(r, "errors"));
+    }
+
+    [Fact]
+    public void ASpecWithWindowNoteFalse_DrawsNoNote_OverAnAnswerThatCarriesOne()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorOptOut", out var r)) return;
+
+        Assert.Empty(Strings(r, "notices"));
+        Assert.Empty(Strings(r, "errors"));
+    }
+
+    [Fact]
+    public void ASpecWithAFloorKey_DrawsTheNestedNote_NotTheTopLevelOne()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorNested", out var r)) return;
+
+        var notice = Assert.Single(Strings(r, "notices"));
+        Assert.Equal("nested: the raw tier starts later", notice);
+    }
+
+    /// <summary>The server tabs' own specs, run under Node (the shipped <c>server-tabs.js</c>): the windowed halves of
+    /// the memory reads say where their data starts, and the newest-snapshot halves beside them, which share the one
+    /// fetch, do not. A strip comes back prefixed with the heading of the panel that drew it.</summary>
+    [Theory]
+    [InlineData("floorMemoryGrants", "Memory Grant Pressure")]
+    [InlineData("floorResourceSemaphore", "Resource Semaphore Pressure")]
+    [InlineData("floorPlanCorrections", "Plan Corrections")]
+    public void TheWindowedPanelOfAFanout_DrawsTheNote_AndItsSnapshotSiblingDoesNot(string scenario, string heading)
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun(scenario, out var r)) return;
+
+        var notice = Assert.Single(Strings(r, "notices"));
+        Assert.StartsWith(heading, notice, StringComparison.Ordinal);
+        Assert.Contains("partial window:", notice, StringComparison.Ordinal);
+        Assert.Empty(Strings(r, "errors"));
+    }
+
+    /// <summary>An <c>empty</c> Plan Corrections answer carries the note in its envelope: the recommendations panel draws it
+    /// above the empty strip, and Automatic Tuning (<c>windowNote:false</c>) stays quiet. Without the flag, nothing draws.</summary>
+    [Fact]
+    public void AnEmptyPlanCorrectionsAnswer_DrawsTheNote_OnlyWhenTruncated_AndNotOnAutomaticTuning()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorPlanCorrectionsEmpty", out var r)) return;
+        var notice = Assert.Single(Strings(r, "notices"));
+        Assert.StartsWith("Plan Corrections", notice, StringComparison.Ordinal);
+        Assert.Contains("partial window:", notice, StringComparison.Ordinal);
+        Assert.DoesNotContain(Strings(r, "notices"), n => n.StartsWith("Automatic Tuning", StringComparison.Ordinal));
+
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorPlanCorrectionsEmptyUntruncated", out var q)) return;
+        Assert.Empty(Strings(q, "notices"));
+    }
+
+    [Fact]
+    public void TheQueryStoreClutterTiles_DrawTheNestedWindowNote_OnTheGridAndTheOverheadGrid_ButNotOnTheClerkTile()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorClutter", out var r)) return;
+
+        var notices = Strings(r, "notices");
+        Assert.Equal(2, notices.Length);
+        Assert.Contains(notices, n => n.StartsWith("Query Store Clutter", StringComparison.Ordinal) && n.EndsWith("nested: the raw tier starts later", StringComparison.Ordinal));
+        Assert.Contains(notices, n => n.StartsWith("Query Store Overhead", StringComparison.Ordinal) && n.EndsWith("nested: the raw tier starts later", StringComparison.Ordinal));
+        Assert.DoesNotContain(notices, n => n.StartsWith("Query Store Memory Clerk", StringComparison.Ordinal));
+    }
+
+    /// <summary>The same decisions in the source text, so they hold without Node: the snapshot halves opt out, the two
+    /// clutter grids read the nested block, and the clerk tile does neither.</summary>
+    [Fact]
+    public void TheSnapshotPanels_OptOut_AndTheClutterGrids_ReadTheNestedWindow()
+    {
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+
+        string Spec(string title)
+        {
+            var at = tabs.IndexOf("title: \"" + title + "\",", StringComparison.Ordinal);
+            Assert.True(at > 0, title + " is not a spec");
+            var end = tabs.IndexOf("emptyText:", at, StringComparison.Ordinal);
+            Assert.True(end > at);
+            return tabs[at..end];
+        }
+
+        foreach (var title in new[] { "Memory Grants", "Resource Semaphore", "Automatic Tuning" })
+        {
+            Assert.Contains("windowNote: false", Spec(title), StringComparison.Ordinal);
+        }
+
+        foreach (var title in new[] { "Memory Grant Pressure", "Resource Semaphore Pressure", "Plan Corrections", "Query Store Memory Clerk" })
+        {
+            Assert.DoesNotContain("windowNote", Spec(title), StringComparison.Ordinal);
+        }
+
+        foreach (var title in new[] { "Query Store Clutter", "Query Store Overhead (per server)" })
+        {
+            Assert.Contains("floorKey: \"window\"", Spec(title), StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("floorKey", Spec("Query Store Memory Clerk"), StringComparison.Ordinal);
+    }
+
     /// <summary>The page wiring in the source text, so it holds without Node: the shared strip is exported, a
     /// descriptor panel draws it for a grid only, and the two hand-built paths that do not go through the descriptor
     /// loader (the fanout tables and the Wait Stats grid) draw it too.</summary>
@@ -306,8 +580,9 @@ public sealed class WebDataStartNoteTests
         var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
 
         Assert.Contains("export function windowFloorStrip(data, desc) {", util, StringComparison.Ordinal);
-        Assert.Contains("desc.viz !== \"table\"", util, StringComparison.Ordinal);
-        Assert.Contains("data.window_truncated !== true", util, StringComparison.Ordinal);
+        Assert.Contains("desc.windowNote === false", util, StringComparison.Ordinal);
+        Assert.Contains("desc.viz !== \"table\" && desc.viz !== \"stat\"", util, StringComparison.Ordinal);
+        Assert.Contains("const source = desc.floorKey ? getPath(data, desc.floorKey) : data;", util, StringComparison.Ordinal);
 
         Assert.Contains("const floor = windowFloorStrip(res.data, desc);", panels, StringComparison.Ordinal);
 
