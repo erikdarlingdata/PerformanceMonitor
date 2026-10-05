@@ -11,6 +11,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -397,5 +398,28 @@ public class StoreStatementStatsTests
         Assert.Equal(StoreStatementStats.WithheldText, DarlingMcpStoreQueryStatsTools.ShownText(StoreStatementStats.WithheldText));
         Assert.Equal(StoreStatementStats.InsufficientPrivilegeText, DarlingMcpStoreQueryStatsTools.ShownText(StoreStatementStats.InsufficientPrivilegeText));
         Assert.Equal("", DarlingMcpStoreQueryStatsTools.ShownText(""));
+    }
+
+    /// <summary>
+    /// #5097: a text the shared sensitive-statement filter withheld in SQL arrives as its placeholder, which is a SQL line comment
+    /// that the lexer strips to an empty string. It must read as withheld instead, so a statement withheld by the tools' second
+    /// layer is not mistaken for one that has no text.
+    /// </summary>
+    [Fact]
+    public void ATextTheSharedFilterWithheld_ReadsAsWithheld_NotAsAnEmptyString()
+    {
+        Assert.Equal(StoreStatementStats.WithheldText, DarlingMcpStoreQueryStatsTools.ShownText(PgSensitiveStatementFilter.PlaceholderText));
+        Assert.NotEqual("", DarlingMcpStoreQueryStatsTools.ShownText(PgSensitiveStatementFilter.PlaceholderText));
+    }
+
+    /// <summary>
+    /// #5097: the ranked read applies the shared predicate on top of the reader function's own filter, as the history tool's text
+    /// read does, so the diagnostics bundle's two statement-text members agree on a store whose function body is older than the
+    /// pattern.
+    /// </summary>
+    [Fact]
+    public void TheRankedRead_WrapsTheReaderFunctionsText_InTheSharedSensitiveStatementPredicate()
+    {
+        Assert.Contains(PgSensitiveStatementFilter.SqlPredicate("ranked.query"), DarlingMcpStoreQueryStatsTools.BuildStatementsSql("total_exec_ms"), StringComparison.Ordinal);
     }
 }

@@ -15,6 +15,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -187,7 +188,7 @@ public sealed class DiagnosticsBundleStoreHistoryLiveTests
 
             Assert.Equal("not_present", member!["status"]!.GetValue<string>());
             Assert.Equal("This store has no statement-history tables yet.", Reason(member));
-            Assert.False(DiagnosticsBundleRunner.HistoryFailed(new JsonObject { ["history"] = member }));
+            Assert.False(DiagnosticsBundleRunner.MemberFailed(new JsonObject { ["history"] = member }));
             ok = true;
         }
         finally
@@ -214,7 +215,7 @@ public sealed class DiagnosticsBundleStoreHistoryLiveTests
             var member = await DiagnosticsBundleRunner.StatementHistoryAsync(source, 24, ct);
 
             Assert.Equal("error", member!["status"]!.GetValue<string>());
-            Assert.True(DiagnosticsBundleRunner.HistoryFailed(new JsonObject { ["cumulative"] = new JsonObject(), ["history"] = member }));
+            Assert.True(DiagnosticsBundleRunner.MemberFailed(new JsonObject { ["cumulative"] = new JsonObject(), ["history"] = member }));
             ok = true;
         }
         finally
@@ -266,6 +267,249 @@ public sealed class DiagnosticsBundleStoreHistoryLiveTests
             Assert.NotNull(section["cumulative"]);
             Assert.Equal("error", section["history"]!["status"]!.GetValue<string>());
             Assert.Contains("get_store_query_history", section["history"]!["message"]!.GetValue<string>(), StringComparison.Ordinal);
+
+            /* Nothing else in the bundle was marked failed by it. */
+            Assert.Equal(
+                new[] { "store_statements" },
+                tree["manifest"]!["sections"]!.AsArray().Where(s => s!["status"]!.GetValue<string>() == "error").Select(s => s!["name"]!.GetValue<string>()).ToArray());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A name and a literal that the first two planted statements carry. Neither may reach the tool's answer or any member of the
+    /// bundle, whatever the reader function returned.
+    /// </summary>
+    private const string PlantedName = "planted_zq9";
+
+    private const string PlantedLiteral = "zq9-literal";
+
+    private const long CredentialId = 9001;
+
+    private const long RawLiteralId = 9002;
+
+    private const long OrdinaryId = 9003;
+
+    /// <summary>Role DDL with a password: the statement the shared sensitive-statement filter names, withheld by its name alone.</summary>
+    private static readonly string CredentialText = $"ALTER ROLE {PlantedName} PASSWORD '{PlantedLiteral}'";
+
+    /// <summary>
+    /// A SELECT with its literals as typed, the text pg_stat_statements keeps when an entry is gone at executor end. The filter does
+    /// not name it, so the lexer is what masks it.
+    /// </summary>
+    private static readonly string RawLiteralText = $"SELECT '{PlantedLiteral}'::text AS raw_col, 4111111111111111";
+
+    private const string MaskedRawLiteralText = "SELECT '?'::text AS raw_col, ?";
+
+    /// <summary>Ordinary normalized text, longer than the tool's 240-character preview.</summary>
+    private static readonly string OrdinaryText =
+        $"SELECT $1 AS {new string('l', 60)}, $2 AS {new string('m', 60)}, $3 AS {new string('n', 60)}, $4 AS {new string('o', 60)}, $5 AS tail_marker";
+
+    /// <summary>
+    /// A store whose reader function is OLDER than the sensitive-statement pattern, the one case the tools' second layer is for. The
+    /// function is built as the product builds it and then replaced by one of the same signature that returns the three planted
+    /// texts as they are: the current body withholds the first text itself, so nothing else can put it in front of that layer. One
+    /// capture and one history row per statement, the credential statement ranking first and the ordinary one last.
+    /// </summary>
+    private static async Task PlantAsync(string connectionString, NpgsqlDataSource source, CancellationToken ct)
+    {
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            var ensured = await StoreStatementStats.EnsureAsync(connection, "config", Array.Empty<string>(), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct);
+            Assert.Equal(StoreStatementStats.SetupOutcome.Ready, ensured);
+        }
+
+        static string Values(long id, double totalMs, string text) =>
+            $"('owner'::text, {id}::bigint, 5::bigint, {totalMs.ToString(CultureInfo.InvariantCulture)}::double precision, 10::double precision, 20::double precision, 0::double precision, 1::bigint, 2::bigint, 3::bigint, 4::bigint, {PgSensitiveStatementFilter.SqlLiteral(text)}::text)";
+
+        await ExecAsync(source, $@"
+CREATE OR REPLACE FUNCTION config.{StoreStatementStats.FunctionName}()
+RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, mean_exec_ms double precision, max_exec_ms double precision, total_plan_ms double precision, rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint, query text)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET standard_conforming_strings = on
+AS $stub$
+    SELECT * FROM (VALUES
+        {Values(CredentialId, 900, CredentialText)},
+        {Values(RawLiteralId, 500, RawLiteralText)},
+        {Values(OrdinaryId, 100, OrdinaryText)}
+    ) AS v
+$stub$", ct);
+
+        await Capture(source, 3.5, ct);
+        await Capture(source, 2.5, ct);
+        await Row(source, 2.5, CredentialId, 5, 900, ct);
+        await Row(source, 2.5, RawLiteralId, 5, 500, ct);
+        await Row(source, 2.5, OrdinaryId, 5, 100, ct);
+    }
+
+    /// <summary>The <c>query</c> of the statement with this id, in a tool answer or a bundle member (both list <c>statements</c> by <c>query_id</c>).</summary>
+    private static string QueryOf(JsonNode? answer, long queryId) =>
+        answer!["statements"]!.AsArray()
+            .Single(s => s!["query_id"]!.GetValue<string>() == queryId.ToString(CultureInfo.InvariantCulture))!["query"]!.GetValue<string>();
+
+    [Fact]
+    public async Task AStatementTheSharedFilterNames_ReadsAsWithheld_InTheToolAndInTheMember_AndARawLiteralIsMasked()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
+        try
+        {
+            await PlantAsync(scratch.ConnectionString, source, ct);
+
+            var member = await DiagnosticsBundleRunner.StatementHistoryAsync(source, 24, ct);
+            var tool = JsonNode.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(
+                source, query_id: null, role: null, hours_back: 24, top: DiagnosticsBundleRunner.StatementHistoryTop, cancellationToken: ct));
+            Assert.Equal(3, member!["statements"]!.AsArray().Count);
+            Assert.Equal(3, tool!["statements"]!.AsArray().Count);
+
+            foreach (var answer in new[] { tool, member })
+            {
+                var json = answer.ToJsonString();
+                Assert.DoesNotContain(PlantedName, json, StringComparison.Ordinal);
+                Assert.DoesNotContain(PlantedLiteral, json, StringComparison.Ordinal);
+
+                /* The statement the filter names reads as withheld: not its text, and not an empty string either. */
+                Assert.Equal(StoreStatementStats.WithheldText, QueryOf(answer, CredentialId));
+
+                /* A raw-literal text is masked by the lexer, on the bundle's whole-text branch as on the tool's cut one. */
+                Assert.Equal(MaskedRawLiteralText, QueryOf(answer, RawLiteralId));
+            }
+
+            /* The ordinary statement survives: whole in the member, which the bundle aliases before it cuts, and cut in the tool's own answer. */
+            Assert.Equal(OrdinaryText, QueryOf(member, OrdinaryId));
+            var cut = QueryOf(tool, OrdinaryId);
+            Assert.True(cut.Length <= 243 && cut.EndsWith("...", StringComparison.Ordinal), "the tool's answer should be cut to the preview");
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AStatementTheSharedFilterNames_ReadsAsWithheld_InBothMembersOfTheBundlesStoreStatementsSection()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var root = Directory.CreateTempSubdirectory("darling-bundle-withheld-");
+        var ok = false;
+        try
+        {
+            await PlantAsync(scratch.ConnectionString, source, ct);
+            var options = DiagnosticsBundle.ParseArgs(new[] { Path.Combine(root.FullName, "b.json"), "--log-dir", root.FullName }).Options!;
+            var config = new DarlingConfig { Servers = { new MonitoredServer { Name = "alpha-sql-01" } } };
+
+            var built = await DiagnosticsBundleRunner.BuildAsync(options, config, scratch.ConnectionString, source, null, null, ct);
+            Assert.True(built.Text is not null, built.Message);
+            Assert.Equal(DarlingCliCommands.DiagnosticsBundleExitCode.Ok, built.ExitCode);
+
+            /* Nowhere in the file: the whole text and the literal of the statement the filter names, and the literal of the raw one. */
+            Assert.DoesNotContain(PlantedName, built.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain(PlantedLiteral, built.Text, StringComparison.Ordinal);
+
+            var section = JsonNode.Parse(built.Text!)!["sections"]!["store_statements"]!;
+            Assert.Null(section["status"]);
+            foreach (var name in new[] { "cumulative", "history" })
+            {
+                var member = section[name];
+                Assert.Equal(3, member!["statements"]!.AsArray().Count);
+                Assert.True(StoreStatementStats.WithheldText == QueryOf(member, CredentialId), $"{name}: the statement the filter names should read as withheld");
+                Assert.True(MaskedRawLiteralText == QueryOf(member, RawLiteralId), $"{name}: the raw literal should be masked");
+
+                /* Cut after aliasing, as every statement text in the bundle is. */
+                var cut = QueryOf(member, OrdinaryId);
+                Assert.True(cut.Length <= 243 && cut.EndsWith("...", StringComparison.Ordinal), $"{name}: the bundle's statement text should be cut to the preview");
+            }
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void AnErrorInEitherMember_FailsTheSection_AndAPreconditionOrARefusalDoesNot()
+    {
+        static JsonObject Member(string? status) => status is null ? new JsonObject { ["mode"] = "ranked" } : new JsonObject { ["status"] = status };
+
+        Assert.True(DiagnosticsBundleRunner.MemberFailed(new JsonObject { ["cumulative"] = Member(null), ["history"] = Member("error") }));
+        Assert.True(DiagnosticsBundleRunner.MemberFailed(new JsonObject { ["cumulative"] = Member("error"), ["history"] = Member(null) }));
+        Assert.True(DiagnosticsBundleRunner.MemberFailed(new JsonObject { ["cumulative"] = Member("error"), ["history"] = Member("error") }));
+
+        Assert.False(DiagnosticsBundleRunner.MemberFailed(new JsonObject { ["cumulative"] = Member(null), ["history"] = Member(null) }));
+        foreach (var status in new[] { "precondition", "invalid", "not_present", "empty" })
+        {
+            Assert.False(DiagnosticsBundleRunner.MemberFailed(new JsonObject { ["cumulative"] = Member(status), ["history"] = Member(status) }));
+        }
+
+        Assert.False(DiagnosticsBundleRunner.MemberFailed(null));
+    }
+
+    [Fact]
+    public async Task ACumulativeReadThatErrors_ListsTheSectionAsError_InTheManifestAndInTheSection_ExitsPartial_AndKeepsTheHistoryMember()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var root = Directory.CreateTempSubdirectory("darling-bundle-cumulativeerror-");
+        var ok = false;
+        try
+        {
+            /* The reader functions must exist for the stats tool to get past its precondition, so the break below is a read error. */
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                var ensured = await StoreStatementStats.EnsureAsync(connection, "config", Array.Empty<string>(), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct);
+                Assert.Equal(StoreStatementStats.SetupOutcome.Ready, ensured);
+            }
+
+            var options = DiagnosticsBundle.ParseArgs(new[] { Path.Combine(root.FullName, "b.json"), "--log-dir", root.FullName }).Options!;
+            var config = new DarlingConfig { Servers = { new MonitoredServer { Name = "alpha-sql-01" } } };
+
+            /* The control: both members read, and the section is ok in the manifest and in its own body. */
+            var control = await DiagnosticsBundleRunner.BuildAsync(options, config, scratch.ConnectionString, source, null, null, ct);
+            var controlTree = JsonNode.Parse(control.Text!)!;
+            Assert.Equal("ok", ManifestStatus(controlTree, "store_statements"));
+            Assert.Null(controlTree["sections"]!["store_statements"]!["status"]);
+            Assert.NotEqual("error", controlTree["sections"]!["store_statements"]!["cumulative"]!["status"]?.GetValue<string>());
+            Assert.Equal(DarlingCliCommands.DiagnosticsBundleExitCode.Ok, control.ExitCode);
+
+            /* Break only the cumulative read. The stats tool's precondition looks at the ranking function alone, so it goes on to read
+               the info function, which is gone, and answers an error. The history member does not touch it. */
+            await ExecAsync(source, $"DROP FUNCTION config.{StoreStatementStats.InfoFunctionName}()", ct);
+
+            var broken = await DiagnosticsBundleRunner.BuildAsync(options, config, scratch.ConnectionString, source, null, null, ct);
+            var tree = JsonNode.Parse(broken.Text!)!;
+
+            /* The exit code reports a partial bundle and the manifest agrees: the section reads "error", the status a section that throws gets. */
+            Assert.Equal(DarlingCliCommands.DiagnosticsBundleExitCode.PartialBundle, broken.ExitCode);
+            Assert.Equal("error", ManifestStatus(tree, "store_statements"));
+
+            /* The section says so itself, and keeps both members: the cumulative one with the tool's own error, the history one as it read. */
+            var section = tree["sections"]!["store_statements"]!;
+            Assert.Equal("error", section["status"]!.GetValue<string>());
+            Assert.Equal("error", section["cumulative"]!["status"]!.GetValue<string>());
+            Assert.Contains("get_store_query_stats", section["cumulative"]!["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.NotNull(section["history"]);
+            Assert.NotEqual("error", section["history"]!["status"]?.GetValue<string>());
 
             /* Nothing else in the bundle was marked failed by it. */
             Assert.Equal(

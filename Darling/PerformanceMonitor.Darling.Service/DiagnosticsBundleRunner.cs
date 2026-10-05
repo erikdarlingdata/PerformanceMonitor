@@ -75,8 +75,9 @@ AND   database_name IS NOT NULL";
 SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclass('collect.store_statement_captures') IS NOT NULL";
 
     /// <summary>
-    /// How many statements the history lists: the 25 that spent the most time in the window, the cap the section has
-    /// always had. The tool's default page is 20.
+    /// How many rows the history lists: the 25 that spent the most time in the window, one row per role and statement. The
+    /// tool ranks that way, so a statement two roles ran takes two of the 25 rows, and the section can name fewer than 25
+    /// distinct statements. 25 is the cap the section has always had. The tool's default page is 20.
     /// </summary>
     internal const int StatementHistoryTop = 25;
 
@@ -518,11 +519,11 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
             ["history"] = await StatementHistoryAsync(postgres, hours, ct),
         };
 
-        /* The tool's error answer is the history member, one level down, so the section's own status would still read ok while
-           the verb exits as a partial bundle (#5097). A section that throws reads error in its body, in the manifest and in the
-           exit code; this one reads the same, keeping its other member and the history member with the tool's own error. The
-           exit code (RunSectionAsync) and the manifest (Assemble) both take a section's failure from this status. */
-        if (HistoryFailed(section))
+        /* A tool's error answer is a member, one level down, so the section's own status would still read ok while the member
+           failed (#5097). A section that throws reads error in its body, in the manifest and in the exit code; this one reads
+           the same when either member answered an error, keeping both members with the tool's own error in the one that failed.
+           The exit code (RunSectionAsync) and the manifest (Assemble) both take a section's failure from this status. */
+        if (MemberFailed(section))
         {
             section.Insert(0, "status", "error");
         }
@@ -532,11 +533,11 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
 
     /// <summary>
     /// The statement history, read through <c>get_store_query_history</c> (#5097): the answer of the tool's ranked mode, the
-    /// 25 statements that spent the most time in the window, becomes the member as the tool wrote it, with each statement's text
-    /// whole (<see cref="DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistoryUncut"/>), because the bundle aliases the text
-    /// before <see cref="CompactStatementTexts"/> cuts it. A refusal or an error the tool answers is the member as it is,
-    /// with its <c>status</c>. The existence probe stays: a store before V163 reads <c>not_present</c> with the reason below,
-    /// and never reaches the tool. Never reads the diff-state baseline table.
+    /// 25 rows that spent the most time in the window (one per role and statement), becomes the member as the tool wrote it,
+    /// with each statement's text whole (<see cref="DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistoryUncut"/>), because
+    /// the bundle aliases the text before <see cref="CompactStatementTexts"/> cuts it. A refusal or an error the tool answers
+    /// is the member as it is, with its <c>status</c>. The existence probe stays: a store before V163 reads <c>not_present</c>
+    /// with the reason below, and never reaches the tool. Never reads the diff-state baseline table.
     /// </summary>
     /// <remarks>
     /// The window is the bundle's <c>--hours</c>, clamped to the tool's range (1 to <see cref="DarlingMcpStoreQueryHistoryTools.MaxHours"/>).
@@ -569,11 +570,13 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
     }
 
     /// <summary>
-    /// Whether the section's <c>history</c> member is the tool's error answer. The member is nested under the section, so the
-    /// section's own status does not show it; <see cref="StoreStatementsSectionAsync"/> then gives the section the status a section
-    /// that throws gets (<c>error</c>), so the exit code and the manifest both count it as failed, as they did when a failed
-    /// history read threw.
+    /// Whether either member of the section, <c>cumulative</c> or <c>history</c>, is the tool's error answer. A member is nested
+    /// under the section, so the section's own status does not show it; <see cref="StoreStatementsSectionAsync"/> then gives the
+    /// section the status a section that throws gets (<c>error</c>), so the exit code and the manifest both count it as failed,
+    /// as they did when a failed read threw. A precondition or a refusal is not an error: it is how a store that cannot serve
+    /// the read yet answers, and it is not counted.
     /// </summary>
-    internal static bool HistoryFailed(JsonNode? section) =>
-        section is JsonObject o && DiagnosticsBundle.StatusOf(o["history"]) == "error";
+    internal static bool MemberFailed(JsonNode? section) =>
+        section is JsonObject o
+        && (DiagnosticsBundle.StatusOf(o["history"]) == "error" || DiagnosticsBundle.StatusOf(o["cumulative"]) == "error");
 }

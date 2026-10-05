@@ -148,6 +148,8 @@ ORDER BY f.capture_time, 2";
     /// The live text for some query ids. <c>$1</c> the ids. The shared sensitive-statement predicate sits on top of the
     /// reader function's own filter (#4348): a second layer for a store whose function body is older than the pattern,
     /// kept here because the diagnostics bundle reads statement text through this tool and its own text read applied it.
+    /// What it withholds arrives as <see cref="PgSensitiveStatementFilter.PlaceholderText"/>, and
+    /// <see cref="DarlingMcpStoreQueryStatsTools.ShownText"/> reads that as <see cref="StoreStatementStats.WithheldText"/>.
     /// </summary>
     /* max(query) GROUP BY queryid assumes a queryid carries the same text under every role (the same normalized statement); if two roles ever disagreed, one text is shown. The predicate wraps the chosen text, not each role's, so it is the shown text that is tested. */
     public static readonly string TextSql = @"
@@ -507,6 +509,12 @@ GROUP BY f.queryid";
 
     private static async Task<IReadOnlyDictionary<long, string>> ReadTextAsync(NpgsqlDataSource postgres, long[] ids, CancellationToken ct)
     {
+        /* No catch here, on purpose (#5097): both callers let a failed text read reach the tool's one catch, so the whole answer
+           is an error. It is never rows with the text left out, and never a fallback that reads a text some other way: every text
+           this tool shows has passed the reader function, the shared predicate and the lexer, and an error is the one outcome that
+           cannot show a text those layers did not clear. A read that fails after the gate passed (the reader's grant revoked or its
+           function replaced in between, a timeout on a large text file) is rare. The cost is that the bundle then marks the section
+           error, with no history rows, and the verb exits as a partial bundle: a fault to see, not text quietly left out. */
         var texts = new Dictionary<long, string>();
         await using var command = postgres.CreateCommand(TextSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
