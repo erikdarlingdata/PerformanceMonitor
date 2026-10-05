@@ -338,6 +338,12 @@ public sealed class RawWindowFloorEffectiveStartTests
         Assert.Contains("\"" + NotCoveredTail + "\"", lite, StringComparison.Ordinal);
         Assert.Equal(NotCoveredHead + NotCoveredTail, DarlingMcpWindowNotice.Build(null, s_start, "query_snapshots", emptyAnswer: true).TruncationNote);
 
+        const string listHead = "The store holds no collection of {table} for this server in this window, so no windowed rows were read, and a list with no rows is not a report that nothing happened. ";
+        Assert.Contains("$\"" + listHead + "\"", lite, StringComparison.Ordinal);
+        Assert.Equal(
+            listHead.Replace("{table}", "query_snapshots", StringComparison.Ordinal) + NotCoveredTail,
+            DarlingMcpWindowNotice.Build(null, s_start, "query_snapshots", listOnly: true).TruncationNote);
+
         const string truncated = "The window reaches further back than this server's raw {table} retains (or this server has been monitored for less time than that), so the older part of it was not read.";
         Assert.Contains("$\"" + truncated + "\"", lite, StringComparison.Ordinal);
         Assert.Equal(TruncatedSentence, DarlingMcpWindowNotice.Build(s_start.AddDays(1), s_start, "query_snapshots").TruncationNote);

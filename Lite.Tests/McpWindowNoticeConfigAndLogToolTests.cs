@@ -353,6 +353,20 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         AssertTruncatedAt(root, Anchor.AddDays(-2), "plan_correction");
     }
 
+    /// <summary>A tuning-only answer over a window the store holds nothing in: the empty list is not a report that nothing was recommended.</summary>
+    [Fact]
+    public async Task PlanCorrections_ATuningOnlyAnswer_TheStoreHoldsNothingInTheWindow_SaysNoWindowedRowsWereRead()
+    {
+        await _duckDb.InitializeAsync();
+        await SeedPlanCorrectionAsync(Anchor.AddDays(-30), recommendation: null);
+
+        var root = Root(await CallAsync(Tool.PlanCorrections));
+
+        Assert.True(root.GetProperty("window_truncated").GetBoolean());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("effective_start").ValueKind);
+        Assert.Contains("so no windowed rows were read", root.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+    }
+
     /// <summary>A one-hour, tuning-only answer is probed too (short window, empty page): effective_start is the probe's floor, not the asked start.</summary>
     [Fact]
     public async Task PlanCorrections_AOneHourTuningOnlyAnswer_NamesTheProbesFloor_NotTheAskedStart()
