@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -325,12 +326,38 @@ internal static class WebDataStartNote
     /// <c>window_truncated</c>, <c>truncation_note</c>, the MCP dialect, in UTC). The page draws its own note from the
     /// fields this method adds, in the browser's zone, so the tool's three are removed first and the note is decided as
     /// it was before the tool wrote them: the page gets the same answer, capped or coverage. When a note is added, the
-    /// payload that carries it is the stripped one, so the tool's three keys are gone from it. When no note is added
-    /// (every early return: covered, a short window, a failed probe, a capped page that reaches the start), the string
-    /// goes back as the tool wrote it, and still holds the tool's keys. That is harmless today: the tool and this method run
-    /// the same probe over the same window, so their verdicts agree.</para>
+    /// payload that carries it is the stripped one. When no note is added (covered, a short window, a failed probe, a capped
+    /// page that reaches the start), the tool's three keys are stripped as well, so a listed read never hands the page the
+    /// tool's own UTC verdict: the page sees only the note this method writes, or none.</para>
     /// </summary>
     internal static async Task<string> AddAsync(
+        NpgsqlDataSource postgres, string tool, string? server, int? hoursBack, string? asOf, string result,
+        ILogger? logger, CancellationToken cancellationToken)
+    {
+        var answered = await AddNoteAsync(postgres, tool, server, hoursBack, asOf, result, logger, cancellationToken);
+        if (!ReferenceEquals(answered, result) || !TableByRead.ContainsKey(tool))
+        {
+            return answered;
+        }
+
+        /* No note was added, and the answer is still the tool's own: its three window-floor keys (in UTC, the MCP dialect) are not
+           the page's, so a covered range reaches the page without them, as a tool that never wrote them would send it. */
+        try
+        {
+            if (JsonNode.Parse(result) is JsonObject own && ToolWindowFloorKeys.Any(own.ContainsKey))
+            {
+                StripToolWindowFloor(own);
+                return own.ToJsonString(McpHelpers.JsonOptions);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+
+        return result;
+    }
+
+    private static async Task<string> AddNoteAsync(
         NpgsqlDataSource postgres, string tool, string? server, int? hoursBack, string? asOf, string result,
         ILogger? logger, CancellationToken cancellationToken)
     {
@@ -352,7 +379,8 @@ internal static class WebDataStartNote
             return result;
         }
 
-        /* Strips the parsed copy only: the early returns below send `result` itself, keys and all. */
+        /* Strips the parsed copy: a note goes out on it. The early returns below send `result` itself, and AddAsync strips the
+           tool's keys from that. */
         StripToolWindowFloor(payload);
 
         /* Rows, or the answer that says the read looked and found nothing (#4966, NothingFoundStatusByRead): an empty span

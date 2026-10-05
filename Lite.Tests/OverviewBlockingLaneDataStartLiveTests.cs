@@ -169,6 +169,98 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
         Assert.Equal(string.Empty, text);
     }
 
+    private Task<(bool Visible, string Text)> LaneNoteWithSourceCheckAsync(DateTime startUtc, DateTime endUtc)
+    {
+        var service = new LocalDataService(_duckDb);
+        return Task.FromResult(OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock();
+            LiteBlockingLaneDataStart.ShowAsync(
+                banner, relation => service.GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc), startUtc, endUtc, [], [], TimeZoneInfo.Utc,
+                () => service.HasBlockedProcessReportsInWindowAsync(ServerId, startUtc, endUtc),
+                () => service.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, ServerId, startUtc, endUtc, includeAlsoCovered: false)).GetAwaiter().GetResult();
+            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text);
+        }));
+    }
+
+    private async Task SeedDmvCoverageAsync(DateTime firstUtc, DateTime lastUtc)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT $1 + row_number() OVER (), $2, $3, 'dmv_blocking_snapshot', g.t, 12, 'SUCCESS', 0
+FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = firstUtc });
+        cmd.Parameters.Add(new DuckDBParameter { Value = lastUtc });
+        _nextId += await cmd.ExecuteNonQueryAsync() + 1;
+    }
+
+    private async Task SeedXeReportAsync(DateTime at)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time)
+VALUES ($1, $2, $3, $4, $2)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = at });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>#5098: the DMV covers the range, the XE collector began 2 days back and its reports are in the window: the lane names the XE start.</summary>
+    [Fact]
+    public async Task DmvCoversTheRange_XeStartsMidway_NamesTheXeStart()
+    {
+        await _duckDb.InitializeAsync();
+        var xeFrom = End.AddDays(-2);
+        await SeedDmvCoverageAsync(End.AddDays(-9), End);
+        await SeedLogRunsAsync(QueryWindowRelation.BlockedProcessReports, xeFrom, End);
+        await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
+        await SeedXeReportAsync(xeFrom.AddHours(3));
+
+        var (visible, text) = await LaneNoteWithSourceCheckAsync(End.AddDays(-7), End);
+
+        Assert.True(visible);
+        Assert.Equal(SinceText(xeFrom), text);
+    }
+
+    /// <summary>#5098: the XE collector covers the whole range: no note.</summary>
+    [Fact]
+    public async Task XeCoversTheRange_ShowsNoNote()
+    {
+        await _duckDb.InitializeAsync();
+        await SeedLogRunsAsync(QueryWindowRelation.BlockedProcessReports, End.AddDays(-9), End);
+        await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
+        await SeedXeReportAsync(End.AddDays(-7).AddHours(5));
+
+        var (visible, _) = await LaneNoteWithSourceCheckAsync(End.AddDays(-7), End);
+
+        Assert.False(visible);
+    }
+
+    /// <summary>#5098: no XE report in the window (DMV only): the two-source probe, as before, so a covering DMV means no note.</summary>
+    [Fact]
+    public async Task DmvOnly_IsAsBefore_ShowsNoNote()
+    {
+        await _duckDb.InitializeAsync();
+        await SeedDmvCoverageAsync(End.AddDays(-9), End);
+        await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
+
+        var (visible, _) = await LaneNoteWithSourceCheckAsync(End.AddDays(-7), End);
+
+        Assert.False(visible);
+    }
+
     /// <summary>A window of 90 minutes or less starts no probe, even on a store that would earn a note.</summary>
     [Fact]
     public async Task AShortWindow_StartsNoProbe_AndShowsNoNote()

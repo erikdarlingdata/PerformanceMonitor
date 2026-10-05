@@ -289,6 +289,17 @@ public sealed class CollectorContext
     public bool CapturePlanXml { get; init; }
 
     /// <summary>
+    /// #5158: when true (and <see cref="CapturePlanXml"/> is on), <c>query_stats</c> leaves the plan out of
+    /// its main query, so the SELECT is the same no-plan form Lite ships and ordinals 44/45 do not exist.
+    /// The host then fetches plan XML in a second target query, <c>QueryStatsCollector.BuildPlanFetchQuery</c>,
+    /// for only the statement plans it has not already committed. Inline capture renders and ships about
+    /// 200 plans every run whether or not the store holds them (one large store: 54 GB/h rendered and
+    /// 29 GB/h shipped against 1.1 GB/h of distinct plans). Default false: every collector's SQL and
+    /// behavior are unchanged until a host sets it.
+    /// </summary>
+    public bool DeferPlanXmlFetch { get; init; }
+
+    /// <summary>
     /// Whether this target has granted <c>pg_read_binary_file</c> (#4046 part 1c), resolved by the host
     /// through <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/> BEFORE <c>BuildQuery</c> runs, for
     /// the three collectors that read <see cref="PgServerLogTail"/>'s tail. False (the default, and what

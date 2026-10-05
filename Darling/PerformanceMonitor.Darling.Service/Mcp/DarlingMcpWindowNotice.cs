@@ -65,8 +65,18 @@ internal static class DarlingMcpWindowNotice
     /// <paramref name="tail"/> is one more sentence a truncated note carries.
     /// </summary>
     internal static McpWindowNotice Build(
-        DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false)
+        DateTime? floor, DateTime requestedStart, string table, string? tail = null, bool emptyAnswer = false, bool listOnly = false)
     {
+        if (floor is null && listOnly)
+        {
+            /* The windowed list is empty but the answer carries other data (a latest-snapshot block), so it is not an empty answer. */
+            return new McpWindowNotice(
+                null,
+                true,
+                $"The store holds no collection of {table} for this server in this window, so no windowed rows were read, and a list with no rows is not a report that nothing happened. "
+                    + "The window may reach further back than the store retains, this server may have been monitored for less time than that, or collection may have stopped; get_collection_health shows which.");
+        }
+
         if (floor is null && emptyAnswer)
         {
             return new McpWindowNotice(
@@ -90,7 +100,8 @@ internal static class DarlingMcpWindowNotice
     /// <see cref="Build"/> with its coverage probe, which a window no longer than
     /// <see cref="DurationTrendRouting.TruncationSlack"/> that answered rows never needs: the probe cannot find a floor
     /// later than the start by more than the slack, so the answer is covered whatever it would read. The probe is a
-    /// delegate and is not started for such a window. An EMPTY answer is always probed, whatever the window's length:
+    /// delegate and is not started for such a window. <paramref name="listOnly"/> probes whatever the window, for an answer whose
+    /// windowed list is empty but which carries other data (so it is not an <paramref name="emptyAnswer"/>). An EMPTY answer is always probed, whatever the window's length:
     /// nothing was read, so nothing else says the store held the window at all.
     ///
     /// <para>A probe that throws, other than because the CALLER cancelled, is logged at Warning and answers
@@ -99,13 +110,13 @@ internal static class DarlingMcpWindowNotice
     /// </summary>
     internal static async Task<McpWindowNotice> ReadAsync(
         Func<Task<DateTime?>> probe, DateTime requestedStart, DateTime windowEnd, string table, string? tail = null, bool emptyAnswer = false,
-        ILogger? logger = null, CancellationToken cancellationToken = default)
+        bool listOnly = false, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(probe);
         try
         {
-            var floor = emptyAnswer || windowEnd - requestedStart > DurationTrendRouting.TruncationSlack ? await probe() : null;
-            return Build(floor, requestedStart, table, tail, emptyAnswer);
+            var floor = emptyAnswer || listOnly || windowEnd - requestedStart > DurationTrendRouting.TruncationSlack ? await probe() : null;
+            return Build(floor, requestedStart, table, tail, emptyAnswer, listOnly);
         }
         catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
         {

@@ -69,6 +69,9 @@ public sealed class OverviewBlockingLaneDataStartPinTests
         Assert.Contains("BlockingLaneDataStartBanner", wrapper, StringComparison.Ordinal);
         Assert.Contains("GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc)", wrapper, StringComparison.Ordinal);
         Assert.Contains("_displayZone()", wrapper, StringComparison.Ordinal);
+        /* #5098: a blocking read that drew the XE reports names the XE collector's start alone. */
+        Assert.Contains("HasBlockedProcessReportsInWindowAsync(_serverId, startUtc, endUtc)", wrapper, StringComparison.Ordinal);
+        Assert.Contains("GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, _serverId, startUtc, endUtc, includeAlsoCovered: false)", wrapper, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -77,9 +80,9 @@ public sealed class OverviewBlockingLaneDataStartPinTests
         var step = Between(Step(), "internal static async Task ShowAsync(", "/// <summary>One series' start:");
         Assert.DoesNotContain("ProbeWindowFloorOrNullAsync", step, StringComparison.Ordinal);
         Assert.True(step.IndexOf("McpQueryTools.CanWindowBeTruncated(startUtc, endUtc)", StringComparison.Ordinal)
-            < step.IndexOf("Probe(floorOf, QueryWindowRelation.BlockedProcessReports)", StringComparison.Ordinal));
+            < step.IndexOf("ProbeBlockingAsync(floorOf, blockingReadTookXe, xeOnlyBlockingFloorOf)", StringComparison.Ordinal));
         Assert.Contains("Probe(floorOf, QueryWindowRelation.Deadlocks)", step, StringComparison.Ordinal);
-        Assert.Contains("StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars)", step, StringComparison.Ordinal);
+        Assert.Contains("StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars, blockingReadTookXe, xeOnlyBlockingFloorOf)", step, StringComparison.Ordinal);
         Assert.Contains("ChooseAsync(blockingProbe, deadlockProbe, blockingBars, deadlockBars)", step, StringComparison.Ordinal);
         Assert.Contains("ServerTab.ApplyWindowFloorToBanner(banner, start, startUtc, zone)", step, StringComparison.Ordinal);
         Assert.Contains("bar.Count > 0", Step(), StringComparison.Ordinal);

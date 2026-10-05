@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Alerting;
@@ -1042,7 +1043,7 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     private const int QueryTextPreviewLength = 400;
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Long windows may read whole days from a daily summary; approximate: true says so. approximation_note says what the summary can miss; summary_days names the days it covered. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
     public static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -1055,6 +1056,13 @@ public sealed class DarlingMcpDataTools
         [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         CancellationToken cancellationToken = default) =>
         GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength, cancellationToken);
+
+    /// <summary>The sentence beside <c>approximate: true</c> on get_query_store_top (#5094): whole days of the window came from the
+    /// daily summary, which is built after each day ends.</summary>
+    internal const string QueryStoreApproximationNote =
+        "Whole days in this window came from a daily summary built after each day ends. A row changed after its day was "
+        + "summarized is missed, or for about a day can be counted twice, and rows from a server whose clock runs more than an hour "
+        + "ahead are left out, so treat totals and the ranking as close, not exact.";
 
     /// <summary>
     /// get_query_store_top under an explicit <paramref name="previewLength"/> (#4198): the MCP tool passes
@@ -1128,15 +1136,27 @@ public sealed class DarlingMcpDataTools
                 if ((execution_type != null || module_name != null)
                     && (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, 1, database_name, cancellationToken)).Count > 0)
                     return module_name is null
-                        ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name)
+                        /* #5094: whole days from the daily summary make a zero here "close, not exact" (a late write the
+                           summary missed), so the empty answer carries the same flag as a populated one. */
+                        ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name,
+                            read.DailyDaysUsed > 0 ? new { approximate = true, approximation_note = QueryStoreApproximationNote } : null)
                         /* The module miss hands back the window it read: "did not run" is a claim about that window,
                            and the raw tier may not reach the whole of the one asked for. */
-                        : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, new
-                        {
-                            effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
-                            effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
-                            window_truncated = truncated
-                        });
+                        : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, read.DailyDaysUsed > 0
+                            ? new
+                            {
+                                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
+                                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                                window_truncated = truncated,
+                                approximate = true,
+                                approximation_note = QueryStoreApproximationNote
+                            }
+                            : (object)new
+                            {
+                                effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
+                                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                                window_truncated = truncated
+                            });
 
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it has to, because the
@@ -1157,6 +1177,7 @@ public sealed class DarlingMcpDataTools
                         "queries did not run.");
             }
 
+            var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
@@ -1200,6 +1221,17 @@ public sealed class DarlingMcpDataTools
                    WriteDisclosure); the census fails a bare `truncated` beside `effective_hours_back`. The note
                    beside it keeps its name: it is the prose for THIS flag, and `*_note` is the house idiom. */
                 window_truncated = truncated,
+                /* #5094: the daily summary answered whole days of this window, so the totals and the ranking are close,
+                   not exact. Always present, so a caller reads the flag rather than inferring it from a missing key. */
+                approximate = approximate,
+                approximation_note = approximate ? QueryStoreApproximationNote : null,
+                summary_days = approximate
+                    ? new
+                    {
+                        from = read.DailySpan!.Value.Start.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                        to_exclusive = read.DailySpan!.Value.EndExclusive.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                    }
+                    : null,
                 truncation_note = !truncated
                     ? null
                     : tablePlan is null
@@ -2183,6 +2215,7 @@ public sealed class DarlingMcpDataTools
             full_text.
         */
         [Description("Return each run's error_message in full instead of a preview. Default false.")] bool full_text = false,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         /* #4199: server_name OMITTED, blank, or "*" means the WHOLE FLEET rather than "auto-select the
@@ -2268,6 +2301,17 @@ public sealed class DarlingMcpDataTools
             var truncated = rows.Count > effectiveLimit;
             if (truncated) rows = rows.Take(effectiveLimit).ToList();
 
+            /* #4966: where the LOG's coverage of the window starts, in the three keys every window-floor tool writes. The probe reads
+               the log whole (DataWindowFloor.Source.ForCollectionLog) and ignores collector_name, min_duration_ms and status ON
+               PURPOSE: the notice says where the log starts for this server, not where one filter's matches do, and a quiet collector
+               inside a covered window is the filtered answer's own sentence. An answer with rows over a window of 90 minutes or less
+               needs no probe; an empty one is always probed. The fleet form carries no notice (no one server's start exists for it),
+               and neither do the unavailable answer or the fleet-maintenance sentinel (not a registered server). */
+            var rowCount = rows.Count;
+            Task<McpWindowNotice> ReadNoticeAsync() => DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, DataWindowFloor.Source.ForCollectionLog(), resolved.ServerName, start, end, cancellationToken),
+                start, end, "collection_log", emptyAnswer: rowCount == 0, logger: logger, cancellationToken: cancellationToken);
+
             var filtered = !string.IsNullOrWhiteSpace(collector_name)
                 || min_duration_ms is not null
                 || !string.IsNullOrWhiteSpace(status);
@@ -2320,16 +2364,18 @@ public sealed class DarlingMcpDataTools
                         $"No collector runs have EVER been recorded for {resolved.ServerName}. This is not an empty window — collection has not run at all for this server. Check that the service is running and that the server is enabled for collection; get_collection_health will be equally empty until it does.");
                 }
 
+                var emptyNotice = await ReadNoticeAsync();
+
                 if (filtered)
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.ServerName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.");
+                        $"No collector runs on {resolved.ServerName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.", emptyNotice.AsHints());
                 }
 
                 return McpHelpers.Status(
                     "empty",
-                    $"No collector runs recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.");
+                    $"No collector runs recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.", emptyNotice.AsHints());
             }
 
             var result = rows.Select(r => new
@@ -2454,12 +2500,18 @@ public sealed class DarlingMcpDataTools
                 },
             });
 
-            return JsonSerializer.Serialize(new
+            var notice = await ReadNoticeAsync();
+            var payload = new
             {
                 server = resolved.ServerName,
                 /* The span REQUESTED. Kept under its shipped name, and no longer the only span reported --
                    see the two timestamps below. */
                 hours_back = hours_back,
+                /* #4966: the window floor, right after hours_back. No effective_hours_back: this payload carries a page `truncated`, and
+                   the census holds that key apart from the window floor, so the reach is the instant. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 run_count = rows.Count,
                 /* Observed by the over-fetch above, not inferred from the row count. */
                 truncated,
@@ -2522,7 +2574,9 @@ public sealed class DarlingMcpDataTools
                 */
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
                 runs = result,
-            }, McpHelpers.JsonOptions);
+            };
+            var json = JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
