@@ -48,7 +48,7 @@ import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell } from "./deadlock-graph.js";
-import { activePlanColumns, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
+import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -1188,7 +1188,7 @@ export const SERVER_TABS = [
         "get_blocking",
         { server, hours: ctx.hours, limit: 30 },
         "events",
-        BLOCKING_COLUMNS,
+        [...BLOCKING_COLUMNS, ...blockingPlanColumns(server)],
         ctx.label,
         "No blocking events in this window.",
         2,
@@ -1201,7 +1201,7 @@ export const SERVER_TABS = [
         "get_deadlocks",
         { server, hours: ctx.hours, limit: 20 },
         "deadlocks",
-        DEADLOCK_COLUMNS,
+        [...DEADLOCK_COLUMNS, deadlockPlanColumn(server)],
         ctx.label,
         "No deadlocks in this window.",
         2,
@@ -3411,7 +3411,8 @@ const ACTIVE_COLUMNS = [
 ];
 
 /* The desktop Blocked Process Reports grid's columns, order and headers, for every field get_blocking returns. Object is
-   the web's own extra. */
+   the web's own extra. The Blocked plan and Blocking plan buttons are added where the grid is built (blockingPlanColumns,
+   #5236), so this list stays the fields the read returns. */
 /* Blocking column groups: the report, the pair and the wait are always shown; the sessions' status and isolation, the blocked
    transaction and the logins, hosts and apps follow the desktop order in three toggles, with the first two on at first. */
 const BLOCKING_GROUPS = { groups: ["Status and isolation", "Transaction", "Sessions"], defaultGroups: ["Status and isolation", "Transaction"] };
@@ -3444,7 +3445,8 @@ const BLOCKING_COLUMNS = [
   { key: "contentious_object", label: "Object" },
 ];
 
-/* Stays local: this page renders the deadlock text through a codeDisclosure and orders the columns differently from the catalog. */
+/* Stays local: this page renders the deadlock text through a codeDisclosure and orders the columns differently from the catalog.
+   The Victim plan button is added where the grid is built (deadlockPlanColumn, #5236), so the five columns here stay the summary. */
 const DEADLOCK_COLUMNS = [
   { key: "deadlock_time", label: "Deadlock Time", format: "time" },
   { key: "victim_sql_text", label: "Victim SQL", render: (r) => codeDisclosure(r.victim_sql_text) },
