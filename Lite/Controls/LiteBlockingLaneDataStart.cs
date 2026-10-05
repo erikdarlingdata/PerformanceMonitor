@@ -29,6 +29,12 @@ namespace PerformanceMonitorLite.Controls;
 /// </summary>
 internal static class LiteBlockingLaneDataStart
 {
+    /// <summary>#5098: the blocked process threshold's history over the window (the viewer's tuple, named so a seam can carry it).</summary>
+    internal readonly record struct BlockedProcessThreshold(bool OnAtWindowStart, DateTime? FirstOnInWindow, bool SawZeroSnapshot)
+    {
+        internal (bool OnAtWindowStart, DateTime? FirstOnInWindow, bool SawZeroSnapshot) AsTuple() => (OnAtWindowStart, FirstOnInWindow, SawZeroSnapshot);
+    }
+
     /// <summary>
     /// The instant the chart's note names, or null when it names nothing. A probe that throws costs its series' start and
     /// nothing else: it is logged and the other series answers alone.
@@ -57,9 +63,10 @@ internal static class LiteBlockingLaneDataStart
     internal static async Task ShowAsync(
         TextBlock banner, Func<QueryWindowRelation, Task<DateTime?>> floorOf, DateTime startUtc, DateTime endUtc,
         IEnumerable<TrendPoint> blockingBars, IEnumerable<TrendPoint> deadlockBars, TimeZoneInfo zone,
-        Func<Task<bool>>? blockingReadTookXe = null, Func<Task<DateTime?>>? xeOnlyBlockingFloorOf = null)
+        Func<Task<bool>>? blockingReadTookXe = null, Func<Task<DateTime?>>? xeOnlyBlockingFloorOf = null,
+        Func<Task<DateTime?>>? earliestReportOf = null, Func<Task<BlockedProcessThreshold>>? thresholdOf = null)
     {
-        var start = await StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars, blockingReadTookXe, xeOnlyBlockingFloorOf);
+        var start = await StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars, blockingReadTookXe, xeOnlyBlockingFloorOf, earliestReportOf, thresholdOf);
         ServerTab.ApplyWindowFloorToBanner(banner, start, startUtc, zone);
     }
 
@@ -71,7 +78,8 @@ internal static class LiteBlockingLaneDataStart
     internal static async Task<DateTime?> StartAsync(
         Func<QueryWindowRelation, Task<DateTime?>> floorOf, DateTime startUtc, DateTime endUtc,
         IEnumerable<TrendPoint> blockingBars, IEnumerable<TrendPoint> deadlockBars,
-        Func<Task<bool>>? blockingReadTookXe = null, Func<Task<DateTime?>>? xeOnlyBlockingFloorOf = null)
+        Func<Task<bool>>? blockingReadTookXe = null, Func<Task<DateTime?>>? xeOnlyBlockingFloorOf = null,
+        Func<Task<DateTime?>>? earliestReportOf = null, Func<Task<BlockedProcessThreshold>>? thresholdOf = null)
     {
         if (!McpQueryTools.CanWindowBeTruncated(startUtc, endUtc))
         {
@@ -79,7 +87,7 @@ internal static class LiteBlockingLaneDataStart
         }
 
         /* The shared floor-or-null wrapper is not used here: it turns a throw into null, and null here would read as "no collector run". */
-        var blockingProbe = ProbeBlockingAsync(floorOf, blockingReadTookXe, xeOnlyBlockingFloorOf);
+        var blockingProbe = ProbeBlockingAsync(floorOf, blockingReadTookXe, xeOnlyBlockingFloorOf, earliestReportOf, thresholdOf);
         var deadlockProbe = Probe(floorOf, QueryWindowRelation.Deadlocks);
 
         return await ChooseAsync(blockingProbe, deadlockProbe, blockingBars, deadlockBars);
@@ -107,10 +115,12 @@ internal static class LiteBlockingLaneDataStart
     /// <summary>
     /// #5098: when the blocking read drew the XE reports (<paramref name="blockingReadTookXe"/> true), the start is the XE collector's
     /// alone (<paramref name="xeOnlyBlockingFloorOf"/>): a DMV that covers the window must not hide where the XE data starts. A check that
-    /// throws falls back to the two-source probe (today's); a throw from the probe itself fails the series as before.
+    /// throws falls back to the two-source probe (today's); a throw from the threshold read falls back to #5159's answer; a throw from the
+    /// probe itself fails the series as before.
     /// </summary>
     private static async Task<DateTime?> ProbeBlockingAsync(
-        Func<QueryWindowRelation, Task<DateTime?>> floorOf, Func<Task<bool>>? blockingReadTookXe, Func<Task<DateTime?>>? xeOnlyBlockingFloorOf)
+        Func<QueryWindowRelation, Task<DateTime?>> floorOf, Func<Task<bool>>? blockingReadTookXe, Func<Task<DateTime?>>? xeOnlyBlockingFloorOf,
+        Func<Task<DateTime?>>? earliestReportOf, Func<Task<BlockedProcessThreshold>>? thresholdOf)
     {
         var fromXe = false;
         if (blockingReadTookXe is not null && xeOnlyBlockingFloorOf is not null)
@@ -125,7 +135,32 @@ internal static class LiteBlockingLaneDataStart
             }
         }
 
+        if (fromXe && earliestReportOf is not null && thresholdOf is not null)
+        {
+            /* #5098: the XE start is the collector's floor, the earliest report and the threshold's history, combined by the shared rule. */
+            return await LocalDataService.CombineBlockingXeStartAsync(
+                xeOnlyBlockingFloorOf!, earliestReportOf, () => ThresholdOrNoneAsync(thresholdOf));
+        }
+
         return await (fromXe ? xeOnlyBlockingFloorOf!() : floorOf(QueryWindowRelation.BlockedProcessReports));
+    }
+
+    /// <summary>
+    /// The threshold's history, or "no snapshots" when the read throws: the shared rule then returns the XE-only floor combined with the
+    /// earliest report (#5159's answer), so a failed threshold read costs only the threshold's refinement, not the whole blocking series.
+    /// </summary>
+    internal static async Task<(bool OnAtWindowStart, DateTime? FirstOnInWindow, bool SawZeroSnapshot)> ThresholdOrNoneAsync(
+        Func<Task<BlockedProcessThreshold>> thresholdOf)
+    {
+        try
+        {
+            return (await thresholdOf()).AsTuple();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("CorrelatedLanes", $"Overview blocking chart: the blocked process threshold read failed, so the note keeps the collector's start: {ex.Message}");
+            return default;
+        }
     }
 
     private static Task<DateTime?> Probe(Func<QueryWindowRelation, Task<DateTime?>> floorOf, QueryWindowRelation relation)

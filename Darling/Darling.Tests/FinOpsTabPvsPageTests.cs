@@ -29,7 +29,7 @@ public sealed class FinOpsTabPvsPageTests
     public void Tab_ReadsGetPvsStatsWithATrendWindow()
     {
         Assert.Contains("readTool(\"get_pvs_stats\", { server, trend_hours_back: TREND_HOURS }, signal)", Tab);
-        Assert.Contains("const TREND_HOURS = 24;", Tab);
+        Assert.Contains("const TREND_HOURS = 168;", Tab);
     }
 
     [Fact]

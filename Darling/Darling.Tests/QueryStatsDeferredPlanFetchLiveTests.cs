@@ -249,6 +249,7 @@ CREATE PROCEDURE dbo.pm_c AS BEGIN SELECT COUNT_BIG(*) AS c1 FROM sys.types; END
             var first = await runner.RunAsync(QueryStatsCollector.Instance, rig.Server, ct);
             Assert.True(first.Rows >= 4, "three procedures, four statements, one row each");
             Assert.True(Rendered(first) >= 4, "a cold cache renders every plan");
+            Assert.True(Rendered(first, "plan_fetch_ms") > 0, "a run with misses times its fetch (#5158 review finding 1)");
 
             var second = await runner.RunAsync(QueryStatsCollector.Instance, rig.Server, ct);
             Assert.True(second.Rows >= 4);
@@ -257,6 +258,9 @@ CREATE PROCEDURE dbo.pm_c AS BEGIN SELECT COUNT_BIG(*) AS c1 FROM sys.types; END
                and carries no plans_rendered measurement at all. */
             Assert.Equal(0, Rendered(second));
             Assert.Equal(0, Rendered(second, "plans_rendered_bytes"));
+            /* Rows the server returns no plan for stay misses (nothing to cache), so run two can still time a fetch that
+               rendered nothing; the no-miss zero is pinned in PlanDigestCacheTests. */
+            Assert.True(Rendered(second, "plan_fetch_ms") >= 0, "the fetch time is always recorded on a deferred run");
 
             var stored = await StoredAsync(rig, ct);
             Assert.Equal(8, stored.Count); /* the three procedures hold four statements, collected twice */
@@ -289,6 +293,7 @@ CREATE PROCEDURE dbo.pm_c AS BEGIN SELECT COUNT_BIG(*) AS c1 FROM sys.types; END
             var second = await runner.RunAsync(QueryStatsCollector.Instance, rig.Server, ct);
 
             Assert.Equal(-1, Rendered(first));
+            Assert.Equal(-1, Rendered(first, "plan_fetch_ms"));
             Assert.Equal(-1, Rendered(second));
             var stored = await StoredAsync(rig, ct);
             Assert.Equal(8, stored.Count); /* the three procedures hold four statements, collected twice */

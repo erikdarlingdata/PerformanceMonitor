@@ -26,9 +26,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
 /// <c>get_server_trend</c> (#4843): the per-server instance trends the desktop viewer charts on its CPU, Memory and
-/// Overview, Activity, Latch / Spinlock and Collection Health tabs, behind one tool with a <c>metric</c> switch: <c>total_waits</c>,
+/// Overview, Activity, Latch / Spinlock and Collection Health, tempdb and File I/O tabs, behind one tool with a <c>metric</c> switch: <c>total_waits</c>,
 /// <c>cpu_scheduler</c>, <c>memory_clerks</c>, <c>plan_cache</c>, <c>latch</c>, <c>spinlock</c>, <c>session_stats</c> and
-/// <c>collector_duration</c>. Every metric reads the same SQL the viewer's chart reads
+/// <c>collector_duration</c>, <c>tempdb_file_io</c>, <c>tempdb_size</c> and <c>file_io_throughput</c>. Every metric reads the same SQL the viewer's chart reads
 /// (<see cref="ServerTrendSql"/>), windowed on both sides, bucketed to the same width ladder as the other trend tools
 /// (<see cref="TrendBuckets"/>), and ends with the shared <c>discontinuities[]</c> block.
 ///
@@ -41,7 +41,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpServerTrendTools
 {
     /// <summary>The metrics this tool serves, in the order its description lists them.</summary>
-    internal static readonly string[] Metrics = ["total_waits", "cpu_scheduler", "memory_clerks", "plan_cache", "latch", "spinlock", "session_stats", "collector_duration"];
+    internal static readonly string[] Metrics = ["total_waits", "cpu_scheduler", "memory_clerks", "plan_cache", "latch", "spinlock", "session_stats", "collector_duration", "tempdb_file_io", "tempdb_size", "file_io_throughput"];
 
     /// <summary>The most points an explicitly requested width may put on the wire, across every clerk series.</summary>
     internal const int MaxPoints = 1500;
@@ -53,10 +53,10 @@ public sealed class DarlingMcpServerTrendTools
     internal const int MaxClerkCount = 10;
 
     private const string TrendGuide =
-        " total_waits is every wait type summed into one wait_time_ms_per_second rate (summed wait time over the seconds it covered); a collection whose interval was unknowable is left out, not drawn as 0. cpu_scheduler points average the runnable, blocked and queued task counts; a count a collection did not report averages as 0, not as missing. memory_clerks gives one series per clerk type, in MB; clerk_types names them (comma-separated, up to 10, matched exactly), default the 5 heaviest in the window; named types with no samples in the window come back in missing_clerk_types. plan_cache gives single-use and multi-use plan cache MB. latch gives wait_time_ms_per_second and spinlock collisions_per_second, one series per latch class or spinlock name, as a rate over the seconds each collection covered (a collection whose interval was unknowable is left out); names narrows them (comma-separated, up to 10, matched exactly), default the 5 with the most wait time or collisions in the window, and named ones with no samples come back in missing_names. session_stats averages the server-wide session counts per bucket and carries the top application and host of the newest collection in each bucket. collector_duration gives one series per collector of its longest and average successful run and the run count per bucket; names narrows it, default the 5 with the longest run. Everything else is a level, averaged per bucket.";
+        " total_waits is every wait type summed into one wait_time_ms_per_second rate (summed wait time over the seconds it covered); a collection whose interval was unknowable is left out, not drawn as 0. cpu_scheduler points average the runnable, blocked and queued task counts; a count a collection did not report averages as 0, not as missing. memory_clerks gives one series per clerk type, in MB; clerk_types names them (comma-separated, up to 10, matched exactly), default the 5 heaviest in the window; named types with no samples in the window come back in missing_clerk_types. plan_cache gives single-use and multi-use plan cache MB. latch gives wait_time_ms_per_second and spinlock collisions_per_second, one series per latch class or spinlock name, as a rate over the seconds each collection covered (a collection whose interval was unknowable is left out); names narrows them (comma-separated, up to 10, matched exactly), default the 5 with the most wait time or collisions in the window, and named ones with no samples come back in missing_names. session_stats averages the server-wide session counts per bucket and carries the top application and host of the newest collection in each bucket. collector_duration gives one series per collector of its longest and average successful run and the run count per bucket; names narrows it, default the 5 with the longest run. tempdb_file_io gives one series per tempdb file of avg_read_latency_ms and avg_write_latency_ms (summed stall over summed operations; 0 when the file did no reads or writes in the bucket); names are tempdb file names, default the 5 with the most operations. tempdb_size is the allocated size, reserved plus unallocated MB, averaged per bucket. file_io_throughput gives read_mb_per_sec and write_mb_per_sec per file, named database.file (for example tempdb.tempdev), as bytes over the seconds each collection covered; a collection whose interval was unknowable is left out; names narrows them, default the 5 with the most bytes. Everything else is a level, averaged per bucket.";
 
     [McpServerTool(Name = "get_server_trend"), Description(
-        "Gets one instance trend over time in buckets, ending at as_of. metric is one of total_waits, cpu_scheduler, memory_clerks, plan_cache, latch, spinlock, session_stats, collector_duration. A quiet window answers empty; unavailable means the collector has never run; not_collected covers a gated engine. <<GUIDE>>" + TrendGuide + BaselineDiscontinuities.DescriptionSentence)]
+        "Gets one instance trend over time in buckets, ending at as_of. metric is one of total_waits, cpu_scheduler, memory_clerks, plan_cache, latch, spinlock, session_stats, collector_duration, tempdb_file_io, tempdb_size, file_io_throughput. A quiet window answers empty; unavailable means the collector has never run; not_collected covers a gated engine. <<GUIDE>>" + TrendGuide + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetServerTrend(
         NpgsqlDataSource postgres,
         [Description("The metric; the tool description lists them.")] string metric,
@@ -65,7 +65,7 @@ public sealed class DarlingMcpServerTrendTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         [Description("memory_clerks only: clerk types, comma-separated, exact case. Default the 5 heaviest.")] string? clerk_types = null,
-        [Description("latch, spinlock, collector_duration: names, exact case. Default top 5.")] string? names = null,
+        [Description("Series names, exact case; default top 5.")] string? names = null,
         CancellationToken cancellationToken = default) =>
         GetServerTrend(postgres, metric, server_name, hours_back, as_of, bucket_minutes, clerk_types, names, TrendBudget.Mcp(MaxPoints), cancellationToken);
 
@@ -91,7 +91,7 @@ public sealed class DarlingMcpServerTrendTools
         var kind = SeriesOf(name);
         if (!string.IsNullOrWhiteSpace(names) && (kind is null || kind.Param != "names"))
         {
-            return McpHelpers.Refusal("names", $"names applies to metrics latch, spinlock and collector_duration only, not {name}. Omit it.");
+            return McpHelpers.Refusal("names", $"names applies to metrics latch, spinlock, collector_duration, tempdb_file_io and file_io_throughput only, not {name}. Omit it.");
         }
 
         var selected = ParseClerks(kind?.Param == "names" ? names : clerk_types);
@@ -201,6 +201,9 @@ public sealed class DarlingMcpServerTrendTools
         "spinlock" => ["collisions_per_second"],
         "session_stats" => SessionFields,
         "collector_duration" => ["max_duration_ms", "avg_duration_ms", "run_count"],
+        "tempdb_file_io" => ["avg_read_latency_ms", "avg_write_latency_ms"],
+        "tempdb_size" => ["allocated_mb"],
+        "file_io_throughput" => ["read_mb_per_sec", "write_mb_per_sec"],
         _ => ["single_use_mb", "multi_use_mb"],
     };
 
@@ -225,6 +228,8 @@ public sealed class DarlingMcpServerTrendTools
         "latch" => new("latch_class", "names", "missing_names", "latch classes", "top_names"),
         "spinlock" => new("spinlock_name", "names", "missing_names", "spinlocks", "top_names"),
         "collector_duration" => new("collector_name", "names", "missing_names", "collectors", "top_names"),
+        "tempdb_file_io" => new("file_name", "names", "missing_names", "tempdb files", "top_names"),
+        "file_io_throughput" => new("file_label", "names", "missing_names", "files", "top_names"),
         _ => null,
     };
 
@@ -251,6 +256,27 @@ public sealed class DarlingMcpServerTrendTools
         {
             return $"Each point summarizes the successful runs of one collector in one {TrendBuckets.Adjective(bucketMinutes)} bucket and {stamp}"
                 + "max_duration_ms is the longest run in the bucket, so a slow run shows however wide the bucket is; avg_duration_ms is the average and run_count the number of runs. "
+                + TrendBuckets.Sizing(requested, budgetPoints);
+        }
+
+        if (metric == "tempdb_file_io")
+        {
+            return $"Each point summarizes the collections of one tempdb file in one {TrendBuckets.Adjective(bucketMinutes)} bucket and {stamp}"
+                + "avg_read_latency_ms and avg_write_latency_ms are recomputed from the summed stall time over the summed operations, never averaged from per-collection latencies; a collection whose interval was unknowable is left out; a bucket with usable rows but no reads (or no writes) reads 0 for that side, and a bucket with no usable read row at all (writes only) is left out. "
+                + TrendBuckets.Sizing(requested, budgetPoints);
+        }
+
+        if (metric == "file_io_throughput")
+        {
+            return $"Each point summarizes the collections of one file in one {TrendBuckets.Adjective(bucketMinutes)} bucket and {stamp}"
+                + "read_mb_per_sec and write_mb_per_sec are recomputed from the summed bytes over the seconds the collections covered, never averaged from per-collection rates; a collection whose interval was unknowable is left out. "
+                + TrendBuckets.Sizing(requested, budgetPoints);
+        }
+
+        if (metric == "tempdb_size")
+        {
+            return $"Each point averages the collections in one {TrendBuckets.Adjective(bucketMinutes)} bucket and {stamp}"
+                + "allocated_mb is the average reserved space plus the average unallocated space, a level, never summed across collections. "
                 + TrendBuckets.Sizing(requested, budgetPoints);
         }
 
@@ -294,6 +320,9 @@ public sealed class DarlingMcpServerTrendTools
         "spinlock" => (string.Empty, "spinlock_stats", ServerTrendSql.HasAnySpinlock, "spinlock statistics"),
         "session_stats" => (ServerTrendSql.SessionSummary, "session_stats", ServerTrendSql.HasAnySessionSummary, "session summary samples"),
         "collector_duration" => (string.Empty, "collection_log", ServerTrendSql.HasAnyCollectionLog, "collector runs"),
+        "tempdb_file_io" => (string.Empty, "file_io_stats", ServerTrendSql.HasAnyTempDbFileIo, "tempdb file I/O samples"),
+        "tempdb_size" => (ServerTrendSql.TempDbSize, "tempdb_stats", ServerTrendSql.HasAnyTempDb, "tempdb space samples"),
+        "file_io_throughput" => (string.Empty, "file_io_stats", ServerTrendSql.HasAnyFileIo, "file I/O samples"),
         _ => (ServerTrendSql.PlanCache, "plan_cache_stats", ServerTrendSql.HasAnyPlanCache, "plan cache samples"),
     };
 
@@ -312,6 +341,9 @@ public sealed class DarlingMcpServerTrendTools
             "spinlock" => await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "spinlock_stats", cancellationToken),
             "session_stats" => await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "session_stats", cancellationToken),
             "collector_duration" => null,
+            "tempdb_file_io" => await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken),
+            "tempdb_size" => await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats", cancellationToken),
+            "file_io_throughput" => await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken),
             _ => await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "plan_cache_stats", cancellationToken),
         };
         if (gated != null)
@@ -342,6 +374,8 @@ public sealed class DarlingMcpServerTrendTools
             "latch" => ServerTrendSql.TopLatchClasses,
             "spinlock" => ServerTrendSql.TopSpinlocks,
             "collector_duration" => ServerTrendSql.TopCollectors,
+            "tempdb_file_io" => ServerTrendSql.TopTempDbFiles,
+            "file_io_throughput" => ServerTrendSql.TopIoFiles,
             _ => ServerTrendSql.TopMemoryClerks,
         };
         await using var command = postgres.CreateCommand(topSql);
@@ -367,6 +401,8 @@ public sealed class DarlingMcpServerTrendTools
             "latch" => ServerTrendSql.LatchWaits(selected.Count),
             "spinlock" => ServerTrendSql.SpinlockCollisions(selected.Count),
             "collector_duration" => ServerTrendSql.CollectorDurations(selected.Count),
+            "tempdb_file_io" => ServerTrendSql.TempDbFileIo(selected.Count),
+            "file_io_throughput" => ServerTrendSql.FileIoThroughput(selected.Count),
             _ => ServerTrendSql.MemoryClerks(selected.Count),
         };
         var series = new Dictionary<string, List<Dictionary<string, object?>>>(StringComparer.Ordinal);

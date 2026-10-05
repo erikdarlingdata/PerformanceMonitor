@@ -323,7 +323,8 @@ public sealed class DarlingWorker : BackgroundService
     /// periodic pass must not launch a second one over a first that is still running, and a re-run's cost
     /// scales with history rather than with the catalog.</description></item>
     /// <item><description><see cref="DarlingModuleMap"/>'s table ensure and refresh — the refresh is a DATA
-    /// upsert rather than a store object and it ALREADY has a periodic home (the daily purge tick), and the
+    /// upsert rather than a store object and it ALREADY has periodic homes (the daily purge tick, and the
+    /// hourly tick's own incremental tenant), and the
     /// table ensure is inseparable from it here because the refresh is gated on the bool it returns. A
     /// module_map table that failed to create is also the one item on this list whose absence is not silent:
     /// the daily refresh warns about it every day.</description></item>
@@ -2870,7 +2871,8 @@ LIMIT 1";
                live like its siblings, so setting it to 1 restores every-cycle plan capture and promoting
                it to a store column later needs no change here. */
             procedureStatsPlanCycleInterval: () => StoreConfigProvider.ClampProcedureStatsPlanCycleInterval(config.ProcedureStatsPlanCycleInterval),
-            /* #5158: query_stats fetches plan XML only for plans this host has not committed. Live like its siblings;
+            /* #5158: query_stats fetches plan XML only for plans this host has not committed. A file-only knob:
+               read through a provider each cycle, but darling.json is loaded once, so an edit needs a restart.
                false restores the inline capture. */
             queryStatsDeferredPlanFetch: () => config.QueryStatsDeferredPlanFetch,
             /* #5158: procedure_stats' deferred plan fetch: off, shadow or on. Live like its siblings; the runner reads it
@@ -11052,6 +11054,32 @@ AND   j.hypertable_name = '{relation}'", connection))
                start. None of the compression-phase reasoning above applies, since a store without
                TimescaleDB has no policy jobs to sample. */
             await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
+        }
+
+        /* #4605: the sixth tenant, same contract — its own method, its own catch-all, one awaited statement.
+           It sits AFTER the gate rather than inside it because it needs no TimescaleDB: procedure_stats and
+           module_map are plain tables on every store shape, and the daily refresh already runs on all of them.
+           It comes last so a store still being converged, or a summary builder that ran out its budget, is
+           never made to wait behind it, and a fault here skips nothing above. */
+        await RefreshModuleMapRecentAsync(stoppingToken);
+    }
+
+    /// <summary>
+    /// The hourly store-maintenance tick's sixth tenant (#4605): the incremental module-map refresh, which keeps
+    /// the <c>collect.module_map</c> watermark within about an hour of procedure_stats so a reader can trust the
+    /// map up to it. Reads only the rows since the last watermark (<see cref="DarlingModuleMap.RefreshRecentAsync"/>),
+    /// failure-isolated inside that method and again here. Its own catch-all: nothing here can fail the tick.
+    /// </summary>
+    private async Task RefreshModuleMapRecentAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(stoppingToken);
+            await DarlingModuleMap.RefreshRecentAsync(connection, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("module_map hourly refresh could not run; the next hourly tick retries: {Message}", ex.Message);
         }
     }
 
