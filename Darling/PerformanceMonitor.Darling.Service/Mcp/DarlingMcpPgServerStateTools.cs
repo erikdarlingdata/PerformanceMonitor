@@ -513,7 +513,8 @@ public sealed class DarlingMcpPgServerStateTools
 
             /* #4966: ONE row whose every figure is a first-to-last difference, so the span it covers IS the row's own first sample
                (window_start) to its last. The keys are derived from that span, with no coverage probe: a first sample more than the
-               slack after the asked start reads as a cut window, as the web's own note for this tile reads it. */
+               slack after the asked start reads as a cut window, as the desktop viewer's banner reads it. The keys can also mean a gap in
+               collection across the window's start, not only a short history. */
             var notice = DarlingMcpWindowNotice.Build(
                 row.WindowStartUtc, requestedStart, WriteStatsTable, "The figures cover only effective_start to window_end.");
 

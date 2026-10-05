@@ -438,6 +438,8 @@ public sealed class DarlingMcpPgIndexUsageTools
             hints["truncation_note"] = notice.TruncationNote;
         }
 
+        /* This "empty" branch cannot be reached today: snapshots are counted from the same rows the read walks, so two or more
+           snapshots in the window mean rows were returned. It stays, with its NothingFoundStatusByRead entry, in case the two ever diverge. */
         if (probe.SnapshotsInWindow >= MinimumSamplesForADisuseClaim)
         {
             return McpHelpers.Status(

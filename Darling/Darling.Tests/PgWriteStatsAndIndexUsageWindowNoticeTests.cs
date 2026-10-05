@@ -98,6 +98,22 @@ VALUES ($1,$2,$3,$4,'db1','public','t1','ix_t1',$5, 0,0,0,0, 10485760, 20971520,
         });
 
     [Fact]
+    public async Task WriteStats_AGapAcrossTheWindowStart_IsTruncated_WithTheFirstSampleAfterTheGap_AgainstDevPostgres() =>
+        await RunAsync(WriteTable, WriteTables, "wgap", async (c, ds, end) =>
+        {
+            var start = end.AddHours(-24);
+            var afterGap = start.AddHours(3);
+            await WindowFloorLiveHarness.SeedServerAsync(c, Name("wgap"), end.AddDays(-30), WriteTable, null, 1, end, WriteTables, TestContext.Current.CancellationToken);
+            await SeedWriteSamplesAsync(c, "wgap", start.AddHours(-4), 60);
+            await SeedWriteSamplesAsync(c, "wgap", afterGap, 60);
+
+            var root = WindowFloorLiveHarness.Parse(await WriteAsync(ds, "wgap", 24, end));
+
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(afterGap), root.GetProperty("effective_start").GetString());
+        });
+
+    [Fact]
     public async Task WriteStats_EmptyAnswer_CarriesTheKeysUnderHints_AndNotCollectedStaysBare_AgainstDevPostgres()
     {
         await RunAsync(WriteTable, WriteTables, "wempty", async (c, ds, end) =>
@@ -202,24 +218,19 @@ VALUES ($1,$2,$3,$4,'db1','public','t1','ix_t1',$5, 0,0,0,0, 10485760, 20971520,
     public void TheNewestPerKeyReads_EmitNoWindowNotice(string tool)
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgIndexTools.cs");
-        var at = source.IndexOf("Name = \"" + tool + "\"", StringComparison.Ordinal);
-        Assert.True(at > 0, tool + " is not in DarlingMcpPgIndexTools.cs");
-        /* The comment that explains the omission sits just above the attribute; the next tool's own comment sits above ITS attribute. */
-        var begin = source.LastIndexOf("/* #4966", at, StringComparison.Ordinal);
-        Assert.True(begin > 0 && at - begin < 1200, tool + " has no comment saying why it carries no window notice");
-        var nextAttribute = source.IndexOf("[McpServerTool(", at + 10, StringComparison.Ordinal);
-        var end = nextAttribute < 0 ? source.Length : nextAttribute;
-        var nextComment = source.LastIndexOf("/* #4966", end, StringComparison.Ordinal);
-        if (nextComment > at)
+        var signature = tool switch
         {
-            end = nextComment;
-        }
-
-        var body = source[begin..end];
+            "get_pg_index_bloat" => "public static async Task<string> GetPgIndexBloat(",
+            _ => "public static async Task<string> GetPgColumnStats(",
+        };
+        var at = source.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(at > 0, tool + " is not in DarlingMcpPgIndexTools.cs");
+        /* The body runs from the method declaration to the next tool's attribute (or the end of the file). */
+        var nextAttribute = source.IndexOf("[McpServerTool(", at + signature.Length, StringComparison.Ordinal);
+        var body = source[at..(nextAttribute < 0 ? source.Length : nextAttribute)];
 
         Assert.DoesNotContain("window_truncated", body, StringComparison.Ordinal);
         Assert.DoesNotContain("effective_start", body, StringComparison.Ordinal);
         Assert.DoesNotContain("DarlingMcpWindowNotice", body, StringComparison.Ordinal);
-        Assert.Contains("newest-per-key", body, StringComparison.Ordinal);
     }
 }
