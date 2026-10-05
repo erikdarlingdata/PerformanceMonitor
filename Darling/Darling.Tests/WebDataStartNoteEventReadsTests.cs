@@ -89,15 +89,18 @@ public sealed class WebDataStartNoteEventReadsTests
         Assert.Contains("? dataStart", source, StringComparison.Ordinal);
     }
 
-    /// <summary>The capped set is exactly the fifteen reads: the four that read <c>collection_time</c>, the two event reads and the nine system_health reads.</summary>
+    /// <summary>The capped set is exactly the twenty reads (#4966): the four that read <c>collection_time</c>, the two SQL Server event reads,
+    /// the nine system_health reads, and the five Blocking, Deadlocks and PostgreSQL event log reads.</summary>
     [Fact]
-    public void CappedByRead_IsExactlyTheFifteenCappedReads()
+    public void CappedByRead_IsExactlyTheTwentyCappedReads()
     {
         Assert.Equal(
-            ["get_blocked_process_xml", "get_collection_log", "get_default_trace_events", "get_health_parser_cpu_tasks", "get_health_parser_io_issues",
-             "get_health_parser_memory_broker", "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues",
-             "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
-             "get_pg_server_config_changes", "get_plan_corrections", "get_waiting_tasks"],
+            [
+                "get_blocked_process_xml", "get_blocking", "get_collection_log", "get_deadlock_detail", "get_deadlocks",
+                "get_default_trace_events", "get_health_parser_cpu_tasks", "get_health_parser_io_issues", "get_health_parser_memory_broker", "get_health_parser_memory_conditions",
+                "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues", "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
+                "get_pg_deadlocks", "get_pg_log_events", "get_pg_server_config_changes", "get_plan_corrections", "get_waiting_tasks",
+            ],
             WebDataStartNote.CappedByRead.Keys.Order(StringComparer.Ordinal).ToArray());
         foreach (var read in WebDataStartNote.NewestFirstCappedReads)
         {

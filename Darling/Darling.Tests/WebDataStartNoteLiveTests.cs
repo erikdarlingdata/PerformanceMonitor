@@ -217,7 +217,7 @@ public sealed class WebDataStartNoteLiveTests
     private const string StandInRows = "{\"server\":\"pg01\",\"rows\":[{\"n\":1}]}";
 
     private static readonly string[] PostgresReads =
-        [.. WebDataStartNote.TableByRead.Keys.Where(k => k.StartsWith("get_pg_", StringComparison.Ordinal)).OrderBy(k => k, StringComparer.Ordinal)];
+        [.. WebDataStartNote.TableByRead.Keys.Where(k => k.StartsWith("get_pg_", StringComparison.Ordinal) && !WebDataStartNote.EventTimeByRead.ContainsKey(k)).OrderBy(k => k, StringComparer.Ordinal)];
 
     /// <summary>Each of the twenty-two PostgreSQL reads (the configuration changes, the window aggregates, the trend grids, Captured Plans and the vacuum, horizon, slot and write tiles among them, #4966), over its own table, for a server added two days ago whose rows
     /// start a day back: the data starts inside the 7-day range, so the note is there and names a start between the
@@ -337,6 +337,13 @@ public sealed class WebDataStartNoteLiveTests
         ("get_long_query_completions", "long_query_completions", "event_time"),
         ("get_memory_pressure_events", "memory_pressure_events", "sample_time"),
         ("get_default_trace_events", "default_trace_events", "event_time"),
+
+        /* PostgreSQL event logs, Blocking and Deadlocks (#4966). */
+        ("get_pg_deadlocks", "pg_deadlocks", "occurred_at"),
+        ("get_pg_log_events", "pg_log_events", "occurred_at"),
+        ("get_blocking", "blocked_process_reports", "event_time"),
+        ("get_deadlocks", "deadlocks", "deadlock_time"),
+        ("get_deadlock_detail", "deadlocks", "deadlock_time"),
     ];
 
     /// <summary>A server added two days ago whose stored events carry times from before it (a first collection stores the
@@ -424,8 +431,35 @@ public sealed class WebDataStartNoteLiveTests
         }
     }
 
+    /// <summary>get_blocking is fed by two tables; a server whose rows sit ONLY in the DMV snapshots (no blocked process reports) still
+    /// gets the note, from that table's coverage, and one whose rows sit only in the XE table gets it from the XE table.</summary>
+    [Fact]
+    public async Task GetBlocking_OnRowsFromOnlyTheDmvPath_OrOnlyTheXePath_NamesThatPathsStart_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+
+        await store.SeedTableAsync("dmv_blocking_snapshots", -496730, "web-data-start-blocking-dmv-only", added, added, ct);
+        var dmv = await store.AskEventReadAsync("get_blocking", "web-data-start-blocking-dmv-only", 168, ct);
+        Assert.True(dmv["window_truncated"]?.GetValue<bool>(), "the DMV-only server gives a note");
+        Assert.True(Math.Abs((ParseUtc(dmv["effective_start"]) - added).TotalSeconds) < 1, "names the DMV table's start");
+
+        await store.SeedTableAsync("blocked_process_reports", -496731, "web-data-start-blocking-xe-only", added, added, ct, extraSet: ExtraSet("blocked_process_reports"));
+        var xe = await store.AskEventReadAsync("get_blocking", "web-data-start-blocking-xe-only", 168, ct);
+        Assert.True(xe["window_truncated"]?.GetValue<bool>(), "the XE-only server gives a note");
+        Assert.True(Math.Abs((ParseUtc(xe["effective_start"]) - added).TotalSeconds) < 1, "names the XE table's start");
+    }
+
     /* The Blocked Process Reports read counts only rows that carry a report; the stand-in seed leaves that column null. */
-    private static string? ExtraSet(string table) => table == "blocked_process_reports" ? "blocked_process_report_xml = '<blocked-process-report/>'" : null;
+    private static string? ExtraSet(string table) => table switch
+    {
+        "blocked_process_reports" => "blocked_process_report_xml = '<blocked-process-report/>'",
+        "deadlocks" => "deadlock_graph_xml = '<deadlock/>'",
+        "pg_deadlocks" => "deadlock_hash = 'x'",
+        "pg_log_events" => "raw_line_hash = 'x', severity = 'ERROR', family = 'error'",
+        _ => null,
+    };
 
     private sealed class Store : IAsyncDisposable
     {
@@ -602,6 +636,11 @@ ORDER BY ordinal_position", connection))
                 "get_long_query_completions" => await DarlingMcpLongQueryTools.GetLongQueryCompletions(DataSource, server, hours, 100, null, cancellationToken: ct),
                 "get_memory_pressure_events" => await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(DataSource, server, hours, null, null, cancellationToken: ct),
                 "get_default_trace_events" => await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(DataSource, server, hours, 100, null, cancellationToken: ct),
+                "get_pg_deadlocks" => await DarlingMcpPgDeadlockTools.GetPgDeadlocks(DataSource, server, hours, 100, null, cancellationToken: ct),
+                "get_pg_log_events" => await DarlingMcpPgLogEventTools.GetPgLogEvents(DataSource, server, hours, null, null, 100, null, cancellationToken: ct),
+                "get_blocking" => await DarlingMcpBlockingTools.GetBlocking(DataSource, server, hours, 100, null, false, null, cancellationToken: ct),
+                "get_deadlocks" => await DarlingMcpBlockingTools.GetDeadlocks(DataSource, server, hours, 100, null, null, cancellationToken: ct),
+                "get_deadlock_detail" => await DarlingMcpBlockingTools.GetDeadlockDetail(DataSource, server, hours, 100, cancellationToken: ct),
                 _ => throw new ArgumentOutOfRangeException(nameof(read), read, "not an event read"),
             };
             var answered = await WebDataStartNote.AddAsync(DataSource, read, server, hours, null, payload, null, ct);
