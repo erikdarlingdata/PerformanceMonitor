@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -47,6 +48,7 @@ public sealed class DarlingMcpConfigHistoryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -65,9 +67,13 @@ public sealed class DarlingMcpConfigHistoryTools
                prior behaviour exactly. An as_of anchor is what closes the upper edge. */
             var changes = ConfigChangeDiff.DiffServerConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
+            {
+                var emptyNotice = await ReadNoticeAsync(postgres, "server_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "server_config", cancellationToken)
-                    ?? NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
+                    ?? NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice);
+            }
 
+            var notice = await ReadNoticeAsync(postgres, "server_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
             var result = changes.Select(c => new
             {
                 change_time = c.ChangeTime.ToString("o"),
@@ -80,13 +86,20 @@ public sealed class DarlingMcpConfigHistoryTools
                 is_advanced = c.IsAdvanced
             });
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: the window floor, always present on a data answer. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 change_count = changes.Count,
                 changes = result
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the changes (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -100,6 +113,7 @@ public sealed class DarlingMcpConfigHistoryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -115,9 +129,13 @@ public sealed class DarlingMcpConfigHistoryTools
             var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId, cancellationToken);
             var changes = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
+            {
+                var emptyNotice = await ReadNoticeAsync(postgres, "database_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_config", cancellationToken)
-                    ?? NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
+                    ?? NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice);
+            }
 
+            var notice = await ReadNoticeAsync(postgres, "database_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
             var result = changes.Select(c => new
             {
                 change_time = c.ChangeTime.ToString("o"),
@@ -127,13 +145,20 @@ public sealed class DarlingMcpConfigHistoryTools
                 new_value = c.NewValue
             });
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: the window floor, always present on a data answer. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 change_count = changes.Count,
                 changes = result
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the changes (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -147,6 +172,7 @@ public sealed class DarlingMcpConfigHistoryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -162,9 +188,13 @@ public sealed class DarlingMcpConfigHistoryTools
             var snapshots = await DarlingConfigHistoryReader.GetTraceFlagSnapshotsAsync(postgres, resolved.ServerId, cancellationToken);
             var changes = ConfigChangeDiff.DiffTraceFlagChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
+            {
+                var emptyNotice = await ReadNoticeAsync(postgres, "trace_flags", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "trace_flags", cancellationToken)
-                    ?? NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)));
+                    ?? NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice);
+            }
 
+            var notice = await ReadNoticeAsync(postgres, "trace_flags", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
             var result = changes.Select(c => new
             {
                 change_time = c.ChangeTime.ToString("o"),
@@ -177,13 +207,20 @@ public sealed class DarlingMcpConfigHistoryTools
                 is_session = c.IsSession
             });
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: the window floor, always present on a data answer. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 change_count = changes.Count,
                 changes = result
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the changes (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -312,13 +349,31 @@ public sealed class DarlingMcpConfigHistoryTools
 
     /// <summary>The "empty" miss for a change tool — distinguishes "no snapshots collected yet" from "snapshots
     /// exist but nothing changed", so a caller understands why the history is empty (the on-connect cadence).</summary>
-    private static string NoChanges(string serverName, int hoursBack, int snapshotCount) =>
+    private static string NoChanges(string serverName, int hoursBack, int snapshotCount, McpWindowNotice notice) =>
         McpHelpers.Status(
             "empty",
             snapshotCount <= 1
                 ? "No configuration change history yet: fewer than two config snapshots have been captured for this server. Config is captured when the service connects to the server, so changes appear once a second connect snapshot exists."
                 : $"No configuration changes detected in the last {hoursBack}h across the captured snapshots.",
-            new { server = serverName, snapshot_count = snapshotCount });
+            notice.IsUnavailable
+                ? (object)new { server = serverName, snapshot_count = snapshotCount }
+                : (object)new { server = serverName, snapshot_count = snapshotCount, effective_start = notice.EffectiveStart, window_truncated = notice.WindowTruncated, truncation_note = notice.TruncationNote });
+
+    /// <summary>
+    /// The window-floor notice for one change tool, from the collector's own table. The rule matches the viewer's and the web's
+    /// Config Changes notes: the probe counts a snapshot or a logged run INSIDE the window, and a snapshot from BEFORE the window
+    /// does not count as covered. Config is captured on connect, so a server that stayed connected holds no snapshot in a recent
+    /// window; with no run of the collector logged in it either, an empty answer says the store holds no collection there rather
+    /// than claiming the server was monitored. (Lite also counts a pre-window snapshot; Darling deliberately does not, so the tool,
+    /// the viewer and the web page never disagree about the same window.) A change is stamped with the capture_time of the snapshot
+    /// that showed it, which is the probe's column, so no event-time rule applies. A data answer on a window of 90 minutes or less
+    /// starts no probe; an empty one always does.
+    /// </summary>
+    private static Task<McpWindowNotice> ReadNoticeAsync(
+        NpgsqlDataSource postgres, string table, string serverName, DateTime windowStart, DateTime windowEnd, bool emptyAnswer, ILogger? logger, CancellationToken cancellationToken) =>
+        DarlingMcpWindowNotice.ReadAsync(
+            () => DarlingMcpWindowNotice.Probe(postgres, table, serverName, windowStart, windowEnd, cancellationToken),
+            windowStart, windowEnd, table, emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
 
     /// <summary>Global / Session / Global+Session scope label from the two flags.</summary>
     private static string Scope(bool? isGlobal, bool? isSession) =>

@@ -43,6 +43,7 @@ public sealed class EffectiveStartUtcTests
     /// another. The null write (a forced-raw read over a window raw no longer holds) is the one exception.
     /// </summary>
     [Theory]
+    [InlineData("DarlingMcpConfigHistoryTools.cs", 3)]
     [InlineData("DarlingMcpDataTools.cs", 5)]
     [InlineData("DarlingMcpQueryStoreClutterTools.cs", 1)]
     [InlineData("DarlingMcpSessionTools.cs", 2)]

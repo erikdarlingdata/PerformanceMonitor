@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -243,6 +244,33 @@ internal static class WebDataStartNote
     /// the same probe over the same window, so their verdicts agree.</para>
     /// </summary>
     internal static async Task<string> AddAsync(
+        NpgsqlDataSource postgres, string tool, string? server, int? hoursBack, string? asOf, string result,
+        ILogger? logger, CancellationToken cancellationToken)
+    {
+        var answered = await AddNoteAsync(postgres, tool, server, hoursBack, asOf, result, logger, cancellationToken);
+        if (!ReferenceEquals(answered, result) || !TableByRead.ContainsKey(tool))
+        {
+            return answered;
+        }
+
+        /* No note was added, and the answer is still the tool's own: its three window-floor keys (in UTC, the MCP dialect) are not
+           the page's, so a covered range reaches the page without them, as a tool that never wrote them would send it. */
+        try
+        {
+            if (JsonNode.Parse(result) is JsonObject own && ToolWindowFloorKeys.Any(own.ContainsKey))
+            {
+                StripToolWindowFloor(own);
+                return own.ToJsonString();
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+
+        return result;
+    }
+
+    private static async Task<string> AddNoteAsync(
         NpgsqlDataSource postgres, string tool, string? server, int? hoursBack, string? asOf, string result,
         ILogger? logger, CancellationToken cancellationToken)
     {
