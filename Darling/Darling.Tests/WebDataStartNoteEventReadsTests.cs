@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -68,10 +69,11 @@ public sealed class WebDataStartNoteEventReadsTests
         Assert.Null(Assert.IsType<JsonObject>(JsonNode.Parse(reached))["window_truncated"]);
     }
 
-    /// <summary>The long query page is the SLOWEST runs, so <c>truncated: true</c> says the page is a sample and its oldest event
-    /// names no reach: the read keeps the coverage-plus-event rule, so it goes to the store.</summary>
+    /// <summary>The long query page is the SLOWEST runs, so on <c>truncated: true</c> it is a sample and its oldest event names no
+    /// reach: only the coverage start applies, as the desktop viewer's Long Queries grid does not borrow a ranked page's event.
+    /// The read still goes to the store for the coverage start.</summary>
     [Fact]
-    public async Task LongQueryCompletions_WithTruncatedTrue_KeepsTheCoverageAndEventRule()
+    public async Task LongQueryCompletions_WithTruncatedTrue_ReadsTheCoverageStart_AndSkipsTheEvent()
     {
         await using var store = NeverConnects();
 
@@ -79,6 +81,43 @@ public sealed class WebDataStartNoteEventReadsTests
             () => WebDataStartNote.AddAsync(store, "get_long_query_completions", "sql01", 48, WindowEnd, LongQueriesTruncated, null, Cancelled));
         Assert.DoesNotContain("get_long_query_completions", WebDataStartNote.CappedByRead.Keys);
         Assert.Equal("oldest_returned_event_time", WebDataStartNote.EventTimeByRead["get_long_query_completions"].Field);
+        Assert.True(WebDataStartNote.EventTimeByRead["get_long_query_completions"].PageIsRanked);
+        Assert.False(WebDataStartNote.EventTimeByRead["get_blocked_process_xml"].PageIsRanked);
+
+        var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "WebDataStartNote.cs");
+        Assert.Contains("var sampled = eventTime.PageIsRanked && ", source, StringComparison.Ordinal);
+        Assert.Contains("? dataStart", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>The capped set is exactly the six reads: the four that read <c>collection_time</c> and the two event reads.</summary>
+    [Fact]
+    public void CappedByRead_IsExactlyTheSixCappedReads()
+    {
+        Assert.Equal(
+            ["get_blocked_process_xml", "get_collection_log", "get_default_trace_events", "get_pg_server_config_changes", "get_plan_corrections", "get_waiting_tasks"],
+            WebDataStartNote.CappedByRead.Keys.Order(StringComparer.Ordinal).ToArray());
+        foreach (var read in WebDataStartNote.NewestFirstCappedReads)
+        {
+            Assert.Contains(read, WebDataStartNote.CappedByRead.Keys);
+        }
+
+        var endpoints = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        Assert.Contains("WebDataStartNote.CappedByRead.ContainsKey(name)", endpoints, StringComparison.Ordinal);
+    }
+
+    /// <summary>A capped blocked process page names its oldest event without asking the store, beside the Default Trace case.</summary>
+    [Fact]
+    public async Task ACappedBlockedProcessXmlPage_NamesItsOldestEvent_WithoutAskingTheStore()
+    {
+        await using var store = NeverConnects();
+        const string page = "{\"server\":\"sql01\",\"reports_returned\":1,\"truncated\":true,"
+            + "\"oldest_returned_event_time\":\"2026-01-02T12:30:00.0000000Z\",\"order\":\"event_time_desc\"}";
+
+        var answered = await WebDataStartNote.AddAsync(store, "get_blocked_process_xml", "sql01", 48, WindowEnd, page, null, Cancelled);
+
+        var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
+        Assert.True(answer["window_truncated"]?.GetValue<bool>());
+        Assert.Equal("2026-01-02T12:30:00.0000000Z", answer["effective_start"]?.GetValue<string>());
     }
 
     /// <summary>The four reads' premises, in the tools' source: the payload fields the rules read.</summary>

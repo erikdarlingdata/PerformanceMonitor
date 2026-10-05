@@ -383,7 +383,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        taken once here and handed to both the read and the note check. A request with its own anchor
                        is left as sent. */
                     var askedAsOf = AsOf(context);
-                    if (askedAsOf is null && WebDataStartNote.NewestFirstCappedReads.Contains(name))
+                    if (askedAsOf is null && WebDataStartNote.CappedByRead.ContainsKey(name))
                     {
                         askedAsOf = WebDataStartNote.FormatWindowEnd(DateTime.UtcNow);
                         context.Request.QueryString = context.Request.QueryString.Add("as_of", askedAsOf);

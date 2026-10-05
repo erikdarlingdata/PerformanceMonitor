@@ -45,9 +45,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// events, the default trace) filters on the event's own time, which can reach before the first collection, so a
 /// coverage start could name a time later than the history it shows. Those are not in this list.</para>
 ///
-/// <para><b>A capped list.</b> Four listed reads are LISTS over time, newest first, under a row cap:
+/// <para><b>A capped list.</b> Six listed reads are LISTS over time, newest first, under a row cap; four read <c>collection_time</c>:
 /// <c>get_waiting_tasks</c>, <c>get_collection_log</c>, <c>get_pg_server_config_changes</c> and <c>get_plan_corrections</c>
-/// (<see cref="NewestFirstCappedReads"/>). When one hits its cap the grid ends at the oldest row the read returned,
+/// (<see cref="CappedByRead"/>, which adds the blocked process and Default Trace event reads). When one hits its cap the grid ends at the oldest row the read returned,
 /// whatever the store covers, so the note names that row (<c>effective_start</c> is the answer's
 /// <c>oldest_returned_collection_time</c>, or for the configuration changes the earliest <c>changed_at</c> on the page,
 /// and the text says the grid shows the newest rows back to it). The answer already carries the time, so this asks the
@@ -305,14 +305,15 @@ internal static class WebDataStartNote
             : McpHelpers.ValidateWindow(hours, asOf, out endUtc);
 
     /// <summary>
-    /// The listed reads that LIST rows newest first under a row cap, so a capped answer ends at a time inside the
-    /// window (<c>get_waiting_tasks</c>: <c>ORDER BY collection_time DESC</c>, the cap read as <c>truncated</c> and
+    /// The listed reads that LIST rows newest first under a row cap and read <c>collection_time</c>
+    /// (<c>get_waiting_tasks</c>: <c>ORDER BY collection_time DESC</c>, the cap read as <c>truncated</c> and
     /// the end of the shown rows as <c>oldest_returned_collection_time</c>); <c>get_plan_corrections</c> pages its
     /// recommendations the same way (<c>ORDER BY collection_time DESC</c>, the cap read as <c>truncated</c>, the same
-    /// oldest field and order word). Every other listed read is an
+    /// oldest field and order word). This is a subset of <see cref="CappedByRead"/>, which also holds the two event reads that
+    /// are newest first under a cap (blocked process reports, the Default Trace). Every read in neither is an
     /// aggregate over the whole window or a list ranked by something other than time, whose cap hides no time range;
     /// a <c>truncated</c> flag on those answers is about rows kept by rank and does not name a time. A test holds
-    /// the list to these four reads, each name one <see cref="TableByRead"/> lists.
+    /// this list to these four reads, each name one <see cref="TableByRead"/> lists.
     /// </summary>
     internal static readonly IReadOnlySet<string> NewestFirstCappedReads = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -329,14 +330,18 @@ internal static class WebDataStartNote
     /// viewer applies: an event carries its own time, and a server's first collection stores history from before it, so the
     /// notice names the earlier of the coverage start and the earliest event shown.
     /// </summary>
-    internal sealed record EventTimeSpec(string? Field, string? RowsKey, string? TimeField);
+    /// <remarks><paramref name="PageIsRanked"/> marks a page ranked by something other than time (the long query page is the
+    /// slowest runs): when that page is cut (<c>truncated: true</c>) it is a sample, its earliest event says nothing about the
+    /// window's start, and only the coverage start is used. The desktop viewer's Long Queries grid keeps the newest 200 by event
+    /// time, so its cap names its oldest event; this page is not that one.</remarks>
+    internal sealed record EventTimeSpec(string? Field, string? RowsKey, string? TimeField, bool PageIsRanked = false);
 
     /// <summary>The event reads and where each answers its earliest event shown. Memory pressure rows are stamped
     /// <c>sample_time</c>; the others <c>event_time</c>.</summary>
     internal static readonly IReadOnlyDictionary<string, EventTimeSpec> EventTimeByRead = new Dictionary<string, EventTimeSpec>(StringComparer.Ordinal)
     {
         ["get_blocked_process_xml"] = new("oldest_returned_event_time", null, null),
-        ["get_long_query_completions"] = new("oldest_returned_event_time", null, null),
+        ["get_long_query_completions"] = new("oldest_returned_event_time", null, null, PageIsRanked: true),
         ["get_memory_pressure_events"] = new(null, "events", "sample_time"),
         ["get_default_trace_events"] = new(null, "events", "event_time"),
     };
@@ -396,7 +401,7 @@ internal static class WebDataStartNote
 
     /// <summary>
     /// <paramref name="result"/> with the notice fields added when <paramref name="tool"/> is a listed grid read whose
-    /// window starts before its table's coverage, or is a newest-first list (<see cref="NewestFirstCappedReads"/>) that
+    /// window starts before its table's coverage, or is a newest-first list (<see cref="CappedByRead"/>) that
     /// hit its row cap; otherwise <paramref name="result"/> itself, untouched.
     /// <paramref name="hoursBack"/> is the window the page asked for (null or below 1: none was asked), and
     /// <paramref name="asOf"/> the request's window anchor.
@@ -529,7 +534,12 @@ internal static class WebDataStartNote
             var start = dataStart;
             if (EventTimeByRead.TryGetValue(tool, out var eventTime))
             {
-                start = ViewerEventDataStart.Of(dataStart, ReadEarliestEvent(payload, eventTime.Field, eventTime.RowsKey, eventTime.TimeField));
+                /* A cut page ranked by duration is a sample of the window: its earliest event is not the window's earliest, so
+                   only the coverage start applies. */
+                var sampled = eventTime.PageIsRanked && payload["truncated"] is JsonValue cut && cut.TryGetValue<bool>(out var wasCut) && wasCut;
+                start = sampled
+                    ? dataStart
+                    : ViewerEventDataStart.Of(dataStart, ReadEarliestEvent(payload, eventTime.Field, eventTime.RowsKey, eventTime.TimeField));
             }
 
             if (!RawWindowFloor.IsTruncated(start, windowStart))
