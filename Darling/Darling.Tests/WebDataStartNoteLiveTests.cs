@@ -323,6 +323,68 @@ public sealed class WebDataStartNoteLiveTests
         }
     }
 
+    /// <summary>Each event read: table, the column that holds the event's own time, and the tool's rows key.</summary>
+    private static readonly (string Read, string Table, string EventColumn)[] EventReads =
+    [
+        ("get_blocked_process_xml", "blocked_process_reports", "event_time"),
+        ("get_long_query_completions", "long_query_completions", "event_time"),
+        ("get_memory_pressure_events", "memory_pressure_events", "sample_time"),
+        ("get_default_trace_events", "default_trace_events", "event_time"),
+    ];
+
+    /// <summary>A server added two days ago whose stored events carry times from before it (a first collection stores the
+    /// server's event history): over 7 days the note names the earliest event shown, which is earlier than the coverage start
+    /// and still after the window's start.</summary>
+    [Fact]
+    public async Task AnEventRead_WhoseHistoryReachesBeforeCoverage_NamesTheEarliestEvent_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+
+        for (var i = 0; i < EventReads.Length; i++)
+        {
+            var (read, table, column) = EventReads[i];
+            var name = "web-data-start-event-history-" + read.Replace('_', '-');
+            await store.SeedTableAsync(table, -496700 - i, name, added, added, ct, eventColumn: column, eventShift: TimeSpan.FromDays(2), extraSet: ExtraSet(table));
+
+            var answer = await store.AskEventReadAsync(read, name, 168, ct);
+
+            Assert.True(answer["window_truncated"]?.GetValue<bool>(), read + " gives a note");
+            var start = ParseUtc(answer["effective_start"]);
+            var earliestEvent = added.AddDays(-2);
+            Assert.True(Math.Abs((start - earliestEvent).TotalSeconds) < 1, read + " names the earliest event, got " + start.ToString("o", CultureInfo.InvariantCulture) + " vs " + earliestEvent.ToString("o", CultureInfo.InvariantCulture) + " " + answer.ToJsonString()[..Math.Min(500, answer.ToJsonString().Length)]);
+            Assert.Equal(start.Ticks, ParseUtc(answer["data_start_utc"]).Ticks);
+            Assert.StartsWith("partial window:", answer["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The same server whose events reach the window's start: the page shows the whole range, so there is no note.</summary>
+    [Fact]
+    public async Task AnEventRead_WhoseHistoryReachesTheWindowsStart_GetsNoNote_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+
+        for (var i = 0; i < EventReads.Length; i++)
+        {
+            var (read, table, column) = EventReads[i];
+            var name = "web-data-start-event-reaches-" + read.Replace('_', '-');
+            await store.SeedTableAsync(table, -496710 - i, name, added, added, ct, eventColumn: column, eventShift: TimeSpan.FromDays(5.5), extraSet: ExtraSet(table));
+
+            var answer = await store.AskEventReadAsync(read, name, 168, ct);
+
+            Assert.NotEqual(true, answer["window_truncated"]?.GetValue<bool>());
+            Assert.Null(answer["data_start_utc"]);
+            Assert.Null(answer["effective_start"]);
+            Assert.Null(answer["truncation_note"]);
+        }
+    }
+
+    /* The Blocked Process Reports read counts only rows that carry a report; the stand-in seed leaves that column null. */
+    private static string? ExtraSet(string table) => table == "blocked_process_reports" ? "blocked_process_report_xml = '<blocked-process-report/>'" : null;
+
     private sealed class Store : IAsyncDisposable
     {
         private readonly ScratchPostgres _scratch;
@@ -409,7 +471,7 @@ FROM generate_series($3::timestamp, $4::timestamp, make_interval(mins => $5)) AS
         /// the note reads only that the server holds a row at a time.</summary>
         public async Task SeedTableAsync(
             string table, int serverId, string serverName, DateTime added, DateTime firstRow, CancellationToken ct,
-            string? runsCollector = null, DateTime? lastRow = null)
+            string? runsCollector = null, DateTime? lastRow = null, string? eventColumn = null, TimeSpan? eventShift = null, string? extraSet = null)
         {
             await using var connection = await DataSource.OpenConnectionAsync(ct);
             await DarlingMcpTestData.RegisterServerAsync(connection, serverId, serverName, ct);
@@ -476,6 +538,32 @@ ORDER BY ordinal_position", connection))
             insert.Parameters.AddWithValue(DateTime.SpecifyKind(firstRow, DateTimeKind.Unspecified));
             insert.Parameters.AddWithValue(DateTime.SpecifyKind(lastRow ?? End, DateTimeKind.Unspecified));
             await insert.ExecuteNonQueryAsync(ct);
+
+            /* An event carries its own time, apart from the collection that stored it: stamp each row's event column that far
+               before its collection_time, as a first collection stores the server's event history. */
+            if (eventColumn is not null)
+            {
+                await using var stamp = new NpgsqlCommand(
+                    "UPDATE collect." + table + " SET " + eventColumn + " = " + time + " - make_interval(secs => $2)" + (extraSet is null ? "" : ", " + extraSet) + " WHERE server_id = $1", connection);
+                stamp.Parameters.AddWithValue(serverId);
+                stamp.Parameters.AddWithValue((eventShift ?? TimeSpan.Zero).TotalSeconds);
+                await stamp.ExecuteNonQueryAsync(ct);
+            }
+        }
+
+        /// <summary>The tool's own payload for an event read over a window, then the data-start note: what the web mirror answers.</summary>
+        public async Task<JsonObject> AskEventReadAsync(string read, string server, int hours, CancellationToken ct)
+        {
+            var payload = read switch
+            {
+                "get_blocked_process_xml" => await DarlingMcpBlockingTools.GetBlockedProcessXml(DataSource, server, hours, 100, null, ct),
+                "get_long_query_completions" => await DarlingMcpLongQueryTools.GetLongQueryCompletions(DataSource, server, hours, 100, null, ct),
+                "get_memory_pressure_events" => await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(DataSource, server, hours, null, null, ct),
+                "get_default_trace_events" => await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(DataSource, server, hours, 100, null, ct),
+                _ => throw new ArgumentOutOfRangeException(nameof(read), read, "not an event read"),
+            };
+            var answered = await WebDataStartNote.AddAsync(DataSource, read, server, hours, null, payload, null, ct);
+            return Assert.IsType<JsonObject>(JsonNode.Parse(answered));
         }
 
         /// <summary>What the web mirror answers for the grid: the tool's own payload, then the data-start note.</summary>

@@ -261,6 +261,10 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             "get_resource_semaphore" => [("DarlingMcpMemoryGrantTools.cs", "GetResourceSemaphore")],
             "get_plan_corrections" => [("DarlingMcpPlanCorrectionTools.cs", "GetPlanCorrections")],
             "get_pg_wait_stats" => [("DarlingMcpPgWaitTools.cs", "GetPgWaitStats")],
+            "get_blocked_process_xml" => [("DarlingMcpBlockingTools.cs", "GetBlockedProcessXml")],
+            "get_long_query_completions" => [("DarlingMcpLongQueryTools.cs", "GetLongQueryCompletions")],
+            "get_memory_pressure_events" => [("DarlingMcpMemoryGrantTools.cs", "GetMemoryPressureEvents")],
+            "get_default_trace_events" => [("DarlingMcpDefaultTraceTools.cs", "GetDefaultTraceEvents")],
             _ => throw new ArgumentOutOfRangeException(nameof(read), read, "a listed read this test does not know"),
         };
 

@@ -3819,6 +3819,7 @@ export function memoryPressurePanels(server, ctx) {
     });
     renderInto(grid.body, () => [
       keptWindowStrip(res),
+      windowFloorStrip(res.data, { viz: "table" }),
       VIZ.table(res.data, { rowsKey: "events", columns: PRESSURE_COLUMNS, emptyText: empty }),
     ]);
   })();
