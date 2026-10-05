@@ -648,7 +648,10 @@ public sealed class McpQueryTools
 
         return McpHelpers.Status(
             "empty",
-            $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's average CPU is more than 25% worse than its baseline — this IS the all-clear for this read.",
+            McpHelpers.QuietUnlessCut(
+                notice.WindowTruncated, notice.EffectiveStart,
+                factual: $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's average CPU is more than 25% worse than its baseline",
+                coveredClaim: " — this IS the all-clear for this read."),
             notice.AsHints());
     }
 
@@ -717,7 +720,7 @@ public sealed class McpQueryTools
                 requestedStart, windowEnd, "query_stats", emptyAnswer: rows.Count == 0);
 
             if (rows.Count == 0)
-                return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, notice);
+                return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, notice, filtered: databases is not null);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
@@ -834,7 +837,8 @@ public sealed class McpQueryTools
     /// caller to widen the window there would be advice pointed at the wrong problem.</para>
     /// </summary>
     private static async Task<string> EmptyHeatmapAsync(
-        LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice)
+        LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
+        bool filtered)
     {
         /* The anchor is threaded in rather than resolved again: the probe answers "was anything collected
            in THIS window", and a window it computed for itself would be a different one. */
@@ -858,7 +862,13 @@ public sealed class McpQueryTools
 
         return McpHelpers.Status(
             "empty",
-            $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
+            McpHelpers.QuietUnlessCut(
+                /* A database_name filter is exempt: the coverage probe is unfiltered, so a filtered empty grid may be the filter and
+                   not the window, and the covered sentence is the one that says so. */
+                notice.WindowTruncated && !filtered, notice.EffectiveStart,
+                factual: $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
+                coveredClaim: ". A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected.",
+                tail: " Delta-based collection also needs a SECOND cycle before the first non-zero row exists."),
             notice.AsHints());
     }
 

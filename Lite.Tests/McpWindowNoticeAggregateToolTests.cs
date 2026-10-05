@@ -13,6 +13,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -458,6 +459,26 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
         /* The later of the two series' starts: before day -2 the blocking series was not collected, so its empty head says nothing. */
         Assert.Equal("empty", root.GetProperty("status").GetString());
         AssertTruncatedAt(root.GetProperty("hints"), Anchor.AddDays(-2), "blocked_process_report and deadlocks");
+
+        /* #4966: cut at a start, so the "genuinely clear" claim gives way to the cut sentence that points at effective_start. */
+        Assert.Equal($"No blocking or deadlocks recorded for {ServerName} in the last {HoursBack} hour(s). {McpHelpers.CutWindowNothingMessage}", root.GetProperty("message").GetString());
+    }
+
+    /// <summary>#4966: both blocking collectors have run from before the window: the covered text keeps its "genuinely clear" claim.</summary>
+    [Fact]
+    public async Task BlockingStats_AnEmptyWindow_Covered_KeepsTheGenuinelyClearClaim()
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRunsAsync("blocked_process_report", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
+        await SeedRunsAsync("deadlocks", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
+
+        var root = Root(await BlockingAsync());
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        AssertCovered(root.GetProperty("hints"), WindowStart);
+        Assert.Equal(
+            $"No blocking or deadlocks recorded for {ServerName} in the last {HoursBack} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.",
+            root.GetProperty("message").GetString());
     }
 
     [Fact]
@@ -470,6 +491,8 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         AssertNothingHeld(root.GetProperty("hints"), "blocked_process_report and deadlocks");
+        /* #4966: no start to name, so the sentence says nothing was read. */
+        Assert.Equal($"No blocking or deadlocks recorded for {ServerName} in the last {HoursBack} hour(s). {McpHelpers.CutWindowNothingReadMessage}", root.GetProperty("message").GetString());
     }
 
     [Fact]
