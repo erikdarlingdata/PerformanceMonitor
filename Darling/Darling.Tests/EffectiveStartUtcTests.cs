@@ -48,6 +48,8 @@ public sealed class EffectiveStartUtcTests
     [InlineData("DarlingMcpSessionTools.cs", 2)]
     [InlineData("DarlingMcpQueryHeatmapTools.cs", 1)]
     [InlineData("DarlingMcpQueryStoreRegressionTools.cs", 1)]
+    [InlineData("DarlingMcpHealthParserTools.cs", 9)]
+    [InlineData("DarlingMcpDefaultTraceTools.cs", 1)]
     public void EveryWindowFloorWrite_RoutesThroughTheSharedFormatter(string file, int minimumRouted)
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);

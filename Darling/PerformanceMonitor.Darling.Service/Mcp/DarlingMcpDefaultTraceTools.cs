@@ -12,9 +12,11 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -45,6 +47,7 @@ public sealed class DarlingMcpDefaultTraceTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of events to return. Default 100.")] int limit = 100,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -56,8 +59,9 @@ public sealed class DarlingMcpDefaultTraceTools
         try
         {
             var now = windowEnd;
+            var windowStart = now.AddHours(-hours_back);
             var all = await DarlingDefaultTraceReader.ReadEventsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
+                postgres, resolved.ServerId, windowStart, now, cancellationToken);
 
             /* The significant-set gate (shared with the viewer's System Events surface): every curated
                category is significant as collected, except ErrorLog which must clear the severity floor. */
@@ -65,9 +69,29 @@ public sealed class DarlingMcpDefaultTraceTools
                 .Where(r => DefaultTraceEventSignificance.IsSignificant(r.EventName, r.Severity))
                 .ToList();
 
+            /* #4966: where the store's coverage of the window starts. The reader gives event times already converted from the server's
+               local clock to UTC, while the coverage probe reads collection_time, the collector's own UTC clock, so both sides are UTC.
+               The first collection of a server stores the trace's history, so an event can be older than the coverage: the notice names
+               the earlier of the two (the rule the viewer's Default Trace grid follows). not_collected carries no notice, so it is decided
+               before any probe; an answer with rows over a window of 90 minutes or less starts none. */
             if (significant.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "default_trace_events", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No significant default trace events found in the requested time range.");
+            {
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "default_trace_events", cancellationToken);
+                if (notCollected is not null)
+                    return notCollected;
+            }
+
+            var earliestShown = significant.Select(r => r.EventTimeUtc).Where(t => t.HasValue).Min();
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                async () =>
+                {
+                    var floor = await DarlingMcpWindowNotice.Probe(postgres, "default_trace_events", resolved.ServerName, windowStart, now, cancellationToken);
+                    return floor is DateTime covered && earliestShown is DateTime shown && shown < covered ? shown : floor ?? earliestShown;
+                },
+                windowStart, now, "default_trace_events", emptyAnswer: significant.Count == 0, logger: logger, cancellationToken: cancellationToken);
+
+            if (significant.Count == 0)
+                return McpHelpers.Status("empty", "No significant default trace events found in the requested time range.", notice.AsHints());
 
             var events = significant.Take(limit).Select(r =>
             {
@@ -97,14 +121,18 @@ public sealed class DarlingMcpDefaultTraceTools
                 };
             }).ToList();
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 total_events = significant.Count,
                 shown = events.Count,
                 events
             }, McpHelpers.JsonOptions);
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
