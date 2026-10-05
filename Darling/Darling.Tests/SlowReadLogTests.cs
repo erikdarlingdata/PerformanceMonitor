@@ -236,14 +236,14 @@ public sealed class SlowReadLogTests
     }
 
     [Fact]
-    public void AShortJsonObjectOrArrayString_IsOmitted_AndAShortNonJsonBracketStringIsKept()
+    public void AnyShortStringWithABrace_OrBracket_IsOmitted_ParsedOrNot()
     {
         var stored = Stored(new JsonObject { ["a"] = "{\"k\":1}", ["b"] = "[1,2]", ["c"] = "[not json", ["d"] = "{also not" }, out _);
 
         Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["a"]!);
         Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["b"]!);
-        Assert.Equal("[not json", (string)stored["c"]!);
-        Assert.Equal("{also not", (string)stored["d"]!);
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["c"]!);
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["d"]!);
     }
 
     [Fact]
@@ -403,6 +403,63 @@ public sealed class SlowReadLogTests
         Assert.True(log.TryRead(out var record));
 
         await log.StoreAsync(dead, record!, null);
+    }
+
+    [Fact]
+    public void ABomPrefixedOrTrailingCommaJsonString_IsOmitted()
+    {
+        var stored = Stored(new JsonObject { ["a"] = "\uFEFF{\"password\":\"x\"}", ["b"] = "{\"password\":\"x\",}", ["c"] = "/*c*/{\"a\":1}" }, out _);
+
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["a"]!);
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["b"]!);
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["c"]!);
+    }
+
+    [Fact]
+    public void AUrlCredentialOrPasswordBearingString_IsOmitted_AndAPlainUrlIsKept()
+    {
+        var stored = Stored(new JsonObject { ["a"] = "https://u:p@h/x", ["b"] = "Server=a;Password=b", ["c"] = "Server=a;PWD = b", ["d"] = "https://h/x" }, out _);
+
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["a"]!);
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["b"]!);
+        Assert.Equal(SlowReadLog.OmittedMarker, (string)stored["c"]!);
+        Assert.Equal("https://h/x", (string)stored["d"]!);
+    }
+
+    [Fact]
+    public void DedupKey_IsKept_WhileApiKeyIsRedacted_AndOrdinaryArgumentsSurvive()
+    {
+        var stored = Stored(new JsonObject { ["dedup_key"] = "abc", ["api_key"] = "abc", ["hours_back"] = 4, ["top"] = 5, ["server_name"] = "s" }, out _);
+
+        Assert.Equal("abc", (string)stored["dedup_key"]!);
+        Assert.Equal(SlowReadLog.RedactedMarker, (string)stored["api_key"]!);
+        Assert.Equal(4, (int)stored["hours_back"]!);
+        Assert.Equal(5, (int)stored["top"]!);
+    }
+
+    [Fact]
+    public void AWebQueryKeyWithOddCharacters_IsDroppedAndCounted_AndALongKeyIsCappedAt64()
+    {
+        var args = DarlingWebEndpoints.WebQueryArguments(new[]
+        {
+            new KeyValuePair<string, string?>("bad key!", "v"),
+            new KeyValuePair<string, string?>(new string('k', 100), "v"),
+            new KeyValuePair<string, string?>("top", "5"),
+        });
+
+        Assert.False(args.ContainsKey("bad key!"));
+        Assert.Equal(1, (int)args["_dropped_keys"]!);
+        Assert.True(args.ContainsKey(new string('k', 64)));
+        Assert.False(args.ContainsKey(new string('k', 100)));
+        Assert.Equal("5", (string)args["top"]!);
+        Assert.False(DarlingWebEndpoints.WebQueryArguments(new[] { new KeyValuePair<string, string?>("top", "5") }).ContainsKey("_dropped_keys"));
+    }
+
+    [Fact]
+    public void AnUnknownComposeSource_RecordsComposeUnknown_AndAKnownOneKeepsItsName()
+    {
+        Assert.Equal("compose:unknown", DarlingWebEndpoints.ComposeRouteLabel(new JsonObject { ["panel"] = new JsonObject { ["source"] = new string('x', 500) } }));
+        Assert.Equal("compose:wait_stats", DarlingWebEndpoints.ComposeRouteLabel(new JsonObject { ["panel"] = new JsonObject { ["source"] = "wait_stats" } }));
     }
 
     private const int McpResponseBudgetBytes = 32 * 1024;

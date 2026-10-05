@@ -96,6 +96,17 @@ WHERE slow_read_id IN
         "connectionstring", "connection_string", "auth",
     };
 
+    /* Fragments that mark a VALUE as a secret. Narrower than the key list: a bare "key" or "auth" would drop ordinary text. */
+    private static readonly string[] s_secretValueFragments =
+    {
+        "password", "passwd", "pwd=", "secret", "token=", "apikey", "api_key", "bearer ",
+    };
+
+    private static readonly System.Text.RegularExpressions.Regex s_credentialShape = new(
+        @"://[^/@\s]+:[^/@\s]*@|(password|pwd)\s*=",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+        TimeSpan.FromMilliseconds(100));
+
     private readonly Channel<SlowReadRecord> _channel;
     private long _dropped;
     private DateTime _lastPurgeUtc = DateTime.MinValue;
@@ -256,6 +267,11 @@ WHERE slow_read_id IN
     /// <summary>True when a key's lower-cased name carries a secret fragment.</summary>
     internal static bool IsSecretKey(string key)
     {
+        if (key == "dedup_key")
+        {
+            return false;
+        }
+
         var lowered = key.ToLowerInvariant();
         foreach (var fragment in s_secretFragments)
         {
@@ -343,23 +359,29 @@ WHERE slow_read_id IN
             return false;
         }
 
-        var trimmed = text.AsSpan().TrimStart();
-        if (trimmed.Length > 0 && (trimmed[0] == '{' || trimmed[0] == '['))
+        /* JSON-looking text is never stored, parsed or not: a BOM, a trailing comma or a comment would defeat the parse. */
+        var cleaned = text.Replace("\uFEFF", string.Empty, StringComparison.Ordinal).Trim();
+        if (cleaned.Contains('{', StringComparison.Ordinal) || cleaned.Contains('[', StringComparison.Ordinal))
         {
-            try
+            return false;
+        }
+
+        foreach (var fragment in s_secretValueFragments)
+        {
+            if (cleaned.Contains(fragment, StringComparison.OrdinalIgnoreCase))
             {
-                if (JsonNode.Parse(text) is JsonObject or JsonArray)
-                {
-                    return false;
-                }
-            }
-            catch (JsonException)
-            {
-                /* Not JSON: a short plain string. */
+                return false;
             }
         }
 
-        return true;
+        try
+        {
+            return !s_credentialShape.IsMatch(cleaned);
+        }
+        catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
+        {
+            return false;
+        }
     }
 
     private static DateTime? Unspecified(DateTime? value)

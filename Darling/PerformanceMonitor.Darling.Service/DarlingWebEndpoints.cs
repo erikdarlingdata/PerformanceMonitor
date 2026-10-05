@@ -1839,6 +1839,42 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
     }
 
+    /// <summary>The query string as slow-read arguments. A key name is caller text: only plain identifier characters
+    /// ([A-Za-z0-9_.-]) are stored, capped at 64; any other key is dropped and counted under <c>_dropped_keys</c>.</summary>
+    internal static JsonObject WebQueryArguments(IEnumerable<KeyValuePair<string, string?>> query)
+    {
+        var arguments = new JsonObject();
+        var droppedKeys = 0;
+        foreach (var (key, value) in query)
+        {
+            if (!key.All(c => c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_' or '.' or '-'))
+            {
+                droppedKeys++;
+                continue;
+            }
+
+            arguments[key.Length > 64 ? key[..64] : key] = value;
+        }
+
+        if (droppedKeys > 0)
+        {
+            arguments["_dropped_keys"] = droppedKeys;
+        }
+
+        return arguments;
+    }
+
+    /// <summary>The composed-panel route label: <c>compose:</c> plus the panel's source when the catalog knows it,
+    /// else <c>compose:unknown</c>, held to 120 characters.</summary>
+    internal static string ComposeRouteLabel(JsonObject body)
+    {
+        var route = body["panel"] is JsonObject panel && panel["source"] is JsonValue sourceValue
+            && sourceValue.TryGetValue<string>(out var source) && MeasureCatalog.IsKnownSource(source)
+            ? "compose:" + source
+            : ComposeUnknownRouteLabel;
+        return route.Length > 120 ? route[..120] : route;
+    }
+
     /// <summary>Offers a slow or failed <c>/api/read/*</c> call to the slow-read record (#5097): the query string, as sent,
     /// becomes the arguments. Never throws into the request.</summary>
     private static void OfferWebSlowRead(ReadLatencyRecorder recorder, ReadScope scope, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, string? errorClass)
@@ -1850,11 +1886,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         try
         {
-            var arguments = new JsonObject();
-            foreach (var (key, values) in context.Request.Query)
-            {
-                arguments[key] = values.Count > 0 ? values[0] : null;
-            }
+            var arguments = WebQueryArguments(context.Request.Query.Select(q => new KeyValuePair<string, string?>(q.Key, q.Value.Count > 0 ? q.Value[0] : null)));
 
             recorder.SlowReads.Offer(scope, ReadSurface.Web, name, outcome, elapsedMs, arguments, errorClass, recorder.Logger);
         }
@@ -1868,10 +1900,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     {
         try
         {
-            var measureKey = body["panel"] is JsonObject panel && panel["source"] is JsonValue sourceValue
-                && sourceValue.TryGetValue<string>(out var source) && !string.IsNullOrEmpty(source)
-                ? "compose:" + source
-                : ComposeUnknownRouteLabel;
+            var measureKey = ComposeRouteLabel(body);
 
             /* Payload => Ok. outcome.Fault carries the real PostgresException for a store fault the panel
                author could not have caused -- classified the same way the web loop classifies any exception.
