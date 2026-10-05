@@ -43,6 +43,13 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
     private int _payloadIndex;
 
     /// <summary>
+    /// True between <see cref="BeginPayload"/> and <see cref="EndPayload"/>: the only span in which a written value is a
+    /// payload value. The host writes each row's prefix (collection id, collection_time, server_id, server_name) through
+    /// these same overloads before <see cref="BeginPayload"/>, so the hour-ledger tally (#4605) observes only inside it.
+    /// </summary>
+    private bool _inPayload;
+
+    /// <summary>
     /// Routes the large text payloads of this collector into the hash-keyed dimension tables instead
     /// of inline onto every row (#1767). The host sets this once per COPY batch, from the SAME
     /// schema it built <see cref="CopyCommandFor(ICollectorSchemaInfo)"/> from — the plan decides
@@ -61,9 +68,15 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
     /// <summary>
     /// Opens one row's payload run: the diversion plan is indexed by PAYLOAD column ordinal, so the
     /// counter must restart after the prefix columns (which the host writes through this same
-    /// writer). Call immediately before the definition's WritePayload.
+    /// writer). Call immediately before the definition's WritePayload. It also opens the window in which the
+    /// ledger tally (<see cref="CountNonZeroAt"/>) watches writes: the prefix's own integers, written through these same
+    /// overloads before this call, are not payload values and are never tallied (#4605).
     /// </summary>
-    public void BeginPayload() => _payloadIndex = 0;
+    public void BeginPayload()
+    {
+        _payloadIndex = 0;
+        _inPayload = true;
+    }
 
     /// <summary>
     /// The payload position whose integer value this writer tallies, or -1 when it tallies none (#4605). The hour
@@ -111,7 +124,9 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
 
     private void Observe(int index, int? value)
     {
-        if (index != _countedPayloadIndex)
+        /* Only payload positions: the host writes its prefix through these same overloads before BeginPayload, and on a
+           fresh writer the first row's server_id (a Value(int)) would otherwise sit at position 1 or 2 (#4605). */
+        if (!_inPayload || index != _countedPayloadIndex)
         {
             return;
         }
@@ -135,6 +150,7 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
     /// </summary>
     public void EndPayload(int expectedPayloadColumns)
     {
+        _inPayload = false;
         if (_payloadIndex != expectedPayloadColumns)
         {
             throw new InvalidOperationException(
