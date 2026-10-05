@@ -69,6 +69,22 @@ public static class QueryStatsHourLedgerWriter
     }
 
     /// <summary>
+    /// Fails the batch before its COPY completes when any row wrote the interval through an overload the tally does not
+    /// see (#4605): an undercounted ledger is the one error the tally must not make silently. The runner calls this with
+    /// the rows it wrote and <see cref="PgCollectorRowWriter.CountedWrites"/>; it is a method of its own so a test can
+    /// fail the check, which a substring pin in the runner's source cannot do.
+    /// </summary>
+    public static void EnsureEveryRowTallied(string collectorName, int rowsWritten, long countedWrites)
+    {
+        if (countedWrites != rowsWritten)
+        {
+            throw new InvalidOperationException(
+                $"The {collectorName} batch wrote {rowsWritten} rows but {countedWrites} integer values at " +
+                $"'{IntervalColumn}', so its ledger count would be wrong (#4605).");
+        }
+    }
+
+    /// <summary>
     /// Adds one batch's count to its hour on the COPY's transaction (<see cref="QueryStatsHourLedger.UpsertSql"/>).
     /// <paramref name="serverName"/> must be the storage name the COPY wrote into <c>server_name</c>, byte for byte, and
     /// <paramref name="collectionTime"/> the batch's stored <c>collection_time</c>. A <paramref name="count"/> of 0 or less

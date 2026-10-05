@@ -4369,11 +4369,9 @@ public sealed class DarlingCollectorRunner
                     /* #4605: every row must have written the interval as an integer for the tally to be the batch's
                        count. A definition that moved the column to another overload would leave rows untallied, and an
                        undercounted ledger is silent: fail the batch here instead, before the COPY completes. */
-                    if (ledgerBatch && writer.CountedWrites != rowsWritten)
+                    if (ledgerBatch)
                     {
-                        throw new InvalidOperationException(
-                            $"The {definition.Name} batch wrote {rowsWritten} rows but {writer.CountedWrites} integer values at " +
-                            $"'{QueryStatsHourLedgerWriter.IntervalColumn}', so its ledger count would be wrong (#4605).");
+                        QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites);
                     }
 
                     await importer.CompleteAsync(cancellationToken);

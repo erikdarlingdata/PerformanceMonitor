@@ -105,9 +105,21 @@ public sealed class QueryStatsHourLedgerWriterTests
         /* The ledger term keeps the transaction non-null for a ledger batch whatever the diversion plan says. */
         Assert.Matches(@"diversionPlan\.Count > 0 \|\| queryStoreDatabases is not null \|\| ledgerBatch\s*\?\s*await pgConnection\.BeginTransactionAsync", code);
 
-        /* A row that wrote the interval through another overload would be untallied: the batch fails before the COPY completes. */
-        var guard = code.IndexOf("writer.CountedWrites != rowsWritten", StringComparison.Ordinal);
+        /* A row that wrote the interval through another overload would be untallied: the batch fails before the COPY completes.
+           The comparison lives in EnsureEveryRowTallied (its own test below fails without it), so this pins the CALL: it sits
+           after the row loop, before the COPY completes, and directly inside `if (ledgerBatch)`. */
+        var guard = code.IndexOf("QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites)", StringComparison.Ordinal);
         Assert.True(guard > rowLoop && guard < code.IndexOf("importer.CompleteAsync(", StringComparison.Ordinal));
+        Assert.Matches(@"if \(ledgerBatch\)\s*\{\s*QueryStatsHourLedgerWriter\.EnsureEveryRowTallied\(definition\.Name, rowsWritten, writer\.CountedWrites\);", code);
+    }
+
+    [Fact]
+    public void EnsureEveryRowTallied_ThrowsOnAnyMismatch_AndPassesOnEquality()
+    {
+        QueryStatsHourLedgerWriter.EnsureEveryRowTallied("query_stats", 3, 3);
+        Assert.Throws<InvalidOperationException>(() => QueryStatsHourLedgerWriter.EnsureEveryRowTallied("query_stats", 3, 2));
+        Assert.Throws<InvalidOperationException>(() => QueryStatsHourLedgerWriter.EnsureEveryRowTallied("query_stats", 3, 4));
+        Assert.Throws<InvalidOperationException>(() => QueryStatsHourLedgerWriter.EnsureEveryRowTallied("query_stats", 1, 0));
     }
 
     [Fact]
