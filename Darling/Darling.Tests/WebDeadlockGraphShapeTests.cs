@@ -25,7 +25,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class WebDeadlockGraphShapeTests
 {
-    private static string ReadSource(string relative) => ReadRepoFileLf(relative.Split('/'));
+    private static string ReadSource(string relative) => ReadRepoFile(relative.Split('/'));
 
     private static string Fixture(string name) => DeadlockGraphParserTests.LoadFixture(name);
 
@@ -203,12 +203,12 @@ public sealed class WebDeadlockGraphShapeTests
     [Fact]
     public void TheGraphScript_NeverParsesMarkup_AndIsWiredIntoTheGrid()
     {
-        var js = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "deadlock-graph.js");
+        var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "deadlock-graph.js");
         foreach (var banned in new[] { "innerHTML", "insertAdjacentHTML", "DOMParser", "outerHTML" })
             Assert.DoesNotContain(banned, js, StringComparison.Ordinal);
         Assert.DoesNotContain("from \"../charts.js\"", js, StringComparison.Ordinal);
 
-        var tabs = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.Contains("from \"./deadlock-graph.js\"", tabs, StringComparison.Ordinal);
         Assert.Contains("{ key: \"graph\"", tabs, StringComparison.Ordinal);
     }
