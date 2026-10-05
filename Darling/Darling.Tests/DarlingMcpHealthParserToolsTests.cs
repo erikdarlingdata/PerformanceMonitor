@@ -364,7 +364,7 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
 /// never captured on a live session is the healthy "empty"; an empty store is "unavailable" (#3541 A12).
 /// </summary>
 [Collection("live-postgres")]
-public sealed partial class DarlingMcpHealthParserToolsLivePostgresTests
+public sealed class DarlingMcpHealthParserToolsLivePostgresTests
 {
     private const string ServerName = "darling-mcp-health-e2e";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);

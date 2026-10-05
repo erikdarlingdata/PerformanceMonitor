@@ -26,7 +26,8 @@ namespace Darling.Tests;
 /// notice compares UTC with UTC. The first collection of a server stores the trace's history, so an event can be older than the
 /// coverage: the notice names the earlier of the two. Every window is anchored by <c>as_of</c>.
 /// </summary>
-public sealed partial class DarlingMcpDefaultTraceToolsLivePostgresTests
+[Collection("live-postgres")]
+public sealed class DarlingMcpDefaultTraceToolsWindowNoticeLiveTests
 {
     private const string TraceTable = "default_trace_events";
     private const int OffsetMinutes = -300;
