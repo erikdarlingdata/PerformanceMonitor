@@ -1560,7 +1560,8 @@ internal static class DarlingDataReader
     /// <paramref name="HourlyFirstBucket"/> is the first rollup bucket this server holds inside the window on
     /// the hourly tier (null when none, or on raw).</summary>
     public sealed record TopQueriesReadResult(
-        List<TopQueryRow> Rows, RetentionTier Tier, bool RawForced = false, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null);
+        List<TopQueryRow> Rows, RetentionTier Tier, bool RawForced = false, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null,
+        string? RetentionNotice = null);
 
     /// <summary>
     /// #4231 stage 3: <see cref="GetTopQueriesByCpuAsync"/>'s routed form, exposing the tier it read so a
@@ -1599,6 +1600,14 @@ internal static class DarlingDataReader
             tier = RetentionTier.Raw;
             rawForced = true;
         }
+
+        /* #5226: a reads ranking can only read raw, so on a window past what raw keeps it is partial, and the answer
+           says so with the raw route's retention notice, the one the composed panels carry (BuildRetentionNotice,
+           judged by the store's measured raw floor). Null when raw reaches the window's start, on a store with no
+           rollups, and for every other ranking. */
+        var retentionNotice = TopRankings.HourlyCarries(ranking)
+            ? null
+            : ComposeStoreAvailability.BuildRetentionNotice("query_stats", ComposeRoute.Raw, startUtc, DateTime.UtcNow, rollups, coverage);
 
         Debug.Assert(!(tier == RetentionTier.Hourly && (minMaxDop > 0 || rollUpByHostObject)));
         if (tier == RetentionTier.Hourly)
@@ -1650,7 +1659,7 @@ internal static class DarlingDataReader
                 ReadTopQueryDetail(reader, 23, clock)));
         }
 
-        return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced);
+        return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced, RetentionNotice: retentionNotice);
     }
 
     /// <summary>The detail columns of <see cref="TopQueriesSql"/> / <see cref="TopQueriesByHostObjectSql"/>, 21
@@ -1842,7 +1851,8 @@ internal static class DarlingDataReader
     /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly);
     /// the MCP tool's <c>tier_used</c> comes from here.</summary>
     public sealed record TopProceduresReadResult(
-        List<TopProcedureRow> Rows, RetentionTier Tier, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null, bool RawForced = false);
+        List<TopProcedureRow> Rows, RetentionTier Tier, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null, bool RawForced = false,
+        string? RetentionNotice = null);
 
     public static async Task<List<TopProcedureRow>> GetTopProceduresByCpuAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
@@ -1878,6 +1888,11 @@ internal static class DarlingDataReader
             tier = RetentionTier.Raw;
             rawForced = true;
         }
+
+        /* #5226: the raw route's retention notice for a reads ranking, as on the queries read. */
+        var retentionNotice = TopRankings.HourlyCarries(ranking)
+            ? null
+            : ComposeStoreAvailability.BuildRetentionNotice("procedure_stats", ComposeRoute.Raw, startUtc, DateTime.UtcNow, rollups, coverage);
 
         if (tier == RetentionTier.Hourly)
         {
@@ -1919,7 +1934,7 @@ internal static class DarlingDataReader
                 ReadTopProcedureDetail(reader, 17, clock)));
         }
 
-        return new TopProceduresReadResult(rows, RetentionTier.Raw, RawForced: rawForced);
+        return new TopProceduresReadResult(rows, RetentionTier.Raw, RawForced: rawForced, RetentionNotice: retentionNotice);
     }
 
     /// <summary>The detail columns of <see cref="TopProceduresSql"/>, ten consecutive fields from

@@ -872,6 +872,10 @@ public sealed class DarlingMcpDataTools
                           + "server has been monitored for less time than that), so the older part of it was not read."
                         : "The window reaches further back than this server's raw query_stats retains (or this "
                           + "server has been monitored for less time than that), so the older part of it was not read.",
+                /* #5226: the raw route's retention notice (ComposeStoreAvailability.BuildRetentionNotice, the one the composed
+                   panels carry), set only for a reads ranking, which can read raw alone, over a window past what raw keeps. Null
+                   for every other ranking, so the MCP tools (CPU only) always send null. The web page draws it above the grid. */
+                retention_notice = routed.RetentionNotice,
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -1134,6 +1138,8 @@ public sealed class DarlingMcpDataTools
                           + "server has been monitored for less time than that), so the older part of it was not read."
                         : "The window reaches further back than this server's raw procedure_stats retains (or this "
                           + "server has been monitored for less time than that), so the older part of it was not read.",
+                /* #5226: as on get_top_queries_by_cpu: the raw route's retention notice for a reads ranking past raw's reach. */
+                retention_notice = routed.RetentionNotice,
                 procedures = result
             }, McpHelpers.JsonOptions);
         }

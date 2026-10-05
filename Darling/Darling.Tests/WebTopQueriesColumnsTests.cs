@@ -111,10 +111,12 @@ public sealed class WebTopQueriesColumnsTests
     public void BothTopQueriesGridsPassTheGroupsAndTheFullDetailRead()
     {
         var js = Tab();
-        Assert.Equal(2, Regex.Matches(js, @"""get_top_queries_by_cpu"",\s*\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \}").Count);
-        Assert.Equal(2, Regex.Matches(js, @"get_top_queries_by_cpu"",\s*\{ server, hours: ctx\.hours, top: 20, detail").Count);
+        /* #5226: both grids send their params through rankedParams, which adds order_by only for a non-default pick, so the
+           default read's params are still exactly { server, hours, top: 20, detail: "full" }. */
+        Assert.Equal(2, Regex.Matches(js, @"""get_top_queries_by_cpu"",\s*rankedParams\(\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \}, ranking\)").Count);
+        Assert.Equal(2, Regex.Matches(js, @"get_top_queries_by_cpu"",\s*rankedParams\(\{ server, hours: ctx\.hours, top: 20, detail").Count);
         Assert.Contains("groups: TOP_QUERY_GROUPS.groups", js, StringComparison.Ordinal);
-        Assert.Matches(@"TOP_QUERY_COLUMNS,[^;]*?TOP_QUERY_GROUPS\s*\)", js);
+        Assert.Matches(@"TOP_QUERY_COLUMNS,[^;]*?TOP_QUERY_GROUPS,\s*picker\s*\)", js);
     }
 
     [Fact]

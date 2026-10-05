@@ -110,8 +110,9 @@ public sealed class WebTopProceduresColumnsTests
     {
         var js = Tab();
         Assert.Equal(2, Regex.Matches(js,
-            @"""get_top_procedures_by_cpu"",\s*\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \},\s*""procedures"",\s*\[\.\.\.TOP_PROC_COLUMNS, procedurePlanColumn\(server\)\],").Count);
-        Assert.Equal(2, Regex.Matches(js, @"""truncation_note"",\s*null,\s*TOP_PROC_GROUPS\s*\)").Count);
+            @"""get_top_procedures_by_cpu"",\s*rankedParams\(\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \}, ranking\),\s*""procedures"",\s*\[\.\.\.TOP_PROC_COLUMNS, procedurePlanColumn\(server\)\],").Count);
+        /* #5226: the ranking's retention notice is a second note on the grid, and the selector is its last argument. */
+        Assert.Equal(2, Regex.Matches(js, @"""truncation_note"",\s*RANKING_NOTE_KEYS,\s*TOP_PROC_GROUPS,\s*picker\s*\)").Count);
     }
 
     [Fact]
