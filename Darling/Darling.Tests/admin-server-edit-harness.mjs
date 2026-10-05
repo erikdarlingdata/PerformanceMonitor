@@ -347,6 +347,7 @@ try {
         requests: requests.map((r) => r.method + " " + r.url),
         removedTotal: removed.length,
         activeElement: activeElement === null,
+        utcOffsetMinutes: new Date(2026, 0, 1).getTimezoneOffset(),
       };
     },
     /* The focus model itself, through the real mount(): a focused box survives a repaint that leaves its node attached and
@@ -378,11 +379,16 @@ try {
       const disabledCannotFocus = activeElement === null;
       return { afterFocus, keptWhenSiblingRepaints, lostWhenAncestorCleared, sameNodeBack, ancestorRecorded, lostOnTextReset, detachedCannotFocus, disabledCannotFocus };
     },
-    /* One call of an admin.js export: {"fn": "buildEditBody", "args": [...]} on stdin. */
+    /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or
+       {"calls": [{"fn": ..., "args": [...]}, ...]} for a table of calls in one process, printed as {"results": [...]}.
+       An export that is not a function (EDIT_FIELDS) is returned as it is. */
     pure: async () => {
-      const { fn, args = [] } = JSON.parse(await readStdin());
-      if (!(fn in page)) throw new Error("admin.js exports no " + fn);
-      return { result: typeof page[fn] === "function" ? page[fn](...args) : page[fn] };
+      const request = JSON.parse(await readStdin());
+      const call = ({ fn, args = [] }) => {
+        if (!(fn in page)) throw new Error("admin.js exports no " + fn);
+        return typeof page[fn] === "function" ? page[fn](...args) : page[fn];
+      };
+      return Array.isArray(request.calls) ? { results: request.calls.map(call) } : { result: call(request) };
     },
   };
   if (!(scenario in scenarios)) throw new Error("unknown scenario " + scenario);
