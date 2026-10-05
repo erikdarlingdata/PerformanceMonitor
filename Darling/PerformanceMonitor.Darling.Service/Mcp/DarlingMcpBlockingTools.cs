@@ -13,10 +13,12 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -105,8 +107,9 @@ public sealed class DarlingMcpBlockingTools
         [Description("Return each row's full blocked_sql_text/blocking_sql_text instead of a 150-character preview. Default false. A dedup_key call ignores this and always returns the full text.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         MonitoredServerRegistryState? registryState = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, SqlTextPreviewLength, registryState, cancellationToken);
+        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, SqlTextPreviewLength, registryState, logger, cancellationToken);
 
     /// <summary>
     /// get_blocking under an explicit <paramref name="sqlTextPreviewLength"/> (#4198): the MCP tool passes
@@ -116,7 +119,7 @@ public sealed class DarlingMcpBlockingTools
     /// </summary>
     internal static async Task<string> GetBlocking(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, string? dedup_key, bool full_text, string? as_of, int sqlTextPreviewLength,
-        MonitoredServerRegistryState? registryState = null, CancellationToken cancellationToken = default)
+        MonitoredServerRegistryState? registryState = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -129,6 +132,7 @@ public sealed class DarlingMcpBlockingTools
         try
         {
             var now = windowEnd;
+            var windowStart = now.AddHours(-hours_back);
             var filtering = !DarlingIncidentFingerprint.NoFilter(dedup_key);
 
             /*
@@ -153,7 +157,12 @@ public sealed class DarlingMcpBlockingTools
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, fetch, cancellationToken);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No blocking events found in the specified time range.");
+                    /* #4966: an empty answer over a window the store may not reach back to is not a true negative, so the window keys
+                       ride on it under hints. The page is fed by two collectors, so the probe is both (the earlier of the two). */
+                    ?? McpHelpers.Status("empty", "No blocking events found in the specified time range.",
+                        (await DarlingMcpWindowNotice.ReadEventAsync(
+                            () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources(xeReportsOnPage: false), resolved.ServerName, windowStart, now, cancellationToken),
+                            null, windowStart, now, BlockingPageTables(xeReportsOnPage: false), emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
 
             var scanTruncated = filtering && rows.Count > DarlingBlockingReader.FingerprintScanCeiling;
             if (scanTruncated) rows = rows.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();
@@ -191,6 +200,15 @@ public sealed class DarlingMcpBlockingTools
                window than limit" — the same field, and both sentences are true of what it measures. */
             var truncated = rows.Count > limit;
             var page = rows.Take(limit).ToList();
+
+            /* #4966: where the store's data starts for the window. An event list, so the floor is the earlier of the coverage probe and
+               the oldest event the page shows (a first run of a collector can store events from before itself). The probe is the
+               source the page's rows came from: when the page holds XE reports it is the XE collector's alone (the DMV snapshots'
+               longer history is not what those rows are), otherwise the earlier of the two collectors, as the viewer's grid does. */
+            var xeReportsOnPage = page.Any(r => r.Source == BlockedProcessAlertRow.XeReportSource);
+            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources(xeReportsOnPage), resolved.ServerName, windowStart, now, cancellationToken),
+                page.Min(r => r.EventTime), windowStart, now, BlockingPageTables(xeReportsOnPage), logger: logger, cancellationToken: cancellationToken);
 
             /* #4198: filtering (a dedup_key) already narrowed the page to one named incident, so that call
                is exempt from the preview cut — see SqlTextPreviewLength's doc comment. */
@@ -241,11 +259,17 @@ public sealed class DarlingMcpBlockingTools
                 dedup_key = keys[i]
             });
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 /* The span REQUESTED. Kept under its shipped name, and no longer the only span on the page. */
                 hours_back,
+                /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
+                   window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
+                   for the window floor. A failed coverage probe leaves the three off (see the return below). */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
                 /*
                     #3541 A3: `total_events` is gone. It was the reader's capped row count — neither the
@@ -274,12 +298,32 @@ public sealed class DarlingMcpBlockingTools
                 separately_monitored_note = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote,
                 separately_monitored_databases = separate
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_blocking", ex);
         }
     }
+
+    /// <summary>
+    /// The collector tables get_blocking's page is fed by (#4966): the XE blocked process reports and the always-on DMV blocking
+    /// snapshots that stand in for them. When the page holds XE reports the probe is the XE table alone, because those rows come from
+    /// that collector and the DMV collector's longer history says nothing about where they start; otherwise (an empty answer, or a
+    /// page of DMV rows only) it is both, and <see cref="DataWindowFloor.GetAsync"/> answers the earlier of the two. Both are table
+    /// sources, not <c>ForCollectorRuns</c>: the rows were read from these tables, so the purge edge that bounds them is the
+    /// tables' (30 days), where the run log's is 60 and would claim coverage of days the rows no longer exist for.
+    /// </summary>
+    private static DataWindowFloor.Source[] BlockingPageSources(bool xeReportsOnPage) =>
+        xeReportsOnPage
+            ? [DataWindowFloor.Source.ForCollectorTable("blocked_process_reports")]
+            : [DataWindowFloor.Source.ForCollectorTable("blocked_process_reports"), DataWindowFloor.Source.ForCollectorTable("dmv_blocking_snapshots")];
+
+    /// <summary>The table name(s) <see cref="BlockingPageSources"/> probes, as the truncation note names them.</summary>
+    private static string BlockingPageTables(bool xeReportsOnPage) =>
+        xeReportsOnPage ? "blocked_process_reports" : "blocked_process_reports and dmv_blocking_snapshots";
 
     /// <summary>
     /// The sentence appended to a no-match answer when the fingerprint scan hit
@@ -302,6 +346,7 @@ public sealed class DarlingMcpBlockingTools
         [Description("Optional alert fingerprint (the alert's Dedup Key). The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit.")] string? dedup_key = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         MonitoredServerRegistryState? registryState = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name, cancellationToken);
@@ -315,6 +360,7 @@ public sealed class DarlingMcpBlockingTools
         try
         {
             var now = windowEnd;
+            var windowStart = now.AddHours(-hours_back);
             var filtering = !DarlingIncidentFingerprint.NoFilter(dedup_key);
 
             /* #3541 A3: see get_blocking — the caller's limit + 1 as the page fetch, the stated scan ceiling
@@ -330,7 +376,11 @@ public sealed class DarlingMcpBlockingTools
                        and then returns zero rows forever, which is byte-identical to a server that simply
                        did not deadlock — the one answer nobody should be given without being told. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
+                    /* #4966: the window keys ride on an empty answer under hints; not_collected and the precondition stay bare. */
+                    ?? McpHelpers.Status("empty", "No deadlocks found in the specified time range.",
+                        (await DarlingMcpWindowNotice.ReadEventAsync(
+                            () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, windowStart, now, cancellationToken),
+                            null, windowStart, now, "deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
 
             var scanTruncated = filtering && rows.Count > DarlingBlockingReader.FingerprintScanCeiling;
             if (scanTruncated) rows = rows.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();
@@ -359,6 +409,11 @@ public sealed class DarlingMcpBlockingTools
             var truncated = rows.Count > limit;
             var page = rows.Take(limit).ToList();
 
+            /* #4966: an event list, so the floor is the earlier of the coverage probe and the oldest deadlock the page shows. */
+            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, windowStart, now, cancellationToken),
+                page.Min(r => r.DeadlockTime), windowStart, now, "deadlocks", logger: logger, cancellationToken: cancellationToken);
+
             var separate = await SeparatelyMonitoredForAsync(postgres, registryState, resolved.ServerId, cancellationToken);
 
             var result = page.Select((r, i) => new
@@ -373,10 +428,16 @@ public sealed class DarlingMcpBlockingTools
                 dedup_key = keys[i]
             });
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
+                   window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
+                   for the window floor. A failed coverage probe leaves the three off (see the return below). */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
                 /* #3541 A3: the page described as a page — see get_blocking for why `total_deadlocks` went.
                    The ORDER BY is deadlock_time, so the bounds are on that stamp rather than collection_time,
@@ -393,6 +454,9 @@ public sealed class DarlingMcpBlockingTools
                 separately_monitored_note = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote,
                 separately_monitored_databases = separate
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -419,6 +483,7 @@ public sealed class DarlingMcpBlockingTools
         [Description("Optional alert fingerprint (the alert's Dedup Key); paste it straight from an alert. Returns only that incident, scoped to the server's display name and its objects.")] string? dedup_key = null,
         [Description("Return each graph's full XML instead of a 2000-character preview. Default false. A dedup_key call ignores this and always returns the full graph.")] bool full_graph = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name, cancellationToken);
@@ -432,6 +497,7 @@ public sealed class DarlingMcpBlockingTools
         try
         {
             var now = windowEnd;
+            var windowStart = now.AddHours(-hours_back);
 
             var filtering = !DarlingIncidentFingerprint.NoFilter(dedup_key);
 
@@ -455,7 +521,11 @@ public sealed class DarlingMcpBlockingTools
                predicate rather than a Where() here, for the reason above. */
             if (candidates.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No deadlock XML available in the specified time range.");
+                    /* #4966: the window keys ride on an empty answer under hints; not_collected stays bare. */
+                    ?? McpHelpers.Status("empty", "No deadlock XML available in the specified time range.",
+                        (await DarlingMcpWindowNotice.ReadEventAsync(
+                            () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, windowStart, now, cancellationToken),
+                            null, windowStart, now, "deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
 
             var examined = candidates.Count;
             var keys = DarlingIncidentFingerprint.DeadlockKeys(
@@ -479,6 +549,11 @@ public sealed class DarlingMcpBlockingTools
 
             var truncated = candidates.Count > limit;
             var withXml = candidates.Take(limit).ToList();
+
+            /* #4966: as get_deadlocks, over the deadlocks that carry a graph. */
+            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, windowStart, now, cancellationToken),
+                withXml.Min(r => r.DeadlockTime), windowStart, now, "deadlocks", logger: logger, cancellationToken: cancellationToken);
 
             /* #4198: filtering (a dedup_key) already narrowed the page to one named incident, so that call
                is exempt from the preview cut — see DeadlockGraphPreviewLength's doc comment. */
@@ -506,10 +581,16 @@ public sealed class DarlingMcpBlockingTools
             };
             });
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
+                   window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
+                   for the window floor. A failed coverage probe leaves the three off (see the return below). */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
                 /* #3541 A3: the page bounds, on the same names as get_deadlocks. The page here is graphs, so
                    truncated means "more deadlocks WITH a graph than limit", which is the sentence this tool's
@@ -523,6 +604,9 @@ public sealed class DarlingMcpBlockingTools
                 scan_truncated = filtering ? scanTruncated : (bool?)null,
                 deadlocks = result
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -537,6 +621,7 @@ public sealed class DarlingMcpBlockingTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum reports WITH XML to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -550,6 +635,7 @@ public sealed class DarlingMcpBlockingTools
         try
         {
             var now = windowEnd;
+            var windowStart = now.AddHours(-hours_back);
 
             /* #3541 A3: same shape as get_deadlock_detail — the report-XML predicate is in the SQL, the XE
                arm alone is read (the DMV fallback never carries a report), and the fetch is the caller's
@@ -565,7 +651,17 @@ public sealed class DarlingMcpBlockingTools
                     /* #2546: same order and same reason as get_deadlocks — a blocked-process capture whose
                        session is gone is indistinguishable here from a server that never blocked. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.");
+                    /* #4966: the report XML exists only in the XE arm, so the probe is the XE collector's alone: the DMV snapshots are
+                       not a source of these rows, and their longer history must not read as coverage of reports they cannot hold. */
+                    ?? McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.",
+                        (await DarlingMcpWindowNotice.ReadEventAsync(
+                            () => DarlingMcpWindowNotice.Probe(postgres, "blocked_process_reports", resolved.ServerName, windowStart, now, cancellationToken),
+                            null, windowStart, now, "blocked_process_reports", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
+
+            /* #4966: the XE collector's coverage, earlier-of the oldest report shown (see get_deadlocks). */
+            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "blocked_process_reports", resolved.ServerName, windowStart, now, cancellationToken),
+                withXml.Min(r => r.EventTime), windowStart, now, "blocked_process_reports", logger: logger, cancellationToken: cancellationToken);
 
             var result = withXml.Select(r => new
             {
@@ -577,10 +673,16 @@ public sealed class DarlingMcpBlockingTools
                 blocked_process_report_xml = r.BlockedProcessReportXml
             });
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
+                   window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
+                   for the window floor. A failed coverage probe leaves the three off (see the return below). */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 /* #3541 A3: the page bounds, on get_blocking's names. truncated means "more reports WITH
                    XML in the window than limit". */
                 reports_returned = withXml.Count,
@@ -590,6 +692,9 @@ public sealed class DarlingMcpBlockingTools
                 order = "event_time_desc",
                 reports = result
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

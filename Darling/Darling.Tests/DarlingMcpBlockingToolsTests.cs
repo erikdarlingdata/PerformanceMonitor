@@ -775,7 +775,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             Assert.Equal("empty", root.GetProperty("status").GetString());
             var hints = root.GetProperty("hints");
             Assert.True(hints.GetProperty("window_truncated").GetBoolean(), tool.Name);
-            Assert.Equal(McpHelpers.FormatEffectiveStart(added), hints.GetProperty("effective_start").GetString());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+            Assert.Contains("no collection of " + tool.Label, hints.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
             Assert.False(root.TryGetProperty("window_truncated", out _), tool.Name);
         });
     }
@@ -794,7 +795,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             var bodySucceeded = false;
             try
             {
-                var root = ParseEvent(await CallEventAsync(postgres, tool, name, 1, end.AddHours(1)));
+                var root = ParseEvent(await CallEventAsync(postgres, tool, name, 1, end));
 
                 Assert.Equal(0, probes);
                 Assert.True(root.GetProperty(tool.ArrayKey).GetArrayLength() > 0, tool.Name);
