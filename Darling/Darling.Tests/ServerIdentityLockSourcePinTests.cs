@@ -114,6 +114,23 @@ public sealed class ServerIdentityLockSourcePinTests
     }
 
     [Fact]
+    public void TheViewersInsertIfAbsent_IsAnIdentityWriteToo_LockFirstThenInsertInOneTransaction()
+    {
+        var body = Between(
+            ViewerSource(),
+            "public async Task<bool> InsertMonitoredServerIfAbsentAsync(",
+            "public async Task<MonitoredServerAddResult> AddMonitoredServerAsync(");
+
+        AssertInOrder(
+            body,
+            "BeginTransactionAsync(",
+            "TakeIdentityLockAndFindClaimantAsync(connection, transaction, row, null, cancellationToken)",
+            "new NpgsqlCommand(MonitoredServerInsertIfAbsentSql, connection, transaction)",
+            "CommitAsync(");
+        Assert.DoesNotContain("_dataSource.CreateCommand(", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheViewersHelper_TakesTheLockBeforeItReadsAnyAddress_BothOnTheCallersTransaction()
     {
         var body = Between(

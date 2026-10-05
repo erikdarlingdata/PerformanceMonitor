@@ -505,15 +505,28 @@ ORDER BY COALESCE(s.display_name, c.name)";
     /// Inserts a server definition only when its <c>server_id</c> is absent — the migrate-in. Returns true
     /// when a row was actually written (so the caller can count the imported servers), false when the id
     /// already existed (the service seed or a prior migrate already has it).
+    ///
+    /// <para>It gives a definition an address, so it is an identity write like <see cref="AddMonitoredServerAsync"/>
+    /// (#5240): one transaction behind <see cref="MonitoredServerIdentityLockSql"/>, and an address another
+    /// definition already holds, under whatever id, is refused the same way a taken id is: false, nothing written.</para>
     /// </summary>
     public async Task<bool> InsertMonitoredServerIfAbsentAsync(MonitoredServerRow row, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(row);
 
-        await using var command = _dataSource.CreateCommand(MonitoredServerInsertIfAbsentSql);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        if (await TakeIdentityLockAndFindClaimantAsync(connection, transaction, row, null, cancellationToken) is not null)
+        {
+            return false;
+        }
+
+        await using var command = new NpgsqlCommand(MonitoredServerInsertIfAbsentSql, connection, transaction);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindMonitoredServer(command, row);
-        return await ExecuteWriteAsync(command, cancellationToken) > 0;
+        var written = await ExecuteWriteAsync(command, cancellationToken) > 0;
+        await transaction.CommitAsync(cancellationToken);
+        return written;
     }
 
     /// <summary>

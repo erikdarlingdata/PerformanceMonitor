@@ -548,6 +548,28 @@ public sealed class ServerIdentityLockLiveTests
         Assert.True(race.BothQueuedOnTheLock, "Both viewer edits should have queued behind the held identity lock.");
     }
 
+    /// <summary>The viewer's insert-if-absent (the migrate-in's old write) is an identity write too: an address an edit
+    /// left a definition at, under an older id, is refused (false, nothing written); a free address is written.</summary>
+    [Fact]
+    public async Task TheViewersInsertIfAbsent_RefusesAnAddressHeldUnderAnotherId_AndWritesAFreeOne()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        await SeedServerAsync(rig.Owner, 7391, "moved", AddressK, ct);
+
+        Assert.False(await viewer.InsertMonitoredServerIfAbsentAsync(
+            ViewerRow(ViewerDataService.ComputeServerId(AddressK, null, false), "again", AddressK), ct));
+        Assert.True(await viewer.InsertMonitoredServerIfAbsentAsync(
+            ViewerRow(ViewerDataService.ComputeServerId("free.example.test", null, false), "free", "free.example.test"), ct));
+
+        var keys = await StorageKeysAsync(rig.Owner, ct);
+        Assert.Equal(2, keys.Count);
+        Assert.Single(keys, key => key.Contains(AddressK, StringComparison.OrdinalIgnoreCase));
+        Assert.Single(keys, key => key.Contains("free.example.test", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(0, await AdvisoryLocksAsync(rig.Owner, true, ct) + await AdvisoryLocksAsync(rig.Owner, false, ct));
+    }
+
     [Fact]
     public async Task AViewerAddAndAViewerEditOnDifferentAddresses_BothSucceed_AfterQueueingOnTheLock()
     {
