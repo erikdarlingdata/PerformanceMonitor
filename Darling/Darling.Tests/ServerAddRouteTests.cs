@@ -407,22 +407,22 @@ public sealed class ServerAddRouteTests
         Assert.Equal(HttpStatusCode.OK, accepted);
     }
 
-    /* ═══════════════════════ slot hand-off ═══════════════════════ */
+    /* ═══════════════════════ slot release ═══════════════════════ */
 
-    /// <summary>Cycles for the hand-off stress pins. The defect is a race between the handler's answer and the
+    /// <summary>Cycles for the slot-release stress pins. The defect is a race between the handler's answer and the
     /// slot release, so one pass proves little; the fixed code frees the slot before the answer exists, so every
     /// cycle passes by construction and a regression shows up as a refusal within the loop.</summary>
-    private const int HandOffCycles = 400;
+    private const int SlotCycles = 400;
 
     [Fact]
     public async Task AnAddThatFinishedInsideTheWait_FreesTheSlotBeforeItsAnswer_SoAnImmediateSecondAddIsNotRefused()
     {
         await using var rig = await StartAsync(_ => Task.FromResult(AddedAnswer));
 
-        for (var i = 0; i < HandOffCycles; i++)
+        for (var i = 0; i < SlotCycles; i++)
         {
             var status = (await PostAsync(rig, Entries(1))).Status;
-            Assert.True(status == HttpStatusCode.OK, $"add {i + 1} of {HandOffCycles} answered {(int)status} right after a finished add");
+            Assert.True(status == HttpStatusCode.OK, $"add {i + 1} of {SlotCycles} answered {(int)status} right after a finished add");
         }
     }
 
@@ -443,7 +443,7 @@ public sealed class ServerAddRouteTests
             return release.Task.ContinueWith(_ => AddedAnswer, TaskScheduler.Default);
         });
 
-        for (var i = 0; i < HandOffCycles; i++)
+        for (var i = 0; i < SlotCycles; i++)
         {
             /* A finishes inside the wait: its handler and its own continuation both reach for the release. */
             Assert.Equal(HttpStatusCode.OK, (await PostAsync(rig, Entries(1))).Status);
