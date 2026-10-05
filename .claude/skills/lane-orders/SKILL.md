@@ -147,7 +147,10 @@ census, one of them introduced by that night's own wave).
 4. Check the port is free. Start the server in the background, because `pg_ctl -w start` hangs a tool call, and
    confirm "ready to accept connections" in the log.
 5. Create `darlingtest` for the suite, and a separate `probe` database for hand-run SQL. A suite database reused
-   across several full runs produces false failures; drop and recreate it before a final run.
+   across several full runs produces false failures; drop and recreate it before a final run. Also create a
+   database named `darling`, exactly as CI's init step does: `createdb -h 127.0.0.1 -p <RIG_PORT> -U darling darling`.
+   The role-provisioning live tests grant CONNECT on it, and fail with `3D000` (database "darling" does not exist)
+   without it.
 6. Set `DARLING_TEST_PG` to `Host=127.0.0.1;Port=<RIG_PORT>;Username=darling;Database=darlingtest`. Set
    `DARLING_TEST_PGRUNTIME=<RIG_DIR>` only when you touch the managed runtime or role provisioning.
 7. Stop the server when you finish.
