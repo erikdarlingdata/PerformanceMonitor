@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// (case-folded, first-occurrence-wins) is unit-tested directly. The live store INSERT/DELETE + config_version
 /// bump round-trip (probe stubbed to success) is gated below.
 /// </summary>
+[Collection("darling-owned-secrets")]
 public sealed class DarlingMcpServerAdminToolsSurfaceTests
 {
     /// <summary>A dead data source (unroutable port) — proves the validate-before-write path bails on a bad request
@@ -957,9 +958,20 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         }
     }
 
+    /// <summary>Sets <see cref="DarlingOwnedSecrets"/> for one test and puts the previous value back on dispose.</summary>
+    private sealed class OwnedSetScope : IDisposable
+    {
+        private readonly DarlingOwnedSet _before = DarlingOwnedSecrets.Current;
+
+        public OwnedSetScope(DarlingOwnedSet? set) => DarlingOwnedSecrets.Set(set!);
+
+        public void Dispose() => DarlingOwnedSecrets.Set(_before);
+    }
+
     [Fact]
     public void ParseRequest_OffWindows_RefusesOnlyTheLiteralEntries_AndKeepsTheReferencesAndTheRest()
     {
+        using var owned = new OwnedSetScope(DarlingOwnedSet.Empty);
         var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(
             "[{\"host\":\"win1\"}," +
             "{\"host\":\"sql1\",\"auth\":\"SQL\",\"username\":\"u\",\"password\":\"literal\"}," +
@@ -974,6 +986,20 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         Assert.Contains("password", invalid[0].Detail, StringComparison.Ordinal);
         Assert.Contains("client secret", invalid[1].Detail, StringComparison.Ordinal);
         Assert.Equal("file:/run/secrets/sql_password", entries[1].PlaintextPassword);
+    }
+
+    [Fact]
+    public void ParseRequest_WithNoConfigurationLoaded_RefusesEveryReferenceEntry_AndKeepsTheRest()
+    {
+        using var owned = new OwnedSetScope(null!);
+        var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(
+            "[{\"host\":\"win1\"}," +
+            "{\"host\":\"sql2\",\"auth\":\"SQL\",\"username\":\"u\",\"password\":\"file:/run/secrets/sql_password\"}," +
+            "{\"host\":\"sql3\",\"auth\":\"SQL\",\"username\":\"u\",\"password\":\"env:SQL_PASSWORD\"}]",
+            isWindows: false);
+
+        Assert.Equal(new[] { 0 }, entries.Select(e => e.Order).ToArray());
+        Assert.Equal(new[] { 1, 2 }, invalid.Select(r => r.Order).ToArray());
     }
 
     [Fact]
