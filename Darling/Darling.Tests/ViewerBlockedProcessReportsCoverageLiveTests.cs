@@ -48,6 +48,7 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
     private const int XeWholeWindowServerId = -499807;
     private const int XeHistoryServerId = -499808;
     private const int XeRunsBeforeWindowServerId = -499809;
+    private const int BeforeLogHorizonServerId = -499810;
     private const string XeCollector = "blocked_process_report";
     private const string DmvCollector = "dmv_blocking_snapshot";
 
@@ -210,6 +211,30 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
         Assert.Equal(store.End.AddDays(-5), chartsProbe);
     }
 
+    /* A window that starts before the collection log's horizon (CollectionLogRetentionDays back) cannot be proven by the run log:
+       its oldest run is the purge edge. The store's clock is the real one (the horizon reads UtcNow), so the range is sized from
+       it: it ends 55 days ago and starts 62 days ago, two days before the 60-day horizon, which a test run's few minutes cannot
+       cross. The charts' probe must answer the XE table rule, not a notice naming the purge edge. */
+    [Fact]
+    public async Task TheChartsProbe_ForAWindowBeforeTheLogHorizon_AnswersTheTableRule_NotThePurgeEdge_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 55, ct);
+
+        await store.AddServerAsync(BeforeLogHorizonServerId, store.End.AddDays(-100), ct);
+        await store.LogRunsAsync(BeforeLogHorizonServerId, XeCollector, store.End.AddDays(-4), store.End, ct);
+        await store.InsertXeReportsAsync(BeforeLogHorizonServerId, store.Start.AddHours(5), store.End, store.Start.AddHours(5), ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(store.ConnectionString);
+        var tableRule = await DataWindowFloor.GetForServerAsync(
+            dataSource, DataWindowFloor.Source.ForCollectorTable("blocked_process_reports"), BeforeLogHorizonServerId, store.Start, store.End, 30, ct);
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(BeforeLogHorizonServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.Equal(tableRule, chartsProbe);
+        Assert.NotEqual(store.End.AddDays(-4), chartsProbe);
+    }
+
+    /* characterization: this pins today's ForCollectorRuns answer; update it when that probe reads first runs. */
     /* The shared run-log probe (DataWindowFloor.Source.ForCollectorRuns) for an XE collector whose runs reach back before the
        window answers covered: at or before the window's start. For runs that begin midway it answers the server's registration
        instead, which is why the charts' probe reads the collector's first run itself. */
