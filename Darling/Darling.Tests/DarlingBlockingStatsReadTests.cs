@@ -7,11 +7,14 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -122,6 +125,173 @@ public sealed class DarlingBlockingStatsReadTests
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
+
+    /* ── #4966: the data-start notice. Two separate series (blocking, deadlocks), one notice at the LATER of their floors. ── */
+
+    private static readonly string[] WindowTables = ["blocked_process_reports", "dmv_blocking_snapshots", "deadlocks"];
+    private static readonly string[] WindowCollectors = ["blocked_process_reports", "dmv_blocking_snapshots", "deadlocks"];
+
+    private static string WindowName(string w) => "blocking-stats-window-" + w;
+
+    private static Task<string> CallWindowAsync(NpgsqlDataSource ds, string w, int hours, DateTime end) =>
+        DarlingMcpDataTools.GetBlockingStats(ds, WindowName(w), hours, WebDataStartNote.FormatWindowEnd(end));
+
+    private static Task RunWindowAsync(string w, Func<NpgsqlConnection, NpgsqlDataSource, DateTime, Task> body) =>
+        WindowFloorLiveHarness.RunAsync(ConnectionString, WindowCollectors, [WindowName(w)], WindowTables, body);
+
+    private static Task SeedWindowAsync(NpgsqlConnection c, string w, DateTime end) =>
+        WindowFloorLiveHarness.SeedServerAsync(c, WindowName(w), end.AddDays(-30), "blocked_process_report", null, 30, end, WindowTables, TestContext.Current.CancellationToken);
+
+    private static Task SeedBprAsync(NpgsqlConnection c, string w, DateTime eventTime, DateTime collectedAt) =>
+        DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid, wait_time_ms) VALUES ($1,$2,$3,$4,$5,'d',50,90,8000)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectedAt), ServerIdHelper.GetDeterministicHashCode(WindowName(w)), WindowName(w), DarlingMcpTestData.Naive(eventTime));
+
+    private static Task SeedDmvAsync(NpgsqlConnection c, string w, DateTime eventTime, DateTime collectedAt) =>
+        DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, monitor_loop, event_time, database_name, blocked_spid, blocking_spid, wait_time_ms) VALUES ($1,$2,$3,$4,-1,$5,'d',50,90,3000)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectedAt), ServerIdHelper.GetDeterministicHashCode(WindowName(w)), WindowName(w), DarlingMcpTestData.Naive(eventTime));
+
+    private static Task SeedDeadlockWindowAsync(NpgsqlConnection c, string w, DateTime at, DateTime collectedAt) =>
+        DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml) VALUES ($1,$2,$3,$4,$5,'p1','x',$6)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectedAt), ServerIdHelper.GetDeterministicHashCode(WindowName(w)), WindowName(w), DarlingMcpTestData.Naive(at), GraphXml);
+
+    private static string Start(DateTime t) => McpHelpers.FormatEffectiveStart(t);
+
+    [Fact]
+    public async Task BlockingCoveredFromBefore_DeadlocksStartInside_NamesTheDeadlockStart_AgainstDevPostgres() =>
+        await RunWindowAsync("bc", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "bc", end);
+            await SeedBprAsync(c, "bc", end.AddHours(-3), end.AddDays(-3));
+            await SeedBprAsync(c, "bc", end.AddHours(-2), end.AddHours(-2));
+            await SeedDeadlockWindowAsync(c, "bc", end.AddHours(-1), end.AddHours(-10));
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "bc", 168, end));
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(Start(end.AddHours(-10)), root.GetProperty("effective_start").GetString());
+            Assert.Contains("blocked_process_report", root.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+            Assert.Contains("deadlocks", root.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+        });
+
+    [Fact]
+    public async Task DeadlocksCoveredFromBefore_BlockingStartsInside_NamesTheBlockingStart_AgainstDevPostgres() =>
+        await RunWindowAsync("dc", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "dc", end);
+            await SeedDeadlockWindowAsync(c, "dc", end.AddDays(-4), end.AddDays(-4));
+            await SeedBprAsync(c, "dc", end.AddHours(-1), end.AddHours(-12));
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "dc", 168, end));
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(Start(end.AddHours(-12)), root.GetProperty("effective_start").GetString());
+        });
+
+    [Fact]
+    public async Task TheLaterOfTheTwoFloors_Wins_AgainstDevPostgres() =>
+        await RunWindowAsync("later", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "later", end);
+            await SeedBprAsync(c, "later", end.AddHours(-30), end.AddHours(-30));
+            await SeedDeadlockWindowAsync(c, "later", end.AddHours(-5), end.AddHours(-5));
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "later", 168, end));
+            Assert.Equal(Start(end.AddHours(-5)), root.GetProperty("effective_start").GetString());
+        });
+
+    [Fact]
+    public async Task DeadlockRowsOnly_IsADataAnswer_WithTheDeadlockFloor_AgainstDevPostgres() =>
+        await RunWindowAsync("donly", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "donly", end);
+            await SeedDeadlockWindowAsync(c, "donly", end.AddHours(-2), end.AddHours(-6));
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "donly", 168, end));
+            Assert.False(root.TryGetProperty("status", out _));
+            Assert.Equal(Start(end.AddHours(-6)), root.GetProperty("effective_start").GetString());
+            Assert.Equal(1, root.GetProperty("deadlock_severity").GetArrayLength());
+        });
+
+    [Fact]
+    public async Task XeEarlyDmvLate_GivesTheXeStartAsTheBlockingFloor_AgainstDevPostgres() =>
+        await RunWindowAsync("xedmv", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "xedmv", end);
+            await SeedBprAsync(c, "xedmv", end.AddHours(-20), end.AddHours(-20));
+            await SeedDmvAsync(c, "xedmv", end.AddHours(-3), end.AddHours(-3));
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "xedmv", 168, end));
+            Assert.Equal(Start(end.AddHours(-20)), root.GetProperty("effective_start").GetString());
+        });
+
+    [Fact]
+    public async Task BothCovered_GivesNoNotice_AgainstDevPostgres() =>
+        await RunWindowAsync("both", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "both", end);
+            await SeedBprAsync(c, "both", end.AddDays(-5), end.AddDays(-5));
+            await SeedBprAsync(c, "both", end.AddHours(-2), end.AddHours(-2));
+            await SeedDeadlockWindowAsync(c, "both", end.AddDays(-5), end.AddDays(-5));
+            await SeedDeadlockWindowAsync(c, "both", end.AddHours(-2), end.AddHours(-2));
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "both", 72, end));
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+            var names = root.EnumerateObject().Select(p => p.Name).ToList();
+            Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(names.IndexOf("hours_back") + 1).Take(3));
+            Assert.True(names.IndexOf("truncation_note") < names.IndexOf("blocking_duration"));
+        });
+
+    [Fact]
+    public async Task AnEventOlderThanItsCollection_MovesThatSeriesFloorEarlier_AgainstDevPostgres() =>
+        await RunWindowAsync("early", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "early", end);
+            /* Collected ten hours ago, but the event happened eleven and a half hours ago. */
+            await SeedBprAsync(c, "early", end.AddHours(-11).AddMinutes(-30), end.AddHours(-10));
+            await SeedDeadlockWindowAsync(c, "early", end.AddHours(-11).AddMinutes(-30), end.AddHours(-10));
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "early", 12, end));
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+        });
+
+    [Fact]
+    public async Task AnEmptyAnswer_PastCoverage_CarriesHints_AgainstDevPostgres() =>
+        await RunWindowAsync("empty", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "empty", end);
+            await DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+                "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) VALUES ($1,$2,$3,'blocked_process_report',$4,10,'SUCCESS',0)",
+                CollectionIdGenerator.Next(), ServerIdHelper.GetDeterministicHashCode(WindowName("empty")), WindowName("empty"), DarlingMcpTestData.Naive(end.AddMinutes(-5)));
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "empty", 1, end));
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            var hints = root.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+        });
+
+    [Fact]
+    public async Task AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres() =>
+        await RunWindowAsync("short", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "short", end);
+            await SeedBprAsync(c, "short", end.AddMinutes(-20), end.AddMinutes(-20));
+            var calls = 0;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => { calls++; return Task.FromResult<DateTime?>(null); };
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "short", 1, end));
+            Assert.Equal(0, calls);
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(1, root.GetProperty("blocking_duration").GetArrayLength());
+        });
+
+    [Fact]
+    public async Task AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres() =>
+        await RunWindowAsync("probefail", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "probefail", end);
+            await SeedBprAsync(c, "probefail", end.AddHours(-3), end.AddHours(-3));
+            DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "probefail", 168, end));
+            Assert.False(root.TryGetProperty("status", out _));
+            Assert.Equal(1, root.GetProperty("blocking_duration").GetArrayLength());
+            Assert.False(root.TryGetProperty("effective_start", out _));
+            Assert.False(root.TryGetProperty("window_truncated", out _));
+            Assert.False(root.TryGetProperty("truncation_note", out _));
+        });
 
     private static DateTime MinutesAgo(int minutes) =>
         DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddMinutes(-minutes));
