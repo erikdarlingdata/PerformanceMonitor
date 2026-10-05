@@ -166,10 +166,10 @@ public sealed class SidebarSearchGroupTests
     [Fact]
     public void TheFleetPage_AndTheSidebar_UseTheSharedHelpers_NeitherKeepsACopy()
     {
-        var fleet = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "fleet.js");
-        var shared = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "fleet-groups.js");
-        var sidebar = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "sidebar.js");
-        var app = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "app.js");
+        var fleet = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "fleet.js");
+        var shared = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "fleet-groups.js");
+        var sidebar = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "sidebar.js");
+        var app = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "app.js");
 
         Assert.Contains("import { buildTagGroups, cardMatches } from \"../fleet-groups.js\";", fleet, StringComparison.Ordinal);
         Assert.DoesNotContain("function buildTagGroups(", fleet, StringComparison.Ordinal);
