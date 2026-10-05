@@ -445,6 +445,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         {
             await SeedWindowServerAsync(connection, tool, name, end.AddDays(-2), end.AddDays(-2), 30, end.AddDays(-1), end, ct);
 
+            var bodySucceeded = false;
             DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
             try
             {
@@ -461,10 +462,15 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
                 var empty = Parse(await CallAsync(postgres, tool, name, 1, end.AddDays(-5)));
                 Assert.Equal("empty", empty.GetProperty("status").GetString());
                 Assert.False(empty.TryGetProperty("hints", out _), tool);
+                bodySucceeded = true;
             }
             finally
             {
-                DarlingMcpWindowNotice.TestOnlyProbe = null;
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () =>
+                {
+                    DarlingMcpWindowNotice.TestOnlyProbe = null;
+                    return Task.CompletedTask;
+                });
             }
         });
     }

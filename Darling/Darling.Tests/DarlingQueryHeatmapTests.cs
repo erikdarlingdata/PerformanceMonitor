@@ -706,6 +706,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             var t1 = FloorToHour(baseNow.AddHours(-3));
             await SeedAsync(connection, ct, t1, "0xHOT", deltaExec: 5, deltaElapsed: 250_000);
 
+            var bodySucceeded = false;
             DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
             try
             {
@@ -721,10 +722,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                 var empty = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 1));
                 Assert.Equal("empty", empty.GetProperty("status").GetString());
                 Assert.False(empty.TryGetProperty("hints", out _));
+                bodySucceeded = true;
             }
             finally
             {
-                DarlingMcpWindowNotice.TestOnlyProbe = null;
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () =>
+                {
+                    DarlingMcpWindowNotice.TestOnlyProbe = null;
+                    return Task.CompletedTask;
+                });
             }
         });
     }

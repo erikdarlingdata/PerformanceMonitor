@@ -490,6 +490,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             await SeedAsync(connection, ct, baseNow.AddHours(-40), 90, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7);
             await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 200, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
 
+            var bodySucceeded = false;
             DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
             try
             {
@@ -508,10 +509,15 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
                 var empty = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 2));
                 Assert.Equal("empty", empty.GetProperty("status").GetString());
                 Assert.False(empty.TryGetProperty("hints", out _));
+                bodySucceeded = true;
             }
             finally
             {
-                DarlingMcpWindowNotice.TestOnlyProbe = null;
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () =>
+                {
+                    DarlingMcpWindowNotice.TestOnlyProbe = null;
+                    return Task.CompletedTask;
+                });
             }
         });
     }
