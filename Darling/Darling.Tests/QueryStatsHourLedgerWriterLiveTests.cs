@@ -366,7 +366,9 @@ public sealed class QueryStatsHourLedgerWriterLiveTests
     /// (the rollup's <c>IS DISTINCT FROM 0</c> population includes it) and a 0 does not. The product's collector can never
     /// emit a NULL interval (<c>ResolveWorkerDelta</c> returns an int), so the NULL rule is pinned here, on the seam that would
     /// count one. A value written through another overload at the watched position is NOT tallied, and
-    /// <c>CountedWrites</c> shows it, which is what the runner's guard compares with the rows it wrote.
+    /// <c>CountedWrites</c> shows it, which is what the runner's guard compares with the rows it wrote. The host's own prefix
+    /// writes (collection_time, server_id) reach the same overloads before the payload opens, in the runner's order, and are
+    /// not tallied either, even when one of them lands on the watched position.
     /// </summary>
     [Fact]
     public async Task TheWriterTalliesTheValueItSendsAtTheIntervalPosition_ANullCountsAndAZeroDoesNot()
@@ -379,7 +381,7 @@ public sealed class QueryStatsHourLedgerWriterLiveTests
         var bodySucceeded = false;
         try
         {
-            await ExecAsync(rig.Connection, "CREATE TEMP TABLE ledger_writer_seam (a integer, b integer, c text); CREATE TEMP TABLE ledger_writer_seam_long (a integer, b bigint, c text)", ct);
+            await ExecAsync(rig.Connection, "CREATE TEMP TABLE ledger_writer_seam (a integer, b integer, c text); CREATE TEMP TABLE ledger_writer_seam_long (a integer, b bigint, c text); CREATE TEMP TABLE ledger_writer_seam_prefix (t timestamp, sid integer, a integer, b integer, c text)", ct);
 
             var writer = new PgCollectorRowWriter();
             writer.CountNonZeroAt(1);
@@ -416,6 +418,33 @@ public sealed class QueryStatsHourLedgerWriterLiveTests
 
             Assert.Equal(0L, writer.NonZeroCounted);
             Assert.Equal(0L, writer.CountedWrites);
+
+            /* The runner's own order: each row's PREFIX (collection_time, server_id) goes through these same overloads BEFORE
+               BeginPayload resets the position, so on a fresh writer the first row's server_id (a Value(int)) lands at
+               position 1, the watched one, and must not be tallied as the interval. A FRESH writer, because the runner builds
+               one per attempt and the checks above leave `writer` already past the collision. */
+            var prefixWriter = new PgCollectorRowWriter();
+            prefixWriter.CountNonZeroAt(1);
+            var prefixRows = 0;
+            using (var importer = await rig.Connection.BeginBinaryImportAsync("COPY ledger_writer_seam_prefix (t, sid, a, b, c) FROM STDIN (FORMAT BINARY)", ct))
+            {
+                prefixWriter.Importer = importer;
+                foreach (var interval in new int?[] { 0, 60, null })
+                {
+                    await importer.StartRowAsync(ct);
+                    prefixWriter.Value(new DateTime(2026, 1, 5, 10, 0, 0)).Value(7);
+                    prefixWriter.BeginPayload();
+                    prefixWriter.Value(1).Value(interval).Value("x");
+                    prefixWriter.EndPayload(3);
+                    prefixRows++;
+                }
+
+                await importer.CompleteAsync(ct);
+            }
+
+            Assert.Equal(prefixRows, prefixWriter.CountedWrites);
+            Assert.Equal(2L, prefixWriter.NonZeroCounted);
+            Assert.Equal(3L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM ledger_writer_seam_prefix WHERE sid = 7", ct)));
 
             bodySucceeded = true;
         }
