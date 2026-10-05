@@ -11010,8 +11010,14 @@ AND   j.hypertable_name = '{relation}'", connection))
                MinValue), and that is deliberate for the reason #3812 gives about its own: the
                "Store object convergence:" line without the "at startup" prefix is the proof the
                hourly path is wired on THIS store, in the same log window an operator reads after a
-               restart. On a converged store that pass costs catalog reads and two metadata ALTERs. */
+               restart. On a converged store that pass costs catalog reads and two metadata ALTERs.
+
+               #5094: the FIFTH tenant, same contract — its own method, its own catch-all, one awaited
+               statement, LAST. The Query Store daily summary builder runs after the convergence pass
+               so a store that is still being converged is never made to build summaries first, and a
+               builder fault or an expired budget cannot skip any tenant above it. */
             await ConvergeStoreObjectsAsync(stoppingToken);
+            await BuildQueryStoreTopDailyAsync(stoppingToken);
         }
         else
         {
@@ -11023,6 +11029,24 @@ AND   j.hypertable_name = '{relation}'", connection))
                start. None of the compression-phase reasoning above applies, since a store without
                TimescaleDB has no policy jobs to sample. */
             await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
+        }
+    }
+
+    /// <summary>
+    /// The hourly store-maintenance tick's fifth tenant (#5094): builds the per-day Query Store summary the
+    /// long windows of <c>get_query_store_top</c> will read, one failure-isolated pass (see
+    /// <see cref="QueryStoreTopDaily.RunTickAsync"/>). Its own catch-all: nothing here can fail the tick.
+    /// </summary>
+    private async Task BuildQueryStoreTopDailyAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await QueryStoreTopDaily.RunTickAsync(
+                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Query Store top daily summary could not run; the next hourly tick retries: {Message}", ex.Message);
         }
     }
 
