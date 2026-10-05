@@ -163,16 +163,16 @@ public class DarlingFirewallCheckTests
             StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void BuildFirewallEnableCommand_List_KeepsEachHostileElementInItsOwnLiteral()
+    [Theory]
+    [InlineData("10.0.0.0/8,x'; whoami; '")]
+    [InlineData("10.0.0.0/8,10.8.0.0/16’; whoami; ’")]
+    public void BuildFirewallEnableCommand_List_RefusesAnElementThatIsNotAnAddressAndPrefix(string remoteCidr)
     {
-        /* The caller-side parse is the primary gate; this is the second layer, and it holds per element: a quote
-           inside any element is doubled, so no element can end its literal and start a statement. */
-        var cmd = DarlingManagedPostgres.BuildFirewallEnableCommand(
-            "PerformanceMonitor Darling MCP (port 5152)", 5152, "10.0.0.0/8,x'; whoami; '");
-
-        Assert.Contains("-RemoteAddress '10.0.0.0/8','x''; whoami; ''' |", cmd, StringComparison.Ordinal);
-        Assert.True((cmd.Split('\'').Length - 1) % 2 == 0, $"unbalanced quoting lets an element escape its literal: {cmd}");
+        /* The caller-side parse is the primary gate; this is the second layer, and it holds per element: one
+           element holding a character outside an address and prefix length (0-9, A-F, ':', '.', '/') refuses the
+           whole list, so nothing but address-shaped elements is ever quoted into the command. */
+        Assert.Throws<ArgumentException>(
+            () => DarlingManagedPostgres.BuildFirewallEnableCommand("PerformanceMonitor Darling MCP (port 5152)", 5152, remoteCidr));
     }
 
     [Theory]

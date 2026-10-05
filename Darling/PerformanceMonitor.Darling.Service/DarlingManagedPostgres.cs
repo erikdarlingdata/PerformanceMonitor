@@ -5806,15 +5806,32 @@ public sealed class DarlingManagedPostgres
     /// <summary>
     /// PowerShell single-quoted literal. Inside <c>'…'</c> PowerShell expands nothing — no <c>$</c>, no
     /// backtick escapes, no subexpressions — so the ONE metacharacter is the quote itself, escaped by
-    /// doubling it. Every value the firewall builders interpolate goes through this (#1646): the builders
-    /// are then safe no matter what a caller hands them, INDEPENDENT of the caller-side CIDR parse that is
-    /// the primary fix. The rule names are internally generated and contain no quotes, so quoting them
-    /// leaves the emitted command byte-for-byte what it has always been.
+    /// doubling it. PowerShell reads FIVE characters as a single quote: the apostrophe U+0027 and the
+    /// typographic U+2018, U+2019, U+201A and U+201B (it closes a single-quoted string on any of them, and a
+    /// quote character followed by another stands for one quote inside the string), so all five are doubled
+    /// — the same rule as the PowerShell SDK's <c>CodeGeneration.EscapeSingleQuotedStringContent</c>. Every
+    /// value the firewall builders interpolate goes through this (#1646): the builders are then safe no
+    /// matter what a caller hands them, INDEPENDENT of the caller-side CIDR parse that is the primary fix.
+    /// The rule names are internally generated and contain no quotes, so quoting them leaves the emitted
+    /// command byte-for-byte what it has always been.
     /// <para><c>internal</c> so <see cref="DarlingFirewallCheck.BuildProbeCommand"/> escapes the rule name
     /// through this same one helper rather than growing a second, subtly different quoting rule (#1771).</para>
     /// </summary>
     internal static string SingleQuotedPowerShell(string value)
-        => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+    {
+        var quoted = new StringBuilder(value.Length + 2);
+        quoted.Append('\'');
+        foreach (var c in value)
+        {
+            quoted.Append(c);
+            if (c is '\'' or '‘' or '’' or '‚' or '‛')
+            {
+                quoted.Append(c);
+            }
+        }
+
+        return quoted.Append('\'').ToString();
+    }
 
     /// <summary>Idempotent-named enable command (remove-by-name then add) — the exact scoped command the docs
     /// lead with (D1). Pure + testable.
@@ -5826,16 +5843,20 @@ public sealed class DarlingManagedPostgres
     /// ONE CIDR is byte-for-byte what it was before the list existed: <c>-RemoteAddress '192.168.1.0/24'</c>.
     /// An EMPTY element (a blank value, a doubled comma, a trailing comma) throws
     /// <see cref="ArgumentException"/> instead of emitting <c>''</c>: a rule scoped by a quietly dropped entry
-    /// is the wrong way to find a typo. This stays a pure quoter — the split is on the already-canonical text
-    /// and does no parsing and no trimming (<see cref="Hosting.CidrAllowList"/> owns those) — so a hostile
-    /// value is still one single-quoted literal per element (#1646).</para></summary>
+    /// is the wrong way to find a typo. An element holding a character outside an address and prefix length
+    /// (<c>0-9</c>, <c>A-F</c>, <c>a-f</c>, <c>:</c>, <c>.</c>, <c>/</c>) throws as well, so only an address-shaped
+    /// element is ever quoted into the command. This is still no parser — the split is on the already-canonical
+    /// text and does no parsing and no trimming (<see cref="Hosting.CidrAllowList"/> owns those) — and each
+    /// element is one single-quoted literal through <see cref="SingleQuotedPowerShell"/> (#1646).</para></summary>
     internal static string BuildFirewallEnableCommand(string ruleName, int port, string remoteCidr)
         => $"Remove-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -ErrorAction SilentlyContinue; " +
            $"New-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {QuotedRemoteAddressList(remoteCidr)} | Out-Null";
 
     /// <summary>#5288: the <c>-RemoteAddress</c> value for <see cref="BuildFirewallEnableCommand"/> — every
     /// comma-separated element through <see cref="SingleQuotedPowerShell"/>, joined by <c>,</c>. Throws
-    /// <see cref="ArgumentException"/> on an empty (or whitespace-only) element rather than emitting <c>''</c>.</summary>
+    /// <see cref="ArgumentException"/> on an empty (or whitespace-only) element rather than emitting <c>''</c>,
+    /// and on an element holding any character outside <c>[0-9A-Fa-f:./]</c> (an address and prefix length) —
+    /// a quote, a space, a semicolon — rather than quoting it.</summary>
     private static string QuotedRemoteAddressList(string remoteCidr)
     {
         ArgumentNullException.ThrowIfNull(remoteCidr);
@@ -5849,6 +5870,17 @@ public sealed class DarlingManagedPostgres
                     "The firewall -RemoteAddress list has an empty element (a blank value, a doubled comma or a " +
                     "trailing comma); refusing to emit an empty -RemoteAddress.",
                     nameof(remoteCidr));
+            }
+
+            foreach (var c in elements[i])
+            {
+                if (c is not ((>= '0' and <= '9') or (>= 'A' and <= 'F') or (>= 'a' and <= 'f') or ':' or '.' or '/'))
+                {
+                    throw new ArgumentException(
+                        $"The firewall -RemoteAddress list element {i + 1} holds a character outside an address and " +
+                        "prefix length (0-9, A-F, ':', '.', '/'); refusing to emit it.",
+                        nameof(remoteCidr));
+                }
             }
 
             elements[i] = SingleQuotedPowerShell(elements[i]);

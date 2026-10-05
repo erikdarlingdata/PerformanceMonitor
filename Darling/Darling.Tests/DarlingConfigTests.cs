@@ -443,7 +443,8 @@ public sealed class DarlingConfigTests
     [InlineData("MCP.Corp.Example")]
     [InlineData("Darling-Box")]
     public void NormalizeHostName_KeepsCaseAsWritten(string raw)
-        /* The Host-header guard compares ignoring case, so folding here would only change what the log shows. */
+        /* The Host-header guard compares ignoring case, so folding here would only change what the log shows. The one
+           exception is a name with an xn-- label (NormalizeHostName_FoldsAnUpperCasePunycodeName_ToLowerCase). */
         => Assert.Equal(raw, McpNetworkConfig.NormalizeHostName(raw));
 
     [Theory]
@@ -504,12 +505,11 @@ public sealed class DarlingConfigTests
 
     [Theory]
     [InlineData("xn--bcher-kva.example")]
-    [InlineData("XN--BCHER-KVA.Example")]
     [InlineData("MCP.Corp.Example")]
-    public void NormalizeHostName_AnAsciiName_IsNeverMapped_SoItKeepsItsCaseAndSpelling(string raw)
+    public void NormalizeHostName_AnAsciiName_IsNeverMapped_SoItKeepsItsSpelling(string raw)
         /* The mapping runs only for a name with a non-ASCII character. An ASCII name that is already punycode must
-           not be decoded and encoded again, and an upper-case one must not be folded: the rows above that keep the
-           case as written (NormalizeHostName_KeepsCaseAsWritten) stay true for every ASCII name. */
+           not be decoded and encoded again: it comes back as written (a name with an upper-case xn-- label is only
+           folded to lower case, see NormalizeHostName_FoldsAnUpperCasePunycodeName_ToLowerCase). */
         => Assert.Equal(raw, McpNetworkConfig.NormalizeHostName(raw));
 
     [Theory]
@@ -536,8 +536,42 @@ public sealed class DarlingConfigTests
     [InlineData("mcp.xn--bcher-kva.example")]
     [InlineData("xn--e1afmkfd.example")]
     public void NormalizeHostName_KeepsAnXnNameThatDecodes_AsWritten(string raw)
-        /* The decode is a check, not a rewrite (#5288): a punycode name that decodes is returned exactly as written,
-           not decoded to Unicode and not folded to lower case. */
+        /* The decode is a check, not a rewrite (#5288): a lower-case punycode name that decodes is returned exactly as
+           written, not decoded to Unicode. */
+        => Assert.Equal(raw, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("XN--BCHER-KVA.EXAMPLE", "xn--bcher-kva.example")]
+    [InlineData("XN--BCHER-KVA.Example", "xn--bcher-kva.example")]
+    [InlineData("Xn--BCHER-kva.example", "xn--bcher-kva.example")]
+    [InlineData("MCP.XN--E1AFMKFD.Example", "mcp.xn--e1afmkfd.example")]
+    [InlineData("  XN--BCHER-KVA.EXAMPLE. ", "xn--bcher-kva.example")]
+    public void NormalizeHostName_FoldsAnUpperCasePunycodeName_ToLowerCase(string raw, string expected)
+        /* #5288: IDNA names are case-insensitive, and the framework decodes a Host header's xn-- labels only when the
+           prefix is lower case (the form a client sends). Every spelling of one punycode name has to come out in one
+           form, and it is the lower-case one. */
+        => Assert.Equal(expected, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Fact]
+    public void NormalizeHostName_UpperAndLowerCasePunycode_NormalizeTheSame_AndBothMatchTheClientsName()
+    {
+        var upper = McpNetworkConfig.NormalizeHostName("XN--BCHER-KVA.EXAMPLE");
+        var lower = McpNetworkConfig.NormalizeHostName("xn--bcher-kva.example");
+
+        Assert.NotNull(upper);
+        Assert.Equal(lower, upper);
+
+        /* What the Host guard compares: the name a client sends, decoded the way the framework decodes a Host header.
+           The MCP host runs the configured name through the same conversion. */
+        var clientsName = Microsoft.AspNetCore.Http.HostString.FromUriComponent("xn--bcher-kva.example");
+        Assert.Equal(clientsName.Value, Microsoft.AspNetCore.Http.HostString.FromUriComponent(upper).Value);
+        Assert.Equal(clientsName.Value, Microsoft.AspNetCore.Http.HostString.FromUriComponent(lower!).Value);
+    }
+
+    [Theory]
+    [InlineData("MCP.Corp.Example")]
+    [InlineData("A-XN--B.Example")]      // "XN--" inside a label is not an ACE prefix: there is no label to fold
+    public void NormalizeHostName_ANameWithNoXnLabel_KeepsItsCase(string raw)
         => Assert.Equal(raw, McpNetworkConfig.NormalizeHostName(raw));
 
     [Theory]
@@ -545,6 +579,7 @@ public sealed class DarlingConfigTests
     [InlineData("MCP.Corp.Example.")]
     [InlineData("bücher.example")]
     [InlineData("xn--bcher-kva.example")]
+    [InlineData("XN--BCHER-KVA.EXAMPLE")]
     [InlineData("a-xn--b.example")]      // "xn--" inside a label is not an ACE prefix: nothing to decode
     public void NormalizeHostName_AnyNameItKeeps_IsOneHostStringFromUriComponentAccepts(string raw)
     {
