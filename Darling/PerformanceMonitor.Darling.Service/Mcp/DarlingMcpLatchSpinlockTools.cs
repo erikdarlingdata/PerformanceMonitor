@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -61,6 +62,7 @@ public sealed class DarlingMcpLatchSpinlockTools
         [Description("Hours of data to analyze. Default 24.")] int hours_back = 24,
         [Description("Number of top latch classes to return. Default 10.")] int top = 10,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -118,13 +120,27 @@ public sealed class DarlingMcpLatchSpinlockTools
                 latest_collection_time = r.LatestCollectionTime.ToString("o")
             });
 
-            return JsonSerializer.Serialize(new
+
+            /* #4966: the window-floor notice. The read windows on collection_time over the raw latch_stats (through its view, no rollup tier),
+               the column the probe reads. A rank cap hides no time range, so the coverage rule applies on a capped page too and
+               the two flags are independent. Only a data answer carries it; the no-rows answers above stay bare. A window of 90
+               minutes or less that answered rows starts no probe. */
+            var windowStart = now.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "latch_stats", resolved.ServerName, windowStart, now, cancellationToken),
+                windowStart, now, "latch_stats", logger: logger, cancellationToken: cancellationToken);
+
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 latch_count = rows.Count,
                 latches
             }, McpHelpers.JsonOptions);
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -139,6 +155,7 @@ public sealed class DarlingMcpLatchSpinlockTools
         [Description("Hours of data to analyze. Default 24.")] int hours_back = 24,
         [Description("Number of top spinlocks to return. Default 10.")] int top = 10,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -177,13 +194,27 @@ public sealed class DarlingMcpLatchSpinlockTools
                 latest_collection_time = r.LatestCollectionTime.ToString("o")
             });
 
-            return JsonSerializer.Serialize(new
+
+            /* #4966: the window-floor notice. The read windows on collection_time over the raw spinlock_stats (through its view, no rollup tier),
+               the column the probe reads. A rank cap hides no time range, so the coverage rule applies on a capped page too and
+               the two flags are independent. Only a data answer carries it; the no-rows answers above stay bare. A window of 90
+               minutes or less that answered rows starts no probe. */
+            var windowStart = now.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "spinlock_stats", resolved.ServerName, windowStart, now, cancellationToken),
+                windowStart, now, "spinlock_stats", logger: logger, cancellationToken: cancellationToken);
+
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 spinlock_count = rows.Count,
                 spinlocks
             }, McpHelpers.JsonOptions);
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

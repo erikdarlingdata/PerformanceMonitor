@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Windows.Controls;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 
@@ -62,6 +63,26 @@ public partial class ServerTab
         }
     }
 
+    /// <summary>
+    /// #5098: the blocking chart's note. The DMV branch is the shared step, unchanged. The XE branch names the combined start
+    /// (<see cref="LocalDataService.GetBlockingXeDataStartAsync"/>: the collector's floor, the earliest report and the blocked process
+    /// threshold's history) through the same guarded probe, so a failed probe costs only the note.
+    /// </summary>
+    private async System.Threading.Tasks.Task RefreshBlockingBannerAsync(
+        bool blockingFromXe, TextBlock banner, DateTime start, DateTime end, DateTime? earliestDrawn, IReadOnlyList<string>? databaseNames)
+    {
+        if (!blockingFromXe)
+        {
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, banner, start, end, earliestDrawn);
+            return;
+        }
+
+        var floor = await ProbeWindowFloorOrNullAsync(
+            () => Task.Run(() => _dataService.GetBlockingXeDataStartAsync(_serverId, start, end, databaseNames)),
+            $"[{_server.DisplayName}] {QueryWindowRelation.BlockedProcessReports}", start, end);
+        ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestDrawn), start, GetPickerZone());
+    }
+
     /// <summary>The Trends sub-tab's three notes, over the SAME UTC window the three reads took.</summary>
     private async System.Threading.Tasks.Task RefreshBlockingTrendsBannersAsync(
         List<LockWaitTrendPoint> lockWait, List<TrendPoint> blocking, List<TrendPoint> deadlocks,
@@ -70,7 +91,7 @@ public partial class ServerTab
         var (start, end) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
         var blockingFromXe = await BlockingReadTookXeAsync(start, end, databaseNames);
         await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.WaitStats, LockWaitTrendTruncationBanner, start, end);
-        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockingTrendTruncationBanner, start, end, EarliestBlockingTrendPointDrawn(blocking), includeAlsoCovered: !blockingFromXe);
+        await RefreshBlockingBannerAsync(blockingFromXe, BlockingTrendTruncationBanner, start, end, EarliestBlockingTrendPointDrawn(blocking), databaseNames);
         await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.Deadlocks, DeadlockTrendTruncationBanner, start, end, EarliestBlockingTrendPointDrawn(deadlocks));
     }
 
@@ -81,7 +102,7 @@ public partial class ServerTab
     {
         var (start, end) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
         var blockingFromXe = await BlockingReadTookXeAsync(start, end, databaseNames);
-        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockingStatsBlockingTruncationBanner, start, end, EarliestBlockingStatsPointDrawn(durationStats), includeAlsoCovered: !blockingFromXe);
+        await RefreshBlockingBannerAsync(blockingFromXe, BlockingStatsBlockingTruncationBanner, start, end, EarliestBlockingStatsPointDrawn(durationStats), databaseNames);
         await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.Deadlocks, BlockingStatsDeadlockTruncationBanner, start, end, EarliestDeadlockStatsPointDrawn(deadlockSeverity));
     }
 }

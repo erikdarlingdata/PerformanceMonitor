@@ -44,7 +44,8 @@ public sealed class EffectiveStartUtcTests
     /// </summary>
     [Theory]
     [InlineData("DarlingMcpConfigHistoryTools.cs", 3)]
-    [InlineData("DarlingMcpDataTools.cs", 5)]
+    [InlineData("DarlingMcpDataTools.cs", 6)]
+    [InlineData("DarlingMcpLatchSpinlockTools.cs", 2)]
     [InlineData("DarlingMcpQueryStoreClutterTools.cs", 1)]
     [InlineData("DarlingMcpSessionTools.cs", 2)]
     [InlineData("DarlingMcpMemoryGrantTools.cs", 1)]
@@ -65,6 +66,8 @@ public sealed class EffectiveStartUtcTests
     [InlineData("DarlingMcpPgKernelStatsTools.cs", 1)]
     [InlineData("DarlingMcpPgPredicateTools.cs", 1)]
     [InlineData("DarlingMcpPgServerStateTools.cs", 2)]
+    [InlineData("DarlingMcpHealthParserTools.cs", 9)]
+    [InlineData("DarlingMcpDefaultTraceTools.cs", 1)]
     public void EveryWindowFloorWrite_RoutesThroughTheSharedFormatter(string file, int minimumRouted)
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
@@ -132,12 +135,17 @@ public sealed class EffectiveStartUtcTests
     /// Each data answer writes the key once, from <c>notice.EffectiveStart</c>; <paramref name="expectedHints"/> counts the
     /// <c>empty</c> answers that carry the same notice under hints (<c>get_collection_log</c> has two: the filtered one and the quiet window).
     /// None of them uses the event-time form: their probes read the column the rows are stamped on.
+    /// <para>#4966 adds the three Lite aggregate tools to the same pin: <c>get_default_trace_events</c> (one write, one hints),
+    /// <c>get_wait_stats</c> (a second write beside <c>get_waiting_tasks</c>'s, and no new hints: its no-rows answer is <c>unavailable</c> and stays bare) and
+    /// <c>get_blocking_stats</c> in McpHealthTools.cs (one write for its two series, one hints on its empty answer).</para>
     /// </summary>
     [Theory]
     [InlineData("McpConfigHistoryTools.cs", 3, 3)]
-    [InlineData("McpHealthTools.cs", 1, 2)]
+    [InlineData("McpHealthTools.cs", 2, 3)]
     [InlineData("McpPlanCorrectionTools.cs", 1, 1)]
     [InlineData("McpMemoryTools.cs", 1, 1)]
+    [InlineData("McpDefaultTraceTools.cs", 1, 1)]
+    [InlineData("McpWaitTools.cs", 2, 0)]
     public void EveryLiteConfigAndLogWindowFloorWrite_ComesFromTheSharedNotice(string file, int expectedWrites, int expectedHints)
     {
         var source = RepoFile.ReadRepoFile("Lite", "Mcp", file);
@@ -151,6 +159,31 @@ public sealed class EffectiveStartUtcTests
         Assert.All(writes, line => Assert.Equal("effective_start = notice.EffectiveStart,", line));
         Assert.Equal(expectedHints, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)").Count);
         Assert.DoesNotContain("EventWindowNoticeAsync", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4966: the nine Lite <c>get_health_parser_*</c> tools write <c>effective_start</c> from the shared notice
+    /// (<c>McpQueryTools.WindowNoticeAsync</c> -> <c>WindowNotice</c>, which prints through
+    /// <see cref="McpHelpers.FormatEffectiveStart(DateTime)"/>), never from a bare <c>ToString("o")</c> of the store's naive floor.
+    /// Each data answer writes the key once, from <c>notice.EffectiveStart</c>. The <c>empty</c> answers are built in one place,
+    /// the empty ladder's three <c>empty</c> rungs, which each pass the same notice under hints; the <c>unavailable</c> rung passes none.
+    /// The event-time form is not used: the probe reads <c>event_time</c>, the column the reads window on.
+    /// </summary>
+    [Fact]
+    public void EveryLiteHealthParserWindowFloorWrite_ComesFromTheSharedNotice()
+    {
+        var source = RepoFile.ReadRepoFile("Lite", "Mcp", "McpHealthParserTools.cs");
+        var writes = source
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("effective_start = ", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Equal(9, writes.Count);
+        Assert.All(writes, line => Assert.Equal("effective_start = notice.EffectiveStart,", line));
+        Assert.Equal(3, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)").Count);
+        /* A call, not the doc comment that explains why there is none. */
+        Assert.DoesNotContain("EventWindowNoticeAsync(", source, StringComparison.Ordinal);
     }
 
     /// <summary>

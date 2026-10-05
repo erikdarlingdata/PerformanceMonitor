@@ -126,6 +126,33 @@ internal static class DarlingMcpWindowNotice
     }
 
     /// <summary>
+    /// The earlier of two instants, a null (nothing to report) giving way to the other; null when both are. Lite's
+    /// <c>LocalDataService.EarlierCoverageFloor</c>.
+    /// </summary>
+    internal static DateTime? Earlier(DateTime? first, DateTime? second) =>
+        first is DateTime a && second is DateTime b ? (a <= b ? a : b) : first ?? second;
+
+    /// <summary>
+    /// <see cref="ReadAsync"/> for an EVENT list (deadlocks, blocked process reports, long query completions), where a first run
+    /// of the collector can store events from before itself (#4966): the coverage probe reads the collector's table on
+    /// <c>collection_time</c>, but the rows are windowed on the event's own time, so a page can show an event older than the
+    /// probe's floor, and a notice that names a start later than a row it shows is wrong on its face. On a data answer the floor is
+    /// the EARLIER of the probe's and <paramref name="oldestEventShown"/> (the oldest event time on the page; null when the page
+    /// holds none, as on an empty answer). The comparison runs inside the probe delegate, so a window the probe is skipped for
+    /// (90 minutes or less, with rows) stays covered at the start that was asked for, as every other window-floor tool does, and
+    /// a probe that throws still answers <see cref="McpWindowNotice.Unavailable"/> (the event time is not a verdict on its own).
+    /// </summary>
+    internal static Task<McpWindowNotice> ReadEventAsync(
+        Func<Task<DateTime?>> probe, DateTime? oldestEventShown, DateTime requestedStart, DateTime windowEnd, string table,
+        bool emptyAnswer = false, ILogger? logger = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(probe);
+        return ReadAsync(
+            async () => Earlier(await probe(), oldestEventShown),
+            requestedStart, windowEnd, table, emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
+    }
+
+    /// <summary>
     /// A payload already serialized with the three window-floor keys, without them: what a tool answers when its probe failed
     /// (<see cref="McpWindowNotice.IsUnavailable"/>). Only top-level keys are touched, and the order of the rest is kept.
     /// </summary>
@@ -220,7 +247,15 @@ internal static class DarlingMcpWindowNotice
 
     /// <summary>The coverage probe over a source the caller built (the collection log, one collector's runs, a stitched read).</summary>
     internal static Task<DateTime?> Probe(
-        NpgsqlDataSource postgres, DataWindowFloor.Source source, string serverName, DateTime start, DateTime end, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, DataWindowFloor.Source source, string serverName, DateTime start, DateTime end, CancellationToken cancellationToken) =>
+        Probe(postgres, [source], serverName, start, end, cancellationToken);
+
+    /// <summary>
+    /// The coverage probe over several sources a page is fed by (get_blocking's XE reports and DMV snapshots, #4966):
+    /// <see cref="DataWindowFloor.GetAsync"/> answers the EARLIEST of them in one read.
+    /// </summary>
+    internal static Task<DateTime?> Probe(
+        NpgsqlDataSource postgres, IReadOnlyList<DataWindowFloor.Source> sources, string serverName, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
         var stub = TestOnlyProbe;
         if (stub != null)
@@ -228,6 +263,6 @@ internal static class DarlingMcpWindowNotice
             return stub();
         }
 
-        return DataWindowFloor.GetAsync(postgres, [source], [serverName], start, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+        return DataWindowFloor.GetAsync(postgres, sources, [serverName], start, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
     }
 }

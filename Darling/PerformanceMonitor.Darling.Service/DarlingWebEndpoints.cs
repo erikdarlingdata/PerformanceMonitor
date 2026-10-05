@@ -2066,7 +2066,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             candidateComposedSeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);
             try
             {
-                hourlyEdgesSnapshot = await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate, serverScope, candidateComposedSeconds.Value, cancellationToken);
+                hourlyEdgesSnapshot = await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate, serverScope, candidateComposedSeconds.Value, plan!.UsesModuleJoin, cancellationToken);
             }
             catch (PostgresException ex)
             {
@@ -2085,7 +2085,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -2442,6 +2442,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static string HourlyEdgesGuardTimeoutSql(int guardSeconds) =>
         string.Create(CultureInfo.InvariantCulture, $"SET LOCAL statement_timeout = '{guardSeconds}s'");
 
+    /// <summary>#4605: a savepoint around the module map watermark read, so a fault in that read (the map's state table missing, say)
+    /// is undone and the panel statement still runs on the same connection and snapshot.</summary>
+    private const string HourlyEdgesModuleMapSavepointSql = "SAVEPOINT hourly_edges_module_map";
+
+    /// <summary>#4605: undoes the watermark read's savepoint, whether the read succeeded or failed.</summary>
+    private const string HourlyEdgesModuleMapRollbackSql = "ROLLBACK TO SAVEPOINT hourly_edges_module_map";
+
     /// <summary>#4605: puts the role's <c>statement_timeout</c> (the compose deadline) back for the panel statement. <c>DEFAULT</c> is
     /// the value the session started with, which for the compose role is the operator's configured deadline, so the panel
     /// keeps exactly the timeout it has today. Still <c>LOCAL</c>, so nothing outlives the transaction.</summary>
@@ -2455,16 +2462,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         private readonly NpgsqlTransaction _transaction;
         private bool _disposed;
 
-        public HourlyEdgesSnapshot(NpgsqlConnection connection, NpgsqlTransaction transaction, ComposeHourlyEdgesVerdict? verdict)
+        public HourlyEdgesSnapshot(NpgsqlConnection connection, NpgsqlTransaction transaction, ComposeHourlyEdgesVerdict? verdict, DateTime? moduleMapThrough = null)
         {
             Connection = connection;
             _transaction = transaction;
             Verdict = verdict;
+            ModuleMapThrough = moduleMapThrough;
         }
 
         public NpgsqlConnection Connection { get; }
 
         public ComposeHourlyEdgesVerdict? Verdict { get; }
+
+        /// <summary>The module map's watermark, read in this snapshot, or null when the panel does not join modules, the
+        /// guard did not pass, or the map has no watermark.</summary>
+        public DateTime? ModuleMapThrough { get; }
 
         public async ValueTask DisposeAsync()
         {
@@ -2499,10 +2511,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>Opens the run's connection, begins the snapshot transaction and runs the count guard in it. A failed OPEN throws
     /// <see cref="ComposeStoreOpenException"/> to the caller. A fault after the open (the begin, the read-only step, a guard
     /// rollback that itself failed) returns null and the panel opens a fresh connection and reads raw; a guard fault that was
-    /// undone cleanly returns a snapshot whose verdict is null and the panel reads raw on it. A cancellation propagates.</summary>
+    /// undone cleanly returns a snapshot whose verdict is null and the panel reads raw on it. A cancellation propagates.
+    /// When the panel joins modules and the guard passed, the module map's watermark is read in the same transaction, so the
+    /// watermark and the panel statement see one snapshot.</summary>
     private static async Task<HourlyEdgesSnapshot?> BeginHourlyEdgesSnapshotAsync(
         NpgsqlDataSource postgres, ComposeHourlyEdgesCandidate candidate, IReadOnlyList<string>? serverScope, int composedSeconds,
-        System.Threading.CancellationToken cancellationToken)
+        bool readModuleMapWatermark, System.Threading.CancellationToken cancellationToken)
     {
         /* The open is outside the try on purpose: a store that cannot be reached throws ComposeStoreOpenException to the caller, who
            answers it the way it answers the panel's own failed open. Opening again here would cost a second open timeout. */
@@ -2513,7 +2527,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
             await ExecuteSnapshotStatementAsync(connection, HourlyEdgesReadOnlySql, McpCommandDeadlines.ReadSeconds, cancellationToken);
             var verdict = await ResolveHourlyEdgesVerdictAsync(connection, candidate, serverScope, composedSeconds, cancellationToken);
-            return new HourlyEdgesSnapshot(connection, transaction, verdict);
+            var moduleMapThrough = verdict is not null && readModuleMapWatermark
+                ? await ReadModuleMapWatermarkInSnapshotAsync(connection, cancellationToken)
+                : null;
+            return new HourlyEdgesSnapshot(connection, transaction, verdict, moduleMapThrough);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2538,6 +2555,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             throw;
         }
+    }
+
+    /// <summary>Reads the module map's watermark on the snapshot connection. The read swallows its own faults and returns null, but
+    /// a failed statement aborts the transaction, so the read runs under a savepoint that is always rolled back to: a fault is
+    /// undone and the panel reads without the map, and a clean read loses nothing. A rollback that itself fails is rethrown to
+    /// the snapshot begin, which abandons the snapshot.</summary>
+    private static async Task<DateTime?> ReadModuleMapWatermarkInSnapshotAsync(NpgsqlConnection connection, System.Threading.CancellationToken cancellationToken)
+    {
+        await ExecuteSnapshotStatementAsync(connection, HourlyEdgesModuleMapSavepointSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        var watermark = await DarlingModuleMap.ReadWatermarkAsync(connection, cancellationToken);
+        await ExecuteSnapshotStatementAsync(connection, HourlyEdgesModuleMapRollbackSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        return watermark;
     }
 
     private static async Task ExecuteSnapshotStatementAsync(
@@ -3661,7 +3690,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── trends (DarlingMcpTrendTools) ── */
             ["get_file_io_trend"] = R(CatTrends, "File I/O read and write latency over time per database and file type, heaviest stall first; database_name charts one database per file.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("database_name")),
             ["get_memory_trend"] = R(CatTrends, "Memory usage over time.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
-            ["get_server_trend"] = R(CatTrends, "One instance trend over time, picked by metric: total_waits, cpu_scheduler, memory_clerks, plan_cache, latch, spinlock, session_stats or collector_duration.", PReqText("metric"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("clerk_types"), PText("names")),
+            ["get_server_trend"] = R(CatTrends, "One instance trend over time, picked by metric: total_waits, cpu_scheduler, memory_clerks, plan_cache, latch, spinlock, session_stats, collector_duration, tempdb_file_io, tempdb_size or file_io_throughput.", PReqText("metric"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("clerk_types"), PText("names")),
             ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             /* #3653 item 17: the four reads below disclose the WINDOW floor as window_truncated (beside
                effective_start / effective_hours_back) — not the page dialect's truncated, which they never had. */
@@ -4441,20 +4470,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, logger, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state"), c.RequestAborted),
 
             /* ── blocking / deadlocks ── */
-            ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
             /* #4198: the internal overload, not the MCP tool wrapper — pins the OLD row limit (30) and the
                OLD 2000-char text cap (WebSqlTextPreviewLength) explicitly, so this page does not change even
                though the tool's own MCP defaults (limit 15, 150-char preview) did. Same shape #3897's trend
                tools use to pass TrendBudget.Chart here instead of their own MCP point budget. */
-            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, c.RequestAborted),
+            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted),
             ["get_blocking_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* #4254: full_graph defaults false on the MCP signature (a preview keeps a busy production
                store's tools/list-driven call under the shared response budget), but the web viewer has
                always shown the whole graph. The row pins its OWN default to true so #4198's MCP-side
                budget cut does not silently shrink what the viewer renders. */
-            ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
             ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), registryState: registryState, cancellationToken: c.RequestAborted),
+            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
             ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
@@ -4513,7 +4542,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                still lets an operator ask for the whole statement via ?full_text=true, but the default (no
                query override) reproduces the page exactly as it always rendered. */
             ["get_query_store_top"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000, cancellationToken: c.RequestAborted),
-            ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
             ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c), c.RequestAborted),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
