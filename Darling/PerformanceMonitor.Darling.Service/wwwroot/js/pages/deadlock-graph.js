@@ -35,7 +35,9 @@ function svgText(attrs, text) {
 
 /* The curve is bowed this far to the right of its direction of travel, so the two arrows of a 2-cycle separate. */
 const BOW = 38;
-const LOOP_RISE = 46;
+const LOOP_RX = 20;
+const LOOP_RY = 16;
+const CYCLE_PAD = 22;
 const SQL_PREVIEW = 40;
 let markerSeq = 0;
 
@@ -44,6 +46,23 @@ const deadlockGraphOpen = new Set();
 
 function graphKey(server, row) {
   return server + "\u0001" + (row.dedup_key || (row.collection_time || "") + "|" + (row.deadlock_time || ""));
+}
+
+/* The cycles worth framing: a component of two or more processes, as the desktop viewer does. */
+function realCycles(graph) {
+  return (Array.isArray(graph.cycles) ? graph.cycles : []).filter((c) => num(c.node_count) >= 2);
+}
+
+/* "PAGE db.schema.table" -> "table" for the canvas; the tooltip keeps the whole label. */
+function shortResource(label) {
+  const s = String(label || "");
+  const sp = s.indexOf(" ");
+  if (sp > 0 && sp < s.length - 1) {
+    const rest = s.slice(sp + 1);
+    const dot = rest.lastIndexOf(".");
+    if (dot >= 0 && dot < rest.length - 1) return rest.slice(dot + 1);
+  }
+  return s;
 }
 
 /** The Graph cell of one get_deadlock_detail row. Draws only when the reader opens it. */
@@ -61,7 +80,7 @@ export function deadlockGraphCell(server, row) {
   }
 
   const processes = Array.isArray(graph.processes) ? graph.processes : [];
-  const cycles = Array.isArray(graph.cycles) ? graph.cycles : [];
+  const cycles = realCycles(graph);
   const body = el("div", { class: "dlg-host" });
   const summary =
     "Graph (" + processes.length + (processes.length === 1 ? " process" : " processes") +
@@ -73,7 +92,7 @@ export function deadlockGraphCell(server, row) {
   const draw = () => {
     if (drawn) return;
     drawn = true;
-    body.appendChild(drawDeadlockGraph(graph));
+    body.appendChild(drawDeadlockGraph(graph, row));
   };
   node.addEventListener("toggle", () => {
     if (node.open) {
@@ -115,23 +134,29 @@ function clip(text, n) {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
-/** The drawn graph and its side panel, from one row's `graph` object. Returns a `.dlg` div. */
-export function drawDeadlockGraph(graph) {
+/** The drawn graph and its side panel, from one row's `graph` object. Returns a `.dlg` div. `row` is the grid row;
+ * its processes[] preview supplies a statement the graph left off because it was the same text. */
+export function drawDeadlockGraph(graph, row) {
   const nodeW = num(graph.node_width, 240);
   const nodeH = num(graph.node_height, 150);
   const width = Math.max(num(graph.width, 400), nodeW);
   const height = Math.max(num(graph.height, 300), nodeH);
   const processes = Array.isArray(graph.processes) ? graph.processes : [];
   const edges = Array.isArray(graph.edges) ? graph.edges : [];
-  const cycles = Array.isArray(graph.cycles) ? graph.cycles : [];
+  const cycles = realCycles(graph);
   const byId = new Map(processes.map((p) => [p.id, p]));
+  const previews = new Map();
+  for (const q of row && Array.isArray(row.processes) ? row.processes : []) if (q && q.process_id != null) previews.set(q.process_id, q.sql_text);
+  for (const p of processes) if (!p.sql_text && previews.get(p.id)) p.sql_text = previews.get(p.id);
 
+  /* A loop's label sits above the card; a card in the top row would clip it, so leave room above the canvas. */
+  const topPad = edges.some((e) => e.self) ? 20 : 0;
   const markerId = "dlg-arrow-" + ++markerSeq;
   const canvas = svg("svg", {
     class: "dlg-svg",
-    viewBox: "0 0 " + width + " " + height,
+    viewBox: "0 " + -topPad + " " + width + " " + (height + topPad),
     width: width,
-    height: height,
+    height: height + topPad,
     role: "img",
     "aria-label": "Deadlock graph: " + processes.length + " processes",
   });
@@ -151,18 +176,21 @@ export function drawDeadlockGraph(graph) {
 
   /* One dashed frame per independent cycle, only when there is more than one to tell apart. */
   if (cycles.length > 1) {
+    let n = 0;
     for (const c of cycles) {
+      n++;
+      /* Past the cards, so the frame never lies on a card border and its label never covers one. */
       canvas.appendChild(
         svg("rect", {
           class: "dlg-cycle",
-          x: num(c.x),
-          y: num(c.y),
-          width: num(c.width),
-          height: num(c.height),
+          x: num(c.x) - CYCLE_PAD,
+          y: num(c.y) - CYCLE_PAD,
+          width: num(c.width) + CYCLE_PAD * 2,
+          height: num(c.height) + CYCLE_PAD * 2,
           rx: 8,
         })
       );
-      canvas.appendChild(svgText({ class: "dlg-cycle-label", x: num(c.x) + 8, y: num(c.y) + 16 }, "Cycle " + c.index + " (" + c.node_count + ")"));
+      canvas.appendChild(svgText({ class: "dlg-cycle-label", x: num(c.x) - CYCLE_PAD + 6, y: num(c.y) - CYCLE_PAD + 14 }, "Cycle " + n));
     }
   }
 
@@ -183,11 +211,13 @@ export function drawDeadlockGraph(graph) {
     if (e.self || waiter === owner) {
       /* A parallel thread waiting on its own exchange: a loop over the top of the card. */
       const top = num(waiter.y);
-      const x1 = wx - 28;
-      const x2 = wx + 28;
-      d = "M " + round1(x1) + " " + round1(top) + " C " + round1(x1 - 18) + " " + round1(top - LOOP_RISE) + " " + round1(x2 + 18) + " " + round1(top - LOOP_RISE) + " " + round1(x2) + " " + round1(top);
+      const cy = top - LOOP_RY;
+      canvas.appendChild(svg("ellipse", { class: "dlg-edge dlg-loop", cx: round1(wx), cy: round1(cy), rx: LOOP_RX, ry: LOOP_RY }));
+      /* The arrowhead at the foot of the loop, pointing down into the card. */
+      canvas.appendChild(svg("path", { class: "dlg-arrowhead dlg-loop-head", d: "M " + round1(wx + 6) + " " + round1(top) + " L " + round1(wx) + " " + round1(top - 12) + " L " + round1(wx + 12) + " " + round1(top - 12) + " z" }));
+      d = null;
       ax = wx;
-      ay = top - LOOP_RISE * 0.75;
+      ay = top - 36; /* above the loop, as the desktop puts it */
     } else {
       const [sx, sy] = clipToRect(wx, wy, ox, oy, halfW, halfH);
       const [ex, ey] = clipToRect(ox, oy, wx, wy, halfW, halfH);
@@ -202,12 +232,13 @@ export function drawDeadlockGraph(graph) {
       ax = 0.25 * sx + 0.5 * mx + 0.25 * ex;
       ay = 0.25 * sy + 0.5 * my + 0.25 * ey;
     }
-    canvas.appendChild(svg("path", { class: "dlg-edge", d, "marker-end": "url(#" + markerId + ")" }));
-    const label = [e.resource_label || e.resource_kind || "", e.request_mode || ""].filter(Boolean).join(" · ");
+    if (d) canvas.appendChild(svg("path", { class: "dlg-edge", d, "marker-end": "url(#" + markerId + ")" }));
+    const label = [shortResource(e.resource_label) || e.resource_kind || "", e.request_mode || ""].filter(Boolean).join(" · ");
     if (label) {
       const t = svgText({ class: "dlg-edge-label", x: round1(ax), y: round1(ay), "text-anchor": "middle" }, label);
       const tip = svg("title");
       tip.textContent =
+        (e.resource_label ? e.resource_label + "\n" : "") +
         "Waiter requests " + (e.request_mode || "?") + ", owner holds " + (e.owner_mode || "?") + (e.resource_kind ? " (" + e.resource_kind + ")" : "");
       t.appendChild(tip);
       edgeLabels.push(t);

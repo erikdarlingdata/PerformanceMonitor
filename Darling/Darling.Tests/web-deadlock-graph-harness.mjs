@@ -91,11 +91,12 @@ switch (process.argv[3]) {
   }
   case "twoCycles": {
     const g = graph();
-    g.cycles = [{ index: 1, node_count: 2, x: 20, y: 20, width: 330, height: 260 }, { index: 2, node_count: 2, x: 380, y: 20, width: 300, height: 260 }];
+    g.cycles = [{ index: 1, node_count: 2, x: 20, y: 20, width: 330, height: 260 }, { index: 5, node_count: 2, x: 380, y: 20, width: 300, height: 260 }, { index: 6, node_count: 1, x: 20, y: 300, width: 100, height: 100 }];
     const cell = mod.deadlockGraphCell("srv", row({ graph: g }));
     open(cell);
     out.cycleFrames = cell.all((n) => n.hasClass("dlg-cycle")).length;
     out.cycleLabels = cell.all((n) => n.hasClass("dlg-cycle-label")).map((n) => n._text);
+    out.frameRects = cell.all((n) => n.hasClass("dlg-cycle")).map((n) => [n.attrs.x, n.attrs.y, n.attrs.width, n.attrs.height].join(","));
     out.summary = cell.tags("summary")[0].textContent;
     break;
   }
@@ -108,11 +109,28 @@ switch (process.argv[3]) {
     };
     const cell = mod.deadlockGraphCell("srv", row({ graph: g }));
     open(cell);
-    const path = cell.all((n) => n.hasClass("dlg-edge"))[0];
-    out.paths = cell.all((n) => n.hasClass("dlg-edge")).length;
-    out.curve = path.attrs.d.includes(" C ");
+    out.paths = cell.tags("path").filter((n) => n.hasClass("dlg-edge")).length;
+    out.ellipses = cell.tags("ellipse").length;
+    out.arrowheads = cell.tags("path").filter((n) => n.hasClass("dlg-loop-head")).length;
+    out.viewBox = cell.tags("svg")[0].attrs.viewBox;
+    out.label = cell.all((n) => n.hasClass("dlg-edge-label"))[0]._text;
     out.cycleFrames = cell.all((n) => n.hasClass("dlg-cycle")).length;
     out.summary = cell.tags("summary")[0].textContent;
+    break;
+  }
+  case "shortLabel": {
+    const cell = mod.deadlockGraphCell("srv", row({ graph: { ...graph(), edges: [{ waiter: "p1", owner: "p2", self: false, resource_kind: "pagelock", resource_label: "PAGE hammerdb_tpcc.dbo.new_order", request_mode: "X", owner_mode: "U" }] } }));
+    open(cell);
+    out.label = cell.all((n) => n.hasClass("dlg-edge-label"))[0]._text;
+    out.title = cell.tags("title")[0].textContent;
+    break;
+  }
+  case "previewFallback": {
+    const g = graph();
+    delete g.processes[0].sql_text;
+    const cell = mod.deadlockGraphCell("srv", row({ graph: g, processes: [{ process_id: "p1", sql_text: "from the preview" }] }));
+    open(cell);
+    out.pre = cell.tags("pre")[0].textContent;
     break;
   }
   case "tooLarge": {

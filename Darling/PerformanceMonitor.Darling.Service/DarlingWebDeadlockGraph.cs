@@ -103,7 +103,9 @@ public static class DarlingWebDeadlockGraph
             return edge;
         }).ToList();
 
-        var cycles = model.ComponentBoxes.Select(b => new Dictionary<string, object?>
+        /* Only a component of two or more processes is a cycle; a lone node (a parallel self-edge) is not, as in the
+           desktop viewer. The page numbers them 1..n itself. */
+        var cycles = model.ComponentBoxes.Where(b => b.NodeCount >= 2).Select(b => new Dictionary<string, object?>
         {
             ["index"] = b.Index,
             ["node_count"] = b.NodeCount,
@@ -152,13 +154,54 @@ public static class DarlingWebDeadlockGraph
             if (row["deadlock_graph_xml_truncated"] is JsonValue t && t.TryGetValue<bool>(out var cut) && cut) continue;
             if (row["deadlock_graph_xml"] is not JsonValue v || !v.TryGetValue<string>(out var xml) || string.IsNullOrWhiteSpace(xml)) continue;
 
-            var graph = BuildGraph(xml);
-            if (graph is null) continue;
-            row["graph"] = JsonSerializer.SerializeToNode(graph, McpHelpers.JsonOptions);
+            /* The graph is an extra on a row that is already complete: whatever goes wrong in parsing or laying it
+               out costs this row its graph, never the read. */
+            JsonNode? shaped;
+            try
+            {
+                var graph = BuildGraph(xml);
+                if (graph is null) continue;
+                DropRepeatedStatements(graph, row);
+                shaped = JsonSerializer.SerializeToNode(graph, McpHelpers.JsonOptions);
+            }
+            catch (Exception)
+            {
+                continue;
+            }
+
+            row["graph"] = shaped;
             changed = true;
         }
 
         return changed ? obj.ToJsonString(McpHelpers.JsonOptions) : json;
+    }
+
+    /// <summary>Removes a graph process's <c>sql_text</c> when the row's <c>processes[]</c> already carries the
+    /// same text for that process; the page reads it from there. A statement that was cut in the preview, or a
+    /// process the preview left out, keeps its own text.</summary>
+    private static void DropRepeatedStatements(Dictionary<string, object?> graph, JsonObject row)
+    {
+        if (row["processes"] is not JsonArray previews || graph["processes"] is not List<Dictionary<string, object?>> drawn) return;
+
+        var seen = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var node in previews)
+        {
+            if (node is JsonObject o
+                && o["process_id"] is JsonValue id && id.TryGetValue<string>(out var pid)
+                && o["sql_text"] is JsonValue st && st.TryGetValue<string>(out var text))
+            {
+                seen[pid] = text;
+            }
+        }
+
+        foreach (var p in drawn)
+        {
+            if (p["id"] is string id && p["sql_text"] is string text && !p.ContainsKey("sql_text_cut")
+                && seen.TryGetValue(id, out var preview) && string.Equals(preview, text, StringComparison.Ordinal))
+            {
+                p.Remove("sql_text");
+            }
+        }
     }
 
     private static void Put(Dictionary<string, object?> map, string key, string? value)

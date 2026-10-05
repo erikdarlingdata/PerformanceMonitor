@@ -3516,7 +3516,7 @@ function deadlockXmlColumns(server) {
       render: (r) =>
         saveXmlButton(r.deadlock_graph_xml, "deadlock_" + fileStamp(r.deadlock_time) + ".xdl", "application/xml;charset=utf-8", r.deadlock_graph_xml_truncated === true),
     },
-    { key: "graph", label: "Graph", sortable: false, csv: false, render: (r) => deadlockGraphCell(server, r) },
+    { key: "graph", label: "Graph", sortable: false, csv: false, filter: false, copy: false, render: (r) => deadlockGraphCell(server, r) },
     { key: "processes", label: "Processes", sortable: false, render: (r) => deadlockProcessesCell(server, r) },
     { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
   ];

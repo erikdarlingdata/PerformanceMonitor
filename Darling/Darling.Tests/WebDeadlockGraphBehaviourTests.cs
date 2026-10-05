@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
@@ -79,8 +80,8 @@ public sealed class WebDeadlockGraphBehaviourTests
         Assert.Equal(2, Int(r, "markerEnds"));
         Assert.Equal(0, Int(r, "cycleFrames"));
         Assert.Equal("0 0 700 300", Str(r, "viewBox"));
-        Assert.All(r.GetProperty("labels").EnumerateArray(), l => Assert.Equal("KEY AppDb.dbo.t · X", l.GetString()));
-        Assert.Contains("Waiter requests X, owner holds U (keylock)", r.GetProperty("titles").EnumerateArray().Select(t => t.GetString()));
+        Assert.All(r.GetProperty("labels").EnumerateArray(), l => Assert.Equal("t · X", l.GetString()));
+        Assert.Contains("KEY AppDb.dbo.t\nWaiter requests X, owner holds U (keylock)", r.GetProperty("titles").EnumerateArray().Select(t => t.GetString()));
         Assert.Equal("SPID 51", r.GetProperty("selectedAtOpen")[0].GetString());
         Assert.Equal("SPID 51 (victim)", Str(r, "head"));
     }
@@ -109,7 +110,9 @@ public sealed class WebDeadlockGraphBehaviourTests
     {
         var r = Run("twoCycles");
         Assert.Equal(2, Int(r, "cycleFrames"));
-        Assert.Equal(new[] { "Cycle 1 (2)", "Cycle 2 (2)" }, r.GetProperty("cycleLabels").EnumerateArray().Select(l => l.GetString()).ToArray());
+        /* The desktop's rule: a one-node box is no cycle, the page numbers 1..n, and each frame sits 22 outside the cards. */
+        Assert.Equal(new[] { "Cycle 1", "Cycle 2" }, r.GetProperty("cycleLabels").EnumerateArray().Select(l => l.GetString()).ToArray());
+        Assert.Equal(new[] { "-2,-2,374,304", "358,-2,344,304" }, r.GetProperty("frameRects").EnumerateArray().Select(l => l.GetString()).ToArray());
         Assert.Equal("Graph (2 processes, 2 cycles)", Str(r, "summary"));
     }
 
@@ -117,10 +120,26 @@ public sealed class WebDeadlockGraphBehaviourTests
     public void AParallelSelfEdge_IsALoopOverTheCard()
     {
         var r = Run("selfLoop");
-        Assert.Equal(1, Int(r, "paths"));
-        Assert.True(r.GetProperty("curve").GetBoolean());
+        Assert.Equal(0, Int(r, "paths"));
+        Assert.Equal(1, Int(r, "ellipses"));
+        Assert.Equal(1, Int(r, "arrowheads"));
+        Assert.StartsWith("0 -", Str(r, "viewBox"), StringComparison.Ordinal);
         Assert.Equal(0, Int(r, "cycleFrames"));
         Assert.Equal("Graph (1 process)", Str(r, "summary"));
+    }
+
+    [Fact]
+    public void AnEdgeLabel_ShowsTheTableName_AndTheTooltipTheWholeResource()
+    {
+        var r = Run("shortLabel");
+        Assert.Equal("new_order · X", Str(r, "label"));
+        Assert.StartsWith("PAGE hammerdb_tpcc.dbo.new_order\n", Str(r, "title"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AStatementTheGraphLeftOff_IsReadFromTheRowsProcessPreview()
+    {
+        Assert.Equal("from the preview", Str(Run("previewFallback"), "pre"));
     }
 
     [Fact]
