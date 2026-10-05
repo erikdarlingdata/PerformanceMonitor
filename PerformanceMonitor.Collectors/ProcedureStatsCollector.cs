@@ -66,7 +66,32 @@ public sealed class ProcedureStatsCollector : CollectorDefinitionBase<ProcedureS
            host captures no plans or the handle aged out before the plan apply ran. Carries the SIZE whether
            or not QueryPlanXml carries the CONTENT, which is what tells a plan omitted for size apart from a
            plan that was never there. */
-        long? QueryPlanXmlBytes);
+        long? QueryPlanXmlBytes)
+    {
+        /// <summary>
+        /// #5158: the digest the host's store already holds for this module's plan, set by a host that defers
+        /// the plan fetch and recognizes the plan from an earlier commit. When set, the writer stores the
+        /// digest instead of the content (<see cref="ICollectorRowWriter.PayloadOrDigest"/>). Null by
+        /// default, so a row writes its <see cref="QueryPlanXml"/> as it always has. Init-only rather than
+        /// positional so existing <c>new Row(...)</c> call sites are untouched. A known identity whose plan is
+        /// over the capture cap has no digest; the host sets <see cref="QueryPlanXmlBytes"/> from its cache for
+        /// it, as <c>query_stats</c> does, so the size column and the oversized backlog both see it. The host
+        /// must clear this digest when it measures a new size for the row.
+        /// </summary>
+        public string? KnownPlanDigest { get; init; }
+
+        /// <summary>#5158 identity fingerprint, read only when the plan fetch is deferred: how many statements
+        /// <c>sys.dm_exec_query_stats</c> holds for this module's plan handle. Zero (with a null max and sum)
+        /// means no statements are visible for the handle: it aged out or none has run. The wiring must not
+        /// cache an identity keyed on a count of zero.</summary>
+        public long? PlanStatementCount { get; init; }
+
+        /// <summary>#5158 identity fingerprint: the latest statement <c>creation_time</c> for the plan handle.</summary>
+        public DateTime? PlanLastStatementCompile { get; init; }
+
+        /// <summary>#5158 identity fingerprint: the sum of <c>plan_generation_num</c> over the plan handle's statements.</summary>
+        public long? PlanGenerationSum { get; init; }
+    }
 
     private const string StandardQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -325,6 +350,90 @@ OPTION(RECOMPILE);";
 OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), "
         + ModuleStatementStartOffset + ", " + ModuleStatementEndOffset + @") AS tqp";
 
+    /// <summary>
+    /// #5158: the identity columns a deferred-fetch host reads INSTEAD of the plan columns, at ordinals 27-29
+    /// (not payload columns). A module's plan XML changes in place when one statement recompiles, while
+    /// <c>plan_handle</c> and <c>cached_time</c> stay put (measured: adding cached_time to the key changed the
+    /// distinct count by zero), so the handle alone cannot say whether a cached digest is still current.
+    /// These three aggregates over the module's statements move when any statement recompiles or first compiles.
+    /// </summary>
+    private const string PlanIdentitySelectFragment = @",
+    plan_statement_count = pfp.plan_statement_count,
+    plan_last_statement_compile = pfp.plan_last_statement_compile,
+    plan_generation_sum = pfp.plan_generation_sum";
+
+    /* PROVISIONAL (#5158): a correlated OUTER APPLY over sys.dm_exec_query_stats, one per surviving row, outside
+       the ranked derived table like the plan apply (at most 150). dm_exec_query_stats cannot seek on
+       plan_handle, so what this costs on a large cache is UNMEASURED; a grouped single walk or
+       dm_exec_cached_plans.size_in_bytes are the alternatives if it proves too slow. No single quotes, because
+       the standard query nests this text inside dynamic SQL. */
+    private const string PlanIdentityApplyFragment = @"
+OUTER APPLY
+(
+    SELECT
+        plan_statement_count = COUNT_BIG(*),
+        plan_last_statement_compile = MAX(qs.creation_time),
+        plan_generation_sum = SUM(CONVERT(bigint, qs.plan_generation_num))
+    FROM sys.dm_exec_query_stats AS qs
+    WHERE qs.plan_handle = CONVERT(varbinary(64), ranked.plan_handle, 1)
+) AS pfp";
+
+    /// <summary>
+    /// True when the main query carries the plan columns itself: the host captures plans and has not deferred
+    /// the fetch to <see cref="BuildPlanFetchQuery"/> (#5158). One definition for the query text and the read.
+    /// </summary>
+    private static bool InlinePlanCapture(CollectorContext context) =>
+        context.CapturePlanXml && !context.DeferPlanXmlFetch;
+
+    /// <summary>True when the host captures plans and defers the fetch, so the main query carries the identity columns.</summary>
+    private static bool DeferredPlanIdentity(CollectorContext context) =>
+        context.CapturePlanXml && context.DeferPlanXmlFetch;
+
+    /// <summary>
+    /// #5158: the second target query for a host that defers the plan fetch. Takes plan handles, not
+    /// <see cref="QueryStatsCollector.PlanFetchKey"/>s, so the offsets are always
+    /// (<see cref="ModuleStatementStartOffset"/>, <see cref="ModuleStatementEndOffset"/>): a caller cannot pass
+    /// a statement grain this collector does not have. It is query_stats' fetch query for those keys, one SQL.
+    /// Read the result with <see cref="QueryStatsCollector.ReadPlanFetchAsync"/>.
+    /// </summary>
+    public static CollectorQuery BuildPlanFetchQuery(CollectorContext context, IReadOnlyList<byte[]> planHandles)
+    {
+        ArgumentNullException.ThrowIfNull(planHandles);
+
+        var keys = new List<QueryStatsCollector.PlanFetchKey>(planHandles.Count);
+        foreach (var handle in planHandles)
+        {
+            keys.Add(new QueryStatsCollector.PlanFetchKey(handle, ModuleStatementStartOffset, ModuleStatementEndOffset));
+        }
+
+        return QueryStatsCollector.BuildPlanFetchQuery(context, keys);
+    }
+
+    /// <summary>
+    /// Parses the shipped <c>plan_handle</c> text (<c>0x</c> and 2 to 128 hex digits) to 1 to 64 bytes. False
+    /// for null, empty, a bare <c>0x</c>, an odd digit count, more than 64 bytes or a non-hex character, so
+    /// such a row is never fetched and ships no plan, as an aged-out handle does.
+    /// </summary>
+    public static bool TryParsePlanHandle(string? hex, out byte[] bytes)
+    {
+        bytes = Array.Empty<byte>();
+        if (hex is null || hex.Length < 4 || hex.Length > 130 || (hex.Length & 1) != 0
+            || hex[0] != '0' || (hex[1] != 'x' && hex[1] != 'X'))
+        {
+            return false;
+        }
+
+        try
+        {
+            bytes = Convert.FromHexString(hex.AsSpan(2));
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
+
     public override string Name => "procedure_stats";
 
     public override string TargetTable => "procedure_stats";
@@ -352,8 +461,12 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-        var planSelect = context.CapturePlanXml ? PlanSelectFragment : "";
-        var planApply = context.CapturePlanXml ? PlanApplyFragment : "";
+        var planSelect = InlinePlanCapture(context)
+            ? PlanSelectFragment
+            : DeferredPlanIdentity(context) ? PlanIdentitySelectFragment : "";
+        var planApply = InlinePlanCapture(context)
+            ? PlanApplyFragment
+            : DeferredPlanIdentity(context) ? PlanIdentityApplyFragment : "";
 
         if (context.Target.IsAzureSqlDb)
         {
@@ -435,6 +548,8 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        var inlinePlan = InlinePlanCapture(context);
+        var deferredIdentity = DeferredPlanIdentity(context);
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -468,14 +583,22 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
                 reader.IsDBNull(26) ? null : reader.GetString(26),
                 /* query_plan_xml is the trailing column present only when CapturePlanXml spliced it
                    into every branch's SELECT (ordinal 27); the short-circuit skips it entirely when off. */
-                context.CapturePlanXml && !reader.IsDBNull(27) ? reader.GetString(27) : null,
+                inlinePlan && !reader.IsDBNull(27) ? reader.GetString(27) : null,
                 /* #3392: the plan's measured size rides the same splice at ordinal 28, so the same
                    short-circuit covers it. Convert rather than GetInt64: DATALENGTH's return type widens to
                    bigint only for the max types, and a provider that hands back an Int32 here would throw on
                    a strict accessor. */
-                context.CapturePlanXml && !reader.IsDBNull(28)
+                inlinePlan && !reader.IsDBNull(28)
                     ? Convert.ToInt64(reader.GetValue(28), CultureInfo.InvariantCulture)
-                    : null));
+                    : null)
+            {
+                /* #5158: a deferred-fetch host reads the identity fingerprint at 27-29 in place of the plan. */
+                PlanStatementCount = deferredIdentity && !reader.IsDBNull(27)
+                    ? Convert.ToInt64(reader.GetValue(27), CultureInfo.InvariantCulture) : null,
+                PlanLastStatementCompile = deferredIdentity && !reader.IsDBNull(28) ? reader.GetDateTime(28) : null,
+                PlanGenerationSum = deferredIdentity && !reader.IsDBNull(29)
+                    ? Convert.ToInt64(reader.GetValue(29), CultureInfo.InvariantCulture) : null,
+            });
         }
 
         return rows;
@@ -547,8 +670,8 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
             .Value(deltaWrites)
             .Value(deltaPhysReads)
             .Value(deltaSpills)
-            .Value(row.QueryPlanXml)           /* null unless CapturePlanXml captured it (Darling) */
-            .Value(row.QueryPlanXmlBytes)      /* #3392: measured size, never gated by the cap */
+            .PayloadOrDigest(row.QueryPlanXml, row.KnownPlanDigest) /* null unless CapturePlanXml captured it (Darling); #5158: or the digest of a plan the store holds */
+            .Value(row.QueryPlanXmlBytes) /* #3392: measured size, never gated by the cap; a host that defers the fetch sets it from its cache for a known identity */
             .Value(sampleIntervalSeconds);     /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
     }
 
