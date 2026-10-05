@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -50,6 +51,7 @@ public sealed class DarlingMcpPgKernelStatsTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum query shapes to return, most CPU first. Default 20. This is what bounds the page - read truncated to know whether the window held more; the shares stay of the whole window.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -73,18 +75,37 @@ public sealed class DarlingMcpPgKernelStatsTools
                 /* pg_stat_kcache needs shared_preload_libraries and a restart, so "not installed" is the
                    likely answer and the precondition vocabulary names the fix. Ordered after the
                    capability check so a wrong-engine target is never told to install an extension. */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                var bare = await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.ServerName, "pg_kernel_stats", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_kernel_stats", cancellationToken)
-                    ?? McpHelpers.Status(
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_kernel_stats", cancellationToken);
+                if (bare is not null)
+                {
+                    return bare;
+                }
+
+                /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+                   Rows are windowed on collection_time over [start, now], the probe's column. A data answer over 90 minutes or less starts
+                   no probe; a failed probe costs the notice, never the rows. */
+                var emptyStart = windowEnd.AddHours(-hours_back);
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_kernel_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+
+                return McpHelpers.Status(
                         "empty",
                         $"No per-query OS resource usage for {resolved.ServerName} in the last "
                         + $"{hours_back} hour(s). These are per-interval deltas, so a single collection "
-                        + "has nothing to difference against and the window fills on the second one.");
+                        + "has nothing to difference against and the window fills on the second one.",
+                        emptyNotice.AsHints());
             }
 
-            return BuildKernelStatsJson(resolved.ServerName, hours_back, page, limit);
+            /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
+               Rows are windowed on collection_time over [start, now], the probe's column. A data answer over 90 minutes or less starts
+               no probe; a failed probe costs the notice, never the rows. */
+            var windowStart = windowEnd.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_kernel_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
+            return BuildKernelStatsJson(resolved.ServerName, hours_back, page, limit, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -105,7 +126,8 @@ public sealed class DarlingMcpPgKernelStatsTools
         string serverName,
         int hoursBack,
         DarlingPgKernelStatsReader.PgKernelStatsPage page,
-        int limit)
+        int limit,
+        McpWindowNotice? notice = null)
     {
         var truncated = page.Rows.Count > limit;
         var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
@@ -141,10 +163,13 @@ public sealed class DarlingMcpPgKernelStatsTools
         })
         .ToList();
 
-        return JsonSerializer.Serialize(new
+        var json = JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,
+            effective_start = notice?.EffectiveStart,
+            window_truncated = notice?.WindowTruncated,
+            truncation_note = notice?.TruncationNote,
             /* #3541 A3 dialect: the page described as a page. No time bounds — each row is one series
                differenced across the whole window, so there is no page reach to report, only a cap. */
             queries_returned = queries.Count,
@@ -168,5 +193,6 @@ public sealed class DarlingMcpPgKernelStatsTools
                      : string.Empty),
             queries,
         }, McpHelpers.JsonOptions);
+        return notice is null || notice.Value.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
     }
 }

@@ -208,6 +208,22 @@ public sealed class DarlingConfig
     public int ProcedureStatsPlanCycleInterval { get; set; } = 4;
 
     /// <summary>
+    /// #5158: whether <c>query_stats</c> fetches plan XML only for statement plans this host has not already
+    /// committed. On (the default), the main query carries no plan and a second target query renders just the
+    /// plans the host has not stored; rows for plans it has stored carry the existing digest, so every reader
+    /// sees what it saw before. Off restores the inline capture, which renders and ships every row's plan every run.
+    ///
+    /// <para><b>Why.</b> On one large store the inline capture rendered 54 GB of plan XML an hour on the monitored
+    /// servers and shipped 29 GB of it, against 1.1 GB an hour of distinct plans: about 47 times the plans there
+    /// are, and the reason the slowest <c>query_stats</c> runs are almost entirely time spent draining plan text.</para>
+    ///
+    /// <para>A file-only knob like <see cref="ProcedureStatsPlanCycleInterval"/>: an edit takes effect on the next
+    /// restart, and it needs no schema rung. Only meaningful while <see cref="CapturePlans"/> is on.</para>
+    /// </summary>
+    [JsonPropertyName("queryStatsDeferredPlanFetch")]
+    public bool QueryStatsDeferredPlanFetch { get; set; } = true;
+
+    /// <summary>
     /// The shared alert engine's enabled flags and thresholds (Phase-5 slice D). Every default
     /// mirrors Lite's <c>App.*</c> alert defaults exactly, so an empty section alerts like a
     /// fresh Lite install. Optional — omit it entirely for the defaults.
@@ -320,6 +336,11 @@ public sealed class DarlingConfig
         return Path.Combine(AppContext.BaseDirectory, "darling.json");
     }
 
+    /// <summary>Every env:/file: reference found in the deserialized config, exactly as written, captured
+    /// in <see cref="Parse"/> before any resolution. Feeds <see cref="DarlingOwnedSecrets"/>.</summary>
+    [JsonIgnore]
+    internal List<string> SecretReferencesAsWritten { get; set; } = new();
+
     public static DarlingConfig Load(string? explicitPath = null)
     {
         var path = ResolveConfigPath(explicitPath);
@@ -329,7 +350,9 @@ public sealed class DarlingConfig
                 $"Configuration file not found: {path}. Copy darling.sample.json to darling.json and edit it.", path);
         }
 
-        return Parse(File.ReadAllText(path));
+        var loaded = Parse(File.ReadAllText(path));
+        DarlingOwnedSecrets.Set(DarlingOwnedSecrets.Compute(loaded, path));
+        return loaded;
     }
 
     public static DarlingConfig Parse(string json)
@@ -339,6 +362,10 @@ public sealed class DarlingConfig
         {
             throw new InvalidDataException("Configuration file parsed to null.");
         }
+
+        /* Capture every env:/file: reference AS WRITTEN, before the resolution below overwrites any slot
+           with the secret it points at. */
+        config.SecretReferencesAsWritten = DarlingOwnedSecrets.CollectReferences(config);
 
         /* #1804: postgres.connectionString also takes an env:/file: reference — for the WHOLE string,
            since the password lives inside it and per-field indirection can't reach it. Resolved ONCE
