@@ -1561,6 +1561,15 @@ export const SERVER_TABS = [
         "No SQL Agent jobs were running at the last collection — the normal state for most servers."
       ),
       table(
+        "Job History",
+        "get_job_history",
+        { server, hours: ctx.hours, limit: 100 },
+        "runs",
+        JOB_HISTORY_COLUMNS,
+        ctx.label + ", newest 100 runs (steps and job outcomes)",
+        "No SQL Agent job runs were retained in this window."
+      ),
+      table(
         "Index Usage",
         "get_index_usage",
         { server },
@@ -3620,6 +3629,19 @@ const JOB_COLUMNS = [
   { key: "percent_of_average", label: "% of avg", format: "num1" },
   { key: "is_running_long", label: "Long", format: "bool" },
   { key: "successful_run_count", label: "Successes", format: "int" },
+];
+
+/* The Job History grid on the Activity tab: the cross-server page's columns less Server, since the tab is one server's. */
+const JOB_HISTORY_COLUMNS = [
+  { key: "run_time", label: "Run Time", format: "time" },
+  { key: "job_name", label: "Job" },
+  { key: "category", label: "Category" },
+  { key: "step", label: "Step" },
+  { key: "status", label: "Status" },
+  { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
+  { key: "retries", label: "Retries", format: "int" },
+  { key: "last_success", label: "Last Success", format: "time" },
+  { key: "message", label: "Message", wrap: true },
 ];
 
 const PERFMON_COLUMNS = [
