@@ -431,7 +431,8 @@ VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), t, ServerId, ServerNa
             Assert.True(conditions.GetProperty("source_observed").GetBoolean());
             Assert.Equal(t.ToString("o"), conditions.GetProperty("last_captured_at").GetString());
             Assert.True(conditions.GetProperty("events_in_window").GetInt32() > 0);
-            Assert.Contains("Events ARE being captured", conditions.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            /* #4966: the plant is minutes old against a 24-hour window, so the window is cut and the healthy-answer claim gives way. */
+            Assert.Equal(McpHelpers.CutWindowNothingMessage, conditions.GetProperty("message").GetString());
 
             var broker = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetMemoryBroker(postgres, ServerName)).RootElement;
             Assert.Equal("empty", broker.GetProperty("status").GetString());

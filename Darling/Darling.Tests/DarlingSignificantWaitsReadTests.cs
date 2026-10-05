@@ -77,7 +77,8 @@ public sealed class DarlingSignificantWaitsReadTests
             var quietDoc = JsonDocument.Parse(quiet);
             Assert.Equal("empty", quietDoc.RootElement.GetProperty("status").GetString());
             var quietText = quietDoc.RootElement.GetProperty("message").GetString()!;
-            Assert.Contains("widen", quietText, StringComparison.Ordinal);
+            /* #4966: the only capture is 48 hours old, so the one-hour window is not covered: the cut sentence, not "widen". */
+            Assert.Equal(McpHelpers.CutWindowNothingMessage, quietText);
 
             /* Same zero rows as the branch above, and it must NOT reach for the same word. */
             Assert.DoesNotContain("EVER", quietText, StringComparison.Ordinal);
@@ -95,8 +96,8 @@ public sealed class DarlingSignificantWaitsReadTests
             var gatedDoc = JsonDocument.Parse(gated);
             Assert.Equal("empty", gatedDoc.RootElement.GetProperty("status").GetString());
             var gatedText = gatedDoc.RootElement.GetProperty("message").GetString()!;
-            Assert.Contains("none was significant", gatedText, StringComparison.Ordinal);
-            Assert.Contains("500", gatedText, StringComparison.Ordinal);
+            /* #4966: the only other capture is 48 hours old, so the 4-hour window is cut and the healthy claim gives way. */
+            Assert.Equal(McpHelpers.CutWindowNothingMessage, gatedText);
 
             /* The three empty messages are three different sentences, not one sentence three times. */
             Assert.DoesNotContain("EVER", gatedText, StringComparison.Ordinal);

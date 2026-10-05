@@ -719,6 +719,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         await _duckDb.InitializeAsync();
         var now = DateTime.UtcNow;
         await SeedRegressionAsync(now.AddDays(-9), queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddDays(-3), queryId: 1, avgUs: 1000, intervalId: 3);
         await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 1000, intervalId: 2);
 
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24));
@@ -753,6 +754,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         await _duckDb.InitializeAsync();
         var now = DateTime.UtcNow;
         await SeedRegressionAsync(now.AddDays(-9), queryId: 1, avgUs: 1000, intervalId: 1);
+        await SeedRegressionAsync(now.AddDays(-3), queryId: 1, avgUs: 1000, intervalId: 3);
         await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 1000, intervalId: 2);
 
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, database_name: "Db"));

@@ -312,7 +312,8 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             var clear = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
             Assert.Equal("empty", clear.GetProperty("status").GetString());
             var clearText = clear.GetProperty("message").GetString()!;
-            Assert.Contains("all-clear", clearText, StringComparison.Ordinal);
+            /* #4966: the baseline reaches 40 hours back, past the 24-hour window's start but not seven days, so the window is cut and the all-clear gives way. */
+            Assert.Equal(McpHelpers.CutWindowNothingMessage, clearText);
             Assert.DoesNotContain("EVER", clearText, StringComparison.Ordinal);
             Assert.DoesNotContain("Widen", clearText, StringComparison.Ordinal);
 
@@ -549,7 +550,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
 
             var clear = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
             Assert.Equal("empty", clear.GetProperty("status").GetString());
-            Assert.Contains("all-clear", clear.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal(McpHelpers.CutWindowNothingMessage, clear.GetProperty("message").GetString());
             var clearHints = clear.GetProperty("hints");
             Assert.True(clearHints.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-40)), clearHints.GetProperty("effective_start").GetString());
@@ -597,7 +598,8 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.DoesNotContain("this IS the all-clear", missText, StringComparison.Ordinal);
 
             var match = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, Db));
-            Assert.Contains("this IS the all-clear", match.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            /* #4966: this fixture's baseline is cut (40 hours of the seven days), so the matching filter's nothing is the cut sentence. */
+            Assert.Equal(McpHelpers.CutWindowNothingMessage, match.GetProperty("message").GetString());
 
             bodySucceeded = true;
         }
@@ -689,6 +691,48 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Contains("no baseline", noBaselineText, StringComparison.Ordinal);
             Assert.Contains("NOT a clean bill of health", noBaselineText, StringComparison.Ordinal);
             Assert.DoesNotContain("this IS the all-clear", noBaselineText, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #4966: the same all-clear over a baseline the store covers in full (a capture older than the seven-day lookback) keeps
+    /// its "this IS the all-clear" sentence, and its hints say the window is not cut.
+    /// </summary>
+    [Fact]
+    public async Task TheAllClear_OverACoveredBaseline_KeepsItsSentence_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live regressions test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var baseNow = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, ct, baseNow.AddDays(-9), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3);
+            await SeedAsync(connection, ct, baseNow.AddDays(-3), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 1);
+
+            var clear = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
+            Assert.Equal("empty", clear.GetProperty("status").GetString());
+            Assert.False(clear.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Contains("this IS the all-clear", clear.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

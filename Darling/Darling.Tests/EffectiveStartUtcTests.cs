@@ -144,7 +144,8 @@ public sealed class EffectiveStartUtcTests
 
         Assert.Equal(expectedWrites, writes.Count);
         Assert.All(writes, line => Assert.Equal("effective_start = notice.EffectiveStart,", line));
-        Assert.Equal(expectedHints, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)").Count);
+        /* #4966: an empty answer reads its notice first (to choose quiet or cut wording), then passes it as hints. */
+        Assert.Equal(expectedHints, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)|emptyNotice\.AsHints\(\)").Count);
         Assert.DoesNotContain("EventWindowNoticeAsync", source, StringComparison.Ordinal);
     }
 
@@ -168,7 +169,8 @@ public sealed class EffectiveStartUtcTests
 
         Assert.Equal(9, writes.Count);
         Assert.All(writes, line => Assert.Equal("effective_start = notice.EffectiveStart,", line));
-        Assert.Equal(3, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)").Count);
+        /* #4966: two rungs read their notice first (to choose quiet or cut wording); the third passes it straight. */
+        Assert.Equal(3, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)|hints: notice\.AsHints\(\)").Count);
         /* A call, not the doc comment that explains why there is none. */
         Assert.DoesNotContain("EventWindowNoticeAsync(", source, StringComparison.Ordinal);
     }
