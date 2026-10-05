@@ -7221,6 +7221,21 @@ RETURNING s.state_key";
     }
 
     /// <summary>
+    /// #5158: records one deferred fetch on the context, then renders the run's measurements FROM the context, so the
+    /// stamp is the single source and the collection_log note only reads it. <c>PerItemPlanFetchMs</c> is "inside
+    /// <c>sql:</c>, not drain"; a procedure_stats change that shares these names will stamp the same fields.
+    /// </summary>
+    internal static void StampPlanFetch(CollectorContext context, int renderedRows, long renderedBytes, long fetchMs)
+    {
+        context.PerItemPlanRenderedRows = renderedRows;
+        context.PerItemPlanRenderedBytes = renderedBytes;
+        context.PerItemPlanFetchMs = fetchMs;
+        context.Measure("plans_rendered", context.PerItemPlanRenderedRows);
+        context.Measure("plans_rendered_bytes", context.PerItemPlanRenderedBytes);
+        context.Measure("plan_fetch_ms", context.PerItemPlanFetchMs);
+    }
+
+    /// <summary>
     /// #5158: procedure_stats' plan reuse, after the main read. In shadow the rows already carry their inline plans, and
     /// this only measures whether each module plan's identity (<see cref="ProcedureStatsPlanKey"/>) would have been
     /// recognized and right; nothing written changes. In on the rows carry no plan: recognized identities get their stored
@@ -7318,21 +7333,6 @@ RETURNING s.state_key";
             outcome.Rendered);
 
         return outcome.Pending;
-    }
-
-    /// <summary>
-    /// #5158: records one deferred fetch on the context, then renders the run's measurements FROM the context, so the
-    /// stamp is the single source and the collection_log note only reads it. <c>PerItemPlanFetchMs</c> is "inside
-    /// <c>sql:</c>, not drain"; a procedure_stats change that shares these names will stamp the same fields.
-    /// </summary>
-    internal static void StampPlanFetch(CollectorContext context, int renderedRows, long renderedBytes, long fetchMs)
-    {
-        context.PerItemPlanRenderedRows = renderedRows;
-        context.PerItemPlanRenderedBytes = renderedBytes;
-        context.PerItemPlanFetchMs = fetchMs;
-        context.Measure("plans_rendered", context.PerItemPlanRenderedRows);
-        context.Measure("plans_rendered_bytes", context.PerItemPlanRenderedBytes);
-        context.Measure("plan_fetch_ms", context.PerItemPlanFetchMs);
     }
 
     /// <summary>
