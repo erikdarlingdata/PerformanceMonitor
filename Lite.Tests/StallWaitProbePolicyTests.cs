@@ -634,7 +634,7 @@ public class StallWaitProbePolicyTests
         /* The idle exclusion is a list of literals rendered from IgnoredWaitDefaults.All, never a copy of it
            and never a name of the set in the text. */
         Assert.DoesNotContain("IgnoredWait", sql, StringComparison.Ordinal);
-        Assert.Contains("owt.wait_type NOT IN", sql, StringComparison.Ordinal);
+        Assert.Contains("wt.is_idle = 0", sql, StringComparison.Ordinal);
 
         /* CONTRIBUTING.md's function rule: COUNT_BIG, never COUNT. Asserted here because nothing in the
            repo enforces it — this query shipped two bare COUNTs through every guard and was caught by eye
@@ -726,8 +726,8 @@ public class StallWaitProbePolicyTests
     }
 
     /// <summary>
-    /// A few wait names come back from the DMV with a trailing space (SQP_STATS_REPORTING is one), and a
-    /// user-task wait can carry it too. The space must not land in the stored top wait type or in the summary
+    /// A few wait names come back from the DMV with a trailing space, and a user-task wait can carry it too
+    /// (the fixture uses a name that is NOT on the idle list, so it is one the real query can rank). The space must not land in the stored top wait type or in the summary
     /// line.
     /// </summary>
     [Fact]
@@ -736,14 +736,14 @@ public class StallWaitProbePolicyTests
         var sample = await StallWaitProbePolicy.ReadAsync(
             new FakeSampleReader(new object?[][]
             {
-                ["SQP_STATS_REPORTING ", 1L, 240_000L, 240_000L, 631L, 14, 8, 97L, 3L, 12L, 21, 0L, 0, 0L, null, null, null, 0L, 0],
+                ["LCK_M_S ", 1L, 240_000L, 240_000L, 631L, 14, 8, 97L, 3L, 12L, 21, 0L, 0, 0L, null, null, null, 0L, 0],
                 ["SOS_SCHEDULER_YIELD", 412L, 9_931L, 61L, 631L, 14, 8, 97L, 3L, 12L, 21, 0L, 0, 0L, null, null, null, 0L, 0],
             }),
             CancellationToken.None);
 
         Assert.NotNull(sample);
-        Assert.Equal("SQP_STATS_REPORTING", sample!.TopWaitType);
-        Assert.Equal("SQP_STATS_REPORTING:1x/240000ms; SOS_SCHEDULER_YIELD:412x/9931ms; excluded from ranking: background 0 tasks/0 types; idle 0 tasks/0 types; ours: not visible", sample.WaitSummary);
+        Assert.Equal("LCK_M_S", sample!.TopWaitType);
+        Assert.Equal("LCK_M_S:1x/240000ms; SOS_SCHEDULER_YIELD:412x/9931ms; excluded from ranking: background 0 tasks/0 types; idle 0 tasks/0 types; ours: not visible", sample.WaitSummary);
     }
 
     /// <summary>
@@ -756,10 +756,10 @@ public class StallWaitProbePolicyTests
     {
         var sql = StallWaitProbePolicy.QueryText;
 
-        var firstApply = sql.IndexOf("OUTER APPLY", StringComparison.Ordinal);
-        var ranking = sql.Substring(firstApply, sql.IndexOf("OUTER APPLY", firstApply + 1, StringComparison.Ordinal) - firstApply);
-
-        var literals = System.Text.RegularExpressions.Regex.Matches(ranking, "N'([^']*)'")
+        /* Rendered ONCE: the list lives in the leading derived set as is_idle, and the totals and the ranking
+           both read that flag. Every N'...' literal before the SELECT is therefore the list, once. */
+        var list = sql.Substring(0, sql.IndexOf("SELECT /* PerformanceMonitorDarling", StringComparison.Ordinal));
+        var literals = System.Text.RegularExpressions.Regex.Matches(list, "N'([^']*)'")
             .Select(m => m.Groups[1].Value)
             .ToList();
 
@@ -790,13 +790,17 @@ public class StallWaitProbePolicyTests
 
         Assert.Contains("idle_waiting_tasks", totals, StringComparison.Ordinal);
         Assert.Contains("idle_wait_types", totals, StringComparison.Ordinal);
-        Assert.Contains("N'SP_SERVER_DIAGNOSTICS_SLEEP'", totals, StringComparison.Ordinal);
+        Assert.Contains("N'SP_SERVER_DIAGNOSTICS_SLEEP'", sql, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, "N'SP_SERVER_DIAGNOSTICS_SLEEP'"));
 
         /* A task counted as background is not counted again as idle. */
-        Assert.Contains("ISNULL(es.is_user_process, 1) <> 0 AND owt.wait_type IN", totals, StringComparison.Ordinal);
+        Assert.Contains("ISNULL(wt.is_user_process, 1) <> 0 AND wt.is_idle = 1", totals, StringComparison.Ordinal);
 
         Assert.Throws<InvalidOperationException>(() => StallWaitProbePolicy.BuildQueryText(new[] { "OK_WAIT", "BAD'; DROP" }));
         Assert.Throws<InvalidOperationException>(() => StallWaitProbePolicy.BuildQueryText(Array.Empty<string>()));
+
+        /* A null entry is the documented refusal too, not an ArgumentNullException from the sort or the regex. */
+        Assert.Throws<InvalidOperationException>(() => StallWaitProbePolicy.BuildQueryText(new string?[] { "OK_WAIT", null }!));
         Assert.DoesNotContain("<<", sql, StringComparison.Ordinal);
     }
 
@@ -808,7 +812,6 @@ public class StallWaitProbePolicyTests
     public void TheRanking_DropsBackgroundTasks_ButTheTotalsDoNot()
     {
         var sql = StallWaitProbePolicy.QueryText;
-        const string predicate = "ISNULL(es.is_user_process, 1) = 1";
 
         var firstApply = sql.IndexOf("OUTER APPLY", StringComparison.Ordinal);
         var crossJoin = sql.IndexOf("CROSS JOIN", StringComparison.Ordinal);
@@ -817,18 +820,22 @@ public class StallWaitProbePolicyTests
         var totals = sql.Substring(crossJoin, firstApply - crossJoin);
         var ranking = sql.Substring(firstApply, sql.IndexOf("OUTER APPLY", firstApply + 1, StringComparison.Ordinal) - firstApply);
 
-        /* A session the DMV cannot show must stay in the totals and keep the ranking's fail-safe. */
-        Assert.Contains("LEFT JOIN sys.dm_exec_sessions AS es", totals, StringComparison.Ordinal);
-        Assert.Contains("LEFT JOIN sys.dm_exec_sessions AS es", ranking, StringComparison.Ordinal);
+        /* Both read the one derived set, which keeps a session the DMV cannot show (a LEFT JOIN), and the
+           ranking keeps its fail-safe. */
+        var waiting = sql.Substring(0, crossJoin);
+        Assert.Contains("LEFT JOIN sys.dm_exec_sessions AS es", waiting, StringComparison.Ordinal);
+        Assert.Contains("FROM waiting AS wt", totals, StringComparison.Ordinal);
+        Assert.Contains("FROM waiting AS wt", ranking, StringComparison.Ordinal);
         Assert.Contains("TOP (5)", ranking, StringComparison.Ordinal);
-        Assert.Contains(predicate, ranking, StringComparison.Ordinal);
+        Assert.Contains("ISNULL(wt.is_user_process, 1) = 1", ranking, StringComparison.Ordinal);
+        Assert.Contains("wt.is_idle = 0", ranking, StringComparison.Ordinal);
 
         Assert.DoesNotContain("is_user_process, 1) = 1", totals, StringComparison.Ordinal);
         Assert.Contains("background_waiting_tasks", totals, StringComparison.Ordinal);
 
-        /* Sessionless tasks are dropped by an explicit predicate in both, not by three-valued logic. */
-        Assert.Contains("owt.session_id IS NOT NULL", totals, StringComparison.Ordinal);
-        Assert.Contains("owt.session_id IS NOT NULL", ranking, StringComparison.Ordinal);
+        /* Sessionless tasks are dropped by an explicit predicate, once, in the derived set both read. */
+        Assert.Contains("owt.session_id IS NOT NULL", waiting, StringComparison.Ordinal);
+        Assert.Contains("owt.wait_type IS NOT NULL", waiting, StringComparison.Ordinal);
     }
 
     /// <summary>

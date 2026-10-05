@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -177,8 +178,15 @@ public class StallWaitProbeLiveTests
             Assert.True(long.Parse(idle.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) >= 1, "the diagnostics session's idle wait is counted: " + sample.WaitSummary);
             Assert.True(int.Parse(idle.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture) >= 1);
 
-            /* The total still counts every waiting task, the idle one included. */
-            Assert.True(sample.WaitingTaskCount >= 2);
+            /* The total counts every waiting task, and covers the three disjoint buckets: the background tasks,
+               the idle ones the ranking dropped, and the ranked waits. Anything else waiting only adds to it. */
+            var idleTasks = long.Parse(idle.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+            var rankedTasks = Regex.Matches(sample.WaitSummary!, @"(?:^|; )[A-Z0-9_]+:(\d+)x/\d+ms")
+                .Cast<Match>().Sum(m => long.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
+            Assert.True(rankedTasks >= 1, "the lock wait is ranked: " + sample.WaitSummary);
+            Assert.True(
+                sample.WaitingTaskCount >= sample.BackgroundWaitingTasks + idleTasks + rankedTasks,
+                $"total {sample.WaitingTaskCount} covers background {sample.BackgroundWaitingTasks} + idle {idleTasks} + ranked {rankedTasks}: {sample.WaitSummary}");
         }
         finally
         {
@@ -224,6 +232,12 @@ public class StallWaitProbeLiveTests
             {
                 /* The table lives in tempdb and goes with the next restart. */
             }
+
+            /* The two KILLed connections are dead on the server. Disposed as they are, they return to the pool
+               and a later test with the same connection string can draw one. ClearPool dooms the pooled
+               connections and discards the in-use ones when they close, so none is reused. */
+            SqlConnection.ClearPool(diagnostics);
+            SqlConnection.ClearPool(blocked);
         }
     }
 }

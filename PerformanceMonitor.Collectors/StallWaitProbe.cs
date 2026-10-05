@@ -425,10 +425,14 @@ public static class StallWaitProbePolicy
     /// set and nothing else (#5267): the availability-group health check runs <c>sp_server_diagnostics</c> on
     /// an ordinary connection (<c>is_user_process = 1</c>), so its <c>SP_SERVER_DIAGNOSTICS_SLEEP</c> idle wait
     /// outranked every real wait on an availability-group server. That list is the one both SKUs already agree
-    /// is idle, and it holds none of the waits this probe exists to find (<c>SOS_SCHEDULER_YIELD</c>,
-    /// <c>THREADPOOL</c>, <c>ASYNC_NETWORK_IO</c> and the lock, latch and IO waits still rank). The list is
-    /// rendered into the text from the set at load, sorted ordinally, and each name is checked against
-    /// <c>^[A-Z0-9_]+$</c> first. The match is on the wait name alone: a session-text or batch-text join would
+    /// is idle, and it holds none of the starvation, lock, latch or IO waits (<c>SOS_SCHEDULER_YIELD</c>,
+    /// <c>THREADPOOL</c>, <c>ASYNC_NETWORK_IO</c> and the lock, latch and IO waits still rank). It does hold
+    /// a few XE-target and cluster-API waits (<c>XE_FILE_TARGET_TVF</c>, <c>PREEMPTIVE_XE_GETTARGETSTATE</c>,
+    /// <c>HADR_CLUSAPI_CALL</c>): another session in one of them does not block this service's collector, and
+    /// when this service's OWN collector is the one stuck in a listed wait it is still named in the 'ours'
+    /// tail, which the exclusion never touches. The list is rendered into the text from the set the first
+    /// time the text is read, sorted ordinally, and each name is checked against <c>^[A-Z0-9_]+$</c> first;
+    /// a name that fails the check fails the probe (recorded as <c>QUERY_FAILED</c>), not the policy. The match is on the wait name alone: a session-text or batch-text join would
     /// cost more than the probe is allowed on an instance that may be stalled. The totals
     /// (<c>all_waiting_tasks</c>, <c>distinct_wait_types</c>) stay unfiltered. <c>background_waiting_tasks</c> /
     /// <c>background_wait_types</c> say how many tasks the ranking left out as background, and
@@ -458,7 +462,20 @@ public static class StallWaitProbePolicy
     /// of following it without exception is that the next reader does not have to work out whether an
     /// exception was reasoned or accidental.</para>
     /// </summary>
-    public static readonly string QueryText = BuildQueryText();
+    public static string QueryText => RenderedQuery.Value;
+
+    /// <summary>
+    /// Renders the text the first time <see cref="QueryText"/> is read, not when
+    /// <see cref="StallWaitProbePolicy"/> loads. A static field of the policy would run
+    /// <see cref="BuildQueryText"/> in the policy's type initialiser, and a bad entry in the shared idle list
+    /// would then make every member of the policy throw <c>TypeInitializationException</c>
+    /// (<see cref="HardBudget"/>, <see cref="Decide"/> and <see cref="Outcomes"/> are used by every budgeted
+    /// collector). Here the same failure surfaces only where the text is used, inside the probe's own
+    /// try block (<c>StallWaitProbeRunner.RunAsync</c>'s catch), and is recorded as that probe's
+    /// <c>QUERY_FAILED</c> outcome with the builder's own message, since a <see cref="Lazy{T}"/> rethrows the
+    /// original exception and not a <c>TypeInitializationException</c> wrapper.
+    /// </summary>
+    private static readonly Lazy<string> RenderedQuery = new(() => BuildQueryText());
 
     /// <summary>The idle-wait placeholder in <see cref="QueryTemplate"/>, replaced by the rendered list.</summary>
     private const string IdleWaitToken = "<<idle-wait-list>>";
@@ -473,16 +490,19 @@ public static class StallWaitProbePolicy
     internal static string BuildQueryText(IEnumerable<string>? waitTypes = null)
     {
         var names = new List<string>(waitTypes ?? IgnoredWaitDefaults.All);
-        names.Sort(StringComparer.Ordinal);
 
+        /* The check runs before the sort: a null name would otherwise throw ArgumentNullException from the
+           comparer, and the documented failure is InvalidOperationException. */
         foreach (var name in names)
         {
-            if (!System.Text.RegularExpressions.Regex.IsMatch(name, WaitNamePattern, System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+            if (name is null || !System.Text.RegularExpressions.Regex.IsMatch(name, WaitNamePattern, System.Text.RegularExpressions.RegexOptions.CultureInvariant))
             {
                 throw new InvalidOperationException(
-                    "An idle wait type is not a plain wait name and cannot be rendered into the stall probe: " + name);
+                    "An idle wait type is not a plain wait name and cannot be rendered into the stall probe: " + (name ?? "(null)"));
             }
         }
+
+        names.Sort(StringComparer.Ordinal);
 
         if (names.Count == 0)
         {
@@ -509,7 +529,26 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 /* Sessionless tasks (dispatcher-pool and on-demand workers) are excluded from both the totals and the
    ranking, as before, by the explicit session_id IS NOT NULL. The ISNULL(es.is_user_process, 1) fallback
-   applies only to a task whose session id is set but whose session this login cannot see. */
+   applies only to a task whose session id is set but whose session this login cannot see. The idle list is
+   rendered ONCE, here, as is_idle per task; the totals and the ranking both read that flag. */
+WITH waiting AS
+(
+    SELECT
+        wait_type = owt.wait_type,
+        wait_duration_ms = owt.wait_duration_ms,
+        is_user_process = es.is_user_process,
+        is_idle =
+            CASE WHEN owt.wait_type IN
+            (
+                <<idle-wait-list>>
+            ) THEN 1 ELSE 0 END
+    FROM sys.dm_os_waiting_tasks AS owt
+    LEFT JOIN sys.dm_exec_sessions AS es
+      ON es.session_id = owt.session_id
+    WHERE owt.wait_type IS NOT NULL
+    AND   owt.session_id IS NOT NULL
+    AND   owt.session_id <> @@SPID
+)
 SELECT /* PerformanceMonitorDarling stall probe */
     wait_type = w.wait_type,
     waiting_tasks = w.waiting_tasks,
@@ -545,48 +584,29 @@ CROSS JOIN
 (
     SELECT
         all_waiting_tasks = COUNT_BIG(*),
-        distinct_wait_types = CONVERT(integer, COUNT_BIG(DISTINCT owt.wait_type)),
+        distinct_wait_types = CONVERT(integer, COUNT_BIG(DISTINCT wt.wait_type)),
         background_waiting_tasks =
-            ISNULL(SUM(CASE WHEN es.is_user_process = 0 THEN CONVERT(bigint, 1) ELSE CONVERT(bigint, 0) END), 0),
+            ISNULL(SUM(CASE WHEN wt.is_user_process = 0 THEN CONVERT(bigint, 1) ELSE CONVERT(bigint, 0) END), 0),
         background_wait_types =
-            CONVERT(integer, COUNT_BIG(DISTINCT CASE WHEN es.is_user_process = 0 THEN owt.wait_type END)),
+            CONVERT(integer, COUNT_BIG(DISTINCT CASE WHEN wt.is_user_process = 0 THEN wt.wait_type END)),
         idle_waiting_tasks =
-            ISNULL(SUM(CASE WHEN ISNULL(es.is_user_process, 1) <> 0 AND owt.wait_type IN
-            (
-                <<idle-wait-list>>
-            ) THEN CONVERT(bigint, 1) ELSE CONVERT(bigint, 0) END), 0),
+            ISNULL(SUM(CASE WHEN ISNULL(wt.is_user_process, 1) <> 0 AND wt.is_idle = 1 THEN CONVERT(bigint, 1) ELSE CONVERT(bigint, 0) END), 0),
         idle_wait_types =
-            CONVERT(integer, COUNT_BIG(DISTINCT CASE WHEN ISNULL(es.is_user_process, 1) <> 0 AND owt.wait_type IN
-            (
-                <<idle-wait-list>>
-            ) THEN owt.wait_type END))
-    FROM sys.dm_os_waiting_tasks AS owt
-    LEFT JOIN sys.dm_exec_sessions AS es
-      ON es.session_id = owt.session_id
-    WHERE owt.wait_type IS NOT NULL
-    AND   owt.session_id IS NOT NULL
-    AND   owt.session_id <> @@SPID
+            CONVERT(integer, COUNT_BIG(DISTINCT CASE WHEN ISNULL(wt.is_user_process, 1) <> 0 AND wt.is_idle = 1 THEN wt.wait_type END))
+    FROM waiting AS wt
 ) AS t
 OUTER APPLY
 (
     SELECT TOP (5)
-        wait_type = owt.wait_type,
+        wait_type = wt.wait_type,
         waiting_tasks = COUNT_BIG(*),
-        total_wait_ms = SUM(CONVERT(bigint, owt.wait_duration_ms)),
-        max_wait_ms = MAX(CONVERT(bigint, owt.wait_duration_ms))
-    FROM sys.dm_os_waiting_tasks AS owt
-    LEFT JOIN sys.dm_exec_sessions AS es
-      ON es.session_id = owt.session_id
-    WHERE owt.wait_type IS NOT NULL
-    AND   owt.session_id IS NOT NULL
-    AND   owt.session_id <> @@SPID
-    AND   ISNULL(es.is_user_process, 1) = 1
-    AND   owt.wait_type NOT IN
-    (
-        <<idle-wait-list>>
-    )
-    GROUP BY owt.wait_type
-    ORDER BY SUM(CONVERT(bigint, owt.wait_duration_ms)) DESC, owt.wait_type ASC
+        total_wait_ms = SUM(CONVERT(bigint, wt.wait_duration_ms)),
+        max_wait_ms = MAX(CONVERT(bigint, wt.wait_duration_ms))
+    FROM waiting AS wt
+    WHERE ISNULL(wt.is_user_process, 1) = 1
+    AND   wt.is_idle = 0
+    GROUP BY wt.wait_type
+    ORDER BY SUM(CONVERT(bigint, wt.wait_duration_ms)) DESC, wt.wait_type ASC
 ) AS w
 OUTER APPLY
 (
