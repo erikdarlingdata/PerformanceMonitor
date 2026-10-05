@@ -101,22 +101,49 @@ public sealed class FleetSilenceBehaviourTests
     }
 
     [Fact]
-    public void Unsilence_DeletesOnlyTheRuleTheSilenceCreated()
+    public void Unsilence_DeletesEveryWholeServerRuleForTheServer_AndNothingNarrower()
     {
         if (!TryRun("unsilence", out var r)) return;
 
         Assert.Equal(new[] { "Unsilence" }, Labels(r, "before"));
-        var write = Assert.Single(r.GetProperty("writes").EnumerateArray());
-        Assert.Equal("DELETE", write.GetProperty("method").GetString());
-        Assert.Equal("/api/mute-rules/own-1", write.GetProperty("url").GetString());
+        var urls = r.GetProperty("writes").EnumerateArray().Select(w => w.GetProperty("method").GetString() + " " + w.GetProperty("url").GetString()).ToArray();
+        Assert.Equal(new[] { "DELETE /api/mute-rules/own-1", "DELETE /api/mute-rules/hand-built" }, urls);
         Assert.Equal(new[] { "Silence" }, Labels(r, "after"));
     }
 
     [Fact]
-    public void Unsilence_LeavesAHandBuiltWholeServerRuleAlone_AndSaysSo()
+    public void ForEveryServerThePageShowsAsSilenced_UnsilenceRemovesTheRule_OrNamesTheOneItCannot()
     {
-        if (!TryRun("unsilenceHandBuilt", out var r)) return;
+        if (!TryRun("unsilenceAgrees", out var r)) return;
+        var per = r.GetProperty("perServer");
+        Assert.Equal(new[] { "DELETE /api/mute-rules/r-marker" }, per.GetProperty("20").EnumerateArray().Select(e => e.GetString()!).ToArray());
+        Assert.Equal(new[] { "DELETE /api/mute-rules/r-edited" }, per.GetProperty("21").EnumerateArray().Select(e => e.GetString()!).ToArray());
+        Assert.Equal(new[] { "DELETE /api/mute-rules/r-noreason" }, per.GetProperty("22").EnumerateArray().Select(e => e.GetString()!).ToArray());
+        Assert.Empty(per.GetProperty("24").EnumerateArray());
+        Assert.Contains("Mute Rules page", Labels(r, "notices").Single());
+    }
+
+    [Fact]
+    public void ANameOnlyRule_IsLeftForTheMuteRulesPage_AndOnlyThatCaseSaysSo()
+    {
+        if (!TryRun("unsilenceNameOnly", out var r)) return;
         Assert.Equal(0, r.GetProperty("writes").GetInt32());
         Assert.Contains("Mute Rules page", Labels(r, "notice").Single());
+    }
+
+    [Fact]
+    public void TheSuccessNotice_ClearsOnTheNextRebuild()
+    {
+        if (!TryRun("noticeClears", out var r)) return;
+        Assert.Equal(1, r.GetProperty("shown").GetInt32());
+        Assert.Equal(0, r.GetProperty("afterRebuild").GetInt32());
+    }
+
+    [Fact]
+    public void AWriteThatNeverReturns_GivesTheButtonBack_WithAMessage()
+    {
+        if (!TryRun("hung", out var r)) return;
+        Assert.False(r.GetProperty("disabled").GetBoolean());
+        Assert.Contains("did not answer", Labels(r, "notice").Single());
     }
 }

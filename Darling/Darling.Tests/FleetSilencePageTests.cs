@@ -41,16 +41,16 @@ public sealed class FleetSilencePageTests
     }
 
     [Fact]
-    public void UnsilenceMatchesOnlyTheRuleTheSilenceCreated()
+    public void UnsilenceMatchesTheDesktopWholeServerPredicate_WithNoReasonTest()
     {
         var fleet = Fleet();
-        Assert.Contains("rule.reason === SILENCE_REASON", fleet);
+        Assert.DoesNotContain("rule.reason", fleet);
         Assert.Contains("rule.server_id === serverId", fleet);
         foreach (var field in new[] { "metric_name", "database_pattern", "query_text_pattern", "wait_type_pattern", "job_name_pattern" })
         {
             Assert.Contains("rule." + field + " == null", fleet);
         }
-        Assert.Contains(".filter((r) => isOwnSilenceRule(r, id))", fleet);
+        Assert.Contains(".filter((r) => isWholeServerSilence(r, id))", fleet);
     }
 
     [Fact]

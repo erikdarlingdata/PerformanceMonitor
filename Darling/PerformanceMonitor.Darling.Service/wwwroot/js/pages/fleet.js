@@ -172,8 +172,8 @@ function tagPills(c) {
    The web twin of the desktop sidebar's whole-server silence: one click writes the rule the desktop's
    BuildServerSilenceRule builds (keyed on the store server id, no pattern fields, no expiry, the reason below),
    through the existing POST /api/mute-rules; Unsilence reads get_mute_rules and DELETEs exactly the rules that
-   shape and reason identify, so a narrower rule built by hand on the Mute Rules page is never touched. The reason
-   text is the same string the desktop stamps (ViewerDataService.ServerSilenceReason) and is the marker.
+   every whole-server rule keyed on the server's id (the desktop's IsWholeServerSilence, the bell's own test), so a narrower rule
+   is never touched. The reason is the string the desktop stamps (ViewerDataService.ServerSilenceReason) but is not matched.
 
    The 60 s poll rebuilds this page, so the state lives at module scope keyed by server id: `silencePending` holds
    the servers with a write in flight (a rebuilt card shows its button disabled and a second click is ignored),
@@ -192,16 +192,42 @@ export function silenceBody(card) {
   return { server_id: card.server_id, server_name: card.display_name, reason: SILENCE_REASON };
 }
 
-/** True for a rule the silence action created for this server: keyed on its id, the marker reason, and no pattern. */
-export function isOwnSilenceRule(rule, serverId) {
-  return !!rule
-    && rule.server_id === serverId
-    && rule.reason === SILENCE_REASON
-    && rule.metric_name == null
+/* True when no pattern field narrows the rule: the desktop's IsWholeServerSilence (ViewerDataService.MuteRules.cs),
+   which is also what the card's bell (is_silenced) tests. The reason is NOT part of the test: a rule made over MCP,
+   by hand or with an edited reason still silences the whole server, so Unsilence has to remove it too. */
+function noPatterns(rule) {
+  return rule.metric_name == null
     && rule.database_pattern == null
     && rule.query_text_pattern == null
     && rule.wait_type_pattern == null
     && rule.job_name_pattern == null;
+}
+
+/** A whole-server silence keyed on this server's id. Enabled/expiry are not part of the match (as on the desktop). */
+export function isWholeServerSilence(rule, serverId) {
+  return !!rule && rule.server_id != null && rule.server_id === serverId && noPatterns(rule);
+}
+
+/** A legacy whole-server silence with no id that matches by display name. The desktop rewrites it for the other
+   servers sharing the name before deleting it; the web does not port that step, so it is left for the Mute Rules page. */
+export function isNameOnlyWholeServerSilence(rule, displayName) {
+  return !!rule
+    && rule.server_id == null
+    && typeof rule.server_name === "string"
+    && typeof displayName === "string"
+    && rule.server_name.toLowerCase() === displayName.toLowerCase()
+    && noPatterns(rule);
+}
+
+/** How long a write may take before the button is given back. A test shortens it. */
+export const silenceTimeouts = { writeMs: 20000 };
+
+function withTimeout(promise) {
+  let timer;
+  const limit = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("the service did not answer in time; check the Mute Rules page before trying again")), silenceTimeouts.writeMs);
+  });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
 }
 
 /** Whether the card shows as silenced: the user's own pending answer for the server wins until the fleet read agrees. */
@@ -232,19 +258,22 @@ async function toggleSilence(card) {
   redrawCards();
   try {
     if (!silenced) {
-      const res = await createRule(silenceBody(card));
+      const res = await withTimeout(createRule(silenceBody(card)));
       if (res.kind !== "ok" && res.kind !== "exists") throw new Error(res.message);
     } else {
-      const read = await readTool("get_mute_rules", { enabled_only: false });
+      const read = await withTimeout(readTool("get_mute_rules", { enabled_only: false }));
       if (read.kind === "error") throw new Error(read.message);
-      const own = ((read.data && read.data.mute_rules) || []).filter((r) => isOwnSilenceRule(r, id));
-      if (!own.length) {
-        silenceNotice = { error: false, text: "'" + name + "' is silenced by a rule made on the Mute Rules page, so it is left alone. Remove it there." };
-        return;
-      }
+      const rules = (read.data && read.data.mute_rules) || [];
+      const own = rules.filter((r) => isWholeServerSilence(r, id));
+      const nameOnly = rules.some((r) => isNameOnlyWholeServerSilence(r, name));
       for (const r of own) {
-        const res = await deleteRule(r.id);
+        const res = await withTimeout(deleteRule(r.id));
         if (res.kind !== "ok" && res.kind !== "notfound") throw new Error(res.message);
+      }
+      if (nameOnly) {
+        silenceNotice = { error: false, text: "'" + name + "' is also silenced by an older rule that names the server but has no server id, and other servers may share that name. Remove it on the Mute Rules page." };
+        if (own.length) silenceOverride.delete(id);
+        return;
       }
     }
     silenceOverride.set(id, { silenced: !silenced, at: Date.now() });
@@ -284,6 +313,7 @@ function silenceButton(c) {
 }
 
 export async function renderFleet(main) {
+  silenceNotice = null; /* a notice lasts until the next rebuild (the 60 s poll) */
   canEditSilence = !!(await api.getSession()).can_edit;
   mount(main, [pageHead(null), loadingStrip("Loading fleet…")]);
 

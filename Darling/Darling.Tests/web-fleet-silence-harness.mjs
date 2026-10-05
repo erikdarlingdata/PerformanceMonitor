@@ -68,12 +68,13 @@ let canEdit = true;
 let fleetSilenced = false;
 let rules = [];
 let gate = null;
+let extraCards = null;
 const calls = [];
 const reply = (status, body) => ({ status, ok: status >= 200 && status < 300, text: async () => JSON.stringify(body) });
 globalThis.fetch = async (url, init = {}) => {
   const method = init.method || "GET";
   if (url === "/api/session") return reply(200, { can_edit: canEdit });
-  if (url === "/api/fleet") return reply(200, { total_servers: 1, critical_count: 0, warning_count: 0, offline_count: 0, tags: [], cards: [card(10, "srv-a", fleetSilenced)] });
+  if (url === "/api/fleet") return reply(200, { total_servers: extraCards ? extraCards.length : 1, critical_count: 0, warning_count: 0, offline_count: 0, tags: [], cards: extraCards || [card(10, "srv-a", fleetSilenced)] });
   if (url.startsWith("/api/read/get_mute_rules")) { calls.push({ method, url }); return reply(200, { mute_rules: rules }); }
   calls.push({ method, url, body: init.body ? JSON.parse(init.body) : null });
   if (gate) await gate;
@@ -140,6 +141,7 @@ try {
         { ...own, id: "narrow", metric_name: "Blocking" },
         { ...own, id: "other-server", server_id: 11 },
         { ...own, id: "hand-built", reason: "my own words" },
+        { ...own, id: "other-name", server_id: null, server_name: "elsewhere" },
       ];
       await draw();
       const before = silenceButtons(main).map((b) => b.textContent);
@@ -147,12 +149,48 @@ try {
       await draw(); /* the fleet read still says silenced for a moment */
       return { before, writes: writes(), after: silenceButtons(main).map((b) => b.textContent), confirms };
     },
-    unsilenceHandBuilt: async () => {
+    /* the invariant: every server the page shows as silenced (the bell's test, no reason condition) loses its rule */
+    unsilenceAgrees: async () => {
+      const none = { metric_name: null, database_pattern: null, query_text_pattern: null, wait_type_pattern: null, job_name_pattern: null };
+      rules = [
+        { id: "r-marker", server_id: 20, server_name: "srv-20", reason: "Silenced from server list", ...none },
+        { id: "r-edited", server_id: 21, server_name: "srv-21", reason: "my own words", ...none },
+        { id: "r-noreason", server_id: 22, server_name: "srv-22", reason: null, ...none },
+        { id: "r-narrow", server_id: 23, server_name: "srv-23", reason: "x", ...none, metric_name: "Blocking" },
+        { id: "r-name", server_id: null, server_name: "SRV-24", reason: "legacy", ...none },
+      ];
+      extraCards = [20, 21, 22, 24].map((i) => card(i, "srv-" + i, true));
+      await draw();
+      const perServer = {};
+      for (let i = 0; i < 4; i++) {
+        const before = writes().length;
+        await click(silenceButtons(main)[i]);
+        perServer[extraCards[i].server_id] = writes().slice(before).map((c) => c.method + " " + c.url);
+      }
+      return { perServer, notices: all(main, (n) => n.attrs.role === "status").map((n) => n.textContent) };
+    },
+    unsilenceNameOnly: async () => {
       fleetSilenced = true;
-      rules = [{ id: "hand-built", server_id: 10, reason: "my own words", metric_name: null, database_pattern: null, query_text_pattern: null, wait_type_pattern: null, job_name_pattern: null }];
+      rules = [{ id: "legacy", server_id: null, server_name: "SRV-A", reason: "x", metric_name: null, database_pattern: null, query_text_pattern: null, wait_type_pattern: null, job_name_pattern: null }];
       await draw();
       await click(silenceButtons(main)[0]);
       return { writes: writes().length, notice: all(main, (n) => n.attrs.role === "status").map((n) => n.textContent) };
+    },
+    noticeClears: async () => {
+      await draw();
+      await click(silenceButtons(main)[0]);
+      const shown = all(main, (n) => n.attrs.role === "status").length;
+      await draw();
+      return { shown, afterRebuild: all(main, (n) => n.attrs.role === "status").length };
+    },
+    hung: async () => {
+      page.silenceTimeouts.writeMs = 50;
+      gate = new Promise(() => {}); /* the write never returns */
+      await draw();
+      await click(silenceButtons(main)[0]);
+      await new Promise((r) => setTimeout(r, 150));
+      const b = silenceButtons(main)[0];
+      return { disabled: b.attrs.disabled === "disabled", label: b.textContent, notice: all(main, (n) => n.attrs.role === "status").map((n) => n.textContent) };
     },
   };
   if (!scenarios[scenario]) throw new Error("unknown scenario " + scenario);
