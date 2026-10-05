@@ -1866,6 +1866,13 @@ export const SERVER_TABS = [
           rowsKey: "collectors",
           columns: COLLECTOR_COLUMNS,
           emptyText: "No collection log rows for this server yet.",
+          /* #5227: a row is the way into that collector's run history (the Collection Log below). */
+          onRow: (row, tr) => {
+            if (!row || !row.collector) return;
+            tr.style.cursor = "pointer";
+            tr.setAttribute("title", "Show the runs of " + row.collector + " in the Collection Log below");
+            tr.addEventListener("click", () => pickCollector(server, row.collector));
+          },
         },
         {
           title: "Heaviest Collectors",
@@ -1880,15 +1887,7 @@ export const SERVER_TABS = [
          the rollup aggregates seven days into one row per collector, and no projection of it can give
          back the individual runs. This is the tab people reach for when the rollup says HEALTHY and
          collection still looks wrong, and until now the WPF viewer was the only way to it. */
-      table(
-        "Collection Log",
-        "get_collection_log",
-        { server, hours: ctx.hours, limit: 200 },
-        "runs",
-        COLLECTION_LOG_COLUMNS,
-        "individual runs, newest first, over the selected window",
-        "No collector runs in the selected window.",
-      ),
+      collectionLogPanel(server, ctx),
     ],
   },
 
@@ -4472,6 +4471,50 @@ const COLLECTION_LOG_COLUMNS = [
   { key: "rows_collected", label: "Rows", format: "int" },
   { key: "error_message", label: "Error", wrap: true },
 ];
+
+/* #5227: the collector picked on the Collectors panel, keyed by server at MODULE scope so the 60 s rebuild of the tab
+   keeps the choice. The Collection Log is drawn into a slot that redraws itself, so a pick re-requests only that read. */
+const collectorPick = new Map();
+const collectionLogRedraw = new Map();
+/* The desktop viewer shows a collector's last 7 days. */
+const COLLECTOR_HISTORY_HOURS = 168;
+
+function pickCollector(server, collector) {
+  collectorPick.set(server, collector);
+  const redraw = collectionLogRedraw.get(server);
+  if (redraw) redraw();
+}
+
+function collectionLogPanel(server, ctx) {
+  const slot = el("div", {}, []);
+  slot.style.display = "contents";
+  const draw = () => {
+    const picked = collectorPick.get(server);
+    const params = picked ? { server, hours: COLLECTOR_HISTORY_HOURS, limit: 200, collector_name: picked } : { server, hours: ctx.hours, limit: 200 };
+    const chip = picked
+      ? el(
+          "button",
+          { class: "chip span-2", type: "button", title: "Show every collector again", onClick: () => { collectorPick.delete(server); draw(); } },
+          ["collector " + picked + " \u00d7"]
+        )
+      : null;
+    mount(slot, [
+      chip,
+      table(
+        "Collection Log",
+        "get_collection_log",
+        params,
+        "runs",
+        COLLECTION_LOG_COLUMNS,
+        picked ? "runs of " + picked + ", newest first, over the last 7 days" : "individual runs, newest first, over the selected window",
+        picked ? "No runs of " + picked + " in the last 7 days." : "No collector runs in the selected window."
+      ),
+    ]);
+  };
+  collectionLogRedraw.set(server, draw);
+  draw();
+  return slot;
+}
 
 const COLLECTOR_COLUMNS = [
   { key: "collector", label: "Collector" },
