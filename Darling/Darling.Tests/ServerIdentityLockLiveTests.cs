@@ -317,6 +317,7 @@ public sealed class ServerIdentityLockLiveTests
         var parked = new ParkedProbe();
         var add = Task.Run(() => Edit.AddServersAsync(rig.Owner, AddJson("race-added.example.test"), parked.Probe, ct), ct);
         var edit = Task.Run(() => Edit.EditServerByNameAsync(rig.Owner, "race-x", "{\"host\":\"race-moved.example.test\"}", parked.Probe, true, null, ct), ct);
+        var bodySucceeded = false;
         try
         {
             Assert.True(
@@ -327,19 +328,28 @@ public sealed class ServerIdentityLockLiveTests
                database holds or waits on an advisory lock, and a third session takes it at once. */
             Assert.Equal(0, await AdvisoryLocksAsync(rig.Owner, true, ct));
             Assert.Equal(0, await AdvisoryLocksAsync(rig.Owner, false, ct));
-            await using var probeConnection = await rig.Owner.OpenConnectionAsync(ct);
-            await using var transaction = await probeConnection.BeginTransactionAsync(ct);
-            await using var tryLock = new NpgsqlCommand("SELECT pg_try_advisory_xact_lock(hashtext('config_monitored_servers.identity'))", probeConnection, transaction);
-            Assert.True((bool)(await tryLock.ExecuteScalarAsync(ct))!, "The identity lock should be free while both callers are in their probe.");
-            await transaction.RollbackAsync(ct);
+            await using (var probeConnection = await rig.Owner.OpenConnectionAsync(ct))
+            await using (var transaction = await probeConnection.BeginTransactionAsync(ct))
+            await using (var tryLock = new NpgsqlCommand("SELECT pg_try_advisory_xact_lock(hashtext('config_monitored_servers.identity'))", probeConnection, transaction))
+            {
+                Assert.True((bool)(await tryLock.ExecuteScalarAsync(ct))!, "The identity lock should be free while both callers are in their probe.");
+                await transaction.RollbackAsync(ct);
+            }
+
+            parked.Release();
+            Assert.Equal("added", AddStatusOf(await add.WaitAsync(TimeSpan.FromSeconds(60), ct)));
+            Assert.Equal("updated", Parse(await edit.WaitAsync(TimeSpan.FromSeconds(60), ct))["status"]!.GetValue<string>());
+            Assert.Equal(0, await AdvisoryLocksAsync(rig.Owner, true, ct));
+            bodySucceeded = true;
         }
         finally
         {
-            parked.Release();
+            /* A body that failed before the release must not leave both callers parked in their probe. */
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () =>
+            {
+                parked.Release();
+                return Task.CompletedTask;
+            });
         }
-
-        Assert.Equal("added", AddStatusOf(await add.WaitAsync(TimeSpan.FromSeconds(60), ct)));
-        Assert.Equal("updated", Parse(await edit.WaitAsync(TimeSpan.FromSeconds(60), ct))["status"]!.GetValue<string>());
-        Assert.Equal(0, await AdvisoryLocksAsync(rig.Owner, true, ct));
     }
 }

@@ -944,7 +944,9 @@ ORDER BY d.host, d.database";
     /// the insert is <c>ON CONFLICT (server_id) DO NOTHING</c>, so a write can save nothing without throwing: two
     /// different keys can hash to one id, and a concurrent add of the same server can land between the duplicate
     /// gate's read and this write. <paramref name="holderStorageKey"/> is the storage key of the row that holds the id
-    /// now, or null when none does.
+    /// now, or null when none does. (#5240: the store's write reads the keys again under the identity lock first, so
+    /// a same-key add or edit that committed during the probe is answered there as <see cref="InsertKeyClaimed"/>;
+    /// the same-key arm below is for a write that still returns 0, and for a definitions seam that is not the store.)
     ///
     /// <list type="bullet">
     /// <item>A DIFFERENT key holds the id: <c>collides</c>. The entry is not a duplicate — its identity is not
