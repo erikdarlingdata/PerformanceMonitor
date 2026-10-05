@@ -63,7 +63,7 @@ public sealed class ServerAddRouteTests
     /// <summary>A host with the route mapped over a stub core. A request's seat comes from its <c>X-Seat</c> header
     /// (<c>viewer</c> is read-only, <c>admin</c> or absent edits); <paramref name="useWriteGate"/> also runs the
     /// host's group-level write gate ahead of the route, as the production pipeline does.</summary>
-    private static async Task<Rig> StartAsync(Func<string, Task<string>> core, bool useWriteGate = false)
+    private static async Task<Rig> StartAsync(Func<string, Task<string>> core, bool useWriteGate = false, TimeSpan? addTimeout = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -77,7 +77,7 @@ public sealed class ServerAddRouteTests
         {
             var seat = context.Request.Headers["X-Seat"] == "viewer"
                 ? new DarlingWebSeat("bob", false)
-                : new DarlingWebSeat("alice", true);
+                : new DarlingWebSeat(Uri.UnescapeDataString(context.Request.Headers["X-Principal"].FirstOrDefault() ?? "alice"), true);
             context.Items[DarlingWebSeat.HttpContextItemKey] = seat;
             if (useWriteGate && !DarlingWebSeat.IsRequestAllowed(seat, context.Request.Method, context.Request.Path.Value ?? "/"))
             {
@@ -91,7 +91,7 @@ public sealed class ServerAddRouteTests
         {
             bodies.Add(body);
             return core(body);
-        });
+        }, addTimeout);
         await app.StartAsync(TestContext.Current.CancellationToken);
         return new Rig { App = app, Client = app.GetTestClient(), Log = log, Source = source, Bodies = bodies };
     }
@@ -275,7 +275,8 @@ public sealed class ServerAddRouteTests
         var (status, body) = await PostAsync(rig, Entries(1));
         Assert.Equal(HttpStatusCode.OK, status);
         AssertNoSecret(rig, body);
-        Assert.Contains("login failed for password [redacted]", body, StringComparison.Ordinal);
+        Assert.Equal(DarlingWebEndpoints.ServerAddLoginText, DetailOf(body));
+        Assert.Contains("login failed for password [redacted]", rig.Log.Joined, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -325,7 +326,7 @@ public sealed class ServerAddRouteTests
         Assert.Equal(2, added.Count);
         Assert.Contains("Server added by alice: sql00, auth SQL", added[0], StringComparison.Ordinal);
         Assert.Contains("Server added by alice: win01, auth Windows", added[1], StringComparison.Ordinal);
-        Assert.DoesNotContain(rig.Log.Lines, l => l.Contains("sql02", StringComparison.Ordinal));
+        Assert.DoesNotContain(added, l => l.Contains("sql02", StringComparison.Ordinal));
         AssertNoSecret(rig, body);
     }
 
@@ -336,5 +337,94 @@ public sealed class ServerAddRouteTests
         await using var rig = await StartAsync(_ => Task.FromResult(answer));
         Assert.Equal(HttpStatusCode.OK, (await PostAsync(rig, Entries(1))).Status);
         Assert.Empty(rig.Log.Lines);
+    }
+
+    /* ═══════════════════════ fixed failure sentences ═══════════════════════ */
+
+    private static string Failed(string status, string detail) =>
+        "{\"requested\":1,\"added\":0,\"skipped\":0,\"collided\":0,\"failed\":1,\"results\":[{\"server\":\"sql00\",\"status\":\"" + status
+        + "\",\"detail\":" + JsonSerializer.Serialize(detail) + "}]}";
+
+    private static string DetailOf(string body) =>
+        JsonNode.Parse(body)!["results"]![0]!["detail"]!.GetValue<string>();
+
+    [Theory]
+    [InlineData("Could not connect: Connection refused 10.1.2.3:1433", DarlingWebEndpoints.ServerAddConnectText)]
+    [InlineData("Could not connect: Connection timed out", DarlingWebEndpoints.ServerAddConnectText)]
+    [InlineData("Could not connect: The SSL connection could not be established", DarlingWebEndpoints.ServerAddConnectText)]
+    [InlineData("Could not connect to the server.", DarlingWebEndpoints.ServerAddConnectText)]
+    [InlineData("Could not connect: Login failed for user 'monitor'.", DarlingWebEndpoints.ServerAddLoginText)]
+    [InlineData("Could not connect: password authentication failed for user \"monitor\"", DarlingWebEndpoints.ServerAddLoginText)]
+    [InlineData("Could not connect: password: environment variable 'DB_PW' is not set (or empty or blank) - the referenced secret cannot resolve.", DarlingWebEndpoints.ServerAddSecretText)]
+    [InlineData("Could not connect: password: secret file '/run/secrets/x' could not be read: Access denied", DarlingWebEndpoints.ServerAddSecretText)]
+    public async Task AProbeFailure_IsShownAsOneFixedSentence_AndTheFullDetailIsLogged(string detail, string expected)
+    {
+        await using var rig = await StartAsync(_ => Task.FromResult(Failed("connection_failed", detail)));
+        var (status, body) = await PostAsync(rig, Entries(1));
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal(expected, DetailOf(body));
+        Assert.Contains(rig.Log.Lines, l => l.StartsWith("Information: Server add failed", StringComparison.Ordinal)
+            && l.Contains(detail.Replace("\"", "\""), StringComparison.Ordinal));
+        AssertNoSecret(rig, body);
+    }
+
+    [Fact]
+    public async Task ASaveFailure_IsShownAsTheGenericSentence()
+    {
+        await using var rig = await StartAsync(_ => Task.FromResult(Failed("not_saved", "Not saved: relation x denied for " + "table")));
+        var (_, body) = await PostAsync(rig, Entries(1));
+        Assert.Equal(DarlingWebEndpoints.ServerAddGenericText, DetailOf(body));
+    }
+
+    [Theory]
+    [InlineData("duplicate", "Already monitored.")]
+    [InlineData("invalid", "host is required.")]
+    [InlineData("added", "Connected to PostgreSQL 16")]
+    public async Task ValidationAndSuccessDetails_PassThrough(string status, string detail)
+    {
+        await using var rig = await StartAsync(_ => Task.FromResult(Failed(status, detail)));
+        var (_, body) = await PostAsync(rig, Entries(1));
+        Assert.Equal(detail, DetailOf(body));
+    }
+
+    /* ═══════════════════════ slot timeout ═══════════════════════ */
+
+    [Fact]
+    public async Task ACoreThatNeverFinishes_Answers503_AndFreesTheSlot()
+    {
+        var hang = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        await using var rig = await StartAsync(
+            _ => ++calls == 1 ? hang.Task : Task.FromResult(AddedAnswer), addTimeout: TimeSpan.FromMilliseconds(200));
+
+        var (status, body) = await PostAsync(rig, Entries(1));
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, status);
+        Assert.Contains(DarlingWebEndpoints.ServerAddTimedOutText, body, StringComparison.Ordinal);
+        AssertNoSecret(rig, body);
+
+        Assert.Equal(HttpStatusCode.OK, (await PostAsync(rig, Entries(1))).Status);
+        hang.SetResult(AddedAnswer);
+    }
+
+    /* ═══════════════════════ principal on one line ═══════════════════════ */
+
+    [Fact]
+    public async Task APrincipalWithControlCharacters_IsLoggedOnOneLine()
+    {
+        await using var rig = await StartAsync(_ => Task.FromResult(AddedAnswer));
+        var ct = TestContext.Current.CancellationToken;
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/servers")
+        {
+            Content = new StringContent(Entries(1), Encoding.UTF8, "application/json"),
+        };
+        request.Headers.TryAddWithoutValidation("X-Principal", "eve%0D%0Aevil%09x");
+        using var response = await rig.Client.SendAsync(request, ct);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var line = Assert.Single(rig.Log.Lines, l => l.Contains("Server added by", StringComparison.Ordinal));
+        Assert.DoesNotContain('\n', line);
+        Assert.DoesNotContain('\r', line);
+        Assert.DoesNotContain('\t', line);
+        Assert.Contains("eve", line, StringComparison.Ordinal);
     }
 }

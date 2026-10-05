@@ -979,6 +979,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
     }
 
+    /// <summary>How long one <c>POST /api/servers</c> request may hold the one-at-a-time slot.</summary>
+    internal static readonly TimeSpan ServerAddSlotTimeout = TimeSpan.FromSeconds(120);
+
+    internal const string ServerAddTimedOutText = "Adding servers took too long; check the server list before retrying.";
+    internal const string ServerAddConnectText = "Could not connect to the server.";
+    internal const string ServerAddLoginText = "The server refused the login.";
+    internal const string ServerAddSecretText = "The password reference could not be resolved.";
+    internal const string ServerAddGenericText = "The server could not be added.";
+
     /// <summary>The most servers one <c>POST /api/servers</c> request may carry.</summary>
     internal const int MaxServersPerAddRequest = 20;
 
@@ -1018,8 +1027,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static void MapServers(
         WebApplication app, NpgsqlDataSource postgres, ILogger logger,
-        Func<string, Task<string>>? addServers = null)
+        Func<string, Task<string>>? addServers = null,
+        TimeSpan? addTimeout = null)
     {
+        var slotTimeout = addTimeout ?? ServerAddSlotTimeout;
+
         /* One gate per host: MapAll runs once per process. */
         var addInFlight = new SemaphoreSlim(1, 1);
 
@@ -1066,7 +1078,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 string result;
                 try
                 {
-                    result = await addServers(body);
+                    var running = addServers(body);
+                    try
+                    {
+                        result = await running.WaitAsync(slotTimeout);
+                    }
+                    catch (TimeoutException)
+                    {
+                        /* The slot is released below; the abandoned add is observed so a late fault is not unobserved. */
+                        _ = running.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                        logger.LogWarning("POST /api/servers: the add did not finish within {Seconds} s; the slot was released", (int)slotTimeout.TotalSeconds);
+                        return ErrorResult(ServerAddTimedOutText, StatusCodes.Status503ServiceUnavailable);
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -1084,6 +1107,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 }
 
                 var answer = RedactAddAnswer(result, secrets);
+                LogServerAddFailures(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, answer);
+                answer = MapAddFailureDetails(answer);
                 LogServerAdds(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, entries, answer);
                 return Results.Text(answer, "application/json", statusCode: MuteRuleEnvelopeStatus(answer));
             }
@@ -1238,6 +1263,100 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         _ => "other",
     };
 
+    /// <summary>PURE: the fixed sentence a probe or save failure detail is shown as on the web route. Only the
+    /// probe (<c>connection_failed</c>) and save (<c>not_saved</c>) statuses carry free-form exception text; the
+    /// rest of the core's details are its own validation sentences and pass through unchanged. Refused, timed-out
+    /// and TLS failures share one sentence, as do the two unresolved-reference causes, so the answer does not
+    /// tell a caller what is listening, or which file or variable exists.</summary>
+    internal static string? FixedFailureDetail(string? status, string? detail)
+    {
+        if (status == DarlingMcpServerAdminTools.AddStatus.NotSaved)
+        {
+            return ServerAddGenericText;
+        }
+
+        if (status != DarlingMcpServerAdminTools.AddStatus.ConnectionFailed)
+        {
+            return null;
+        }
+
+        var text = detail ?? "";
+        if (text.Contains("secret", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("environment variable", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("reference", StringComparison.OrdinalIgnoreCase))
+        {
+            return ServerAddSecretText;
+        }
+
+        if (text.Contains("login failed", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("authentication failed", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("password", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("28P01", StringComparison.Ordinal))
+        {
+            return ServerAddLoginText;
+        }
+
+        return ServerAddConnectText;
+    }
+
+    /// <summary>The answer with every probe or save failure detail replaced by its fixed sentence.</summary>
+    internal static string MapAddFailureDetails(string answer)
+    {
+        try
+        {
+            if (JsonNode.Parse(answer) is JsonObject envelope && envelope["results"] is JsonArray results)
+            {
+                foreach (var row in results.OfType<JsonObject>())
+                {
+                    var fixedText = FixedFailureDetail(TryGetString(row, "status"), TryGetString(row, "detail"));
+                    if (fixedText is not null)
+                    {
+                        row["detail"] = fixedText;
+                    }
+                }
+
+                return envelope.ToJsonString();
+            }
+        }
+        catch (JsonException)
+        {
+            return "{\"status\":\"error\",\"message\":\"The answer could not be read.\"}";
+        }
+
+        return answer;
+    }
+
+    /// <summary>One Information line per failed row with the core's full detail (secrets already redacted), so the
+    /// operator keeps what the web answer no longer shows.</summary>
+    private static void LogServerAddFailures(ILogger logger, string principal, string answer)
+    {
+        try
+        {
+            if (JsonNode.Parse(answer) is JsonObject envelope && envelope["results"] is JsonArray results)
+            {
+                foreach (var row in results.OfType<JsonObject>())
+                {
+                    var status = TryGetString(row, "status");
+                    if (FixedFailureDetail(status, TryGetString(row, "detail")) is null)
+                    {
+                        continue;
+                    }
+
+                    logger.LogInformation(
+                        "Server add failed for {Principal}: {Server}, {Status}: {Detail}",
+                        DarlingHttpRefusalLog.Sanitize(principal, 256),
+                        DarlingHttpRefusalLog.Sanitize(TryGetString(row, "server") ?? "", 256),
+                        status,
+                        DarlingHttpRefusalLog.Sanitize(TryGetString(row, "detail") ?? "", 1024));
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            /* An unreadable answer has no rows to log. */
+        }
+    }
+
     /// <summary>One Information line per server this request ADDED: who, which server and its auth mode. Request
     /// text is sanitized before it reaches the log; the secret is never read here.</summary>
     private static void LogServerAdds(ILogger logger, string principal, List<JsonObject> entries, string answer)
@@ -1267,7 +1386,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     var server = TryGetString(row, "server") ?? "";
                     logger.LogInformation(
                         "Server added by {Principal}: {Server}, auth {AuthMode}",
-                        principal, DarlingHttpRefusalLog.Sanitize(server, 256), authByName.GetValueOrDefault(server, "other"));
+                        DarlingHttpRefusalLog.Sanitize(principal, 256), DarlingHttpRefusalLog.Sanitize(server, 256), authByName.GetValueOrDefault(server, "other"));
                 }
             }
         }
