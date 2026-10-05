@@ -4108,6 +4108,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_store_plan_xml"] = R(CatPlans, "The stored Query Store plan XML for a query (requires database_name, query_id).", PReqText("database_name"), PReqInt("query_id"), PServer(), PInt("plan_id")),
             ["get_procedure_plan_xml"] = R(CatPlans, "The stored plan XML for a procedure (requires sql_handle).", PReqText("sql_handle"), PServer()),
             ["get_active_query_plan_xml"] = R(CatPlans, "The plan captured with one Active Queries row (requires collection_time, session_id).", PReqText("collection_time"), PReqInt("session_id"), PServer(), PInt("request_id", 0), PBool("live", false)),
+            /* #5233: a repro script built from the stored text and plan — store-only, nothing runs. */
+            ["get_query_repro_script"] = R(CatPlans, "A T-SQL repro script built from a stored query's text and plan (requires kind and its key).", PReqText("kind"), PServer(), PText("database_name"), PText("query_hash"), PInt("query_id"), PInt("plan_id"), PText("collection_time"), PInt("session_id"), PInt("request_id", 0)),
 
             /* ── default trace (DarlingMcpDefaultTraceTools) ── */
             ["get_default_trace_events"] = R(CatDefaultTrace, "Default-trace events (file growth, DDL, security).", PServer(), PHours(24), PLimit(100), PAsOf()),
@@ -5084,6 +5086,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : First(c, "live") is { } liveText && !bool.TryParse(liveText, out _) ? UnparseableParam("live", "Expected true or false.")
                 : WrapPlanXmlAsync(DarlingMcpPlanTools.GetActiveQueryPlanXml(pg, snapTime, snapSession.Value, Server(c), snapRequest ?? 0, QueryBool(c, "live", false), c.RequestAborted),
                     PlanIdentity(("collection_time", snapTime), ("session_id", snapSession), ("request_id", snapRequest ?? 0), ("live", QueryBool(c, "live", false)))),
+            /* #5233: the repro script. A key that is present but unreadable is refused, never defaulted. The JSON passes
+               through unwrapped. */
+            ["get_query_repro_script"] = (c, pg, an) => !RequireText(c, "kind", out var reproKind)
+                ? MissingParam("kind")
+                : !OptionalLong(c, "query_id", out var reproQueryId) ? UnparseableParam("query_id")
+                : !OptionalLong(c, "plan_id", out var reproPlanId) ? UnparseableParam("plan_id")
+                : !OptionalInt(c, "session_id", out var reproSession) ? UnparseableParam("session_id")
+                : !OptionalInt(c, "request_id", out var reproRequest) ? UnparseableParam("request_id")
+                : DarlingMcpPlanTools.GetQueryReproScript(pg, reproKind, Server(c), Str(c, "database_name"), Str(c, "query_hash"),
+                    reproQueryId, reproPlanId, Str(c, "collection_time"), reproSession, request_id: reproRequest ?? 0, cancellationToken: c.RequestAborted),
 
             /* ── default trace ── */
             ["get_default_trace_events"] = (c, pg, an) => DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(pg, Server(c), Hours(c, 24), Rows(c, "limit", 100), as_of: AsOf(c), cancellationToken: c.RequestAborted),

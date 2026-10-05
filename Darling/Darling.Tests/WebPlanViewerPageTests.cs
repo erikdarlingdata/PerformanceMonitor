@@ -71,6 +71,38 @@ public sealed class WebPlanViewerPageTests
         Assert.False(d.Params.Any(p => p.Name is "hours" or "as_of"), tool + " is a point read: it takes no window");
     }
 
+    /// <summary>#5233: the Repro button is offered for the three kinds that keep query text, and never for a procedure.
+    /// Each kind's reproParams sends the key get_query_repro_script needs for that kind, and the tool is on the web read
+    /// surface with only `kind` required.</summary>
+    [Theory]
+    [InlineData("query_hash", "kind: \"query_hash\"", "query_hash:")]
+    [InlineData("active_snapshot", "kind: \"active_snapshot\"", "collection_time:")]
+    [InlineData("query_store", "kind: \"query_store\"", "query_id:")]
+    public void ThePlanKindsThatKeepQueryText_OfferARepro_WithTheirOwnKey(string kind, string kindParam, string keyParam)
+    {
+        var viewer = Js("pages", "plan-viewer.js");
+        var start = viewer.IndexOf("  " + kind + ": {", StringComparison.Ordinal);
+        var block = viewer.Substring(start, viewer.IndexOf("\n  },", start, StringComparison.Ordinal) - start);
+        Assert.Contains("repro: true", block, StringComparison.Ordinal);
+        var reproParams = block.Substring(block.IndexOf("reproParams:", StringComparison.Ordinal));
+        Assert.Contains(kindParam, reproParams, StringComparison.Ordinal);
+        Assert.Contains(keyParam, reproParams, StringComparison.Ordinal);
+        Assert.DoesNotContain("live", reproParams, StringComparison.Ordinal);
+
+        Assert.True(DarlingWebEndpoints.CatalogDescriptors.TryGetValue("get_query_repro_script", out var d));
+        Assert.Equal(new[] { "kind" }, d!.Params.Where(p => p.Required).Select(p => p.Name).ToArray());
+        Assert.False(d.Params.Any(p => p.Name is "hours" or "as_of"), "a point read takes no window");
+    }
+
+    [Fact]
+    public void TheProcedureKind_HasNoRepro()
+    {
+        var viewer = Js("pages", "plan-viewer.js");
+        var start = viewer.IndexOf("  procedure: {", StringComparison.Ordinal);
+        var block = viewer.Substring(start, viewer.IndexOf("\n  },", start, StringComparison.Ordinal) - start);
+        Assert.DoesNotContain("repro", block, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheTimestamp_GoesToTheRead_AsTheRowHoldsIt_NeverThroughADate()
     {

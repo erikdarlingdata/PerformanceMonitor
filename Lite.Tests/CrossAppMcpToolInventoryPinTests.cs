@@ -244,6 +244,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_query_store_plan_xml",
         "get_procedure_plan_xml",
         "get_active_query_plan_xml",
+        /* #5233: the repro script behind the web plan panel's Repro button. Lite builds repro scripts in the desktop grid, not over MCP. */
+        "get_query_repro_script",
 
         /* #3797: the Query Store clutter view (get_query_store_clutter) - per database the query_store
            collector's read cost off collection_log's fan-out rollup, plan churn off the raw query_store_stats

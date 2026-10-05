@@ -217,7 +217,8 @@ public sealed class McpToolsListBudgetTests
     /* #5228: the three raw-plan reads behind the web grids' plan buttons (get_query_store_plan_xml, get_procedure_plan_xml,
        get_active_query_plan_xml), measured on the tree merged with dev 94aa5e755: 188,119 -> 190,004 (+1,885), 173 -> 176 tools. Each head
        is under 160 characters. */
-    private const int TotalCeilingBytes = 190_004;
+    /* #5233: get_query_repro_script, the store-only repro script behind the web plan panel's Repro button: 190,004 -> 191,172 (+1,168), 176 -> 177 tools. Its head is exactly 160 characters. */
+    private const int TotalCeilingBytes = 191_172;
 
 
 

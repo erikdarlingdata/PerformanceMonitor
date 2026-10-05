@@ -272,6 +272,18 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("get_procedure_plan_xml", "sql_handle=0x", "sql_handle")]
     [InlineData("get_procedure_plan_xml", "sql_handle=0x03%27%3BDROP", "sql_handle")]
     [InlineData("get_procedure_plan_xml", "", "sql_handle")]
+    [InlineData("get_query_repro_script", "", "kind")]
+    [InlineData("get_query_repro_script", "kind=procedure", "kind")]
+    [InlineData("get_query_repro_script", "kind=bogus", "kind")]
+    [InlineData("get_query_repro_script", "kind=query_hash", "query_hash")]
+    [InlineData("get_query_repro_script", "kind=query_store&query_id=1", "database_name")]
+    [InlineData("get_query_repro_script", "kind=query_store&database_name=d", "query_id")]
+    [InlineData("get_query_repro_script", "kind=query_store&database_name=d&query_id=x", "query_id")]
+    [InlineData("get_query_repro_script", "kind=query_store&database_name=d&query_id=1&plan_id=x", "plan_id")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&session_id=1", "collection_time")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&collection_time=2026-03-04T05:06:07.1234560Z", "session_id")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&collection_time=bad&session_id=1", "collection_time")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&collection_time=2026-03-04T05:06:07.1234560Z&session_id=1&request_id=x", "request_id")]
     public async Task TheRowPlanReads_RefuseAMissingOrUnparseableKey_BeforeTheStore(string tool, string query, string key)
     {
         var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
