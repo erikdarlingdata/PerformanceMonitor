@@ -160,6 +160,242 @@ export function serverRows(data) {
   return data && Array.isArray(data.servers) ? data.servers : [];
 }
 
+/* Edit a server (#5240): the pure rules behind the Servers tab's edit form. They decide what the form shows, what it
+   checks before it sends anything, the body it sends and what each answer means. None of them touches the page or the
+   network, so the form built on top of them can be tested rule by rule.
+   They mirror the service's edit (PlanEdit and ParseEditChanges in Mcp/DarlingMcpServerAdminTools.Edit.cs):
+     - only the fields the form changed are sent, plus the read's opaque modified_at text as expected_modified_at;
+     - a SQL Server edit never sends port (the service refuses it, even 0) and a PostgreSQL edit never sends auth;
+     - a password is required when the connection of a SQL or ServicePrincipal server changes, because the stored one
+       cannot be read back; and the service probes the new connection on ANY connection change (Windows and managed
+       identity included) or whenever a password is sent.
+   `original` below is editFormValues(the by-id read) as the form opened; it carries the engine. `values` is the
+   form's current text and booleans, shaped the same way. */
+
+/** The editable fields in form order. The body is built only from these keys, so no other column can be sent. */
+export const EDIT_FIELDS = [
+  { key: "host", label: "Server Name / Address" },
+  { key: "display_name", label: "Display Name" },
+  { key: "port", label: "Port" },
+  { key: "auth", label: "Authentication" },
+  { key: "username", label: "Username" },
+  { key: "encrypt_mode", label: "Encryption" },
+  { key: "trust_server_certificate", label: "Trust server certificate" },
+  { key: "database", label: "Database" },
+  { key: "read_only_intent", label: "Read-only intent" },
+  { key: "multi_subnet_failover", label: "Multi-subnet failover" },
+  { key: "monthly_cost_usd", label: "Monthly Cost ($)" },
+];
+export const EDIT_AUTHS = ["Windows", "SQL", "ServicePrincipal", "ManagedIdentity"];
+export const EDIT_ENCRYPT_MODES = ["Optional", "Mandatory", "Strict"];
+
+/* The service treats any engine that is not "sqlserver" (ignoring case) as PostgreSQL. */
+const isPostgres = (engine) => String(engine == null ? "" : engine).toLowerCase() !== "sqlserver";
+const asText = (x) => (x == null ? "" : String(x));
+/* The list entry that matches `raw` ignoring case and outer spaces, or undefined. */
+const pickWord = (list, raw) => list.find((w) => w.toLowerCase() === asText(raw).trim().toLowerCase());
+const authWord = (raw) => pickWord(EDIT_AUTHS, raw) || "Windows";
+const storesSecret = (auth) => auth === "SQL" || auth === "ServicePrincipal";
+/* The service compares the encryption mode ignoring case and every other field exactly. */
+const sameValue = (key, a, b) => (key === "encrypt_mode" ? asText(a).toLowerCase() === asText(b).toLowerCase() : a === b);
+
+/** The by-id read (or a conflict answer's `current`) as the form's values. PostgreSQL always shows auth "SQL", an auth
+    the list does not know shows "Windows" as the service's own word for it does, port 0 (the default) shows blank, a
+    boolean is true only when it is exactly true, and an encryption mode the list does not know stays as stored text. */
+export function editFormValues(row) {
+  const r = row && typeof row === "object" ? row : {};
+  const engine = isPostgres(r.engine) ? "postgres" : "sqlserver";
+  const port = Number(r.port);
+  const cost = Number(r.monthly_cost_usd);
+  const stored = asText(r.encrypt_mode);
+  return {
+    engine,
+    host: asText(r.host),
+    display_name: asText(r.display_name),
+    port: Number.isFinite(port) && port > 0 ? String(port) : "",
+    auth: engine === "postgres" ? "SQL" : authWord(r.auth),
+    username: asText(r.username),
+    encrypt_mode: pickWord(EDIT_ENCRYPT_MODES, stored) || stored,
+    trust_server_certificate: r.trust_server_certificate === true,
+    database: asText(r.database),
+    read_only_intent: r.read_only_intent === true,
+    multi_subnet_failover: r.multi_subnet_failover === true,
+    monthly_cost_usd: Number.isFinite(cost) ? String(cost) : "0",
+  };
+}
+
+/** Form values as the service reads them: text trimmed, a blank database or username null, the username null for
+    Windows, port a number for PostgreSQL (blank is 0, the default; a typed one must be digits from 1 to 65535, else NaN)
+    and null for SQL Server (its port goes in the host), auth "SQL" for PostgreSQL, cost a number (blank is 0, a typed
+    one must be digits with an optional decimal point, else NaN) and booleans only when exactly true. */
+export function normalizeEdit(values, engine) {
+  const v = values && typeof values === "object" ? values : {};
+  const postgres = isPostgres(engine);
+  const trim = (x) => asText(x).trim();
+  const auth = postgres ? "SQL" : authWord(v.auth);
+  const port = trim(v.port);
+  const cost = trim(v.monthly_cost_usd);
+  let portValue = null;
+  if (postgres) portValue = port === "" ? 0 : /^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535 ? Number(port) : NaN;
+  return {
+    host: trim(v.host),
+    display_name: trim(v.display_name),
+    port: portValue,
+    auth,
+    username: auth === "Windows" ? null : trim(v.username) || null,
+    encrypt_mode: pickWord(EDIT_ENCRYPT_MODES, v.encrypt_mode) || trim(v.encrypt_mode),
+    trust_server_certificate: v.trust_server_certificate === true,
+    database: trim(v.database) || null,
+    read_only_intent: v.read_only_intent === true,
+    multi_subnet_failover: v.multi_subnet_failover === true,
+    monthly_cost_usd: cost === "" ? 0 : /^(\d+\.?\d*|\.\d+)$/.test(cost) ? Number(cost) : NaN,
+  };
+}
+
+/* The service's own test for "how this server is reached changed", over two normalized sets of values (connectionChanged
+   in PlanEdit). NaN never equals NaN, so a port typed wrong counts as a change; the form refuses it before this matters. */
+function connectionDiffers(o, v) {
+  return o.host !== v.host
+    || o.port !== v.port
+    || o.database !== v.database
+    || o.read_only_intent !== v.read_only_intent
+    || o.auth !== v.auth
+    || o.username !== v.username
+    || o.encrypt_mode.toLowerCase() !== v.encrypt_mode.toLowerCase()
+    || o.trust_server_certificate !== v.trust_server_certificate
+    || o.multi_subnet_failover !== v.multi_subnet_failover;
+}
+
+/** True when the service will ask for the password again: the effective auth (PostgreSQL is always "SQL") stores a
+    secret AND the connection changed, switching auth included. Windows and managed identity store none, so never. */
+export function passwordRequired(original, values) {
+  const engine = original && original.engine;
+  const next = normalizeEdit(values, engine);
+  return storesSecret(next.auth) && connectionDiffers(normalizeEdit(original, engine), next);
+}
+
+/** True when the service will probe the new connection before saving: a password is sent, or the connection changed
+    whatever the auth (the same field test as passwordRequired, without its auth condition). */
+export function probeExpected(original, values, passwordSent) {
+  const engine = original && original.engine;
+  return !!passwordSent || connectionDiffers(normalizeEdit(original, engine), normalizeEdit(values, engine));
+}
+
+/** The first sentence that stops a save before any request, or null. Each is the desktop's or the service's own
+    sentence, in the order the form's fields run. `password` is what was typed (empty when nothing was). */
+export function validateEdit(original, values, password) {
+  const engine = original && original.engine;
+  const was = normalizeEdit(original, engine);
+  const next = normalizeEdit(values, engine);
+  if (!next.host) return "Server name is required.";
+  if (isPostgres(engine) && Number.isNaN(next.port)) return "Port must be between 1 and 65535, or blank for the default (5432).";
+  if (next.auth === "SQL" && !next.username) return "Username is required for SQL Server authentication.";
+  if (next.auth === "ServicePrincipal" && !next.username) return "The Application (client) ID is required for service-principal authentication.";
+  if (!password && passwordRequired(original, values)) {
+    if (was.auth !== next.auth) {
+      return next.auth === "ServicePrincipal"
+        ? "Switching to ServicePrincipal authentication needs the client secret as password."
+        : "Switching to SQL authentication needs the password.";
+    }
+    return "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+  }
+  if (!Number.isFinite(next.monthly_cost_usd)) return "Monthly cost must be a number, zero or more.";
+  return null;
+}
+
+/** The edit's request body, or null when nothing differs and no password is sent. Only EDIT_FIELDS keys that differ
+    between the normalized `original` and `values` (a number that is not finite is never sent); a SQL Server body never
+    carries port and a PostgreSQL body never carries auth; a switch of auth always carries the username for SQL,
+    ServicePrincipal and managed identity (the service drops the old one on a switch) and Windows never carries one;
+    password only when typed AND the effective auth stores a secret; `expected_modified_at` is `token` exactly as the
+    read gave it, always last. */
+export function buildEditBody(original, values, token, password) {
+  const engine = original && original.engine;
+  const postgres = isPostgres(engine);
+  const was = normalizeEdit(original, engine);
+  const next = normalizeEdit(values, engine);
+  const switched = was.auth !== next.auth;
+  const body = {};
+  for (const { key } of EDIT_FIELDS) {
+    if (key === (postgres ? "auth" : "port")) continue;
+    const value = next[key];
+    if (typeof value === "number" && !Number.isFinite(value)) continue;
+    if (key === "username" && next.auth === "Windows") continue;
+    if ((key === "username" && switched) || !sameValue(key, was[key], value)) body[key] = value;
+  }
+  if (typeof password === "string" && password !== "" && storesSecret(next.auth)) body.password = password;
+  if (!Object.keys(body).length) return null;
+  /* A missing token is sent as null, which the service refuses by name, rather than dropped, which would save with no
+     stale-edit check at all. */
+  body.expected_modified_at = token == null ? null : token;
+  return body;
+}
+
+/** What one answer to the edit means, from the HTTP status, the parsed body and (for status 0) the transport's own
+    message: { kind, close, reread, banner?, notice?, current? }. `close` drops the form, `reread` reads the list again,
+    `banner` is the sentence for the form's error strip and `notice` the sentence for the page. It branches on the
+    status and the body's status word, never on message text. The sentence is the body's message, else its error, else
+    "Request failed (HTTP n).". A 2xx whose body is not a JSON object is the sign-in page of an expired session. */
+export function interpretEdit(status, body, message) {
+  const b = body !== null && typeof body === "object" && !Array.isArray(body) ? body : null;
+  const word = b && typeof b.status === "string" ? b.status : "";
+  const sentence = (b && [b.message, b.error].find((s) => typeof s === "string" && s !== "")) || "Request failed (HTTP " + status + ").";
+  if (status === 0) return { kind: "network", close: false, reread: false, banner: asText(message) || "Network error." };
+  if (status === 401 || (status >= 200 && status < 300 && !b)) return { kind: "expired", close: true, reread: false };
+  if (status === 403) return { kind: "readonly", close: true, reread: false, notice: "This account has read-only access. Nothing was saved." };
+  if (status === 404) return { kind: "notfound", close: true, reread: true, notice: sentence };
+  if (status === 409 && word === "conflict" && b.current && typeof b.current === "object") {
+    return { kind: "conflict", close: false, reread: false, banner: "This server was changed since you opened it. Nothing was saved.", current: b.current };
+  }
+  if (status === 503) return { kind: "timeout", close: false, reread: true, banner: sentence };
+  if (status === 200 && word === "updated") {
+    const name = asText(b.display_name) || asText(b.server);
+    const note = typeof b.note === "string" && b.note ? " " + b.note : "";
+    const tested = b.tested === true ? " The connection was tested before saving." : "";
+    return { kind: "updated", close: true, reread: true, notice: (name ? 'Saved "' + name + '".' : "Saved.") + note + tested };
+  }
+  if (status === 200 && word === "unchanged") return { kind: "unchanged", close: true, reread: false, notice: "No change was needed; nothing was written." };
+  return { kind: "failed", close: false, reread: false, banner: sentence };
+}
+
+/* A value as a conflict line shows it: yes or no, "(default)" for port 0, "(blank)" for none, and what the user typed
+   for a number that did not parse. */
+function shownEdit(key, value, typed) {
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (key === "port" && value === 0) return "(default)";
+  if (typeof value === "number" && !Number.isFinite(value)) return asText(typed).trim() || "(blank)";
+  return value == null || value === "" ? "(blank)" : String(value);
+}
+
+/** The fields a 409 conflict says changed under the form: one { key, label, was, now, yours, text } per EDIT_FIELDS
+    key whose value in `current` (the answer's current values, run through editFormValues) differs from `original`.
+    `yours` is what the user entered when they changed that field too, else null. SQL Server skips port and PostgreSQL
+    skips auth, as the body does. text is "<Label>: was <old>, now <new>" plus " (you entered <yours>)". */
+export function conflictChanges(original, current, values) {
+  const engine = original && original.engine;
+  const postgres = isPostgres(engine);
+  const was = normalizeEdit(original, engine);
+  const now = normalizeEdit(editFormValues(current), engine);
+  const mine = normalizeEdit(values, engine);
+  const typed = values && typeof values === "object" ? values : {};
+  const changes = [];
+  for (const { key, label } of EDIT_FIELDS) {
+    if (key === (postgres ? "auth" : "port") || sameValue(key, was[key], now[key])) continue;
+    const shownWas = shownEdit(key, was[key]);
+    const shownNow = shownEdit(key, now[key]);
+    const yours = sameValue(key, was[key], mine[key]) ? null : shownEdit(key, mine[key], typed[key]);
+    changes.push({ key, label, was: shownWas, now: shownNow, yours, text: label + ": was " + shownWas + ", now " + shownNow + (yours === null ? "" : " (you entered " + yours + ")") });
+  }
+  return changes;
+}
+
+/** `text` with every copy of the typed password replaced by "[redacted]" (plain split and join, no pattern); with no
+    password the text is returned as it is. Applied to any service sentence before it is shown. */
+export function redactPassword(text, password) {
+  if (typeof password !== "string" || password === "") return text;
+  return asText(text).split(password).join("[redacted]");
+}
+
 const TABS = [
   { id: "servers", label: "Servers" },
   { id: "routes", label: "Notification Routes" },
