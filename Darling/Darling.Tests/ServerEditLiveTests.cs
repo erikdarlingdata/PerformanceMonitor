@@ -227,6 +227,8 @@ public sealed class ServerEditLiveTests : IDisposable
             };
             var lost = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-11", "{\"host\":\"alpha-12.example.test\"}", racing, true, null, ct));
             Assert.Equal("conflict", lost["status"]!.GetValue<string>());
+            Assert.Equal("alpha-11", lost["current"]!["display_name"]!.GetValue<string>());
+            Assert.Equal("alpha-11.example.test", lost["current"]!["host"]!.GetValue<string>());
             Assert.Equal("alpha-11.example.test", await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 5111", ct));
             ok = true;
         }
@@ -285,6 +287,11 @@ public sealed class ServerEditLiveTests : IDisposable
 
             var denied = await Assert.ThrowsAsync<PostgresException>(async () => await ScalarAsync<string>(rig.Mcp, "SELECT encrypted_password FROM config_monitored_servers", ct));
             Assert.Equal("42501", denied.SqlState);
+
+            /* A probe that throws with the submitted secret in its message: the outer catch redacts it. */
+            Edit.ServerProbe throwing = (_, _) => throw new InvalidOperationException("driver said: " + SecretRef);
+            var thrown = await Edit.EditServerByNameAsync(rig.Mcp, "alpha-31", $"{{\"host\":\"alpha-33.example.test\",\"password\":\"{SecretRef}\"}}", throwing, true, null, ct);
+            Assert.DoesNotContain(SecretRef, thrown, StringComparison.Ordinal);
 
             /* A name-only edit leaves the stored secret alone, with no password in the request. */
             var rename = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-31", "{\"display_name\":\"Beta\"}", Reachable, true, null, ct));

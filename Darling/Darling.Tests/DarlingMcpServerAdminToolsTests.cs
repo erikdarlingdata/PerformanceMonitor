@@ -88,6 +88,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     [Theory]
     [InlineData("add_servers", "servers_json")]
     [InlineData("remove_server", "server_name")]
+    [InlineData("edit_server", "server_name,changes_json")]
     public void ParamContract_MatchesContract(string toolName, string expectedCsv)
     {
         Assert.Equal(expectedCsv.Split(','), McpParams(toolName).Select(p => p.Name).ToArray());
@@ -96,6 +97,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     [Theory]
     [InlineData("add_servers", "servers_json")]
     [InlineData("remove_server", "server_name")]
+    [InlineData("edit_server", "server_name,changes_json")]
     public void ParamContract_BothTools_RequireTheirTarget(string toolName, string requiredCsv)
     {
         var required = McpParams(toolName).Where(p => !p.Optional).Select(p => p.Name)

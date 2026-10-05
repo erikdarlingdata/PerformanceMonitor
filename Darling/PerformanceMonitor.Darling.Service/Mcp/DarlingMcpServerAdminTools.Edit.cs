@@ -140,6 +140,7 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static async Task<string> EditServerByNameAsync(
         NpgsqlDataSource postgres, string server_name, string changes_json, ServerProbe probe, bool isWindows, ILogger? logger, CancellationToken cancellationToken)
     {
+        string? submittedSecret = null;
         try
         {
             if (string.IsNullOrWhiteSpace(server_name))
@@ -154,6 +155,7 @@ public sealed partial class DarlingMcpServerAdminTools
                 return Outcome(EditStatus.Invalid, parseError);
             }
 
+            submittedSecret = changes!.Password;
             var definitions = await LoadDefinitionsForRemovalAsync(postgres);
             var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name);
             if (target.Candidates.Count == 0)
@@ -187,6 +189,8 @@ public sealed partial class DarlingMcpServerAdminTools
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* A probe or driver that throws can carry the submitted secret in its message: redact the whole envelope. */
+            ex = new InvalidOperationException(RedactEditSecret(ex.Message, submittedSecret));
             return McpHelpers.FormatError("edit_server", ex);
         }
     }
@@ -283,11 +287,13 @@ public sealed partial class DarlingMcpServerAdminTools
             case ServerEditWriteKind.Occupied:
                 return OccupiedAnswer(plan.NewStorageKey);
             case ServerEditWriteKind.Conflict:
-                return JsonSerializer.Serialize(new
+                /* Same shape as the pre-probe conflict: the current non-secret values, so the caller can retry. */
+                if (await store.ReadRowAsync(serverId, cancellationToken) is { } currentRow)
                 {
-                    status = EditStatus.Conflict,
-                    message = "This server was changed while the edit ran; nothing was saved. Read it again and retry.",
-                }, McpHelpers.JsonOptions);
+                    return ConflictAnswer(currentRow);
+                }
+
+                return Outcome(EditStatus.NotFound, "This server's definition was removed while the edit ran; nothing was changed.");
         }
 
         /* One line per edit: the id and the field NAMES. Never a value, never the secret. */
@@ -416,7 +422,8 @@ public sealed partial class DarlingMcpServerAdminTools
         if (keys.FirstOrDefault(k => EditRefusedKeys.Contains(k, StringComparer.Ordinal)
                                   || k.StartsWith("remediation_", StringComparison.Ordinal)) is { } refused)
         {
-            return (null, $"'{refused}' cannot be changed here: it is the server's identity or a setting kept in the desktop app. Nothing was changed.");
+            var refusedName = refused.StartsWith("remediation_", StringComparison.Ordinal) ? "remediation_*" : TruncateKey(refused);
+            return (null, $"'{refusedName}' cannot be changed here: it is the server's identity or a setting kept in the desktop app. Nothing was changed.");
         }
 
         if (keys.FirstOrDefault(k => !EditableKeys.Contains(k, StringComparer.Ordinal)) is { } unknown)
@@ -643,6 +650,11 @@ public sealed partial class DarlingMcpServerAdminTools
                           "(integrated/Kerberos auth is not supported for PostgreSQL targets).");
         }
 
+        if (!isPostgres && c.Port is not null)
+        {
+            return (null, "A SQL Server port goes in host, as host,port.");
+        }
+
         if (secretMode)
         {
             if (string.IsNullOrWhiteSpace(username))
@@ -714,7 +726,7 @@ public sealed partial class DarlingMcpServerAdminTools
         Set("read_only_intent", NpgsqlDbType.Boolean, readOnly, readOnly != row.ReadOnlyIntent);
         Set("auth", NpgsqlDbType.Text, auth, authSwitched);
         Set("username", NpgsqlDbType.Text, username, !string.Equals(username, row.Username, StringComparison.Ordinal));
-        Set("encrypt_mode", NpgsqlDbType.Text, encryptMode, !string.Equals(encryptMode, row.EncryptMode, StringComparison.Ordinal));
+        Set("encrypt_mode", NpgsqlDbType.Text, encryptMode, !string.Equals(encryptMode, row.EncryptMode, StringComparison.OrdinalIgnoreCase));
         Set("trust_server_certificate", NpgsqlDbType.Boolean, trust, trust != row.TrustServerCertificate);
         Set("multi_subnet_failover", NpgsqlDbType.Boolean, multi, multi != row.MultiSubnetFailover);
         Set("monthly_cost_usd", NpgsqlDbType.Numeric, cost, cost != row.MonthlyCostUsd);
@@ -754,7 +766,7 @@ public sealed partial class DarlingMcpServerAdminTools
         var before = new MonitoredServer
         {
             StoredServerId = row.ServerId, Name = row.Name, Host = row.Host, Database = row.Database, Auth = row.Auth,
-            Username = row.Username, EncryptedPassword = "stored", EncryptMode = row.EncryptMode,
+            Username = row.Username, EncryptedPassword = IsSecretAuth(row.Auth) ? "stored" : null, EncryptMode = row.EncryptMode,
             TrustServerCertificate = row.TrustServerCertificate, ReadOnlyIntent = row.ReadOnlyIntent,
             MultiSubnetFailover = row.MultiSubnetFailover, Engine = row.Engine, Port = row.Port,
         };

@@ -41,8 +41,8 @@ public sealed class ServerEditCoreTests : IDisposable
 
     private static readonly DateTime Stamp = new(2026, 10, 5, 12, 0, 0, 123, DateTimeKind.Unspecified);
 
-    private static Edit.ServerEditRow SqlRow(string host = "alpha-01.example.test", string auth = "sql") => new(
-        ServerId: 41, Name: "alpha-01", Host: host, Port: 0, Database: null, ReadOnlyIntent: false, Engine: "sqlserver",
+    private static Edit.ServerEditRow SqlRow(string host = "alpha-01.example.test", string auth = "sql", string engine = "sqlserver") => new(
+        ServerId: 41, Name: "alpha-01", Host: host, Port: 0, Database: null, ReadOnlyIntent: false, Engine: engine,
         Auth: auth, Username: auth == "integrated" ? null : "monitor", EncryptMode: "Mandatory", TrustServerCertificate: false,
         MultiSubnetFailover: false, MonthlyCostUsd: 10m, ModifiedAt: Stamp.AddTicks(7));
 
@@ -119,7 +119,7 @@ public sealed class ServerEditCoreTests : IDisposable
         var answer = await Run(store, $"{{\"display_name\":\"x\",\"{key}\":1}}");
 
         Assert.Equal("invalid", Status(answer));
-        Assert.Contains(key, answer, StringComparison.Ordinal);
+        Assert.Contains(key.StartsWith("remediation_", StringComparison.Ordinal) ? "remediation_*" : key, answer, StringComparison.Ordinal);
         Assert.Contains("cannot be changed here", answer, StringComparison.Ordinal);
         Assert.Equal(0, store.Reads);
         Assert.Equal(0, store.Writes);
@@ -218,7 +218,6 @@ public sealed class ServerEditCoreTests : IDisposable
             "UPDATE config_monitored_servers SET name = $3, encrypted_password = $4, modified_at = (now() AT TIME ZONE 'UTC') " +
             "WHERE server_id = $1 AND modified_at = $2 RETURNING modified_at", sql);
         Assert.DoesNotContain("COALESCE", sql, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("server_id =  ", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SET server_id", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("now()", sql.Replace("(now() AT TIME ZONE 'UTC')", ""), StringComparison.Ordinal);
     }
@@ -257,7 +256,6 @@ public sealed class ServerEditCoreTests : IDisposable
 
     [Theory]
     [InlineData("{\"host\":\"beta-01.example.test\"}")]
-    [InlineData("{\"port\":1444}")]
     [InlineData("{\"database\":\"Orders\"}")]
     [InlineData("{\"read_only_intent\":true}")]
     [InlineData("{\"username\":\"someone-else\"}")]
@@ -283,6 +281,81 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.True(plan.AddressChanged);
         Assert.Equal(["host", "password"], plan.ChangedFields);
         Assert.Equal(Secret, plan.PlaintextSecret);
+    }
+
+    [Fact]
+    public void APortOnASqlServerRow_IsRefused_ThePortGoesInTheHost()
+    {
+        var (plan, error) = Plan(SqlRow(), "{\"port\":1444}");
+
+        Assert.Null(plan);
+        Assert.Equal("A SQL Server port goes in host, as host,port.", error);
+    }
+
+    [Fact]
+    public void APortOnAPostgresRow_IsAccepted_AndNeedsTheSecret()
+    {
+        var (needs, needsError) = Plan(SqlRow(engine: "postgres"), "{\"port\":5433}");
+        Assert.Null(needs);
+        Assert.Equal(Edit.EditPasswordNeededText, needsError);
+
+        var (plan, error) = Plan(SqlRow(engine: "postgres"), "{\"port\":5433,\"password\":\"" + Secret + "\"}");
+        Assert.Null(error);
+        Assert.Contains("port", plan!.ChangedFields);
+    }
+
+    [Fact]
+    public void ACaseOnlyEncryptModeChange_IsUnchanged_NotAWriteOrAReconnect()
+    {
+        var (plan, error) = Plan(SqlRow(), "{\"encrypt_mode\":\"mandatory\"}");
+
+        Assert.Null(error);
+        Assert.Empty(plan!.Sets);
+        Assert.False(plan.NeedsProbe);
+    }
+
+    [Theory]
+    [InlineData("integrated")]
+    [InlineData("managedidentity")]
+    public void ACostOnlyEdit_OnANonSecretAuthRow_DoesNotReconnect(string auth)
+    {
+        var (plan, error) = Plan(SqlRow(auth: auth), "{\"monthly_cost_usd\":99}");
+
+        Assert.Null(error);
+        Assert.Equal(["monthly_cost_usd"], plan!.ChangedFields);
+        Assert.False(plan.Reconnects);
+    }
+
+    [Fact]
+    public void ASwitchFromASecretModeToANonSecretMode_StillReconnects()
+    {
+        var (plan, error) = Plan(SqlRow(), "{\"auth\":\"Windows\"}");
+
+        Assert.Null(error);
+        Assert.True(plan!.Reconnects);
+    }
+
+    [Fact]
+    public async Task ARefusedKey_IsTruncated_AndARemediationKeyNamesOnlyThePrefix()
+    {
+        var longKey = new string('k', 60);
+        var answer = await Run(new FakeStore { Row = SqlRow() }, "{\"remediation_password_hint_" + longKey + "\":1}");
+        Assert.Equal("invalid", Status(answer));
+        Assert.Contains("remediation_*", answer, StringComparison.Ordinal);
+        Assert.DoesNotContain(longKey, answer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AConflictInsideTheWrite_CarriesTheCurrentValues_LikeThePreProbeConflict()
+    {
+        var store = new FakeStore { Row = SqlRow(), WriteResult = Edit.ServerEditWriteKind.Conflict };
+
+        var answer = await Run(store, "{\"monthly_cost_usd\":5}");
+
+        Assert.Equal("conflict", Status(answer));
+        var current = JsonNode.Parse(answer)!["current"]!;
+        Assert.Equal("alpha-01", current["display_name"]!.GetValue<string>());
+        Assert.Equal(Edit.ModifiedAtToken(store.Row!.ModifiedAt), current["modified_at"]!.GetValue<string>());
     }
 
     [Fact]
@@ -492,7 +565,7 @@ public sealed class ServerEditCoreTests : IDisposable
     [Fact]
     public async Task TheColumnsWritten_AreExactlyTheChangedOnes_NeverAnIdentityOrOwnerColumn()
     {
-        var store = new FakeStore { Row = SqlRow() };
+        var store = new FakeStore { Row = SqlRow(engine: "postgres") };
 
         await Run(store, "{\"host\":\"b.example.test\",\"port\":1444,\"database\":\"D\",\"read_only_intent\":true,\"monthly_cost_usd\":3," +
                          "\"encrypt_mode\":\"Strict\",\"trust_server_certificate\":true,\"multi_subnet_failover\":true,\"username\":\"u2\"," +

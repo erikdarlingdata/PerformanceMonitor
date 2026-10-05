@@ -317,7 +317,7 @@ Configuration is a single JSON file with no schedule knobs. See the **[Darling o
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
 | Portability | Single executable | Portable service + viewer zip (Windows), service tarball (Linux) | Server-bound |
-| MCP server (LLM integration) | Built-in (89 tools) | On request (173 tools) | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (89 tools) | On request (174 tools) | Built into Dashboard (66 tools) |
 
 ---
 
