@@ -105,6 +105,24 @@ a:hover { text-decoration: underline; }
 }
 .server-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Per-browser viewer conveniences (#4843): the favourite star, the acknowledgeable alert-count badge, the
+   collapsible sidebar and the severity-colour settings. --sev-* are set from localStorage as #rrggbb only. */
+.fav-star { background: none; border: 0; padding: 0 2px; color: var(--muted); cursor: pointer; font-size: 1rem; line-height: 1; }
+.fav-star.on { color: var(--warn); }
+.alert-badge {
+  border: 0; border-radius: 8px; padding: 0 6px; min-width: 16px; height: 16px; font-size: 0.7rem; font-weight: 700;
+  cursor: pointer; color: var(--bg-dark);
+}
+.alert-badge.warn { background: var(--sev-warning, var(--warn)); }
+.alert-badge.crit { background: var(--sev-critical, var(--err)); }
+.sidebar-collapse { float: right; background: none; border: 1px solid var(--border); color: var(--dim); border-radius: var(--radius-sm); cursor: pointer; }
+#app.sidebar-collapsed #sidebar { width: 2.5rem; flex-basis: 2.5rem; overflow: hidden; }
+#app.sidebar-collapsed #sidebar > :not(.brand),
+#app.sidebar-collapsed #sidebar .brand > :not(.sidebar-collapse) { display: none; }
+.viewer-settings { padding: 0.5rem 1.25rem; font-size: 0.8rem; color: var(--dim); }
+.sev-color-row { display: flex; justify-content: space-between; align-items: center; margin: 4px 0; text-transform: capitalize; }
+.sev-color-reset { margin-top: 6px; }
+
 #main {
   flex: 1;
   min-width: 0;
@@ -848,9 +866,9 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .status-cell .glyph { font-weight: 700; }
 .status-cell .channel { color: var(--muted); font-size: 0.75rem; }
 .status-cell.sev-Healthy { color: var(--ok); }
-.status-cell.sev-Warning { color: var(--warn); }
-.status-cell.sev-Critical { color: var(--err); }
-.status-cell.sev-Unknown { color: var(--muted); }
+.status-cell.sev-Warning { color: var(--sev-warning, var(--warn)); }
+.status-cell.sev-Critical { color: var(--sev-critical, var(--err)); }
+.status-cell.sev-Unknown { color: var(--sev-info, var(--muted)); }
 
 /* ─────────────────────────── disclosure (expandable alert detail / query text) ─────────────────────────── */
 
