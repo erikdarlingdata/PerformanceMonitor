@@ -137,6 +137,17 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;", sql, StringComparison.Ordinal);
 
+        /* #4843: the web add-server route runs the add_servers core as viewer: INSERT on config_monitored_servers and
+           no UPDATE (the core never updates a row) and no DELETE (no web route removes a server yet), one explicit
+           statement naming viewer alone. The credential column stays SELECT-carved (asserted with the carve below). */
+        Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO viewer;", sql, StringComparison.Ordinal);
+        Assert.Equal(
+            new[] { "GRANT INSERT ON config.config_monitored_servers TO viewer;" },
+            System.Text.RegularExpressions.Regex.Matches(
+                    System.Text.RegularExpressions.Regex.Replace(sql, @"(?m)^\s*--.*$", ""),
+                    @"GRANT [^;(]*? ON config\.config_monitored_servers TO [^;]*viewer[^;]*;")
+                .Select(m => m.Value).ToArray());
+
         /* It must NOT widen the schema-wide config write to viewer (that grant stays admin-only, pinned here). */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin, viewer", sql, StringComparison.Ordinal);
