@@ -57,6 +57,14 @@ public sealed class DiagnosticsBundleLeakLiveTests
         "zeta-07x", RemovedServer, StoreLogSecretHost, "QXCORP", "svc_zeta", StoreRole, TcpServer, TcpHostName, "qxtcphost", "qxzone",
     };
 
+    /// <summary>
+    /// A statement that reads as 233 characters of text before <see cref="DbTwo"/>, so the name straddles the 240-character preview
+    /// cut (the tool's cut would keep "gamma_o"). pg_stat_statements stores the literals as <c>$n</c>, so the text is
+    /// <c>SELECT $1 AS c..., $2 AS d..., $3 AS e..., $4 AS ffffffff, $5 AS gamma_orders</c>. The identifiers are under the 63-byte limit.
+    /// </summary>
+    private static readonly string StraddlingStatement =
+        $"SELECT 1 AS {new string('c', 60)}, 2 AS {new string('d', 60)}, 3 AS {new string('e', 60)}, 4 AS ffffffff, 5 AS {DbTwo}";
+
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     private static async Task DropRoleAsync(string connectionString)
@@ -252,6 +260,25 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
                     await using var statement = new NpgsqlCommand($"SELECT '{ServerOne}' AS {DbOne}, '{RemovedServer}' AS lit_col, pg_sleep(0.3)", connection);
                     await statement.ExecuteNonQueryAsync(ct);
                 }
+
+                /* The history member reads through get_store_query_history: a statement whose text carries a registered database
+                   name across the 240-character preview cut, with a history row that ranks it first. The tool's own cut would leave
+                   the front of the name behind as a prefix no alias matches, so the bundle must read the text whole. */
+                await using (var straddle = new NpgsqlCommand(StraddlingStatement, connection))
+                {
+                    await straddle.ExecuteNonQueryAsync(ct);
+                }
+
+                long straddlingQueryId;
+                await using (var find = new NpgsqlCommand(
+                    "SELECT queryid FROM pg_stat_statements WHERE query LIKE ('%AS ' || $1) AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) LIMIT 1", connection))
+                {
+                    find.Parameters.AddWithValue(DbTwo);
+                    straddlingQueryId = (long)(await find.ExecuteScalarAsync(ct))!;
+                }
+
+                await ExecAsync(connection, "INSERT INTO collect.store_statement_history VALUES ($1, 60, $2, $3, 5, 1500.0, 5, 10, 1, 0, 3.5, FALSE, FALSE, FALSE)",
+                    DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-3), DateTimeKind.Unspecified), Login, straddlingQueryId);
             }
 
             var logs = Path.Combine(root.FullName, "logs");
@@ -298,9 +325,21 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
             Assert.NotEmpty(sections["stall_probes"]!["probes"]!.AsArray());
             Assert.NotEmpty(sections["slow_reads"]!["reads"]!.AsArray());
             Assert.NotEmpty(sections["service_log"]!["entries"]!.AsArray());
-            Assert.Equal("ok", sections["store_statements"]!["history"]!["status"]!.GetValue<string>());
-            Assert.NotEmpty(sections["store_statements"]!["history"]!["top_statement_rows"]!.AsArray());
+            /* The history member is the ranked answer of get_store_query_history (#5097), not the two V163 tables read by the bundle
+               itself: its shape is the tool's (mode ranked, a statements list), where it was status ok and top_statement_rows. */
+            var history = sections["store_statements"]!["history"]!;
+            Assert.Equal("ranked", history["mode"]!.GetValue<string>());
+            Assert.NotEmpty(history["statements"]!.AsArray());
             Assert.Contains("DeltaLedgerDb", await File.ReadAllTextAsync(map, ct), StringComparison.Ordinal);
+
+            /* The history's statement text was aliased whole and cut afterwards: the name that straddles the preview cut reads as its
+               token, and no prefix of it is left. */
+            var straddling = history["statements"]!.AsArray()
+                .Select(s => s!["query"]!.GetValue<string>())
+                .Single(q => q.Contains("ffffffff", StringComparison.Ordinal));
+            Assert.Matches(@"AS db-\d+$", straddling);
+            Assert.DoesNotContain("gamma", straddling, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("gamma", history.ToJsonString(), StringComparison.OrdinalIgnoreCase);
 
             /* The statement ran and its text reached the bundle, with the seeded identifier aliased. */
             var cumulative = sections["store_statements"]!["cumulative"]!.ToJsonString();
