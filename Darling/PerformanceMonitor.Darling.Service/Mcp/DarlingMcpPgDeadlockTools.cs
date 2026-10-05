@@ -104,7 +104,7 @@ public sealed class DarlingMcpPgDeadlockTools
                plausible shape for a bad afternoon, not a corner. McpHelpers.BoundPage trims the page back to
                `limit`, so deadlock_count below stays a count of what is returned. */
             var fetched = await DarlingPgDeadlockReader.GetDeadlocksAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1, cancellationToken);
+                postgres, resolved.ServerId, windowStart, windowEnd, limit + 1, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
