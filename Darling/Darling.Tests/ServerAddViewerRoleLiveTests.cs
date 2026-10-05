@@ -37,7 +37,7 @@ public sealed class ServerAddViewerRoleLiveTests
 {
     private static readonly string RolePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
 
-    private const string ServerGrant = "GRANT INSERT, DELETE ON config.config_monitored_servers TO viewer;";
+    private const string ServerGrant = "GRANT INSERT ON config.config_monitored_servers TO viewer;";
 
     private static readonly DarlingMcpServerAdminTools.ServerProbe Reachable = (_, _) => Task.FromResult(
         new ConnectionProbeResult(
@@ -155,9 +155,13 @@ public sealed class ServerAddViewerRoleLiveTests
                 Assert.True(Convert.ToInt64(await read.ExecuteScalarAsync(ct)) > versionBefore);
             }
 
-            /* The same grant lets the remove core delete the definition it inserted. */
-            var removed = JsonNode.Parse(await DarlingMcpServerAdminTools.RemoveServer(asViewer, "added-by-viewer"))!;
-            Assert.Equal("removed", removed["status"]!.GetValue<string>());
+            /* The grant is INSERT only: the viewer role cannot delete the definition it inserted (no web route removes one yet). */
+            var deleteDenied = await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var delete = asViewer.CreateCommand("DELETE FROM config_monitored_servers WHERE host = 'added-by-viewer'");
+                await delete.ExecuteNonQueryAsync(ct);
+            });
+            Assert.Equal("42501", deleteDenied.SqlState);
 
             /* The credential column stays unreadable to this role: INSERT needed no read of it. */
             var denied = await Assert.ThrowsAsync<PostgresException>(async () =>
