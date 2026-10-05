@@ -291,7 +291,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --help, -h          Print this help and exit." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server (the store's registry when it is reachable, otherwise the file's list)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --check-settings [--json]   Print the store host profile and a verdict per sizing-relevant setting; exits non-zero if any is stale-after-hardware-change." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --diagnostics-bundle <path> [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--force]   Write one aliased diagnostics file to attach to a bug report (run elevated on the store host; --diag-bundle is the short form)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --diagnostics-bundle <path> [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--include-log-text] [--force]   Write one aliased diagnostics file to attach to a bug report (run elevated on the store host; --diag-bundle is the short form)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-mcp-token   Reprint the MCP bearer token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
@@ -595,7 +595,7 @@ public static class DarlingCliCommands
         if (options is null)
         {
             error.WriteLine(parseError);
-            error.WriteLine("Usage: --diagnostics-bundle <path> [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--force]");
+            error.WriteLine("Usage: --diagnostics-bundle <path> [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--include-log-text] [--force]");
             return DiagnosticsBundleExitCode.ConfigError;
         }
 
@@ -632,6 +632,13 @@ public static class DarlingCliCommands
         if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable, ensureStoreSearchPath: true))
         {
             error.WriteLine(unusable);
+            return DiagnosticsBundleExitCode.ConfigError;
+        }
+
+        var mapProblem = DiagnosticsBundle.CheckAliasMap(options);
+        if (mapProblem is not null)
+        {
+            error.WriteLine(mapProblem);
             return DiagnosticsBundleExitCode.ConfigError;
         }
 
@@ -685,6 +692,11 @@ public static class DarlingCliCommands
             {
                 await dataSource.DisposeAsync();
             }
+        }
+
+        foreach (var warning in outcome.Warnings ?? Array.Empty<string>())
+        {
+            error.WriteLine("WARNING: " + warning);
         }
 
         if (outcome.Text is null)
@@ -2071,7 +2083,7 @@ public static class DarlingCliCommands
            it writes is deliberately file-defined + restart-only.
        ================================================================================================ */
 
-    private const string ServiceName = "PerformanceMonitor Darling";
+    internal const string ServiceName = "PerformanceMonitor Darling";
 
     /// <summary>
     /// Interactive wizard that guides the operator through the opt-in store / MCP / web-dashboard LAN exposure and writes

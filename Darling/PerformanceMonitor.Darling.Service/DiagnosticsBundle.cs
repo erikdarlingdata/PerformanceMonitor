@@ -27,10 +27,11 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>The parsed command line of <c>--diagnostics-bundle</c>.</summary>
 internal sealed record DiagnosticsBundleOptions(
-    string OutputPath, int Hours, string? ServerName, string? LogDirectory, string? ConfigPath, bool Force, string? AliasMapPath);
+    string OutputPath, int Hours, string? ServerName, string? LogDirectory, string? ConfigPath, bool Force, string? AliasMapPath,
+    bool IncludeLogText = false);
 
 /// <summary>One section as read, before aliasing.</summary>
-internal sealed record BundleSection(string Name, JsonNode? Node, bool Failed);
+internal sealed record BundleSection(string Name, JsonNode? Node, bool Failed, Func<JsonNode?, JsonNode?>? AfterAlias = null);
 
 /// <summary>
 /// The diagnostics bundle (#5097): one aliased JSON file a user can attach to a bug report. Each section is read through
@@ -129,9 +130,11 @@ internal static class DiagnosticsBundle
     internal static JsonObject BuildConfigShape(DarlingConfig config)
     {
         var byEngine = new JsonObject();
-        foreach (var group in config.Servers.GroupBy(s => s.Engine ?? "sqlserver", StringComparer.OrdinalIgnoreCase).OrderBy(g => g.Key, StringComparer.Ordinal))
+        /* Keyed by the parsed engine, never by the free text of the config: an unrecognized Engine string is
+           user-typed text, and a key is never aliased. */
+        foreach (var group in config.Servers.GroupBy(s => s.TargetEngine).OrderBy(g => g.Key.ToString(), StringComparer.Ordinal))
         {
-            byEngine[group.Key.ToLowerInvariant()] = group.Count();
+            byEngine[group.Key.ToString().ToLowerInvariant()] = group.Count();
         }
 
         var modes = new JsonArray();
@@ -163,6 +166,7 @@ internal static class DiagnosticsBundle
         string? path = null, server = null, logDir = null, config = null, aliasMap = null;
         var hours = DefaultHours;
         var force = false;
+        var includeLogText = false;
         for (var i = 0; i < args.Length; i++)
         {
             var arg = args[i];
@@ -170,6 +174,10 @@ internal static class DiagnosticsBundle
             if (string.Equals(arg, "--force", StringComparison.OrdinalIgnoreCase))
             {
                 force = true;
+            }
+            else if (string.Equals(arg, "--include-log-text", StringComparison.OrdinalIgnoreCase))
+            {
+                includeLogText = true;
             }
             else if (string.Equals(arg, "--hours", StringComparison.OrdinalIgnoreCase))
             {
@@ -232,10 +240,37 @@ internal static class DiagnosticsBundle
 
         if (string.IsNullOrEmpty(Path.GetExtension(path)))
         {
-            path += ".json";
+            /* "out." has no extension either; appending would give "out..json". */
+            path = path.TrimEnd('.') + ".json";
         }
 
-        return (new DiagnosticsBundleOptions(path, hours, server, logDir, config, force, aliasMap), null);
+        return (new DiagnosticsBundleOptions(path, hours, server, logDir, config, force, aliasMap, includeLogText), null);
+    }
+
+    /// <summary>
+    /// Checks the alias-map location before any work: the map must never share a path with the bundle (the map would
+    /// replace the attachable file with the real-name map), and an existing map file needs <c>--force</c>. Returns the
+    /// refusal sentence, or null.
+    /// </summary>
+    internal static string? CheckAliasMap(DiagnosticsBundleOptions options)
+    {
+        if (options.AliasMapPath is null)
+        {
+            return null;
+        }
+
+        var comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (string.Equals(Path.GetFullPath(options.AliasMapPath), Path.GetFullPath(options.OutputPath), comparison))
+        {
+            return "--alias-map must be a different file from the bundle: the map holds the real names.";
+        }
+
+        if (File.Exists(options.AliasMapPath) && !options.Force)
+        {
+            return "The alias map file already exists; pass --force to replace it.";
+        }
+
+        return null;
     }
 
     /// <summary>Checks the output location before any work: an existing file without --force, or a missing or unwritable directory, is exit 4.</summary>
@@ -271,7 +306,7 @@ internal static class DiagnosticsBundle
     /// the store connection string's hosts, database and login, the machine and domain names, and the secrets (every
     /// string in the config under a secret-named key, and the store password).
     /// </summary>
-    internal static void SeedFromConfig(BundleAliaser aliaser, DarlingConfig config, string? storeConnectionString)
+    internal static IReadOnlyList<string> SeedFromConfig(BundleAliaser aliaser, DarlingConfig config, string? storeConnectionString)
     {
         foreach (var server in config.Servers)
         {
@@ -304,7 +339,55 @@ internal static class DiagnosticsBundle
             SeedFromConnectionString(aliaser, cs);
         }
 
-        AddLocalIdentity(aliaser);
+        SeedNotificationIdentifiers(aliaser, config);
+        return AddLocalIdentity(aliaser);
+    }
+
+    /// <summary>
+    /// The other places a config names a host: the SMTP host, the domains of the From and To addresses, the dashboard's
+    /// public base URL, and every webhook URL and proxy. A webhook URL carries its secret in the path, so each is also
+    /// a secret.
+    /// </summary>
+    internal static void SeedNotificationIdentifiers(BundleAliaser aliaser, DarlingConfig config)
+    {
+        if (config.Smtp is { } smtp)
+        {
+            aliaser.AddName(AliasKind.Host, smtp.Host);
+            foreach (var list in new[] { smtp.From, smtp.To })
+            {
+                foreach (var address in (list ?? string.Empty).Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    var at = address.LastIndexOf('@');
+                    if (at >= 0 && at < address.Length - 1)
+                    {
+                        aliaser.AddDomain(address[(at + 1)..]);
+                    }
+                }
+            }
+        }
+
+        AddUrlHost(aliaser, config.Web?.PublicBaseUrl);
+        if (config.Webhooks is { } hooks)
+        {
+            foreach (var url in new[] { hooks.TeamsUrl, hooks.SlackUrl, hooks.GenericUrl })
+            {
+                AddUrlHost(aliaser, url);
+                aliaser.AddSecret(url);
+            }
+
+            foreach (var proxy in new[] { hooks.TeamsProxy, hooks.SlackProxy, hooks.GenericProxy })
+            {
+                AddUrlHost(aliaser, proxy);
+            }
+        }
+    }
+
+    private static void AddUrlHost(BundleAliaser aliaser, string? url)
+    {
+        if (!string.IsNullOrWhiteSpace(url) && Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri) && !string.IsNullOrEmpty(uri.Host))
+        {
+            aliaser.AddName(AliasKind.Host, uri.Host);
+        }
     }
 
     /// <summary>Adds a connection string's hosts, database and login as names and its password as a secret.</summary>
@@ -347,19 +430,62 @@ internal static class DiagnosticsBundle
                 }
 
                 break;
-            case JsonValue value when secretKey && value.TryGetValue<string>(out var text) && text.Length >= SecretMinimumLength:
+            case JsonValue value when secretKey && value.TryGetValue<string>(out var text):
+                /* No length floor: a short secret is replaced on word boundaries (see BundleAliaser.AddSecret), and only
+                   one of four or more characters is also substring-verified. */
                 aliaser.AddSecret(text);
                 break;
         }
     }
 
-    /// <summary>Secrets shorter than this are not tracked: they would match inside ordinary words.</summary>
-    internal const int SecretMinimumLength = 4;
-
     private static readonly string[] s_sharedAccounts = { "system", "administrator", "root", "localsystem", "service", "networkservice", "admin" };
 
-    private static void AddLocalIdentity(BundleAliaser aliaser)
+    /// <summary>
+    /// Splits a service logon account (<c>CORP\svc_darling</c>, <c>.\svc</c>, <c>svc@corp.example.test</c>) into its
+    /// domain and login. The built-in accounts (<c>LocalSystem</c>, <c>NT AUTHORITY\...</c>, <c>NT SERVICE\...</c>) name
+    /// nothing and return null parts.
+    /// </summary>
+    internal static (string? Domain, string? Login) ParseServiceAccount(string? objectName)
     {
+        var account = objectName?.Trim();
+        if (string.IsNullOrEmpty(account) || string.Equals(account, "LocalSystem", StringComparison.OrdinalIgnoreCase))
+        {
+            return (null, null);
+        }
+
+        var slash = account.IndexOf('\\', StringComparison.Ordinal);
+        if (slash > 0)
+        {
+            var domain = account[..slash];
+            var login = account[(slash + 1)..];
+            if (domain is "." or "NT AUTHORITY" or "NT SERVICE" || string.Equals(domain, "NT AUTHORITY", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(domain, "NT SERVICE", StringComparison.OrdinalIgnoreCase))
+            {
+                return (null, domain == "." ? login : null);
+            }
+
+            return (domain, login);
+        }
+
+        var at = account.IndexOf('@', StringComparison.Ordinal);
+        return at > 0 ? (account[(at + 1)..], account[..at]) : (null, account);
+    }
+
+    private static string? ReadServiceObjectName()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+            @"SYSTEM\CurrentControlSet\Services\" + DarlingCliCommands.ServiceName);
+        return key?.GetValue("ObjectName") as string;
+    }
+
+    private static List<string> AddLocalIdentity(BundleAliaser aliaser)
+    {
+        var notes = new List<string>();
         aliaser.AddName(AliasKind.Host, Environment.MachineName);
         try
         {
@@ -388,6 +514,31 @@ internal static class DiagnosticsBundle
         {
             aliaser.AddName(AliasKind.Login, user);
         }
+
+        var userDomain = Environment.UserDomainName;
+        if (!string.IsNullOrWhiteSpace(userDomain) && !s_sharedAccounts.Contains(userDomain, StringComparer.OrdinalIgnoreCase))
+        {
+            aliaser.AddName(AliasKind.Domain, userDomain);
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            notes.Add("The service's logon account was not read: this host is not Windows. A service account named only in log text is aliased by its quoted DOMAIN\\login form.");
+            return notes;
+        }
+
+        try
+        {
+            var (domain, login) = ParseServiceAccount(ReadServiceObjectName());
+            aliaser.AddName(AliasKind.Domain, domain);
+            aliaser.AddName(AliasKind.Login, login);
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException or InvalidOperationException)
+        {
+            notes.Add("The service's logon account could not be read from the service registration (" + ex.GetType().Name + ").");
+        }
+
+        return notes;
     }
 
     /// <summary>Runs one reader under its own timeout and try/catch; a failure becomes an <c>error_class</c>, never an exception.</summary>
@@ -522,6 +673,13 @@ internal static class DiagnosticsBundle
         foreach (var section in sections)
         {
             var shaped = aliaser.AliasTree(section.Node);
+
+            /* Text is cut only AFTER it is aliased: a name cut to a prefix by an earlier truncation would match no token. */
+            if (section.AfterAlias is not null)
+            {
+                shaped = section.AfterAlias(shaped);
+            }
+
             var budget = SectionBudgets.TryGetValue(section.Name, out var b) ? b : DefaultSectionBudgetBytes;
             shaped = FitToBudget(shaped, budget, out var truncated);
             aliased.Add((section.Name, shaped, truncated));
@@ -600,20 +758,47 @@ internal static class DiagnosticsBundle
         };
     }
 
-    /// <summary>Writes the text to a temp file beside the target, then moves it over. Nothing is left behind on failure.</summary>
+    /// <summary>
+    /// Writes the text to a temp file beside the target, then moves it over. The temp name is random and the file is
+    /// created with <see cref="FileMode.CreateNew"/>, so a path someone planted in a shared directory is never written
+    /// through. The temp file is deleted on every path that does not end in the move.
+    /// </summary>
     internal static string? WriteAtomically(string path, string text, bool force)
     {
-        var temp = path + ".tmp";
+        string temp;
         try
         {
-            File.WriteAllText(temp, text, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            var full = Path.GetFullPath(path);
+            temp = Path.Combine(Path.GetDirectoryName(full)!, "." + Path.GetFileName(full) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return "Could not write the bundle (" + ex.GetType().Name + ").";
+        }
+
+        var moved = false;
+        try
+        {
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(text);
+                stream.Write(bytes, 0, bytes.Length);
+            }
+
             File.Move(temp, path, overwrite: force);
+            moved = true;
             return null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            TryDelete(temp);
             return "Could not write the bundle (" + ex.GetType().Name + ").";
+        }
+        finally
+        {
+            if (!moved)
+            {
+                TryDelete(temp);
+            }
         }
     }
 

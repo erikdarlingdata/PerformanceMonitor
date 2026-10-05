@@ -39,6 +39,10 @@ SELECT server_id, server_name, display_name
 FROM servers
 ORDER BY server_id";
 
+    /// <summary>Every store login (the system roles excluded), for the name set: a login with no connection string in the config still appears in statement sections.</summary>
+    internal const string StoreRolesSql = @"
+SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_'";
+
     /// <summary>The store's own database names.</summary>
     internal const string StoreDatabasesSql = @"
 SELECT datname FROM pg_database";
@@ -101,7 +105,74 @@ FROM " + PgSchemaGenerator.ConfigSchema + "." + StoreStatementStats.FunctionName
 WHERE queryid = ANY($1)";
 
     /// <summary>The outcome of building and writing a bundle.</summary>
-    internal sealed record Outcome(int ExitCode, string? Text, IReadOnlyList<BundleLeak> Leaks, BundleAliaser Aliaser, string Message);
+    internal sealed record Outcome(
+        int ExitCode, string? Text, IReadOnlyList<BundleLeak> Leaks, BundleAliaser Aliaser, string Message, IReadOnlyList<string>? Warnings = null);
+
+    /// <summary>
+    /// The fleet roll-up with its tag forest reduced to a count. A tag name is text the operator chose (often a client's
+    /// name), and the bundle has no use for it.
+    /// </summary>
+    internal static JsonNode? ShapeFleetOverview(JsonNode? fleet)
+    {
+        if (fleet is JsonObject obj && obj["tags"] is JsonArray tags)
+        {
+            obj["tags"] = new JsonObject { ["count"] = tags.Count };
+        }
+
+        return fleet;
+    }
+
+    /// <summary>Statement text in a store-statements section, cut to the preview length after it has been aliased.</summary>
+    internal static JsonNode? CompactStatementTexts(JsonNode? section)
+    {
+        void Cut(JsonNode? node)
+        {
+            switch (node)
+            {
+                case JsonObject o:
+                    foreach (var key in o.Select(p => p.Key).ToList())
+                    {
+                        if (key == "query" && o[key] is JsonValue v && v.TryGetValue<string>(out var text))
+                        {
+                            o[key] = StoreStatementStats.CompactStatementText(text, DarlingMcpStoreQueryStatsTools.PreviewLength);
+                        }
+                        else
+                        {
+                            Cut(o[key]);
+                        }
+                    }
+
+                    break;
+                case JsonArray a:
+                    foreach (var item in a)
+                    {
+                        Cut(item);
+                    }
+
+                    break;
+            }
+        }
+
+        Cut(section);
+        return section;
+    }
+
+    /// <summary>The service log's message text, cut to the entry cap after aliasing.</summary>
+    internal static JsonNode? CapServiceLogMessages(JsonNode? section)
+    {
+        if (section is JsonObject o && o["entries"] is JsonArray entries)
+        {
+            foreach (var entry in entries.OfType<JsonObject>())
+            {
+                if (entry["message"] is JsonValue v && v.TryGetValue<string>(out var text))
+                {
+                    entry["message"] = DiagnosticsBundleServiceLog.CutAtWhitespace(text, DiagnosticsBundleServiceLog.MaxEntryChars);
+                }
+            }
+        }
+
+        return section;
+    }
 
     /// <summary>
     /// Builds the bundle text. <paramref name="postgres"/> is null when the store could not be reached
@@ -117,17 +188,15 @@ WHERE queryid = ANY($1)";
         CancellationToken cancellationToken)
     {
         var aliaser = new BundleAliaser();
-        DiagnosticsBundle.SeedFromConfig(aliaser, config, connectionString);
+        var warnings = new List<string>(DiagnosticsBundle.SeedFromConfig(aliaser, config, connectionString));
         var sections = new List<BundleSection>();
         string scope = "fleet";
-        var failedSections = 0;
 
         if (postgres is not null)
         {
             await SeedFromStoreAsync(aliaser, postgres, cancellationToken);
         }
 
-        int? scopeServerId = null;
         string? scopeServerName = null;
         if (postgres is not null && !string.IsNullOrWhiteSpace(options.ServerName))
         {
@@ -138,7 +207,6 @@ WHERE queryid = ANY($1)";
                     "--server did not match one monitored server.");
             }
 
-            scopeServerId = resolved.ServerId;
             scopeServerName = resolved.ServerName;
             scope = aliaser.AddServer(resolved.ServerId, resolved.ServerName);
         }
@@ -147,12 +215,20 @@ WHERE queryid = ANY($1)";
 
         if (postgres is null)
         {
-            sections.Add(new BundleSection("store_unreachable", new JsonObject
+            var unreachable = new JsonObject
             {
                 ["status"] = "store_unreachable",
                 ["error_class"] = storeError is null ? "NotConfigured" : SlowReadLog.ErrorClassOf(storeError),
                 ["message"] = storeErrorSentence ?? storeError?.Message ?? "The store could not be opened.",
-            }, true));
+            };
+            if (!string.IsNullOrWhiteSpace(options.ServerName))
+            {
+                const string ignored = "--server was ignored: the store is unreachable, so the server could not be looked up and no section is limited to it.";
+                unreachable["server_scope"] = ignored;
+                warnings.Add(ignored);
+            }
+
+            sections.Add(new BundleSection("store_unreachable", unreachable, true));
         }
         else
         {
@@ -168,23 +244,38 @@ WHERE queryid = ANY($1)";
                 async c => DiagnosticsBundle.ParseReader(await DarlingMcpSlowReadTools.GetSlowReads(postgres, hours, scopeServerName, null, null, 100, true, c)), ct));
             sections.Add(await DiagnosticsBundle.RunSectionAsync("read_latency",
                 async c => DiagnosticsBundle.ParseReader(await DarlingMcpReadLatencyTools.GetReadLatency(postgres, hours, null, null, 200, c)), ct));
-            sections.Add(await DiagnosticsBundle.RunSectionAsync("store_statements",
-                c => StoreStatementsSectionAsync(postgres, hours, c), ct));
+            sections.Add((await DiagnosticsBundle.RunSectionAsync("store_statements",
+                c => StoreStatementsSectionAsync(postgres, hours, c), ct)) with { AfterAlias = CompactStatementTexts });
             sections.Add(await DiagnosticsBundle.RunSectionAsync("store_log",
                 async c => DiagnosticsBundle.ParseReader(await DarlingMcpStoreLogTools.GetStoreLog(postgres, hours, 50, null, c)), ct));
         }
 
         var logDirectory = options.LogDirectory ?? DarlingFileLoggerProvider.DefaultLogDirectory();
         var searched = options.LogDirectory is null ? "default" : "--log-dir";
-        sections.Add(await DiagnosticsBundle.RunSectionAsync("service_log",
-            _ => Task.FromResult<JsonNode?>(DiagnosticsBundleServiceLog.Read(logDirectory, searched, DateTime.Now.AddHours(-options.Hours))), cancellationToken));
 
-        failedSections = sections.Count(s => s.Failed && s.Name != "store_unreachable");
+        /* With the store down, the registry (--add-server entries live only there) cannot be read, so servers known only to
+           it cannot be aliased. The service log then goes out as counts only, unless the caller asks for the text. */
+        var includeText = postgres is not null || options.IncludeLogText;
+        if (postgres is null && options.IncludeLogText)
+        {
+            const string registryOnly = "--include-log-text with the store unreachable: servers known only to the store registry cannot be aliased, so the service log text may name them. Read the file before you attach it.";
+            warnings.Add(registryOnly);
+        }
+
+        var logSection = await DiagnosticsBundle.RunSectionAsync("service_log",
+            _ => Task.FromResult<JsonNode?>(DiagnosticsBundleServiceLog.Read(logDirectory, searched, DateTime.Now.AddHours(-options.Hours), includeText)), cancellationToken);
+        sections.Add(logSection with { AfterAlias = CapServiceLogMessages });
+
+        var failedSections = sections.Count(s => s.Failed && s.Name != "store_unreachable");
         var exit = postgres is null ? DiagnosticsBundleExitCode.StoreUnreachable
             : failedSections > 0 ? DiagnosticsBundleExitCode.PartialBundle : DiagnosticsBundleExitCode.Ok;
 
-        _ = scopeServerId;
         var manifest = DiagnosticsBundle.BuildManifest(options.Hours, scope, exit);
+        if (warnings.Count > 0)
+        {
+            manifest["notes"] = new JsonArray(warnings.Select(w => (JsonNode?)JsonValue.Create(w)).ToArray());
+        }
+
         var (text, leaks, overCap) = DiagnosticsBundle.Assemble(sections, aliaser, manifest);
         if (overCap)
         {
@@ -196,7 +287,7 @@ WHERE queryid = ANY($1)";
             return new Outcome(DiagnosticsBundleExitCode.LeakGuard, null, leaks, aliaser, "A known name or secret survived aliasing.");
         }
 
-        return new Outcome(exit, text, leaks, aliaser, string.Empty);
+        return new Outcome(exit, text, leaks, aliaser, string.Empty, warnings);
     }
 
     private static async Task SeedFromStoreAsync(BundleAliaser aliaser, NpgsqlDataSource postgres, CancellationToken ct)
@@ -225,6 +316,15 @@ WHERE queryid = ANY($1)";
             if (!reader.IsDBNull(2))
             {
                 aliaser.AddNameLike(reader.GetString(2), name);
+            }
+        }, ct);
+
+        await TryReadAsync(postgres, StoreRolesSql, reader =>
+        {
+            var role = reader.GetString(0);
+            if (!BundleAliaser.ProductRoles.Contains(role, StringComparer.OrdinalIgnoreCase))
+            {
+                aliaser.AddName(AliasKind.Login, role);
             }
         }, ct);
 
@@ -295,10 +395,10 @@ WHERE queryid = ANY($1)";
             health.Add(new JsonObject { ["server_name"] = server.ServerName, ["health"] = DiagnosticsBundle.ParseReader(json) });
         }
 
-        var fleet = DiagnosticsBundle.ParseReader(await DarlingMcpFleetTools.GetFleetOverview(postgres, hours_back: 1, detail: "summary", cancellationToken: ct));
+        var fleet = ShapeFleetOverview(DiagnosticsBundle.ParseReader(await DarlingMcpFleetTools.GetFleetOverview(postgres, hours_back: 1, detail: "summary", cancellationToken: ct)));
         var slowest = DiagnosticsBundle.ParseReader(await DarlingMcpDataTools.GetCollectionLog(
             postgres, server_name: string.IsNullOrWhiteSpace(serverName) ? "*" : serverName, hours_back: hours, limit: 50, as_of: null,
-            collector_name: null, min_duration_ms: 1, status: null, full_text: false, logger: null, cancellationToken: ct));
+            collector_name: null, min_duration_ms: 1, status: null, full_text: true, logger: null, cancellationToken: ct));
         var cost = DiagnosticsBundle.ParseReader(await DarlingMcpCollectorCostTools.GetCollectorCost(postgres, days, null, ct));
         return new JsonObject
         {
@@ -313,7 +413,7 @@ WHERE queryid = ANY($1)";
     private static async Task<JsonNode?> StoreStatementsSectionAsync(NpgsqlDataSource postgres, int hours, CancellationToken ct)
     {
         var cumulative = DiagnosticsBundle.ParseReader(
-            await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(postgres, null, "total_time", 25, false, ct));
+            await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(postgres, null, "total_time", 25, true, ct));
         return new JsonObject
         {
             ["cumulative"] = cumulative,
@@ -385,7 +485,7 @@ WHERE queryid = ANY($1)";
                 while (await reader.ReadAsync(ct))
                 {
                     var raw = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
-                    texts[reader.GetInt64(0)] = StoreStatementStats.CompactStatementText(DarlingMcpStoreQueryStatsTools.ShownText(raw), 240);
+                    texts[reader.GetInt64(0)] = DarlingMcpStoreQueryStatsTools.ShownText(raw);
                 }
             }
             catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
@@ -408,8 +508,8 @@ WHERE queryid = ANY($1)";
                 rows.Add(new JsonObject
                 {
                     ["capture_time"] = reader.GetDateTime(0).ToString("o", CultureInfo.InvariantCulture),
-                    ["interval_seconds"] = reader.GetInt32(1),
-                    ["role_name"] = reader.GetString(2),
+                    ["interval_seconds"] = reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                    ["role_name"] = reader.IsDBNull(2) ? null : reader.GetString(2),
                     ["queryid"] = id.ToString(CultureInfo.InvariantCulture),
                     ["delta_calls"] = reader.GetInt64(4),
                     ["delta_total_exec_ms"] = reader.GetDouble(5),

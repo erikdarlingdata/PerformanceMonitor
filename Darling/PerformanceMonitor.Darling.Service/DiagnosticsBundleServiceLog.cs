@@ -29,6 +29,12 @@ internal static class DiagnosticsBundleServiceLog
 {
     internal const int TailBytes = 8 * 1024 * 1024;
     internal const int MaxEntryChars = 2_000;
+
+    /// <summary>
+    /// How much of an entry <see cref="Read"/> keeps for the alias pass. The cut to <see cref="MaxEntryChars"/> comes
+    /// AFTER aliasing, so a name straddling the final cut cannot be left as an unrecognizable prefix.
+    /// </summary>
+    internal const int AliasInputChars = 16_384;
     internal const int MaxEntries = 300;
     private const string FilePrefix = "darling-service_";
 
@@ -38,7 +44,7 @@ internal static class DiagnosticsBundleServiceLog
         TimeSpan.FromSeconds(1));
 
     /// <summary>Reads the section. <paramref name="searched"/> names where the directory came from (<c>default</c> or <c>--log-dir</c>); the path itself never enters the bundle.</summary>
-    internal static JsonObject Read(string directory, string searched, DateTime windowStartLocal)
+    internal static JsonObject Read(string directory, string searched, DateTime windowStartLocal, bool includeEntries = true)
     {
         if (!Directory.Exists(directory))
         {
@@ -83,7 +89,7 @@ internal static class DiagnosticsBundleServiceLog
                 var (text, bytes, partial) = ReadTail(path);
                 info["bytes"] = bytes;
                 info["tail_only"] = partial;
-                entries.AddRange(Parse(text, partial, windowStartLocal));
+                entries.AddRange(Parse(text, partial, windowStartLocal, AliasInputChars));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -97,6 +103,20 @@ internal static class DiagnosticsBundleServiceLog
         foreach (var group in entries.GroupBy(e => (e.Level, e.Category)).OrderByDescending(g => g.Count()).ThenBy(g => g.Key.Level, StringComparer.Ordinal).ThenBy(g => g.Key.Category, StringComparer.Ordinal))
         {
             counts.Add(new JsonObject { ["level"] = group.Key.Level, ["category"] = group.Key.Category, ["count"] = group.Count() });
+        }
+
+        if (!includeEntries)
+        {
+            /* Counts only: no message text leaves the service log unless the caller opted in. */
+            return new JsonObject
+            {
+                ["status"] = "ok",
+                ["searched"] = searched,
+                ["text_withheld"] = true,
+                ["files"] = fileInfo,
+                ["entries_in_window"] = entries.Count,
+                ["counts"] = counts,
+            };
         }
 
         var newest = new JsonArray();
@@ -153,8 +173,21 @@ internal static class DiagnosticsBundleServiceLog
         return (Encoding.UTF8.GetString(buffer, 0, read), length, partial);
     }
 
+    /// <summary>Cuts text to <paramref name="max"/> characters, backing up to the last whitespace so a word is not left half-cut.</summary>
+    internal static string CutAtWhitespace(string text, int max)
+    {
+        if (text.Length <= max)
+        {
+            return text;
+        }
+
+        var cut = text.LastIndexOfAny(new[] { ' ', '\n', '\t' }, max - 1);
+        return cut > max / 2 ? text[..cut] : text[..max];
+    }
+
     /// <summary>Parses entries from log text. A <paramref name="partial"/> read drops its first line (cut mid-line by the seek). Pure.</summary>
-    internal static List<(DateTime Time, string Level, string Category, string Message)> Parse(string text, bool partial, DateTime windowStartLocal)
+    internal static List<(DateTime Time, string Level, string Category, string Message)> Parse(
+        string text, bool partial, DateTime windowStartLocal, int maxEntryChars = MaxEntryChars)
     {
         var result = new List<(DateTime, string, string, string)>();
         var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
@@ -168,7 +201,7 @@ internal static class DiagnosticsBundleServiceLog
             if (message is not null && time is { } t && level is "WARN" or "ERROR" or "CRIT" && t >= windowStartLocal)
             {
                 var m = message.ToString();
-                result.Add((t, level, category, m.Length > MaxEntryChars ? m[..MaxEntryChars] : m));
+                result.Add((t, level, category, CutAtWhitespace(m, maxEntryChars)));
             }
 
             message = null;
@@ -197,7 +230,7 @@ internal static class DiagnosticsBundleServiceLog
             }
             else if (message is not null && line.StartsWith("    ", StringComparison.Ordinal))
             {
-                if (message.Length < MaxEntryChars)
+                if (message.Length < maxEntryChars)
                 {
                     message.Append('\n').Append(line, 4, line.Length - 4);
                 }

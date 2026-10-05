@@ -94,7 +94,7 @@ public sealed class DiagnosticsBundleAliasHardeningTests
         Assert.DoesNotContain("sql02", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("sql03", text, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("host-", text, StringComparison.Ordinal);
-        Assert.Equal(text.Split("host-1").Length - 1, 2);
+        Assert.Equal(2, text.Split("host-1").Length - 1);
     }
 
     [Fact]
