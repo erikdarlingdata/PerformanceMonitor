@@ -88,6 +88,9 @@ try {
   for (const f of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js"), path.join("pages", "pg-plan-viewer.js")]) {
     if (fs.existsSync(path.join(jsDir, f))) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
   }
+  /* #5246: the Graph cell of the Deadlock Graphs grid. */
+  fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
+  fs.copyFileSync(path.join(jsDir, "pages", "deadlock-graph.js"), path.join(scratch, "pages", "deadlock-graph.js"));
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
   modules = { util: await load("util.js"), tabs: await load(path.join("pages", "server-tabs.js")) };
 } finally {

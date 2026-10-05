@@ -99,6 +99,8 @@ public sealed class DarlingCliUnusableStoreConnectionTests
             "--set-collector-run-at" => await DarlingCliCommands.SetCollectorRunAtAsync(
                 ["index_object_stats", "02:00", "--config", configPath], output, error, ct),
             "--drop-xe-sessions" => await DarlingCliCommands.DropXeSessionsAsync(["SQL2022", "--dry-run", "--config", configPath], output, error, ct),
+            "--diagnostics-bundle" => await DarlingCliCommands.DiagnosticsBundleAsync(
+                [Path.Combine(Path.GetTempPath(), "darling-unusable-" + Guid.NewGuid().ToString("N") + ".json"), "--config", configPath], output, error, ct),
             _ => throw new ArgumentOutOfRangeException(nameof(verb), verb, "not a verb this class knows"),
         };
 
@@ -119,6 +121,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--disable-collector")]
     [InlineData("--set-collector-run-at")]
     [InlineData("--drop-xe-sessions")]
+    [InlineData("--diagnostics-bundle")]
     public async Task ConnectionStringThatDoesNotParse_ExitsWithOne_AndNamesTheSetting(string verb)
     {
         var root = Directory.CreateTempSubdirectory("darling-cli-4744-badconn-");
@@ -245,10 +248,10 @@ public sealed class DarlingCliUnusableStoreConnectionTests
            shared body), --collapse-legacy-slices, --recompress-plan-dim, --add-server, --backfill-rollups, and the
            two collector toggles (one shared body). That is eight call sites. The ninth is --drop-xe-sessions reading
            this install's id, the long-query schedule rows and the instance names (#4961), after it has resolved the
-           server through the first one's shared body. A tenth verb that opens the store adds a tenth here, and growing
-           this count is the point. */
+           server through the first one's shared body. The tenth is --diagnostics-bundle (#5097). An eleventh verb that
+           opens the store adds an eleventh here, and growing this count is the point. */
         var calls = Regex.Matches(code, @"(?<!bool\s)TryBuildStoreConnectionString\(").Count;
-        Assert.Equal(9, calls);
+        Assert.Equal(10, calls);
 
         /* The stored credential is read bare in exactly two places: inside that method, and in the firewall verb's
            best-effort read (TryReadEndpointTogglesAsync), which turns a failure into a reason it prints rather than

@@ -67,6 +67,9 @@ public sealed class DarlingWebEndpointsTests
 
         var expected = catalog.Except(DarlingWebEndpoints.ExcludedToolNames).ToHashSet(StringComparer.Ordinal);
 
+        /* The web page's own keyed reads (#5241) have no tool behind them, by design: exactly this set is added. */
+        expected.UnionWith(DarlingWebEndpoints.WebOnlyReadNames);
+
         /* Symmetric-difference messages so a miss names the exact tool. */
         var missing = expected.Except(endpoints).OrderBy(n => n, StringComparer.Ordinal).ToArray();
         var extra = endpoints.Except(expected).OrderBy(n => n, StringComparer.Ordinal).ToArray();
@@ -117,6 +120,18 @@ public sealed class DarlingWebEndpointsTests
         using (ExecutionContext.SuppressFlow())
         {
             return Task.Run(() => DarlingWebEndpoints.BuildReadDispatch().ContainsKey(routeName), ct);
+        }
+    }
+
+    [Fact]
+    public void WebOnlyReads_AreNotMcpTools_AndAreServedAndCataloged()
+    {
+        var catalog = ReflectToolCatalog();
+        foreach (var name in DarlingWebEndpoints.WebOnlyReadNames)
+        {
+            Assert.DoesNotContain(name, catalog);
+            Assert.Contains(name, DarlingWebEndpoints.BuildReadDispatch().Keys);
+            Assert.Contains(name, DarlingWebEndpoints.CatalogDescriptors.Keys);
         }
     }
 
