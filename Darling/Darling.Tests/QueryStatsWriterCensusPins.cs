@@ -29,7 +29,8 @@ namespace Darling.Tests;
 /// for itself, so this census is the defence: the expected writer set is exactly <c>{CopyBatchOnceAsync}</c>, and a
 /// second writer fails here with the reason.
 ///
-/// <para>Three arms. (1) A literal scan of every non-test Darling source for a DML verb aimed at the table. (2) Every
+/// <para>Three arms. (1) A literal scan of every non-test source in the service's <c>ProjectReference</c> closure (see
+/// below) for a DML verb aimed at the table. (2) Every
 /// <c>BeginBinaryImportAsync</c> site must be on a register, because the real COPY is built at run time
 /// (<c>PgCollectorRowWriter.CopyCommandFor(definition)</c> appends <c>schema.TargetTable</c>), so arm 1 cannot see it:
 /// the runner's one site over the generic definition, and the four RDS ingestors, each over its own fixed definition
@@ -37,15 +38,28 @@ namespace Darling.Tests;
 /// The scan must also be shown to have looked: it asserts the number of files it read and that the files it names were
 /// among them, and each arm carries a positive control.</para>
 ///
+/// <para><b>What the scan covers.</b> The scan root is the service's compile closure, not a directory glob: every
+/// <c>Darling/PerformanceMonitor.*</c> project and every project those reference through a <c>ProjectReference</c>,
+/// transitively. The service and storage projects compile six root libraries into the same binary
+/// (<c>PerformanceMonitor.Alerting</c>, <c>.Analysis</c>, <c>.Collectors</c>, <c>.Common</c>, <c>.Notifications</c> and
+/// <c>.PlanAnalysis</c>; <c>QueryStatsCollector</c> itself is in <c>.Collectors</c>), and the viewer adds
+/// <c>PerformanceMonitor.Ui</c>, so a writer added to any of them is seen. The tests project is outside the closure by
+/// construction, since nothing references it.</para>
+///
 /// <para><b>Known blind spots, stated rather than implied.</b> Dynamic SQL is invisible to a text scan. Arm 2 closes the
 /// COPY path, which is how a collector writes. Run-time-built DML outside a COPY, such as <c>INSERT INTO collect.{t}</c>
-/// from a table variable, is NOT seen by arm 1; the writers of that shape in the tree today are the payload dimensions
-/// and the Query Store slice repair, and neither names this table. Dynamic SQL inside a migration rung is closed by
-/// <c>MigrationDataMovingRungCensusPins.TheLadderStillContainsNoDynamicSql</c>, which keeps the ladder free of it.
-/// Database-side writers (a trigger, a function, a scheduled job) and projects outside <c>Darling/PerformanceMonitor.*</c>
-/// are not scanned. An UPDATE in place is invisible to the ledger as it is to the guard it feeds, so arm 1 lists UPDATE
-/// to make a new one a decision rather than an accident. Retention's DELETE is deliberately not a writer here: a row
-/// removed from raw can only make raw smaller than the ledger, which fails the guard safe.</para>
+/// from a table variable, is NOT seen by arm 1, and neither is DML built by an interpolated string, a
+/// <c>StringBuilder</c> or a concatenation across literals; the writers of that shape in the tree today are the payload
+/// dimensions and the Query Store slice repair, and neither names this table. Dynamic SQL inside a migration rung is
+/// closed by <c>MigrationDataMovingRungCensusPins.TheLadderStillContainsNoDynamicSql</c>, which keeps the ladder free of
+/// it. SQL in a file that is not <c>.cs</c> is not read; none exists in these projects today (no <c>*.sql</c> file and no
+/// SQL <c>EmbeddedResource</c>). Database-side writers are not scanned: a trigger, a rule, a function or a scheduled
+/// job, including one a rung above the ledger's own creates with <c>CREATE TRIGGER</c> or <c>CREATE RULE</c>, which arm
+/// 3's verb list does not flag. A COPY reached through a method group (<c>Func&lt;...&gt; f = conn.BeginBinaryImportAsync;</c>)
+/// has no <c>(</c> after the name, so arm 2 does not see it. An UPDATE in place is invisible to the ledger as it is to
+/// the guard it feeds, so arm 1 lists UPDATE to make a new one a decision rather than an accident. Retention's DELETE is
+/// deliberately not a writer here: a row removed from raw can only make raw smaller than the ledger, which fails the
+/// guard safe.</para>
 /// </summary>
 public sealed class QueryStatsWriterCensusPins
 {
@@ -120,14 +134,36 @@ public sealed class QueryStatsWriterCensusPins
 
     /* ---------------- the scan ---------------- */
 
-    /// <summary>Every non-test Darling source: <c>Darling/PerformanceMonitor.*/**/*.cs</c> without <c>bin</c> and <c>obj</c>.
-    /// The tests project is outside the glob by name.</summary>
+    /// <summary>Every non-test source compiled into the Darling binaries: the <c>Darling/PerformanceMonitor.*</c> projects and
+    /// every project they reference, transitively (the root <c>PerformanceMonitor.*</c> libraries ship in the same service),
+    /// without <c>bin</c> and <c>obj</c>. The tests project is outside the closure because nothing references it. File keys
+    /// are <c>ProjectName/relative/path.cs</c>.</summary>
     private static List<(string File, string Text)> LoadSources()
     {
-        var sources = new List<(string File, string Text)>();
-        foreach (var projectDir in Directory.EnumerateDirectories(RepoFile.PathTo("Darling"), "PerformanceMonitor.*")
-                     .OrderBy(d => d, StringComparer.Ordinal))
+        var pending = new Stack<string>(
+            Directory.EnumerateDirectories(RepoFile.PathTo("Darling"), "PerformanceMonitor.*")
+                .SelectMany(d => Directory.EnumerateFiles(d, "*.csproj")));
+        var projects = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (pending.Count > 0)
         {
+            var csproj = Path.GetFullPath(pending.Pop());
+            if (!projects.Add(csproj))
+            {
+                continue;
+            }
+
+            foreach (Match reference in Regex.Matches(File.ReadAllText(csproj), @"<ProjectReference\s+Include=""(?<path>[^""]+)"""))
+            {
+                pending.Push(Path.Combine(
+                    Path.GetDirectoryName(csproj)!,
+                    reference.Groups["path"].Value.Replace('\\', Path.DirectorySeparatorChar)));
+            }
+        }
+
+        var sources = new List<(string File, string Text)>();
+        foreach (var csproj in projects)
+        {
+            var projectDir = Path.GetDirectoryName(csproj)!;
             var project = Path.GetFileName(projectDir);
             foreach (var path in Directory.EnumerateFiles(projectDir, "*.cs", SearchOption.AllDirectories))
             {
@@ -291,8 +327,9 @@ public sealed class QueryStatsWriterCensusPins
         var sources = LoadSources();
 
         /* The scan must have looked: a glob that moved or a read that found nothing would otherwise satisfy "no
-           second writer" for the wrong reason. */
-        Assert.True(sources.Count > 300, $"the census read only {sources.Count.ToString(CultureInfo.InvariantCulture)} Darling source files; its glob no longer reaches the tree");
+           second writer" for the wrong reason. The Collectors file is outside Darling/, so finding it shows the
+           ProjectReference walk followed the references into the root projects (#4605). */
+        Assert.True(sources.Count > 300, $"the census read only {sources.Count.ToString(CultureInfo.InvariantCulture)} source files; its project-reference walk no longer reaches the tree");
         var files = sources.Select(s => s.File).ToHashSet(StringComparer.Ordinal);
         foreach (var known in new[]
                  {
@@ -300,6 +337,7 @@ public sealed class QueryStatsWriterCensusPins
                      "PerformanceMonitor.Darling.Service/DarlingRetention.cs",
                      "PerformanceMonitor.Darling.Storage/PgCollectorRowWriter.cs",
                      "PerformanceMonitor.Darling.Storage/QueryStatsHourLedger.cs",
+                     "PerformanceMonitor.Collectors/QueryStatsCollector.cs",
                  })
         {
             Assert.Contains(known, files);
