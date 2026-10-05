@@ -408,6 +408,24 @@ public sealed class DarlingConfig
            reported even on a config that has no servers yet. */
         problems.AddRange(PeersConfig.Validate(Peers));
 
+        foreach (var entry in Web?.ServerAddSecretReferences ?? new List<string>())
+        {
+            var trimmed = entry?.Trim() ?? "";
+            var isFile = trimmed.StartsWith("file:", StringComparison.OrdinalIgnoreCase);
+            if (!isFile && !trimmed.StartsWith("env:", StringComparison.OrdinalIgnoreCase))
+            {
+                problems.Add("web.serverAddSecretReferences entries must start with 'file:' or 'env:'.");
+            }
+            else if (isFile && !Path.IsPathRooted(trimmed["file:".Length..].Trim()))
+            {
+                problems.Add("web.serverAddSecretReferences 'file:' entries must be absolute paths.");
+            }
+            else if (trimmed.Length <= (isFile ? 5 : 4))
+            {
+                problems.Add("web.serverAddSecretReferences entries must name a path or variable prefix.");
+            }
+        }
+
         if (Servers is null || Servers.Count == 0)
         {
             problems.Add("servers must contain at least one entry.");
@@ -1350,6 +1368,15 @@ public sealed class WebConfig
     /// </summary>
     [JsonPropertyName("network")]
     public WebNetworkConfig? Network { get; set; }
+
+    /// <summary>
+    /// Secret references (<c>env:NAME</c> prefixes, <c>file:/dir</c> directories) the web add-server route may
+    /// accept as a password. Empty (the default) refuses every reference there; the MCP tool is unaffected. A
+    /// <c>file:</c> entry must be an absolute path. Anything the service itself reads (this file's directory, the
+    /// files and environment names the configuration points at) is refused even when an entry covers it.
+    /// </summary>
+    [JsonPropertyName("serverAddSecretReferences")]
+    public List<string> ServerAddSecretReferences { get; set; } = new();
 }
 
 /// <summary>

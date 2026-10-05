@@ -295,7 +295,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, WebSecretReferenceScope? secretReferences = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -438,7 +438,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCustomAlerts(app, postgres, logger);
         MapMuteRules(app, postgres, logger);
         MapServerTags(app, postgres, logger);
-        MapServers(app, postgres, logger);
+        MapServers(app, postgres, logger, secretReferences: secretReferences);
         MapAlertHistoryDismiss(app, postgres, logger);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
@@ -1028,9 +1028,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static void MapServers(
         WebApplication app, NpgsqlDataSource postgres, ILogger logger,
         Func<string, Task<string>>? addServers = null,
-        TimeSpan? addTimeout = null)
+        TimeSpan? addTimeout = null,
+        WebSecretReferenceScope? secretReferences = null)
     {
         var slotTimeout = addTimeout ?? ServerAddSlotTimeout;
+        secretReferences ??= WebSecretReferenceScope.Empty;
 
         /* One gate per host: MapAll runs once per process. */
         var addInFlight = new SemaphoreSlim(1, 1);
@@ -1063,6 +1065,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             if (!TryReadServerAddBody(body, out var entries, out var refusal))
             {
                 return ErrorResult(refusal!, StatusCodes.Status400BadRequest);
+            }
+
+            if (entries.Select(e => DarlingWebSecretReferencePolicy.Refusal(TryGetString(e, "password"), secretReferences)).FirstOrDefault(r => r is not null) is { } referenceRefusal)
+            {
+                return ErrorResult(referenceRefusal, StatusCodes.Status400BadRequest);
             }
 
             if (!addInFlight.Wait(0))

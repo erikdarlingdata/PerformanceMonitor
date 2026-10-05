@@ -394,6 +394,12 @@
     "enabled": false,
     "port": 5153,
 
+    // Secret references the dashboard's add-server form may accept as a password. Empty (the default) refuses
+    // every "env:" / "file:" password there (MCP is unaffected). "file:/dir" allows files under that absolute
+    // directory; "env:PREFIX" allows variables whose names start with PREFIX. The service's own files and
+    // variables are refused even when listed.
+    "serverAddSecretReferences": [],
+
     // The base URL RECIPIENTS can reach this dashboard on (e.g. "http://10.0.0.5:5153", or a DNS name
     // fronted by a proxy). Set it and every alert webhook (Teams/Slack/PagerDuty/generic {{triage_url}})
     // and email carries a per-alert triage-page link; leave it empty (the default) and alerts carry no
