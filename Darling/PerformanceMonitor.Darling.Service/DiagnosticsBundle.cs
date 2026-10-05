@@ -309,7 +309,10 @@ internal static class DiagnosticsBundle
             current = Path.Combine(current, part);
             try
             {
-                FileSystemInfo info = Directory.Exists(current) ? new DirectoryInfo(current) : new FileInfo(current);
+                /* The attributes, not Directory.Exists, pick the kind: a directory link or junction that cannot be traversed reports
+                   Exists false, and its reparse point must still be followed. */
+                var attributes = File.GetAttributes(current);
+                FileSystemInfo info = (attributes & FileAttributes.Directory) != 0 ? new DirectoryInfo(current) : new FileInfo(current);
                 var target = info.ResolveLinkTarget(returnFinalTarget: true);
                 if (target is not null)
                 {
