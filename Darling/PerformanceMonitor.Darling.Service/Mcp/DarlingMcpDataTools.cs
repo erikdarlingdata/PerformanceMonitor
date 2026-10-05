@@ -110,6 +110,7 @@ public sealed class DarlingMcpDataTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum wait types to return, heaviest first. Default 20. This is what bounds the page — read truncated to know whether the window observed more.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -147,10 +148,23 @@ public sealed class DarlingMcpDataTools
                 };
             });
 
-            return JsonSerializer.Serialize(new
+
+            /* #4966: the window-floor notice. The read windows on collection_time over the raw wait_stats (through its view, no rollup tier),
+               the column the probe reads. A rank cap hides no time range, so the coverage rule applies on a capped page too and
+               the two flags are independent. Only a data answer carries it; the no-rows answers above stay bare. A window of 90
+               minutes or less that answered rows starts no probe. */
+            var windowStart = now.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "wait_stats", resolved.ServerName, windowStart, now, cancellationToken),
+                windowStart, now, "wait_stats", logger: logger, cancellationToken: cancellationToken);
+
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 /* #3541 A3: the page described as a page. No time bounds here — the rows are per-type
                    aggregates over the whole window, so there is no page reach to report, only a cap. */
                 wait_types_returned = page.Count,
@@ -158,6 +172,7 @@ public sealed class DarlingMcpDataTools
                 order = "total_wait_time_ms_desc",
                 waits = result
             }, McpHelpers.JsonOptions);
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -154,6 +154,7 @@ public sealed class ComposeParameterCoverageTests
         + (serverScoped ? 1 : 0)
         + (PredictsWideStartBind(plan, context) ? 1 : 0)
         + (PredictsHourlyEdgesBinds(plan, context) ? 2 : 0)
+        + (PredictsModuleOverlayFloorBind(plan, context) ? 1 : 0)
         + plan.Filters.Count
         + (plan.Mode is PanelMode.Ranked or PanelMode.RankedTimeSeries ? 1 : 0);
 
@@ -167,6 +168,13 @@ public sealed class ComposeParameterCoverageTests
         && verdict.SourceTable == candidate.SourceTable
         && verdict.HourStartUtc == candidate.HourStartUtc
         && verdict.HourEndUtc == candidate.HourEndUtc;
+
+    /// <summary>The module-overlay rule from intent alone: the run takes the hourly-raw-edges route, the plan joins modules and a
+    /// module map watermark no later than the run's now was supplied, so the compiler binds the overlay floor. Not read back from the compiler's parameters.</summary>
+    internal static bool PredictsModuleOverlayFloorBind(PanelPlan plan, ComposeRunContext context) =>
+        context.ModuleMapThrough is { } through && through <= context.NowUtc
+        && plan.UsesModuleJoin
+        && PredictsHourlyEdgesBinds(plan, context);
 
     /// <summary>The #4689 rule from intent alone: a wide-eligible run whose common start is later than the
     /// window start, reading the Query Store table. Not read back from the compiler's parameters.</summary>
@@ -345,13 +353,13 @@ public sealed class ComposeParameterCoverageTests
     /// <summary>
     /// <see cref="PredictedParameterCount"/> restates a rule that lives in another file, so it can be
     /// outgrown. This counts the <c>ParamList</c> call sites in <c>ComposeCompiler.cs</c> and pins the
-    /// total: twenty-three, which is the three window/scope binds and one <c>topN</c> per ranked arm in
-    /// <c>Compile</c>, the two edge-instant binds in <c>Compile</c> when the run takes the hourly-raw-edges route, the Query Store wide-start bind in <c>Compile</c> when the run reads the interval table
+    /// total: twenty-four, which is the three window/scope binds and one <c>topN</c> per ranked arm in
+    /// <c>Compile</c>, the two edge-instant binds in <c>Compile</c> when the run takes the hourly-raw-edges route, the module-overlay floor bind in <c>Compile</c> when that route joins modules from the module map, the Query Store wide-start bind in <c>Compile</c> when the run reads the interval table
     /// from a later start, the seven <c>BuildFilterClause</c> operator arms, the three window/scope binds in
     /// <c>CompileAnnotation</c>, the four offset-stretch arrays in <c>ServerLocalRangeJoin</c> and the server
     /// scope in <c>CompileServerClockRead</c> (#4821; both predicted above).
     ///
-    /// <para>A twenty-fourth is the "next site someone adds" case, and it reds HERE — where the fix is to decide
+    /// <para>A twenty-fifth is the "next site someone adds" case, and it reds HERE — where the fix is to decide
     /// whether the prediction grows with it — rather than in the sweep, where it would read as a compiler
     /// bug. Comments and string literals are stripped first, because this file's reasoning names
     /// <c>p.AddTextArray</c> in prose.</para>
@@ -370,7 +378,7 @@ public sealed class ComposeParameterCoverageTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
         var sites = Regex.Matches(code, @"\bp\.Add[A-Za-z]+\s*\(").Count;
 
-        Assert.Equal(23, sites);
+        Assert.Equal(24, sites);
     }
 
     /// <summary>
@@ -578,24 +586,43 @@ public sealed class ComposeParameterCoverageTests
                 edgePlan!, edgeNow, edgeNow.AddHours(-24), edgeNow, RollupAvailability.All, edgeCoverage);
             Assert.NotNull(edgeCandidate);
 
-            foreach (var servers in new[] { (IReadOnlyList<string>?)null, TwoServers })
+            /* The same route joining modules: with a map watermark it binds the overlay floor too, so the prediction's +1
+               is in the population, and without one it binds nothing more. */
+            var (moduleEdgePlan, moduleEdgeParseError) = ComposeSpec.TryParsePanel(
+                (JsonObject)JsonNode.Parse(
+                    "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,"
+                    + "\"groupBy\":[\"database_name\",\"object_name\"],\"viz\":\"table\"}")!,
+                []);
+            Assert.True(moduleEdgeParseError is null, moduleEdgeParseError);
+
+            foreach (var (edgePanel, moduleMapThrough) in new[]
             {
-                var edgeContext = new ComposeRunContext(
-                    servers, edgeNow.AddHours(-24), edgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, edgeNow, edgeCoverage,
-                    HourlyEdges: new ComposeHourlyEdgesVerdict(edgeCandidate!.SourceTable, edgeCandidate.HourStartUtc, edgeCandidate.HourEndUtc, servers));
-                var (edgeCompiled, edgeError) = ComposeCompiler.Compile(edgePlan!, edgeContext);
-                Assert.True(edgeError is null, edgeError);
-                Assert.Contains("UNION ALL", edgeCompiled!.Sql, StringComparison.Ordinal);
-                corpus.Add(new Statement(
-                    $"query_worker_us Ranked ({(servers is null ? "fleet" : "scoped")}) hourly-raw-edges",
-                    edgeCompiled,
-                    PredictedParameterCount(edgePlan!, servers is not null, edgeContext),
-                    edgePlan!.Mode,
-                    servers is not null,
-                    "query_worker_us",
-                    Annotation: null,
-                    FilterOp: null,
-                    UsesVariable: false));
+                (edgePlan!, (DateTime?)null),
+                (moduleEdgePlan!, (DateTime?)null),
+                (moduleEdgePlan!, (DateTime?)edgeNow.AddMinutes(-30)),
+            })
+            {
+                foreach (var servers in new[] { (IReadOnlyList<string>?)null, TwoServers })
+                {
+                    var edgeContext = new ComposeRunContext(
+                        servers, edgeNow.AddHours(-24), edgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, edgeNow, edgeCoverage,
+                        HourlyEdges: new ComposeHourlyEdgesVerdict(edgeCandidate!.SourceTable, edgeCandidate.HourStartUtc, edgeCandidate.HourEndUtc, servers),
+                        ModuleMapThrough: moduleMapThrough);
+                    var (edgeCompiled, edgeError) = ComposeCompiler.Compile(edgePanel, edgeContext);
+                    Assert.True(edgeError is null, edgeError);
+                    Assert.Contains("UNION ALL", edgeCompiled!.Sql, StringComparison.Ordinal);
+                    corpus.Add(new Statement(
+                        $"query_worker_us Ranked ({(servers is null ? "fleet" : "scoped")}) hourly-raw-edges"
+                            + (edgePanel == moduleEdgePlan ? (moduleMapThrough is null ? " module join" : " module map overlay") : string.Empty),
+                        edgeCompiled,
+                        PredictedParameterCount(edgePanel, servers is not null, edgeContext),
+                        edgePanel.Mode,
+                        servers is not null,
+                        "query_worker_us",
+                        Annotation: null,
+                        FilterOp: null,
+                        UsesVariable: false));
+                }
             }
         }
 

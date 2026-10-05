@@ -31,7 +31,8 @@ permissions:
 # already replaced — ~60 reclaimable runner-minutes in one evening). Cancelling a
 # superseded PUSH run is safe because a push run produces nothing any other run consumes:
 # every upload-artifact step in this workflow is gated to the release event (the SignPath
-# signing path) or to failure() (darling-pg diagnostics), nothing in the repo downloads
+# signing path) or to failure() (darling-pg diagnostics), except the per-run Lite timing
+# uploads (#5208), which are ungated and harmless because nothing downloads
 # cross-run artifacts (no download-artifact, gh run download, or workflow_run consumer
 # exists), nightly.yml builds its own tree from its own checkout, and a release compiles
 # fresh on the release event. The accepted trade: push builds are diff-scoped, so a
@@ -489,7 +490,23 @@ jobs:
       # pass so the artifact-producing run still executes the suite whole, in one log.
       - name: Run Lite tests
         if: github.event_name == 'release'
-        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build
+        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -xml TestResults/lite-timing-release.xml
+
+      # #5208: per-test timings of the unsharded release pass, same shape as the lite-tests shards.
+      - name: Lite test timing summary
+        if: always() && github.event_name == 'release'
+        continue-on-error: true
+        run: python .github/scripts/lite-timing-top.py TestResults
+
+      - name: Upload Lite test timings
+        if: always() && github.event_name == 'release'
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: lite-tests-timing-release
+          path: TestResults/lite-timing-*.xml
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Run Installer tests
         if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
@@ -1761,7 +1778,21 @@ jobs:
         shard: [0, 1, 2, 3]
     # A shard is at most ~27% of a ~9½-minute suite plus ~2½ minutes of setup; 20 minutes is ~4x that,
     # past which something is hung and a shared-pool Windows runner is being held for nothing.
-    timeout-minutes: 20
+    #
+    # Raised from 20 to 30. The suite now runs roughly five times slower on hosted runners than the
+    # ~9.5 minutes above assumed, and it is still getting slower: the four shard durations summed to
+    # 18-22 min on Sep 30, 20-27 on Oct 1, 26-34 on Oct 2, 29-42 on Oct 3, 33-45 on Oct 4 and 41-55
+    # on Oct 5, about +7 min/day, while the suite gained only ~110 tests in the last day. So the cost
+    # is growing per test with the SIZE OF THE REPO, not with the number of tests - the suspects are
+    # the ~54 Lite.Tests classes that walk a directory or glob many files, whose work grows every
+    # time anyone adds a file. On a developer VM the whole suite still runs in ~10 minutes in one
+    # process, so this is specific to hosted runners' disk.
+    #
+    # A shard that crosses the cap is a RED THAT IS A TIMEOUT, not a test failure, and is easy to
+    # misread as a bug in whatever pull request happened to be in the train. This is a guard against
+    # those spurious reds, NOT a fix: the slowdown is tracked in #5208, and this value should come
+    # back down when it is fixed. At +7 min/day the slowest shard crosses 30 within about a week.
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -1955,7 +1986,8 @@ jobs:
               $chunkArgs = foreach ($class in $chunk) { '-class'; $class }
               $chunkLength = ($chunk | ForEach-Object { '-class'.Length + 1 + $_.Length + 1 } | Measure-Object -Sum).Sum
               Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count): $($chunk.Count) classes, $chunkLength characters"
-              dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @chunkArgs
+              # -xml: per-test durations for the lite-tests-timing artifact (#5208).
+              dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @chunkArgs -xml TestResults/lite-timing-${{ matrix.shard }}-$chunkNumber.xml
               if ($LASTEXITCODE -ne 0) {
                   $failedChunks++
                   Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"
@@ -1963,6 +1995,22 @@ jobs:
           }
           if ($failedChunks -gt 0) { Write-Host "shard ${{ matrix.shard }}: $failedChunks of $($chunks.Count) chunks failed"; exit 1 }
           exit 0
+
+      # #5208: where the time goes. Informational; a parse problem must never turn the shard red.
+      - name: Lite test timing summary
+        if: always()
+        continue-on-error: true
+        run: python .github/scripts/lite-timing-top.py TestResults
+
+      - name: Upload Lite test timings
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: lite-tests-timing-${{ matrix.shard }}
+          path: TestResults/lite-timing-*.xml
+          retention-days: 7
+          if-no-files-found: ignore
 
   # The one result branch protection can require. Four matrix legs cannot each be a required check
   # without hard-coding the shard count into repo settings, and a leg that never starts reports

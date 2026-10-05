@@ -114,6 +114,7 @@ try {
   const findings = path.join("pages", "analysis-findings.js");
   if (fs.existsSync(path.join(jsDir, findings))) fs.copyFileSync(path.join(jsDir, findings), path.join(scratch, findings));
   fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
+  for (const file of ["viewer-local.js", "viewer-local-ui.js"]) fs.copyFileSync(path.join(jsDir, file), path.join(scratch, file));
   for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js")]) {
     const from = path.join(jsDir, rel);
     if (!fs.existsSync(from)) continue;
@@ -268,6 +269,13 @@ const PG_WINDOW_BODIES = {
   get_pg_wait_trend: { points: [{ collection_time: "2026-01-01T00:00:00" }] },
   get_pg_io_trend: { points: [{ collection_time: "2026-01-01T00:00:00" }] },
   get_pg_plans: { plans: [{ query_id: 1 }] },
+  get_pg_autovacuum_health: { tables_returned: 1, growing_count: 1, tables: [{ table_name: "t1" }] },
+  get_pg_replication_slots: { slot_count: 1, worst_slot: "s1", slots: [{ slot_name: "s1" }] },
+  get_pg_xmin_horizon: { winning_source: "session", winning_xmin_age: 5, holders: [{ source: "session" }] },
+  get_pg_wraparound_risk: {
+    worst_database: "db1", worst_pct_toward_wraparound: 1, thresholds: { failsafe_engages_around_pct: 74.5 }, databases: [{ database_name: "db1" }],
+  },
+  get_pg_write_stats: { checkpoints_timed: 4, checkpoints_requested: 1 },
 };
 
 const scenarios = {

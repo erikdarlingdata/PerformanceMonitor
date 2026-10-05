@@ -42,6 +42,15 @@ public sealed class McpWaitTools
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
+            /* #4966: where this server's wait_stats data starts for the window. The rows are per-type sums over the whole
+               window, so a window the store only partly held sums less than it asked for with nothing in the numbers saying
+               so. Keyed on the data answer only: the no-rows answer above is `unavailable` and stays bare. The probe reads
+               the collector's coverage on collection_time, the column the sum windows on. */
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var notice = await McpQueryTools.WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.WaitStats, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "wait_stats");
+
             var result = page.Select(r => new
             {
                 wait_type = r.WaitType,
@@ -56,6 +65,11 @@ public sealed class McpWaitTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where the data starts, always present (false and null when the store covered the window). No
+                   effective_hours_back: this payload carries a page `truncated`. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 /* #3541 A3: the page described as a page, on Darling's names. No time bounds here — the rows
                    are per-type aggregates over the whole window, so there is no page reach to report, only a
                    cap. */

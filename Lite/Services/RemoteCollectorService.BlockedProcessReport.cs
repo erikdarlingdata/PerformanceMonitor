@@ -59,6 +59,29 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
+    /// #5098: one extra <c>server_config</c> capture after this install changed <c>blocked process threshold (s)</c>, so the snapshots
+    /// show the change when it happened. Skipped when the collector is disabled for the server. A failure is logged and costs only
+    /// that capture: it must not fail the blocked process ensure it runs inside.
+    /// </summary>
+    private async Task RecaptureServerConfigAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
+        var schedule = _scheduleManager.GetScheduleForServer(server.Id, "server_config");
+        if (schedule == null || !schedule.Enabled)
+        {
+            return;
+        }
+
+        try
+        {
+            await RunCollectorAsync(server, "server_config", cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            AppLogger.Warn("XeSession", $"[{server.DisplayName}] The server_config capture after the blocked process threshold change failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// On-prem / Azure MI / AWS RDS: creates or ensures server-scoped XE session with ring_buffer target.
     /// Also ensures the blocked process threshold is configured (skipped on RDS where sp_configure is not available).
     /// </summary>
@@ -67,6 +90,7 @@ public partial class RemoteCollectorService
         /* Check blocked process threshold and configure if needed.
            Wrapped in try/catch because sp_configure is not available on AWS RDS
            (threshold must be set via RDS parameter groups instead). */
+        var thresholdChanged = false;
         try
         {
             using var thresholdCmd = new SqlCommand(@"
@@ -101,6 +125,7 @@ SELECT @threshold;", connection);
             if (threshold == 0)
             {
                 AppLogger.Info("XeSession", $"[{server.DisplayName}] Configured blocked process threshold to 5 seconds");
+                thresholdChanged = true;
             }
         }
         catch (SqlException ex)
@@ -108,6 +133,14 @@ SELECT @threshold;", connection);
             /* Threshold could not be set: the login lacks ALTER SETTINGS, or sp_configure
                is unavailable on the platform (AWS RDS / Azure SQL DB). Tolerated either way. */
             AppLogger.Info("XeSession", $"[{server.DisplayName}] Could not auto-configure 'blocked process threshold (s)' to 5 seconds. This is expected when the monitoring login lacks ALTER SETTINGS, or on AWS RDS / Azure SQL DB where it is set via platform config. It is benign: blocking is still captured by the always-on DMV blocking snapshot; only the richer blocked-process-report XE stays off until the threshold is set. Detail: {ex.Message}");
+        }
+
+        /* #5098: server_config is an on-load collector and runs before this one on a tab-open run, so its snapshot read the
+           threshold at 0. Without a second capture the next one is a day away, and the Blocking charts' data-start note would
+           name that day as when the threshold went on, cutting a new server's first day. One capture, now that it has changed. */
+        if (thresholdChanged)
+        {
+            await RecaptureServerConfigAsync(server, cancellationToken);
         }
 
         /* Check if our XE session already exists */

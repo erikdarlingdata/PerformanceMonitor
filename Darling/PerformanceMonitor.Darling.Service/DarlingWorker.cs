@@ -323,7 +323,8 @@ public sealed class DarlingWorker : BackgroundService
     /// periodic pass must not launch a second one over a first that is still running, and a re-run's cost
     /// scales with history rather than with the catalog.</description></item>
     /// <item><description><see cref="DarlingModuleMap"/>'s table ensure and refresh — the refresh is a DATA
-    /// upsert rather than a store object and it ALREADY has a periodic home (the daily purge tick), and the
+    /// upsert rather than a store object and it ALREADY has periodic homes (the daily purge tick, and the
+    /// hourly tick's own incremental tenant), and the
     /// table ensure is inseparable from it here because the refresh is gated on the bool it returns. A
     /// module_map table that failed to create is also the one item on this list whose absence is not silent:
     /// the daily refresh warns about it every day.</description></item>
@@ -1053,6 +1054,7 @@ public sealed class DarlingWorker : BackgroundService
        none), and 42501, a login without the log read. get_store_log already reports the gap on the read
        surface, so the hourly Warning only repeated what nobody was going to change. */
     private bool _storeLogCaptureUnavailableWarned;
+    private bool _storeStatementHistoryWarned;
 
     /* Stage 4 service self-alerts (collection-stopped, connection lost/restored, capture-down). Built
        once in RunCollectionLoopAsync over the SAME deliverer/history the shared engine uses, so the
@@ -9925,7 +9927,8 @@ AND   j.hypertable_name = '{relation}'", connection))
     ///
     /// <para>Two more self-telemetry passes ride the same tick, connection and budget: the #3021
     /// <see cref="StoreLogSweep"/> read of the store's own server log, and the #2674 collector-cost flush.
-    /// The shared budget is what bounds the whole tick — three passes on one
+    /// A fourth pass, the #5097 <see cref="StoreStatementHistory"/> snapshot, rides the same budget.
+    /// The shared budget is what bounds the whole tick — every pass on one
     /// <see cref="StoreSelfMetrics.SweepTimeoutSeconds"/> linked CTS, not one each.</para>
     /// </summary>
     /// <param name="checkpointLongestSync">(#4834) The longest single checkpoint sync the minute sampler saw since the
@@ -10094,6 +10097,44 @@ AND   j.hypertable_name = '{relation}'", connection))
                     _logger.LogWarning(
                         "PostgreSQL deadlocks: re-masking alerts, reports and findings stored before this build failed, and is retried next hour: {Message}",
                         ex.Message);
+                }
+            }
+
+            /* #5097: the store's own statement history, on this same hourly tick so it lands on the census' grid.
+               ITS OWN catch, and a Warning once: a store whose owner cannot run the reader function (a bring-your-own
+               store without the extension) repeats the same failure hourly, and none of it may cost the
+               collector-cost or read-latency flush below. A snapshot that fails rolls back whole, so the baseline
+               and the history never disagree. */
+            if (connection.State != ConnectionState.Open)
+            {
+                await connection.CloseAsync();
+                await connection.OpenAsync(budget.Token);
+            }
+
+            /* Its own slice of the budget, like the re-mask above: seven commands at 60 s each could otherwise use the
+               whole sweep budget and a cancellation here would skip the flushes below. A slice that expired while the
+               budget did not is a failed pass like any other; only the budget itself ends the sweep. */
+            using var historyBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+            historyBudget.CancelAfter(StoreStatementHistory.SliceBudget);
+            try
+            {
+                await StoreStatementHistory.SnapshotAsync(connection, DateTime.UtcNow, _logger, historyBudget.Token);
+                _storeStatementHistoryWarned = false;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                || (historyBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+            {
+                var sqlState = (ex as PostgresException)?.SqlState ?? "n/a";
+                if (_storeStatementHistoryWarned)
+                {
+                    _logger.LogDebug("Store statement history is still failing (SqlState {SqlState}): {Message}", sqlState, ex.Message);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Store statement history failed (SqlState {SqlState}), so this hour's per-statement deltas are missing: {Message}",
+                        sqlState, ex.Message);
+                    _storeStatementHistoryWarned = true;
                 }
             }
 
@@ -11046,6 +11087,32 @@ AND   j.hypertable_name = '{relation}'", connection))
                start. None of the compression-phase reasoning above applies, since a store without
                TimescaleDB has no policy jobs to sample. */
             await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
+        }
+
+        /* #4605: the sixth tenant, same contract — its own method, its own catch-all, one awaited statement.
+           It sits AFTER the gate rather than inside it because it needs no TimescaleDB: procedure_stats and
+           module_map are plain tables on every store shape, and the daily refresh already runs on all of them.
+           It comes last so a store still being converged, or a summary builder that ran out its budget, is
+           never made to wait behind it, and a fault here skips nothing above. */
+        await RefreshModuleMapRecentAsync(stoppingToken);
+    }
+
+    /// <summary>
+    /// The hourly store-maintenance tick's sixth tenant (#4605): the incremental module-map refresh, which keeps
+    /// the <c>collect.module_map</c> watermark within about an hour of procedure_stats so a reader can trust the
+    /// map up to it. Reads only the rows since the last watermark (<see cref="DarlingModuleMap.RefreshRecentAsync"/>),
+    /// failure-isolated inside that method and again here. Its own catch-all: nothing here can fail the tick.
+    /// </summary>
+    private async Task RefreshModuleMapRecentAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(stoppingToken);
+            await DarlingModuleMap.RefreshRecentAsync(connection, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("module_map hourly refresh could not run; the next hourly tick retries: {Message}", ex.Message);
         }
     }
 
