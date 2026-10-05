@@ -2696,7 +2696,7 @@ public static class DarlingCliCommands
                 return null;
             }
 
-            var allowFrom = Prompt(input, output, "Allowed remote CIDR (e.g. 192.168.1.0/24)");
+            var allowFrom = Prompt(input, output, "Allowed remote CIDR(s), one or several separated by commas (e.g. 192.168.1.0/24,10.8.0.0/16)");
             if (allowFrom is null)
             {
                 output.WriteLine("Cancelled — no changes made.");
@@ -2719,7 +2719,10 @@ public static class DarlingCliCommands
             var decision = DarlingMcpHostService.ResolveMcpBind(candidate, managed: true);
             if (decision.Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback)
             {
-                return (listen, allowFrom, encryptedToken, plainToken, generatedPlain);
+                /* #5288: ONE entry stays as typed; a LIST comes back canonical (masked, de-duplicated, comma-joined).
+                   This is the value the block writer stores AND the firewall hint is built from, so the rule the
+                   operator is told to run carries the scope the service enforces. */
+                return (listen, DarlingNetworkConfigEditor.AllowFromText(allowFrom), encryptedToken, plainToken, generatedPlain);
             }
 
             output.WriteLine($"  Not accepted: {McpDegradeText(decision.Reason, candidate)}");
@@ -2773,7 +2776,7 @@ public static class DarlingCliCommands
                 return null;
             }
 
-            var allowFrom = Prompt(input, output, "Allowed remote CIDR (e.g. 192.168.1.0/24)");
+            var allowFrom = Prompt(input, output, "Allowed remote CIDR(s), one or several separated by commas (e.g. 192.168.1.0/24,10.8.0.0/16)");
             if (allowFrom is null)
             {
                 output.WriteLine("Cancelled — no changes made.");
@@ -2796,7 +2799,10 @@ public static class DarlingCliCommands
             var decision = DarlingWebHostService.ResolveWebBind(candidate, managed: true);
             if (decision.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback)
             {
-                return (listen, allowFrom, encryptedToken, plainToken, generatedPlain);
+                /* #5288: ONE entry stays as typed; a LIST comes back canonical (masked, de-duplicated, comma-joined).
+                   This is the value the block writer stores AND the firewall hint is built from, so the rule the
+                   operator is told to run carries the scope the service enforces. */
+                return (listen, DarlingNetworkConfigEditor.AllowFromText(allowFrom), encryptedToken, plainToken, generatedPlain);
             }
 
             output.WriteLine($"  Not accepted: {WebDegradeText(decision.Reason, candidate)}");
@@ -2812,7 +2818,7 @@ public static class DarlingCliCommands
         DarlingHostBinding.BindReason.TokenMissing =>
             "no access token is set (the wizard should have supplied one — this is unexpected).",
         DarlingHostBinding.BindReason.AllowFromInvalid =>
-            $"web.network.allowFrom '{web.Network?.AllowFrom}' is not a valid CIDR or its address family does not match listen (e.g. 192.168.1.0/24, host bits zeroed).",
+            $"web.network.allowFrom '{web.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address) and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
         DarlingHostBinding.BindReason.ManagedModeRequired =>
             "network exposure is managed-mode only.",
         _ => "the web bind resolver rejected these values.",
@@ -2826,7 +2832,7 @@ public static class DarlingCliCommands
         DarlingMcpHostService.McpBindReason.TokenMissing =>
             "no bearer token is set (the wizard should have supplied one — this is unexpected).",
         DarlingMcpHostService.McpBindReason.AllowFromInvalid =>
-            $"mcp.network.allowFrom '{mcp.Network?.AllowFrom}' is not a valid CIDR or its address family does not match listen (e.g. 192.168.1.0/24, host bits zeroed).",
+            $"mcp.network.allowFrom '{mcp.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address) and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
         DarlingMcpHostService.McpBindReason.ManagedModeRequired =>
             "network exposure is managed-mode only.",
         _ => "the MCP resolver rejected these values.",
@@ -3233,32 +3239,39 @@ public static class DarlingCliCommands
         : elevated ? EndpointFirewallPlan.RunElevated
         : EndpointFirewallPlan.Handoff;
 
-    /// <summary>Whether an ENABLE toggle's <c>allowFrom</c> can be used as a firewall <c>-RemoteAddress</c> (#1646).</summary>
+    /// <summary>Whether an ENABLE toggle's <c>allowFrom</c> (one CIDR, or a comma-separated list of them since #5288) can be used as a firewall <c>-RemoteAddress</c> (#1646).</summary>
     public enum EndpointAllowFromVerdict
     {
         /// <summary>Absent/blank — the service would fail-close this endpoint to loopback, so there is nothing to open.</summary>
         Missing,
 
-        /// <summary>Present but not a CIDR — REFUSE. Never build a firewall command from it.</summary>
+        /// <summary>Present but not a CIDR list (one bad or empty entry makes the whole list invalid) — REFUSE. Never build a firewall command from it.</summary>
         Invalid,
 
-        /// <summary>A valid CIDR; the canonical <c>IPNetwork.ToString()</c> form is what reaches the command.</summary>
+        /// <summary>A valid CIDR list; the canonical <see cref="CidrAllowList.ToString"/> form (one CIDR, or CIDRs joined by commas with no spaces) is what reaches the command.</summary>
         Valid,
     }
 
     /// <summary>
-    /// PURE <c>allowFrom</c> gate for a toggle verb (#1646). <c>darling.json</c> is operator-supplied text that
-    /// <see cref="DarlingConfig.Load"/> only deserializes — it never calls <see cref="DarlingConfig.Validate"/> —
-    /// so this was the ONE <see cref="DarlingManagedPostgres.BuildFirewallEnableCommand"/> caller that reached
-    /// the PowerShell <c>-Command</c> string with an unparsed value, where a blank-check was the only gate.
-    /// Every other call site passes a canonicalized <c>IPNetwork.ToString()</c>; this makes that universal.
-    /// Parsing is the security property, not the formatting: <see cref="IPNetwork.TryParse"/> accepts ONLY a
-    /// single <c>address/prefix</c> pair, so no shell metacharacter, statement separator, or second CIDR can
-    /// survive it — and <paramref name="canonicalCidr"/> is the PARSER'S output, never the caller's string, so
-    /// nothing unvalidated is carried through even on the valid path. That last point is load-bearing rather
-    /// than belt-and-braces: <c>TryParse</c> MASKS host bits instead of rejecting them (<c>192.168.1.5/24</c>
-    /// parses, as <c>192.168.1.0/24</c>), so "validate, then use the original" would forward a string the
-    /// parser had already decided meant something else.
+    /// PURE <c>allowFrom</c> gate for a toggle verb (#1646, a CIDR LIST since #5288). <c>darling.json</c> is
+    /// operator-supplied text that <see cref="DarlingConfig.Load"/> only deserializes — it never calls
+    /// <see cref="DarlingConfig.Validate"/> — so this is the gate in front of the PowerShell <c>-Command</c>
+    /// string that <see cref="DarlingManagedPostgres.BuildFirewallEnableCommand"/> builds, where a blank-check
+    /// was once the only gate. Every other call site already passes a canonical list; this makes that universal.
+    ///
+    /// <para>Parsing is the security property, not the formatting. The text goes through
+    /// <see cref="CidrAllowList.TryParse"/>, the one parser the bind ladder and both hosts' gates use (no second
+    /// split, trim or de-dupe lives here to drift from it), and <paramref name="canonicalCidr"/> is that
+    /// parser's <see cref="CidrAllowList.ToString"/>, never the caller's string. So every ELEMENT that reaches
+    /// the command is parser output: an <c>address/prefix</c> pair that <see cref="IPNetwork"/> formatted
+    /// itself, and no shell metacharacter, statement separator or hostile token can survive the parse (one bad
+    /// or empty entry refuses the whole list). The comma is the only separator a list adds, and
+    /// <see cref="DarlingManagedPostgres.BuildFirewallEnableCommand"/> splits on it and single-quotes each element
+    /// on its own, so the second layer holds per element too.</para>
+    ///
+    /// <para>The canonical form is load-bearing rather than belt-and-braces: the parser MASKS host bits instead
+    /// of rejecting them (<c>192.168.1.5/24</c> parses, as <c>192.168.1.0/24</c>), so "validate, then use the
+    /// original" would forward a string the parser had already decided meant something else.</para>
     /// </summary>
     public static EndpointAllowFromVerdict ClassifyAllowFrom(string? allowFrom, out string canonicalCidr)
     {
@@ -3269,12 +3282,12 @@ public static class DarlingCliCommands
             return EndpointAllowFromVerdict.Missing;
         }
 
-        if (!IPNetwork.TryParse(allowFrom.Trim(), out var cidr))
+        if (!CidrAllowList.TryParse(allowFrom, out var list))
         {
             return EndpointAllowFromVerdict.Invalid;
         }
 
-        canonicalCidr = cidr.ToString();
+        canonicalCidr = list.ToString();
         return EndpointAllowFromVerdict.Valid;
     }
 
@@ -3548,8 +3561,8 @@ public static class DarlingCliCommands
             return;
         }
 
-        /* #1646: parse allowFrom as a CIDR BEFORE it can reach a PowerShell -Command string, and pass the
-           parser's canonical form — the posture every other BuildFirewallEnableCommand caller already had.
+        /* #1646: parse allowFrom as a CIDR (a LIST since #5288) BEFORE it can reach a PowerShell -Command string,
+           and pass the parser's canonical form — the posture every other BuildFirewallEnableCommand caller already had.
            An unparseable value is refused outright: the firewall is NOT touched and nothing is printed for an
            operator to paste into an elevated shell, because the injected text would run either way (this verb
            runs the command itself when elevated, and hands it to a human to run elevated when it is not). */
@@ -3562,16 +3575,18 @@ public static class DarlingCliCommands
                     /* Non-loopback listen but no allowFrom CIDR: the service itself would fail-close this to loopback, so
                        there is nothing to open. Point at the wizard rather than emit a malformed New-NetFirewallRule. */
                     output.WriteLine(
-                        $"Firewall: the network block sets listen '{listen}' but no allowFrom CIDR, so the service will bind " +
+                        $"Firewall: the network block sets listen '{listen}' but no allowFrom (one CIDR, or several separated by commas), so the service will bind " +
                         "loopback-only until it is completed. Run --configure-network to finish the block; not opening the firewall.");
                     return;
 
                 case EndpointAllowFromVerdict.Invalid:
                     error.WriteLine(
-                        $"Firewall: allowFrom in darling.json is not a valid CIDR, so NO firewall change was made and no " +
+                        $"Firewall: allowFrom in darling.json is not a valid CIDR list, so NO firewall change was made and no " +
                         "command is being printed to run by hand. The endpoint toggle itself already succeeded; the service " +
-                        "will bind loopback-only until allowFrom is fixed. Expected an address/prefix with the host bits " +
-                        "zeroed, e.g. 192.168.1.0/24 or 2001:db8::/32. Run --configure-network to rewrite the block.");
+                        "will bind loopback-only until allowFrom is fixed. Expected one address/prefix (e.g. 192.168.1.0/24 " +
+                        "or 2001:db8::/32) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32); an empty entry " +
+                        "(a doubled or trailing comma) is refused, and host bits are masked rather than refused " +
+                        "(192.168.1.5/24 means 192.168.1.0/24). Run --configure-network to rewrite the block.");
                     return;
             }
         }
@@ -3798,8 +3813,9 @@ public static class DarlingCliCommands
         return plans;
     }
 
-    /// <summary>The parser's canonical CIDR, or null when it will not parse. The bind resolvers have already
-    /// refused exposure in the null case, so an Open plan always carries a real CIDR; this never forwards the
+    /// <summary>The parser's canonical CIDR list (one CIDR, or CIDRs joined by commas, #5288), or null when it
+    /// will not parse. The bind resolvers have already refused exposure in the null case, so an Open plan always
+    /// carries a real list; this never forwards the
     /// caller's raw string into a PowerShell command (#1646).</summary>
     private static string? CanonicalCidrOrNull(string? allowFrom) =>
         ClassifyAllowFrom(allowFrom, out var canonical) == EndpointAllowFromVerdict.Valid ? canonical : null;
@@ -3853,7 +3869,7 @@ public static class DarlingCliCommands
             DarlingMcpHostService.McpBindReason.TokenMissing =>
                 $"{section}.network is set but its token is missing or unreadable, so the service fail-closes this endpoint to loopback",
             DarlingMcpHostService.McpBindReason.AllowFromInvalid =>
-                $"{section}.network.allowFrom is missing or not a valid CIDR, so the service fail-closes this endpoint to loopback",
+                $"{section}.network.allowFrom is missing, is not a valid CIDR list, or has an entry whose address family does not match listen, so the service fail-closes this endpoint to loopback",
             DarlingMcpHostService.McpBindReason.ManagedModeRequired =>
                 $"{section}.network is set but postgres.managed = false; LAN exposure is managed-mode only and is ignored",
             _ => null,

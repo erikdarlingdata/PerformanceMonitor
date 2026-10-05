@@ -143,6 +143,61 @@ public class DarlingFirewallCheckTests
             remedy);
     }
 
+    /* ---- #5288: allowFrom is a CIDR LIST; the builder quotes each range on its own ---- */
+
+    [Fact]
+    public void BuildFirewallEnableCommand_List_QuotesEachRange()
+    {
+        const string ruleName = "PerformanceMonitor Darling MCP (port 5152)";
+
+        /* Exact text: one single-quoted literal per range, joined by "," with no spaces (PowerShell array syntax).
+           Quoting only the first range, or a bare comma list inside one literal, would change this string. */
+        Assert.Equal(
+            $"Remove-NetFirewallRule -DisplayName '{ruleName}' -ErrorAction SilentlyContinue; " +
+            $"New-NetFirewallRule -DisplayName '{ruleName}' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5152 -RemoteAddress '10.8.0.0/16','192.168.1.5/32' | Out-Null",
+            DarlingManagedPostgres.BuildFirewallEnableCommand(ruleName, 5152, "10.8.0.0/16,192.168.1.5/32"));
+
+        Assert.Contains(
+            "-RemoteAddress '10.8.0.0/16','192.168.1.0/24','2001:db8::/32' |",
+            DarlingManagedPostgres.BuildFirewallEnableCommand(ruleName, 5152, "10.8.0.0/16,192.168.1.0/24,2001:db8::/32"),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildFirewallEnableCommand_List_KeepsEachHostileElementInItsOwnLiteral()
+    {
+        /* The caller-side parse is the primary gate; this is the second layer, and it holds per element: a quote
+           inside any element is doubled, so no element can end its literal and start a statement. */
+        var cmd = DarlingManagedPostgres.BuildFirewallEnableCommand(
+            "PerformanceMonitor Darling MCP (port 5152)", 5152, "10.0.0.0/8,x'; whoami; '");
+
+        Assert.Contains("-RemoteAddress '10.0.0.0/8','x''; whoami; ''' |", cmd, StringComparison.Ordinal);
+        Assert.True((cmd.Split('\'').Length - 1) % 2 == 0, $"unbalanced quoting lets an element escape its literal: {cmd}");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(",")]
+    [InlineData("10.8.0.0/16,")]
+    [InlineData(",10.8.0.0/16")]
+    [InlineData("10.8.0.0/16,,192.168.1.5/32")]
+    [InlineData("10.8.0.0/16, ,192.168.1.5/32")]
+    public void BuildFirewallEnableCommand_EmptyElement_Throws_RatherThanEmittingEmptyQuotes(string remoteCidr)
+        => Assert.Throws<ArgumentException>(
+            () => DarlingManagedPostgres.BuildFirewallEnableCommand("PerformanceMonitor Darling MCP (port 5152)", 5152, remoteCidr));
+
+    [Fact]
+    public void BuildRemedyCommand_ForAMissingRule_WithAList_IsTheBuildersText()
+    {
+        const string rule = "PerformanceMonitor Darling MCP (port 5152)";
+        var remedy = DarlingFirewallCheck.BuildRemedyCommand(
+            FirewallRuleVerdict.ExposedRuleMissing, rule, 5152, "10.8.0.0/16,192.168.1.0/24");
+
+        Assert.Equal(DarlingManagedPostgres.BuildFirewallEnableCommand(rule, 5152, "10.8.0.0/16,192.168.1.0/24"), remedy);
+        Assert.Contains("-RemoteAddress '10.8.0.0/16','192.168.1.0/24' |", remedy, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void BuildRemedyCommand_ForAStaleRule_RemovesOnly()
     {
