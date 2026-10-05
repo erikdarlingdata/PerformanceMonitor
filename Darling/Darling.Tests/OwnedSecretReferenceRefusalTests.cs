@@ -124,18 +124,65 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
         Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + path));
     }
 
+    /* A link this process cannot create is a SKIP with a reason, never a pass: a bare return reads as covered. */
+    private static void CreateLinkOrSkip(string link, string target)
+    {
+        try
+        {
+            Directory.CreateSymbolicLink(link, target);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            Assert.Skip("could not create a directory symbolic link here (" + ex.GetType().Name + "); Windows needs the SeCreateSymbolicLink privilege. The junction test covers the same rule without one.");
+        }
+    }
+
+    private static void AssertResolvesTo(string link, string expectedTarget)
+    {
+        var resolved = Directory.ResolveLinkTarget(link, returnFinalTarget: true);
+        Assert.NotNull(resolved);
+        Assert.Equal(
+            Path.GetFullPath(expectedTarget).TrimEnd(Path.DirectorySeparatorChar),
+            Path.GetFullPath(resolved!.FullName).TrimEnd(Path.DirectorySeparatorChar),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void ASymlinkIntoTheOwnedDirectory_IsRefused()
     {
         var link = Path.Combine(_root, "other", "alias");
-        try
+        CreateLinkOrSkip(link, _owned);
+        AssertResolvesTo(link, _owned);
+
+        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + Path.Combine(link, "secret.txt")));
+    }
+
+    [Fact]
+    public void AJunctionIntoTheOwnedDirectory_IsRefused()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "directory junctions exist only on Windows; they need no privilege, so this case cannot skip there.");
+        var link = Path.Combine(_root, "other", "junction");
+        var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe")
         {
-            Directory.CreateSymbolicLink(link, _owned);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        psi.ArgumentList.Add("/c");
+        psi.ArgumentList.Add("mklink");
+        psi.ArgumentList.Add("/J");
+        psi.ArgumentList.Add(link);
+        psi.ArgumentList.Add(_owned);
+        using (var proc = System.Diagnostics.Process.Start(psi)!)
         {
-            return;
+            var output = proc.StandardOutput.ReadToEnd() + proc.StandardError.ReadToEnd();
+            proc.WaitForExit();
+            Assert.True(proc.ExitCode == 0, "mklink /J failed: " + output);
         }
+
+        Assert.True(Directory.Exists(link), "the junction was not created");
+        AssertResolvesTo(link, _owned);
 
         Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + Path.Combine(link, "secret.txt")));
     }
@@ -145,15 +192,10 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     {
         var a = Path.Combine(_root, "other", "a");
         var b = Path.Combine(_root, "other", "b");
-        try
-        {
-            Directory.CreateSymbolicLink(a, b);
-            Directory.CreateSymbolicLink(b, a);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            return;
-        }
+        CreateLinkOrSkip(a, b);
+        CreateLinkOrSkip(b, a);
+        Assert.NotNull(new DirectoryInfo(a).LinkTarget);
+        Assert.NotNull(new DirectoryInfo(b).LinkTarget);
 
         Assert.NotNull(Check("file:" + Path.Combine(a, "x")));
     }
@@ -258,10 +300,7 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     {
         var owned = Path.Combine(_owned, "secret.txt");
         var variant = Path.Combine(_root.ToUpperInvariant(), "OWN", "SECRET.TXT");
-        if (!File.Exists(variant))
-        {
-            return; /* a case-sensitive volume: the variant is a different (missing) file */
-        }
+        Assert.SkipUnless(File.Exists(variant), "a case-sensitive volume: the variant is a different (missing) file, so there is nothing to refuse.");
 
         Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + variant));
         Assert.NotNull(owned);
