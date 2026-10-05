@@ -149,6 +149,16 @@ public sealed class WebChartLegendIsolateBehaviourTests
     }
 
     [Fact]
+    public void AComposedPanel_KeepsItsHiddenSeriesAcrossARebuild_AndDoesNotLeakToAnotherPanelOrServer()
+    {
+        var r = Run();
+        Assert.Equal(new[] { "AAA" }, Off(S(r, "composedHidden")));
+        Assert.Equal(new[] { "AAA" }, Off(S(r, "composedRebuilt")));
+        Assert.Empty(Off(S(r, "composedOtherPanel")));
+        Assert.Empty(Off(S(r, "composedOtherServer")));
+    }
+
+    [Fact]
     public void ExportToCsv_CarriesExactlyTheShownSeries()
     {
         var r = Run();

@@ -77,6 +77,7 @@ globalThis.URL.revokeObjectURL = () => {};
 
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-legend-")));
 let charts;
+let compose;
 try {
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
@@ -84,6 +85,10 @@ try {
   fs.copyFileSync(path.join(jsDir, "grid-tools.js"), path.join(scratch, "grid-tools.js"));
   charts = await import(pathToFileURL(path.join(scratch, "charts.js")).href);
   await import(pathToFileURL(path.join(scratch, "grid-tools.js")).href);
+  fs.copyFileSync(path.join(jsDir, "compose.js"), path.join(scratch, "compose.js"));
+  fs.writeFileSync(path.join(scratch, "panels.js"), "export function navigateServer() {}\nexport function gridTable() { return document.createElement(\"div\"); }\n");
+  fs.writeFileSync(path.join(scratch, "views-api.js"), "export async function getCatalog() { return { compose: {} }; }\n");
+  compose = await import(pathToFileURL(path.join(scratch, "compose.js")).href);
 } catch (e) {
   fs.rmSync(scratch, { recursive: true, force: true });
   throw e;
@@ -128,6 +133,22 @@ const state = (host) => ({
 });
 const click = (host, label, ev) => target(host, label).dispatch("click", ev);
 const dbl = (host, label) => target(host, label).dispatch("dblclick", {});
+
+globalThis.fetch = async () => ({
+  status: 200,
+  ok: true,
+  text: async () => JSON.stringify({
+    sql: "select 1",
+    rows: Array.from({ length: 11 }, (_, i) => [["AAA", 1000 + i * 100], ["BBB", i % 5]].map(([w, v]) => ({ bucket: new Date(T0 + i * MIN).toISOString().slice(0, 19), wait: w, value: v }))).flat(),
+  }),
+});
+const composedPanel = (title) => ({ source: "waits", viz: "line", measure: "wait_ms", title, groupBy: ["wait"] });
+const composedScope = { server: "A", hours: 4 };
+const drawComposed = async (title, slot) => {
+  const body = new FakeNode("div");
+  await compose.renderComposedInto(body, composedPanel(title), composedScope, { panelSlot: slot });
+  return body;
+};
 
 const out = {};
 const scope = charts.chartZoomScope(4);
@@ -195,6 +216,16 @@ const st = charts.zoomableLineChart(stackedSpec(), "c4", scope);
 out.stackedBefore = state(st);
 click(st, "BIG");
 out.stackedAfter = state(st);
+
+// 9. a composed panel: hidden state survives its rebuild and does not reach a second composed panel
+const cp1 = await drawComposed("Waits one", 0);
+click(cp1, "AAA");
+out.composedHidden = state(cp1);
+out.composedRebuilt = state(await drawComposed("Waits one", 0));
+out.composedOtherPanel = state(await drawComposed("Waits two", 1));
+globalThis.location.hash = "#/server/B/waits";
+out.composedOtherServer = state(await drawComposed("Waits one", 0));
+globalThis.location.hash = "#/server/A/waits";
 
 fs.rmSync(scratch, { recursive: true, force: true });
 console.log(JSON.stringify(out));
