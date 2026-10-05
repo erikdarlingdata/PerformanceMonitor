@@ -8,6 +8,7 @@
 
 using System;
 using System.Diagnostics;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Protocol;
@@ -55,10 +56,18 @@ public sealed class McpToolLatencyFilter
     private readonly ReadLatencyAccumulator _readLatency;
     private readonly ILogger? _logger;
 
+    private readonly SlowReadLog? _slowReads;
+
     public McpToolLatencyFilter(ReadLatencyAccumulator readLatency, ILogger? logger)
+        : this(readLatency, logger, null)
+    {
+    }
+
+    internal McpToolLatencyFilter(ReadLatencyAccumulator readLatency, ILogger? logger, SlowReadLog? slowReads)
     {
         _readLatency = readLatency ?? throw new ArgumentNullException(nameof(readLatency));
         _logger = logger;
+        _slowReads = slowReads;
     }
 
     /// <summary>The filter: run the tool, time it, record the outcome. A filter is <c>next =&gt; handler</c>.</summary>
@@ -77,12 +86,16 @@ public sealed class McpToolLatencyFilter
             try
             {
                 var result = await next(request, cancellationToken);
-                Record(toolName, ReadScope.Resolve(ClassifyResult(result, cancellationToken), readScope.Fallback), stopwatch.ElapsedMilliseconds);
+                var outcome = ReadScope.Resolve(ClassifyResult(result, cancellationToken), readScope.Fallback);
+                Record(toolName, outcome, stopwatch.ElapsedMilliseconds);
+                OfferSlow(readScope.Scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, outcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(outcome));
                 return result;
             }
             catch (Exception ex)
             {
-                Record(toolName, ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, cancellationToken), readScope.Fallback), stopwatch.ElapsedMilliseconds);
+                var outcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, cancellationToken), readScope.Fallback);
+                Record(toolName, outcome, stopwatch.ElapsedMilliseconds);
+                OfferSlow(readScope.Scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, SlowReadLog.ErrorClassOf(ex));
                 throw;
             }
         };
@@ -102,6 +115,36 @@ public sealed class McpToolLatencyFilter
         }
 
         return result.IsError == true ? ReadOutcome.Error : ReadOutcome.Ok;
+    }
+
+    /// <summary>Offers a slow or failed call to the slow-read record (#5097). The arguments are built only when the
+    /// call qualifies, and nothing here can reach the request.</summary>
+    private void OfferSlow(ReadScope scope, string toolName, ReadOutcome outcome, long elapsedMs,
+        ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request, string? errorClass)
+    {
+        if (_slowReads is null || !SlowReadLog.ShouldRecord(outcome, elapsedMs))
+        {
+            return;
+        }
+
+        JsonObject? arguments = null;
+        try
+        {
+            if (request.Params?.Arguments is { } supplied)
+            {
+                arguments = new JsonObject();
+                foreach (var (key, value) in supplied)
+                {
+                    arguments[key] = JsonNode.Parse(value.GetRawText());
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Slow-read arguments for MCP tool {Tool} were not read.", toolName);
+        }
+
+        _slowReads.Offer(scope, ReadSurface.Mcp, toolName, outcome, elapsedMs, arguments, errorClass, _logger);
     }
 
     private void Record(string toolName, ReadOutcome outcome, long elapsedMs)

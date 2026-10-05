@@ -1557,6 +1557,10 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SourceSideCutKeys =
     [
+        ("arguments_truncated", ["DarlingMcpSlowReadTools.cs"],
+            "get_slow_reads' arguments: the writer held the recorded arguments to 4,096 bytes and stored a truncated object naming the keys instead, a cut made when the row was written"),
+        ("statements_truncated", ["DarlingMcpSlowReadTools.cs"],
+            "get_slow_reads' statements: the writer stored at most 50 of the statements a read ran, a cut made when the row was written; statement_count is the whole number"),
         ("capture_was_truncated", ["DarlingMcpPgSessionStatesTools.cs"],
             "the pg_session_states collector's per-capture row cap bit at COLLECTION: the stored rows for that capture are a worst-first sample of the instance's sessions"),
         ("chain_may_be_truncated", ["DarlingMcpPgBlockingTools.cs"],
