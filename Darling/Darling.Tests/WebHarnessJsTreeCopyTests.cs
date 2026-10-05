@@ -31,10 +31,11 @@ namespace Darling.Tests;
 ///
 /// <para><b>The rule, as text.</b> A copy call (<c>copyFileSync</c>, <c>copyFile</c>, <c>cpSync</c> or <c>fs.cp</c>) in a harness
 /// is allowed only when it is the whole-tree copy of <c>jsDir</c> (recursive, with no <c>filter</c> that would smuggle a list
-/// back in), or when its source is already inside the scratch tree (the perf-monitor harnesses copy the real
-/// <c>charts.js</c> to <c>charts-real.js</c> before they write a wrapper over it). A harness that makes a scratch folder
-/// (<c>mkdtempSync</c>) must contain the whole-tree copy. The analysis is text only, so it does not run Node and it does not
-/// need the harnesses to be runnable on the machine that builds the tests.</para>
+/// back in), or when its source is already inside the scratch tree (the perfmon, waits and server-trends harnesses copy
+/// the real <c>charts.js</c> to <c>charts-real.js</c> before they write a wrapper over <c>charts.js</c>). A harness that makes a scratch folder
+/// (<c>mkdtempSync</c>) must contain the whole-tree copy, and every stand-in module it writes into the scratch folder must come
+/// after that copy, because the copy overwrites what is already there. The analysis is text only, so it does not run Node and
+/// it does not need the harnesses to be runnable on the machine that builds the tests.</para>
 /// </summary>
 public sealed class WebHarnessJsTreeCopyTests
 {
@@ -49,6 +50,12 @@ public sealed class WebHarnessJsTreeCopyTests
     private static readonly Regex FilterOption = new(@"\bfilter\b", RegexOptions.Compiled, TimeSpan.FromSeconds(5));
 
     private static readonly Regex InsideScratch = new(@"\bscratch\b", RegexOptions.Compiled, TimeSpan.FromSeconds(5));
+
+    private static readonly Regex WriteCall = new(@"\bwriteFileSync\s*\(", RegexOptions.Compiled, TimeSpan.FromSeconds(5));
+
+    /// <summary>A path argument that names a js module, as in <c>path.join(scratch, "pages", "server.js")</c>. The
+    /// <c>package.json</c> marker a harness writes does not end in <c>.js"</c>, so it is not one.</summary>
+    private static readonly Regex ModuleTarget = new(@"\.js""\s*\)?\s*$", RegexOptions.Compiled, TimeSpan.FromSeconds(5));
 
     private static readonly string[] SkippedDirectories = { "bin", "obj", "node_modules" };
 
@@ -119,6 +126,26 @@ public sealed class WebHarnessJsTreeCopyTests
     }
 
     /// <summary>
+    /// A stand-in module written before the whole-tree copy would be overwritten by the real file, so it is flagged. The
+    /// <c>package.json</c> marker is not a module and may come first.
+    /// </summary>
+    [Fact]
+    public void AStandInWrittenBeforeTheWholeTreeCopy_IsFlagged()
+    {
+        const string early =
+            "const scratch = fs.mkdtempSync(path.join(os.tmpdir(), \"x-\"));\n" +
+            "fs.writeFileSync(path.join(scratch, \"charts.js\"), \"export const stub = 1;\\n\");\n" +
+            "fs.cpSync(jsDir, scratch, { recursive: true });\n";
+        const string marker =
+            "const scratch = fs.mkdtempSync(path.join(os.tmpdir(), \"x-\"));\n" +
+            "fs.writeFileSync(path.join(scratch, \"package.json\"), \"{}\");\n" +
+            "fs.cpSync(jsDir, scratch, { recursive: true });\n";
+
+        Assert.Single(Violations(early));
+        Assert.Empty(Violations(marker));
+    }
+
+    /// <summary>
     /// The whole-tree copy, and a copy whose source is already inside the scratch tree, are the two allowed forms.
     /// </summary>
     [Fact]
@@ -162,7 +189,7 @@ public sealed class WebHarnessJsTreeCopyTests
     internal static List<string> Violations(string source)
     {
         var found = new List<string>();
-        var copiesTree = false;
+        var firstTreeCopy = -1;
 
         foreach (Match call in CopyCall.Matches(source))
         {
@@ -173,7 +200,11 @@ public sealed class WebHarnessJsTreeCopyTests
 
             if (arguments is not null && IsWholeTreeCopy(api, first, arguments))
             {
-                copiesTree = true;
+                if (firstTreeCopy < 0)
+                {
+                    firstTreeCopy = call.Index;
+                }
+
                 continue;
             }
 
@@ -185,9 +216,30 @@ public sealed class WebHarnessJsTreeCopyTests
             found.Add($"line {line}: {api}({first}, ...) copies from the js tree by name or by directory, not the whole tree");
         }
 
-        if (source.Contains("mkdtempSync(", StringComparison.Ordinal) && !copiesTree)
+        if (firstTreeCopy < 0)
         {
-            found.Add("makes a scratch folder (mkdtempSync) but never copies the whole tree with fs.cpSync(jsDir, ..., { recursive: true })");
+            if (source.Contains("mkdtempSync(", StringComparison.Ordinal))
+            {
+                found.Add("makes a scratch folder (mkdtempSync) but never copies the whole tree with fs.cpSync(jsDir, ..., { recursive: true })");
+            }
+
+            return found;
+        }
+
+        /* A stand-in module only replaces the real file when it is written AFTER the copy: the copy overwrites what is there. */
+        foreach (Match write in WriteCall.Matches(source))
+        {
+            if (write.Index >= firstTreeCopy)
+            {
+                break;
+            }
+
+            var arguments = CallArguments(source, write.Index + write.Length - 1);
+            var first = arguments is null ? string.Empty : FirstArgument(arguments);
+            if (InsideScratch.IsMatch(first) && ModuleTarget.IsMatch(first))
+            {
+                found.Add($"line {LineOf(source, write.Index)}: writes {first} before the whole-tree copy, which would overwrite it with the real module; write every stand-in module after the copy");
+            }
         }
 
         return found;
