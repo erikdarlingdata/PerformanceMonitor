@@ -67,8 +67,9 @@ function svg(tag, attrs) {
  *                Show Data Source item appears only when this is given.
  *   zoomed / onResetZoom — optional: when zoomed is true and onResetZoom is a function, the chart menu offers Reset zoom.
  *   atTime     — optional { server }: a server-tab chart. A right-click on the plot then also offers Show Active Queries /
- *                Blocking / Deadlocks at This Time, which set the server's custom range to the clicked time ±30 minutes
- *                and open that tab. A menu opened without a pointer (the ⋯ button) has no clicked time and offers none.
+ *                Blocking / Deadlocks at This Time, which set the server's custom range to the time of the drawn point
+ *                nearest the click ±30 minutes and open that tab. A menu opened without a pointer (the ⋯ button) has no
+ *                clicked time and offers none.
  *   windowStart— optional x-axis DOMAIN start, windowEnd its end, both UTC-epoch ms (#2802). When both are given
  *   windowEnd    and windowEnd > windowStart, the axis spans [windowStart, windowEnd] — the REQUESTED time window
  *                — instead of the data's own first/last-point extent, so a sparse discrete-event series (blocking,
@@ -491,10 +492,9 @@ export function renderLineChart(spec) {
     });
   }
 
-  overlay.addEventListener("mousemove", (ev) => {
-    if (dragFromX != null) return; /* brushing — the band owns the pointer */
-    const rect = root.getBoundingClientRect();
-    const vbX = ((ev.clientX - rect.left) / rect.width) * W;
+  /* The index of the drawn point nearest a viewBox x, or -1 when no point sits on the plot. The hover tooltip names this
+     point, and so does the chart menu's right-click time (#5230), so the two always agree. */
+  const nearestPointIdx = (vbX) => {
     let idx = -1;
     let best = Infinity;
     for (let i = 0; i < xs.length; i++) {
@@ -506,6 +506,14 @@ export function renderLineChart(spec) {
         idx = i;
       }
     }
+    return idx;
+  };
+
+  overlay.addEventListener("mousemove", (ev) => {
+    if (dragFromX != null) return; /* brushing — the band owns the pointer */
+    const rect = root.getBoundingClientRect();
+    const vbX = ((ev.clientX - rect.left) / rect.width) * W;
+    const idx = nearestPointIdx(vbX);
     if (idx < 0) return;
     const { t, r } = rows[idx];
     const px = xs[idx];
@@ -572,8 +580,16 @@ export function renderLineChart(spec) {
   const exportRows = exportPoints
     ? exportPoints.map((r) => ({ t: parseUtc(r[xKey]), r })).filter((p) => p.t).sort((a, b) => a.t - b.t)
     : rows;
-  /* The right-click time: the pointer's x mapped through vbToTime, which clamps it to the chart's own x range. */
-  const timeAt = atTime ? (clientX) => vbToTime(toVbX(clientX)) : null;
+  /* The right-click time: the time of the drawn point nearest the pointer, the one the hover tooltip names. The desktop's
+     AddChartDrillDownMenuItem (ServerTab.DrillDown.cs) takes the nearest point's time the same way, so a click a pixel or
+     two beside a one-bucket spike on a 7-day chart still opens the hour that holds it. A click past either edge snaps to
+     the first or last point; no point on the plot gives undefined, so no items. */
+  const timeAt = atTime
+    ? (clientX) => {
+        const idx = nearestPointIdx(toVbX(clientX));
+        return idx < 0 ? undefined : rows[idx].t.getTime();
+      }
+    : null;
   attachChartMenu(chart, root, { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, timeAt }, exportRows);
   return chart;
 }

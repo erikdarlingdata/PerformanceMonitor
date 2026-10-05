@@ -1,7 +1,7 @@
 /* Runs the web viewer's shipped charts.js against a stand-in DOM and checks the chart menu's "at This Time" items: a
    right-click on a server-tab chart (spec.atTime = { server }) offers Show Active Queries / Blocking / Deadlocks at
-   This Time, and each item sets the server's custom range to the clicked time +- 30 minutes and moves the hash to
-   that tab. Prints the findings as one line of JSON.
+   This Time, and each item sets the server's custom range to the time of the drawn point nearest the click +- 30 minutes
+   and moves the hash to that tab. Prints the findings as one line of JSON.
    WebChartAtTimeBehaviourTests starts it as
        node web-chart-at-time-harness.mjs <path to wwwroot/js>
    Every .js under js/ and js/pages/ is copied into the scratch directory (a hand-kept list breaks whenever a page
@@ -130,7 +130,8 @@ const closeMenu = (host) => {
 const settle = () => new Promise((r) => setTimeout(r, 60));
 const scope = charts.chartZoomScope(4);
 
-/* x = 521 viewBox px is the middle of the plot (58 .. 984), so the clicked time is T0 + 5 min. */
+/* x = 521 viewBox px is the middle of the plot (58 .. 984) and lands exactly on the point at T0 + 5 min (one point a
+   minute), so the clicked time is T0 + 5 min. */
 const a = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server: "A" } }), "t1", scope);
 rightClick(a, 521);
 out.rightClickItems = labels(a);
@@ -176,6 +177,14 @@ const edge = async (host, x, id) => {
 const e1 = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server: "A" } }), "t2", scope);
 out.clampLeft = await edge(e1, -300);
 out.clampRight = await edge(e1, 5000);
+
+/* The nearest drawn point: a chart with only two points, at T0 and T0 + 10 min, across the 10-minute window. The menu names
+   the time of the point nearest the pointer, the one the hover tooltip names, not the raw pointer time (T0 + 5.85 min at
+   x = 600, which no point holds). The exact middle is equidistant from both, so that click may land on either. */
+const sparse = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server: "A" }, points: [points[0], points[10]] }), "t8", scope);
+out.sparseNearLeft = await edge(sparse, 400);
+out.sparseNearRight = await edge(sparse, 600);
+out.sparseMiddle = await edge(sparse, 521);
 
 /* A click inside the last half hour: a range may not end in the future, so the hour is shifted to end now and still holds the time. */
 const realNow = Date.now;

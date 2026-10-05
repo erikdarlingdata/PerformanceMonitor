@@ -19,9 +19,10 @@ namespace Darling.Tests;
 
 /// <summary>
 /// A right-click on a server-tab line chart also offers Show Active Queries / Blocking / Deadlocks at This Time (the
-/// desktop's chart drill-downs). Each item sets the server's custom range to the clicked time +- 30 minutes (the
-/// smallest range the picker allows) and moves the hash to that tab. These run the shipped <c>charts.js</c> under Node
-/// (<c>web-chart-at-time-harness.mjs</c>), and read <c>server-tabs.js</c> for the charts that must hand the server over.
+/// desktop's chart drill-downs). Each item sets the server's custom range to the time of the drawn point nearest the
+/// click +- 30 minutes (the smallest range the picker allows) and moves the hash to that tab. These run the shipped
+/// <c>charts.js</c> under Node (<c>web-chart-at-time-harness.mjs</c>), and read <c>server-tabs.js</c> for the charts that
+/// must hand the server over.
 /// </summary>
 public sealed class WebChartAtTimeBehaviourTests
 {
@@ -129,6 +130,18 @@ public sealed class WebChartAtTimeBehaviourTests
         var r = Run();
         Assert.Equal(1767225600000, r.GetProperty("clampLeft").GetInt64());  // 00:00
         Assert.Equal(1767226200000, r.GetProperty("clampRight").GetInt64()); // 00:10
+    }
+
+    [Fact]
+    public void AClickBesideADrawnPoint_UsesThatPointsTime_NotTheRawPointerTime()
+    {
+        // Two points only, at 00:00 and 00:10. The hover tooltip snaps to the nearer one, and so does the menu, so a click a
+        // pixel or two beside a one-bucket spike on a wide chart still opens the hour that holds the spike.
+        var r = Run();
+        Assert.Equal(1767225600000, r.GetProperty("sparseNearLeft").GetInt64());  // 00:00, drawn at the left edge
+        Assert.Equal(1767226200000, r.GetProperty("sparseNearRight").GetInt64()); // 00:10, drawn at the right edge
+        // The exact middle is equidistant from both: either point, never the 00:05 that no point holds.
+        Assert.Contains(r.GetProperty("sparseMiddle").GetInt64(), new[] { 1767225600000, 1767226200000 });
     }
 
     [Fact]
