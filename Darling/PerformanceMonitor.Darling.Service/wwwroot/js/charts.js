@@ -68,8 +68,8 @@ function svg(tag, attrs) {
  *   zoomed / onResetZoom — optional: when zoomed is true and onResetZoom is a function, the chart menu offers Reset zoom.
  *   atTime     — optional { server }: a server-tab chart. A right-click on the plot then also offers Show Active Queries /
  *                Blocking / Deadlocks at This Time, which set the server's custom range to the time of the drawn point
- *                nearest the click ±30 minutes and open that tab. A menu opened without a pointer (the ⋯ button) has no
- *                clicked time and offers none.
+ *                nearest the click ±30 minutes and open that tab. A menu opened without a click on the plot (the ⋯ button,
+ *                Shift+F10, a right-click on the legend, the status line or the open menu) has no time and offers none.
  *   windowStart— optional x-axis DOMAIN start, windowEnd its end, both UTC-epoch ms (#2802). When both are given
  *   windowEnd    and windowEnd > windowStart, the axis spans [windowStart, windowEnd] — the REQUESTED time window
  *                — instead of the data's own first/last-point extent, so a sparse discrete-event series (blocking,
@@ -1322,7 +1322,10 @@ function attachChartMenu(chart, root, opts, rows) {
   chart.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     const box = chart.getBoundingClientRect();
-    open(Math.max(0, e.clientX - box.left), Math.max(0, e.clientY - box.top), timeAt ? timeAt(e.clientX) : undefined);
+    /* Only a click on the drawing itself names a time: the legend, the status line, the ⋯ button and the open menu do not,
+       and Shift+F10 on the button lands here with the button as the target (#5230). `root` is the plot's SVG. */
+    const onPlot = !!timeAt && !!e.target && root.contains(e.target);
+    open(Math.max(0, e.clientX - box.left), Math.max(0, e.clientY - box.top), onPlot ? timeAt(e.clientX) : undefined);
   });
   chart.appendChild(button);
   chart.appendChild(status);

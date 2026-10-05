@@ -169,6 +169,22 @@ public sealed class WebChartAtTimeBehaviourTests
     }
 
     [Fact]
+    public void ARightClickOffThePlot_OffersNoTimeItems()
+    {
+        // The listener sits on the whole chart box, but only the drawing names a time. The legend, the status line, the open
+        // menu and the button (Shift+F10 on it raises a contextmenu with the button as the target) would map their x through
+        // the plot and open an hour the user never pointed at.
+        var r = Run();
+        var usual = new[] { "Copy Image", "Save Image As...", "Export Data to CSV..." };
+        Assert.Equal(usual, Strings(r.GetProperty("offPlotLegendItems")));
+        Assert.Equal(usual, Strings(r.GetProperty("offPlotStatusItems")));
+        Assert.Equal(usual, Strings(r.GetProperty("offPlotButtonItems")));
+        // The menu from a click on the plot held the six items before it was right-clicked itself.
+        Assert.Equal(6, r.GetProperty("offPlotMenuBefore").GetInt32());
+        Assert.Equal(usual, Strings(r.GetProperty("offPlotMenuItems")));
+    }
+
+    [Fact]
     public void AMenuHeldOpenAcrossTheMinutePollRebuild_KeepsItsClickedTime()
     {
         var r = Run();

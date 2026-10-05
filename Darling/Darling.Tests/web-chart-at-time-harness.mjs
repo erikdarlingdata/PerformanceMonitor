@@ -37,6 +37,7 @@ class FakeNode {
   getAttribute(name) { return name in this.attrs ? this.attrs[name] : null; }
   addEventListener(type, listener) { (this.listeners[type] = this.listeners[type] || []).push(listener); }
   removeEventListener() {}
+  contains(n) { return n === this || this.children.some((c) => c.contains(n)); }
   setPointerCapture() {}
   focus() {}
   click() {}
@@ -122,7 +123,10 @@ const btn = (host) => find(host, (n) => n.tag === "button" && n.attrs["aria-labe
 const items = (host) => find(host, (n) => n.attrs.role === "menuitem");
 const labels = (host) => items(host).map((n) => n.textContent);
 const chartDiv = (host) => find(host, (n) => String(n.className) === "chart")[0];
-const rightClick = (host, x) => chartDiv(host).listeners.contextmenu[0]({ preventDefault() {}, clientX: x, clientY: 20 });
+const plotNode = (host) => find(host, (n) => n.tag === "svg")[0];
+/* A right-click lands on a node: the plot's svg unless a case names another (the legend, the status line, the button, the menu). */
+const rightClick = (host, x, target = plotNode(host)) =>
+  chartDiv(host).listeners.contextmenu[0]({ preventDefault() {}, clientX: x, clientY: 20, target });
 const closeMenu = (host) => {
   const m = find(host, (n) => n.attrs.role === "menu")[0];
   if (m) m.listeners.keydown[0]({ key: "Escape", preventDefault() {} });
@@ -211,6 +215,27 @@ const viaButton = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server
 btn(viaButton).listeners.click[0]();
 out.buttonItems = labels(viaButton);
 btn(viaButton).listeners.click[0]();
+
+/* Only the drawing names a time. The contextmenu listener sits on the whole chart box, so a right-click on the legend, the
+   status line or the open menu, and Shift+F10 on the button (the button is the target then), reach it too. Their x would be
+   mapped through the plot to a time the user never pointed at, so those menus offer only the usual three items. */
+const off = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server: "A" } }), "t9", scope);
+const nodeOf = (pred, what) => {
+  const n = find(off, pred)[0];
+  if (!n) throw new Error("the chart has no " + what);
+  return n;
+};
+rightClick(off, 521, nodeOf((n) => String(n.className) === "chart-legend", "legend"));
+out.offPlotLegendItems = labels(off);
+rightClick(off, 521, nodeOf((n) => String(n.className) === "chart-menu-status", "status line"));
+out.offPlotStatusItems = labels(off);
+rightClick(off, 521, btn(off));
+out.offPlotButtonItems = labels(off);
+rightClick(off, 521);
+out.offPlotMenuBefore = labels(off).length;
+rightClick(off, 521, items(off)[0]);
+out.offPlotMenuItems = labels(off);
+closeMenu(off);
 
 /* A rebuild of the chart (the 60 s poll) keeps the open menu and its clicked time. */
 const k1 = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server: "A" } }), "t6", scope);
