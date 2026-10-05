@@ -532,10 +532,10 @@ public partial class ServerTab : UserControl
     /// (<see cref="FirstColumnDrawn"/>, #4966), which holds the data start and so starts up to one column before it.
     /// Every other caller leaves it out and gets the probe's floor as before.</para>
     /// </summary>
-    private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc, DateTime? earliestRowShownUtc = null)
+    private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc, DateTime? earliestRowShownUtc = null, bool includeAlsoCovered = true)
     {
         var floor = await ProbeWindowFloorOrNullAsync(
-            () => Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc)),
+            () => Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc, includeAlsoCovered: includeAlsoCovered)),
             $"[{_server.DisplayName}] {relation}", startUtc, endUtc);
         ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestRowShownUtc), startUtc, GetPickerZone());
     }
@@ -869,7 +869,7 @@ public partial class ServerTab : UserControl
                         UpdateLockWaitTrendChart(lwt.Result, hoursBack, fromDate, toDate);
                         UpdateBlockingTrendChart(bt.Result, hoursBack, fromDate, toDate);
                         UpdateDeadlockTrendChart(dt.Result, hoursBack, fromDate, toDate);
-                        await RefreshBlockingTrendsBannersAsync(lwt.Result, bt.Result, dt.Result, hoursBack, fromDate, toDate);
+                        await RefreshBlockingTrendsBannersAsync(lwt.Result, bt.Result, dt.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
                         break;
                     case 1: // Current Waits — 2 charts
                         var cwd = Helpers.MethodProfiler.TimeAsync("Locking.WaitingTaskTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetWaitingTaskTrendAsync(_serverId, hoursBack, fromDate, toDate))));
@@ -922,7 +922,7 @@ public partial class ServerTab : UserControl
                         UpdateDeadlockWaitChart(bdsSeverity.Result, hoursBack, fromDate, toDate);
                         UpdateDeadlockTotalWaitChart(bdsSeverity.Result, hoursBack, fromDate, toDate);
                         UpdateBlockingStatsSummary(bdsStats.Result, bdsCount.Result, bdsSeverity.Result);
-                        await RefreshBlockingStatsBannersAsync(bdsStats.Result, bdsSeverity.Result, hoursBack, fromDate, toDate);
+                        await RefreshBlockingStatsBannersAsync(bdsStats.Result, bdsSeverity.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
                         break;
                 }
                 /* Always keep alert badge current when Blocking tab is visible */
@@ -973,8 +973,8 @@ public partial class ServerTab : UserControl
             }
 
             /* #4966: the notes of the Trends and Blocking Stats charts, after the charts are drawn. */
-            await RefreshBlockingTrendsBannersAsync(lockWaitTrendTask.Result, blockingTrendTask.Result, deadlockTrendTask.Result, hoursBack, fromDate, toDate);
-            await RefreshBlockingStatsBannersAsync(blockingDurationStatsTask.Result, deadlockSeverityStatsTask.Result, hoursBack, fromDate, toDate);
+            await RefreshBlockingTrendsBannersAsync(lockWaitTrendTask.Result, blockingTrendTask.Result, deadlockTrendTask.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
+            await RefreshBlockingStatsBannersAsync(blockingDurationStatsTask.Result, deadlockSeverityStatsTask.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
 
             {
                 /* Where the stored waiting-task rows start, over the SAME UTC window the Current Waits charts read --
