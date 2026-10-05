@@ -90,7 +90,7 @@ public sealed class WebBlockingSaveXmlBehaviourTests
         var r = Run("truncated");
         Assert.True(r.GetProperty("disabled").GetBoolean());
         Assert.False(r.GetProperty("hasClick").GetBoolean());
-        Assert.Contains("cut this XML short", r.GetProperty("title").GetString());
+        Assert.Contains("sent only a preview of the XML", r.GetProperty("title").GetString());
         Assert.Equal(0, r.GetProperty("downloads").GetInt32());
     }
 
