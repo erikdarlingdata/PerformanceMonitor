@@ -106,14 +106,6 @@ globalThis.addEventListener = (type, fn, options) => {
   if (type === "hashchange") hashListeners.push({ fn, once: !!(options && options.once) });
 };
 
-const copyAll = (from, to) => {
-  fs.mkdirSync(to, { recursive: true });
-  for (const e of fs.readdirSync(from, { withFileTypes: true })) {
-    if (e.isDirectory()) copyAll(path.join(from, e.name), path.join(to, e.name));
-    else if (e.name.endsWith(".js")) fs.copyFileSync(path.join(from, e.name), path.join(to, e.name));
-  }
-};
-
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-at-time-")));
 let charts;
 const out = {};
@@ -132,7 +124,7 @@ try {
     const shipped = path.join(scratch, "shipped");
     fs.mkdirSync(shipped);
     fs.writeFileSync(path.join(shipped, "package.json"), '{ "type": "module" }');
-    copyAll(jsDir, shipped);
+    fs.cpSync(jsDir, shipped, { recursive: true });
     const server = await import(pathToFileURL(path.join(shipped, "pages", "server.js")).href);
     const tc = Date.UTC(2026, 0, 1, 12, 0, 0);
     const half = 30 * 60000;
@@ -145,7 +137,7 @@ try {
   }
 
   /* The menu checks: a copy whose pages/server.js is a recording stand-in for the module the menu items import. */
-  copyAll(jsDir, scratch);
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(
     path.join(scratch, "pages", "server.js"),
     'export const calls = []; export function applyCustomRange(server, startMs, endMs, nowMs, { redraw = true } = {}) { calls.push({ server, startMs, endMs, redraw, hash: globalThis.location.hash }); return globalThis.__rangeError || null; }\n'

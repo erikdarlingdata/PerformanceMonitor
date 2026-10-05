@@ -79,13 +79,13 @@ const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-leg
 let charts;
 let compose;
 try {
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert; every stand-in below is
+     written AFTER the copy, so it still replaces the real file. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
-  fs.copyFileSync(path.join(jsDir, "charts.js"), path.join(scratch, "charts.js"));
-  fs.copyFileSync(path.join(jsDir, "grid-tools.js"), path.join(scratch, "grid-tools.js"));
   charts = await import(pathToFileURL(path.join(scratch, "charts.js")).href);
   await import(pathToFileURL(path.join(scratch, "grid-tools.js")).href);
-  fs.copyFileSync(path.join(jsDir, "compose.js"), path.join(scratch, "compose.js"));
   fs.writeFileSync(path.join(scratch, "panels.js"), "export function navigateServer() {}\nexport function gridTable() { return document.createElement(\"div\"); }\n");
   fs.writeFileSync(path.join(scratch, "views-api.js"), "export async function getCatalog() { return { compose: {} }; }\n");
   compose = await import(pathToFileURL(path.join(scratch, "compose.js")).href);
