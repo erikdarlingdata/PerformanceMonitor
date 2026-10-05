@@ -2871,7 +2871,8 @@ LIMIT 1";
                live like its siblings, so setting it to 1 restores every-cycle plan capture and promoting
                it to a store column later needs no change here. */
             procedureStatsPlanCycleInterval: () => StoreConfigProvider.ClampProcedureStatsPlanCycleInterval(config.ProcedureStatsPlanCycleInterval),
-            /* #5158: query_stats fetches plan XML only for plans this host has not committed. Live like its siblings;
+            /* #5158: query_stats fetches plan XML only for plans this host has not committed. A file-only knob:
+               read through a provider each cycle, but darling.json is loaded once, so an edit needs a restart.
                false restores the inline capture. */
             queryStatsDeferredPlanFetch: () => config.QueryStatsDeferredPlanFetch,
             /* #3477: the per-collector database scope, resolved live against the SAME _scheduleOverrides

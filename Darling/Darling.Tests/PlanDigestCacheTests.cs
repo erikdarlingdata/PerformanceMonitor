@@ -224,6 +224,39 @@ public sealed class PlanDigestCacheTests
         Assert.Equal(1, Count(source, "ConfirmPending("));
     }
 
+    [Fact]
+    public void TheFetchStamps_AreTheSourceOfTheMeasurements()
+    {
+        var context = new CollectorContext { ServerId = 1, ServerName = "s", CollectionTime = DateTime.UtcNow, Deltas = new NoDeltas() };
+
+        /* A run with misses: the context carries the values and the note's measurements read them. */
+        DarlingCollectorRunner.StampPlanFetch(context, 3, 1234, 17);
+        Assert.Equal(3, context.PerItemPlanRenderedRows);
+        Assert.Equal(1234, context.PerItemPlanRenderedBytes);
+        Assert.Equal(17, context.PerItemPlanFetchMs);
+        Assert.Equal(3, context.Measurements.Single(m => m.Label == "plans_rendered").Value);
+        Assert.Equal(1234, context.Measurements.Single(m => m.Label == "plans_rendered_bytes").Value);
+        Assert.Equal(17, context.Measurements.Single(m => m.Label == "plan_fetch_ms").Value);
+
+        /* A run with no misses ran no fetch: the stamps and the measurements are 0, never absent. */
+        var quiet = new CollectorContext { ServerId = 1, ServerName = "s", CollectionTime = DateTime.UtcNow, Deltas = new NoDeltas() };
+        DarlingCollectorRunner.StampPlanFetch(quiet, 0, 0, 0);
+        Assert.Equal(0, quiet.PerItemPlanFetchMs);
+        Assert.Equal(0, quiet.Measurements.Single(m => m.Label == "plan_fetch_ms").Value);
+        Assert.Equal(0, quiet.Measurements.Single(m => m.Label == "plans_rendered").Value);
+    }
+
+    [Fact]
+    public void TheRunnerTimesTheFetchLoop_AndStampsOnlyThroughTheOneSeam()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
+        var body = source[source.IndexOf("private async Task<List<QueryStatsPlanKey>> FetchDeferredQueryStatsPlansAsync", StringComparison.Ordinal)..];
+        body = body[..body.IndexOf("internal static void StampPlanFetch", StringComparison.Ordinal)];
+        Assert.Contains("Stopwatch.StartNew()", body, StringComparison.Ordinal);
+        Assert.Equal(2, Count(body, "StampPlanFetch("));
+        Assert.DoesNotContain("context.Measure(", body, StringComparison.Ordinal);
+    }
+
     private static int Count(string text, string needle)
     {
         var count = 0;

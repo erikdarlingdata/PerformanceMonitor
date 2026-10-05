@@ -382,8 +382,9 @@ public sealed class DarlingCollectorRunner
     private readonly Func<int> _procedureStatsPlanCycleInterval;
 
     /* #5158: whether query_stats defers its plan fetch (darling.json "queryStatsDeferredPlanFetch", default true).
-       Off gives the inline plan capture exactly as before. Read through a provider like its siblings, so it is
-       honored on the NEXT cycle. */
+       Off gives the inline plan capture exactly as before. Read through a provider on every cycle, but a file-only
+       knob: darling.json is loaded once at start and nothing re-reads it, so an edit takes effect on the next
+       RESTART. */
     private readonly Func<bool> _queryStatsDeferredPlanFetch;
 
     /* #5158: what this host knows of the statement plans it has already committed, one cache per server and per
@@ -6962,9 +6963,24 @@ RETURNING s.state_key";
     /// whose handle aged out between the two queries comes back with no plan and no size, the pairing the inline form
     /// gives for the same case, and is not cached.</para>
     ///
-    /// <para>A fetch that fails ships the rows without plans, caches nothing, and does not fail the run: the plans
-    /// are fetched again next cycle. A stop or the item budget expiring is not a fetch failure and propagates. What
-    /// this run rendered is returned as pending keys: they are confirmed after the batch commits, or discarded.</para>
+    /// <para>A fetch that fails ships the rows without plans and does not fail the run: the plans not yet fetched
+    /// are fetched again next cycle. A chunk that fails keeps what the chunks before it already rendered (those
+    /// rows carry their plans, and their keys are returned as pending like any other); it caches nothing for the
+    /// failed chunk or any after it. A stop or the item budget expiring is not a fetch failure and propagates.
+    /// What this run rendered is returned as pending keys: they are confirmed after the batch commits, or discarded.</para>
+    ///
+    /// <para><b>Timing.</b> The fetch loop runs after the main read, inside the same <c>sql:</c> slice but outside
+    /// the drain, so it has its own stopwatch: <see cref="CollectorContext.PerItemPlanFetchMs"/> and the
+    /// <c>plan_fetch_ms</c> measurement carry it, beside <c>plans_rendered</c> and <c>plans_rendered_bytes</c>, which are
+    /// rendered from <see cref="CollectorContext.PerItemPlanRenderedRows"/> and
+    /// <see cref="CollectorContext.PerItemPlanRenderedBytes"/>. A run with misses records the loop's elapsed
+    /// milliseconds; a run with none records 0, because it ran no fetch.</para>
+    ///
+    /// <para><b>Accepted race.</b> A statement recompile between the main query and this fetch can render the new
+    /// plan and store its digest under the old identity (<c>creation_time</c>, <c>plan_generation_num</c>). That
+    /// pairing is wrong for that one run's row only: the old identity leaves <c>dm_exec_query_stats</c> with the
+    /// recompile, so nothing reads it again, and the cache prunes it after an hour. The inline form has the same
+    /// race in a smaller window.</para>
     /// </summary>
     private async Task<List<QueryStatsPlanKey>> FetchDeferredQueryStatsPlansAsync(
         ITargetProvider provider,
@@ -7006,15 +7022,17 @@ RETURNING s.state_key";
             await hook(cancellationToken);
         }
 
+        var renderedRows = 0;
+        long renderedBytes = 0;
+        var fetchWatch = Stopwatch.StartNew();
         if (misses.Count == 0)
         {
-            context.Measure("plans_rendered", 0);
-            context.Measure("plans_rendered_bytes", 0);
+            /* Nothing to render: no fetch ran, so the stamps read 0 and the measurements say so. */
+            fetchWatch.Stop();
+            StampPlanFetch(context, 0, 0, 0);
             return pending;
         }
 
-        var renderedRows = 0;
-        long renderedBytes = 0;
         try
         {
             for (var offset = 0; offset < misses.Count; offset += QueryStatsCollector.MaxPlanFetchKeys)
@@ -7069,13 +7087,26 @@ RETURNING s.state_key";
         }
         finally
         {
-            context.PerItemPlanRenderedRows = renderedRows;
-            context.PerItemPlanRenderedBytes = renderedBytes;
-            context.Measure("plans_rendered", renderedRows);
-            context.Measure("plans_rendered_bytes", renderedBytes);
+            fetchWatch.Stop();
+            StampPlanFetch(context, renderedRows, renderedBytes, fetchWatch.ElapsedMilliseconds);
         }
 
         return pending;
+    }
+
+    /// <summary>
+    /// #5158: records one deferred fetch on the context, then renders the run's measurements FROM the context, so the
+    /// stamp is the single source and the collection_log note only reads it. <c>PerItemPlanFetchMs</c> is "inside
+    /// <c>sql:</c>, not drain"; a procedure_stats change that shares these names will stamp the same fields.
+    /// </summary>
+    internal static void StampPlanFetch(CollectorContext context, int renderedRows, long renderedBytes, long fetchMs)
+    {
+        context.PerItemPlanRenderedRows = renderedRows;
+        context.PerItemPlanRenderedBytes = renderedBytes;
+        context.PerItemPlanFetchMs = fetchMs;
+        context.Measure("plans_rendered", context.PerItemPlanRenderedRows);
+        context.Measure("plans_rendered_bytes", context.PerItemPlanRenderedBytes);
+        context.Measure("plan_fetch_ms", context.PerItemPlanFetchMs);
     }
 
     /// <summary>
