@@ -20,6 +20,7 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>Keeps the owned set (<see cref="DarlingOwnedSecrets"/>) complete as the service grows.</summary>
+[Collection("darling-owned-secrets")]
 public sealed class DarlingOwnedSecretsCensusTests
 {
     private static readonly string[] s_serviceDir = { "Darling", "PerformanceMonitor.Darling.Service" };

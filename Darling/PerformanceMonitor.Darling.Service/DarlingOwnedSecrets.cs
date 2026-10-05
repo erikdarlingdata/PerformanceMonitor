@@ -32,10 +32,188 @@ public static class DarlingOwnedSecrets
     private static volatile DarlingOwnedSet s_current = DarlingOwnedSet.Empty;
     private const int MaxDepth = 8;
 
+    /// <summary>Environment variables the service itself reads. A census test keeps this complete.</summary>
+    internal static readonly IReadOnlySet<string> ServiceEnvNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "DARLING_CONFIG",
+        "DARLING_OUTPUT_FORMAT",
+        "DARLING_STOPPED_MARKER",
+        "DOTNET_RUNNING_IN_CONTAINER",
+        "SystemDrive",
+        "USERPROFILE",
+    };
+
     /// <summary>The current owned set (empty until a config has been loaded).</summary>
     public static DarlingOwnedSet Current => s_current;
 
     public static void Set(DarlingOwnedSet set) => s_current = set ?? DarlingOwnedSet.Empty;
+
+    /// <summary>One sentence for every refusal; it names no path and no variable.</summary>
+    internal const string ReferenceRefusalText =
+        "That password reference points at this service's own configuration or secrets.";
+
+    private const int MaxLinkHops = 40;
+
+    private static StringComparison EnvComparison =>
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+    private static StringComparison PathComparison =>
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+    /// <summary>Null when <paramref name="password"/> is not an <c>env:</c>/<c>file:</c> reference or the reference
+    /// points at nothing Darling owns; otherwise <see cref="ReferenceRefusalText"/>.</summary>
+    internal static string? ReferenceRefusal(string? password) => ReferenceRefusal(password, s_current);
+
+    internal static string? ReferenceRefusal(string? password, DarlingOwnedSet owned)
+    {
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            return null;
+        }
+
+        var value = password.Trim();
+        if (value.StartsWith("file:", StringComparison.Ordinal))
+        {
+            return FileRefused(value["file:".Length..].Trim(), owned) ? ReferenceRefusalText : null;
+        }
+
+        if (value.StartsWith("env:", StringComparison.Ordinal))
+        {
+            var name = value["env:".Length..].Trim();
+            return owned.EnvNames.Any(n => string.Equals(n, name, EnvComparison)) ? ReferenceRefusalText : null;
+        }
+
+        return null;
+    }
+
+    private static bool FileRefused(string path, DarlingOwnedSet owned)
+    {
+        if (IsRefusedForm(path))
+        {
+            return true;
+        }
+
+        var real = RealPath(path);
+        if (real is null)
+        {
+            return true;
+        }
+
+        foreach (var ownedPath in owned.Paths)
+        {
+            if (string.IsNullOrWhiteSpace(ownedPath) || ownedPath.Contains('\0'))
+            {
+                continue;
+            }
+
+            var ownedReal = RealPath(ownedPath);
+            if (ownedReal is not null && Covers(ownedReal, real))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Forms no real secret path needs, refused before any comparison.</summary>
+    private static bool IsRefusedForm(string path)
+    {
+        if (path.Length == 0 || path.Contains('\0') || !Path.IsPathRooted(path) || path[0] == '~')
+        {
+            return true;
+        }
+
+        if (path.StartsWith("\\\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal))
+        {
+            return true; /* UNC root, and the \\?\ and \\.\ prefixes */
+        }
+
+        if (path.Split('/', '\\').Contains(".."))
+        {
+            return true;
+        }
+
+        var hasDrive = path.Length >= 2 && char.IsAsciiLetter(path[0]) && path[1] == ':';
+        if (path.IndexOf(':', hasDrive ? 2 : 0) >= 0)
+        {
+            return true; /* alternate data stream */
+        }
+
+        return path.Equals("/proc", StringComparison.Ordinal) || path.StartsWith("/proc/", StringComparison.Ordinal)
+            || path.Equals("/sys", StringComparison.Ordinal) || path.StartsWith("/sys/", StringComparison.Ordinal);
+    }
+
+    /// <summary>The path with every symbolic link followed (capped; null on a cycle or an unresolvable path).</summary>
+    private static string? RealPath(string path)
+    {
+        try
+        {
+            var full = Path.GetFullPath(path);
+            var root = Path.GetPathRoot(full) ?? "";
+            var queue = new LinkedList<string>(full[root.Length..].Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries));
+            var current = root;
+            var hops = 0;
+            while (queue.First is { } head)
+            {
+                queue.RemoveFirst();
+                var part = head.Value;
+                if (part == ".")
+                {
+                    continue;
+                }
+
+                if (part == "..")
+                {
+                    current = Path.GetDirectoryName(current) ?? root;
+                    continue;
+                }
+
+                var next = Path.Combine(current, part);
+                var target = new DirectoryInfo(next).LinkTarget;
+                if (target is null)
+                {
+                    current = next;
+                    continue;
+                }
+
+                if (++hops > MaxLinkHops)
+                {
+                    return null;
+                }
+
+                var targetFull = Path.IsPathRooted(target) ? target : Path.Combine(current, target);
+                var targetRoot = Path.GetPathRoot(targetFull) ?? "";
+                current = targetRoot;
+                var parts = targetFull[targetRoot.Length..].Split(
+                    new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+                for (var i = parts.Length - 1; i >= 0; i--)
+                {
+                    queue.AddFirst(parts[i]);
+                }
+            }
+
+            return Path.GetFullPath(current);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private static bool Covers(string directory, string path)
+    {
+        var dir = Path.TrimEndingDirectorySeparator(directory);
+        if (path.Equals(dir, PathComparison) || path.Equals(directory, PathComparison))
+        {
+            return true;
+        }
+
+        return path.Length > dir.Length
+            && path.StartsWith(dir, PathComparison)
+            && (path[dir.Length] == Path.DirectorySeparatorChar || path[dir.Length] == Path.AltDirectorySeparatorChar);
+    }
 
     /// <summary>Walks string properties of the graph by reflection and returns every env:/file: value as written.</summary>
     internal static List<string> CollectReferences(object root)
@@ -133,7 +311,7 @@ public static class DarlingOwnedSecrets
     internal static DarlingOwnedSet Compute(DarlingConfig config, string configPath)
     {
         var paths = new List<string>();
-        var envNames = new List<string>(DarlingWebSecretReferencePolicy.ServiceEnvNames);
+        var envNames = new List<string>(ServiceEnvNames);
 
         try
         {
