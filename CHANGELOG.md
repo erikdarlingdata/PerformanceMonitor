@@ -21,10 +21,6 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
-### Added
-
-- **The Darling store keeps an hourly history of its own `pg_stat_statements` deltas** (V163): the 100 statements that spent the most time each hour, kept 90 days, surviving service and store restarts and stats resets ([#5097])
-
 ## [3.9.0] - 2026-10-02
 
 Full entries: [docs/changelog/3.9.md](docs/changelog/3.9.md)
