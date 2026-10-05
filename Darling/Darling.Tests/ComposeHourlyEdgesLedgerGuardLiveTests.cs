@@ -25,11 +25,15 @@ namespace Darling.Tests;
 /// <item>A ledger that does not cover the window (its <c>counted_since</c> is after the window start): the guard answers -1,
 /// the runner returns no verdict and notes <see cref="ReadFallback.LedgerUncovered"/> with no log line, and the transaction is
 /// usable for the raw panel statement with the statement timeout put back.</item>
-/// <item>A store before V164 (no ledger table): the guard cannot plan and faults inside its savepoint; the runner undoes it,
-/// returns no verdict and notes <see cref="ReadFallback.GateFailed"/> with no Warning, and the transaction is usable.</item>
+/// <item>A store before V164 (its schema version is below <see cref="QueryStatsHourLedger.RungVersion"/>, and it has no ledger
+/// table): the runner reads the schema version after its savepoint, before the guard's SQL, so the guard never runs. It returns no
+/// verdict and notes <see cref="ReadFallback.GateFailed"/> with no log line, and the transaction is usable.</item>
+/// <item>A store at V164 or later whose ledger table is gone (renamed by hand): that is a real fault, not a store the migration has
+/// not reached. The guard faults inside its savepoint, the runner undoes it, returns no verdict, notes
+/// <see cref="ReadFallback.GateFailed"/> and logs the one Warning every other guard fault logs, and the transaction is usable.</item>
 /// </list>
 /// Each fact also says what is NOT recorded, because a fallback that logged a Warning per panel run would flood a store whose
-/// ledger simply has not caught up yet.
+/// ledger simply has not caught up yet, and what IS recorded, because a store that lost a table must not go quiet.
 ///
 /// <para><b>#1776 own-store</b>: mints a scratch database because it needs TimescaleDB's continuous aggregate and drops a
 /// table, so it is deliberately NOT in the <c>live-postgres</c> collection.</para>
@@ -100,7 +104,7 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
     }
 
     [Fact]
-    public async Task AStoreBeforeTheLedger_GivesNoVerdict_NotesGateFailed_WithNoWarning_AndLeavesTheTransactionUsable()
+    public async Task AStoreBeforeTheLedger_ReadsItsVersion_NeverRunsTheGuard_NotesGateFailed_WithNoLogLine_AndLeavesTheTransactionUsable()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await CreateScratchAsync(ct);
@@ -111,9 +115,56 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
         var bodySucceeded = false;
         try
         {
-            /* A store that has not reached V164 has neither ledger table. */
+            /* A store that has not reached V164 has neither ledger table, and its schema version is below the rung: the rung
+               stamps darling_schema_version in the same transaction as its tables, so the two go together. */
             await ExecuteAsync(connection, $"DROP TABLE {QueryStatsHourLedger.StateTable}", ct);
             await ExecuteAsync(connection, $"DROP TABLE {QueryStatsHourLedger.LedgerTable}", ct);
+            await ExecuteAsync(connection, $"DELETE FROM darling_schema_version WHERE version >= {QueryStatsHourLedger.RungVersion}", ct);
+            Assert.True(await ScalarAsync(connection, "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", ct) < QueryStatsHourLedger.RungVersion);
+
+            var timeoutOutside = await TextAsync(connection, "SHOW statement_timeout", ct);
+            await using var snapshot = await BeginSnapshotAsync(connection, ct);
+            var logger = new CapturingTestLogger();
+            using var scope = ReadScope.Open(logger);
+            var verdict = await DarlingWebEndpoints.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
+
+            Assert.Null(verdict);
+            Assert.Equal(ReadFallback.GateFailed, scope.Fallback);
+            Assert.Equal(ReadOutcome.GateFailed, ReadScope.Resolve(ReadOutcome.Ok, scope.Fallback));
+            Assert.True(logger.Lines.Count == 0, "a store before V164 falls back with no log line at any level: " + logger.Joined);
+
+            /* The guard never ran, so nothing aborted the transaction and its statement timeout was never moved: the panel's raw
+               statement runs on it as it stands. */
+            Assert.Equal(timeoutOutside, await TextAsync(connection, "SHOW statement_timeout", ct));
+            Assert.Equal(1L, await ScalarAsync(connection, "SELECT 1", ct));
+            Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.query_stats", ct));
+            await snapshot.RollbackAsync(ct);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(scratch, bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task AStoreAtTheRungWhoseLedgerTableIsGone_FaultsInTheSavepoint_NotesGateFailed_WithTheOneWarning_AndLeavesTheTransactionUsable()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await CreateScratchAsync(ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PrepareStoreAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* The store is at the rung (its schema version says the ledger exists) but the ledger table was renamed by hand.
+               That is a fault, not a store the migration has not reached: it must log, and it must not be taken for the pre-V164
+               state. */
+            await ExecuteAsync(connection, $"ALTER TABLE {QueryStatsHourLedger.LedgerTable} RENAME TO query_stats_hour_ledger_renamed", ct);
+            Assert.True(await ScalarAsync(connection, "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", ct) >= QueryStatsHourLedger.RungVersion);
 
             await using var snapshot = await BeginSnapshotAsync(connection, ct);
             var logger = new CapturingTestLogger();
@@ -123,7 +174,7 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
             Assert.Null(verdict);
             Assert.Equal(ReadFallback.GateFailed, scope.Fallback);
             Assert.Equal(ReadOutcome.GateFailed, ReadScope.Resolve(ReadOutcome.Ok, scope.Fallback));
-            Assert.True(logger.CountAtLevel(LogLevel.Warning) == 0, "a store before V164 falls back quietly: " + logger.Joined);
+            Assert.True(logger.CountAtLevel(LogLevel.Warning) == 1, "a store at V164 or later that lost its ledger table warns once: " + logger.Joined);
 
             /* The failed statement aborted the transaction; the rollback to the savepoint made it usable again, so the
                panel's raw statement can run on it. */

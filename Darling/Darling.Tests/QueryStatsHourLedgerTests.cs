@@ -80,6 +80,7 @@ public sealed class QueryStatsHourLedgerTests
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal(164, Rung.Version);
+        Assert.Equal(QueryStatsHourLedger.RungVersion, Rung.Version); // the runner's below-the-rung check reads this constant
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);

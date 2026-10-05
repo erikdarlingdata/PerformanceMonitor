@@ -19,7 +19,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para>A result of 0 means the guard passed. <see cref="UncoveredResult"/> (-1) means the ledger does not cover the
 /// window: the state row's <c>counted_since</c> is after the window start, or the state row is missing, so the hours
 /// before it were never counted and no comparison says anything. Any other result, or a fault, means the read stays on
-/// raw. A store before V164 has no ledger table, so the guard faults and the read stays on raw too.</para>
+/// raw. A store before V164 has no ledger table, so the runner reads the store's schema version first and does not run the
+/// guard below <see cref="QueryStatsHourLedger.RungVersion"/>: the read stays on raw with no fault. A ledger table that is missing
+/// on a store at the rung is a fault like any other.</para>
 /// <para><b>Why a pass is exact.</b> The ledger counts the rollup's population: a restart row
 /// (<c>sample_interval_seconds = 0</c>) is in neither, and a row with a NULL interval is in both, because the rollup's
 /// own <c>count(*)</c> sits under <c>WHERE sample_interval_seconds IS DISTINCT FROM 0</c>

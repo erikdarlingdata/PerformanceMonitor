@@ -55,6 +55,14 @@ public static class QueryStatsHourLedger
     public const string StateTable = "collect.query_stats_hour_ledger_state";
 
     /// <summary>
+    /// The store schema version of the rung that creates both tables (V164). A store below it has neither table, so a
+    /// reader checks the store's schema version against this before it names them: the hourly-edges runner does, and a
+    /// store below the rung reads raw with no fault to log (#4605). <c>QueryStatsHourLedgerTests</c> pins it to the
+    /// version the rung is registered under.
+    /// </summary>
+    public const int RungVersion = 164;
+
+    /// <summary>
     /// Both tables and the state row, as the V164 rung runs them. Idempotent: the tables are guarded and the state row
     /// is inserted once (<c>ON CONFLICT DO NOTHING</c>), so a re-run of the rung keeps the original
     /// <c>counted_since</c>. The rung embeds this text, so editing it edits a shipped rung: add a new rung instead, and

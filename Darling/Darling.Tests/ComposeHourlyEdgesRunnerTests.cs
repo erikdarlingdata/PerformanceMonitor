@@ -61,7 +61,9 @@ public class ComposeHourlyEdgesRunnerTests
     {
         var body = Resolver();
         var set = body.IndexOf("HourlyEdgesGuardTimeoutSql(guardSeconds), McpCommandDeadlines", StringComparison.Ordinal);
-        var guard = body.IndexOf("ExecuteScalarAsync(", StringComparison.Ordinal);
+
+        /* The guard's own statement: the schema-version probe (#4605) also executes a scalar, but ahead of the timeout, by design. */
+        var guard = body.IndexOf("guard.ExecuteScalarAsync(", StringComparison.Ordinal);
         var restore = body.IndexOf("HourlyEdgesRestoreTimeoutSql, McpCommandDeadlines", StringComparison.Ordinal);
 
         Assert.True(set > 0 && guard > set && restore > guard, "SET LOCAL statement_timeout, then the guard, then the restore");
@@ -211,19 +213,37 @@ public class ComposeHourlyEdgesRunnerTests
     }
 
     [Fact]
-    public void AStoreBeforeTheLedger_FaultsInTheSavepoint_AndIsNotedQuietlyAsGateFailed_WhileEveryOtherFaultStillWarns()
+    public void AStoreBeforeTheLedger_IsFoundByItsSchemaVersion_BeforeTheGuardRuns_WhileEveryGuardFaultStillWarns()
     {
         var body = Resolver();
-        var catchAt = body.IndexOf("catch (Exception ex) when (ex is not OperationCanceledException)", StringComparison.Ordinal);
-        Assert.True(catchAt > 0);
-        var tail = body[catchAt..];
+        var savepoint = body.IndexOf("HourlyEdgesSavepointSql, McpCommandDeadlines", StringComparison.Ordinal);
+        var probe = body.IndexOf("new NpgsqlCommand(QueryStoreWideSchemaVersionSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds }", StringComparison.Ordinal);
+        var below = body.IndexOf("if (schemaVersion < QueryStatsHourLedger.RungVersion)", StringComparison.Ordinal);
+        var quiet = body.IndexOf("ReadScope.Note(ReadFallback.GateFailed);", StringComparison.Ordinal);
+        var set = body.IndexOf("HourlyEdgesGuardTimeoutSql(guardSeconds), McpCommandDeadlines", StringComparison.Ordinal);
+        var guardSql = body.IndexOf("new NpgsqlCommand(IntervalRollupCountGuard.QueryStatsSql", StringComparison.Ordinal);
+        Assert.True(savepoint > 0 && probe > savepoint && below > probe && quiet > below && set > quiet && guardSql > set,
+            "savepoint, then the schema-version read, then the below-the-rung branch, then the guard's timeout and SQL");
 
-        var quietGuard = tail.IndexOf("if (ex is PostgresException { SqlState: PostgresErrorCodes.UndefinedTable })", StringComparison.Ordinal);
-        var quiet = tail.IndexOf("ReadScope.Note(ReadFallback.GateFailed);", StringComparison.Ordinal);
+        /* A store below the rung returns from the branch before the guard's timeout is set, so nothing is left to put back. */
+        var branch = body[below..set];
+        Assert.Contains("return null;", branch, StringComparison.Ordinal);
+        Assert.DoesNotContain("NoteFallback", branch, StringComparison.Ordinal);
+
+        /* The only other statement that reads the version is the Query Store route's constant, shared, not copied. */
+        Assert.DoesNotContain("darling_schema_version", body, StringComparison.Ordinal);
+        Assert.Equal("SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", DarlingWebEndpoints.QueryStoreWideSchemaVersionSql);
+
+        /* No fault is special-cased: every one, an undefined table included, warns once, then rolls back to the savepoint. */
+        var catchAt = body.IndexOf("catch (Exception ex) when (ex is not OperationCanceledException)", StringComparison.Ordinal);
+        Assert.True(catchAt > guardSql);
+        var tail = body[catchAt..];
+        Assert.DoesNotContain("UndefinedTable", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("PostgresException", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("ReadScope.Note(ReadFallback.GateFailed);", tail, StringComparison.Ordinal);
         var loud = tail.IndexOf("ReadScope.NoteFallback(ReadFallback.GateFailed, \"#4605 compose hourly-edges count guard\", ex);", StringComparison.Ordinal);
         var rollback = tail.IndexOf("HourlyEdgesRollbackToSavepointSql", StringComparison.Ordinal);
-        Assert.True(quietGuard >= 0 && quiet > quietGuard && loud > quiet && rollback > loud,
-            "an undefined table (no ledger) notes without a log line; any other fault warns; both then roll back to the savepoint");
+        Assert.True(loud >= 0 && rollback > loud, "any guard fault warns, then rolls back to the savepoint");
     }
 
     [Fact]
