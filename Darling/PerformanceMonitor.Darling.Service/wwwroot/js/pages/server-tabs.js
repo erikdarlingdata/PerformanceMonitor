@@ -996,6 +996,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No latch classes accumulated waits in this window."
       ),
+      namedTrendPanel(server, ctx, "latch"),
       table(
         "Spinlock Stats",
         "get_spinlock_stats",
@@ -1005,6 +1006,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No spinlocks recorded collisions in this window."
       ),
+      namedTrendPanel(server, ctx, "spinlock"),
     ],
   },
 
@@ -1654,6 +1656,7 @@ export const SERVER_TABS = [
     label: "Activity",
     build: (server, ctx) => [
       perfmonPanel(server, ctx),
+      sessionStatsTrendPanel(server, ctx),
       ...fanout("get_session_stats", { server }, [
         { title: "Sessions", subtitle: SNAPSHOT, viz: "stat", stats: SESSION_STATS },
         {
@@ -3773,6 +3776,172 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
     }, "clerk-trend|" + server, chartZoomScope(ctx.hours)),
     typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? el("div", { class: "mp-metric-note", text: trend.data.aggregate_note }) : null,
   ]);
+}
+
+/**
+ * The latch and spinlock trends get_server_trend serves as one line per name (#5170). The options are the classes of the
+ * table above (heaviest first, read with the same window); the heaviest five are checked the first time, as the read's
+ * own default does. The checked set and search text live in multi-picker.js's module state keyed by kind and server, so
+ * the 60 s rebuild keeps them.
+ */
+const NAMED_TRENDS = {
+  latch: {
+    title: "Latch Trend",
+    optionsTool: "get_latch_stats",
+    rowsKey: "latches",
+    nameKey: "latch_class",
+    seriesKey: "latch_class",
+    unit: "ms/s",
+    noun: "latch class",
+    label: "Latch classes",
+    note: "Wait ms/s, one line per checked latch class.",
+    noOptions: "No latch classes accumulated waits in this window.",
+  },
+  spinlock: {
+    title: "Spinlock Trend",
+    optionsTool: "get_spinlock_stats",
+    rowsKey: "spinlocks",
+    nameKey: "spinlock_name",
+    seriesKey: "spinlock_name",
+    unit: "collisions/s",
+    noun: "spinlock",
+    label: "Spinlocks",
+    note: "Collisions/s, one line per checked spinlock.",
+    noOptions: "No spinlocks recorded collisions in this window.",
+  },
+};
+const MAX_NAMES_CHARTED = 10;
+const DEFAULT_NAMES_CHECKED = 5;
+
+export function namedTrendPanel(server, ctx, kind) {
+  const spec = NAMED_TRENDS[kind];
+  const { panel, body } = panelShell(spec.title, ctx.label + ", with a trend for the " + spec.noun + "s you check");
+  (async () => {
+    const res = await readToolWithinKeptHistory(spec.optionsTool, { server, hours: ctx.hours, top: MAX_NAMES_CHARTED }, ctx && ctx.signal);
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message || spec.noOptions)]);
+    const options = (res.data[spec.rowsKey] || []).map((r) => r[spec.nameKey]).filter(Boolean);
+    if (!options.length) return mount(body, emptyStrip(spec.noOptions));
+
+    const chartSlot = el("div", {}, [loadingStrip()]);
+    const picker = multiPicker({
+      key: kind + "|" + server,
+      label: spec.label,
+      options,
+      max: MAX_NAMES_CHARTED,
+      noun: spec.noun,
+      defaultsLabel: "Top " + spec.noun + "s",
+      defaults: (o) => o.slice(0, DEFAULT_NAMES_CHECKED),
+      onChange: (checked) => drawNamedTrends(chartSlot, server, ctx, kind, checked),
+    });
+    mount(body, [picker.node, chartSlot]);
+    drawNamedTrends(chartSlot, server, ctx, kind, picker.checked());
+    picker.restoreFocus();
+  })();
+  return panel;
+}
+
+/* The newest named-trend draw's AbortController per kind and server: a new draw aborts the previous one's read. */
+const namedDraws = new Map();
+
+export async function drawNamedTrends(slot, server, ctx, kind, checked) {
+  const spec = NAMED_TRENDS[kind];
+  const names = checked.slice(0, MAX_NAMES_CHARTED);
+  const drawKey = kind + "|" + server;
+  const previous = namedDraws.get(drawKey);
+  if (previous) previous.abort();
+  const mine = new AbortController();
+  namedDraws.set(drawKey, mine);
+  if (!names.length) {
+    mount(slot, emptyStrip("Check at least one " + spec.noun + " to chart its trend."));
+    return;
+  }
+  mount(slot, loadingStrip());
+  const signal = ctx && ctx.signal && typeof AbortSignal !== "undefined" && AbortSignal.any ? AbortSignal.any([mine.signal, ctx.signal]) : mine.signal;
+  const trend = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours, names: names.join(",") }, signal);
+  if (namedDraws.get(drawKey) !== mine || mine.signal.aborted) return;
+
+  if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
+  /* The read names the series it found no samples for under missing_names at the top level on a partial match and
+     under hints on an empty answer. */
+  const missingOf = (data) => {
+    const top = data && Array.isArray(data.missing_names) ? data.missing_names : [];
+    const hinted = data && data.hints && Array.isArray(data.hints.missing_names) ? data.hints.missing_names : [];
+    return [...new Set([...top, ...hinted])];
+  };
+  const missingStrip = (data) => (missingOf(data).length ? noticeStrip("No samples in this window for: " + missingOf(data).join(", ") + ".") : null);
+  if (trend.kind === "empty") {
+    return mount(slot, [keptWindowStrip(trend), missingStrip(trend.hints || {}), emptyStrip(trend.message || "No " + spec.noun + " samples in this window.")]);
+  }
+
+  const drawn = (trend.data.series || []).map((s, i) => ({
+    key: "n" + i,
+    label: s[spec.seriesKey],
+    rows: s.trend || [],
+    color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length],
+  }));
+  if (!drawn.length) return mount(slot, [keptWindowStrip(trend), missingStrip(trend.data), emptyStrip("No " + spec.noun + " samples in this window.")]);
+  /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+  const notes = discontinuityNotes(trend.data);
+  mount(slot, [
+    keptWindowStrip(trend),
+    notes.length ? noticeStrip(notes.join(" ")) : null,
+    missingStrip(trend.data),
+    zoomableLineChart({
+      points: mergeSeriesRows(drawn, "time", kind === "latch" ? "wait_time_ms_per_second" : "collisions_per_second"),
+      xKey: "time",
+      series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
+      formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+      unit: spec.unit,
+      ...windowFromHours(trend.keptHours || ctx.hours),
+    }, kind + "-trend|" + server, chartZoomScope(ctx.hours)),
+    el("div", { class: "mp-metric-note", text: spec.note }),
+    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? el("div", { class: "mp-metric-note", text: trend.data.aggregate_note }) : null,
+  ]);
+}
+
+/** The session counts the Activity tab charts; the read also carries databases_with_connections and the top application and host. */
+const SESSION_TREND_SERIES = [
+  { key: "total_sessions", label: "Total" },
+  { key: "running_sessions", label: "Running" },
+  { key: "sleeping_sessions", label: "Sleeping" },
+  { key: "background_sessions", label: "Background" },
+  { key: "dormant_sessions", label: "Dormant" },
+  { key: "idle_sessions_over_30min", label: "Idle over 30 min" },
+  { key: "sessions_waiting_for_memory", label: "Waiting for memory" },
+];
+
+/** Session Stats trend: the server-wide session counts per bucket, with the newest bucket's top application and host as text. */
+export function sessionStatsTrendPanel(server, ctx) {
+  const { panel, body } = panelShell("Session Stats Trend", ctx.label);
+  (async () => {
+    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: "session_stats", hours: ctx.hours }, ctx && ctx.signal);
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message || "No session samples in this window.")]);
+    const points = res.data.trend || [];
+    if (!points.length) return mount(body, [keptWindowStrip(res), emptyStrip("No session samples in this window.")]);
+    /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
+    const notes = discontinuityNotes(res.data);
+    const newest = points[points.length - 1];
+    const top = [];
+    if (newest.top_application_name) top.push("application " + newest.top_application_name + " (" + newest.top_application_connections + ")");
+    if (newest.top_host_name) top.push("host " + newest.top_host_name + " (" + newest.top_host_connections + ")");
+    mount(body, [
+      keptWindowStrip(res),
+      notes.length ? noticeStrip(notes.join(" ")) : null,
+      zoomableLineChart({
+        points,
+        xKey: "time",
+        series: SESSION_TREND_SERIES.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
+        formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+        unit: "sessions",
+        ...windowFromHours(res.keptHours || ctx.hours),
+      }, "server-trend|" + server + "|session_stats", chartZoomScope(ctx.hours)),
+      top.length ? el("div", { class: "mp-metric-note", text: "Top in the newest bucket: " + top.join("; ") + "." }) : null,
+      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? el("div", { class: "mp-metric-note", text: res.data.aggregate_note }) : null,
+    ]);
+  })();
+  return panel;
 }
 
 /**
