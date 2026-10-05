@@ -95,9 +95,9 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var end);
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
-        var start = end.AddHours(-hours_back);
+        var start = windowEnd.AddHours(-hours_back);
 
         try
         {
@@ -110,7 +110,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                 command.Parameters.AddWithValue(query_id);
                 /* #1969: the columns are timestamp without time zone; a Utc-kinded bind is refused or shifted. */
                 command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
-                command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+                command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified));
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
@@ -127,7 +127,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                     ?? McpHelpers.Status("empty",
                         $"No Query Store history for query_id {query_id} in database '{database_name}' in the {hours_back}-hour window searched.");
 
-            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, start, end, cancellationToken);
+            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, start, windowEnd, cancellationToken);
             var effectiveStart = RawWindowFloor.EffectiveStart(floor, start);
             var truncated = RawWindowFloor.IsTruncated(floor, start);
 
