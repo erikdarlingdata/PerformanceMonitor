@@ -152,6 +152,7 @@ public sealed class PlanViewerBehaviourTests
         Assert.Equal(new[] { "Plan", "Live plan" }, Strs(r, "activeLabels"));
         Assert.True(r.GetProperty("activeHide").GetBoolean());
         Assert.True(r.GetProperty("planColsNoFilter").GetBoolean());
+        Assert.True(r.GetProperty("planColsNoFilterNoCopy").GetBoolean(), "every plan column, planColumn included, sets filter, copy and csv to false: an open panel's XML is the cell's text");
 
         Assert.Equal("/api/read/get_active_query_plan_xml", Str(r, "activePath"));
         var est = r.GetProperty("activeQuery");

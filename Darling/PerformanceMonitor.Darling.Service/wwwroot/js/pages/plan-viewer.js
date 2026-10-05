@@ -309,6 +309,7 @@ export function activePlanColumns(server) {
       sortable: false,
       filter: false,
       csv: false,
+      copy: false,
     },
     {
       key: "has_live_query_plan",
@@ -319,6 +320,7 @@ export function activePlanColumns(server) {
       sortable: false,
       filter: false,
       csv: false,
+      copy: false,
     },
   ];
 }
@@ -341,6 +343,7 @@ export function queryStorePlanColumn(server) {
     sortable: false,
     filter: false,
     csv: false,
+    copy: false,
   };
 }
 
@@ -355,6 +358,7 @@ export function procedurePlanColumn(server) {
     sortable: false,
     filter: false,
     csv: false,
+    copy: false,
   };
 }
 
@@ -366,6 +370,8 @@ export function planColumn(server) {
     render: (row) => storedPlanCell(server, row),
     hideWhenEmpty: true,
     sortable: false,
+    filter: false,
     csv: false,
+    copy: false,
   };
 }

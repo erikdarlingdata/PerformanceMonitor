@@ -161,6 +161,9 @@ const scenarios = {
     out.activeKeys = cols.map((c) => c.key);
     out.activeLabels = cols.map((c) => c.label);
     out.planColsNoFilter = [...cols, viewer.queryStorePlanColumn("srv-a"), viewer.procedurePlanColumn("srv-a")].every((c) => c.filter === false);
+    /* An open panel's XML is the cell's text, so every plan column also stays out of the column filter and Copy row / Copy all. */
+    out.planColsNoFilterNoCopy = [...cols, viewer.queryStorePlanColumn("srv-a"), viewer.procedurePlanColumn("srv-a"), viewer.planColumn("srv-a")]
+      .every((c) => c.filter === false && c.copy === false && c.csv === false);
     out.activeHide = cols.every((c) => c.hideWhenEmpty === true && c.sortable === false && c.csv === false);
     const est = cols[0].render(snap);
     est.byText("Plan").click();
