@@ -264,8 +264,11 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
                 /* The history member reads through get_store_query_history: a statement whose text carries a registered database
                    name across the 240-character preview cut, with a history row that ranks it first. The tool's own cut would leave
                    the front of the name behind as a prefix no alias matches, so the bundle must read the text whole. */
-                await using (var straddle = new NpgsqlCommand(StraddlingStatement, connection))
+                /* Run many times: the extension's table is shared by every database on the server and evicts the least-used entries
+                   first, so a statement that ran once is gone when the full suite churns it (the full run showed exactly that). */
+                for (var i = 0; i < 25; i++)
                 {
+                    await using var straddle = new NpgsqlCommand(StraddlingStatement, connection);
                     await straddle.ExecuteNonQueryAsync(ct);
                 }
 

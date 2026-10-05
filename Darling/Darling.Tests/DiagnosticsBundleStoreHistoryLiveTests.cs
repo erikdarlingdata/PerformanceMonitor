@@ -89,7 +89,8 @@ public sealed class DiagnosticsBundleStoreHistoryLiveTests
                 await connection.OpenAsync(ct);
                 var ensured = await StoreStatementStats.EnsureAsync(connection, "config", Array.Empty<string>(), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct);
                 Assert.Equal(StoreStatementStats.SetupOutcome.Ready, ensured);
-                for (var i = 0; i < 2; i++)
+                /* Many runs: the extension's table is shared by every database on the server and evicts the least-used entries first. */
+                for (var i = 0; i < 25; i++)
                 {
                     await using var statement = new NpgsqlCommand(LongStatement, connection);
                     await statement.ExecuteNonQueryAsync(ct);
