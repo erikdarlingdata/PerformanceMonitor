@@ -1100,7 +1100,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return Results.Text(answer, "application/json", statusCode: MuteRuleEnvelopeStatus(answer));
         });
 
-        /* #5240: edit one server in place. Gates in add's order: the seat (403), JSON content type (415), a bounded
+        /* #5240: edit one server in place. Gates in add's order: the sign-in's edit right (403), JSON content type (415), a bounded
            body (400), a JSON object without duplicate keys (400), the token (400), then the shared slot (429) and the
            core with a timeout (503). The host's group-level method gate has already refused a read-only sign-in
            every unsafe method. */
