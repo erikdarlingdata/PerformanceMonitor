@@ -176,19 +176,37 @@ public sealed class PayloadDigestPassThroughLiveTests
         return absent;
     }
 
-    private static async Task<NpgsqlConnection> OpenMigratedStoreAsync(string connectionString, CancellationToken ct)
+    /// <summary>
+    /// The ONE place this file opens a connection. Production names the dimension tables bare
+    /// (PayloadDimensions.QueryPlanDimTable is "query_plan_dim") and resolves them through the data source's
+    /// search_path (DarlingManagedPostgres.BuildConnectionString sets NpgsqlConnectionStringBuilder.SearchPath).
+    /// Every connection opens the same way, so the bare names resolve as they do live; a connection added later
+    /// should come through here too.
+    /// </summary>
+    private static async Task<NpgsqlConnection> OpenWithStoreSearchPathAsync(string connectionString, CancellationToken ct)
     {
-        /* Production names the dimension tables bare (PayloadDimensions.QueryPlanDimTable is "query_plan_dim") and
-           resolves them through the data source's search_path (DarlingManagedPostgres.BuildConnectionString sets
-           NpgsqlConnectionStringBuilder.SearchPath). Open the same way, so the bare names below resolve as they do live. */
         var builder = new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = PgSchemaGenerator.SearchPath };
         var connection = new NpgsqlConnection(builder.ConnectionString);
-        await connection.OpenAsync(ct);
+        try
+        {
+            await connection.OpenAsync(ct);
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+
+        return connection;
+    }
+
+    private static async Task<NpgsqlConnection> OpenMigratedStoreAsync(string connectionString, CancellationToken ct)
+    {
+        var connection = await OpenWithStoreSearchPathAsync(connectionString, ct);
         await PgMigrations.MigrateAsync(connection, ct);
         return connection;
     }
 
-    /// <summary>The plan a reader resolves for one row through v_query_stats (text-else-gzip), or null.</summary>
     private static async Task<string?> ResolvedPlanAsync(NpgsqlConnection connection, int serverId, string queryHash, CancellationToken ct)
     {
         await using var read = new NpgsqlCommand(
@@ -467,8 +485,7 @@ public sealed class PayloadDigestPassThroughLiveTests
         var now = Anchor.AddHours(10);
 
         await using var first = await OpenMigratedStoreAsync(connectionString!, ct);
-        await using var second = new NpgsqlConnection(connectionString);
-        await second.OpenAsync(ct);
+        await using var second = await OpenWithStoreSearchPathAsync(connectionString!, ct);
         var bodySucceeded = false;
         try
         {

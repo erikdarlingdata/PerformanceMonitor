@@ -547,6 +547,93 @@ CREATE TABLE IF NOT EXISTS collect.slow_reads
 CREATE INDEX IF NOT EXISTS idx_slow_reads_time
     ON collect.slow_reads(read_time, slow_read_id);";
 
+    /// <summary>
+    /// V163 (#5097) — the store's own statement history: an hourly, delta-per-statement record of the store's
+    /// <c>pg_stat_statements</c>, so a statement's mean milliseconds per call can be read hour by hour across a store
+    /// restart, a service restart, a <c>pg_stat_statements_reset()</c> and the nightly upgrade.
+    ///
+    /// <para><b>Not a collector.</b> The store has no <c>servers</c> row and no <c>server_id</c>, and self-telemetry is
+    /// kept out of <c>CollectorCatalog.All</c> on purpose (V111's reasoning), which also keeps the hypertable
+    /// conversion and the catalog purge off these tables. The three tables are plain, like V111's and V161's. The
+    /// hourly store self-metrics tick writes them, and the writer pays for its own retention: 90 days, because
+    /// statement ids change with a major upgrade and a year of hourly rows would read as noise.</para>
+    ///
+    /// <para><b>Why a baseline table.</b> The per-target statement collector keeps its previous snapshot in process
+    /// memory and re-seeds it from stored rows after a restart. A top-N history cannot seed that way: a statement
+    /// left out of last hour's top N has no stored previous row. So the previous cumulative counters live in the store,
+    /// in <c>config.store_statement_baseline</c>, and the delta is computed in SQL. It is state and not collected data,
+    /// so it sits in <c>config</c> where no purge ages it out, the same reasoning as <c>config.store_log_read_marker</c>.
+    /// Provisioning re-grants every <c>config</c> table after migration, so it needs no GRANT here.</para>
+    ///
+    /// <para><b>No statement text.</b> The history stores the role and the query id only. A reader joins the live text
+    /// at read time, so a stored row can never hold a statement the reader function would withhold. There are no WAL or
+    /// temp-file columns beyond temp blocks written: the store's own statements do not move them.</para>
+    ///
+    /// <para><b>Reading the columns.</b> <c>max_exec_ms</c> is the longest single execution since the entry started
+    /// in the extension, not within the interval: it is cumulative and cannot be differenced. <c>first_seen</c> can be
+    /// an upper bound (an entry already there but missing from the baseline, such as a query id that became visible
+    /// after a grant or a renamed role, is credited its whole lifetime as one interval). An entry that was evicted and
+    /// re-added, and has already passed its old baseline, undercounts with no flag; <c>dealloc_delta</c> on the capture
+    /// is the hint. <c>statements_seen</c> is 0 on a <c>rebaselined</c> capture.</para>
+    ///
+    /// <para><b>No Lite twin.</b> Lite's store is DuckDB, which has no <c>pg_stat_statements</c>; the same structural
+    /// reason as V111.</para>
+    /// </summary>
+    private const string V163Sql = @"
+CREATE TABLE IF NOT EXISTS collect.store_statement_captures
+(
+    capture_time timestamp NOT NULL,
+    interval_seconds integer,
+    stats_reset timestamp,
+    dealloc bigint,
+    dealloc_delta bigint,
+    statements_seen integer NOT NULL,
+    statements_kept integer NOT NULL,
+    hidden_statements integer NOT NULL,
+    outcome text NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_statement_captures_time
+    ON collect.store_statement_captures(capture_time);
+
+CREATE TABLE IF NOT EXISTS collect.store_statement_history
+(
+    capture_time timestamp NOT NULL,
+    interval_seconds integer NOT NULL,
+    role_name text NOT NULL,
+    queryid bigint NOT NULL,
+    delta_calls bigint NOT NULL,
+    delta_total_exec_ms double precision NOT NULL,
+    delta_rows bigint NOT NULL,
+    delta_shared_blks_hit bigint NOT NULL,
+    delta_shared_blks_read bigint NOT NULL,
+    delta_temp_blks_written bigint NOT NULL,
+    max_exec_ms double precision,
+    first_seen boolean NOT NULL,
+    entry_restarted boolean NOT NULL,
+    reset_in_interval boolean NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_statement_history_time
+    ON collect.store_statement_history(capture_time);
+
+CREATE INDEX IF NOT EXISTS idx_store_statement_history_query
+    ON collect.store_statement_history(queryid, capture_time);
+
+CREATE TABLE IF NOT EXISTS config.store_statement_baseline
+(
+    role_name text NOT NULL,
+    queryid bigint NOT NULL,
+    calls bigint NOT NULL,
+    total_exec_ms double precision NOT NULL,
+    rows_returned bigint NOT NULL,
+    shared_blks_hit bigint NOT NULL,
+    shared_blks_read bigint NOT NULL,
+    temp_blks_written bigint NOT NULL,
+    captured_at timestamp NOT NULL,
+    CONSTRAINT pk_store_statement_baseline PRIMARY KEY (role_name, queryid)
+);";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -747,6 +834,7 @@ CREATE INDEX IF NOT EXISTS idx_slow_reads_time
         new Migration(160, "collector-run-time", V160Sql),
         new Migration(161, "query-store-top-daily", V161Sql),
         new Migration(162, "slow-reads", V162Sql),
+        new Migration(163, "store-statement-history", V163Sql),
     };
 
     /// <summary>

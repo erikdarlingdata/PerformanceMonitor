@@ -33,7 +33,7 @@ public sealed class SlowReadsRungTests
 
     public static int RungVersion => Rung.Version;
 
-    /// <summary>This rung's sentinel; the ordinal is a fact of the probe's shape, and it is the probe's last.</summary>
+    /// <summary>This rung's sentinel; the ordinal is a fact of the probe's shape, and a newer rung's sentinel follows it.</summary>
     private const int ProbeOrdinal = 137;
 
     private const string SkipText = "Set DARLING_TEST_PG to a Postgres connection string to run the slow-read table's live pins (each mints its own scratch database).";
@@ -45,12 +45,13 @@ public sealed class SlowReadsRungTests
     private static string Statements() => Rung.Sql.Replace("\r\n", "\n", StringComparison.Ordinal);
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder_AndIsTheTopRung()
+    public void TheRungIsRegisteredInADenseLadder_AtVersion162()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal(162, Rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, Rung.Version);
+        /* No longer the top rung: V163 (the store's statement history) landed above it. */
+        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
@@ -79,24 +80,22 @@ public sealed class SlowReadsRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheTableAsItsLastArm_AndMapsFullyMigratedToTheTopRung()
+    public void TheProbeCarriesTheTable_AndMapsAStoreThroughThisRungToThisRung()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = $"to_regclass('collect.{Table}') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.LastIndexOf("EXISTS", StringComparison.Ordinal) < probe.IndexOf(arm, StringComparison.Ordinal),
-            "the new arm is the probe's last EXISTS, so it reads at the next ordinal");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        Assert.True(ProbeOrdinal < arity - 1, "a newer rung's sentinel follows this one");
         Assert.Equal("hasSlowReads", method.GetParameters()[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
+        var all = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(Rung.Version, (int)method.Invoke(null, all)!);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 

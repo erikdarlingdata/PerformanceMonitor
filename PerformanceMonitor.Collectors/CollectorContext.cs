@@ -291,6 +291,8 @@ public sealed class CollectorContext
     /// <summary>
     /// #5158: when true (and <see cref="CapturePlanXml"/> is on), <c>query_stats</c> leaves the plan out of
     /// its main query, so the SELECT is the same no-plan form Lite ships and ordinals 44/45 do not exist.
+    /// <c>procedure_stats</c> does the same at module grain (offsets 0, -1; its plan ordinals are 27/28) and
+    /// adds three identity columns at 27-29 in their place; its fetch is <c>ProcedureStatsCollector.BuildPlanFetchQuery</c>.
     /// The host then fetches plan XML in a second target query, <c>QueryStatsCollector.BuildPlanFetchQuery</c>,
     /// for only the statement plans it has not already committed. Inline capture renders and ships about
     /// 200 plans every run whether or not the store holds them (one large store: 54 GB/h rendered and
