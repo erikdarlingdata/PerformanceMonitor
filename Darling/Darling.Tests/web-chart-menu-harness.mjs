@@ -34,6 +34,8 @@ class FakeNode {
   setPointerCapture() {}
   focus() {}
   click() {}
+  get offsetWidth() { return this.attrs.role === "menu" ? 176 : 0; }
+  get offsetHeight() { return this.attrs.role === "menu" ? 100 : 0; }
   getBoundingClientRect() { return { left: 0, top: 0, width: 1000, height: 320 }; }
   set textContent(value) { this.children = []; this.text = String(value); }
   get textContent() { return (this.text || "") + this.children.map((c) => c.textContent).join(""); }
@@ -105,12 +107,36 @@ openMenu(a).find((n) => n.textContent.startsWith("Export Data to CSV")).listener
 await new Promise((r) => setTimeout(r, 50));
 out.csv = blobParts ? String(blobParts[1]).split("\r\n") : null;
 
+/* A right-click near the bottom-right corner: the menu is placed by left/top alone and kept inside the chart's box. */
+const corner = charts.zoomableLineChart(spec({ title: "Wait trend" }), "m6", scope);
+const cornerDiv = find(corner, (n) => String(n.className) === "chart")[0];
+cornerDiv.listeners.contextmenu[0]({ preventDefault() {}, clientX: 990, clientY: 315 });
+const cornerMenu = find(corner, (n) => n.attrs.role === "menu")[0];
+out.rightClickStyle = { left: cornerMenu.style.left, top: cornerMenu.style.top, right: cornerMenu.style.right };
+cornerMenu.listeners.keydown[0]({ key: "Tab", preventDefault() {} });
+out.menuAfterTab = find(corner, (n) => n.attrs.role === "menu").length;
+
+/* The menu and the source panel survive a rebuild of the same chart (the 60 s poll). */
+const keep1 = charts.zoomableLineChart(spec({ title: "Wait trend", source: { read: "get_wait_stats", params: { hours: 4 } } }), "m7", scope);
+openMenu(keep1).find((n) => n.textContent === "Show Data Source").listeners.click[0]();
+openMenu(keep1);
+const keep2 = charts.zoomableLineChart(spec({ title: "Wait trend", source: { read: "get_wait_stats", params: { hours: 4 } } }), "m7", scope);
+out.rebuiltMenuOpen = find(keep2, (n) => n.attrs.role === "menu").length;
+out.rebuiltSource = find(keep2, (n) => String(n.className) === "chart-source")[0].textContent;
+const other = charts.zoomableLineChart(spec({ title: "Wait trend" }), "m8", scope);
+out.otherChartMenuOpen = find(other, (n) => n.attrs.role === "menu").length;
+
 const z = charts.zoomableLineChart(spec({ title: "Wait trend" }), "m2", scope);
 out.noSourceItems = labels(openMenu(z));
 btn(z).listeners.click[0]();
 charts.setChartZoom("m3", scope, T0 + 2 * MIN, T0 + 6 * MIN);
 const zz = charts.zoomableLineChart(spec({ title: "Wait trend" }), "m3", scope);
 out.zoomedItems = labels(openMenu(zz));
+blobParts = null;
+items(zz).find((n) => n.textContent.startsWith("Export Data to CSV")).listeners.click[0]();
+await new Promise((r) => setTimeout(r, 50));
+out.zoomedCsvRows = blobParts ? String(blobParts[1]).split("\r\n").length : null;
+openMenu(zz);
 items(zz).find((n) => n.textContent === "Reset zoom").listeners.click[0]();
 out.zoomAfterReset = charts.getChartZoom("m3", scope) !== null;
 out.menuAfterReset = labels(openMenu(zz));

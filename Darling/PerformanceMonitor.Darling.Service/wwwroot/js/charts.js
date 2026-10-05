@@ -77,7 +77,7 @@ function svg(tag, attrs) {
  */
 export function renderLineChart(spec) {
   const { points, xKey, series, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2 = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
-  const { title = null, source = null, zoomed = false, onResetZoom = null } = spec;
+  const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
   const stacked = mode === "stacked";
   const stackedBar = mode === "stacked-bar";
   /* Both stacked modes share the cumulative pre-pass, the sum-based y-domain, and the hover-at-stack-top dots. */
@@ -550,7 +550,12 @@ export function renderLineChart(spec) {
     tooltip.style.display = "none";
   });
 
-  attachChartMenu(chart, root, { title, source, zoomed, onResetZoom, xKey, series, series2 }, rows);
+  /* Export Data to CSV writes every loaded point, the same as the Viewer, not just the zoomed span (exportPoints
+     is the unzoomed set a zoomable chart passes). */
+  const exportRows = exportPoints
+    ? exportPoints.map((r) => ({ t: parseUtc(r[xKey]), r })).filter((p) => p.t).sort((a, b) => a.t - b.t)
+    : rows;
+  attachChartMenu(chart, root, { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey }, exportRows);
   return chart;
 }
 
@@ -1013,8 +1018,29 @@ function menuFileStem(title) {
   return String(title || "chart").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "chart";
 }
 
+/* What a chart's menu and Show Data Source panel have open, at MODULE scope so the 60 s poll's rebuild of the
+   panel puts them back. Keyed by chart identity (the key zoomableLineChart passes: id + scope); an entry older than
+   MENU_STATE_TTL_MS is ignored, so a chart left while its menu was open does not reopen it much later. */
+const chartMenuStates = new Map();
+const MENU_STATE_TTL_MS = 90000;
+
 function attachChartMenu(chart, root, opts, rows) {
-  const { title, source, zoomed, onResetZoom, xKey, series, series2 } = opts;
+  const { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey } = opts;
+  const owner = {};
+  const held = menuKey ? chartMenuStates.get(menuKey) : null;
+  const restore = held && Date.now() - held.at < MENU_STATE_TTL_MS ? held : null;
+  const hold = (patch) => {
+    if (!menuKey) return;
+    const cur = chartMenuStates.get(menuKey) || {};
+    chartMenuStates.set(menuKey, { ...cur, ...patch, owner, at: Date.now() });
+  };
+  const release = (field) => {
+    const cur = menuKey ? chartMenuStates.get(menuKey) : null;
+    if (!cur || cur.owner !== owner) return;
+    if (field === "menu") cur.menu = null;
+    else cur.source = false;
+    if (!cur.menu && !cur.source) chartMenuStates.delete(menuKey);
+  };
   const hasSource = !!(source && source.read);
   const canReset = zoomed === true && typeof onResetZoom === "function";
   const button = el("button", { class: "chart-menu-btn", type: "button", title: "Chart menu", "aria-label": "Chart menu", "aria-haspopup": "menu", "aria-expanded": "false", text: "⋯" });
@@ -1033,6 +1059,7 @@ function attachChartMenu(chart, root, opts, rows) {
       popup = null;
     }
     button.setAttribute("aria-expanded", "false");
+    release("menu");
     if (outside && typeof document.removeEventListener === "function") document.removeEventListener("click", outside);
     outside = null;
   };
@@ -1041,13 +1068,14 @@ function attachChartMenu(chart, root, opts, rows) {
     label: CHART_MENU_LABELS.copy,
     run: async () => {
       try {
-        const blob = await chartPngBlob(root);
         const nav = typeof navigator !== "undefined" ? navigator : null;
         if (!nav || !nav.clipboard || typeof nav.clipboard.write !== "function" || typeof ClipboardItem === "undefined" || window.isSecureContext === false) {
           say("Copy isn't available here: the browser only allows it on a secure (HTTPS or localhost) page.");
           return;
         }
-        await nav.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        /* Safari only honours the click for a clipboard write that is started at once, so the item takes the
+           still-rendering PNG as a promise instead of awaiting it first. */
+        await nav.clipboard.write([new ClipboardItem({ "image/png": chartPngBlob(root) })]);
         say("Image copied.");
       } catch (e) {
         say("Copy failed: " + (e && e.message ? e.message : "the browser refused."));
@@ -1078,9 +1106,13 @@ function attachChartMenu(chart, root, opts, rows) {
   actions.push({
     label: CHART_MENU_LABELS.csv,
     run: async () => {
-      const tools = await import("./grid-tools.js");
-      tools.downloadCsv(tools.csvFileName(menuFileStem(title)), tools.toCsv(chartCsvRows(rows, xKey, series, series2)));
-      say("CSV exported.");
+      try {
+        const tools = await import("./grid-tools.js");
+        tools.downloadCsv(tools.csvFileName(menuFileStem(title)), tools.toCsv(chartCsvRows(rows, xKey, series, series2)));
+        say("CSV exported.");
+      } catch (e) {
+        say("Export failed: " + (e && e.message ? e.message : "the browser refused."));
+      }
     },
   });
   if (hasSource) {
@@ -1090,9 +1122,16 @@ function attachChartMenu(chart, root, opts, rows) {
         sourceBox.textContent = "";
         for (const line of chartSourceLines(source)) sourceBox.appendChild(el("div", { text: line }));
         sourceBox.style.display = sourceBox.style.display === "none" ? "" : "none";
+        if (sourceBox.style.display === "none") release("source");
+        else hold({ source: true });
       },
     });
   }
+  const showSource = () => {
+    sourceBox.textContent = "";
+    for (const line of chartSourceLines(source)) sourceBox.appendChild(el("div", { text: line }));
+    sourceBox.style.display = "";
+  };
 
   const open = (x, y) => {
     if (popup) close();
@@ -1106,13 +1145,21 @@ function attachChartMenu(chart, root, opts, rows) {
       return b;
     });
     popup = el("div", { class: "chart-menu", role: "menu" }, items);
-    if (typeof x === "number" && typeof y === "number") {
-      popup.style.left = x + "px";
-      popup.style.top = y + "px";
+    const at0 = typeof x === "number" && typeof y === "number" ? { x, y } : null;
+    if (at0) {
+      /* The stylesheet pins the menu to the right edge; a click position needs left/top alone. */
+      popup.style.right = "auto";
+      popup.style.left = at0.x + "px";
+      popup.style.top = at0.y + "px";
     }
+    hold({ menu: at0 || {} });
     popup.addEventListener("keydown", (e) => {
       const at = items.indexOf(typeof document !== "undefined" ? document.activeElement : null);
-      if (e.key === "Escape") {
+      if (e.key === "Tab") {
+        /* Leaving the menu closes it; focus goes back to the button so Tab carries on from there. */
+        button.focus && button.focus();
+        close();
+      } else if (e.key === "Escape") {
         close();
         button.focus && button.focus();
       } else if (e.key === "ArrowDown") {
@@ -1124,6 +1171,14 @@ function attachChartMenu(chart, root, opts, rows) {
       }
     });
     chart.appendChild(popup);
+    if (at0) {
+      /* Keep the whole menu inside the chart's box. */
+      const box = chart.getBoundingClientRect();
+      const w = popup.offsetWidth || 0;
+      const h = popup.offsetHeight || 0;
+      popup.style.left = Math.max(0, Math.min(at0.x, box.width - w)) + "px";
+      popup.style.top = Math.max(0, Math.min(at0.y, box.height - h)) + "px";
+    }
     button.setAttribute("aria-expanded", "true");
     if (items[0] && items[0].focus) items[0].focus();
     if (typeof document.addEventListener === "function") {
@@ -1145,6 +1200,16 @@ function attachChartMenu(chart, root, opts, rows) {
   chart.appendChild(button);
   chart.appendChild(status);
   chart.appendChild(sourceBox);
+  if (restore) {
+    if (restore.source && hasSource) {
+      showSource();
+      hold({ source: true });
+    }
+    if (restore.menu) {
+      const m = restore.menu;
+      open(typeof m.x === "number" ? m.x : undefined, typeof m.y === "number" ? m.y : undefined);
+    }
+  }
 }
 
 /* ─────────────────────────── client-side brush zoom ─────────────────────────── */
@@ -1238,6 +1303,8 @@ export function zoomableLineChart(spec, id, scope) {
     const chart = renderLineChart({
       ...shown,
       zoomed,
+      menuKey: id + "|" + scope,
+      exportPoints: spec.points,
       onResetZoom: () => {
         setChartZoom(id, scope, null, null);
         draw();

@@ -100,4 +100,34 @@ public sealed class WebChartMenuBehaviourTests
         Assert.False(r.GetProperty("zoomAfterReset").GetBoolean());
         Assert.DoesNotContain("Reset zoom", Strings(r.GetProperty("menuAfterReset")));
     }
+
+    [Fact]
+    public void ARightClickMenu_IsPlacedByLeftAndTopOnly_AndStaysInsideTheChart()
+    {
+        var style = Run().GetProperty("rightClickStyle");
+        Assert.Equal("auto", style.GetProperty("right").GetString());
+        Assert.Equal("824px", style.GetProperty("left").GetString());
+        Assert.Equal("220px", style.GetProperty("top").GetString());
+    }
+
+    [Fact]
+    public void ExportDataToCsv_OnAZoomedChart_WritesEveryLoadedPoint()
+    {
+        Assert.Equal(1 + 11 * 2, Run().GetProperty("zoomedCsvRows").GetInt32());
+    }
+
+    [Fact]
+    public void TabbingOutOfTheMenu_ClosesIt()
+    {
+        Assert.Equal(0, Run().GetProperty("menuAfterTab").GetInt32());
+    }
+
+    [Fact]
+    public void TheOpenMenuAndSourcePanel_SurviveARebuildOfTheSameChart_ButNotOnAnotherChart()
+    {
+        var r = Run();
+        Assert.Equal(1, r.GetProperty("rebuiltMenuOpen").GetInt32());
+        Assert.Contains("Read: get_wait_stats", r.GetProperty("rebuiltSource").GetString());
+        Assert.Equal(0, r.GetProperty("otherChartMenuOpen").GetInt32());
+    }
 }
