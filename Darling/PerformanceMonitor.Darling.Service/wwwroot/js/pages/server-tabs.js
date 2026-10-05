@@ -1435,7 +1435,10 @@ export const SERVER_TABS = [
         ctx.label,
         "No Query Store rows in this window.",
         2,
-        "truncation_note"
+        "truncation_note",
+        /* #5094: when whole days came from the daily summary the answer says so (`approximate`), and its note is
+           drawn above the grid as text, so the totals are not read as exact. Null (no line) on an exact answer. */
+        ["approximation_note"]
       ),
       /* #2484: the Query Store Regressions tab -- the only tab in the per-server page that was entirely
          unreachable from a browser rather than merely reduced. Built with table(), not an object literal:
