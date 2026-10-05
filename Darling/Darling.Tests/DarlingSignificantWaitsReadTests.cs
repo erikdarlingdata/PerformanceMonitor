@@ -80,7 +80,7 @@ public sealed class DarlingSignificantWaitsReadTests
             /* #4966: the only capture is 48 hours old, so the one-hour window is not covered: the cut sentence, not "widen". */
             Assert.True(quietDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.StartsWith("No wait_info events were captured for ", quietText, StringComparison.Ordinal);
-            Assert.EndsWith(". " + McpHelpers.CutWindowClaim(quietDoc.RootElement.GetProperty("hints").GetProperty("effective_start").GetString()), quietText, StringComparison.Ordinal);
+            Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, quietText, StringComparison.Ordinal);
 
             /* Same zero rows as the branch above, and it must NOT reach for the same word. */
             Assert.DoesNotContain("EVER", quietText, StringComparison.Ordinal);
@@ -102,7 +102,7 @@ public sealed class DarlingSignificantWaitsReadTests
             Assert.True(gatedDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.Contains("none was significant", gatedText, StringComparison.Ordinal);
             Assert.Contains("500", gatedText, StringComparison.Ordinal);
-            Assert.EndsWith(". " + McpHelpers.CutWindowClaim(gatedDoc.RootElement.GetProperty("hints").GetProperty("effective_start").GetString()), gatedText, StringComparison.Ordinal);
+            Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, gatedText, StringComparison.Ordinal);
             Assert.DoesNotContain("healthy answer", gatedText, StringComparison.Ordinal);
 
             /* The three empty messages are three different sentences, not one sentence three times. */

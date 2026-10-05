@@ -406,7 +406,10 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         Assert.False(EmptyHints(root).GetProperty("window_truncated").GetBoolean());
-        Assert.Contains("WERE collected", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("WERE collected", message, StringComparison.Ordinal);
+        /* Both branches carry the factual sentence; only the covered one ends in the idle claim. */
+        Assert.EndsWith(". A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.", message, StringComparison.Ordinal);
     }
 
     [Fact]
